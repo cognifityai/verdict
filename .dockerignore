@@ -1,0 +1,28 @@
+# Keep the build context small. The Dockerfile only needs ui/server.py,
+# ui/dashboard.html, ui/requirements.txt, and verdict_experiment.db*.
+.git
+.github
+.venv
+**/__pycache__
+*.pyc
+.pytest_cache
+.ruff_cache
+.mypy_cache
+.DS_Store
+.env
+.env.*
+packages
+docs
+scripts
+examples
+experiment_logs
+research
+docker-compose.yml
+# other local databases we don't want baked in (keep verdict_experiment.db*)
+verdict.db
+verdict.db-*
+verdict_experiment_run1.db
+verdict_pipeline_demo.db*
+# standalone front-end variants not needed by the server
+ui/VerdictUI.html
+ui/VerdictUI.jsx

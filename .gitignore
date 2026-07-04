@@ -1,0 +1,63 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.tox/
+htmlcov/
+.coverage
+.coverage.*
+
+# Verdict local artifacts
+verdict.db
+verdict.db-shm
+verdict.db-wal
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
+
+# Env / secrets — never commit
+.env
+.env.*
+!.env.example
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+
+# FUSE / mounted-filesystem temp files
+# These can appear when files are renamed while still open on a mounted
+# workspace. They are stale snapshots and should not be committed.
+.fuse_hidden*
+.venv/
+verdict.db*
+
+# Local run artifacts
+experiment_logs/
+probe_runs/
+dogfood_report.md
+research/results/
+
+# Generated standalone UI preview; server uses landing.html/dashboard.html.
+ui/VerdictUI.html
+
+# Local assistant memory. AGENTS.md is the public contributor guide and is
+# committed; CLAUDE.md is local-only.
+CLAUDE.md
+
+# Local handoff notes and calibration data.
+REMAINING_WORK.md
+raw.jsonl
+labels.jsonl
+*.labels.jsonl
+live_capture_check.db

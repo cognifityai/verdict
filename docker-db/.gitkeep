@@ -1,0 +1,12 @@
+# Optional Docker DB drop-zone.
+#
+# This directory exists so the Dockerfile can COPY a *directory* (which always
+# succeeds) instead of an optional `verdict_experiment.db*` glob (which fails
+# the build when the gitignored DB is absent in a clean clone).
+#
+# To bake the validation database into the image, copy it here before building:
+#   cp verdict_experiment.db docker-db/
+# Otherwise the build initializes an empty, schema-valid DB automatically.
+#
+# *.db files are gitignored, so any DB you drop here stays local and is never
+# committed.

@@ -1,0 +1,27 @@
+# Local dev stack. v0 is SQLite-backed and doesn't actually need any of this,
+# but `docker-compose up` is the muscle-memory developer experience and we
+# want it to work when v0.5 adds the Postgres + FastAPI ingest service.
+#
+# Today this only provisions Postgres so you can experiment with the Postgres
+# adapter (when it lands) without changing your local setup.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: verdict-postgres
+    environment:
+      POSTGRES_USER: verdict
+      POSTGRES_PASSWORD: verdict
+      POSTGRES_DB: verdict
+    ports:
+      - "5432:5432"
+    volumes:
+      - verdict_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U verdict -d verdict"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  verdict_pg_data:

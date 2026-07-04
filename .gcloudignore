@@ -1,0 +1,18 @@
+# Used by `gcloud run deploy --source` INSTEAD OF .gitignore.
+# This file is essential: .gitignore excludes *.db, which would strip the
+# validation database the image bakes in. Here we upload only what the build
+# needs — and we explicitly keep verdict_experiment.db*.
+*
+
+!Dockerfile
+!.dockerignore
+!ui/
+!ui/**
+!verdict_experiment.db
+!verdict_experiment.db-wal
+!verdict_experiment.db-shm
+
+# trim things under ui/ that the server doesn't need
+ui/__pycache__/
+ui/VerdictUI.html
+ui/VerdictUI.jsx

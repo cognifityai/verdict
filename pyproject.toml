@@ -1,0 +1,21 @@
+[project]
+name = "verdict-workspace"
+version = "0.0.1"
+description = "Verdict — open-source LLM observability and drift detection (workspace root, not published)"
+readme = "README.md"
+requires-python = ">=3.10"
+
+[tool.uv.workspace]
+members = ["packages/verdict", "packages/verdict_eval", "packages/verdict_inspect"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "RUF", "ASYNC"]
+ignore = ["E501"]  # handled by formatter
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["packages/verdict/tests", "packages/verdict_eval/tests", "packages/verdict_inspect/tests"]
