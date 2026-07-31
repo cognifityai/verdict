@@ -83,7 +83,7 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     environment:
-      name: pypi
+      name: pypi-core
       url: https://pypi.org/project/cognifity-verdict/
     permissions:
       contents: read
@@ -107,7 +107,7 @@ jobs:
     needs: publish-core
     runs-on: ubuntu-latest
     environment:
-      name: pypi
+      name: pypi-eval
       url: https://pypi.org/project/cognifity-verdict-eval/
     permissions:
       contents: read
@@ -131,7 +131,7 @@ jobs:
     needs: publish-eval
     runs-on: ubuntu-latest
     environment:
-      name: pypi
+      name: pypi-inspect
       url: https://pypi.org/project/cognifity-verdict-inspect/
     permissions:
       contents: read
