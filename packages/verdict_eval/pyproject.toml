@@ -1,6 +1,6 @@
 [project]
 name = "cognifity-verdict-eval"
-version = "0.1.0a1"
+version = "0.1.0a2"
 description = "Verdict eval engine: judge, drift detection, Bradley-Terry comparator, regression injector"
 readme = "README.md"
 requires-python = ">=3.10"
