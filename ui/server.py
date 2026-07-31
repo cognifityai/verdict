@@ -78,6 +78,20 @@ def _label_for(provider: str, model: str) -> str:
     return PRETTY.get(model, model or provider)
 
 
+def _signal_provider(
+    alias: str,
+    provider_keys: set[str],
+    cluster_providers: dict[str, set[str]],
+) -> str | None:
+    if alias in PROVIDER_ALIAS:
+        return PROVIDER_ALIAS[alias]
+    if alias in provider_keys:
+        return alias
+
+    providers = cluster_providers.get(alias, set())
+    return next(iter(providers)) if len(providers) == 1 else None
+
+
 def resolve_db() -> Path:
     env = os.environ.get("VERDICT_DB")
     if env:
@@ -93,7 +107,24 @@ def resolve_db() -> Path:
 #  Aggregation — produces the exact shape the dashboard consumes
 # --------------------------------------------------------------------------- #
 def build_bundle(db_path: str | os.PathLike) -> dict:
-    con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    path = str(db_path)
+    try:
+        return _build_from_connection(sqlite3.connect(f"file:{path}?mode=ro", uri=True))
+    except sqlite3.OperationalError as exc:
+        if "unable to open database file" not in str(exc).lower():
+            raise
+        # URI mode can fail on some filesystems/paths. Fall back to a plain
+        # connection, but never let sqlite CREATE a missing db, and enforce
+        # read-only at the connection level.
+        if not Path(path).is_file():
+            raise FileNotFoundError(f"Verdict database not found: {path}") from exc
+        _log.warning("read-only SQLite URI failed; retrying with query-only connection: %s", exc)
+        con = sqlite3.connect(path)
+        con.execute("PRAGMA query_only = ON")
+        return _build_from_connection(con)
+
+
+def _build_from_connection(con: sqlite3.Connection) -> dict:
     con.row_factory = sqlite3.Row
     cur = con.cursor()
     try:
@@ -143,6 +174,17 @@ def _build(cur) -> dict:
             prov_dim[prov][d["name"]][d["verdict"]] += 1
 
     keys = _provider_order({r["provider"] for r in cur.execute("SELECT DISTINCT provider FROM traces")})
+    # Providers present in each cluster. Used ONLY to attribute a drift signal
+    # to a provider when the attribution is factual (cluster is single-provider).
+    # Drift is detected per (cluster, dimension) and may span providers; the
+    # detector does not establish a causal provider, so we never guess one.
+    cluster_providers: dict[str, set] = {}
+    for r in cur.execute(
+        """SELECT DISTINCT cluster_id, provider
+             FROM traces
+            WHERE cluster_id IS NOT NULL AND cluster_id <> ''"""
+    ):
+        cluster_providers.setdefault(r["cluster_id"], set()).add(r["provider"])
 
     # ---- providers ----
     providers = []
@@ -177,10 +219,17 @@ def _build(cur) -> dict:
     for s in cur.execute("SELECT * FROM drift_signals"):
         s = dict(s)
         alias = s["cluster_id"]
-        prov = PROVIDER_ALIAS.get(alias, alias if alias in keys else "anthropic")
+        # Attribute a provider only when it is a fact, not an inference:
+        #   1. demo alias mapping (cluster IS a provider bucket), or
+        #   2. cluster_id is itself a provider key, or
+        #   3. every trace in the cluster comes from one provider.
+        # Otherwise attribute to the cluster itself — the detector's real unit.
+        prov = _signal_provider(alias, set(keys), cluster_providers)
         drift.append({
             "id": s["signal_id"][:8], "dimension": s["dimension"], "direction": s["direction"],
-            "provider": prov, "providerLabel": _label_for(prov, model_of.get(prov, "")),
+            "provider": prov or "",
+            "providerLabel": (_label_for(prov, model_of.get(prov, "")) if prov
+                              else f"cluster {alias} (mixed providers)"),
             "statName": s["statistic_name"], "stat": round(s["statistic_value"], 1),
             "p": s["p_value"], "pAdj": s["p_value_adjusted"],
             "cliffsDelta": round(s["effect_size_cliffs_delta"], 3) if s["effect_size_cliffs_delta"] is not None else None,

@@ -2,9 +2,8 @@ name: tests
 
 on:
   push:
-    branches: [main]
+    branches: [public-v0, main]
   pull_request:
-    branches: [main]
   workflow_dispatch:
 
 jobs:
