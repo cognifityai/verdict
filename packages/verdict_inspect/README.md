@@ -1,4 +1,7 @@
-# verdict-inspect
+# Verdict Inspect
+
+PyPI distribution: `cognifity-verdict-inspect`. Command:
+`verdict-inspect`.
 
 One-shot drift analysis on a chat export. Drop in a `conversations.json` from
 ChatGPT, a Claude.ai export, a Cursor `.jsonl`, or any OpenAI-format

@@ -1,0 +1,42 @@
+name: Feature request
+description: Propose a focused improvement to Verdict
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: checkboxes
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues and the v1 roadmap.
+          required: true
+  - type: textarea
+    attributes:
+      label: Problem
+      description: What user problem or limitation are you trying to address?
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Proposed behavior
+      description: Describe the smallest useful outcome, not only a preferred implementation.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Alternatives considered
+      description: Describe current workarounds or alternative approaches.
+  - type: dropdown
+    attributes:
+      label: Area
+      options:
+        - Capture and provider SDKs
+        - Storage
+        - Evaluation and judging
+        - Drift detection and statistics
+        - Dashboard
+        - Documentation and onboarding
+        - Agent-level roadmap
+        - Other
+    validations:
+      required: true

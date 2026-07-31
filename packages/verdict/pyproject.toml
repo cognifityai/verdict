@@ -1,11 +1,22 @@
 [project]
-name = "verdict"
-version = "0.0.1"
+name = "cognifity-verdict"
+version = "0.1.0a1"
 description = "Verdict — open-source LLM observability & drift detection SDK"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
 authors = [{name = "Cognifity AI"}]
+keywords = ["llm", "observability", "drift-detection", "evaluation", "monitoring"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
 
 dependencies = [
     "wrapt>=1.16",
@@ -22,12 +33,18 @@ postgres = ["psycopg[binary,pool]>=3.1"]
 # NOTE: Redaction is built-in (regex + Luhn, see redaction.py) and needs no
 # extra dependencies. Presidio-based redaction is a planned option, not yet
 # wired, so no `redaction` extra is published.
-all = ["verdict[anthropic,openai,google,postgres]"]
+all = ["cognifity-verdict[anthropic,openai,google,postgres]"]
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.23",
     "ruff>=0.5",
 ]
+
+[project.urls]
+Homepage = "https://cognifity.ai/verdict"
+Documentation = "https://github.com/cognifityai/verdict/tree/main/docs"
+Repository = "https://github.com/cognifityai/verdict"
+Issues = "https://github.com/cognifityai/verdict/issues"
 
 [build-system]
 requires = ["hatchling"]

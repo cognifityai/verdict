@@ -44,6 +44,11 @@ The judge is pluggable behind a provider interface, so you can point it at Anthr
 
 **Requires Python 3.10+.** On macOS the system `/usr/bin/python3` is often 3.9 and will fail to install — use a 3.10+ interpreter (`brew install python@3.12`, `pyenv`, or `uv venv --python 3.12`).
 
+The first PyPI release will use the distribution names
+`cognifity-verdict`, `cognifity-verdict-eval`, and
+`cognifity-verdict-inspect`. Until those distributions are published, install
+from a source checkout:
+
 ```bash
 pip install -e "packages/verdict[anthropic,openai,google]"  # install only the provider extras you need
 pip install -e packages/verdict_eval
@@ -52,6 +57,12 @@ pip install -r ui/requirements.txt                           # dashboard server:
 ```
 
 Extras for `packages/verdict`: `anthropic`, `openai`, `google`, `postgres`, or `all`. Google capture specifically needs the `google` extra (`google-genai`). The dashboard is intentionally a repo-local app, so install its deps from `ui/requirements.txt`.
+
+An unrelated project owns the `verdict` distribution on PyPI and exposes the
+same top-level `verdict` import. Do not install that distribution in the same
+environment as `cognifity-verdict`; overlapping Python package paths make the
+combination unsafe. Cognifity's distribution name is different, while the SDK
+API remains `import verdict`.
 
 Optional higher-quality semantic embeddings:
 
@@ -63,7 +74,7 @@ The full test suite also needs pytest:
 
 ```bash
 pip install pytest pytest-asyncio
-pytest -q
+python -m pytest -q
 ```
 
 Key-free smoke test (needs only numpy + wrapt):
@@ -143,4 +154,7 @@ Apache 2.0 — see [LICENSE](LICENSE).
 
 ## Contributing
 
-Read [`docs/adrs/`](docs/adrs/) for the major decisions, then [`docs/v1-roadmap.md`](docs/v1-roadmap.md) for known limits and follow-up work. Conventions are in [`AGENTS.md`](AGENTS.md).
+Read [`CONTRIBUTING.md`](CONTRIBUTING.md) before opening a pull request. Major
+decisions are documented in [`docs/adrs/`](docs/adrs/), known limits are in
+[`docs/v1-roadmap.md`](docs/v1-roadmap.md), and community expectations are in
+[`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md).

@@ -14,6 +14,12 @@ provider key (bring your own — Verdict never ships one).
 
 ## 1. Install (one chain covers all three packages)
 
+The public-alpha PyPI distributions will be named `cognifity-verdict`,
+`cognifity-verdict-eval`, and `cognifity-verdict-inspect`. Until they are
+published, use the source-checkout installation below. Do not install the
+unrelated `verdict` distribution from PyPI; it exposes the same import namespace
+and cannot safely coexist in one environment.
+
 ```bash
 git clone https://github.com/cognifityai/verdict.git
 cd verdict

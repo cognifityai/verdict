@@ -1,14 +1,25 @@
 [project]
-name = "verdict-eval"
-version = "0.0.1"
+name = "cognifity-verdict-eval"
+version = "0.1.0a1"
 description = "Verdict eval engine: judge, drift detection, Bradley-Terry comparator, regression injector"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
 authors = [{name = "Cognifity AI"}]
+keywords = ["llm", "evaluation", "drift-detection", "statistics", "llm-as-judge"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 
 dependencies = [
-    "verdict",
+    "cognifity-verdict>=0.1.0a1,<0.2",
     "pydantic>=2.7",
     "httpx>=0.27",
     "scikit-learn>=1.4",
@@ -17,7 +28,7 @@ dependencies = [
 ]
 
 [tool.uv.sources]
-verdict = { workspace = true }
+cognifity-verdict = { workspace = true }
 
 [project.optional-dependencies]
 semantic = [
@@ -27,6 +38,12 @@ dev = [
     "pytest>=8",
     "pytest-asyncio>=0.23",
 ]
+
+[project.urls]
+Homepage = "https://cognifity.ai/verdict"
+Documentation = "https://github.com/cognifityai/verdict/tree/main/docs"
+Repository = "https://github.com/cognifityai/verdict"
+Issues = "https://github.com/cognifityai/verdict/issues"
 
 [build-system]
 requires = ["hatchling"]

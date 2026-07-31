@@ -1,15 +1,16 @@
 """Verdict — the five-line install.
 
 Run:
-    pip install verdict anthropic
+    pip install -e "packages/verdict[anthropic]"
     export ANTHROPIC_API_KEY=...
     python examples/basic_anthropic.py
 
 After running, open verdict.db in any SQLite viewer to see the captured trace.
 """
 
-from anthropic import Anthropic
 import verdict
+from anthropic import Anthropic
+from verdict.client import get_client
 
 # 1. Initialize Verdict once at startup.
 verdict.init(
@@ -31,7 +32,6 @@ resp = client.messages.create(
 print(resp.content[0].text)
 
 # 3. (Optional) check what was captured.
-from verdict.client import get_client
 storage = get_client().storage
 traces = storage.list_traces(limit=5)
 print(f"\nVerdict captured {len(traces)} trace(s).")

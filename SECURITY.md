@@ -5,7 +5,7 @@
 Please report security vulnerabilities **privately**. Do not open a public
 GitHub issue for a suspected vulnerability.
 
-Email: **security@cognifity.ai**
+Email: **info@cognifity.ai** with "Security vulnerability" in the subject line.
 
 Include, if you can: a description of the issue, the affected component
 (e.g. `packages/verdict` instrumentation, storage adapter, `ui/` dashboard),

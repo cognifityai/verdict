@@ -1,9 +1,6 @@
-# Local dev stack. v0 is SQLite-backed and doesn't actually need any of this,
-# but `docker-compose up` is the muscle-memory developer experience and we
-# want it to work when v0.5 adds the Postgres + FastAPI ingest service.
-#
-# Today this only provisions Postgres so you can experiment with the Postgres
-# adapter (when it lands) without changing your local setup.
+# Optional local Postgres stack. Verdict uses SQLite by default; run this when
+# developing or testing the Postgres storage adapter. The credentials below are
+# intentionally local-only and must not be reused in a shared environment.
 
 services:
   postgres:
@@ -14,7 +11,7 @@ services:
       POSTGRES_PASSWORD: verdict
       POSTGRES_DB: verdict
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - verdict_pg_data:/var/lib/postgresql/data
     healthcheck:

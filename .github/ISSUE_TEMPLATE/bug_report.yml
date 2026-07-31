@@ -1,0 +1,58 @@
+name: Bug report
+description: Report reproducible incorrect behavior in Verdict
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting a bug. Remove credentials, personal data, and captured trace content before submitting.
+  - type: checkboxes
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues for this problem.
+          required: true
+        - label: I removed API keys, credentials, personal data, and private trace content.
+          required: true
+  - type: input
+    attributes:
+      label: Verdict version or commit
+      placeholder: "0.1.0a1 or git commit SHA"
+    validations:
+      required: true
+  - type: input
+    attributes:
+      label: Python and operating system
+      placeholder: "Python 3.12.4, macOS 15"
+    validations:
+      required: true
+  - type: input
+    attributes:
+      label: Provider SDK and version
+      description: Leave blank when the issue does not involve provider capture.
+      placeholder: "anthropic 0.68.0"
+  - type: textarea
+    attributes:
+      label: What happened?
+      description: Describe the observed behavior and its impact.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Minimal reproduction
+      description: Include the smallest safe example and exact commands needed to reproduce the issue.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Sanitized logs
+      description: Do not include provider keys, prompts, responses, customer data, or other sensitive information.
+      render: text

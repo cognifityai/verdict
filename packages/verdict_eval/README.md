@@ -1,4 +1,6 @@
-# verdict-eval — Eval engine
+# Verdict Eval
+
+PyPI distribution: `cognifity-verdict-eval`. Python import: `verdict_eval`.
 
 The Verdict eval engine. LLM-as-judge with binary rubric, intent clustering,
 non-parametric drift detection per cluster per dimension (Fisher's exact test
@@ -10,8 +12,8 @@ regression injector for verifying the pipeline catches what it should.
 from verdict_eval import Judge, DEFAULT_RUBRIC, DriftDetector, CorruptionInjector
 ```
 
-See the parent repo [README](../../README.md), ADRs in `../../docs/adrs/`
-(especially ADR-002 on judge methodology), and verification scripts in
-`../../scripts/`.
+See the [repository README](https://github.com/cognifityai/verdict#readme),
+[ADR-002](https://github.com/cognifityai/verdict/blob/main/docs/adrs/002-judge-methodology.md),
+and the [verification scripts](https://github.com/cognifityai/verdict/tree/main/scripts).
 
 Apache 2.0.

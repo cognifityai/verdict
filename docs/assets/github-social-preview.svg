@@ -1,0 +1,88 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640">
+  <defs>
+    <pattern id="grid" width="64" height="64" patternUnits="userSpaceOnUse">
+      <path d="M64 0H0V64" fill="none" stroke="#ffffff" stroke-opacity="0.045"/>
+    </pattern>
+  </defs>
+
+  <rect width="1280" height="640" fill="#09162c"/>
+  <rect width="1280" height="640" fill="url(#grid)"/>
+  <rect x="0" y="0" width="14" height="640" fill="#00c2ff"/>
+
+  <g transform="translate(74 62)">
+    <path d="M24 8H8v16" fill="none" stroke="#ffffff" stroke-width="5"
+          stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M34 50h16V34" fill="none" stroke="#ffffff" stroke-width="5"
+          stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M16 29h27" fill="none" stroke="#00c2ff" stroke-width="5"
+          stroke-linecap="round"/>
+    <text x="76" y="40" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
+          font-size="31" font-weight="700" letter-spacing="0" fill="#ffffff">cognifity ai</text>
+  </g>
+
+  <text x="74" y="238" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
+        font-size="94" font-weight="760" letter-spacing="0" fill="#ffffff">Verdict</text>
+  <text x="76" y="300" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
+        font-size="33" font-weight="620" letter-spacing="0" fill="#d8e1ee">
+    Open-source monitoring for LLM behavior drift
+  </text>
+  <text x="76" y="354" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
+        font-size="24" font-weight="450" letter-spacing="0" fill="#93a4ba">
+    Capture model calls. Evaluate comparable workloads.
+  </text>
+  <text x="76" y="390" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
+        font-size="24" font-weight="450" letter-spacing="0" fill="#93a4ba">
+    Detect meaningful changes in quality, cost, and latency.
+  </text>
+
+  <g transform="translate(76 472)" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
+     font-size="18" font-weight="650" letter-spacing="0">
+    <text x="0" y="0" fill="#00c2ff">APACHE 2.0</text>
+    <text x="142" y="0" fill="#61738c">/</text>
+    <text x="176" y="0" fill="#70d6a4">LOCAL-FIRST</text>
+    <text x="322" y="0" fill="#61738c">/</text>
+    <text x="356" y="0" fill="#ffb45d">BRING YOUR OWN KEY</text>
+  </g>
+
+  <g transform="translate(770 116)">
+    <path d="M24 87H131" fill="none" stroke="#536882" stroke-width="3"/>
+    <path d="M157 87H264" fill="none" stroke="#536882" stroke-width="3"/>
+    <path d="M290 87H397" fill="none" stroke="#536882" stroke-width="3"/>
+
+    <circle cx="12" cy="87" r="12" fill="#00c2ff"/>
+    <circle cx="145" cy="87" r="12" fill="#70d6a4"/>
+    <circle cx="278" cy="87" r="12" fill="#ffb45d"/>
+    <circle cx="411" cy="87" r="12" fill="#ff6b73"/>
+
+    <g font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
+       font-size="15" font-weight="650" letter-spacing="0" text-anchor="middle">
+      <text x="12" y="127" fill="#b7c4d5">CAPTURE</text>
+      <text x="145" y="127" fill="#b7c4d5">CLUSTER</text>
+      <text x="278" y="127" fill="#b7c4d5">EVALUATE</text>
+      <text x="411" y="127" fill="#b7c4d5">DETECT</text>
+    </g>
+
+    <g transform="translate(12 215)">
+      <text x="0" y="0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
+            font-size="16" font-weight="650" letter-spacing="0" fill="#93a4ba">
+        REFERENCE WINDOW
+      </text>
+      <path d="M0 46C61 30 116 34 168 52S271 69 324 43 384 24 411 31"
+            fill="none" stroke="#70d6a4" stroke-width="5" stroke-linecap="round"/>
+
+      <text x="0" y="117" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
+            font-size="16" font-weight="650" letter-spacing="0" fill="#93a4ba">
+        CURRENT WINDOW
+      </text>
+      <path d="M0 159C55 145 111 150 163 166S249 187 301 203 369 239 411 254"
+            fill="none" stroke="#ff6b73" stroke-width="5" stroke-linecap="round"/>
+      <circle cx="411" cy="254" r="9" fill="#ff6b73"/>
+      <path d="M411 224V181" stroke="#ff6b73" stroke-width="3" stroke-linecap="round"/>
+      <path d="M400 192L411 181l11 11" fill="none" stroke="#ff6b73" stroke-width="3"
+            stroke-linecap="round" stroke-linejoin="round"/>
+    </g>
+  </g>
+
+  <text x="76" y="584" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
+        font-size="20" font-weight="600" letter-spacing="0" fill="#ffffff">github.com/cognifityai/verdict</text>
+</svg>

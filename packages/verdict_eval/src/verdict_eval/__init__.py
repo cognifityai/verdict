@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+__version__ = "0.1.0a1"
+
 if TYPE_CHECKING:
     from verdict_eval.compare import BradleyTerryComparator, PairwiseResult
     from verdict_eval.drift import DriftDetector, DriftWindow
@@ -88,28 +90,29 @@ def __getattr__(name: str):
 
 
 __all__ = [
-    "Judge",
-    "Rubric",
     "DEFAULT_RUBRIC",
-    "LLMProvider",
-    "DriftDetector",
-    "DriftWindow",
     "BradleyTerryComparator",
-    "PairwiseResult",
+    "CorrelationPair",
+    "CorrelationReport",
     "CorruptionInjector",
     "CorruptionKind",
-    "StructuralChecker",
-    "StructuralSignal",
-    "StructuralDriftSignal",
-    "ProbeRunner",
-    "ProbeSuite",
+    "DriftDetector",
+    "DriftWindow",
+    "Judge",
+    "LLMProvider",
+    "PairwiseResult",
     "Probe",
     "ProbeExpectation",
     "ProbeResult",
     "ProbeRun",
+    "ProbeRunner",
+    "ProbeSuite",
+    "Rubric",
+    "StructuralChecker",
+    "StructuralDriftSignal",
+    "StructuralSignal",
+    "UserSignalCorrelator",
+    "__version__",
     "default_suite",
     "load_suite_yaml",
-    "UserSignalCorrelator",
-    "CorrelationPair",
-    "CorrelationReport",
 ]

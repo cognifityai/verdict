@@ -47,6 +47,17 @@ experiment_logs/
 probe_runs/
 dogfood_report.md
 research/results/
+drift_report*.md
+*.jsonl
+*.csv
+*.tsv
+*.parquet
+conversations.json
+claude_export.json
+
+# Business and presentation artifacts
+*.pdf
+*.pptx
 
 # Generated standalone UI preview; server uses landing.html/dashboard.html.
 ui/VerdictUI.html

@@ -1,4 +1,6 @@
-# verdict — Python SDK
+# Verdict Python SDK
+
+PyPI distribution: `cognifity-verdict`. Python import: `verdict`.
 
 The Verdict Python SDK. Auto-instruments your LLM calls via `wrapt` and
 captures them into a vendor-neutral `Trace` schema (attribute *names* follow
@@ -17,7 +19,9 @@ client = Anthropic()
 # Use Anthropic normally — every call is captured.
 ```
 
-See the parent repo [README](../../README.md) for the full picture, ADRs in
-`../../docs/adrs/`, and examples in `../../examples/`.
+See the
+[repository README](https://github.com/cognifityai/verdict#readme) for the full
+picture, the [architecture decisions](https://github.com/cognifityai/verdict/tree/main/docs/adrs),
+and the [examples](https://github.com/cognifityai/verdict/tree/main/examples).
 
 Apache 2.0.
