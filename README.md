@@ -44,19 +44,17 @@ The judge is pluggable behind a provider interface, so you can point it at Anthr
 
 **Requires Python 3.10+.** On macOS the system `/usr/bin/python3` is often 3.9 and will fail to install — use a 3.10+ interpreter (`brew install python@3.12`, `pyenv`, or `uv venv --python 3.12`).
 
-The first PyPI release will use the distribution names
-`cognifity-verdict`, `cognifity-verdict-eval`, and
-`cognifity-verdict-inspect`. Until those distributions are published, install
-from a source checkout:
+Install the public alpha from PyPI. Choose only the provider extras you use:
 
 ```bash
-pip install -e "packages/verdict[anthropic,openai,google]"  # install only the provider extras you need
-pip install -e packages/verdict_eval
-pip install -e packages/verdict_inspect
-pip install -r ui/requirements.txt                           # dashboard server: FastAPI + Uvicorn
+pip install "cognifity-verdict[anthropic,openai,google]"
+pip install cognifity-verdict-eval cognifity-verdict-inspect
 ```
 
-Extras for `packages/verdict`: `anthropic`, `openai`, `google`, `postgres`, or `all`. Google capture specifically needs the `google` extra (`google-genai`). The dashboard is intentionally a repo-local app, so install its deps from `ui/requirements.txt`.
+Extras for `cognifity-verdict`: `anthropic`, `openai`, `google`, `postgres`, or
+`all`. Google capture specifically needs the `google` extra (`google-genai`).
+The dashboard is intentionally a repo-local app; from a source checkout,
+install its server dependencies with `pip install -r ui/requirements.txt`.
 
 An unrelated project owns the `verdict` distribution on PyPI and exposes the
 same top-level `verdict` import. Do not install that distribution in the same
@@ -67,7 +65,7 @@ API remains `import verdict`.
 Optional higher-quality semantic embeddings:
 
 ```bash
-pip install -e "packages/verdict_eval[semantic]"   # installs sentence-transformers / all-MiniLM-L6-v2 support
+pip install "cognifity-verdict-eval[semantic]"   # sentence-transformers / all-MiniLM-L6-v2 support
 ```
 
 The full test suite also needs pytest:

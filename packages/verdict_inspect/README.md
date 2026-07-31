@@ -56,7 +56,7 @@ Semantic drift runs key-free. By default it tries the optional
 `sentence-transformers/all-MiniLM-L6-v2` embedder when installed, then falls
 back to the built-in `HashingEmbedder` if the dependency/model is unavailable.
 Install the heavier local embedder with
-`pip install -e "packages/verdict_eval[semantic]"`.
+`pip install "cognifity-verdict-eval[semantic]"`.
 
 For shorter conversations: just structural metrics (the others need ~30 turns/window for meaningful statistics).
 

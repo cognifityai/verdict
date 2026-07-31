@@ -14,9 +14,8 @@ provider key (bring your own — Verdict never ships one).
 
 ## 1. Install (one chain covers all three packages)
 
-The public-alpha PyPI distributions will be named `cognifity-verdict`,
-`cognifity-verdict-eval`, and `cognifity-verdict-inspect`. Until they are
-published, use the source-checkout installation below. Do not install the
+The public-alpha distributions are `cognifity-verdict`,
+`cognifity-verdict-eval`, and `cognifity-verdict-inspect`. Do not install the
 unrelated `verdict` distribution from PyPI; it exposes the same import namespace
 and cannot safely coexist in one environment.
 
@@ -25,13 +24,11 @@ git clone https://github.com/cognifityai/verdict.git
 cd verdict
 uv venv --python 3.12 && source .venv/bin/activate     # or your own 3.10+ venv
 
-# Order matters only in that each depends on the previous; install all three.
 # Include the provider extras you want to test live. Google capture needs `google`.
-pip install -e "packages/verdict[anthropic,openai,google]"
-pip install -e packages/verdict_eval           # pulls scipy + scikit-learn automatically
-pip install -e packages/verdict_inspect         # adds the `verdict-inspect` CLI
-pip install -r ui/requirements.txt              # dashboard server: FastAPI + Uvicorn
-pip install pytest pytest-asyncio               # only needed if you want to run the test suite
+pip install "cognifity-verdict[anthropic,openai,google]"
+pip install cognifity-verdict-eval cognifity-verdict-inspect
+pip install -r ui/requirements.txt              # repo-local dashboard server
+pip install pytest pytest-asyncio               # only needed for the source test suite
 ```
 
 You do **not** need a separate `pip install scipy scikit-learn` — `verdict_eval`
@@ -41,7 +38,7 @@ Optional: for higher-quality local semantic embeddings with
 `sentence-transformers/all-MiniLM-L6-v2`, install:
 
 ```bash
-pip install -e "packages/verdict_eval[semantic]"
+pip install "cognifity-verdict-eval[semantic]"
 ```
 
 ## 2. Confirm it's healthy (30 seconds, no key)
