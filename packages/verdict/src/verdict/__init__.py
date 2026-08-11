@@ -16,7 +16,7 @@ from verdict.schema import DriftSignal, Judgment, Trace
 from verdict.signals import record_user_signal
 from verdict.trace import current_span, trace
 
-__version__ = "0.1.0a2"
+__version__ = "0.1.0a3"
 
 __all__ = [
     "DriftSignal",
