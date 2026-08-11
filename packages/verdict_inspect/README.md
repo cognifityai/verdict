@@ -4,8 +4,8 @@ PyPI distribution: `cognifity-verdict-inspect`. Command:
 `verdict-inspect`.
 
 One-shot drift analysis on a chat export. Drop in a `conversations.json` from
-ChatGPT, a Claude.ai export, a Cursor `.jsonl`, or any OpenAI-format
-messages dump, and get back a rigorous drift / quality report.
+ChatGPT, a Claude.ai export, a supported agent-session JSONL file, or an
+OpenAI-format messages dump, and get back a local drift / quality report.
 
 ## Why this exists
 
@@ -14,8 +14,9 @@ for production agent traffic. But before a team commits to instrumenting
 their stack, they want to know: **does Verdict actually find anything
 interesting in my data?**
 
-`verdict-inspect` answers that in 60 seconds against a file the user already
-has on their laptop. Local-first; nothing leaves the machine.
+`verdict-inspect` runs against a file the user already has on their laptop.
+Structural and embedding analysis stay local; the optional judge has a separate
+privacy boundary described below.
 
 ## Usage
 
@@ -46,22 +47,32 @@ history files, Llama Index conversation logs.
 
 ## What you get back
 
-For any conversation longer than ~30 substantive turns:
+For a file with enough substantive assistant turns:
 
 1. **Semantic drift** — embedding-distribution shifts across temporal windows
 2. **Judge sample** — PASS/FAIL by dimension on stride-sampled turns (requires `ANTHROPIC_API_KEY`)
 3. **Structural metrics** — response length, hedge density, refusal rate, apology rate per window
 
-Semantic drift runs key-free. By default it tries the optional
-`sentence-transformers/all-MiniLM-L6-v2` embedder when installed, then falls
-back to the built-in `HashingEmbedder` if the dependency/model is unavailable.
-Install the heavier local embedder with
+Semantic drift runs key-free. By default it tries
+`sentence-transformers/all-MiniLM-L6-v2`, then falls back to the built-in
+`HashingEmbedder` if the dependency/model is unavailable. That fallback detects
+lexical embedding-distribution changes; it is not a semantic model, and the
+report labels it explicitly. Install the local semantic embedder with
 `pip install "cognifity-verdict-eval[semantic]"`.
 
-For shorter conversations: just structural metrics (the others need ~30 turns/window for meaningful statistics).
+Turns with fewer than 10 assistant-response words are excluded from windowed
+analysis. At least 16 substantive turns are required for a two-window
+comparison; 24 create the default early/middle/late split. Each window's judge
+sample is capped at 25 turns. Treat small-window output as exploratory rather
+than calibrated production evidence.
 
 ## Privacy
 
-Everything runs on your machine. No data is uploaded anywhere. The judge layer
-makes API calls to Anthropic if you set `ANTHROPIC_API_KEY`, but you can run
-without it to get drift + structural metrics only.
+Structural metrics and embedding inference run on your machine. The first
+MiniLM run may download model weights, but it does not upload the analyzed
+conversation. If `ANTHROPIC_API_KEY` is set and the judge is enabled,
+`verdict-inspect` sends stride-sampled user and assistant text (up to 4,000
+characters each) to the configured Anthropic model. Anthropic credentials and
+data-handling terms apply. Pass `--no-judge` or omit the key to keep conversation
+content local and receive structural plus embedding analysis only. The v0
+inspect judge is Anthropic-only.

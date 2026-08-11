@@ -20,17 +20,15 @@ This module replaces *label-based* identity with *assignment-based* identity:
   - Existing IDs are never renumbered. Adding traffic only ever (a) grows an
     existing cluster or (b) creates a new one — it cannot relabel old ones.
 
-Two hard requirements for this to actually be stable, both of which the current
-pipeline violates:
+Two hard requirements for this to actually be stable:
 
   1. The embedder must be *deterministic across runs* — the same text must embed
-     to the same vector every run. `SentenceTransformerEmbedder` satisfies this.
-     `HashingEmbedder` does NOT on its own: it fits a TruncatedSVD on the first
-     batch, so a fresh instance each run lives in a different subspace. Persist a
-     single fitted embedder (or use sentence-transformers) and reuse it.
+     to the same vector every run. Both shipped embedders satisfy this, but only
+     `SentenceTransformerEmbedder` captures paraphrased semantic intent well.
+     `HashingEmbedder` is a lexical fallback and can fragment paraphrases.
   2. The registry must be persisted between runs (see `save`/`load`). Clustering
-     should happen once, at capture time; the drift run reads the stored
-     cluster_id and never re-clusters.
+     happens when an unassigned trace first reaches the analysis pipeline; later
+     runs read its stored cluster_id and do not re-cluster it by default.
 
 `clustering_version` tags every assignment. Bumping the embedder or threshold
 bumps the version so drift signals computed under incompatible cluster
@@ -40,6 +38,9 @@ definitions are never compared.
 from __future__ import annotations
 
 import json
+import math
+import statistics
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -51,6 +52,66 @@ UNCLUSTERED_ID = "unclustered"
 def _unit(v: np.ndarray) -> np.ndarray:
     n = float(np.linalg.norm(v))
     return v / n if n > 0 else v
+
+
+@dataclass(frozen=True)
+class ClusterHealth:
+    """Observable health summary for an intent-clustering result."""
+
+    n_traces: int
+    n_clusters: int
+    median_cluster_size: float
+    clusters_meeting_sample_floor: int
+    min_sample_size: int
+    is_fragmented: bool
+    messages: tuple[str, ...]
+
+
+def assess_cluster_health(
+    cluster_ids: list[str | None], *, min_sample_size: int = 30,
+) -> ClusterHealth:
+    """Flag clustering that cannot support meaningful per-cluster drift tests.
+
+    Fragmentation and low volume are reported separately. Ten singleton
+    clusters are a clustering failure; two coherent clusters with twenty
+    traces each simply need more traffic.
+    """
+    usable = [cid for cid in cluster_ids if cid and cid != UNCLUSTERED_ID]
+    counts = Counter(usable)
+    sizes = list(counts.values())
+    n_traces = len(usable)
+    n_clusters = len(counts)
+    median_size = float(statistics.median(sizes)) if sizes else 0.0
+    ratio = n_clusters / n_traces if n_traces else 0.0
+    fragmented = n_traces >= 4 and ratio > 0.5
+    meeting_floor = sum(1 for size in sizes if size >= min_sample_size)
+
+    messages: list[str] = []
+    if not usable:
+        messages.append("No usable intent-cluster assignments are available.")
+    if fragmented:
+        messages.append(
+            f"Intent clustering is fragmented: {n_clusters} clusters for "
+            f"{n_traces} traces ({ratio:.0%} clusters-to-traces). Use the "
+            "semantic embedder or review the distance threshold before trusting drift results."
+        )
+    if sizes and median_size < min_sample_size:
+        messages.append(
+            f"Median cluster size is {median_size:g}; {meeting_floor}/{n_clusters} "
+            f"clusters meet the {min_sample_size}-sample floor. Drift tests remain "
+            "inactive for clusters below that floor; add traffic or use coarser, "
+            "validated clusters."
+        )
+
+    return ClusterHealth(
+        n_traces=n_traces,
+        n_clusters=n_clusters,
+        median_cluster_size=median_size,
+        clusters_meeting_sample_floor=meeting_floor,
+        min_sample_size=min_sample_size,
+        is_fragmented=fragmented,
+        messages=tuple(messages),
+    )
 
 
 @dataclass
@@ -66,6 +127,8 @@ class ClusterRegistry:
     counts: list[int] = field(default_factory=list)
     next_index: int = 0
     version: str = "v1"
+    distance_threshold: float | None = None
+    embedding_dimension: int | None = None
 
     # -- assignment --------------------------------------------------------- #
 
@@ -113,23 +176,27 @@ class ClusterRegistry:
             "counts": self.counts,
             "next_index": self.next_index,
             "version": self.version,
+            "distance_threshold": self.distance_threshold,
+            "embedding_dimension": self.embedding_dimension,
         })
 
     @classmethod
-    def from_json(cls, s: str | None) -> "ClusterRegistry":
+    def from_json(cls, s: str | None) -> ClusterRegistry:
         if not s:
             return cls()
         d = json.loads(s)
         return cls(
             ids=d["ids"], centroids=d["centroids"], counts=d["counts"],
             next_index=d["next_index"], version=d.get("version", "v1"),
+            distance_threshold=d.get("distance_threshold"),
+            embedding_dimension=d.get("embedding_dimension"),
         )
 
     def save(self, path: str | Path) -> None:
         Path(path).write_text(self.to_json())
 
     @classmethod
-    def load(cls, path: str | Path) -> "ClusterRegistry":
+    def load(cls, path: str | Path) -> ClusterRegistry:
         p = Path(path)
         if not p.exists():
             return cls()
@@ -147,8 +214,9 @@ class StableIntentClusterer:
         across runs (see module docstring).
     threshold:
         Max cosine distance for a prompt to join an existing cluster. Higher =
-        coarser clusters. Cosine distance is in [0, 2]; 0.30 is a reasonable
-        start for sentence-transformer embeddings.
+        coarser clusters. Cosine distance is in [0, 2]; 0.50 is the shipped
+        starting point for the MiniLM adapter, but production workloads should
+        validate it against representative prompts.
     freeze_after:
         Lock a centroid once it has this many members so its identity stays
         anchored. 0 disables freezing.
@@ -158,10 +226,44 @@ class StableIntentClusterer:
     """
 
     embedder: object
-    threshold: float = 0.30
+    threshold: float = 0.50
     freeze_after: int = 200
     min_chars: int = 3
     registry: ClusterRegistry = field(default_factory=ClusterRegistry)
+
+    def __post_init__(self) -> None:
+        dimension = getattr(self.embedder, "dim", None)
+        if not isinstance(dimension, int) or dimension <= 0:
+            raise ValueError("Embedder must expose a positive integer `dim` attribute.")
+
+        stored = self.registry.distance_threshold
+        if stored is None:
+            if self.registry.ids:
+                raise ValueError(
+                    "Existing cluster registry has no recorded distance threshold; "
+                    "bump clustering_version and rebuild it before assigning new traffic."
+                )
+            self.registry.distance_threshold = self.threshold
+        elif not math.isclose(stored, self.threshold, rel_tol=0.0, abs_tol=1e-12):
+            raise ValueError(
+                f"Cluster registry threshold is {stored}, but this run requested "
+                f"{self.threshold}; use the stored threshold or bump clustering_version."
+            )
+
+        stored_dimension = self.registry.embedding_dimension
+        if stored_dimension is None:
+            if self.registry.ids:
+                raise ValueError(
+                    "Existing cluster registry has no recorded embedding dimension; "
+                    "bump clustering_version and rebuild it before assigning new traffic."
+                )
+            self.registry.embedding_dimension = dimension
+        elif stored_dimension != dimension:
+            raise ValueError(
+                f"Cluster registry embedding dimension is {stored_dimension}, but this "
+                f"embedder produces {dimension}; bump clustering_version before changing "
+                "the embedding model."
+            )
 
     def assign(self, texts: list[str]) -> list[str]:
         """Assign each text a stable cluster_id, independent of input order.
@@ -178,8 +280,8 @@ class StableIntentClusterer:
              snapshotted at the start of the call; every text is matched
              against that snapshot. So whether a text joins an existing cluster
              — and which one — does NOT depend on batch order or on the other
-             texts in the batch. Existing centroids are not mutated, keeping
-             them anchored (the same role `freeze_after` serves).
+             texts in the batch. Matched centroids are updated only after every
+             assignment decision, in canonical text order.
           2. **Mint new clusters in canonical order.** Texts that match no
              existing cluster are processed in a canonical (sorted-by-text)
              order, so brand-new clusters are minted deterministically and
@@ -205,6 +307,7 @@ class StableIntentClusterer:
         snap = (np.asarray(self.registry.centroids, dtype=np.float64)
                 if self.registry.centroids else None)
         unmatched: list[int] = []   # positions k into usable_idx
+        matched_updates: dict[int, list[tuple[str, np.ndarray]]] = {}
         for k, i in enumerate(usable_idx):
             u = _unit(np.asarray(vecs[k], dtype=np.float64))
             if snap is not None and len(snap):
@@ -212,8 +315,16 @@ class StableIntentClusterer:
                 j = int(np.argmin(dists))
                 if float(dists[j]) <= self.threshold:
                     out[i] = snap_ids[j]
+                    matched_updates.setdefault(j, []).append((texts[i], u))
                     continue
             unmatched.append(k)
+
+        # Update matched centroids only after every assignment decision has
+        # been made against the frozen snapshot. Canonical text order makes
+        # the resulting registry independent of caller batch order too.
+        for j in sorted(matched_updates):
+            for _, u in sorted(matched_updates[j], key=lambda item: item[0]):
+                self.registry._update(j, u, freeze_after=self.freeze_after)
 
         # Phase 2: mint new clusters for unmatched texts in canonical order.
         for k in sorted(unmatched, key=lambda k: texts[usable_idx[k]]):
@@ -230,5 +341,5 @@ class StableIntentClusterer:
     @classmethod
     def load(
         cls, path: str | Path, *, embedder: object, **kw,
-    ) -> "StableIntentClusterer":
+    ) -> StableIntentClusterer:
         return cls(embedder=embedder, registry=ClusterRegistry.load(path), **kw)

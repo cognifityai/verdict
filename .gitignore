@@ -13,6 +13,7 @@ build/
 htmlcov/
 .coverage
 .coverage.*
+node_modules/
 
 # Verdict local artifacts
 verdict.db

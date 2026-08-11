@@ -1,23 +1,17 @@
-"""Intent clustering for prompts.
+"""Embedding adapters used by Verdict's intent clustering pipeline.
 
-We cluster prompts so the drift detector compares like-with-like even when
-the underlying production prompt distribution shifts (Mondays vs Fridays,
-new product launches, etc.).
-
-For v0 we use a simple HashingVectorizer + fixed random-projection embedder
-with online Birch. A more sophisticated embedding model can swap in via the
-Embedder port — both adapters need to exist for the abstraction to be real
-(ADR-001).
+The persistent cluster assignment algorithm lives in ``stable_clustering.py``.
+This module provides the embedding port and its local adapters: a lightweight
+hashing fallback, sentence-transformers for semantic clustering, and a
+deterministic test adapter.
 """
 
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
 import numpy as np
-from sklearn.cluster import Birch
 from sklearn.feature_extraction.text import HashingVectorizer
 
 
@@ -122,62 +116,3 @@ class DeterministicHashEmbedder:
             for j in range(self.dim):
                 out[i, j] = (digest[j % len(digest)] - 128) / 128.0
         return out
-
-
-@dataclass
-class IntentClusterer:
-    """Online intent clusterer using Birch + a provided Embedder.
-
-    Birch is suited to streaming workloads (incremental partial_fit) and has
-    bounded memory. Once cluster count grows past `threshold`, Birch
-    consolidates.
-    """
-
-    embedder: Embedder = field(default_factory=HashingEmbedder)
-    n_clusters: int | None = None         # let Birch decide
-    threshold: float = 0.5
-    _model: Birch = field(init=False)
-
-    def __post_init__(self) -> None:
-        self._model = Birch(
-            n_clusters=self.n_clusters,
-            threshold=self.threshold,
-            branching_factor=50,
-        )
-        self._seen = False
-
-    def fit_predict(self, texts: list[str]) -> list[str]:
-        """Train and assign cluster IDs in one call. Returns string cluster ids."""
-        if not texts:
-            return []
-        vecs = self.embedder.embed(texts)
-        if not self._seen:
-            self._model.fit(vecs)
-            self._seen = True
-        else:
-            self._model.partial_fit(vecs)
-        labels = self._model.predict(vecs)
-        return [f"c{int(label):04d}" for label in labels]
-
-    def predict(self, texts: list[str]) -> list[str]:
-        if not self._seen:
-            raise RuntimeError("IntentClusterer not fitted yet; call fit_predict first")
-        vecs = self.embedder.embed(texts)
-        labels = self._model.predict(vecs)
-        return [f"c{int(label):04d}" for label in labels]
-
-    def partial_fit(self, texts: list[str]) -> list[str]:
-        """Incrementally update the model and assign labels.
-
-        Use for streaming production ingestion.
-        """
-        if not texts:
-            return []
-        vecs = self.embedder.embed(texts)
-        if not self._seen:
-            self._model.fit(vecs)
-            self._seen = True
-        else:
-            self._model.partial_fit(vecs)
-        labels = self._model.predict(vecs)
-        return [f"c{int(label):04d}" for label in labels]

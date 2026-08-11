@@ -5,12 +5,10 @@ adapter but not the other, the Protocol is leaking implementation details.
 
 from __future__ import annotations
 
-import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
-
 from verdict.schema import (
     DimensionScore,
     DriftDirection,
@@ -62,6 +60,30 @@ def test_insert_and_get_trace(storage):
     assert fetched.input_tokens == 100
 
 
+def test_trace_accepts_enum_value_string(storage):
+    """Manual Trace construction accepts the documented enum value string."""
+    trace = _trace(operation="chat")
+    storage.insert_trace(trace)
+
+    fetched = storage.get_trace(trace.trace_id)
+    assert fetched is not None
+    assert fetched.operation == Operation.CHAT
+
+
+def test_trace_maps_provider_operation_string_to_vendor_neutral_enum(storage):
+    trace = _trace(operation="messages.create")
+    storage.insert_trace(trace)
+
+    fetched = storage.get_trace(trace.trace_id)
+    assert fetched is not None
+    assert fetched.operation == Operation.CHAT
+
+
+def test_trace_rejects_unknown_operation_string():
+    with pytest.raises(ValueError, match="Unsupported operation"):
+        _trace(operation="not-a-real-operation")
+
+
 def test_get_missing_trace_returns_none(storage):
     assert storage.get_trace("does-not-exist") is None
 
@@ -100,7 +122,7 @@ def test_insert_and_list_judgments_for_cluster(storage):
         trace_id=trace.trace_id,
         judge_models=["gemini-flash"],
         dimensions=[
-            DimensionScore(name="groundedness", verdict=Verdict.PASS, reasoning="ok", judge_model="gemini-flash"),
+            DimensionScore(name="groundedness", verdict="pass", reasoning="ok", judge_model="gemini-flash"),
             DimensionScore(name="relevance", verdict=Verdict.FAIL, reasoning="not really", judge_model="gemini-flash"),
         ],
     )
@@ -153,7 +175,7 @@ def test_drift_signals_round_trip(storage):
     sig = DriftSignal(
         cluster_id="c0001",
         dimension="groundedness",
-        direction=DriftDirection.REGRESSION,
+        direction="regression",
         statistic_name="fisher_exact",
         statistic_value=1234.5,
         p_value=0.001,
@@ -184,6 +206,59 @@ def test_drift_signals_round_trip(storage):
     assert s.example_trace_ids == ["abc", "def"]
 
 
+def test_reinsert_drift_signal_updates_in_place(storage):
+    """A rerun of the same analysis window refreshes one signal, not two."""
+    original = DriftSignal(
+        signal_id="stable-window-signal",
+        cluster_id="c0001",
+        dimension="groundedness",
+        direction="regression",
+        statistic_name="fisher_exact",
+        p_value=0.04,
+        recommended_action="initial result",
+    )
+    storage.insert_drift_signal(original)
+
+    replacement = DriftSignal(
+        signal_id=original.signal_id,
+        cluster_id="c0001",
+        dimension="groundedness",
+        direction="regression",
+        statistic_name="fisher_exact",
+        p_value=0.001,
+        example_trace_ids=["current-1"],
+        recommended_action="refreshed result",
+    )
+    storage.insert_drift_signal(replacement)
+
+    fetched = storage.list_drift_signals()
+    assert len(fetched) == 1
+    assert fetched[0].p_value == 0.001
+    assert fetched[0].example_trace_ids == ["current-1"]
+    assert fetched[0].recommended_action == "refreshed result"
+
+
+def test_delete_drift_signals_between_uses_half_open_window(storage):
+    start = datetime(2026, 8, 11, 12, tzinfo=timezone.utc)
+    for signal_id, detected_at in [
+        ("before", datetime(2026, 8, 11, 11, 59, tzinfo=timezone.utc)),
+        ("inside", start),
+        ("end", datetime(2026, 8, 11, 13, tzinfo=timezone.utc)),
+    ]:
+        storage.insert_drift_signal(DriftSignal(
+            signal_id=signal_id,
+            detected_at=detected_at,
+            cluster_id="c1",
+            dimension="relevance",
+        ))
+
+    storage.delete_drift_signals_between(
+        start, datetime(2026, 8, 11, 13, tzinfo=timezone.utc),
+    )
+
+    assert {s.signal_id for s in storage.list_drift_signals()} == {"before", "end"}
+
+
 def test_drift_signal_columns_cover_all_stat_fields():
     """DB-free guard: every adapter must persist the same DriftSignal stat
     fields. The Postgres adapter once silently omitted Cliff's δ, Wasserstein
@@ -211,6 +286,13 @@ def test_drift_signal_columns_cover_all_stat_fields():
     # columns, or positional binding silently shifts.
     n_cols = len([c for c in pg.PostgresStorage._SIGNAL_COLUMNS.split(",")])
     assert n_cols == 18, f"expected 18 drift-signal columns, got {n_cols}"
+
+    # DB-free guard only: the live Postgres path still needs integration
+    # coverage in an environment that provides a Postgres instance.
+    import inspect
+
+    insert_source = inspect.getsource(pg.PostgresStorage.insert_drift_signal)
+    assert "ON CONFLICT (signal_id) DO UPDATE SET" in insert_source
 
 
 def test_delete_trace_removes_trace_and_judgments(storage):
@@ -307,3 +389,22 @@ def test_sqlite_persists_across_reopens(tmp_path):
         assert fetched.cluster_id == "persisted"
     finally:
         s2.close()
+
+
+def test_sqlite_constructor_accepts_sqlite_url(tmp_path):
+    db_path = tmp_path / "url.db"
+    storage = SQLiteStorage(f"sqlite:///{db_path}")
+    try:
+        trace = _trace()
+        storage.insert_trace(trace)
+        assert storage.get_trace(trace.trace_id) is not None
+    finally:
+        storage.close()
+
+    assert db_path.is_file()
+    assert not (tmp_path / "sqlite:").exists()
+
+
+def test_sqlite_constructor_rejects_non_sqlite_url():
+    with pytest.raises(ValueError, match="SQLite path or sqlite"):
+        SQLiteStorage("postgresql://localhost/verdict")

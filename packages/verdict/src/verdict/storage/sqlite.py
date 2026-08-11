@@ -142,10 +142,22 @@ def _parse_iso(s: str | None) -> datetime | None:
     return datetime.fromisoformat(s) if s else None
 
 
+def _normalize_sqlite_path(path: str) -> str:
+    """Accept either a filesystem path or the public ``sqlite:///`` URL form."""
+    if path.startswith("sqlite:///"):
+        path = path[len("sqlite:///"):]
+    elif "://" in path:
+        raise ValueError(f"Expected a SQLite path or sqlite:/// URL, got {path!r}")
+    if not path:
+        raise ValueError("SQLite path cannot be empty")
+    return path
+
+
 class SQLiteStorage:
     """Durable single-file storage. Thread-safe via a single connection + lock."""
 
     def __init__(self, path: str) -> None:
+        path = _normalize_sqlite_path(path)
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
         # Set row_factory once on the shared connection rather than mutating it
@@ -426,6 +438,13 @@ class SQLiteStorage:
                     "example_trace_ids_json": json.dumps(signal.example_trace_ids),
                     "recommended_action": signal.recommended_action,
                 },
+            )
+
+    def delete_drift_signals_between(self, start: datetime, end: datetime) -> None:
+        with self._lock:
+            self._conn.execute(
+                "DELETE FROM drift_signals WHERE detected_at >= ? AND detected_at < ?",
+                (_iso(start), _iso(end)),
             )
 
     def list_drift_signals(self, *, limit: int = 100) -> list[DriftSignal]:

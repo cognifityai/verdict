@@ -7,6 +7,7 @@ import cycles.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Protocol, runtime_checkable
 
 from verdict.schema import DriftSignal, Judgment, SpanRecord, Trace, UserSignalRecord
@@ -46,6 +47,10 @@ class Storage(Protocol):
     ) -> list[Judgment]: ...
 
     def insert_drift_signal(self, signal: DriftSignal) -> None: ...
+
+    def delete_drift_signals_between(
+        self, start: datetime, end: datetime,
+    ) -> None: ...
 
     def list_drift_signals(self, *, limit: int = 100) -> list[DriftSignal]: ...
 

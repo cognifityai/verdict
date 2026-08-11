@@ -31,7 +31,6 @@ from verdict.schema import (
     Verdict,
 )
 
-
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS traces (
     trace_id          TEXT PRIMARY KEY,
@@ -391,7 +390,24 @@ class PostgresStorage:
         self._exec(
             f"""INSERT INTO drift_signals ({self._SIGNAL_COLUMNS}) VALUES (
                 %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb,%s
-            ) ON CONFLICT (signal_id) DO NOTHING""",
+            ) ON CONFLICT (signal_id) DO UPDATE SET
+                detected_at = EXCLUDED.detected_at,
+                cluster_id = EXCLUDED.cluster_id,
+                dimension = EXCLUDED.dimension,
+                direction = EXCLUDED.direction,
+                statistic_name = EXCLUDED.statistic_name,
+                statistic_value = EXCLUDED.statistic_value,
+                p_value = EXCLUDED.p_value,
+                p_value_adjusted = EXCLUDED.p_value_adjusted,
+                effect_size_cohens_d = EXCLUDED.effect_size_cohens_d,
+                effect_size_cliffs_delta = EXCLUDED.effect_size_cliffs_delta,
+                wasserstein_distance = EXCLUDED.wasserstein_distance,
+                psi = EXCLUDED.psi,
+                sample_size_current = EXCLUDED.sample_size_current,
+                sample_size_baseline = EXCLUDED.sample_size_baseline,
+                contributing_layers = EXCLUDED.contributing_layers,
+                example_trace_ids = EXCLUDED.example_trace_ids,
+                recommended_action = EXCLUDED.recommended_action""",
             (
                 signal.signal_id,
                 signal.detected_at,
@@ -412,6 +428,12 @@ class PostgresStorage:
                 json.dumps(signal.example_trace_ids),
                 signal.recommended_action,
             ),
+        )
+
+    def delete_drift_signals_between(self, start: datetime, end: datetime) -> None:
+        self._exec(
+            "DELETE FROM drift_signals WHERE detected_at >= %s AND detected_at < %s",
+            (start, end),
         )
 
     def list_drift_signals(self, *, limit: int = 100) -> list[DriftSignal]:

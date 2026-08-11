@@ -56,7 +56,9 @@ from __future__ import annotations
 
 import queue
 import threading
-from typing import Any, Callable
+from collections.abc import Callable
+from datetime import datetime
+from typing import Any
 
 from verdict.schema import DriftSignal, Judgment, SpanRecord, Trace, UserSignalRecord
 
@@ -243,6 +245,9 @@ class BufferedStorage:
 
     def insert_drift_signal(self, signal: DriftSignal) -> None:
         self._enqueue(self._inner.insert_drift_signal, signal)
+
+    def delete_drift_signals_between(self, start: datetime, end: datetime) -> None:
+        self._enqueue(self._inner.delete_drift_signals_between, start, end)
 
     def insert_span(self, span: SpanRecord) -> None:
         self._enqueue(self._inner.insert_span, span)

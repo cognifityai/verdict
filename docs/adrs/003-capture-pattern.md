@@ -5,14 +5,14 @@
 
 ## Context
 
-We need to capture LLM traffic from customer applications. Five capture patterns exist: wrap-the-client, monkey-patch (auto-instrumentation), gateway/proxy, native SDK callbacks, eBPF. Each has tradeoffs.
+We need to capture LLM traffic from user applications. Five capture patterns exist: wrap-the-client, monkey-patch (auto-instrumentation), gateway/proxy, native SDK callbacks, eBPF. Each has tradeoffs.
 
 Users should be able to add observability without rewriting their application
 around Verdict-specific clients.
 
 ## Decision
 
-**Primary capture: monkey-patch via `wrapt`.** The customer runs `verdict.init()`
+**Primary capture: monkey-patch via `wrapt`.** The user runs `verdict.init()`
 once at app startup; we transparently intercept provider SDK calls (e.g.
 `Anthropic.messages.create`, `OpenAI.chat.completions.create`) by wrapping the
 target functions with `wrapt`. This is a common pattern for Python
@@ -42,7 +42,7 @@ OpenLLMetry runtime dependency**. It:
 1. Installs `wrapt` wrappers over supported provider SDK call sites at
    `verdict.init()` time.
 2. Normalizes each intercepted call into a **vendor-neutral `Trace` record**
-   (see `verdict/schema.py`) — provider, model, token counts, latency, cost,
+   (see `verdict/schema.py`) — provider, model, token counts, latency, estimated cost,
    finish reason, redacted prompt/response, plus tenant/session/cluster tags.
 3. Provides the manual `@verdict.trace` decorator / context manager, which emits
    `SpanRecord`s into the same store.
@@ -84,9 +84,9 @@ target deployment before relying on them.
 - Two redaction modes are implemented:
   - `redact` — replace the match with a placeholder (e.g. `<REDACTED>`).
   - `hash` — HMAC-SHA-256 the matched value (requires a `redaction_secret`).
-- **`encrypt` mode is Planned / not yet implemented.** Selecting it is rejected at
+- **`encrypt` mode is planned / not yet implemented.** Selecting it is rejected at
   `init()` and `redact()` raises `NotImplementedError` (envelope encryption with a
-  customer-held KMS key is deferred to a later release).
+  user-held KMS key is deferred to a later release).
 - User IDs are never stored raw: they are HMAC/SHA-256 hashed (keyed with the
   redaction secret when configured).
 
@@ -99,9 +99,10 @@ target deployment before relying on them.
 - The captured data lives in our own vendor-neutral schema. Interop with the
   OpenTelemetry/OpenInference ecosystems is possible later via an exporter, but is
   not available today.
-- The customer never edits their LLM client code: install + import + `init()`.
+- Existing calls through supported provider SDK methods remain unchanged after
+  adding the Verdict import and `init()` call.
 - For frameworks we don't auto-instrument (custom retrieval, business logic), the
-  customer uses `@verdict.trace`.
+  user can add `@verdict.trace`.
 - Redaction is best-effort pattern matching, not a full PII engine; teams with
   strict requirements should keep content capture off or review the regex set.
   `encrypt` mode is not available yet.

@@ -5,9 +5,17 @@ No provider SDKs are imported — pure arithmetic against PRICE_PER_1K.
 
 from __future__ import annotations
 
+import logging
 import math
+from datetime import date
 
-from verdict.pricing import PRICE_PER_1K, compute_cost_usd
+import verdict.pricing as pricing
+from verdict.pricing import (
+    PRICE_PER_1K,
+    PRICING_LAST_VERIFIED,
+    PRICING_REVIEW_AFTER,
+    compute_cost_usd,
+)
 
 
 def test_known_model_exact_match():
@@ -56,6 +64,50 @@ def test_unknown_model_returns_none():
     assert compute_cost_usd("some-random-model", 100, 100) is None
 
 
+def test_model_lookup_is_case_insensitive():
+    assert compute_cost_usd("GPT-4O-MINI", 1000, 1000) == compute_cost_usd(
+        "gpt-4o-mini", 1000, 1000,
+    )
+
+
+def test_negative_token_counts_return_none():
+    assert compute_cost_usd("gpt-4o-mini", -1, 100) is None
+
+
+def test_unknown_model_warns_that_cost_is_unavailable(caplog):
+    with caplog.at_level(logging.WARNING, logger="verdict.pricing"):
+        assert compute_cost_usd("never-seen-model-for-warning-test", 100, 100) is None
+    assert "cost_usd will be unavailable" in caplog.text
+
+
+def test_pricing_table_has_a_visible_verification_date():
+    assert PRICING_LAST_VERIFIED.isoformat() >= "2026-08-01"
+    assert PRICING_REVIEW_AFTER >= PRICING_LAST_VERIFIED
+
+
+def test_stale_pricing_snapshot_warns(monkeypatch, caplog):
+    class FutureDate(date):
+        @classmethod
+        def today(cls):
+            return cls(2026, 9, 1)
+
+    monkeypatch.setattr(pricing, "date", FutureDate)
+    monkeypatch.setattr(pricing, "_warned_stale", False)
+    with caplog.at_level(logging.WARNING, logger="verdict.pricing"):
+        assert compute_cost_usd("gpt-4o-mini", 100, 100) is not None
+    assert "due for review" in caplog.text
+
+
+def test_current_model_entries_use_base_text_rates():
+    assert PRICE_PER_1K["claude-opus-5"] == (0.005, 0.025)
+    assert PRICE_PER_1K["gpt-5.6-sol"] == (0.005, 0.030)
+    assert PRICE_PER_1K["gpt-5.6-terra"] == (0.0025, 0.015)
+    assert PRICE_PER_1K["gpt-5.6-luna"] == (0.001, 0.006)
+    assert PRICE_PER_1K["gpt-5.5-pro"] == (0.030, 0.180)
+    assert PRICE_PER_1K["gpt-5.4"] == (0.0025, 0.015)
+    assert PRICE_PER_1K["gemini-3.5-flash"] == (0.0015, 0.009)
+
+
 def test_none_tokens_returns_none():
     assert compute_cost_usd("gpt-4o", None, None) is None
 
@@ -66,7 +118,7 @@ def test_empty_model_returns_none():
 
 def test_partial_tokens_treated_as_zero():
     # Only output tokens known -> input treated as 0.
-    in_rate, out_rate = PRICE_PER_1K["gpt-4o-mini"]
+    _in_rate, out_rate = PRICE_PER_1K["gpt-4o-mini"]
     cost = compute_cost_usd("gpt-4o-mini", None, 1000)
     assert cost is not None
     assert math.isclose(cost, out_rate, rel_tol=1e-9)

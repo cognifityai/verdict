@@ -6,12 +6,11 @@ Usage:
 Examples:
     verdict-inspect analyze ~/Downloads/conversations.json
     verdict-inspect analyze --format claude_ai ~/Downloads/claude_export.json
-    verdict-inspect analyze --json ~/cursor_chats.jsonl | jq .
+    verdict-inspect analyze --json ~/agent_session.jsonl | jq .
 """
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import click
@@ -78,7 +77,7 @@ def analyze(
         try:
             fmt = detect_format(path)
         except ValueError as e:
-            raise click.UsageError(str(e))
+            raise click.UsageError(str(e)) from e
         click.echo(f"Detected format: {fmt}", err=True)
     conversations = parse(path, fmt)
     if not conversations:

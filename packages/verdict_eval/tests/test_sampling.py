@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
+import pytest
 from verdict_eval.sampling import (
     StratifiedJudgeSampler,
     WindowSpec,
@@ -44,6 +45,12 @@ def test_window_label_boundaries():
     assert WINDOW.label(NOW - timedelta(hours=36)) is None
     # Far past → None
     assert WINDOW.label(NOW - timedelta(days=30)) is None
+    assert WINDOW.label(NOW + timedelta(seconds=1)) is None
+
+
+def test_window_rejects_naive_trace_timestamp():
+    with pytest.raises(ValueError, match="timezone"):
+        WINDOW.label(datetime(2026, 6, 29, 11))
 
 
 def test_high_volume_cluster_is_capped_at_target():
@@ -51,7 +58,7 @@ def test_high_volume_cluster_is_capped_at_target():
     traces = _make("c1", 500, _current_ts(), "cur")
     plan = StratifiedJudgeSampler(target_per_cell=40).plan(traces, window=WINDOW)
     assert plan.total_to_judge == 40
-    cell = [c for c in plan.cells if c.window == "current"][0]
+    cell = next(c for c in plan.cells if c.window == "current")
     assert cell.to_judge == 40 and not cell.under_covered
 
 
@@ -130,5 +137,5 @@ def test_uniform_contrast_shows_starvation():
     strat = StratifiedJudgeSampler(target_per_cell=30).plan(traces, window=WINDOW)
     # Stratified reaches the floor for big and judges all 20 of small (capped by
     # availability), spending far less than uniform on the big cluster.
-    big_cell = [c for c in strat.cells if c.cluster_id == "big"][0]
+    big_cell = next(c for c in strat.cells if c.cluster_id == "big")
     assert big_cell.to_judge == 30   # not 100

@@ -1,24 +1,25 @@
-"""Synthetic regression injection — the week-2 verification deliverable.
+"""Synthetic regression injection self-test.
 
 Generates corrupted responses across 7 categories, runs them through a judge,
-and reports precision/recall/F1 per category. The judge should detect every
-corruption type with high recall.
+and reports precision/recall/F1 per category. This verifies pipeline wiring on
+known synthetic corruptions; it is not external validation or a production
+quality claim.
 
 Usage:
     python scripts/run_regression_injection.py \\
         --judge-model gemini-2.5-flash \\
-        --provider gemini \\
+        --provider google \\
         --n-samples 50
 
-This script intentionally accepts a "fake" provider for offline testing — it
-proves the harness works even before live LLM keys are wired up.
+This script intentionally accepts a "fake" provider for offline testing so the
+self-test is runnable before live LLM keys are wired up.
 """
 
 from __future__ import annotations
 
+# ruff: noqa: E402 - source-checkout imports follow the local sys.path bootstrap.
 import argparse
 import json
-import statistics
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -37,7 +38,6 @@ from verdict_eval.injector import (
 )
 from verdict_eval.judge import DEFAULT_RUBRIC, Judge
 from verdict_eval.providers import FakeProvider
-
 
 # A small built-in corpus so the script runs without external data.
 DEFAULT_CORPUS = [
@@ -110,6 +110,17 @@ def main() -> int:
     p.add_argument("--strengths", default="1.0",
                    help="Comma-separated corruption strengths (0.0-1.0).")
     args = p.parse_args()
+
+    if args.provider == "fake":
+        print(
+            "SELF-TEST MODE: the deterministic oracle knows the injected labels. "
+            "Scores verify harness wiring only; do not publish them as judge validation."
+        )
+    else:
+        print(
+            "SYNTHETIC BATTERY: results measure this judge on generated corruptions, "
+            "not agreement with human labels on production traffic."
+        )
 
     corpus = DEFAULT_CORPUS[: args.n_samples] or DEFAULT_CORPUS
     strengths = [float(s) for s in args.strengths.split(",")]
