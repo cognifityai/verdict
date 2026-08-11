@@ -11,6 +11,27 @@ permissions:
   contents: read
 
 jobs:
+  ui-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: pnpm/setup@v1
+        with:
+          version: 11.16.0
+          runtime: node@22
+          cache: true
+          cache-dependency-path: ui/pnpm-lock.yaml
+          install: false
+
+      - name: Build dashboard assets
+        run: |
+          pnpm --dir ui install --frozen-lockfile
+          pnpm --dir ui build
+
+      - name: Verify generated dashboard assets are current
+        run: git diff --exit-code -- ui/landing.html ui/dashboard.html ui/assets
+
   test:
     runs-on: ubuntu-latest
     strategy:

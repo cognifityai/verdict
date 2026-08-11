@@ -26,7 +26,7 @@ uv venv --python 3.12 && source .venv/bin/activate     # or your own 3.10+ venv
 
 # Include the provider extras you want to test live. Google capture needs `google`.
 pip install "cognifity-verdict[anthropic,openai,google]"
-pip install cognifity-verdict-eval cognifity-verdict-inspect
+pip install "cognifity-verdict-eval[semantic]" cognifity-verdict-inspect
 pip install -r ui/requirements.txt              # repo-local dashboard server
 pip install pytest pytest-asyncio               # only needed for the source test suite
 ```
@@ -34,11 +34,10 @@ pip install pytest pytest-asyncio               # only needed for the source tes
 You do **not** need a separate `pip install scipy scikit-learn` — `verdict_eval`
 lists them as hard dependencies, so the line above brings them in.
 
-Optional: for higher-quality local semantic embeddings with
-`sentence-transformers/all-MiniLM-L6-v2`, install:
+Minimal alternative without the local semantic model:
 
 ```bash
-pip install "cognifity-verdict-eval[semantic]"
+pip install cognifity-verdict-eval   # hash fallback only; lexical, not semantic
 ```
 
 ## 2. Confirm it's healthy (30 seconds, no key)
@@ -62,12 +61,15 @@ verdict-inspect analyze --report ./drift_report.md ~/Downloads/chatlog.jsonl
 verdict-inspect analyze --no-judge ~/Downloads/conversations.json   # skip the key-gated judge
 ```
 
-Key-free, you get semantic drift with the built-in lightweight embedder plus
-structural metrics (length, hedge/refusal/apology rates over time). Install the
-`semantic` extra above if you want the heavier MiniLM embedder. Set
+Key-free, the recommended install gives you local MiniLM semantic drift plus
+structural metrics (length, hedge/refusal/apology rates over time). The minimal
+install falls back to a lexical hash embedding and labels that limitation in the
+report; it should not be interpreted as semantic similarity. The first MiniLM
+run may download model weights; embedding inference then runs locally. Set
 `ANTHROPIC_API_KEY` to add the PASS/FAIL judge sample; omit it (or pass
-`--no-judge`) to stay fully local. Meaningful drift stats need conversations of
-~30+ substantive turns per window.
+`--no-judge`) to stay fully local. The inspector can form windows from eight
+substantive turns each, but treat those small-window results as exploratory;
+roughly 30 or more per window gives more useful evidence.
 
 ## 4. Instrument your own app (the five-line pattern)
 
@@ -77,7 +79,7 @@ from anthropic import Anthropic     # or openai / google
 
 verdict.init(service_name="my-app", storage="sqlite:///./verdict.db")
 client = Anthropic()
-# use the client normally — every call is captured
+# use the client normally — supported SDK calls are captured
 ```
 
 Content capture is **off by default** (PII surface); enable with
@@ -95,8 +97,9 @@ python scripts/live_capture_check.py
 python scripts/live_capture_check.py --providers anthropic,openai --no-streaming
 ```
 
-A pass confirms traces land with tokens, cost, finish reason, and errors
-populated — non-streaming and streaming — on the SDK versions you actually have.
+A pass confirms traces land with tokens, estimated cost for recognized models,
+finish reason, and errors populated — non-streaming and streaming — on the SDK
+versions you actually have.
 
 ## 5. Judge calibration with `verdict_eval` (only if you want quality-drift)
 
@@ -118,8 +121,10 @@ estimate. Needs a provider key (the judge makes calls).
 
 ## 6. See your results — run the pipeline, then open the dashboard
 
-Capture is live and inline: once `verdict.init()` runs, every call streams into
-`verdict.db` immediately. But **judging and drift detection are not automatic** —
+Capture starts when `verdict.init()` installs the supported provider wrappers.
+By default, supported calls that pass the configured sampling policy are
+persisted during capture; with `buffered_writes=True`, they are queued for a
+background batched writer. **Judging and drift detection are not automatic** -
 they are a batch step you run, then a dashboard you read. Two commands:
 
 ```bash
@@ -138,9 +143,12 @@ python ui/server.py --db ./verdict.db     # FastAPI + Uvicorn (from ui/requireme
 ```
 
 The dashboard shows per-provider traffic (trace counts, error rate, latency,
-tokens, **cost**), intent clusters, pass-rate by dimension, and the **drift
-signals** — each with its dimension, direction, effect size (Cliff's δ),
-BH-adjusted p-value, sample sizes, and a recommended action. That's the payoff:
+tokens, **estimated cost**), intent clusters, pass-rate by dimension, and the
+**drift signals** — each with its dimension, direction, effect size (Cliff's δ),
+BH-adjusted p-value, sample sizes, a recommended action, and up to five current-
+window evidence trace IDs. For regressions, those examples prioritize failed
+traces; improvements prioritize passing traces; evaluability regressions
+prioritize `UNCLEAR` traces. That's the payoff:
 instead of "the model feels worse," you get "instruction_following on cluster 4
 dropped, p-adj 0.003, δ −0.31," and can act — roll back a model version, fix a
 prompt, or escalate.
@@ -159,14 +167,41 @@ prompt, or escalate.
   expected, not a failure. `run_drift_pipeline.py --help` lists flags
   (`--current-hours`, `--baseline-days`, `--min-sample-size`) if you want to
   shorten the windows for a quick demo on smaller data.
+- **The effect-size gate is also a sensitivity floor.** The default Cliff's
+  delta threshold is 0.147, which equals a 14.7 percentage-point pass-rate
+  change on binary dimensions. Smaller changes do not alert regardless of
+  sample size. Use `--effect-size-threshold` only after choosing the smallest
+  operationally meaningful change for your workload.
+- **Intent clustering needs workload validation.** MiniLM with a `0.50`
+  cosine-distance threshold is a starting point. Check the cluster-health
+  status for fragmentation or underpowered clusters. If you change the
+  threshold or embedding model, bump `--clustering-version`; Verdict rejects a
+  reused registry whose recorded threshold or embedding dimension does not match.
+  When upgrading an existing store, run once with `--recluster` so old trace IDs
+  are rebuilt under the new registry. Use `--trust-existing-clusters` only when
+  every judgeable trace was assigned by your own stable external clusterer.
+- **Windows use capture time.** The pipeline places judgments into windows using
+  the associated trace's `started_at`, not the time the judgment was created.
+  Re-running the same hourly analysis bucket replaces that bucket's signals, so
+  a signal is removed if it no longer clears the gates after new evidence arrives.
+  A rerun reuses and aggregates at most one judgment per trace for the selected
+  judge model and rubric version; judgments from other evaluator definitions are
+  retained in storage but excluded from that run.
+- **The v0 runner is single-tenant per store.** It rejects a database containing
+  multiple tenant scopes instead of pooling them. Use separate stores until
+  tenant-scoped cluster registries and drift signals ship.
+- **Dashboard cost is an estimate.** Verdict uses a dated static table of public
+  base token prices. Unknown models are left unpriced, and caching, special
+  tiers, provider tools, residency, and negotiated rates are not modeled.
 
 ## What needs a key vs. not
 
 | Capability | Provider key? |
 |---|---|
-| Capture (traces, tokens, latency, cost, errors) | No |
+| Capture (traces, tokens, latency, estimated cost, errors) | No |
 | Structural checks (refusal / JSON / length / latency drift) | No |
-| Semantic drift (built-in deterministic/hash embedder; optional MiniLM) | No |
+| Lexical embedding drift (built-in hash fallback) | No |
+| Semantic embedding drift (local MiniLM; extra install) | No |
 | Intent clustering | No |
 | `verdict-inspect` semantic + structural report | No |
 | Judge PASS/FAIL quality drift | Yes (BYOK) |

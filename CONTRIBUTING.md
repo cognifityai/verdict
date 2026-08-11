@@ -36,6 +36,19 @@ python -m pytest -q
 
 Run `ruff check <changed Python files>` for Python files you modify.
 
+The dashboard ships checked-in production assets and does not need Node at
+runtime. When changing files under `ui/`, install Node 18 or newer and pnpm,
+then rebuild the tracked assets:
+
+```bash
+pnpm --dir ui install --frozen-lockfile
+pnpm --dir ui build
+python -m pytest -q ui/tests
+```
+
+Include the updated `ui/landing.html`, `ui/dashboard.html`, and `ui/assets/`
+files in the same pull request as the source change.
+
 Provider instrumentation changes should also be checked with
 `scripts/live_capture_check.py` against the real SDKs they affect. That script
 makes paid provider calls, so use only providers for which you have configured

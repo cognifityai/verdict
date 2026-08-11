@@ -7,6 +7,8 @@ implementations and would slowly couple to SQLite semantics.
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from verdict.schema import DriftSignal, Judgment, SpanRecord, Trace, UserSignalRecord
 
 
@@ -97,6 +99,13 @@ class InMemoryStorage:
 
     def insert_drift_signal(self, signal: DriftSignal) -> None:
         self._signals[signal.signal_id] = signal
+
+    def delete_drift_signals_between(self, start: datetime, end: datetime) -> None:
+        self._signals = {
+            signal_id: signal
+            for signal_id, signal in self._signals.items()
+            if not (start <= signal.detected_at < end)
+        }
 
     def list_drift_signals(self, *, limit: int = 100) -> list[DriftSignal]:
         items = sorted(self._signals.values(), key=lambda s: s.detected_at, reverse=True)

@@ -82,39 +82,39 @@ DIMENSIONS = ["groundedness", "relevance", "completeness", "safety", "instructio
 INTENTS: dict[str, list[str]] = {
     "billing_refund": [
         "How do I get a refund for my last charge?",
-        "I want my money back on the subscription.",
-        "Can you process a refund to my card?",
-        "Please reverse the payment I made yesterday.",
+        "Can I get my most recent payment refunded?",
+        "Please reverse the latest charge on my account.",
+        "I want my money back for the last payment.",
     ],
     "weather_forecast": [
-        "What's the weather going to be tomorrow?",
-        "Will it rain this weekend?",
-        "Give me the five-day forecast for Seattle.",
-        "Is it going to be sunny on Friday?",
+        "What's tomorrow's weather forecast for Seattle?",
+        "Will it rain in Seattle tomorrow?",
+        "Give me the Seattle weather forecast for tomorrow.",
+        "Will Seattle be sunny tomorrow?",
     ],
     "code_debug": [
-        "Why does my Python loop throw an IndexError?",
-        "Help me fix this stack trace in my function.",
-        "My code crashes on an empty list, what's wrong?",
-        "Debug this null pointer in my method.",
+        "Why does my Python loop raise an IndexError?",
+        "Help me fix an IndexError in my Python loop.",
+        "My Python loop crashes with list index out of range.",
+        "How do I prevent index out of range in this Python loop?",
     ],
     "travel_booking": [
         "Book me a flight to Tokyo next month.",
-        "Find a hotel near the conference center.",
-        "What's the cheapest train from Paris to Lyon?",
-        "Reserve a rental car for my trip.",
+        "Find me a flight to Tokyo next month.",
+        "I need a plane ticket to Tokyo next month.",
+        "Help me reserve airfare to Tokyo for next month.",
     ],
     "account_security": [
         "How do I reset my password?",
-        "Someone logged into my account, what do I do?",
-        "Enable two-factor authentication for me.",
-        "I think my account was hacked, help.",
+        "I forgot my password and need to reset it.",
+        "Help me change my account password.",
+        "How can I recover access with a new password?",
     ],
     "product_howto": [
         "How do I export my data to CSV?",
-        "Where is the setting to change my theme?",
-        "Walk me through connecting an integration.",
-        "How can I invite a teammate to my workspace?",
+        "Where can I download my data as a CSV?",
+        "Export my workspace data to a CSV file.",
+        "How can I save my data in CSV format?",
     ],
 }
 
@@ -298,7 +298,7 @@ def _synthetic_judge(cfg: Config, gt: GeneratedTrace, rng: random.Random) -> Jud
         dims.append(DimensionScore(name=dim, verdict=verdict, reasoning="synthetic", judge_model="synthetic"))
     return Judgment(
         trace_id=gt.trace.trace_id, rubric_name="default", rubric_version="1",
-        judge_models=["synthetic"], dimensions=dims, created_at=gt.trace.started_at,
+        judge_models=["synthetic"], dimensions=dims,
     )
 
 
@@ -336,7 +336,7 @@ def run_multirun(cfg: Config, *, embedder_kind: str, judge_mode: str):
         registry_json = storage.load_cluster_registry("v1")
         from verdict_eval.stable_clustering import ClusterRegistry
         clusterer = StableIntentClusterer(
-            embedder=embedder, threshold=0.30,
+            embedder=embedder, threshold=0.50,
             registry=ClusterRegistry.from_json(registry_json),
         )
         clusterer.registry.version = "v1"
@@ -378,12 +378,11 @@ def run_multirun(cfg: Config, *, embedder_kind: str, judge_mode: str):
 def _live_judge(storage, g: GeneratedTrace) -> None:
     """Live judge path (costs money). Uses the real Anthropic judge over an
     injector-corrupted response so there is a ground-truth label."""
-    from verdict_eval.judge import Judge, DEFAULT_RUBRIC
+    from verdict_eval.judge import DEFAULT_RUBRIC, Judge
     from verdict_eval.providers import AnthropicAdapter
     judge = Judge(provider=AnthropicAdapter(), model="claude-haiku-4-5", rubric=DEFAULT_RUBRIC)
     j = judge.judge(query=g.trace.prompt_redacted or "", response=g.trace.response_redacted or "",
                     trace_id=g.trace.trace_id)
-    j.created_at = g.trace.started_at
     storage.insert_judgment(j)
 
 
@@ -420,6 +419,10 @@ def detect_and_score(state: dict) -> int:
         all_judgments.extend(storage.list_judgments_for_cluster(cid, limit=10**9))
     cur_windows, base_windows = split_windows_by_time(
         all_judgments, state["cluster_for_trace"],
+        {
+            t.trace_id: t.started_at
+            for t in storage.list_traces(limit=10**9)
+        },
         current_hours=cfg.current_days * 24,
         baseline_days=cfg.baseline_days,
         baseline_lag_hours=cfg.gap_hours,

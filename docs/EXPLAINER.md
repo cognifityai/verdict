@@ -39,16 +39,22 @@ they go through a supported provider SDK.
 
 1. **Capture**: call `verdict.init(...)` in your app. Verdict wraps supported
    provider SDK methods and records request metadata, response metadata, token
-   usage, cost estimates, errors, and optional redacted content.
+   usage, cost estimates, errors, and optional redacted content. `sample_rate`
+   controls the retained fraction.
 2. **Store**: traces are written through a storage interface. SQLite is the
-   default local store; Postgres is available for shared environments.
-3. **Evaluate**: sampled traces can be scored by a judge model using Verdict's
-   rubric schema.
-4. **Group**: prompt embeddings are clustered so similar work is compared with
-   similar work.
-5. **Detect**: Verdict compares recent quality distributions against a reference
-   window and emits drift signals when changes clear both statistical and
-   practical thresholds.
+   default local store; Postgres is available for shared environments. Optional
+   buffered writes move persistence to a background batched writer.
+3. **Group**: on a pipeline run, prompt embeddings are assigned against a
+   persisted cluster registry so existing cluster IDs remain stable. Local
+   MiniLM is the semantic default; the explicit hash fallback is lexical.
+4. **Evaluate**: the separately invoked batch pipeline selects traces per
+   cluster and time window, then scores them with a configured judge and rubric.
+   Capture itself does not make judge calls.
+5. **Detect**: Verdict compares current and baseline judgments using each
+   trace's capture timestamp. It emits per-cluster, per-dimension signals only
+   when both statistical and practical thresholds clear, and retains up to five
+   current-window trace IDs as review evidence. Re-running the same hourly
+   analysis bucket replaces stale results from that bucket.
 6. **Inspect**: use the CLI, Python APIs, or dashboard to review traces, scores,
    clusters, and drift reports.
 
@@ -87,6 +93,10 @@ themselves. Production deployments should validate provider coverage,
 storage settings, redaction behavior, retention policy, and judge calibration for
 their own traffic before depending on alerts.
 
+The v0 drift runner supports one tenant scope per store and rejects mixed-tenant
+analysis. Cost figures are best-effort estimates from a dated static table of
+public base token prices, not provider billing data.
+
 ## Security And Privacy Notes
 
 - Content capture is opt-in. You can capture metadata without storing prompts or
@@ -94,6 +104,9 @@ their own traffic before depending on alerts.
 - Redaction is best-effort pattern redaction, not a compliance guarantee.
 - API keys are read from your environment and should not be committed to the
   repository.
+- Structural checks and local embedding inference keep trace content local. A
+  provider-backed judge sends the sampled prompt/response content to the
+  configured provider under that provider's data-handling terms.
 - Local SQLite files and generated reports may contain sensitive trace data.
   Keep them out of source control.
 - Before using Verdict with production data, review `SECURITY.md`, your

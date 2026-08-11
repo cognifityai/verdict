@@ -27,18 +27,13 @@ REPO = HERE.parent  # .../verdict
 
 _log = logging.getLogger("verdict.dashboard")
 
-# Security headers applied to every HTTP response. The CSP is deliberately
-# strict but allows exactly the CDNs the dashboard page actually loads
-# (tailwind, cdnjs for React/Recharts/lucide/babel) plus the inline styles and
-# in-browser Babel transform the research-preview page relies on. It is kept in
-# sync with the <meta http-equiv="Content-Security-Policy"> tag in
-# dashboard.html. Tighten/remove 'unsafe-inline'/'unsafe-eval' once the page is
-# served from a pre-built bundle instead of CDN + in-browser Babel.
+# Security headers applied to every HTTP response. Scripts and stylesheets are
+# pre-built local assets. ``unsafe-inline`` remains style-only because the React
+# views use style properties for data-driven colors and dimensions.
 _CSP = (
     "default-src 'self'; "
-    "script-src 'self' 'unsafe-inline' 'unsafe-eval' "
-    "https://cdn.tailwindcss.com https://cdnjs.cloudflare.com; "
-    "style-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com; "
+    "script-src 'self'; "
+    "style-src 'self' 'unsafe-inline'; "
     "img-src 'self' data:; "
     "connect-src 'self'; "
     "font-src 'self' data:; "
@@ -139,14 +134,36 @@ def _provider_order(keys) -> list[str]:
     return ordered
 
 
+def _cluster_health(cluster_ids: list[str | None], min_sample_size: int = 30) -> dict:
+    from verdict_eval.stable_clustering import assess_cluster_health
+
+    health = assess_cluster_health(cluster_ids, min_sample_size=min_sample_size)
+    status = "fragmented" if health.is_fragmented else (
+        "underpowered" if health.clusters_meeting_sample_floor < health.n_clusters else "ready"
+    )
+    if health.n_clusters == 0:
+        status = "empty"
+    return {
+        "status": status,
+        "nTraces": health.n_traces,
+        "nClusters": health.n_clusters,
+        "medianClusterSize": health.median_cluster_size,
+        "clustersMeetingSampleFloor": health.clusters_meeting_sample_floor,
+        "minSampleSize": health.min_sample_size,
+        "messages": list(health.messages),
+    }
+
+
 def _build(cur) -> dict:
     t0row = cur.execute("SELECT MIN(started_at) m, MAX(started_at) x FROM traces").fetchone()
     if not t0row or not t0row["m"]:
         # empty DB — return a minimal, valid-but-empty bundle
         return {"meta": {"runStart": None, "durationHours": 0, "totalTraces": 0,
-                         "totalJudged": 0, "totalCost": 0.0, "regressionHour": 0,
+                         "totalJudged": 0, "totalCost": None,
+                         "totalCostStatus": "unavailable", "regressionHour": 0,
                          "providers": 0, "clusters": 0},
                 "providers": [], "clusters": [], "driftSignals": [],
+                "clusterHealth": _cluster_health([]),
                 "dimensionOverall": [], "tsRows": [], "passrate": [], "haikuDim": [],
                 "samples": [], "providerDimension": []}
     t0, tmax = _dt(t0row["m"]), _dt(t0row["x"])
@@ -193,7 +210,8 @@ def _build(cur) -> dict:
             """SELECT COUNT(*) n,
                       SUM(CASE WHEN error IS NOT NULL AND error<>'' THEN 1 ELSE 0 END) errors,
                       AVG(latency_ms) lat, SUM(input_tokens) it, SUM(output_tokens) ot,
-                      SUM(cost_usd) cost
+                      SUM(cost_usd) cost,
+                      SUM(CASE WHEN cost_usd IS NULL THEN 1 ELSE 0 END) cost_unknown
                FROM traces WHERE provider=?""", (p,)).fetchone()
         pas = tot = 0
         for c in prov_dim[p].values():
@@ -206,13 +224,20 @@ def _build(cur) -> dict:
             "n": r["n"], "errors": r["errors"] or 0,
             "errorRate": round(100 * (r["errors"] or 0) / r["n"], 1) if r["n"] else 0.0,
             "avgLatency": round((r["lat"] or 0) / 1000, 2),
-            "inTok": r["it"] or 0, "outTok": r["ot"] or 0, "cost": round(r["cost"] or 0, 4),
+            "inTok": r["it"] or 0, "outTok": r["ot"] or 0,
+            "cost": round(r["cost"], 4) if r["cost"] is not None else None,
+            "costUnknown": r["cost_unknown"] or 0,
             "passRate": round(100 * pas / tot, 1) if tot else None, "judged": tot,
         })
 
     # ---- clusters ----
-    clusters = [dict(cluster_id=r["cluster_id"], n=r["n"]) for r in
-                cur.execute("SELECT cluster_id, COUNT(*) n FROM traces GROUP BY cluster_id ORDER BY n DESC")]
+    clusters = [dict(cluster_id=r["cluster_id"], n=r["n"]) for r in cur.execute(
+        """SELECT cluster_id, COUNT(*) n FROM traces
+           WHERE cluster_id IS NOT NULL AND cluster_id <> ''
+           GROUP BY cluster_id ORDER BY n DESC"""
+    )]
+    cluster_ids = [r["cluster_id"] for r in cur.execute("SELECT cluster_id FROM traces")]
+    cluster_health = _cluster_health(cluster_ids)
 
     # ---- drift signals ----
     drift = []
@@ -236,6 +261,7 @@ def _build(cur) -> dict:
             "cohensD": round(s["effect_size_cohens_d"], 2),
             "nCur": s["sample_size_current"], "nBase": s["sample_size_baseline"],
             "layers": json.loads(s["contributing_layers_json"] or "[]"),
+            "exampleTraceIds": json.loads(s["example_trace_ids_json"] or "[]"),
             "action": s["recommended_action"], "detectedAt": s["detected_at"],
         })
     # Sort by the primary effect size (Cliff's δ) when present, else Cohen's d.
@@ -355,19 +381,28 @@ def _build(cur) -> dict:
         samples.append(s)
 
     total_traces = sum(p["n"] for p in providers)
+    priced_traces = sum(p["n"] - p["costUnknown"] for p in providers)
+    total_cost = sum(p["cost"] or 0 for p in providers)
+    total_cost_status = (
+        "unavailable" if priced_traces == 0
+        else "complete" if priced_traces == total_traces
+        else "partial"
+    )
     return {
         "meta": {
             "runStart": t0row["m"],
             "durationHours": max(1, round((tmax - t0).total_seconds() / 3600)),
             "totalTraces": total_traces,
             "totalJudged": len(judg_by_trace),
-            "totalCost": round(sum(p["cost"] for p in providers), 3),
+            "totalCost": round(total_cost, 3) if priced_traces else None,
+            "totalCostStatus": total_cost_status,
             "regressionHour": int(os.environ.get("VERDICT_REGRESSION_HOUR", "4")),
             "providers": len(providers),
             "clusters": len(clusters),
         },
         "providers": providers,
         "clusters": clusters,
+        "clusterHealth": cluster_health,
         "driftSignals": drift,
         "dimensionOverall": dimensionOverall,
         "tsRows": tsRows,
@@ -388,8 +423,10 @@ def create_app():
     from fastapi import FastAPI
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import HTMLResponse, JSONResponse, Response
+    from fastapi.staticfiles import StaticFiles
 
     app = FastAPI(title="Verdict Dashboard", version="0.1.0")
+    app.mount("/assets", StaticFiles(directory=HERE / "assets", check_dir=False), name="assets")
     # CORS is locked down by default (same-origin only). The dashboard is served
     # from this same origin, so it needs nothing. Set VERDICT_CORS_ORIGINS to a
     # comma-separated allowlist only if a separate frontend must read /api/data.
@@ -433,8 +470,7 @@ def create_app():
 
     @app.middleware("http")
     async def security_headers(request, call_next):
-        """Apply baseline security headers (CSP, nosniff, frame-deny, no-referrer)
-        to every response. Kept in sync with the <meta> CSP in dashboard.html."""
+        """Apply baseline security headers to every response."""
         resp = await call_next(request)
         for k, v in _SECURITY_HEADERS.items():
             resp.headers.setdefault(k, v)
@@ -444,7 +480,7 @@ def create_app():
         html = HERE / filename
         if not html.exists():
             return HTMLResponse(f"<h1>{filename} not found</h1>"
-                                "<p>Run <code>python ui/build.py</code> to generate it.</p>",
+                                "<p>Run <code>pnpm --dir ui build</code> to generate it.</p>",
                                 status_code=404)
         return HTMLResponse(html.read_text())
 

@@ -18,10 +18,18 @@ from __future__ import annotations
 import os
 import time
 from dataclasses import dataclass, field
-from typing import Any
+
+from verdict_eval.structural import (
+    count_hedges as _count_hedges,
+)
+from verdict_eval.structural import (
+    is_apology_start as _is_apology_start,
+)
+from verdict_eval.structural import (
+    is_refusal as _is_refusal,
+)
 
 from verdict_inspect.parsers.base import ParsedConversation, ParsedTurn, flatten
-
 
 # Default thresholds — these are configurable on `run_inspect`
 MIN_TURN_WORDS = 10
@@ -34,11 +42,6 @@ JUDGE_SAMPLE_PER_WINDOW = 25
 # Structural Layer 2 metrics live in verdict_eval.structural — that module
 # owns the canonical pattern libraries and per-window summary logic so the
 # same checks are usable from outside this pipeline (e.g. the streaming SDK).
-from verdict_eval.structural import (
-    count_hedges as _count_hedges,
-    is_apology_start as _is_apology_start,
-    is_refusal as _is_refusal,
-)
 
 
 @dataclass
@@ -153,20 +156,20 @@ def _make_embedder() -> tuple[object, str]:
     except Exception as e:
         from verdict_eval.clustering import HashingEmbedder
         print(f"  [embedder] SentenceTransformerEmbedder unavailable ({e}); "
-              "falling back to HashingEmbedder.")
-        return HashingEmbedder(), "HashingEmbedder (fallback)"
+              "falling back to lexical HashingEmbedder (not semantic).")
+        return HashingEmbedder(), "HashingEmbedder (lexical fallback; not semantic)"
 
 
 def _semantic_drift(windows: list[Window], embedder: object) -> list[SemanticDriftRow]:
     """Run SemanticDriftDetector pairwise: each later window vs the early baseline."""
     if len(windows) < 2:
         return []
+    import numpy as np
     from verdict_eval.semantic_drift import (
         SemanticDriftDetector,
         _cosine_distance,
         _psi_1d,
     )
-    import numpy as np
 
     detector = SemanticDriftDetector(
         embedder=embedder,
@@ -329,6 +332,11 @@ def run_inspect(
     embedder_name = "(skipped)"
     if enable_semantic and len(windows) >= 2 and len(substantive) >= 2 * MIN_TURNS_PER_WINDOW:
         embedder, embedder_name = _make_embedder()
+        if "not semantic" in embedder_name:
+            notes.append(
+                "Semantic model unavailable: embedding drift used the lexical hash "
+                "fallback. Do not interpret these rows as semantic similarity."
+            )
         semantic_rows = _semantic_drift(windows, embedder)
 
     judge_rows: list[JudgeRow] = []

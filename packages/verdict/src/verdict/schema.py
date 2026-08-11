@@ -11,7 +11,6 @@ from enum import Enum
 from typing import Any
 from uuid import uuid4
 
-
 # ---------------------------------------------------------------------------
 # OpenTelemetry GenAI semconv attribute name constants
 # (gated experimental as of mid-2026 — track open-telemetry/semantic-conventions)
@@ -44,6 +43,19 @@ class Operation(str, Enum):
     CHAT = "chat"
     TEXT_COMPLETION = "text_completion"
     EMBEDDING = "embeddings"
+
+
+_OPERATION_ALIASES = {
+    "messages.create": Operation.CHAT,
+    "chat.completions.create": Operation.CHAT,
+    "responses.create": Operation.CHAT,
+    "generate_content": Operation.CHAT,
+    "models.generate_content": Operation.CHAT,
+    "completions.create": Operation.TEXT_COMPLETION,
+    "embeddings.create": Operation.EMBEDDING,
+    "embed_content": Operation.EMBEDDING,
+    "models.embed_content": Operation.EMBEDDING,
+}
 
 
 def _now() -> datetime:
@@ -99,6 +111,22 @@ class Trace:
     # Cost (computed by verdict.pricing static pricing table)
     cost_usd: float | None = None
 
+    def __post_init__(self) -> None:
+        """Normalize enum values supplied by manual instrumentation."""
+        if isinstance(self.operation, Operation):
+            return
+        try:
+            self.operation = Operation(self.operation)
+        except (TypeError, ValueError) as exc:
+            alias = _OPERATION_ALIASES.get(str(self.operation).lower())
+            if alias is not None:
+                self.operation = alias
+                return
+            supported = ", ".join(op.value for op in Operation)
+            raise ValueError(
+                f"Unsupported operation {self.operation!r}; expected one of: {supported}"
+            ) from exc
+
 
 # ---------------------------------------------------------------------------
 # Judgments — output of the eval engine
@@ -117,6 +145,10 @@ class DimensionScore:
     verdict: Verdict
     reasoning: str = ""
     judge_model: str = ""                  # which judge produced this
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.verdict, Verdict):
+            self.verdict = Verdict(self.verdict)
 
 
 @dataclass
@@ -232,5 +264,9 @@ class DriftSignal:
     contributing_layers: list[str] = field(default_factory=list)
 
     # User-facing
-    example_trace_ids: list[str] = field(default_factory=list)  # 3–5 worst examples
+    example_trace_ids: list[str] = field(default_factory=list)  # 3-5 worst examples
     recommended_action: str = ""
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.direction, DriftDirection):
+            self.direction = DriftDirection(self.direction)

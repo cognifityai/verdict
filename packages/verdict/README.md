@@ -10,13 +10,18 @@ capture (prompts/completions) is **off by default** — opt in with
 `capture_content=True`; when enabled, captured content is run through built-in
 regex + Luhn PII redaction before it is stored.
 
+`sample_rate` controls the fraction of supported calls retained, and
+`buffered_writes=True` moves persistence to a background batched writer. Stored
+costs are best-effort estimates from Verdict's dated static base-price table;
+unknown models remain unpriced, and the values are not billing truth.
+
 ```python
 import verdict
 from anthropic import Anthropic
 
 verdict.init(service_name="my-app", storage="sqlite:///./verdict.db")
 client = Anthropic()
-# Use Anthropic normally — every call is captured.
+# Use Anthropic normally — supported SDK calls are captured.
 ```
 
 See the

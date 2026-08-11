@@ -29,9 +29,10 @@ This module is pure stdlib (no scipy/sklearn), so it imports and tests cheaply.
 from __future__ import annotations
 
 import random
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Iterable, Protocol
+from typing import Protocol
 
 
 class _HasClusterAndTime(Protocol):
@@ -52,15 +53,21 @@ class WindowSpec:
     baseline_lag_hours: int = 24
 
     def _now(self) -> datetime:
-        return self.now or datetime.now(timezone.utc)
+        now = self.now or datetime.now(timezone.utc)
+        if now.tzinfo is None:
+            raise ValueError("WindowSpec.now must include a timezone offset")
+        return now.astimezone(timezone.utc)
 
     def label(self, ts: datetime) -> str | None:
         """Return 'current', 'baseline', or None (in the gap / out of range)."""
         now = self._now()
+        if ts.tzinfo is None:
+            raise ValueError("Trace.started_at must include a timezone offset")
+        ts = ts.astimezone(timezone.utc)
         cur_start = now - timedelta(hours=self.current_hours)
         base_end = now - timedelta(hours=self.baseline_lag_hours)
         base_start = base_end - timedelta(days=self.baseline_days)
-        if ts >= cur_start:
+        if cur_start <= ts <= now:
             return "current"
         if base_start <= ts < base_end:
             return "baseline"

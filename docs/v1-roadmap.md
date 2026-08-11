@@ -90,7 +90,17 @@ Areas under consideration:
 ## Known Boundaries In v0
 
 - Verdict v0 is LLM-call observability, not a full agent runtime.
-- The local dashboard is intended for localhost or trusted-network use.
+- The local dashboard is intended for localhost or trusted-network use. Its v0
+  JavaScript and CSS are pre-built local assets, so rendering does not require
+  public CDN access. Put TLS and authentication in front of it before any
+  non-local deployment.
+- Quality judging and drift detection are periodic batch operations, not a
+  streaming alert service.
+- The v0 drift runner supports one tenant scope per store and refuses to pool a
+  mixed-tenant database.
+- Cost values are estimates from a dated static base-price table; caching,
+  long-context tiers, batch/priority modes, tools, regional uplifts, and
+  negotiated discounts are not modeled.
 - Content redaction is best-effort pattern redaction, not a compliance guarantee.
 - Reversible encrypted redaction is not implemented.
 - Production users should configure storage, retention, access control, and

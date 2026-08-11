@@ -8,9 +8,10 @@ Also covers Benjamini-Hochberg, Cliff's δ, Wasserstein, PSI in isolation.
 from __future__ import annotations
 
 import random
+from datetime import datetime, timedelta, timezone
 
 import numpy as np
-
+import pytest
 from verdict.schema import DriftDirection
 from verdict_eval.drift import (
     DriftDetector,
@@ -19,6 +20,7 @@ from verdict_eval.drift import (
     _cliffs_delta,
     _psi,
     _wasserstein,
+    split_windows_by_time,
 )
 
 
@@ -51,6 +53,23 @@ def test_real_regression_is_detected():
     assert s.p_value_adjusted < 0.01
 
 
+def test_regression_signal_includes_current_failure_trace_ids():
+    detector = DriftDetector(min_sample_size=30, p_threshold=0.01)
+    baseline = [DriftWindow(
+        "c1", "groundedness", [1.0] * 40,
+        trace_ids=[f"base-{i}" for i in range(40)],
+    )]
+    current = [DriftWindow(
+        "c1", "groundedness", [0.0] * 40,
+        trace_ids=[f"current-{i}" for i in range(40)],
+    )]
+
+    signals = detector.detect(current=current, baseline=baseline)
+
+    assert len(signals) == 1
+    assert signals[0].example_trace_ids == [f"current-{i}" for i in range(5)]
+
+
 def test_improvement_is_marked_improvement():
     detector = DriftDetector(min_sample_size=30, p_threshold=0.01, effect_size_threshold=0.2)
     current = [DriftWindow("c1", "relevance", _binom_scores(200, 0.9, seed=33))]
@@ -60,11 +79,14 @@ def test_improvement_is_marked_improvement():
     assert signals[0].direction == DriftDirection.IMPROVEMENT
 
 
-def test_too_few_samples_silently_skipped():
+def test_too_few_samples_reports_why_detection_was_skipped(caplog):
     detector = DriftDetector(min_sample_size=30, p_threshold=0.01)
     current = [DriftWindow("c1", "groundedness", _binom_scores(5, 0.3, seed=1))]
     baseline = [DriftWindow("c1", "groundedness", _binom_scores(5, 0.9, seed=2))]
     assert detector.detect(current=current, baseline=baseline) == []
+    assert detector.last_diagnostics
+    assert "minimum 30" in detector.last_diagnostics[0]
+    assert "minimum 30" in caplog.text
 
 
 def test_unmatched_cluster_or_dimension_skipped():
@@ -267,3 +289,87 @@ def test_build_windows_populates_n_unclear():
     assert w.n == 6
     assert w.n_unclear == 4
     assert abs(w.unclear_fraction - 0.4) < 1e-9
+    assert w.trace_ids == [f"t{i}" for i in range(6)]
+    assert w.unclear_trace_ids == [f"u{i}" for i in range(4)]
+
+
+def test_split_windows_uses_trace_time_not_judgment_creation_time():
+    """A historical trace judged today must remain in the baseline window."""
+    from verdict.schema import DimensionScore, Judgment, Verdict
+
+    now = datetime(2026, 8, 11, 12, tzinfo=timezone.utc)
+    judgments = [
+        Judgment(
+            trace_id="baseline-trace",
+            created_at=now,
+            dimensions=[DimensionScore(name="relevance", verdict=Verdict.PASS)],
+        ),
+        Judgment(
+            trace_id="current-trace",
+            created_at=now,
+            dimensions=[DimensionScore(name="relevance", verdict=Verdict.FAIL)],
+        ),
+    ]
+    clusters = {"baseline-trace": "c1", "current-trace": "c1"}
+    trace_times = {
+        "baseline-trace": now - timedelta(days=3),
+        "current-trace": now - timedelta(hours=2),
+    }
+
+    current, baseline = split_windows_by_time(
+        judgments,
+        clusters,
+        trace_times,
+        current_hours=24,
+        baseline_days=7,
+        baseline_lag_hours=24,
+        now=now,
+    )
+
+    assert current[0].trace_ids == ["current-trace"]
+    assert baseline[0].trace_ids == ["baseline-trace"]
+
+
+def test_split_windows_rejects_judgment_without_trace_time():
+    from verdict.schema import Judgment
+
+    judgment = Judgment(trace_id="missing")
+    try:
+        split_windows_by_time([judgment], {"missing": "c1"}, {})
+    except ValueError as exc:
+        assert "Trace.started_at" in str(exc)
+    else:
+        raise AssertionError("missing trace event time should fail loudly")
+
+
+def test_split_windows_rejects_naive_trace_time():
+    from verdict.schema import Judgment
+
+    judgment = Judgment(trace_id="naive")
+    with pytest.raises(ValueError, match="timezone"):
+        split_windows_by_time(
+            [judgment],
+            {"naive": "c1"},
+            {"naive": datetime(2026, 8, 11, 12)},
+            now=datetime(2026, 8, 11, 13, tzinfo=timezone.utc),
+        )
+
+
+def test_split_windows_excludes_future_trace():
+    from verdict.schema import DimensionScore, Judgment, Verdict
+
+    now = datetime(2026, 8, 11, 12, tzinfo=timezone.utc)
+    judgment = Judgment(
+        trace_id="future",
+        dimensions=[DimensionScore(name="relevance", verdict=Verdict.PASS)],
+    )
+
+    current, baseline = split_windows_by_time(
+        [judgment],
+        {"future": "c1"},
+        {"future": now + timedelta(minutes=1)},
+        now=now,
+    )
+
+    assert current == []
+    assert baseline == []

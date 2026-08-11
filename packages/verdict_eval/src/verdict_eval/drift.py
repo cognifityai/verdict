@@ -11,7 +11,7 @@ Statistical methodology (June 2026 refresh):
 
 - **Significance test — chosen by data type:**
   - For binary PASS/FAIL windows (the common case here) we use **Fisher's exact
-    test** (Fisher 1922) on the 2×2 pass/fail × current/baseline table. It is
+    test** (Fisher 1922) on the 2x2 pass/fail x current/baseline table. It is
     exact, non-parametric, and the textbook test for comparing two proportions —
     a better fit than Mann-Whitney U, which on heavily-tied binary data is only
     a weaker proxy for the same comparison.
@@ -51,13 +51,12 @@ from __future__ import annotations
 
 import logging
 import math
-from dataclasses import dataclass
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Iterable
 
 import numpy as np
 from scipy.stats import fisher_exact, mannwhitneyu, wasserstein_distance
-
 from verdict.schema import DriftDirection, DriftSignal, Judgment, Verdict
 
 log = logging.getLogger("verdict_eval.drift")
@@ -79,6 +78,9 @@ class DriftWindow:
     dimension: str
     scores: list[float]
     n_unclear: int = 0
+    # IDs remain aligned with `scores`; unclear IDs are tracked separately.
+    trace_ids: list[str] = field(default_factory=list)
+    unclear_trace_ids: list[str] = field(default_factory=list)
 
     @property
     def n(self) -> int:
@@ -122,6 +124,7 @@ class DriftDetector:
     min_sample_size: int = 30
     p_threshold: float = 0.01
     effect_size_threshold: float = 0.147     # Cliff's δ "small" threshold
+    last_diagnostics: list[str] = field(default_factory=list, init=False, repr=False)
 
     def detect(
         self,
@@ -130,6 +133,7 @@ class DriftDetector:
         baseline: Iterable[DriftWindow],
     ) -> list[DriftSignal]:
         """Compare matched (cluster, dimension) windows. Return drift signals."""
+        self.last_diagnostics = []
         baseline_map = {(w.cluster_id, w.dimension): w for w in baseline}
         # All matched (current, baseline) pairs, regardless of scored count —
         # the unclear-rate check needs pairs where the *scored* window is too
@@ -153,6 +157,19 @@ class DriftDetector:
         unclear_signals = self._detect_unclear_drift(matched)
 
         if not pairs:
+            if matched:
+                best_available = max(
+                    min(cur.n, base.n) for cur, base in matched
+                )
+                self._diagnose(
+                    f"No matched drift window reached the minimum {self.min_sample_size} "
+                    f"scored judgments in both periods (best matched cell: "
+                    f"n={best_available} on its smaller side)."
+                )
+            else:
+                self._diagnose(
+                    "No current and baseline windows shared the same cluster and dimension."
+                )
             return unclear_signals
 
         # Run all statistics per pair
@@ -250,10 +267,17 @@ class DriftDetector:
                     sample_size_current=r["cur"].n,
                     sample_size_baseline=r["base"].n,
                     contributing_layers=["judge_rubric"],
+                    example_trace_ids=_example_trace_ids(
+                        r["cur"], r["direction"], limit=5,
+                    ),
                     recommended_action=_recommend(r["direction"], r["cliffs"], r["wass"]),
                 )
             )
         return signals + unclear_signals
+
+    def _diagnose(self, message: str) -> None:
+        self.last_diagnostics.append(message)
+        log.warning(message)
 
     def _detect_unclear_drift(
         self, matched: list[tuple[DriftWindow, DriftWindow]]
@@ -294,6 +318,7 @@ class DriftDetector:
                     sample_size_current=cur.n_total,
                     sample_size_baseline=base.n_total,
                     contributing_layers=["judge_rubric"],
+                    example_trace_ids=cur.unclear_trace_ids[:5],
                     recommended_action=(
                         f"unclear rate rose {base_frac:.0%}→{cur_frac:.0%}; the judge is "
                         "increasingly unable to evaluate this dimension (e.g. missing "
@@ -323,7 +348,9 @@ def build_windows_from_judgments(
     tested instead of being flagged.
     """
     buckets: dict[tuple[str, str], list[float]] = {}
+    trace_ids: dict[tuple[str, str], list[str]] = {}
     unclear: dict[tuple[str, str], int] = {}
+    unclear_trace_ids: dict[tuple[str, str], list[str]] = {}
     for j in judgments:
         cluster = cluster_id_for_trace.get(j.trace_id)
         if cluster is None:
@@ -336,8 +363,10 @@ def build_windows_from_judgments(
                 v = 0.0
             else:
                 unclear[key] = unclear.get(key, 0) + 1
+                unclear_trace_ids.setdefault(key, []).append(j.trace_id)
                 continue
             buckets.setdefault(key, []).append(v)
+            trace_ids.setdefault(key, []).append(j.trace_id)
 
     # Diagnostic: flag (cluster, dimension) pairs dominated by UNCLEAR.
     for key, n_unclear in unclear.items():
@@ -361,6 +390,8 @@ def build_windows_from_judgments(
             dimension=d,
             scores=buckets.get((c, d), []),
             n_unclear=unclear.get((c, d), 0),
+            trace_ids=trace_ids.get((c, d), []),
+            unclear_trace_ids=unclear_trace_ids.get((c, d), []),
         )
         for (c, d) in all_keys
     ]
@@ -369,22 +400,42 @@ def build_windows_from_judgments(
 def split_windows_by_time(
     judgments: list[Judgment],
     cluster_id_for_trace: dict[str, str],
+    trace_started_at_for_trace: Mapping[str, datetime],
     *,
     current_hours: int = 24,
     baseline_days: int = 7,
     baseline_lag_hours: int = 24,
     now: datetime | None = None,
 ) -> tuple[list[DriftWindow], list[DriftWindow]]:
-    """Split a flat list of judgments into (current, baseline) windows."""
+    """Split judgments using the original trace event time.
+
+    ``Judgment.created_at`` records when evaluation happened. It is not the
+    event time of the model call and therefore cannot define production drift
+    windows: backfilled historical traces would otherwise all appear current.
+    Callers must provide the captured ``Trace.started_at`` for every judgment.
+    """
     now_ts = now or datetime.now(timezone.utc)
+    if now_ts.tzinfo is None:
+        raise ValueError("Analysis time must include a timezone offset")
+    now_ts = now_ts.astimezone(timezone.utc)
     cur_start = now_ts - timedelta(hours=current_hours)
     base_end = now_ts - timedelta(hours=baseline_lag_hours)
     base_start = base_end - timedelta(days=baseline_days)
 
     current_js, baseline_js = [], []
     for j in judgments:
-        ts = j.created_at
-        if ts >= cur_start:
+        try:
+            ts = trace_started_at_for_trace[j.trace_id]
+        except KeyError as exc:
+            raise ValueError(
+                f"Missing Trace.started_at for judgment trace_id={j.trace_id!r}"
+            ) from exc
+        if ts.tzinfo is None:
+            raise ValueError(
+                f"Trace.started_at must include a timezone for trace_id={j.trace_id!r}"
+            )
+        ts = ts.astimezone(timezone.utc)
+        if cur_start <= ts <= now_ts:
             current_js.append(j)
         elif base_start <= ts < base_end:
             baseline_js.append(j)
@@ -392,6 +443,24 @@ def split_windows_by_time(
         build_windows_from_judgments(current_js, cluster_id_for_trace),
         build_windows_from_judgments(baseline_js, cluster_id_for_trace),
     )
+
+
+def _example_trace_ids(
+    window: DriftWindow, direction: DriftDirection, *, limit: int,
+) -> list[str]:
+    """Select trace evidence from the current window for a drift signal."""
+    if len(window.trace_ids) != len(window.scores):
+        return []
+    pairs = list(zip(window.trace_ids, window.scores, strict=True))
+    if direction == DriftDirection.REGRESSION:
+        ordered = [trace_id for trace_id, score in pairs if score == 0.0]
+    elif direction == DriftDirection.IMPROVEMENT:
+        ordered = [trace_id for trace_id, score in pairs if score == 1.0]
+    else:
+        ordered = [trace_id for trace_id, _ in pairs]
+    if not ordered:
+        ordered = [trace_id for trace_id, _ in pairs]
+    return ordered[:limit]
 
 
 # ---------------------------------------------------------------------------

@@ -13,13 +13,41 @@ the "claude-3-5-sonnet" entry.
 
 from __future__ import annotations
 
+import logging
+from datetime import date
+
+log = logging.getLogger("verdict.pricing")
+
+# This is deliberately visible to callers and tests. Static pricing without an
+# audit date looks authoritative long after it has become stale.
+PRICING_LAST_VERIFIED = date(2026, 8, 11)
+PRICING_REVIEW_AFTER = date(2026, 8, 31)
+PRICING_SOURCE_URLS = (
+    "https://platform.claude.com/docs/en/about-claude/pricing",
+    "https://developers.openai.com/api/docs/pricing",
+    "https://ai.google.dev/gemini-api/docs/pricing",
+)
+_warned_unknown_models: set[str] = set()
+_UNKNOWN_WARNING_LIMIT = 100
+_warned_stale = False
+
 # model_substring -> (input_usd_per_1k, output_usd_per_1k)
 #
-# IMPORTANT: these are STATIC public list prices captured at authoring time and
-# WILL drift as providers change pricing. Review and update periodically.
+# IMPORTANT: these are STATIC base text input/output rates. They do not model
+# cached tokens, long-context tiers, audio, batch/priority modes, data
+# residency, server tools, or negotiated discounts. Review periodically.
 # Sources: Anthropic / OpenAI / Google public pricing pages.
 PRICE_PER_1K: dict[str, tuple[float, float]] = {
     # Anthropic (USD per 1K tokens)
+    "claude-fable-5": (0.010, 0.050),
+    "claude-mythos-5": (0.010, 0.050),
+    "claude-opus-5": (0.005, 0.025),
+    "claude-sonnet-5": (0.002, 0.010),
+    "claude-opus-4-8": (0.005, 0.025),
+    "claude-opus-4-7": (0.005, 0.025),
+    "claude-opus-4-6": (0.005, 0.025),
+    "claude-opus-4-5": (0.005, 0.025),
+    "claude-sonnet-4-6": (0.003, 0.015),
     "claude-haiku-4-5": (0.001, 0.005),
     "claude-sonnet-4-5": (0.003, 0.015),
     "claude-3-5-haiku": (0.0008, 0.004),
@@ -29,11 +57,23 @@ PRICE_PER_1K: dict[str, tuple[float, float]] = {
     "claude-3-haiku": (0.00025, 0.00125),
     "claude-3-sonnet": (0.003, 0.015),
     # OpenAI (USD per 1K tokens)
+    "gpt-5.6-sol": (0.005, 0.030),
+    "gpt-5.6-terra": (0.0025, 0.015),
+    "gpt-5.6-luna": (0.001, 0.006),
+    "gpt-5.5-pro": (0.030, 0.180),
+    "gpt-5.5": (0.005, 0.030),
+    "gpt-5.4-pro": (0.030, 0.180),
+    "gpt-5.4-mini": (0.00075, 0.0045),
+    "gpt-5.4-nano": (0.0002, 0.00125),
+    "gpt-5.4": (0.0025, 0.015),
     "gpt-4o-mini": (0.00015, 0.0006),
     "gpt-4o": (0.0025, 0.01),
     "gpt-4-turbo": (0.01, 0.03),
     "gpt-3.5-turbo": (0.0005, 0.0015),
     # Google Gemini (USD per 1K tokens)
+    "gemini-3.5-flash": (0.0015, 0.009),
+    "gemini-3.5-flash-lite": (0.0003, 0.0025),
+    "gemini-3.1-flash-lite": (0.00025, 0.0015),
     "gemini-2.5-flash-lite": (0.0001, 0.0004),
     "gemini-2.5-flash": (0.0003, 0.0025),
     "gemini-2.5-pro": (0.00125, 0.01),
@@ -56,16 +96,39 @@ def compute_cost_usd(
 
     Never raises — returns None on any unexpected input.
     """
+    global _warned_stale
+    if date.today() > PRICING_REVIEW_AFTER and not _warned_stale:
+        _warned_stale = True
+        log.warning(
+            "Static pricing was last verified on %s and is due for review; "
+            "dashboard costs are estimates, not billing truth.",
+            PRICING_LAST_VERIFIED.isoformat(),
+        )
     if not model:
         return None
 
     try:
+        normalized_model = model.lower()
+        if (input_tokens is not None and input_tokens < 0) or (
+            output_tokens is not None and output_tokens < 0
+        ):
+            return None
         # Longest substring match wins.
         best_key: str | None = None
         for key in PRICE_PER_1K:
-            if key in model and (best_key is None or len(key) > len(best_key)):
+            if key in normalized_model and (best_key is None or len(key) > len(best_key)):
                 best_key = key
         if best_key is None:
+            if (
+                normalized_model not in _warned_unknown_models
+                and len(_warned_unknown_models) < _UNKNOWN_WARNING_LIMIT
+            ):
+                _warned_unknown_models.add(normalized_model)
+                log.warning(
+                    "No static pricing entry for model %r; cost_usd will be unavailable. "
+                    "Treat dashboard spend as incomplete and verify current provider pricing.",
+                    model,
+                )
             return None
 
         if input_tokens is None and output_tokens is None:

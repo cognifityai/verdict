@@ -6,7 +6,7 @@ Five-line install pattern:
     verdict.init(storage="sqlite:///./verdict.db")
 
     # ...your existing Anthropic/OpenAI code...
-    # Verdict transparently captures every LLM call.
+    # Verdict transparently captures supported provider SDK calls.
 """
 
 from __future__ import annotations

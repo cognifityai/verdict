@@ -1,4 +1,4 @@
-<svg viewBox="0 0 1300 800" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system, BlinkMacSystemFont, 'Inter', sans-serif">
+<svg viewBox="0 0 1300 900" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system, BlinkMacSystemFont, 'Inter', sans-serif">
   <defs>
     <style>
       .title { font-size: 22px; font-weight: 700; fill: #0B1730; }
@@ -17,18 +17,18 @@
     </marker>
   </defs>
 
-  <rect width="1300" height="800" fill="#F5F7FA"/>
+  <rect width="1300" height="900" fill="#F5F7FA"/>
   <text x="40" y="44" class="title">Verdict v0 — Current Architecture</text>
   <text x="40" y="66" class="subtitle">What's actually in the repo today: SDK capture, storage adapters, eval engine, local dashboard, and reproducible verification scripts.</text>
 
   <!-- USER LAYER -->
-  <text x="40" y="110" class="plane">USER APPLICATION</text>
+  <text x="40" y="80" class="plane">USER APPLICATION</text>
   <rect x="220" y="90" width="320" height="60" rx="10" fill="#FFFFFF" stroke="#0B1730" stroke-width="1.5"/>
-  <text x="380" y="115" class="node-title" text-anchor="middle">Customer Code</text>
-  <text x="380" y="133" class="node-sub" text-anchor="middle">unchanged: from anthropic import Anthropic; client.messages.create(...)</text>
+  <text x="380" y="115" class="node-title" text-anchor="middle">Application Code</text>
+  <text x="380" y="133" class="node-sub" text-anchor="middle">existing SDK calls remain unchanged after verdict.init(...)</text>
 
   <!-- INSTRUMENTATION (wrapt monkey-patch) -->
-  <text x="40" y="200" class="plane">SDK · WRAPT MONKEY-PATCH</text>
+  <text x="40" y="170" class="plane">SDK · WRAPT MONKEY-PATCH</text>
   <rect x="120" y="180" width="200" height="80" rx="10" fill="#FFFFFF" stroke="#0B1730" stroke-width="1.5"/>
   <text x="220" y="205" class="node-title" text-anchor="middle">AnthropicInstrumentor</text>
   <text x="220" y="222" class="node-sub" text-anchor="middle">sync + async + streaming</text>
@@ -43,7 +43,8 @@
   <rect x="560" y="180" width="200" height="80" rx="10" fill="#FFFFFF" stroke="#0B1730" stroke-width="1.5"/>
   <text x="660" y="205" class="node-title" text-anchor="middle">GoogleInstrumentor</text>
   <text x="660" y="222" class="node-sub" text-anchor="middle">google-genai + legacy SDK</text>
-  <text x="660" y="237" class="node-sub" text-anchor="middle">streaming captured (verify: scripts/live_capture_check.py)</text>
+  <text x="660" y="237" class="node-sub" text-anchor="middle">streaming captured</text>
+  <text x="660" y="252" class="node-sub" text-anchor="middle">verify with live_capture_check.py</text>
 
   <rect x="780" y="180" width="200" height="80" rx="10" fill="#FFFFFF" stroke="#0B1730" stroke-width="1.5" stroke-dasharray="4 4"/>
   <text x="880" y="205" class="node-title" text-anchor="middle">@verdict.trace decorator</text>
@@ -51,16 +52,16 @@
   <text x="880" y="237" class="node-sub" text-anchor="middle">RAG, tools, business logic</text>
 
   <rect x="1000" y="180" width="180" height="80" rx="10" fill="#0B1730"/>
-  <text x="1090" y="205" class="node-title" text-anchor="middle" fill="#F5F7FA">PII Redaction</text>
-  <text x="1090" y="222" class="node-sub" text-anchor="middle" fill="#00C2FF">regex + Luhn</text>
-  <text x="1090" y="237" class="node-sub" text-anchor="middle" fill="#00C2FF">redact · hash</text>
+  <text x="1090" y="205" class="node-title" text-anchor="middle" style="fill:#F5F7FA">PII Redaction</text>
+  <text x="1090" y="222" class="node-sub" text-anchor="middle" style="fill:#00C2FF">regex + Luhn</text>
+  <text x="1090" y="237" class="node-sub" text-anchor="middle" style="fill:#00C2FF">redact · hash</text>
 
   <line x1="380" y1="150" x2="220" y2="180" class="arrow-cyan" marker-end="url(#arrow-cyan)"/>
   <line x1="380" y1="150" x2="440" y2="180" class="arrow-cyan" marker-end="url(#arrow-cyan)"/>
   <line x1="380" y1="150" x2="660" y2="180" class="arrow-cyan" marker-end="url(#arrow-cyan)"/>
 
   <!-- STORAGE LAYER -->
-  <text x="40" y="320" class="plane">STORAGE · 3 ADAPTERS</text>
+  <text x="40" y="290" class="plane">STORAGE · 3 ADAPTERS + BUFFERED WRAPPER</text>
   <rect x="120" y="300" width="200" height="80" rx="10" fill="#FFFFFF" stroke="#0B1730" stroke-width="1.5"/>
   <text x="220" y="325" class="node-title" text-anchor="middle">SQLiteStorage</text>
   <text x="220" y="343" class="node-sub" text-anchor="middle">durable single-file</text>
@@ -79,10 +80,10 @@
   <text x="660" y="373" class="node-sub" text-anchor="middle">postgres:// URL</text>
 
   <rect x="780" y="300" width="380" height="80" rx="10" fill="#FFFFFF" stroke="#0B1730" stroke-width="1.5" stroke-dasharray="4 4"/>
-  <text x="970" y="325" class="node-title" text-anchor="middle">Storage Protocol (port)</text>
-  <text x="970" y="343" class="node-sub" text-anchor="middle">insert_trace · get_trace · list_traces ·</text>
-  <text x="970" y="358" class="node-sub" text-anchor="middle">insert_judgment · list_judgments_for_cluster ·</text>
-  <text x="970" y="373" class="node-sub" text-anchor="middle">insert_drift_signal · list_drift_signals</text>
+  <text x="970" y="325" class="node-title" text-anchor="middle">Storage Protocol + BufferedStorage</text>
+  <text x="970" y="343" class="node-sub" text-anchor="middle">optional background batched writes</text>
+  <text x="970" y="358" class="node-sub" text-anchor="middle">traces · judgments · signals · evidence IDs</text>
+  <text x="970" y="373" class="node-sub" text-anchor="middle">delete / prune · persistent cluster registry</text>
 
   <line x1="220" y1="260" x2="220" y2="300" class="arrow-cyan" marker-end="url(#arrow-cyan)"/>
   <line x1="440" y1="260" x2="440" y2="300" class="arrow-cyan" marker-end="url(#arrow-cyan)"/>
@@ -90,11 +91,11 @@
   <line x1="880" y1="260" x2="660" y2="300" class="arrow" marker-end="url(#arrow)"/>
 
   <!-- EVAL ENGINE -->
-  <text x="40" y="440" class="plane">EVAL ENGINE · verdict_eval</text>
+  <text x="40" y="410" class="plane">EVAL ENGINE · verdict_eval</text>
   <rect x="120" y="420" width="200" height="100" rx="10" fill="#FFFFFF" stroke="#0B1730" stroke-width="1.5"/>
   <text x="220" y="445" class="node-title" text-anchor="middle">Judge (single)</text>
   <text x="220" y="463" class="node-sub" text-anchor="middle">5-dim binary rubric</text>
-  <text x="220" y="478" class="node-sub" text-anchor="middle">CoT reasoning + verdict</text>
+  <text x="220" y="478" class="node-sub" text-anchor="middle">short rationale + verdict</text>
   <text x="220" y="493" class="node-sub" text-anchor="middle">JSON output, fault-tolerant</text>
   <text x="220" y="508" class="node-sub" text-anchor="middle">JudgeEnsemble for cross-family</text>
 
@@ -106,15 +107,15 @@
   <text x="440" y="508" class="node-sub" text-anchor="middle">PairwiseJudgeEnsemble</text>
 
   <rect x="560" y="420" width="200" height="100" rx="10" fill="#FFFFFF" stroke="#0B1730" stroke-width="1.5"/>
-  <text x="660" y="445" class="node-title" text-anchor="middle">IntentClusterer</text>
-  <text x="660" y="463" class="node-sub" text-anchor="middle">Birch online clustering</text>
-  <text x="660" y="478" class="node-sub" text-anchor="middle">HashingEmbedder + random projection</text>
-  <text x="660" y="493" class="node-sub" text-anchor="middle">partial_fit for streaming</text>
+  <text x="660" y="445" class="node-title" text-anchor="middle">Stable cluster registry</text>
+  <text x="660" y="463" class="node-sub" text-anchor="middle">stable persistent assignment</text>
+  <text x="660" y="478" class="node-sub" text-anchor="middle">MiniLM semantic default</text>
+  <text x="660" y="493" class="node-sub" text-anchor="middle">lexical hash fallback (labeled)</text>
   <text x="660" y="508" class="node-sub" text-anchor="middle">per-cluster comparison</text>
 
   <rect x="780" y="420" width="200" height="100" rx="10" fill="#FFFFFF" stroke="#0B1730" stroke-width="1.5"/>
   <text x="880" y="445" class="node-title" text-anchor="middle">DriftDetector</text>
-  <text x="880" y="463" class="node-sub" text-anchor="middle">Fisher's exact / MWU per</text>
+  <text x="880" y="463" class="node-sub" text-anchor="middle">trace-time windows · Fisher / MWU</text>
   <text x="880" y="478" class="node-sub" text-anchor="middle">(cluster, dimension)</text>
   <text x="880" y="493" class="node-sub" text-anchor="middle">Benjamini-Hochberg adj</text>
   <text x="880" y="508" class="node-sub" text-anchor="middle">Cliff's δ effect-size gate</text>
@@ -127,25 +128,25 @@
   <text x="1090" y="508" class="node-sub" text-anchor="middle">anchor win-rate</text>
 
   <!-- LLM PROVIDER PORT -->
-  <text x="40" y="600" class="plane">PROVIDER PORT · 3 ADAPTERS</text>
+  <text x="40" y="570" class="plane">PROVIDER PORT · 3 ADAPTERS</text>
   <rect x="120" y="580" width="160" height="60" rx="10" fill="#0B1730"/>
-  <text x="200" y="605" class="node-title" text-anchor="middle" fill="#F5F7FA">AnthropicAdapter</text>
-  <text x="200" y="622" class="node-sub" text-anchor="middle" fill="#00C2FF">claude-haiku-4-5, sonnet, opus</text>
+  <text x="200" y="605" class="node-title" text-anchor="middle" style="fill:#F5F7FA">AnthropicAdapter</text>
+  <text x="200" y="622" class="node-sub" text-anchor="middle" style="fill:#00C2FF">claude-haiku-4-5, sonnet, opus</text>
 
   <rect x="300" y="580" width="160" height="60" rx="10" fill="#0B1730"/>
-  <text x="380" y="605" class="node-title" text-anchor="middle" fill="#F5F7FA">OpenAIAdapter</text>
-  <text x="380" y="622" class="node-sub" text-anchor="middle" fill="#00C2FF">gpt-4o, gpt-4o-mini</text>
+  <text x="380" y="605" class="node-title" text-anchor="middle" style="fill:#F5F7FA">OpenAIAdapter</text>
+  <text x="380" y="622" class="node-sub" text-anchor="middle" style="fill:#00C2FF">gpt-4o, gpt-4o-mini</text>
 
   <rect x="480" y="580" width="160" height="60" rx="10" fill="#0B1730"/>
-  <text x="560" y="605" class="node-title" text-anchor="middle" fill="#F5F7FA">GoogleAdapter</text>
-  <text x="560" y="622" class="node-sub" text-anchor="middle" fill="#00C2FF">gemini-2.5-flash, -pro</text>
+  <text x="560" y="605" class="node-title" text-anchor="middle" style="fill:#F5F7FA">GoogleAdapter</text>
+  <text x="560" y="622" class="node-sub" text-anchor="middle" style="fill:#00C2FF">gemini-2.5-flash, -pro</text>
 
   <rect x="660" y="580" width="220" height="60" rx="10" fill="#FFFFFF" stroke="#0B1730" stroke-width="1.5" stroke-dasharray="4 4"/>
   <text x="770" y="605" class="node-title" text-anchor="middle">FakeProvider (in-memory)</text>
   <text x="770" y="622" class="node-sub" text-anchor="middle">deterministic for tests</text>
 
   <!-- VERIFICATION HARNESS -->
-  <text x="40" y="700" class="plane">VERIFICATION HARNESS</text>
+  <text x="40" y="670" class="plane">VERIFICATION HARNESS</text>
   <rect x="120" y="680" width="220" height="80" rx="10" fill="#FFFFFF" stroke="#0B1730" stroke-width="1.5"/>
   <text x="230" y="705" class="node-title" text-anchor="middle">Regression Injector</text>
   <text x="230" y="723" class="node-sub" text-anchor="middle">7 corruption categories</text>
@@ -157,12 +158,29 @@
   <text x="470" y="738" class="node-sub" text-anchor="middle">3-way + binarized Cohen's κ / Gwet's AC2</text>
 
   <rect x="600" y="680" width="220" height="80" rx="10" fill="#FFFFFF" stroke="#0B1730" stroke-width="1.5"/>
-  <text x="710" y="705" class="node-title" text-anchor="middle">8h Traffic Experiment</text>
-  <text x="710" y="723" class="node-sub" text-anchor="middle">synthetic regression at hr 4</text>
-  <text x="710" y="738" class="node-sub" text-anchor="middle">end-to-end pipeline demo</text>
+  <text x="710" y="705" class="node-title" text-anchor="middle">Multi-run validation</text>
+  <text x="710" y="723" class="node-sub" text-anchor="middle">12 runs · stable IDs · n≥30/cell</text>
+  <text x="710" y="738" class="node-sub" text-anchor="middle">planted regressions + clean controls</text>
 
   <rect x="840" y="680" width="340" height="80" rx="10" fill="#FFFFFF" stroke="#0B1730" stroke-width="1.5"/>
   <text x="1010" y="705" class="node-title" text-anchor="middle">Test suite</text>
   <text x="1010" y="723" class="node-sub" text-anchor="middle">pytest suite for SDK, eval, and inspect packages</text>
   <text x="1010" y="738" class="node-sub" text-anchor="middle">GitHub Actions CI on push/PR (Python 3.10/3.11/3.12)</text>
+
+  <!-- LOCAL DASHBOARD -->
+  <text x="40" y="780" class="plane">LOCAL DASHBOARD</text>
+  <rect x="220" y="790" width="280" height="70" rx="10" fill="#FFFFFF" stroke="#0B1730" stroke-width="1.5"/>
+  <text x="360" y="815" class="node-title" text-anchor="middle">FastAPI read API</text>
+  <text x="360" y="833" class="node-sub" text-anchor="middle">explicit DB selection · optional Basic Auth</text>
+  <text x="360" y="848" class="node-sub" text-anchor="middle">localhost / trusted-network scope</text>
+
+  <rect x="520" y="790" width="280" height="70" rx="10" fill="#FFFFFF" stroke="#0B1730" stroke-width="1.5"/>
+  <text x="660" y="815" class="node-title" text-anchor="middle">Checked-in production assets</text>
+  <text x="660" y="833" class="node-sub" text-anchor="middle">React · Recharts · Tailwind · Lucide</text>
+  <text x="660" y="848" class="node-sub" text-anchor="middle">pnpm build · no runtime CDN / Babel</text>
+
+  <rect x="820" y="790" width="280" height="70" rx="10" fill="#FFFFFF" stroke="#0B1730" stroke-width="1.5"/>
+  <text x="960" y="815" class="node-title" text-anchor="middle">Operational review view</text>
+  <text x="960" y="833" class="node-sub" text-anchor="middle">traffic · clusters · quality · signals</text>
+  <text x="960" y="848" class="node-sub" text-anchor="middle">current-window evidence trace IDs</text>
 </svg>

@@ -1,18 +1,27 @@
 # Verdict
 
-> Open-source drift detection and quality monitoring for LLM-powered apps. Catches when the models inside your app silently change behavior, when costs move, and when response quality degrades on real production traffic.
+[![Tests](https://github.com/cognifityai/verdict/actions/workflows/test.yml/badge.svg)](https://github.com/cognifityai/verdict/actions/workflows/test.yml)
+[![PyPI](https://img.shields.io/pypi/v/cognifity-verdict.svg)](https://pypi.org/project/cognifity-verdict/)
+[![Python](https://img.shields.io/pypi/pyversions/cognifity-verdict.svg)](https://pypi.org/project/cognifity-verdict/)
+[![License](https://img.shields.io/github/license/cognifityai/verdict.svg)](LICENSE)
+
+> Open-source drift detection and quality monitoring for LLM-powered apps. Helps surface behavior, estimated-cost, and response-quality changes in captured production traffic.
 
 A [Cognifity AI](https://cognifity.ai) project. Apache 2.0.
+
+![Verdict dashboard showing synthetic sample drift evidence](docs/assets/verdict-dashboard-evidence-view.png)
+
+*Bundled dashboard shown with clearly labeled synthetic sample data.*
 
 ---
 
 ## What this is
 
-Verdict instruments your LLM-powered app with one line (`wrapt` monkey-patching), so every model call is captured — model, tokens, latency, cost, finish reason, and (opt-in) redacted content. On top of that capture it adds a monitoring stack:
+Verdict instruments supported Anthropic, OpenAI, and Google SDK methods with one line (`wrapt` monkey-patching), capturing model, tokens, latency, estimated cost, finish reason, and (opt-in) redacted content. On top of that capture it adds a monitoring stack:
 
 - **Structural checks** (no LLM needed): refusal-rate spikes, JSON-validity drops, response-length and latency drift, hedge/apology rate.
-- **Semantic drift** (local embedding model, no API key): detects when your responses shift in topic/shape/length.
-- **Judge-based quality drift** (needs a provider key — see BYOK below): an LLM "judge" scores each response PASS/FAIL on a rubric; Verdict clusters prompts by intent, samples, and runs non-parametric statistics (Fisher's exact, Cliff's δ, Benjamini–Hochberg) per cluster per dimension over rolling windows, emitting a drift signal only when a change is statistically real.
+- **Embedding drift** (no API key): MiniLM detects semantic distribution shifts; the built-in hash fallback is lexical only and is labeled as such.
+- **Judge-based quality drift** (needs a provider key — see BYOK below): an LLM "judge" scores each response PASS/FAIL on a rubric; Verdict clusters prompts by intent, samples, and runs non-parametric statistics (Fisher's exact, Cliff's δ, Benjamini–Hochberg) per cluster per dimension over rolling windows, emitting a drift signal only when both the configured significance and effect-size gates clear.
 - **Cross-model comparison** (Bradley–Terry) and a **synthetic regression injector** for verifying the pipeline catches known corruptions.
 
 Verdict is **not a better judge** than the model you point it at — it *uses* that model as a measuring instrument and adds the monitoring system around it (capture → cluster → sample → judge → aggregate over time → detect drift).
@@ -25,14 +34,15 @@ Verdict never ships with anyone's API key. It reads **your** provider key from t
 
 | Capability | Needs a provider API key? |
 |---|---|
-| Capture (traces, tokens, latency, cost, errors) | **No** |
+| Capture (traces, tokens, latency, estimated cost, errors) | **No** |
 | Structural checks (refusal/JSON/length/latency drift) | **No** |
-| Semantic drift (built-in deterministic/hash embedder; optional MiniLM) | **No** |
+| Lexical embedding drift (built-in hash fallback) | **No** |
+| Semantic embedding drift (local MiniLM; extra install) | **No** |
 | Intent clustering | **No** |
 | Judge-based PASS/FAIL quality drift | **Yes** (your key) |
 | Cross-model Bradley–Terry comparison | **Yes** (your key) |
 
-So: clone it and you immediately get key-free observability + structural/semantic drift using the built-in lightweight embedder. For higher-quality local semantic embeddings with `sentence-transformers/all-MiniLM-L6-v2`, install the optional semantic extra shown below. Set a provider key to turn on judge-based quality scoring. If no key is set, the judge layer simply skips — nothing crashes.
+After installation, capture and structural checks can run without a provider key. The built-in hash embedder can report lexical embedding-distribution changes, but it is not a semantic model and may split paraphrases into separate intent clusters. Install the local `sentence-transformers/all-MiniLM-L6-v2` extra shown below for semantic intent clustering and semantic drift. Capture never invokes a judge automatically. A provider-backed judge run requires that provider's key; `verdict-inspect` skips its optional Anthropic judge when no Anthropic key is set.
 
 ```bash
 export ANTHROPIC_API_KEY=...     # or OPENAI_API_KEY / GOOGLE_API_KEY
@@ -48,7 +58,7 @@ Install the public alpha from PyPI. Choose only the provider extras you use:
 
 ```bash
 pip install "cognifity-verdict[anthropic,openai,google]"
-pip install cognifity-verdict-eval cognifity-verdict-inspect
+pip install "cognifity-verdict-eval[semantic]" cognifity-verdict-inspect
 ```
 
 Extras for `cognifity-verdict`: `anthropic`, `openai`, `google`, `postgres`, or
@@ -62,10 +72,10 @@ environment as `cognifity-verdict`; overlapping Python package paths make the
 combination unsafe. Cognifity's distribution name is different, while the SDK
 API remains `import verdict`.
 
-Optional higher-quality semantic embeddings:
+Minimal install without the local semantic model:
 
 ```bash
-pip install "cognifity-verdict-eval[semantic]"   # sentence-transformers / all-MiniLM-L6-v2 support
+pip install cognifity-verdict-eval   # hash fallback only; lexical, not semantic
 ```
 
 The full test suite also needs pytest:
@@ -89,10 +99,11 @@ from anthropic import Anthropic
 
 verdict.init(service_name="my-app", storage="sqlite:///./verdict.db")
 client = Anthropic()
-# Use Anthropic normally; every call is captured. Judge scoring runs if a key is set.
+# Use Anthropic normally; supported calls are captured.
+# Run scripts/run_drift_pipeline.py separately for sampling, judging, and drift.
 ```
 
-Content capture is **off by default** (a PII surface); enable it with `verdict.init(capture_content=True)`, and prompts/completions are redacted (regex + Luhn) before storage. For high-volume production, `verdict.init(buffered_writes=True)` moves writes to a background batched writer off the request hot path.
+Content capture is **off by default** (a PII surface); enable it with `verdict.init(capture_content=True)`, and prompts/completions are redacted (regex + Luhn) before storage. `sample_rate` controls what fraction of supported calls is retained. For high-volume production, `verdict.init(buffered_writes=True)` moves writes to a background batched writer off the request hot path.
 
 ## Validation status
 
@@ -105,6 +116,9 @@ What this repo includes:
 
 - A synthetic regression battery for checking that the capture -> judge -> score
   path catches known injected failures (`scripts/run_regression_injection.py`).
+- A multi-run validation that exercises stable cluster assignment, trace-time
+  windows, the n>=30 cell floor, planted regressions, clean controls, and
+  `UNCLEAR`-rate drift across 12 separate runs (`scripts/validate_multirun.py`).
 - A pairwise judge-alignment harness for comparing model-ranking judgments
   against human-labeled public data (`scripts/verify_judge_alignment.py`).
 - A rubric-alignment harness for measuring PASS/FAIL judge consistency against
@@ -137,6 +151,30 @@ Hexagonal / ports-and-adapters, ≥2 adapters per port (one real + in-memory for
 - **Agent-run / tool-call tracing** is v1, not built. Manual `@trace` spans *are* persisted, but multi-step agent-run stitching is not.
 - Judge quality depends on the model, rubric, and workload; for math/code
   correctness, use stronger judges on samples or deterministic checks.
+- The default Cliff's delta gate is `0.147`. On binary PASS/FAIL dimensions that
+  is a 14.7 percentage-point sensitivity floor regardless of sample size. Tune
+  `--effect-size-threshold` deliberately for smaller changes.
+- Intent clustering is workload-dependent. MiniLM plus a `0.50` cosine-distance
+  threshold is the shipped starting point, not a universal cutoff. Review the
+  dashboard's cluster-health warning and bump `--clustering-version` whenever
+  you deliberately change the threshold or embedding model. The runner rejects
+  a registry whose recorded threshold or embedding dimension is incompatible.
+  Existing traces whose IDs are absent from the selected registry also fail
+  closed: use a one-time `--recluster` after a Verdict clustering migration, or
+  `--trust-existing-clusters` only for stable clusters assigned outside Verdict.
+- The batch drift runner uses each captured trace's `started_at` timestamp for
+  its current and baseline windows. Re-running the same hourly analysis bucket
+  replaces that bucket's signals, including retracting signals that no longer
+  clear the gates. It reuses and aggregates at most one judgment per trace for
+  the current judge model and rubric version; judgments from other evaluator
+  definitions are excluded. Signals retain up to five current-window trace IDs
+  as review evidence.
+- The v0 drift runner supports one tenant scope per store and rejects mixed-
+  tenant analysis. Use separate stores until tenant-scoped cluster registries
+  and signals are implemented.
+- `cost_usd` is a best-effort estimate from a dated static base-price table, not
+  a billing source of truth. Unknown models remain unpriced; caching, special
+  tiers, tools, residency, and negotiated discounts are not modeled.
 - This is a **public alpha** release — not a hosted monitoring service and not a substitute for workload-specific calibration.
 
 ## License

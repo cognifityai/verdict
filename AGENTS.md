@@ -61,11 +61,33 @@ work and should not be described as current functionality.
 - Run the test suite before claiming behavior is fixed.
 - Keep docs explicit about what ships today versus what is planned.
 
+## Documentation Definition Of Done
+
+Documentation updates are required in the same change whenever code modifies
+public behavior, defaults, configuration, schemas, installation, CLI or UI
+workflows, architecture, security/privacy boundaries, limitations, or validation
+claims. Do not defer them to a later cleanup pass.
+
+Before declaring a coding task complete:
+
+1. Identify the affected documentation before or while implementing the change.
+2. Search the entire repository for stale descriptions of the old behavior,
+   including package READMEs, onboarding and architecture docs, ADRs, examples,
+   command help/docstrings, screenshots, and diagrams.
+3. Update every affected document and validate links, commands, generated assets,
+   and diagrams where applicable.
+4. In the final report, list the documentation files changed. If none changed,
+   state explicitly why the code change has no documentation impact.
+
+The task is not complete while any known code/documentation mismatch remains.
+
 ## Useful Commands
 
 ```bash
 python scripts/smoke_test.py
 python -m pytest
 python scripts/live_capture_check.py
-python ui/build.py
+pnpm --dir ui install --frozen-lockfile
+pnpm --dir ui build
+python -m pytest -q ui/tests
 ```
