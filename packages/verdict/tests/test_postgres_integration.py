@@ -266,3 +266,47 @@ def test_live_postgres_round_trip_and_mutation_contracts():
         ):
             storage._exec(f"DELETE FROM {table} WHERE {column} = %s", (value,))  # nosec B608
         storage.close()
+
+
+def test_live_postgres_span_upsert_retracts_a_failed_trace_link():
+    """The retraction direction (non-NULL -> NULL) on the real backend.
+
+    Only the NULL -> non-NULL direction was covered before. A COALESCE-based
+    upsert passes that one and silently keeps a stale link on this one, which
+    would make the "no span points at a trace that never landed" guarantee
+    hold on SQLite/memory but not on Postgres.
+    """
+    storage = PostgresStorage(DSN)
+    try:
+        suffix = uuid4().hex[:8]
+        trace_id = f"trace-{suffix}"
+        span_id = f"span-{suffix}"
+        storage.insert_trace(Trace(trace_id=trace_id, provider="anthropic"))
+
+        # 1. Span written while its trace link was still unconfirmed.
+        storage.insert_span(
+            SpanRecord(span_id=span_id, name="retrieve", trace_id=trace_id)
+        )
+        linked = [s for s in storage.list_spans(limit=500) if s.span_id == span_id]
+        assert linked and linked[0].trace_id == trace_id
+
+        # 2. The trace write is acknowledged as failed; the link is retracted.
+        storage.insert_span(
+            SpanRecord(
+                span_id=span_id,
+                name="retrieve",
+                trace_id=None,
+                attributes={"verdict.link_status": "trace_write_failed"},
+            )
+        )
+        retracted = [s for s in storage.list_spans(limit=500) if s.span_id == span_id]
+        assert retracted, "span disappeared on retraction"
+        assert retracted[0].trace_id is None, "COALESCE kept a stale trace link"
+        assert (
+            retracted[0].attributes.get("verdict.link_status")
+            == "trace_write_failed"
+        )
+
+        storage.delete_trace(trace_id)
+    finally:
+        storage.close()

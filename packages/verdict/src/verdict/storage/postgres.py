@@ -698,7 +698,10 @@ class PostgresStorage:
             ) VALUES (
                 %s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s
             ) ON CONFLICT (span_id) DO UPDATE SET
-                trace_id    = COALESCE(EXCLUDED.trace_id, spans.trace_id),
+                -- Assign, not COALESCE: a link retraction rewrites trace_id to
+                -- NULL, and COALESCE would silently keep the stale link, making
+                -- the retraction guarantee backend-dependent.
+                trace_id    = EXCLUDED.trace_id,
                 ended_at    = EXCLUDED.ended_at,
                 duration_ms = EXCLUDED.duration_ms,
                 attributes  = EXCLUDED.attributes,

@@ -792,15 +792,22 @@ def test_postgres_judgment_query_uses_fixed_columns_and_maps_them_in_order():
     assert judgment.dimensions[0].verdict is Verdict.PASS
 
 
-def test_postgres_span_upsert_can_add_a_delayed_trace_link():
-    """Late stream finalization must update the trace_id on an existing span."""
+def test_postgres_span_upsert_assigns_trace_id_in_both_directions():
+    """The span upsert must both ADD a delayed link and RETRACT a failed one.
+
+    COALESCE(EXCLUDED.trace_id, spans.trace_id) satisfies only the first: it
+    silently keeps a stale link when a retraction rewrites trace_id to NULL,
+    making the "no span points at a trace that never landed" guarantee
+    backend-dependent. Behavioural coverage lives in test_postgres_integration.
+    """
     import inspect
 
     from verdict.storage import postgres as pg
 
     insert_source = inspect.getsource(pg.PostgresStorage.insert_span)
     update_clause = insert_source.split("ON CONFLICT (span_id) DO UPDATE SET", 1)[1]
-    assert "trace_id    = COALESCE(EXCLUDED.trace_id, spans.trace_id)" in update_clause
+    assert "trace_id    = EXCLUDED.trace_id" in update_clause
+    assert "COALESCE(EXCLUDED.trace_id" not in update_clause
 
 
 def test_postgres_identity_upserts_replace_every_non_primary_key_column():

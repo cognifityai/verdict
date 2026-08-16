@@ -115,6 +115,13 @@ def mark_trace_persisted(trace: Trace) -> None:
         direct_parent = False
         span = span.parent
 
+    # Spans that already wrote with this unconfirmed link (siblings and children
+    # of the provider call, which the ancestor walk above cannot reach) are now
+    # correctly linked; just clear the registry.
+    from verdict.trace import resolve_unconfirmed_links
+
+    resolve_unconfirmed_links(trace.trace_id, durable=True)
+
 
 def _trace_exists(trace: Trace, trace_id: str | None) -> bool:
     if trace_id is None:
@@ -180,6 +187,12 @@ def mark_trace_failed(trace: Trace) -> None:
             if span.ended_at is not None:
                 _persist_span(span)
         span = span.parent
+
+    # Retract the link on every span that already wrote optimistically with it,
+    # including siblings and children the ancestor walk above cannot reach.
+    from verdict.trace import resolve_unconfirmed_links
+
+    resolve_unconfirmed_links(trace.trace_id, durable=False)
 
 
 def persist_trace(client: VerdictClient, trace: Trace) -> None:

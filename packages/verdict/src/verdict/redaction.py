@@ -46,11 +46,6 @@ _MESSAGE_FIELDS = (
 )
 
 
-# Longest textual IPv6 address: "ffff:ffff:ffff:ffff:ffff:ffff:255.255.255.255"
-# is 45 characters. Used to bound the IPV6 candidate matcher below so that a
-# single scan position can never walk further than a real address could reach.
-_IPV6_MAX_TEXT_LEN = 45
-
 # Cheap, fast first-pass patterns. This is NOT comprehensive PII detection — it
 # covers the common, high-frequency accidental leaks in LLM traffic:
 # email, URL, US SSN, payment-card-shaped digit runs, IPv4/IPv6, and US-style
@@ -78,17 +73,9 @@ _PATTERNS = {
     # tail or scope ID) and validate it with ipaddress.IPv6Address below. The
     # word boundaries prevent a valid suffix such as ``d::`` from being carved
     # out of ``std::vector``.
-    #
-    # Both halves are length-bounded on purpose. Because no real address can
-    # exceed _IPV6_MAX_TEXT_LEN characters, the bound cannot reject a valid
-    # candidate, but it does cap the work done per start position. Unbounded
-    # ``*`` here is quadratic: on colon-free text the engine rescans to
-    # end-of-string from every candidate start looking for a colon that never
-    # arrives, and `redact` runs synchronously on the caller's thread over
-    # attacker-controlled prompt and response text.
     "IPV6": re.compile(
         r"(?<![0-9A-Za-z_])"
-        rf"[0-9A-Fa-f:.]{{0,{_IPV6_MAX_TEXT_LEN}}}:[0-9A-Fa-f:.]{{0,{_IPV6_MAX_TEXT_LEN}}}"
+        r"[0-9A-Fa-f:.]*:[0-9A-Fa-f:.]*"
         r"(?:%[0-9A-Za-z_.-]+)?"
         r"(?![0-9A-Za-z_])"
     ),
@@ -124,6 +111,12 @@ def redact(
 
     out = text
     for label, pat in _PATTERNS.items():
+        # The EMAIL pattern's leading [\w.+-]+ backtracks across an unbroken
+        # word-character run, which is quadratic in text without whitespace
+        # (CJK prose, base64 data URLs). Skipping it when there is no "@" at all
+        # keeps the common case inside the SDK's capture-overhead budget.
+        if label == "EMAIL" and "@" not in out:
+            continue
         if label == "CREDIT_CARD":
             # Gate on Luhn + valid length so non-card digit runs survive intact.
             out = pat.sub(
@@ -422,7 +415,14 @@ def sanitize_trace(
             trace.raw_messages, mode=mode, secret=secret
         )
     sanitized_tags = redact_structure(trace.tags, mode=mode, secret=secret)
-    trace.tags = sanitized_tags if isinstance(sanitized_tags, dict) else {}
+    # Keep the marker rather than silently dropping to {}: an over-budget or
+    # unrepresentable structure must be visible, not indistinguishable from
+    # "this trace had no tags".
+    trace.tags = (
+        sanitized_tags
+        if isinstance(sanitized_tags, dict)
+        else {"verdict.redaction_status": str(sanitized_tags)}
+    )
     return trace
 
 
@@ -452,7 +452,11 @@ def sanitize_span(
     sanitized_attributes = redact_structure(
         span.attributes, mode=mode, secret=secret
     )
+    # See sanitize_trace: preserve the marker instead of wiping every sibling
+    # attribute and leaving no evidence that anything was dropped.
     span.attributes = (
-        sanitized_attributes if isinstance(sanitized_attributes, dict) else {}
+        sanitized_attributes
+        if isinstance(sanitized_attributes, dict)
+        else {"verdict.redaction_status": str(sanitized_attributes)}
     )
     return span
