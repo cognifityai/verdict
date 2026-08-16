@@ -14,8 +14,8 @@ from verdict.instrumentors.google import GoogleInstrumentor
 from verdict.instrumentors.openai import OpenAIInstrumentor
 
 __all__ = [
-    "BaseInstrumentor",
     "AnthropicInstrumentor",
+    "BaseInstrumentor",
     "GoogleInstrumentor",
     "OpenAIInstrumentor",
 ]

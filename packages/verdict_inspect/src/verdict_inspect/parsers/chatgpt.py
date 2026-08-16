@@ -74,7 +74,6 @@ def _extract_text(content: Any) -> str:
     """
     if not isinstance(content, dict):
         return ""
-    ctype = content.get("content_type", "")
     parts = content.get("parts") or []
     if not isinstance(parts, list):
         return ""

@@ -107,6 +107,40 @@ Areas under consideration:
   judge calibration for their own environment.
 - Provider SDKs change over time; live capture checks should stay part of the
   release process.
+- Judge calls run sequentially. Verdict does not yet retain judge token/cost
+  usage or enforce an evaluation budget.
+- Tool-call sequences are not a first-class capture/evaluation unit. Manual
+  spans and supported provider traces now carry parent linkage, but they do not
+  reconstruct an agent-run graph or provide agent-run scoring.
+- Cache-token accounting and cache-aware pricing are not modeled.
+- Stable intent clusters have IDs and health diagnostics, but no automatic
+  human-readable naming or fragmented-cluster merge operation.
+
+## Prioritized Product Follow-ups
+
+These are product additions, not correctness fixes. They require a pilot need
+and an approved design before implementation.
+
+1. **Judge cost and budget visibility (medium effort, high value for paid
+   recurring evals):** retain usage, estimate judge cost, persist run budgets,
+   and define partial-run/stop semantics.
+2. **Cache-token accounting (medium effort, high value for cache-heavy
+   workloads):** add provider-normalized cache fields, migrations, and pricing
+   reconciliation.
+3. **Concurrent judging (medium effort, latency value):** bounded concurrency,
+   provider rate-limit handling, cancellation, deterministic output, and load
+   tests. This reduces wall time, not token spend.
+4. **First-class tool-call/run evaluation (large effort, high agent-workload
+   value):** requires a versioned sequence schema, privacy model, storage/UI,
+   and task-level evaluation contract.
+5. **Cluster naming (small/medium effort, usability value):** prefer explicit
+   customer labels; any generated name needs versioning and privacy controls.
+6. **Cluster fusion (large, high-risk effort):** requires offline quality
+   evaluation, immutable aliases/history, migration, rollback, and continuity
+   across drift windows. v0 keeps explicit health warnings/reclustering instead.
+7. **Dependency/packaging cleanup (small/medium maintenance value):** handle as
+   a standalone clean-install/release-artifact change rather than mixing it into
+   behavioral remediation.
 
 ## Engineering Principles
 

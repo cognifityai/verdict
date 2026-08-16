@@ -15,8 +15,9 @@ from __future__ import annotations
 
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 
-from verdict.schema import Trace
+from verdict.schema import DriftSignal, Trace
 from verdict.storage.buffered import BufferedStorage
 from verdict.storage.memory import InMemoryStorage
 
@@ -44,6 +45,29 @@ def test_writes_visible_after_flush():
         assert len(inner.list_traces(limit=1000)) == 50
         assert buf.written == 50
         assert buf.write_errors == 0
+    finally:
+        buf.close()
+
+
+def test_each_queued_operation_reaches_inner_exactly_once():
+    """Idempotent upserts must not hide duplicate worker invocations."""
+    class CountingInner(InMemoryStorage):
+        def __init__(self) -> None:
+            super().__init__()
+            self.insert_calls = 0
+
+        def insert_trace(self, trace: Trace) -> None:
+            self.insert_calls += 1
+            super().insert_trace(trace)
+
+    inner = CountingInner()
+    buf = BufferedStorage(inner, flush_interval=10.0, batch_size=100)
+    try:
+        buf.insert_trace(_trace("exactly-once"))
+        buf.flush()
+
+        assert inner.insert_calls == 1
+        assert buf.written == 1
     finally:
         buf.close()
 
@@ -219,12 +243,106 @@ def test_background_exception_counted_thread_survives():
 
 
 # ---------------------------------------------------------------------------
+# 6. flush() is a point-in-time barrier, not a wait for future producers
+# ---------------------------------------------------------------------------
+
+def test_flush_does_not_wait_for_writes_enqueued_after_its_barrier():
+    """A live producer must not be able to extend an in-progress flush forever."""
+    inner = InMemoryStorage()
+    first_started = threading.Event()
+    release_first = threading.Event()
+    late_started = threading.Event()
+    release_late = threading.Event()
+    real_insert = inner.insert_trace
+
+    def controlled_insert(trace: Trace) -> None:
+        if trace.trace_id == "first":
+            first_started.set()
+            assert release_first.wait(timeout=2.0)
+        elif trace.trace_id == "late":
+            late_started.set()
+            assert release_late.wait(timeout=2.0)
+        real_insert(trace)
+
+    inner.insert_trace = controlled_insert  # type: ignore[method-assign]
+    buf = BufferedStorage(inner, flush_interval=10.0, batch_size=100)
+    flush_returned = threading.Event()
+
+    def do_flush() -> None:
+        buf.flush()
+        flush_returned.set()
+
+    try:
+        buf.insert_trace(_trace("first"))
+        assert first_started.wait(timeout=1.0)
+        flush_thread = threading.Thread(target=do_flush)
+        flush_thread.start()
+
+        # The flush marker is now queued behind the blocked first write.
+        deadline = time.monotonic() + 1.0
+        while buf._queue.qsize() < 1 and time.monotonic() < deadline:
+            time.sleep(0.001)
+        assert buf._queue.qsize() >= 1
+        buf.insert_trace(_trace("late"))
+
+        release_first.set()
+        assert flush_returned.wait(timeout=1.0), (
+            "flush incorrectly waited for a write queued after its barrier"
+        )
+        flush_thread.join(timeout=1.0)
+
+        # The later write is allowed to still be running after the snapshot flush.
+        assert late_started.wait(timeout=1.0)
+        assert inner.get_trace("first") is not None
+    finally:
+        release_first.set()
+        release_late.set()
+        buf.close()
+
+
+# ---------------------------------------------------------------------------
+# 7. Keyword-only write contracts survive the async queue
+# ---------------------------------------------------------------------------
+
+def test_delete_drift_signals_forwards_keyword_only_evaluator_filter():
+    """Buffered writes must preserve keyword-only adapter arguments.
+
+    InMemoryStorage intentionally makes ``evaluator_fingerprint`` keyword-only.
+    Passing it positionally makes the background write fail silently and leaves
+    the stale drift signal in place.
+    """
+    inner = InMemoryStorage()
+    buf = BufferedStorage(inner, flush_interval=10.0, batch_size=100)
+    start = datetime(2026, 8, 16, 12, tzinfo=timezone.utc)
+    end = start + timedelta(hours=1)
+    try:
+        for signal_id, fingerprint in (("delete-me", "eval-a"), ("keep-me", "eval-b")):
+            buf.insert_drift_signal(DriftSignal(
+                signal_id=signal_id,
+                detected_at=start,
+                evaluator_fingerprint=fingerprint,
+            ))
+
+        buf.delete_drift_signals_between(
+            start,
+            end,
+            evaluator_fingerprint="eval-a",
+        )
+
+        assert [signal.signal_id for signal in buf.list_drift_signals()] == ["keep-me"]
+        assert buf.write_errors == 0
+    finally:
+        buf.close()
+
+
+# ---------------------------------------------------------------------------
 # Standalone harness (stdlib only) — runs every test above and reports.
 # ---------------------------------------------------------------------------
 
 def _run_all() -> int:
     tests = [
         test_writes_visible_after_flush,
+        test_each_queued_operation_reaches_inner_exactly_once,
         test_many_concurrent_writers_all_land,
         test_read_after_write_via_get_trace,
         test_read_after_write_via_list,
@@ -232,6 +350,8 @@ def _run_all() -> int:
         test_close_flushes_remaining_observable,
         test_queue_full_falls_back_to_sync_no_loss,
         test_background_exception_counted_thread_survives,
+        test_flush_does_not_wait_for_writes_enqueued_after_its_barrier,
+        test_delete_drift_signals_forwards_keyword_only_evaluator_filter,
     ]
     failures = 0
     for t in tests:

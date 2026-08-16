@@ -9,7 +9,15 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from verdict.schema import DriftSignal, Judgment, SpanRecord, Trace, UserSignalRecord
+from verdict.redaction import sanitize_judgment, sanitize_span, sanitize_trace
+from verdict.schema import (
+    DriftSignal,
+    EvaluatorHealthRecord,
+    Judgment,
+    SpanRecord,
+    Trace,
+    UserSignalRecord,
+)
 
 
 class InMemoryStorage:
@@ -18,24 +26,32 @@ class InMemoryStorage:
     def __init__(self) -> None:
         self._traces: dict[str, Trace] = {}
         self._judgments: dict[str, Judgment] = {}
+        self._evaluator_health: dict[str, EvaluatorHealthRecord] = {}
         self._signals: dict[str, DriftSignal] = {}
         self._cluster_registries: dict[str, str] = {}
         self._spans: dict[str, SpanRecord] = {}
         self._user_signals: dict[str, UserSignalRecord] = {}
 
     def insert_trace(self, trace: Trace) -> None:
+        sanitize_trace(trace)
         # Match the SQL adapters' UPSERT semantics: a re-write that carries no
         # cluster_id (None) must not clobber an already-assigned one. The
         # clusterer assigns cluster_id after the trace is first written, and a
         # later content/usage update would otherwise erase it. (COALESCE parity
         # with sqlite/postgres ON CONFLICT.)
         existing = self._traces.get(trace.trace_id)
-        if existing is not None and trace.cluster_id is None and existing.cluster_id is not None:
-            trace.cluster_id = existing.cluster_id
+        if existing is not None:
+            if trace.cluster_id is None and existing.cluster_id is not None:
+                trace.cluster_id = existing.cluster_id
+            if trace.parent_span_id is None and existing.parent_span_id is not None:
+                trace.parent_span_id = existing.parent_span_id
         self._traces[trace.trace_id] = trace
 
     def get_trace(self, trace_id: str) -> Trace | None:
         return self._traces.get(trace_id)
+
+    def trace_exists(self, trace_id: str) -> bool:
+        return trace_id in self._traces
 
     def list_traces(
         self,
@@ -76,6 +92,7 @@ class InMemoryStorage:
         return len(doomed)
 
     def insert_judgment(self, judgment: Judgment) -> None:
+        sanitize_judgment(judgment)
         self._judgments[judgment.judgment_id] = judgment
 
     def list_judgments_for_cluster(
@@ -97,14 +114,47 @@ class InMemoryStorage:
                 break
         return out
 
+    def insert_evaluator_health(self, record: EvaluatorHealthRecord) -> None:
+        self._evaluator_health[record.health_id] = record
+
+    def list_evaluator_health(
+        self,
+        *,
+        evaluator_fingerprint: str | None = None,
+        limit: int = 100,
+    ) -> list[EvaluatorHealthRecord]:
+        records = sorted(
+            self._evaluator_health.values(),
+            key=lambda record: record.evaluated_at,
+            reverse=True,
+        )
+        if evaluator_fingerprint is not None:
+            records = [
+                record for record in records
+                if record.evaluator_fingerprint == evaluator_fingerprint
+            ]
+        return records[:limit]
+
     def insert_drift_signal(self, signal: DriftSignal) -> None:
         self._signals[signal.signal_id] = signal
 
-    def delete_drift_signals_between(self, start: datetime, end: datetime) -> None:
+    def delete_drift_signals_between(
+        self,
+        start: datetime,
+        end: datetime,
+        *,
+        evaluator_fingerprint: str | None = None,
+    ) -> None:
         self._signals = {
             signal_id: signal
             for signal_id, signal in self._signals.items()
-            if not (start <= signal.detected_at < end)
+            if not (
+                start <= signal.detected_at < end
+                and (
+                    evaluator_fingerprint is None
+                    or signal.evaluator_fingerprint == evaluator_fingerprint
+                )
+            )
         }
 
     def list_drift_signals(self, *, limit: int = 100) -> list[DriftSignal]:
@@ -112,6 +162,7 @@ class InMemoryStorage:
         return items[:limit]
 
     def insert_span(self, span: SpanRecord) -> None:
+        sanitize_span(span)
         self._spans[span.span_id] = span
 
     def list_spans(self, *, trace_id: str | None = None, limit: int = 100) -> list[SpanRecord]:
@@ -141,6 +192,7 @@ class InMemoryStorage:
     def close(self) -> None:
         self._traces.clear()
         self._judgments.clear()
+        self._evaluator_health.clear()
         self._signals.clear()
         self._cluster_registries.clear()
         self._spans.clear()

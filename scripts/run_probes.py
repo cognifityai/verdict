@@ -40,6 +40,20 @@ from verdict_eval.providers import (
 )
 
 
+def _pass_rate(value: str) -> float:
+    rate = float(value)
+    if not 0.0 <= rate <= 1.0:
+        raise argparse.ArgumentTypeError("pass-rate threshold must be between 0 and 1")
+    return rate
+
+
+def probe_run_exit_code(run, *, min_pass_rate: float) -> int:
+    """Return 2 for execution errors, 1 for a failed quality gate, else 0."""
+    if any(result.error for result in run.results):
+        return 2
+    return 0 if run.pass_rate >= min_pass_rate else 1
+
+
 def _provider_for_model(model: str):
     """Map "vendor/model-name" → adapter instance."""
     if model.startswith("anthropic/"):
@@ -64,6 +78,13 @@ def main(argv: list[str] | None = None) -> int:
                         help="Judge model (different family from target recommended)")
     parser.add_argument("--out", default=None,
                         help="Output JSON path. Default: research/results/probe_runs/<timestamp>.json")
+    parser.add_argument(
+        "--min-pass-rate",
+        type=_pass_rate,
+        default=1.0,
+        help="Required weighted pass rate (default 1.0). Below it exits 1; "
+             "provider/judge execution errors exit 2.",
+    )
     args = parser.parse_args(argv)
 
     suite = load_suite_yaml(args.suite) if args.suite else default_suite()
@@ -82,10 +103,24 @@ def main(argv: list[str] | None = None) -> int:
     print("Running probes...")
     run = runner.run_suite(suite)
 
-    print(f"\nPass rate: {run.pass_rate:.2%}  ({sum(1 for r in run.results if r.overall_passed)}/{len(run.results)})")
-    print("By category:")
+    passed_weight = sum(r.weight for r in run.results if r.overall_passed)
+    total_weight = sum(r.weight for r in run.results)
+    passed_probes = sum(1 for r in run.results if r.overall_passed)
+    print(
+        f"\nWeighted pass rate: {run.pass_rate:.2%} "
+        f"({passed_weight:g}/{total_weight:g} weight passed)"
+    )
+    print(f"Unweighted probes passed: {passed_probes}/{len(run.results)}")
+    print(
+        "Methodology: metric schema "
+        f"v{run.metric_schema_version}; judge method v{run.judge_method_version}"
+    )
+    print("Weighted by category:")
     for cat, rate in run.pass_rate_by_category().items():
         print(f"  {cat:25s} {rate:.2%}")
+    print("Weighted expectation agreement by dimension:")
+    for dimension, rate in run.pass_rate_by_dimension().items():
+        print(f"  {dimension:25s} {rate:.2%}")
     print()
     for r in run.results:
         mark = "PASS" if r.overall_passed else "FAIL"
@@ -111,7 +146,15 @@ def main(argv: list[str] | None = None) -> int:
     out_path.write_text(json.dumps(asdict(run), indent=2, default=str))
     print(f"\nWrote: {out_path}")
 
-    return 0
+    exit_code = probe_run_exit_code(run, min_pass_rate=args.min_pass_rate)
+    if exit_code == 2:
+        print("ERROR: one or more probes had target/judge execution errors.")
+    elif exit_code == 1:
+        print(
+            f"ERROR: weighted pass rate {run.pass_rate:.2%} is below the "
+            f"required {args.min_pass_rate:.2%}."
+        )
+    return exit_code
 
 
 if __name__ == "__main__":

@@ -24,12 +24,56 @@ signal must clear the BH-adjusted p-value gate and the Cliff's delta effect-size
 gate. On binary PASS/FAIL data the default `0.147` delta is a 14.7 percentage-
 point sensitivity floor. These defaults require workload-specific validation.
 
-Pipeline reruns deduplicate by trace for the selected judge model and rubric
-version. Stored judgments from a different evaluator definition are retained but
-are not pooled into the current drift windows.
+Pipeline reruns use the latest attempt per trace for one complete evaluator
+identity: provider, model list, rubric name/version, behavior-relevant
+configuration, expected dimensions, and effective prompt/rubric fingerprint. A
+latest error is excluded from PASS/FAIL and can be retried. Other evaluator
+definitions are retained but not pooled. Persisted drift signals carry the same
+fingerprint. Optional fixed human-labeled sentinel runs store independent judge-
+health aggregates; a healthy status requires both the label floor and the 95%
+Wilson-interval lower bound to clear the configured threshold. The interval's
+effective sample size is the number of independently judged sentinel examples,
+not the number of correlated dimension labels. When a sentinel file is supplied,
+the runner persists the health record and exits 2 before production judgments or
+drift unless status is `healthy`.
+
+Probe weights affect suite, category, and per-dimension expectation agreement.
+The bundled weighted suite is version `2.0`. New `ProbeRun` and `ProbeResult`
+artifacts stamp metric-schema version `2` and one-dimension judge-method version
+`2`; historical artifacts without those fields remain version `1` when loaded
+through the dataclasses, so scheduled comparisons cannot silently cross the
+methodology boundary. Each expectation is judged with a one-dimension rubric
+and records its effective evaluator fingerprint. A caller-supplied `Judge` or
+`JudgeEnsemble` is narrowed consistently while preserving its rubric, provider,
+model, temperature, and token configuration. Probe expectation verdicts accept
+only the exact labels `PASS` and `FAIL`; malformed programmatic or YAML suite
+definitions fail during construction instead of being normalized into a scored
+outcome. Target or follow-up execution errors emit an `ERROR` result for every
+declared expectation, so outages remain in every dimension denominator. The
+scheduled CLI requires a 100% weighted pass rate by default, exits 1 below the
+configured threshold, and exits 2 on provider/judge execution errors.
+Non-positive or non-finite weights in historical result JSON contribute zero
+rather than crashing or corrupting an aggregate. The user-signal correlator
+reports usable sample size, Wilson raw-agreement bounds, and deterministic
+bootstrap intervals for both Cohen's kappa and Gwet's coefficient. It refuses to
+call low-data output calibrated, excludes `UNCLEAR` judge results from its binary
+confusion matrix, and requires an explicit evaluator selection when identities
+are mixed. Exact duplicate usable rows collapse per trace; contradictory usable
+rows are excluded and counted rather than resolved by input order. Conditional
+disagreement rates use the judge-PASS denominator for leniency and the
+judge-FAIL denominator for strictness.
+Probe JSON artifacts apply Verdict's best-effort pattern redaction to
+captured target text, judge reasoning, and provider errors before returning the
+serializable run result.
 
 ```python
-from verdict_eval import Judge, DEFAULT_RUBRIC, DriftDetector, CorruptionInjector
+from verdict_eval import (
+    DEFAULT_RUBRIC,
+    CorruptionInjector,
+    DriftDetector,
+    Judge,
+    PairwiseJudge,
+)
 ```
 
 See the [repository README](https://github.com/cognifityai/verdict#readme),

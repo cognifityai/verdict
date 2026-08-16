@@ -25,7 +25,8 @@ they go through a supported provider SDK.
 - Supports non-streaming and streaming responses for the supported SDK paths.
 - Stores traces in SQLite by default, with Postgres support for deployments that
   need a server database.
-- Redacts common sensitive patterns when content capture is enabled.
+- Recursively redacts common sensitive patterns in supported JSON-compatible
+  message fields when content capture is enabled, including nested tool data.
 - Scores responses with a configurable judge model and rubric dimensions such as
   groundedness, relevance, completeness, safety, and instruction following.
 - Groups similar prompts so quality changes can be inspected by workload or
@@ -49,12 +50,17 @@ they go through a supported provider SDK.
    MiniLM is the semantic default; the explicit hash fallback is lexical.
 4. **Evaluate**: the separately invoked batch pipeline selects traces per
    cluster and time window, then scores them with a configured judge and rubric.
-   Capture itself does not make judge calls.
+   Capture itself does not make judge calls. Every stored judgment identifies
+   the evaluator provider, model list, rubric name/version, behavior-relevant
+   configuration, expected dimensions, and prompt/rubric fingerprint. Results
+   from different identities are never pooled by the runner or dashboard.
 5. **Detect**: Verdict compares current and baseline judgments using each
    trace's capture timestamp. It emits per-cluster, per-dimension signals only
    when both statistical and practical thresholds clear, and retains up to five
    current-window trace IDs as review evidence. Re-running the same hourly
-   analysis bucket replaces stale results from that bucket.
+   analysis bucket replaces stale results from that bucket for that evaluator
+   only. Drift signals retain the evaluator fingerprint; historical signals
+   without one are unavailable for evaluator-scoped reporting.
 6. **Inspect**: use the CLI, Python APIs, or dashboard to review traces, scores,
    clusters, and drift reports.
 
@@ -97,11 +103,44 @@ The v0 drift runner supports one tenant scope per store and rejects mixed-tenant
 analysis. Cost figures are best-effort estimates from a dated static table of
 public base token prices, not provider billing data.
 
+PASS rate is `PASS / (PASS + FAIL)`. `UNCLEAR`, missing dimensions, and judge
+errors are coverage states, not failures in that denominator. The dashboard
+shows coverage separately and reports an unavailable rate when there are no
+PASS/FAIL scores. A latest judge error supersedes an older attempt for analysis
+and is eligible for a later retry.
+
+Optional fixed human-labeled sentinel runs monitor the selected evaluator
+fingerprint separately from production drift. `healthy` requires the configured
+label floor and Wilson confidence-interval lower bound, using independently
+judged examples rather than correlated dimension labels as the effective sample
+size. When a sentinel file is supplied, any non-healthy result is persisted and
+blocks production judging/drift with exit status 2. The anchor set cannot detect
+changes outside the examples it covers.
+
+Streaming trace persistence is deterministic after full consumption, iteration
+error, explicit `close()` / `aclose()`, context-manager exit, or async
+cancellation. Garbage collection of a never-iterated, unclosed stream is not a
+supported finalization boundary. Supported instrumented provider calls made
+inside manual spans persist `Trace.parent_span_id` automatically and link the
+span back only after the Trace write succeeds. Explicit `trace_context(...)` or
+`set_context(trace_id=...)` still links manual-only work to an existing stored
+trace. Nested spans inherit an outer provider link until they make a provider
+call of their own, which replaces only the child's inherited link. Unknown
+explicit IDs become unlinked spans with a link-status attribute;
+standalone spans remain explicit.
+
 ## Security And Privacy Notes
 
 - Content capture is opt-in. You can capture metadata without storing prompts or
   responses.
-- Redaction is best-effort pattern redaction, not a compliance guarantee.
+- Supported message top-level fields are allowlisted. Their nested JSON strings,
+  including tool arguments/results and metadata, are sanitized before Trace
+  assignment and again at storage; judge reasoning, manual-span attributes, and
+  dashboard output receive the same boundary treatment. Unsupported objects fail
+  closed. Redaction is still best-effort pattern matching, not a compliance
+  guarantee: names, addresses, dates of birth, many international identifiers,
+  and arbitrary opaque metadata can remain. Use non-sensitive identifiers and
+  keep capture off when this is insufficient.
 - API keys are read from your environment and should not be committed to the
   repository.
 - Structural checks and local embedding inference keep trace content local. A
@@ -111,6 +150,13 @@ public base token prices, not provider billing data.
   Keep them out of source control.
 - Before using Verdict with production data, review `SECURITY.md`, your
   retention requirements, and your provider data-handling settings.
+
+The bundled dashboard server reads SQLite only. Postgres is an SDK storage
+adapter, not a dashboard backend.
+When `VERDICT_USER` and `VERDICT_PASS` are both set, HTTP Basic authentication
+gates `/dashboard` and `/api/data` while the landing and health endpoints remain
+public. Chart series contain observed hourly bins only and are capped at 1,000
+points.
 
 ## Validation Position
 

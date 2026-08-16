@@ -8,11 +8,9 @@ parser regressions without needing customer data.
 from __future__ import annotations
 
 import json
-import tempfile
 from pathlib import Path
 
 import pytest
-
 from verdict_inspect.parsers import (
     detect_format,
     parse_chatgpt_export,
@@ -20,7 +18,6 @@ from verdict_inspect.parsers import (
     parse_cowork_jsonl,
     parse_openai_jsonl,
 )
-
 
 # --------------------------------------------------------------------------- #
 # ChatGPT export

@@ -160,15 +160,19 @@ class LiteLLMAdapter:
 
     name = "litellm"
 
-    def __init__(self) -> None:
+    def __init__(self, *, max_retries: int = 4) -> None:
         try:
             import litellm  # noqa: F401
         except ImportError as e:
             raise ImportError(
                 "LiteLLMAdapter requires `pip install litellm`"
             ) from e
+        self._max_retries = max_retries
 
     def complete(self, req: CompletionRequest) -> CompletionResponse:
+        return _with_retry(self._complete_once, req, max_attempts=self._max_retries)
+
+    def _complete_once(self, req: CompletionRequest) -> CompletionResponse:
         import litellm
 
         # LiteLLM accepts the OpenAI-shaped messages list directly

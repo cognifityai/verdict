@@ -17,6 +17,14 @@ from verdict_eval.pairwise import (
 from verdict_eval.providers import CompletionResponse, FakeProvider
 
 
+def test_pairwise_judges_are_available_from_the_package_root() -> None:
+    from verdict_eval import PairwiseJudge as RootPairwiseJudge
+    from verdict_eval import PairwiseJudgeEnsemble as RootPairwiseJudgeEnsemble
+
+    assert RootPairwiseJudge is PairwiseJudge
+    assert RootPairwiseJudgeEnsemble is PairwiseJudgeEnsemble
+
+
 class _StubJudge:
     """Duck-typed judge whose compare() returns a preset reconciled verdict.
 

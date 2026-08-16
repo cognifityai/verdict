@@ -13,11 +13,15 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 
+from verdict.redaction import sanitize_judgment, sanitize_span, sanitize_trace
 from verdict.schema import (
     DimensionScore,
     DriftDirection,
     DriftSignal,
+    EvaluatorHealthRecord,
+    EvaluatorHealthStatus,
     Judgment,
+    JudgmentStatus,
     Operation,
     SpanRecord,
     Trace,
@@ -28,6 +32,7 @@ from verdict.schema import (
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS traces (
     trace_id TEXT PRIMARY KEY,
+    parent_span_id TEXT,
     started_at TEXT NOT NULL,
     ended_at TEXT,
     provider TEXT,
@@ -64,10 +69,33 @@ CREATE TABLE IF NOT EXISTS judgments (
     judge_models_json TEXT,
     dimensions_json TEXT,
     position_swap_consistent INTEGER,
+    evaluator_provider TEXT,
+    evaluator_config_json TEXT,
+    evaluator_fingerprint TEXT,
+    expected_dimensions_json TEXT,
+    status TEXT DEFAULT 'completed',
+    error TEXT,
     FOREIGN KEY (trace_id) REFERENCES traces(trace_id)
 );
 CREATE INDEX IF NOT EXISTS idx_judgments_trace ON judgments(trace_id);
 CREATE INDEX IF NOT EXISTS idx_judgments_created ON judgments(created_at);
+
+CREATE TABLE IF NOT EXISTS evaluator_health (
+    health_id TEXT PRIMARY KEY,
+    evaluated_at TEXT NOT NULL,
+    evaluator_fingerprint TEXT NOT NULL,
+    sentinel_set_name TEXT,
+    sentinel_set_fingerprint TEXT NOT NULL,
+    correct_labels INTEGER NOT NULL,
+    total_labels INTEGER NOT NULL,
+    agreement REAL,
+    confidence_low REAL,
+    confidence_high REAL,
+    status TEXT NOT NULL,
+    error_count INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_evaluator_health_identity
+    ON evaluator_health(evaluator_fingerprint, evaluated_at);
 
 CREATE TABLE IF NOT EXISTS drift_signals (
     signal_id TEXT PRIMARY KEY,
@@ -75,6 +103,7 @@ CREATE TABLE IF NOT EXISTS drift_signals (
     cluster_id TEXT,
     dimension TEXT,
     direction TEXT,
+    evaluator_fingerprint TEXT,
     statistic_name TEXT,
     statistic_value REAL,
     p_value REAL,
@@ -171,22 +200,76 @@ class SQLiteStorage:
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._lock = threading.Lock()
         with self._lock:
+            # Migrate columns used by CREATE INDEX statements *before* running
+            # the full idempotent schema. Otherwise an older table makes
+            # executescript abort at the index and none of the later tables or
+            # migrations are created.
+            existing_tables = {
+                row[0]
+                for row in self._conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
+            }
+            if "traces" in existing_tables:
+                trace_columns = {
+                    row[1] for row in self._conn.execute("PRAGMA table_info(traces)")
+                }
+                for column, ddl in (
+                    ("cluster_id", "TEXT"),
+                    ("parent_span_id", "TEXT"),
+                ):
+                    if column not in trace_columns:
+                        self._conn.execute(
+                            f"ALTER TABLE traces ADD COLUMN {column} {ddl}"
+                        )
+            if "spans" in existing_tables:
+                span_columns = {
+                    row[1] for row in self._conn.execute("PRAGMA table_info(spans)")
+                }
+                if "parent_name" not in span_columns:
+                    self._conn.execute(
+                        "ALTER TABLE spans ADD COLUMN parent_name TEXT"
+                    )
             self._conn.executescript(_SCHEMA)
+            try:
+                self._conn.execute(
+                    "ALTER TABLE traces ADD COLUMN parent_span_id TEXT"
+                )
+            except sqlite3.OperationalError:
+                pass
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_traces_parent_span "
+                "ON traces(parent_span_id)"
+            )
             # Idempotent column-add for in-place migration of older DBs
             for col, ddl in [
                 ("effect_size_cliffs_delta", "REAL DEFAULT 0.0"),
                 ("wasserstein_distance", "REAL DEFAULT 0.0"),
                 ("psi", "REAL DEFAULT 0.0"),
+                ("evaluator_fingerprint", "TEXT"),
             ]:
                 try:
                     self._conn.execute(f"ALTER TABLE drift_signals ADD COLUMN {col} {ddl}")
                 except sqlite3.OperationalError:
                     # Column already exists — fine
                     pass
+            for col, ddl in [
+                ("evaluator_provider", "TEXT"),
+                ("evaluator_config_json", "TEXT"),
+                ("evaluator_fingerprint", "TEXT"),
+                ("expected_dimensions_json", "TEXT"),
+                ("status", "TEXT DEFAULT 'completed'"),
+                ("error", "TEXT"),
+            ]:
+                try:
+                    self._conn.execute(f"ALTER TABLE judgments ADD COLUMN {col} {ddl}")
+                except sqlite3.OperationalError:
+                    pass
 
     # -- Traces ------------------------------------------------------------
 
     def insert_trace(self, trace: Trace) -> None:
+        sanitize_trace(trace)
         with self._lock:
             # SQLite UPSERT with an explicit column list. Mirrors the Postgres
             # adapter's ON CONFLICT DO UPDATE SET exactly so re-writes behave
@@ -197,14 +280,14 @@ class SQLiteStorage:
             # an already-assigned cluster_id when a later write carries NULL.
             self._conn.execute(
                 """INSERT INTO traces (
-                    trace_id, started_at, ended_at, provider, operation,
+                    trace_id, parent_span_id, started_at, ended_at, provider, operation,
                     request_model, response_model, input_tokens, output_tokens,
                     temperature, max_tokens, finish_reason, error, latency_ms,
                     prompt_redacted, response_redacted, raw_messages_json,
                     tenant_id, session_id, user_id_hash, cluster_id,
                     tags_json, cost_usd
                 ) VALUES (
-                    :trace_id, :started_at, :ended_at, :provider, :operation,
+                    :trace_id, :parent_span_id, :started_at, :ended_at, :provider, :operation,
                     :request_model, :response_model, :input_tokens, :output_tokens,
                     :temperature, :max_tokens, :finish_reason, :error, :latency_ms,
                     :prompt_redacted, :response_redacted, :raw_messages_json,
@@ -220,10 +303,14 @@ class SQLiteStorage:
                     latency_ms        = excluded.latency_ms,
                     prompt_redacted   = excluded.prompt_redacted,
                     response_redacted = excluded.response_redacted,
+                    parent_span_id    = COALESCE(
+                        excluded.parent_span_id, traces.parent_span_id
+                    ),
                     cluster_id        = COALESCE(excluded.cluster_id, traces.cluster_id),
                     cost_usd          = excluded.cost_usd""",
                 {
                     "trace_id": trace.trace_id,
+                    "parent_span_id": trace.parent_span_id,
                     "started_at": _iso(trace.started_at),
                     "ended_at": _iso(trace.ended_at),
                     "provider": trace.provider,
@@ -252,6 +339,7 @@ class SQLiteStorage:
     def _row_to_trace(self, row: sqlite3.Row) -> Trace:
         return Trace(
             trace_id=row["trace_id"],
+            parent_span_id=row["parent_span_id"],
             started_at=_parse_iso(row["started_at"]) or datetime.now(timezone.utc),
             ended_at=_parse_iso(row["ended_at"]),
             provider=row["provider"] or "",
@@ -281,6 +369,13 @@ class SQLiteStorage:
             cur = self._conn.execute("SELECT * FROM traces WHERE trace_id = ?", (trace_id,))
             row = cur.fetchone()
         return self._row_to_trace(row) if row else None
+
+    def trace_exists(self, trace_id: str) -> bool:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT 1 FROM traces WHERE trace_id = ? LIMIT 1", (trace_id,)
+            ).fetchone()
+        return row is not None
 
     def list_traces(
         self,
@@ -329,12 +424,20 @@ class SQLiteStorage:
     # -- Judgments ---------------------------------------------------------
 
     def insert_judgment(self, judgment: Judgment) -> None:
+        sanitize_judgment(judgment)
         dims_payload = [asdict(d) for d in judgment.dimensions]
         with self._lock:
             self._conn.execute(
-                """INSERT OR REPLACE INTO judgments VALUES (
+                """INSERT OR REPLACE INTO judgments (
+                    judgment_id, trace_id, rubric_name, rubric_version, created_at,
+                    judge_models_json, dimensions_json, position_swap_consistent,
+                    evaluator_provider, evaluator_config_json,
+                    evaluator_fingerprint, expected_dimensions_json, status, error
+                ) VALUES (
                     :judgment_id, :trace_id, :rubric_name, :rubric_version, :created_at,
-                    :judge_models_json, :dimensions_json, :position_swap_consistent
+                    :judge_models_json, :dimensions_json, :position_swap_consistent,
+                    :evaluator_provider, :evaluator_config_json,
+                    :evaluator_fingerprint, :expected_dimensions_json, :status, :error
                 )""",
                 {
                     "judgment_id": judgment.judgment_id,
@@ -348,6 +451,16 @@ class SQLiteStorage:
                         None if judgment.position_swap_consistent is None
                         else int(judgment.position_swap_consistent)
                     ),
+                    "evaluator_provider": judgment.evaluator_provider,
+                    "evaluator_config_json": json.dumps(
+                        judgment.evaluator_config, sort_keys=True
+                    ),
+                    "evaluator_fingerprint": judgment.evaluator_fingerprint,
+                    "expected_dimensions_json": json.dumps(
+                        judgment.expected_dimensions
+                    ),
+                    "status": judgment.status.value,
+                    "error": judgment.error,
                 },
             )
 
@@ -371,6 +484,18 @@ class SQLiteStorage:
             created_at=_parse_iso(row["created_at"]) or datetime.now(timezone.utc),
             judge_models=json.loads(row["judge_models_json"]) if row["judge_models_json"] else [],
             dimensions=dims,
+            evaluator_provider=row["evaluator_provider"] or "",
+            evaluator_config=(
+                json.loads(row["evaluator_config_json"])
+                if row["evaluator_config_json"] else {}
+            ),
+            evaluator_fingerprint=row["evaluator_fingerprint"] or "",
+            expected_dimensions=(
+                json.loads(row["expected_dimensions_json"])
+                if row["expected_dimensions_json"] else []
+            ),
+            status=JudgmentStatus(row["status"] or "completed"),
+            error=row["error"],
             position_swap_consistent=None if swap is None else bool(swap),
         )
 
@@ -398,6 +523,74 @@ class SQLiteStorage:
             rows = cur.fetchall()
         return [self._row_to_judgment(r) for r in rows]
 
+    # -- Evaluator health -------------------------------------------------
+
+    def insert_evaluator_health(self, record: EvaluatorHealthRecord) -> None:
+        with self._lock:
+            self._conn.execute(
+                """INSERT OR REPLACE INTO evaluator_health (
+                    health_id, evaluated_at, evaluator_fingerprint,
+                    sentinel_set_name, sentinel_set_fingerprint,
+                    correct_labels, total_labels, agreement, confidence_low,
+                    confidence_high, status, error_count
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    record.health_id,
+                    _iso(record.evaluated_at),
+                    record.evaluator_fingerprint,
+                    record.sentinel_set_name,
+                    record.sentinel_set_fingerprint,
+                    record.correct_labels,
+                    record.total_labels,
+                    record.agreement,
+                    record.confidence_low,
+                    record.confidence_high,
+                    record.status.value,
+                    record.error_count,
+                ),
+            )
+
+    def list_evaluator_health(
+        self,
+        *,
+        evaluator_fingerprint: str | None = None,
+        limit: int = 100,
+    ) -> list[EvaluatorHealthRecord]:
+        where = ""
+        params: list[object] = []
+        if evaluator_fingerprint is not None:
+            where = "WHERE evaluator_fingerprint = ?"
+            params.append(evaluator_fingerprint)
+        params.append(limit)
+        with self._lock:
+            # `where` is one of two fixed strings; fingerprint and limit are bound.
+            sql = (
+                f"SELECT * FROM evaluator_health {where} "  # nosec B608
+                "ORDER BY evaluated_at DESC LIMIT ?"
+            )
+            rows = self._conn.execute(
+                sql,
+                params,
+            ).fetchall()
+        return [
+            EvaluatorHealthRecord(
+                health_id=row["health_id"],
+                evaluated_at=_parse_iso(row["evaluated_at"])
+                or datetime.now(timezone.utc),
+                evaluator_fingerprint=row["evaluator_fingerprint"],
+                sentinel_set_name=row["sentinel_set_name"] or "",
+                sentinel_set_fingerprint=row["sentinel_set_fingerprint"],
+                correct_labels=row["correct_labels"],
+                total_labels=row["total_labels"],
+                agreement=row["agreement"],
+                confidence_low=row["confidence_low"],
+                confidence_high=row["confidence_high"],
+                status=EvaluatorHealthStatus(row["status"]),
+                error_count=row["error_count"],
+            )
+            for row in rows
+        ]
+
     # -- Drift signals -----------------------------------------------------
 
     def insert_drift_signal(self, signal: DriftSignal) -> None:
@@ -405,6 +598,7 @@ class SQLiteStorage:
             self._conn.execute(
                 """INSERT OR REPLACE INTO drift_signals (
                     signal_id, detected_at, cluster_id, dimension, direction,
+                    evaluator_fingerprint,
                     statistic_name, statistic_value, p_value, p_value_adjusted,
                     effect_size_cohens_d, effect_size_cliffs_delta,
                     wasserstein_distance, psi,
@@ -412,6 +606,7 @@ class SQLiteStorage:
                     contributing_layers_json, example_trace_ids_json, recommended_action
                 ) VALUES (
                     :signal_id, :detected_at, :cluster_id, :dimension, :direction,
+                    :evaluator_fingerprint,
                     :statistic_name, :statistic_value, :p_value, :p_value_adjusted,
                     :effect_size_cohens_d, :effect_size_cliffs_delta,
                     :wasserstein_distance, :psi,
@@ -424,6 +619,7 @@ class SQLiteStorage:
                     "cluster_id": signal.cluster_id,
                     "dimension": signal.dimension,
                     "direction": signal.direction.value,
+                    "evaluator_fingerprint": signal.evaluator_fingerprint,
                     "statistic_name": signal.statistic_name,
                     "statistic_value": signal.statistic_value,
                     "p_value": signal.p_value,
@@ -440,12 +636,20 @@ class SQLiteStorage:
                 },
             )
 
-    def delete_drift_signals_between(self, start: datetime, end: datetime) -> None:
+    def delete_drift_signals_between(
+        self,
+        start: datetime,
+        end: datetime,
+        *,
+        evaluator_fingerprint: str | None = None,
+    ) -> None:
         with self._lock:
-            self._conn.execute(
-                "DELETE FROM drift_signals WHERE detected_at >= ? AND detected_at < ?",
-                (_iso(start), _iso(end)),
-            )
+            sql = "DELETE FROM drift_signals WHERE detected_at >= ? AND detected_at < ?"
+            params: tuple = (_iso(start), _iso(end))
+            if evaluator_fingerprint is not None:
+                sql += " AND evaluator_fingerprint = ?"
+                params += (evaluator_fingerprint,)
+            self._conn.execute(sql, params)
 
     def list_drift_signals(self, *, limit: int = 100) -> list[DriftSignal]:
         with self._lock:
@@ -467,6 +671,7 @@ class SQLiteStorage:
                 cluster_id=r["cluster_id"] or "",
                 dimension=r["dimension"] or "",
                 direction=DriftDirection(r["direction"] or "change"),
+                evaluator_fingerprint=_get(r, "evaluator_fingerprint", ""),
                 statistic_name=r["statistic_name"] or "",
                 statistic_value=r["statistic_value"] or 0.0,
                 p_value=r["p_value"] or 1.0,
@@ -487,6 +692,7 @@ class SQLiteStorage:
     # -- Spans -------------------------------------------------------------
 
     def insert_span(self, span: SpanRecord) -> None:
+        sanitize_span(span)
         with self._lock:
             self._conn.execute(
                 """INSERT OR REPLACE INTO spans (

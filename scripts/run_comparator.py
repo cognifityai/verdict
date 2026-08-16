@@ -223,8 +223,8 @@ def main() -> int:
             responses[(model, i)] = _generate(gen_provider, model, prompt, args.max_tokens)
 
     # -- Step 2: pairwise judge (position-swap consistent) -------------------
-    from verdict_eval.pairwise import PairwiseJudge, PairwiseVerdict
     from verdict_eval.compare import PairwiseResult
+    from verdict_eval.pairwise import PairwiseJudge, PairwiseVerdict
 
     judge = PairwiseJudge(provider=judge_provider, model=judge_model,
                           temperature=0.0, max_tokens=256)

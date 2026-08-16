@@ -6,17 +6,25 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
 
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   ui-build:
+    name: UI build and generated assets
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
 
-      - uses: pnpm/setup@v1
+      - uses: pnpm/setup@5d160c5bc68a09337ad0d5654e237e03253b5879 # v1
         with:
           version: 11.16.0
           runtime: node@22
@@ -27,12 +35,14 @@ jobs:
       - name: Build dashboard assets
         run: |
           pnpm --dir ui install --frozen-lockfile
+          pnpm --dir ui test
           pnpm --dir ui build
 
       - name: Verify generated dashboard assets are current
         run: git diff --exit-code -- ui/landing.html ui/dashboard.html ui/assets
 
   test:
+    name: Python ${{ matrix.python-version }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -40,10 +50,12 @@ jobs:
         python-version: ["3.10", "3.11", "3.12"]
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
 
       - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: ${{ matrix.python-version }}
 
@@ -53,9 +65,10 @@ jobs:
       - name: Install dependencies
         run: |
           uv pip install --system \
-            wrapt pydantic aiosqlite httpx \
+            wrapt httpx \
             numpy scipy scikit-learn \
-            "pytest>=8" "pytest-asyncio>=0.23"
+            "pyyaml>=6" "pytest>=8" "pytest-asyncio>=0.23" "ruff>=0.5" \
+            -r ui/requirements.txt
           uv pip install --system -e packages/verdict
           uv pip install --system -e packages/verdict_eval
           uv pip install --system -e packages/verdict_inspect
@@ -63,5 +76,47 @@ jobs:
       - name: Smoke test
         run: python scripts/smoke_test.py
 
+      - name: Ruff
+        run: ruff check packages scripts ui
+
       - name: pytest
         run: python -m pytest -v --tb=short
+
+  postgres:
+    name: PostgreSQL adapter round trip
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: verdict
+          POSTGRES_PASSWORD: verdict-test
+          POSTGRES_DB: verdict_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U verdict -d verdict_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      VERDICT_TEST_POSTGRES_DSN: postgresql://verdict:verdict-test@127.0.0.1:5432/verdict_test
+
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+
+      - name: Install Postgres test dependencies
+        run: |
+          python -m pip install --disable-pip-version-check \
+            pytest "psycopg[binary,pool]"
+          python -m pip install --disable-pip-version-check -e packages/verdict
+
+      - name: Exercise the real Postgres adapter
+        run: python -m pytest -v packages/verdict/tests/test_postgres_integration.py

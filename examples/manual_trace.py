@@ -4,9 +4,8 @@ Auto-instrumentation captures the LLM call. Use @verdict.trace for the
 surrounding business logic — retrieval, reranking, tool execution.
 """
 
-from anthropic import Anthropic
 import verdict
-
+from anthropic import Anthropic
 
 verdict.init(service_name="example-rag-bot", storage="sqlite:///./verdict.db")
 

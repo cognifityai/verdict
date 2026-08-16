@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect } from "react";
+import React, { useState, useEffect } from "react";
 import {
   LineChart, Line, AreaChart, Area, BarChart, Bar, XAxis, YAxis, CartesianGrid,
   Tooltip, ResponsiveContainer, ReferenceLine, ReferenceArea, Cell,
@@ -6,9 +6,11 @@ import {
 import {
   Activity, AlertTriangle, ArrowRight, ArrowLeft, BarChart3, Boxes, CheckCircle2,
   Clock, Code2, Database, GitBranch, Layers, Scale, Search, Shield, Signal,
-  TrendingDown, Zap, Github, Terminal, Gauge, FlaskConical, Cpu, DollarSign,
+  TrendingDown, TrendingUp, Zap, Github, Terminal, Gauge, FlaskConical, Cpu, DollarSign,
   Filter, X, Sparkles, ChevronRight, Eye, Network, RefreshCw,
 } from "lucide-react";
+import { dimensionAxisLabel, dimensionLabel } from "./dimension-labels.js";
+import { providerPresentation } from "./provider-presentation.js";
 
 // Embedded synthetic sample data. This keeps the static dashboard renderable when
 // no live API is reachable. It is not a benchmark, experiment result, or claim
@@ -30,6 +32,18 @@ const SEED = (() => {
       totalCost: 0.42, totalCostStatus: 'complete', regressionHour: 4,
       providers: 3, clusters: 4,
     },
+    evaluation: {
+      status: "selected", selectedId: "sample-evaluator",
+      selectedIdentity: { id: "sample-evaluator", label: "sample-judge · sample-rubric v1", complete: true },
+      availableIdentities: [{ id: "sample-evaluator", label: "sample-judge · sample-rubric v1", complete: true }],
+      driftStatus: "selected", unattributedDriftSignals: 0,
+    },
+    scoreCoverage: { pass: 223, fail: 17, unclear: 0, missing: 0, error: 0, evaluable: 240 },
+    evaluatorHealth: [{
+      id: "sample-health", evaluatedAt: "sample-data", sentinelSetName: "sample-anchor-v1",
+      correctLabels: 27, totalLabels: 30, agreement: 90, confidenceLow: 74.4,
+      confidenceHigh: 96.5, status: "healthy", errorCount: 0,
+    }],
     providers: [
       { key: 'anthropic', label: 'Anthropic sample', model: 'sample-model-a', n: 32, errors: 0, errorRate: 0, avgLatency: 2.25, inTok: 2400, outTok: 9600, cost: 0.19, passRate: 82, judged: 16 },
       { key: 'openai', label: 'OpenAI sample', model: 'sample-model-b', n: 32, errors: 0, errorRate: 0, avgLatency: 2.48, inTok: 2380, outTok: 8200, cost: 0.08, passRate: 96, judged: 16 },
@@ -46,8 +60,8 @@ const SEED = (() => {
       clustersMeetingSampleFloor: 4, minSampleSize: 12, messages: [],
     },
     driftSignals: [
-      { id: 'sample-01', dimension: 'completeness', direction: 'regression', provider: 'anthropic', providerLabel: 'Anthropic sample', statName: 'fisher_exact', stat: 7.2, p: 0.0009, pAdj: 0.0042, cliffsDelta: -0.42, cohensD: -1.1, nCur: 12, nBase: 12, layers: ['judge_rubric'], exampleTraceIds: ['sample-trace-001'], action: 'Review affected traces and compare the current prompt/model configuration against the reference window.', detectedAt: 'sample-data' },
-      { id: 'sample-02', dimension: 'instruction_following', direction: 'regression', provider: 'anthropic', providerLabel: 'Anthropic sample', statName: 'fisher_exact', stat: 5.8, p: 0.0021, pAdj: 0.0095, cliffsDelta: -0.35, cohensD: -0.9, nCur: 12, nBase: 12, layers: ['judge_rubric'], exampleTraceIds: ['sample-trace-001'], action: 'Inspect sampled failures and confirm whether the change is meaningful for this workload.', detectedAt: 'sample-data' },
+      { id: 'sample-01', clusterId: 'support', dimension: 'completeness', direction: 'regression', provider: 'anthropic', providerLabel: 'Anthropic sample', statName: 'fisher_exact', stat: 7.2, p: 0.0009, pAdj: 0.0042, cliffsDelta: -0.42, cohensD: -1.1, nCur: 12, nBase: 12, layers: ['judge_rubric'], exampleTraceIds: ['sample-trace-001'], action: 'Review affected traces and compare the current prompt/model configuration against the reference window.', detectedAt: 'sample-data' },
+      { id: 'sample-02', clusterId: 'support', dimension: 'instruction_following', direction: 'regression', provider: 'anthropic', providerLabel: 'Anthropic sample', statName: 'fisher_exact', stat: 5.8, p: 0.0021, pAdj: 0.0095, cliffsDelta: -0.35, cohensD: -0.9, nCur: 12, nBase: 12, layers: ['judge_rubric'], exampleTraceIds: ['sample-trace-001'], action: 'Inspect sampled failures and confirm whether the change is meaningful for this workload.', detectedAt: 'sample-data' },
     ],
     dimensionOverall: [
       { dim: 'groundedness', passRate: 96, pass: 46, fail: 2, unclear: 0, tot: 48 },
@@ -67,6 +81,7 @@ const SEED = (() => {
       { hour: 6, anthropic: 74, openai: 96, google: 93 },
       { hour: 7, anthropic: 82, openai: 96, google: 94 },
     ],
+    clusterPassrate: [],
     haikuDim: [
       { hour: 0, groundedness: 98, relevance: 98, completeness: 98, safety: 100, instruction_following: 98 },
       { hour: 1, groundedness: 98, relevance: 98, completeness: 96, safety: 100, instruction_following: 98 },
@@ -105,6 +120,12 @@ const SEED = (() => {
 const API_URL = (typeof window !== "undefined" && window.VERDICT_API) || "/api/data";
 let DATA = SEED;
 
+function apiUrlForEvaluator(evaluatorId) {
+  if (!evaluatorId) return API_URL;
+  const separator = API_URL.includes("?") ? "&" : "?";
+  return `${API_URL}${separator}evaluator=${encodeURIComponent(evaluatorId)}`;
+}
+
 /* ---------------------------------------------------------------- palette */
 const C = {
   bg: "#0b0e0d", panel: "#111615", panel2: "#151b19", raised: "#1b2421",
@@ -113,27 +134,20 @@ const C = {
   cyan: "#55d9e8", green: "#56d39b", red: "#ff746a", amber: "#efbd63", blue: "#82aaff",
   redBg: "#2d1918", amberBg: "#2a2418", greenBg: "#172a22", blueBg: "#17242c",
 };
-const PROV = {
-  anthropic: { color: "#f39a62", label: "Anthropic sample", short: "Anthropic" },
-  openai: { color: "#4ee1aa", label: "OpenAI sample", short: "OpenAI" },
-  google: { color: "#82aaff", label: "Google sample", short: "Google" },
-};
-const DIM_LABEL = {
-  groundedness: "Groundedness", relevance: "Relevance", completeness: "Completeness",
-  safety: "Safety", instruction_following: "Instruction-following",
-};
-
 /* ---------------------------------------------------------------- helpers */
 const pct = (n) => (n == null ? "—" : `${n}%`);
 const usd = (n) => (n == null ? "Unavailable" : `$${n < 1 ? n.toFixed(3) : n.toFixed(2)}`);
 const k = (n) => (n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k` : `${n}`);
 const shortTraceId = (id) => id.length > 20 ? `${id.slice(0, 8)}…${id.slice(-8)}` : id;
 const sci = (n) => {
+  if (n == null || !Number.isFinite(n)) return "n/a";
   if (n === 0) return "0";
   if (n >= 0.001) return n.toFixed(4);
   const e = Math.floor(Math.log10(n));
   return `${(n / Math.pow(10, e)).toFixed(1)}e${e}`;
 };
+const coveragePct = (n) => n == null || !Number.isFinite(n) ? "n/a" : `${Math.round(n * 1000) / 10}%`;
+const statValue = (n) => n == null || !Number.isFinite(n) ? "n/a" : n;
 
 function ChartTooltip({ active, payload, label, unit = "", title }) {
   if (!active || !payload || !payload.length) return null;
@@ -197,7 +211,7 @@ function Landing({ onEnter }) {
   ];
   const steps = [
     { icon: Activity, t: "Capture", d: "One line of init instruments supported provider SDK calls into Verdict's vendor-neutral Trace schema." },
-    { icon: Database, t: "Store", d: "Traces land in SQLite, Postgres, or memory — one Storage protocol behind all three." },
+    { icon: Database, t: "Store", d: "The SDK stores traces through one protocol: SQLite locally, Postgres for shared environments, or memory for tests. The bundled dashboard reads SQLite." },
     { icon: Layers, t: "Cluster", d: "Persistent MiniLM-based assignment groups similar prompts so baseline and current windows compare like with like." },
     { icon: Scale, t: "Judge", d: "A configurable judge model scores sampled responses on 5 binary dimensions, reasoning before its verdict." },
     { icon: Signal, t: "Detect drift", d: "Fisher's exact test (binary dimensions) / Mann-Whitney U + Benjamini-Hochberg per (cluster, dimension), gated on Cliff's δ." },
@@ -244,7 +258,7 @@ function Landing({ onEnter }) {
             Monitor LLM-call quality on your <span style={{ color: C.accent2 }}>own workloads.</span>
           </h1>
           <p className="mt-5 text-lg" style={{ color: C.sub, lineHeight: 1.6 }}>
-            Verdict instruments supported model calls with one line, evaluates sampled outputs against a 5-dimension rubric,
+            Verdict instruments supported model calls with one line, evaluates sampled outputs against your configured rubric,
             and helps you inspect quality, cost, and behavior changes on
             <span style={{ color: C.text }}> your own traffic</span> instead of relying on generic benchmarks.
           </p>
@@ -371,8 +385,10 @@ function Section({ title, subtitle, children }) {
 }
 
 /* ============================================================== DASHBOARD */
-function Dashboard({ onExit, source = "sample", onReload, reloading }) {
+function Dashboard({ onExit, source = "sample", onReload, onEvaluatorChange, reloading }) {
   const [tab, setTab] = useState("overview");
+  const evaluation = DATA.evaluation || { status: "empty", selectedId: null, availableIdentities: [] };
+  const evaluatorSelectionNeeded = ["selection_required", "invalid_selection"].includes(evaluation.status);
   const nav = [
     { id: "overview", label: "Overview", icon: Gauge },
     { id: "drift", label: "Drift signals", icon: Signal, badge: DATA.driftSignals.length },
@@ -430,6 +446,39 @@ function Dashboard({ onExit, source = "sample", onReload, reloading }) {
             </div>
           )}
         </div>
+        {evaluation.availableIdentities.length > 0 && (
+          <div className="mb-5 flex flex-col md:flex-row md:items-center gap-3 px-3 py-3 border"
+            style={{ borderColor: evaluatorSelectionNeeded ? "#6b5529" : C.border, background: evaluatorSelectionNeeded ? C.amberBg : C.panel2, borderRadius: 3 }}>
+            <div className="min-w-0 flex-1">
+              <div className="text-xs font-mono" style={{ color: evaluatorSelectionNeeded ? C.amber : C.accent2 }}>EVALUATOR IDENTITY</div>
+              <div className="text-xs mt-1" style={{ color: C.sub }}>
+                {evaluatorSelectionNeeded
+                  ? "Select one evaluator before reading judgment summaries or trace verdicts."
+                  : "All judgment summaries and trace verdicts below use only this evaluator identity."}
+              </div>
+            </div>
+            <select aria-label="Evaluator identity" value={evaluation.selectedId || ""}
+              onChange={(event) => onEvaluatorChange(event.target.value)}
+              className="text-xs px-3 py-2 border max-w-full"
+              style={{ color: C.text, background: C.panel, borderColor: C.border, borderRadius: 3 }}>
+              <option value="" disabled>Select an evaluator</option>
+              {evaluation.availableIdentities.map((identity) => (
+                <option key={identity.id} value={identity.id}>{identity.label}</option>
+              ))}
+            </select>
+          </div>
+        )}
+        {(evaluation.driftStatus === "historical_unattributed" || evaluation.unattributedDriftSignals > 0) && (
+          <div className="mb-5 px-3 py-3 border flex items-start gap-2 text-sm"
+            style={{ borderColor: "#6b5529", background: C.amberBg, color: C.text, borderRadius: 3 }}>
+            <AlertTriangle size={16} style={{ color: C.amber, marginTop: 1, flexShrink: 0 }} />
+            <span>
+              {evaluation.driftStatus === "historical_unattributed"
+                ? "Historical drift signals have no evaluator fingerprint, so Verdict cannot attribute them to the selected evaluator. They are excluded; this is unavailable evidence, not zero drift."
+                : `${evaluation.unattributedDriftSignals} historical drift signal${evaluation.unattributedDriftSignals === 1 ? "" : "s"} without evaluator identity ${evaluation.unattributedDriftSignals === 1 ? "is" : "are"} excluded.`}
+            </span>
+          </div>
+        )}
         {tab === "overview" && <Overview />}
         {tab === "drift" && <Drift />}
         {tab === "traces" && <Traces />}
@@ -459,32 +508,61 @@ function Overview() {
   const healthColor = health.status === "ready" ? C.green : health.status === "fragmented" ? C.red : C.amber;
   const healthLabel = health.status === "ready" ? "Ready" : health.status === "fragmented" ? "Fragmented" : "Needs volume";
   const leadSignal = DATA.driftSignals[0];
+  const leadIsCoverage = leadSignal?.statName === "unclear_rate_increase";
+  const leadIsImprovement = leadSignal?.direction === "improvement";
+  const leadColor = leadIsImprovement ? C.green : C.red;
+  const leadBg = leadIsImprovement ? C.greenBg : C.redBg;
+  const driftUnavailable = ["selection_required", "invalid_selection", "historical_unattributed"].includes(DATA.evaluation?.driftStatus);
+  const seriesColors = [C.accent, C.accent2, C.amber, C.green, C.blue, C.cyan];
+  const providerSeries = DATA.providers.map((provider, index) => {
+    const presentation = providerPresentation(
+      provider.rawProvider ?? provider.key,
+      provider.model,
+      provider.label,
+    );
+    return {
+      key: provider.key,
+      label: presentation.label,
+      color: presentation.color || seriesColors[index % seriesColors.length],
+    };
+  });
+  const clusterMode = providerSeries.length === 1
+    && DATA.clusters.length > 1
+    && (DATA.clusterPassrate || []).length > 0;
+  const driftClusters = new Set(DATA.driftSignals.map((signal) => signal.clusterId).filter(Boolean));
+  const clusterSeries = DATA.clusters.map((cluster, index) => ({
+    key: cluster.cluster_id,
+    label: cluster.cluster_id,
+    color: driftClusters.has(cluster.cluster_id) ? C.red : seriesColors[(index + 1) % seriesColors.length],
+  }));
+  const qualitySeries = clusterMode ? clusterSeries : providerSeries;
+  const qualityRows = clusterMode ? DATA.clusterPassrate : DATA.passrate;
   return (
     <div className="space-y-5">
       <div className="border-y flex flex-col lg:flex-row" style={{ borderColor: C.border, background: C.panel2 }}>
         <div className="px-4 py-4 flex items-start gap-3 flex-1">
-          <div className="w-8 h-8 flex items-center justify-center shrink-0" style={{ background: DATA.driftSignals.length ? C.redBg : C.greenBg, borderRadius: 3 }}>
-            {DATA.driftSignals.length ? <AlertTriangle size={16} style={{ color: C.red }} /> : <CheckCircle2 size={16} style={{ color: C.green }} />}
+          <div className="w-8 h-8 flex items-center justify-center shrink-0" style={{ background: driftUnavailable ? C.amberBg : DATA.driftSignals.length ? leadBg : C.greenBg, borderRadius: 3 }}>
+            {driftUnavailable ? <AlertTriangle size={16} style={{ color: C.amber }} /> : DATA.driftSignals.length ? leadIsImprovement ? <TrendingUp size={16} style={{ color: leadColor }} /> : <AlertTriangle size={16} style={{ color: leadColor }} /> : <CheckCircle2 size={16} style={{ color: C.green }} />}
           </div>
           <div className="min-w-0">
-            <div className="text-xs font-mono" style={{ color: DATA.driftSignals.length ? C.red : C.green }}>LATEST PIPELINE RUN</div>
-            <div className="font-semibold mt-0.5">{DATA.driftSignals.length} persisted regression signal{DATA.driftSignals.length === 1 ? "" : "s"}</div>
+            <div className="text-xs font-mono" style={{ color: driftUnavailable ? C.amber : DATA.driftSignals.length ? leadColor : C.green }}>LATEST PIPELINE RUN</div>
+            <div className="font-semibold mt-0.5">{driftUnavailable ? "Drift evidence unavailable" : `${DATA.driftSignals.length} persisted drift signal${DATA.driftSignals.length === 1 ? "" : "s"}`}</div>
             <div className="text-sm mt-0.5" style={{ color: C.sub }}>
-              {DATA.driftSignals.length ? DATA.driftSignals.map((s) => DIM_LABEL[s.dimension]).join(" and ") : "No dimensions currently clear both alert gates."}
+              {driftUnavailable ? "Select an evaluator with attributed drift signals, or rerun the pipeline with the current schema." : DATA.driftSignals.length ? DATA.driftSignals.map((s) => dimensionLabel(s.dimension)).join(" and ") : "No dimensions currently clear both alert gates."}
             </div>
           </div>
         </div>
         <div className="grid grid-cols-3 border-t lg:border-t-0 lg:border-l" style={{ borderColor: C.border, minWidth: "min(100%, 430px)" }}>
-          <GateCell label="ADJUSTED P" value={leadSignal ? sci(leadSignal.pAdj) : "clear"} color={leadSignal ? C.red : C.green} />
-          <GateCell label="CLIFF'S DELTA" value={leadSignal?.cliffsDelta ?? "clear"} color={leadSignal ? C.red : C.green} />
+          <GateCell label="ADJUSTED P" value={driftUnavailable ? "—" : leadIsCoverage ? "n/a" : leadSignal ? sci(leadSignal.pAdj) : "clear"} color={driftUnavailable || leadIsCoverage ? C.amber : leadSignal ? C.red : C.green} />
+          <GateCell label="CLIFF'S DELTA" value={driftUnavailable ? "—" : leadIsCoverage ? "n/a" : leadSignal ? statValue(leadSignal.cliffsDelta) : "clear"} color={driftUnavailable || leadIsCoverage ? C.amber : leadSignal ? C.red : C.green} />
           <GateCell label="CURRENT N" value={leadSignal?.nCur ?? "—"} color={C.text} />
         </div>
       </div>
 
       <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-px border-y" style={{ borderColor: C.border, background: C.border }}>
         <MetricCell label="Traces captured" value={m.totalTraces.toLocaleString()} sub={`${m.providers} providers`} icon={Activity} accent={C.accent} />
-        <MetricCell label="Responses judged" value={m.totalJudged} sub="5-dimension rubric" icon={Scale} accent={C.blue} />
-        <MetricCell label="Drift signals" value={DATA.driftSignals.length} sub="latest pipeline run" icon={Signal} accent={C.red} />
+        <MetricCell label="Responses judged" value={m.totalJudged} sub={`${DATA.dimensionOverall.length}-dimension rubric`} icon={Scale} accent={C.blue} />
+        <MetricCell label="Drift signals" value={driftUnavailable ? "Unavailable" : DATA.driftSignals.length} sub={driftUnavailable ? "identity not attributable" : "latest pipeline run"} icon={Signal} accent={driftUnavailable ? C.amber : C.red} />
         <MetricCell label="Estimated spend" value={usd(m.totalCost)} sub={m.totalCostStatus === "partial" ? "partial pricing coverage" : m.totalCostStatus === "unavailable" ? "pricing unavailable" : `${m.durationHours} hour window`} icon={DollarSign} accent={m.totalCostStatus === "complete" ? C.green : C.amber} />
         <MetricCell label="Intent clusters" value={m.clusters} sub={`median ${health.medianClusterSize || 0} traces`} icon={Layers} accent={healthColor} />
         <MetricCell label="Cluster readiness" value={healthLabel} sub={`${health.clustersMeetingSampleFloor}/${health.nClusters} meet n=${health.minSampleSize}`} icon={Gauge} accent={healthColor} />
@@ -501,18 +579,20 @@ function Overview() {
         <Panel className="p-5 lg:col-span-8">
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-1">
             <div className="font-semibold text-sm">Judge pass-rate over time</div>
-            <Legend3 />
+            <SeriesLegend series={qualitySeries} />
           </div>
-            <div className="text-xs mb-3" style={{ color: C.sub }}>Pass rate by provider · current capture window</div>
+          <div className="text-xs mb-3" style={{ color: C.sub }}>
+            {clusterMode ? "Pass rate by intent cluster · single-provider store" : "Pass rate by provider · current capture window"}
+          </div>
           <ResponsiveContainer width="100%" height={260}>
-            <LineChart data={DATA.passrate} margin={{ top: 5, right: 8, left: -18, bottom: 0 }}>
+            <LineChart data={qualityRows} margin={{ top: 5, right: 8, left: -18, bottom: 0 }}>
               <CartesianGrid stroke={C.grid} vertical={false} />
               <XAxis dataKey="hour" tick={{ fill: C.sub, fontSize: 12 }} stroke={C.border} tickFormatter={(h) => `${h}h`} />
               <YAxis domain={[0, 100]} tick={{ fill: C.sub, fontSize: 12 }} stroke={C.border} tickFormatter={(v) => `${v}%`} />
               <Tooltip content={<ChartTooltip unit="%" />} />
-              <ReferenceLine x={4} stroke={C.red} strokeDasharray="4 4" label={{ value: "change point", fill: C.red, fontSize: 11, position: "top" }} />
-              {Object.keys(PROV).map((p) => (
-                <Line key={p} type="monotone" dataKey={p} name={PROV[p].label} stroke={PROV[p].color} strokeWidth={2.4} dot={{ r: 2.5 }} connectNulls isAnimationActive={false} />
+              <ReferenceLine x={m.regressionHour} stroke={C.red} strokeDasharray="4 4" label={{ value: "change point", fill: C.red, fontSize: 11, position: "top" }} />
+              {qualitySeries.map((series) => (
+                <Line key={series.key} type="monotone" dataKey={series.key} name={series.label} stroke={series.color} strokeWidth={2.4} dot={{ r: 2.5 }} connectNulls isAnimationActive={false} />
               ))}
             </LineChart>
           </ResponsiveContainer>
@@ -552,15 +632,15 @@ function Overview() {
       <Panel className="p-5">
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-3">
           <div className="font-semibold text-sm">Mean latency by provider</div>
-          <Legend3 />
+          <SeriesLegend series={providerSeries} />
         </div>
         <ResponsiveContainer width="100%" height={210}>
           <AreaChart data={DATA.tsRows} margin={{ top: 5, right: 8, left: -18, bottom: 0 }}>
             <defs>
-              {Object.keys(PROV).map((p) => (
-                <linearGradient key={p} id={`g-${p}`} x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%" stopColor={PROV[p].color} stopOpacity={0.35} />
-                  <stop offset="100%" stopColor={PROV[p].color} stopOpacity={0.02} />
+              {providerSeries.map((series) => (
+                <linearGradient key={series.key} id={`g-${series.key}`} x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor={series.color} stopOpacity={0.35} />
+                  <stop offset="100%" stopColor={series.color} stopOpacity={0.02} />
                 </linearGradient>
               ))}
             </defs>
@@ -568,8 +648,8 @@ function Overview() {
             <XAxis dataKey="hour" tick={{ fill: C.sub, fontSize: 12 }} stroke={C.border} tickFormatter={(h) => `${h}h`} />
             <YAxis tick={{ fill: C.sub, fontSize: 12 }} stroke={C.border} tickFormatter={(v) => `${v}s`} />
             <Tooltip content={<ChartTooltip unit="s" />} />
-            {Object.keys(PROV).map((p) => (
-              <Area key={p} type="monotone" dataKey={`${p}_lat`} name={PROV[p].label} stroke={PROV[p].color} strokeWidth={2} fill={`url(#g-${p})`} connectNulls isAnimationActive={false} />
+            {providerSeries.map((series) => (
+              <Area key={series.key} type="monotone" dataKey={`${series.key}_lat`} name={series.label} stroke={series.color} strokeWidth={2} fill={`url(#g-${series.key})`} connectNulls isAnimationActive={false} />
             ))}
           </AreaChart>
         </ResponsiveContainer>
@@ -587,11 +667,11 @@ function GateCell({ label, value, color }) {
   );
 }
 
-function Legend3() {
+function SeriesLegend({ series }) {
   return (
     <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs" style={{ color: C.sub }}>
-      {Object.keys(PROV).map((p) => (
-        <span key={p} className="flex items-center gap-1.5"><Dot color={PROV[p].color} />{PROV[p].short}</span>
+      {series.map((item) => (
+        <span key={item.key} className="flex items-center gap-1.5"><Dot color={item.color} />{item.label}</span>
       ))}
     </div>
   );
@@ -600,34 +680,44 @@ function Legend3() {
 /* ----------------------------------------------------------------- DRIFT */
 function Drift() {
   const [open, setOpen] = useState(DATA.driftSignals[0]?.dimension);
+  const seriesColors = [C.accent, C.accent2, C.amber, C.green, C.blue, C.cyan];
+  const dimensionSeries = DATA.dimensionOverall.map((dimension, index) => ({
+    key: dimension.dim,
+    label: dimensionLabel(dimension.dim),
+    color: seriesColors[index % seriesColors.length],
+  }));
   return (
     <div className="space-y-4">
       <div className="text-sm" style={{ color: C.sub }}>
-        Each signal cleared both configured gates: the BH-adjusted p-value and the minimum absolute Cliff&apos;s δ.
-        Signals come from the latest persisted pipeline run.
+        PASS/FAIL signals clear both the BH-adjusted p-value and minimum absolute Cliff&apos;s δ gates.
+        UNCLEAR coverage signals instead use a deterministic 15-point increase and the configured sample floor. Signals come from the latest persisted pipeline run.
       </div>
       {DATA.driftSignals.map((s) => {
         const isOpen = open === s.dimension;
+        const isCoverage = s.statName === "unclear_rate_increase";
+        const isImprovement = s.direction === "improvement";
+        const signalColor = isImprovement ? C.green : C.red;
+        const signalBg = isImprovement ? C.greenBg : C.redBg;
         return (
           <Panel key={s.id} className="overflow-hidden">
             <button onClick={() => setOpen(isOpen ? null : s.dimension)} className="w-full flex items-center gap-4 p-4 text-left">
-              <div className="w-10 h-10 flex items-center justify-center shrink-0" style={{ background: C.redBg, borderRadius: 3 }}>
-                <TrendingDown size={19} style={{ color: C.red }} />
+              <div className="w-10 h-10 flex items-center justify-center shrink-0" style={{ background: signalBg, borderRadius: 3 }}>
+                {isImprovement ? <TrendingUp size={19} style={{ color: signalColor }} /> : <TrendingDown size={19} style={{ color: signalColor }} />}
               </div>
               <div className="min-w-0">
                 <div className="flex items-center gap-2 flex-wrap">
-                  <span className="font-semibold">{DIM_LABEL[s.dimension]}</span>
-                  <Pill color={C.red} bg={C.redBg}>regression</Pill>
+                  <span className="font-semibold">{dimensionLabel(s.dimension)}</span>
+                  <Pill color={signalColor} bg={signalBg}>{isCoverage ? "evaluability regression" : s.direction}</Pill>
                   <span className="text-xs" style={{ color: C.sub }}>on {s.providerLabel}</span>
                 </div>
                 <div className="text-xs mt-0.5" style={{ color: C.sub }}>
-                  {s.statName === "fisher_exact" ? "Fisher's exact" : "Mann-Whitney U"} · p<sub>adj</sub> = {sci(s.pAdj)} · {s.cliffsDelta != null ? <>Cliff&apos;s δ = {s.cliffsDelta} · </> : null}Cohen&apos;s d = {s.cohensD}
+                  {isCoverage ? <>UNCLEAR rate = {coveragePct(s.stat)} · deterministic coverage gate</> : <>{s.statName === "fisher_exact" ? "Fisher's exact" : "Mann-Whitney U"} · p<sub>adj</sub> = {sci(s.pAdj)} · {s.cliffsDelta != null ? <>Cliff&apos;s δ = {s.cliffsDelta} · </> : null}Cohen&apos;s d = {statValue(s.cohensD)}</>}
                 </div>
               </div>
               <div className="ml-auto flex items-center gap-3">
                 <div className="text-right">
-                  <div className="font-semibold" style={{ color: C.red, fontSize: 18 }}>{s.cliffsDelta != null ? s.cliffsDelta : s.cohensD}</div>
-                  <div className="text-xs" style={{ color: C.faint }}>{s.cliffsDelta != null ? "Cliff's δ" : "effect size"}</div>
+                  <div className="font-semibold" style={{ color: signalColor, fontSize: 18 }}>{isCoverage ? coveragePct(s.stat) : statValue(s.cliffsDelta ?? s.cohensD)}</div>
+                  <div className="text-xs" style={{ color: C.faint }}>{isCoverage ? "UNCLEAR rate" : s.cliffsDelta != null ? "Cliff's δ" : "effect size"}</div>
                 </div>
                 <ChevronRight size={18} style={{ color: C.faint, transform: isOpen ? "rotate(90deg)" : "none", transition: "transform .15s" }} />
               </div>
@@ -635,10 +725,10 @@ function Drift() {
             {isOpen && (
               <div className="px-4 pb-4 border-t" style={{ borderColor: C.border }}>
                 <div className="grid sm:grid-cols-4 gap-3 mt-4">
-                  <Stat label="Statistic" value={s.statName === "fisher_exact" ? `OR = ${s.stat}` : `U = ${s.stat}`} note={s.statName === "fisher_exact" ? "Fisher's exact" : "Mann-Whitney"} />
-                  <Stat label="p-value" value={sci(s.p)} note={`adjusted ${sci(s.pAdj)} (BH)`} />
-                  <Stat label="Cliff's δ" value={s.cliffsDelta} note="primary effect-size gate" />
-                  <Stat label="Samples" value={`${s.nCur} vs ${s.nBase}`} note="current vs baseline" />
+                  <Stat label="Statistic" value={isCoverage ? coveragePct(s.stat) : s.statName === "fisher_exact" ? `OR = ${statValue(s.stat)}` : `U = ${statValue(s.stat)}`} note={isCoverage ? "current UNCLEAR fraction" : s.statName === "fisher_exact" ? "Fisher's exact" : "Mann-Whitney"} />
+                  <Stat label="p-value" value={isCoverage ? "n/a" : sci(s.p)} note={isCoverage ? "deterministic threshold" : `adjusted ${sci(s.pAdj)} (BH)`} />
+                  <Stat label="Cliff's δ" value={isCoverage ? "n/a" : statValue(s.cliffsDelta)} note={isCoverage ? "not a PASS/FAIL test" : "primary effect-size gate"} />
+                  <Stat label="Samples" value={`${statValue(s.nCur)} vs ${statValue(s.nBase)}`} note="current vs baseline" />
                 </div>
                 <div className="mt-4 rounded-md p-3 flex items-start gap-2.5" style={{ background: C.panel2, border: `1px solid ${C.border}` }}>
                   <Zap size={15} style={{ color: C.amber, marginTop: 1 }} />
@@ -650,7 +740,7 @@ function Drift() {
                 <div className="mt-3 flex items-center gap-2 text-xs" style={{ color: C.faint }}>
                   <span>Contributing layer:</span>
                   {s.layers.map((l) => <Pill key={l} color={C.sub}>{l}</Pill>)}
-                  <span className="ml-auto font-mono">signal {s.id}</span>
+                  <span className="ml-auto font-mono">signal {s.id.slice(0, 8)}</span>
                 </div>
                 {s.exampleTraceIds && s.exampleTraceIds.length > 0 && (
                   <div className="mt-3 pt-3 border-t text-xs" style={{ borderColor: C.border }}>
@@ -667,9 +757,9 @@ function Drift() {
       })}
 
       <Panel className="p-5">
-        <div className="font-semibold text-sm mb-1">Sample provider pass-rate by dimension</div>
+        <div className="font-semibold text-sm mb-1">Focused provider pass rate by dimension</div>
         <div className="text-xs mb-3" style={{ color: C.sub }}>
-          Completeness and instruction-following dip after hour 4 in the synthetic sample. Groundedness and safety stay comparatively stable.
+          {DATA.focusProviderLabel ? `${DATA.focusProviderLabel} is shown. Mixed-provider lead signals fall back to the first available provider rather than an empty chart.` : "No provider series is available."}
         </div>
         <ResponsiveContainer width="100%" height={280}>
           <LineChart data={DATA.haikuDim} margin={{ top: 5, right: 8, left: -18, bottom: 0 }}>
@@ -677,16 +767,16 @@ function Drift() {
             <XAxis dataKey="hour" tick={{ fill: C.sub, fontSize: 12 }} stroke={C.border} tickFormatter={(h) => `${h}h`} />
             <YAxis domain={[0, 100]} tick={{ fill: C.sub, fontSize: 12 }} stroke={C.border} tickFormatter={(v) => `${v}%`} />
             <Tooltip content={<ChartTooltip unit="%" />} />
-            <ReferenceArea x1={4} x2={7} fill={C.red} fillOpacity={0.06} />
-            <ReferenceLine x={4} stroke={C.red} strokeDasharray="4 4" />
-            {[["completeness", C.red], ["instruction_following", C.amber], ["relevance", C.accent2], ["groundedness", C.green], ["safety", C.blue]].map(([d, col]) => (
-              <Line key={d} type="monotone" dataKey={d} name={DIM_LABEL[d]} stroke={col} strokeWidth={2} dot={false} connectNulls isAnimationActive={false} />
+            <ReferenceArea x1={DATA.meta.regressionHour} x2={DATA.meta.regressionHour + 3} fill={C.red} fillOpacity={0.06} />
+            <ReferenceLine x={DATA.meta.regressionHour} stroke={C.red} strokeDasharray="4 4" />
+            {dimensionSeries.map((dimension) => (
+              <Line key={dimension.key} type="monotone" dataKey={dimension.key} name={dimension.label} stroke={dimension.color} strokeWidth={2} dot={false} connectNulls isAnimationActive={false} />
             ))}
           </LineChart>
         </ResponsiveContainer>
         <div className="flex flex-wrap gap-x-4 gap-y-1 mt-3 text-xs" style={{ color: C.sub }}>
-          {[["completeness", C.red], ["instruction_following", C.amber], ["relevance", C.accent2], ["groundedness", C.green], ["safety", C.blue]].map(([d, col]) => (
-            <span key={d} className="flex items-center gap-1.5"><Dot color={col} />{DIM_LABEL[d]}</span>
+          {dimensionSeries.map((dimension) => (
+            <span key={dimension.key} className="flex items-center gap-1.5"><Dot color={dimension.color} />{dimension.label}</span>
           ))}
         </div>
       </Panel>
@@ -709,11 +799,19 @@ function Traces() {
   const [prov, setProv] = useState("all");
   const [q, setQ] = useState("");
   const [sel, setSel] = useState(null);
-  const rows = useMemo(() => DATA.samples.filter((s) =>
-    (prov === "all" || s.provider === prov) &&
+  const providerOptions = DATA.providers.map((provider) => {
+    const presentation = providerPresentation(
+      provider.rawProvider ?? provider.key,
+      provider.model,
+      provider.label,
+    );
+    return { key: provider.key, label: presentation.short };
+  });
+  const rows = DATA.samples.filter((s) =>
+    (prov === "all" || (s.providerKey || s.provider) === prov) &&
     (q === "" || (s.prompt_redacted || "").toLowerCase().includes(q.toLowerCase()) ||
       (s.trace_id || "").toLowerCase().includes(q.toLowerCase()))
-  ), [prov, q]);
+  );
 
   return (
     <div className="flex flex-col xl:flex-row gap-5">
@@ -726,10 +824,10 @@ function Traces() {
           </div>
           <div className="flex items-center gap-1 px-1 py-1 border" style={{ borderColor: C.border, background: C.panel, borderRadius: 3 }}>
             <Filter size={13} style={{ color: C.faint, marginLeft: 4 }} />
-            {["all", ...Object.keys(PROV)].map((p) => (
-              <button key={p} onClick={() => setProv(p)} className="text-xs px-2.5 py-1 rounded-md"
-                style={{ background: prov === p ? C.raised : "transparent", color: prov === p ? C.text : C.sub, fontWeight: prov === p ? 600 : 400 }}>
-                {p === "all" ? "All" : PROV[p].short}
+            {[{ key: "all", label: "All" }, ...providerOptions].map((option) => (
+              <button key={option.key} onClick={() => setProv(option.key)} className="text-xs px-2.5 py-1 rounded-md"
+                style={{ background: prov === option.key ? C.raised : "transparent", color: prov === option.key ? C.text : C.sub, fontWeight: prov === option.key ? 600 : 400 }}>
+                {option.label}
               </button>
             ))}
           </div>
@@ -744,14 +842,19 @@ function Traces() {
             {rows.map((s) => {
               const on = sel && sel.trace_id === s.trace_id;
               const verdicts = s.judgment ? s.judgment.dims : null;
-              const failed = verdicts ? verdicts.some((d) => d.verdict === "fail") : false;
+              const judgmentStatus = s.judgment?.summary?.status || (
+                verdicts?.some((d) => d.verdict === "fail") ? "fail"
+                  : verdicts?.some((d) => d.verdict === "unclear") ? "unclear"
+                    : verdicts ? "pass" : "unavailable"
+              );
+              const provider = providerPresentation(s.provider, s.request_model);
               return (
                 <button key={s.trace_id} onClick={() => setSel(s)}
                   className="w-full grid items-center text-left px-4 py-2.5 border-b text-sm"
                   style={{ borderColor: C.grid, gridTemplateColumns: "44px 1fr 88px 96px 70px 64px", background: on ? C.raised : "transparent" }}>
                   <span className="text-xs font-mono" style={{ color: C.faint }}>{s.hour}h</span>
                   <span className="flex items-center gap-2 min-w-0 pr-3">
-                    <Dot color={PROV[s.provider].color} />
+                    <Dot color={provider.color} />
                     <span className="truncate" style={{ color: C.text }}>{s.prompt_redacted}</span>
                   </span>
                   <span><Pill color={C.sub}>{s.cluster_id}</Pill></span>
@@ -759,8 +862,9 @@ function Traces() {
                   <span className="text-xs" style={{ color: C.sub }}>{s.latency_ms ? `${(s.latency_ms / 1000).toFixed(1)}s` : "—"}</span>
                   <span>
                     {s.error ? <Pill color={C.red} bg={C.redBg}>error</Pill>
-                      : failed ? <Pill color={C.amber} bg={C.amberBg}>fail</Pill>
-                        : verdicts ? <Pill color={C.green} bg={C.greenBg}>pass</Pill>
+                      : judgmentStatus === "fail" ? <Pill color={C.red} bg={C.redBg}>fail</Pill>
+                        : judgmentStatus === "unclear" ? <Pill color={C.amber} bg={C.amberBg}>unclear</Pill>
+                          : judgmentStatus === "pass" ? <Pill color={C.green} bg={C.greenBg}>pass</Pill>
                           : <Pill color={C.faint}>—</Pill>}
                   </span>
                 </button>
@@ -787,12 +891,13 @@ function Traces() {
 }
 
 function TraceDetail({ s, onClose }) {
+  const provider = providerPresentation(s.provider, s.request_model);
   return (
     <Panel className="overflow-hidden sticky top-20">
       <div className="flex items-center justify-between px-4 py-3 border-b" style={{ borderColor: C.border }}>
         <div className="flex items-center gap-2">
-          <Dot color={PROV[s.provider].color} />
-          <span className="font-semibold text-sm">{PROV[s.provider].label}</span>
+          <Dot color={provider.color} />
+          <span className="font-semibold text-sm">{provider.label}</span>
         </div>
         <button onClick={onClose}><X size={16} style={{ color: C.faint }} /></button>
       </div>
@@ -802,6 +907,10 @@ function TraceDetail({ s, onClose }) {
           <Pill color={C.sub}>{s.hour}h</Pill>
           <Pill color={C.sub}>{s.input_tokens}/{s.output_tokens} tok</Pill>
           <Pill color={C.sub}>{usd(s.cost_usd || 0)}</Pill>
+        </div>
+        <div className="text-xs" style={{ color: C.faint }}>
+          Provider: <span style={{ color: C.sub }}>{s.provider == null || s.provider === "" ? "<unknown>" : String(s.provider)}</span>
+          {" · "}Model: <span style={{ color: C.sub }}>{s.request_model == null || s.request_model === "" ? "<unknown>" : String(s.request_model)}</span>
         </div>
         <div>
           <div className="text-xs mb-1" style={{ color: C.faint }}>PROMPT</div>
@@ -826,7 +935,7 @@ function TraceDetail({ s, onClose }) {
                     {d.verdict === "pass" ? <CheckCircle2 size={14} style={{ color: C.green }} />
                       : d.verdict === "fail" ? <X size={14} style={{ color: C.red }} />
                         : <AlertTriangle size={14} style={{ color: C.amber }} />}
-                    <span className="text-sm font-medium">{DIM_LABEL[d.name]}</span>
+                    <span className="text-sm font-medium">{dimensionLabel(d.name)}</span>
                     <span className="ml-auto text-xs font-semibold" style={{ color: d.verdict === "pass" ? C.green : d.verdict === "fail" ? C.red : C.amber }}>
                       {d.verdict.toUpperCase()}
                     </span>
@@ -845,18 +954,48 @@ function TraceDetail({ s, onClose }) {
 
 /* ----------------------------------------------------------------- JUDGE */
 function Judge() {
+  const providerKeys = DATA.providers.map((provider) => provider.key);
+  const providerPresentations = Object.fromEntries(DATA.providers.map((provider) => [
+    provider.key,
+    providerPresentation(provider.rawProvider ?? provider.key, provider.model, provider.label),
+  ]));
+  const judgeModels = [...new Set(DATA.samples.flatMap((sample) => sample.judgment?.judges || []))];
+  const latestHealth = DATA.evaluatorHealth?.[0];
+  const scoreCoverage = DATA.scoreCoverage || {};
+  const coverageItems = [
+    { label: "PASS", value: scoreCoverage.pass, color: C.green },
+    { label: "FAIL", value: scoreCoverage.fail, color: C.red },
+    { label: "UNCLEAR", value: scoreCoverage.unclear, color: C.amber },
+    { label: "Missing", value: scoreCoverage.missing, color: C.amber },
+    { label: "Errors", value: scoreCoverage.error, color: C.red },
+    { label: "Evaluable", value: scoreCoverage.evaluable, color: C.accent },
+  ];
   return (
     <div className="space-y-5">
       <div className="text-sm" style={{ color: C.sub }}>
-        Judged responses are scored on five binary dimensions, with reasoning stored beside each PASS/FAIL decision.
+        Judged responses are scored on configured rubric dimensions, with reasoning stored beside each PASS/FAIL decision.
       </div>
+      <Panel className="p-4">
+        <div className="font-semibold text-sm">Evaluation coverage</div>
+        <div className="text-xs mt-1" style={{ color: C.faint }}>
+          PASS and FAIL are evaluable labels. UNCLEAR, missing dimensions, and judge errors remain visible rather than entering pass-rate denominators.
+        </div>
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 mt-3">
+          {coverageItems.map((item) => (
+            <div key={item.label} className="rounded-md p-3" style={{ background: C.panel2, border: `1px solid ${C.border}` }}>
+              <div className="text-xs" style={{ color: C.sub }}>{item.label}</div>
+              <div className="font-semibold mt-0.5" style={{ color: item.color, fontSize: 18 }}>{item.value ?? 0}</div>
+            </div>
+          ))}
+        </div>
+      </Panel>
       <div className="grid lg:grid-cols-2 gap-5">
         <Panel className="p-5">
           <div className="font-semibold text-sm mb-3">Pass rate by dimension (all providers)</div>
           <ResponsiveContainer width="100%" height={250}>
             <BarChart data={DATA.dimensionOverall} margin={{ top: 5, right: 8, left: -18, bottom: 0 }}>
               <CartesianGrid stroke={C.grid} vertical={false} />
-              <XAxis dataKey="dim" tick={{ fill: C.sub, fontSize: 11 }} stroke={C.border} tickFormatter={(d) => DIM_LABEL[d].split("-")[0]} />
+              <XAxis dataKey="dim" tick={{ fill: C.sub, fontSize: 11 }} stroke={C.border} tickFormatter={dimensionAxisLabel} />
               <YAxis domain={[0, 100]} tick={{ fill: C.sub, fontSize: 12 }} stroke={C.border} tickFormatter={(v) => `${v}%`} />
               <Tooltip content={<ChartTooltip unit="%" title=" " />} cursor={{ fill: "rgba(78,225,170,0.05)" }} />
               <Bar dataKey="passRate" name="pass rate" radius={[5, 5, 0, 0]} isAnimationActive={false}>
@@ -873,15 +1012,17 @@ function Judge() {
           <div className="space-y-3 mt-1">
             {DATA.providerDimension.map((row) => (
               <div key={row.dim}>
-                <div className="text-xs mb-1.5" style={{ color: C.sub }}>{DIM_LABEL[row.dim]}</div>
+                <div className="text-xs mb-1.5" style={{ color: C.sub }}>{dimensionLabel(row.dim)}</div>
                 <div className="flex gap-2">
-                  {Object.keys(PROV).map((p) => (
+                  {providerKeys.map((p) => (
                     <div key={p} className="flex-1">
                       <div className="h-2 rounded-full overflow-hidden" style={{ background: C.grid }}>
-                        <div style={{ width: `${row[p] || 0}%`, height: "100%", background: PROV[p].color }} />
+                        <div style={{ width: `${row[p] || 0}%`, height: "100%", background: providerPresentations[p].color }} />
                       </div>
                       <div className="flex items-center gap-1 mt-1 text-xs" style={{ color: C.faint }}>
-                        <Dot color={PROV[p].color} />{pct(row[p])}
+                        <Dot color={providerPresentations[p].color} />
+                        <span>{providerPresentations[p].short}</span>
+                        <span className="ml-auto">{pct(row[p])}</span>
                       </div>
                     </div>
                   ))}
@@ -895,17 +1036,39 @@ function Judge() {
       <div className="grid sm:grid-cols-3 lg:grid-cols-5 gap-3">
         {DATA.dimensionOverall.map((d) => (
           <Panel key={d.dim} className="p-4">
-            <div className="text-xs" style={{ color: C.sub }}>{DIM_LABEL[d.dim]}</div>
-            <div className="font-semibold mt-1.5" style={{ fontSize: 22, color: d.passRate >= 95 ? C.green : d.passRate >= 85 ? C.amber : C.red }}>{d.passRate}%</div>
+            <div className="text-xs" style={{ color: C.sub }}>{dimensionLabel(d.dim)}</div>
+            <div className="font-semibold mt-1.5" style={{ fontSize: 22, color: d.passRate == null ? C.faint : d.passRate >= 95 ? C.green : d.passRate >= 85 ? C.amber : C.red }}>{pct(d.passRate)}</div>
             <div className="text-xs mt-0.5" style={{ color: C.faint }}>{d.pass} pass · {d.fail} fail{d.unclear ? ` · ${d.unclear} unclear` : ""}</div>
           </Panel>
         ))}
       </div>
 
+      <Panel className="p-4">
+        <div className="flex items-start gap-3">
+          <Gauge size={16} style={{ color: latestHealth?.status === "healthy" ? C.green : latestHealth?.status === "degraded" ? C.red : C.amber, marginTop: 1 }} />
+          <div className="min-w-0">
+            <div className="font-semibold text-sm">Judge health · independent sentinel agreement</div>
+            {latestHealth ? (
+              <div className="text-sm mt-1" style={{ color: C.sub }}>
+                <span style={{ color: C.text }}>{latestHealth.sentinelSetName || "Unnamed anchor set"}</span>: {pct(latestHealth.agreement)} ({latestHealth.correctLabels}/{latestHealth.totalLabels} labels; 95% CI {pct(latestHealth.confidenceLow)}–{pct(latestHealth.confidenceHigh)}), status <span style={{ color: latestHealth.status === "healthy" ? C.green : latestHealth.status === "degraded" ? C.red : C.amber }}>{latestHealth.status.replaceAll("_", " ")}</span>{latestHealth.errorCount ? `; ${latestHealth.errorCount} judge errors` : ""}.
+              </div>
+            ) : (
+              <div className="text-sm mt-1" style={{ color: C.sub }}>No fixed human-labeled sentinel run is recorded for this evaluator fingerprint.</div>
+            )}
+            <div className="text-xs mt-1.5" style={{ color: C.faint }}>Sentinel agreement is separate from production drift and cannot rule out silent judge changes outside the anchor set.</div>
+          </div>
+        </div>
+      </Panel>
+
       <Panel className="p-4 flex items-start gap-3">
         <Shield size={16} style={{ color: C.accent2, marginTop: 1 }} />
         <div className="text-sm" style={{ color: C.sub }}>
-          Judge shown in the bundled sample: <span style={{ color: C.text }}>sample-judge</span>. For real traffic, run the calibration workflow and gate rankings or alerts on workload-specific agreement.
+          {judgeModels.length ? (
+            <>Judges represented in sampled traces: <span style={{ color: C.text }}>{judgeModels.join(", ")}</span>. </>
+          ) : (
+            <>Judge model metadata is not available in the sampled traces. </>
+          )}
+          For real traffic, run the calibration workflow and gate rankings or alerts on workload-specific agreement.
         </div>
       </Panel>
     </div>
@@ -914,10 +1077,17 @@ function Judge() {
 
 /* --------------------------------------------------------------- COMPARE */
 function Compare() {
-  const provs = DATA.providers;
-  const costData = provs.map((p) => ({ name: PROV[p.key].short, v: p.cost, key: p.key }));
-  const latData = provs.map((p) => ({ name: PROV[p.key].short, v: p.avgLatency, key: p.key }));
-  const tokData = provs.map((p) => ({ name: PROV[p.key].short, v: p.outTok, key: p.key }));
+  const provs = DATA.providers.map((provider) => ({
+    ...provider,
+    presentation: providerPresentation(
+      provider.rawProvider ?? provider.key,
+      provider.model,
+      provider.label,
+    ),
+  }));
+  const costData = provs.map((p) => ({ name: p.presentation.short, v: p.cost, key: p.key, color: p.presentation.color }));
+  const latData = provs.map((p) => ({ name: p.presentation.short, v: p.avgLatency, key: p.key, color: p.presentation.color }));
+  const tokData = provs.map((p) => ({ name: p.presentation.short, v: p.outTok, key: p.key, color: p.presentation.color }));
   return (
     <div className="space-y-5">
       <div className="text-sm" style={{ color: C.sub }}>
@@ -928,12 +1098,12 @@ function Compare() {
         {provs.map((p) => (
           <Panel key={p.key} className="p-5" style={{ borderColor: p.key === "anthropic" ? "rgba(243,154,98,0.45)" : C.border }}>
             <div className="flex items-center gap-2 mb-3">
-              <Dot color={PROV[p.key].color} />
+              <Dot color={p.presentation.color} />
               <span className="font-semibold">{p.label}</span>
               {p.key === "anthropic" && <Pill color={C.red} bg={C.redBg}>regressed</Pill>}
             </div>
             <div className="grid grid-cols-2 gap-y-3 gap-x-2 text-sm">
-              <Metric label="Pass rate" value={`${p.passRate}%`} color={p.passRate >= 95 ? C.green : C.red} />
+              <Metric label="Pass rate" value={pct(p.passRate)} color={p.passRate != null && p.passRate >= 95 ? C.green : C.red} />
               <Metric label="Avg latency" value={`${p.avgLatency}s`} />
               <Metric label="Error rate" value={`${p.errorRate}%`} color={p.errorRate > 5 ? C.amber : C.text} />
               <Metric label="Output tokens" value={k(p.outTok)} />
@@ -982,11 +1152,11 @@ function MiniBar({ title, data, fmt }) {
         {data.map((d) => (
           <div key={d.name}>
             <div className="flex items-center justify-between text-xs mb-1">
-              <span className="flex items-center gap-1.5" style={{ color: C.sub }}><Dot color={PROV[d.key].color} />{d.name}</span>
+              <span className="flex items-center gap-1.5" style={{ color: C.sub }}><Dot color={d.color} />{d.name}</span>
               <span style={{ color: C.text, fontWeight: 600 }}>{fmt(d.v)}</span>
             </div>
             <div className="h-2 rounded-full overflow-hidden" style={{ background: C.grid }}>
-              <div style={{ width: `${Number.isFinite(d.v) ? (d.v / max) * 100 : 0}%`, height: "100%", background: PROV[d.key].color }} />
+              <div style={{ width: `${Number.isFinite(d.v) ? (d.v / max) * 100 : 0}%`, height: "100%", background: d.color }} />
             </div>
           </div>
         ))}
@@ -996,13 +1166,14 @@ function MiniBar({ title, data, fmt }) {
 }
 
 /* ------------------------------------------------------------------- APP */
-function App({ source = "sample", onReload, reloading }) {
+function App({ source = "sample", onReload, onEvaluatorChange, reloading }) {
   const [mode, setMode] = useState("landing");
   return (
     <div style={{ fontFamily: "ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif", height: "100%", background: C.bg }}>
       {mode === "landing"
         ? <Landing onEnter={() => setMode("dashboard")} />
-        : <Dashboard onExit={() => setMode("landing")} source={source} onReload={onReload} reloading={reloading} />}
+        : <Dashboard onExit={() => setMode("landing")} source={source} onReload={onReload}
+          onEvaluatorChange={onEvaluatorChange} reloading={reloading} />}
     </div>
   );
 }
@@ -1019,9 +1190,9 @@ export function DashboardRoot() {
   const [source, setSource] = useState("sample");
   const [reloading, setReloading] = useState(false);
   const [, setVersion] = useState(0);
-  const load = React.useCallback(() => {
+  const load = React.useCallback((evaluatorId = null) => {
     setReloading(true);
-    fetch(API_URL, { headers: { Accept: "application/json" } })
+    fetch(apiUrlForEvaluator(evaluatorId), { headers: { Accept: "application/json" } })
       .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
       .then((d) => {
         if (d && d.meta && d.providers) {
@@ -1036,7 +1207,8 @@ export function DashboardRoot() {
   useEffect(() => { load(); }, [load]);
   return (
     <div style={{ fontFamily: "ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif", minHeight: "100%", background: C.bg }}>
-      <Dashboard onExit={() => { window.location.href = "/"; }} source={source} onReload={load} reloading={reloading} />
+      <Dashboard onExit={() => { window.location.href = "/"; }} source={source}
+        onReload={() => load(DATA.evaluation?.selectedId)} onEvaluatorChange={load} reloading={reloading} />
     </div>
   );
 }
@@ -1048,9 +1220,9 @@ export default function Root() {
   const [source, setSource] = useState("sample");
   const [reloading, setReloading] = useState(false);
   const [, setVersion] = useState(0);
-  const load = React.useCallback(() => {
+  const load = React.useCallback((evaluatorId = null) => {
     setReloading(true);
-    fetch(API_URL, { headers: { Accept: "application/json" } })
+    fetch(apiUrlForEvaluator(evaluatorId), { headers: { Accept: "application/json" } })
       .then((r) => { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
       .then((d) => {
         if (d && d.meta && d.providers) { DATA = d; setSource("live"); setVersion((v) => v + 1); }
@@ -1059,5 +1231,6 @@ export default function Root() {
       .finally(() => setReloading(false));
   }, []);
   useEffect(() => { load(); }, [load]);
-  return <App source={source} onReload={load} reloading={reloading} />;
+  return <App source={source} onReload={() => load(DATA.evaluation?.selectedId)}
+    onEvaluatorChange={load} reloading={reloading} />;
 }

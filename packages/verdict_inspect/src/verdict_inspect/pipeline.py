@@ -238,7 +238,8 @@ def _stride_sample(turns: list[ParsedTurn], k: int) -> list[ParsedTurn]:
 
 def _judge_windows(windows: list[Window], judge_model: str) -> tuple[list[JudgeRow], dict[str, dict[str, float]]]:
     try:
-        from verdict_eval.judge import DEFAULT_RUBRIC, Judge, verdict_label
+        from verdict.metrics import count_scores
+        from verdict_eval.judge import DEFAULT_RUBRIC, Judge
         from verdict_eval.providers import AnthropicAdapter
     except ImportError:
         return [], {}
@@ -258,8 +259,7 @@ def _judge_windows(windows: list[Window], judge_model: str) -> tuple[list[JudgeR
     rows: list[JudgeRow] = []
     for w in windows:
         sampled = _stride_sample(w.turns, JUDGE_SAMPLE_PER_WINDOW)
-        pass_count = {n: 0 for n in dim_names}
-        applicable_count = {n: 0 for n in dim_names}   # PASS + FAIL (excludes UNCLEAR)
+        verdicts = {name: [] for name in dim_names}
         judged = 0
         for t in sampled:
             try:
@@ -271,18 +271,17 @@ def _judge_windows(windows: list[Window], judge_model: str) -> tuple[list[JudgeR
                 continue
             judged += 1
             for d in j.dimensions:
-                label = verdict_label(d.verdict)
-                if label in ("PASS", "FAIL"):
-                    applicable_count[d.name] += 1
-                if label == "PASS":
-                    pass_count[d.name] += 1
+                if d.name in verdicts:
+                    verdicts[d.name].append(d.verdict)
             time.sleep(0.2)
         # Pass rate = PASS / (PASS + FAIL); None when no applicable judgments
         rows.append(JudgeRow(
             window=w.name,
             n_judged=judged,
-            pass_rate={n: (pass_count[n] / applicable_count[n]
-                           if applicable_count[n] else None) for n in dim_names},
+            pass_rate={
+                name: count_scores(verdicts[name]).pass_rate
+                for name in dim_names
+            },
         ))
 
     deltas: dict[str, dict[str, float]] = {}

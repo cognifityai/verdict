@@ -78,10 +78,10 @@ Minimal install without the local semantic model:
 pip install cognifity-verdict-eval   # hash fallback only; lexical, not semantic
 ```
 
-The full test suite also needs pytest:
+The full test suite also needs pytest and the dashboard's HTTP test dependency:
 
 ```bash
-pip install pytest pytest-asyncio
+pip install pytest pytest-asyncio httpx
 python -m pytest -q
 ```
 
@@ -103,14 +103,27 @@ client = Anthropic()
 # Run scripts/run_drift_pipeline.py separately for sampling, judging, and drift.
 ```
 
-Content capture is **off by default** (a PII surface); enable it with `verdict.init(capture_content=True)`, and prompts/completions are redacted (regex + Luhn) before storage. `sample_rate` controls what fraction of supported calls is retained. For high-volume production, `verdict.init(buffered_writes=True)` moves writes to a background batched writer off the request hot path.
+Content capture is **off by default** (a PII surface). With
+`verdict.init(capture_content=True)`, Verdict recursively sanitizes supported
+JSON-compatible message fields, including nested tool inputs/results and OpenAI
+tool arguments, before `Trace` assignment and again at storage. The detector is
+best-effort pattern matching with Luhn card checks and standard-library IP
+address validation, not a compliance control; names, addresses, many
+international identifiers, and opaque application metadata are not guaranteed
+to be found. Clock values such as `12:34:56` are not treated as IPv6. Use
+non-sensitive tenant/session/cluster IDs. `sample_rate`
+controls what fraction of supported calls is retained. For high-volume
+production, `verdict.init(buffered_writes=True)` moves writes to a background
+batched writer off the request hot path.
 
 ## Validation status
 
 Reproduce the checks yourself with the scripts here. The defensible claim is
 deliberately narrow:
 
-> **Verdict supports calibrated PASS/FAIL drift monitoring on real LLM traces, with per-workload judge calibration.**
+> **Verdict captures supported real LLM calls and runs evaluator-isolated
+> PASS/FAIL drift analysis; the included workflows let each team measure judge
+> agreement on its own held-out labels.**
 
 What this repo includes:
 
@@ -141,14 +154,32 @@ You hand-label a sample PASS/FAIL (blind, before the judge runs), then the harne
 
 ## Architecture
 
-Hexagonal / ports-and-adapters, ≥2 adapters per port (one real + in-memory for tests). Storage: `SQLiteStorage`, `PostgresStorage`, `InMemoryStorage`, plus a `BufferedStorage` wrapper for async batched writes. Judge providers: Anthropic, OpenAI, Google, and a `FakeProvider` for tests. Capture uses a **vendor-neutral `Trace` schema** (it borrows OpenTelemetry GenAI *attribute names* but does **not** emit OTel/OpenInference spans — an exporter is a v1 roadmap item). See the ADRs in [`docs/adrs/`](docs/adrs/).
+Hexagonal / ports-and-adapters, ≥2 adapters per port (one real + in-memory for tests). Storage: `SQLiteStorage`, `PostgresStorage`, `InMemoryStorage`, plus a `BufferedStorage` wrapper for async batched writes. Judge providers: Anthropic, OpenAI, Google, optional LiteLLM, and a `FakeProvider` for tests. Capture uses a **vendor-neutral `Trace` schema** (it borrows OpenTelemetry GenAI *attribute names* but does **not** emit OTel/OpenInference spans — an exporter is a v1 roadmap item). See the ADRs in [`docs/adrs/`](docs/adrs/).
 
 ## Honest limits / not in v0
 
 - **No OpenTelemetry/OpenInference span emission** yet (vendor-neutral schema today; exporter is planned).
 - **Streaming:** Anthropic, OpenAI, and Google modern-SDK streaming are captured and confirmed against live SDKs via `scripts/live_capture_check.py`. Keep that script in the release checklist, because provider SDK stream chunk shapes can drift.
-- **`encrypt` redaction mode** is not implemented (rejected at `init()`); redaction is regex + Luhn. Presidio is not used.
+- Stream traces finalize deterministically on full iteration, an iteration
+  error, explicit `close()` / `aclose()`, or context-manager exit. Async
+  cancellation is recorded as an error. Dropping a never-iterated or unclosed
+  stream and relying on garbage collection is not a supported persistence
+  guarantee.
+- **`encrypt` redaction mode** is not implemented (rejected at `init()`);
+  redaction uses regex candidates with Luhn card checks and standard-library IP
+  validation. Presidio is not used.
 - **Agent-run / tool-call tracing** is v1, not built. Manual `@trace` spans *are* persisted, but multi-step agent-run stitching is not.
+- A supported instrumented provider call made inside a manual span now stores
+  that span's ID in `Trace.parent_span_id`; after successful trace persistence,
+  the span records a trace ID too. Multiple calls retain distinct trace IDs and
+  point to the same parent span. A nested child inherits its parent's link only
+  until the child persists its own provider call, at which point the child and
+  that call link to each other while the parent retains its original link.
+  Callers can also bind manual-only work to an
+  existing stored trace with `verdict.trace_context(trace_id)` or
+  `verdict.set_context(trace_id=...)`. Missing explicit trace IDs degrade to an
+  unlinked span with `verdict.link_status=trace_not_found`, rather than an orphan.
+  This linkage is not first-class tool-sequence or task-success evaluation.
 - Judge quality depends on the model, rubric, and workload; for math/code
   correctness, use stronger judges on samples or deterministic checks.
 - The default Cliff's delta gate is `0.147`. On binary PASS/FAIL dimensions that
@@ -166,16 +197,31 @@ Hexagonal / ports-and-adapters, ≥2 adapters per port (one real + in-memory for
   its current and baseline windows. Re-running the same hourly analysis bucket
   replaces that bucket's signals, including retracting signals that no longer
   clear the gates. It reuses and aggregates at most one judgment per trace for
-  the current judge model and rubric version; judgments from other evaluator
-  definitions are excluded. Signals retain up to five current-window trace IDs
-  as review evidence.
+  one complete evaluator identity (provider, model list, rubric name/version,
+  behavior-relevant config, expected dimensions, and prompt/rubric fingerprint);
+  incomplete historical identities and other evaluator definitions are excluded.
+  Drift signals carry the same evaluator fingerprint; historical unattributed
+  signals are shown as unavailable rather than mixed with a selected evaluator.
+  Optional fixed human-labeled sentinel runs monitor that fingerprint separately
+  from production drift. When `--judge-sentinel-file` is supplied, the runner
+  persists the aggregate and blocks production judging/drift unless the status is
+  `healthy`; `degraded` and `insufficient_data` both exit with status 2. The
+  confidence interval uses independently judged sentinel examples as its
+  effective sample size rather than treating correlated dimensions as independent.
+  Signals retain up to five current-window trace IDs as review evidence.
 - The v0 drift runner supports one tenant scope per store and rejects mixed-
   tenant analysis. Use separate stores until tenant-scoped cluster registries
   and signals are implemented.
 - `cost_usd` is a best-effort estimate from a dated static base-price table, not
   a billing source of truth. Unknown models remain unpriced; caching, special
   tiers, tools, residency, and negotiated discounts are not modeled.
+- Judge execution is sequential. Judge token/cost usage, evaluation-budget
+  enforcement, cache-token accounting, human-readable cluster naming, and
+  automatic fragmented-cluster fusion are not implemented. Their scoped
+  follow-ups are listed in [`docs/v1-roadmap.md`](docs/v1-roadmap.md).
 - This is a **public alpha** release — not a hosted monitoring service and not a substitute for workload-specific calibration.
+- The bundled dashboard server is a read-only **SQLite** view. The SDK also has
+  a Postgres adapter, but the dashboard does not read Postgres directly.
 
 ## License
 

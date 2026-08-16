@@ -12,7 +12,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from verdict.schema import Verdict
 from verdict_eval.judge import DEFAULT_RUBRIC, Judge
 
 

@@ -111,6 +111,10 @@ class Trace:
     # Cost (computed by verdict.pricing static pricing table)
     cost_usd: float | None = None
 
+    # The innermost manual span active when this provider call began. Kept last
+    # to preserve the positional constructor order of historical Trace fields.
+    parent_span_id: str | None = None
+
     def __post_init__(self) -> None:
         """Normalize enum values supplied by manual instrumentation."""
         if isinstance(self.operation, Operation):
@@ -136,6 +140,17 @@ class Verdict(str, Enum):
     PASS = "pass"
     FAIL = "fail"
     UNCLEAR = "unclear"
+
+
+class JudgmentStatus(str, Enum):
+    COMPLETED = "completed"
+    ERROR = "error"
+
+
+class EvaluatorHealthStatus(str, Enum):
+    HEALTHY = "healthy"
+    DEGRADED = "degraded"
+    INSUFFICIENT_DATA = "insufficient_data"
 
 
 @dataclass
@@ -164,8 +179,23 @@ class Judgment:
     judge_models: list[str] = field(default_factory=list)   # ensemble support
     dimensions: list[DimensionScore] = field(default_factory=list)
 
-    # Position-swap consistency (for pairwise; unused on single-response)
+    # Keep this in its published 0.1.0a3 positional slot. New fields must be
+    # appended after it so existing positional callers cannot silently bind a
+    # boolean to evaluator_provider.
     position_swap_consistent: bool | None = None
+
+    # Complete evaluator identity. Historical rows created before these fields
+    # were introduced load with empty values and remain explicitly incomplete.
+    evaluator_provider: str = ""
+    evaluator_config: dict[str, Any] = field(default_factory=dict)
+    evaluator_fingerprint: str = ""
+    expected_dimensions: list[str] = field(default_factory=list)
+    status: JudgmentStatus = JudgmentStatus.COMPLETED
+    error: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.status, JudgmentStatus):
+            self.status = JudgmentStatus(self.status)
 
     @property
     def pass_count(self) -> int:
@@ -176,9 +206,45 @@ class Judgment:
         return sum(1 for d in self.dimensions if d.verdict == Verdict.FAIL)
 
     @property
-    def pass_rate(self) -> float:
-        total = self.pass_count + self.fail_count
-        return self.pass_count / total if total else 0.0
+    def pass_rate(self) -> float | None:
+        from verdict.metrics import count_scores
+
+        return count_scores(d.verdict for d in self.dimensions).pass_rate
+
+    @property
+    def evaluator_identity_complete(self) -> bool:
+        return bool(
+            self.evaluator_provider
+            and self.judge_models
+            and self.evaluator_fingerprint
+            and self.expected_dimensions
+        )
+
+
+@dataclass
+class EvaluatorHealthRecord:
+    """Agreement of one evaluator fingerprint against a fixed human anchor set.
+
+    These records are intentionally separate from production judgments and drift
+    signals: target-model behavior must never be pooled with judge-health evidence.
+    """
+
+    health_id: str = field(default_factory=_id)
+    evaluated_at: datetime = field(default_factory=_now)
+    evaluator_fingerprint: str = ""
+    sentinel_set_name: str = ""
+    sentinel_set_fingerprint: str = ""
+    correct_labels: int = 0
+    total_labels: int = 0
+    agreement: float | None = None
+    confidence_low: float | None = None
+    confidence_high: float | None = None
+    status: EvaluatorHealthStatus = EvaluatorHealthStatus.INSUFFICIENT_DATA
+    error_count: int = 0
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.status, EvaluatorHealthStatus):
+            self.status = EvaluatorHealthStatus(self.status)
 
 
 # ---------------------------------------------------------------------------
@@ -266,6 +332,12 @@ class DriftSignal:
     # User-facing
     example_trace_ids: list[str] = field(default_factory=list)  # 3-5 worst examples
     recommended_action: str = ""
+
+    # The measuring instrument that produced this signal. Empty means a
+    # historical signal whose evaluator cannot be attributed safely. This is
+    # appended after every field published in 0.1.0a3 to preserve positional
+    # constructor compatibility.
+    evaluator_fingerprint: str = ""
 
     def __post_init__(self) -> None:
         if not isinstance(self.direction, DriftDirection):

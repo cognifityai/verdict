@@ -50,7 +50,7 @@ sys.path.insert(0, str(HERE.parent / "packages" / "verdict" / "src"))
 sys.path.insert(0, str(HERE.parent / "packages" / "verdict_eval" / "src"))
 
 # Reuse the tested metric functions from the ranking harness (single source).
-from verify_judge_alignment import bootstrap_ci, cohens_kappa, gwets_ac2  # noqa: E402
+from verify_judge_alignment import bootstrap_ci, gwets_ac2  # noqa: E402
 
 DIMENSIONS = ["groundedness", "relevance", "completeness", "safety", "instruction_following"]
 
@@ -167,6 +167,7 @@ def run_offline() -> int:
     """Wiring check: run the REAL Judge with a FakeProvider over synthetic labeled
     examples, plus a controlled metric sanity check. No API, no real numbers."""
     import random
+
     from verdict_eval.judge import DEFAULT_RUBRIC, Judge
     from verdict_eval.providers import FakeProvider
 

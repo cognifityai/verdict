@@ -1,0 +1,8 @@
+---
+description: Mandatory Verdict engineering and verification instructions
+alwaysApply: true
+---
+
+Read and follow `AGENTS.md` before changing code. Its Verification and Release
+Discipline and Documentation Definition of Done are mandatory. When this repo
+is inside the Cognifity workspace, also follow `../../ENGINEERING_STANDARDS.md`.

@@ -15,7 +15,7 @@ Pipeline:
     stored user signals  +  stored judgments
         → join on trace_id (skip signals whose trace has no judgment)
         → overall PASS/FAIL per trace (majority of PASS/FAIL dimensions)
-        → CorrelationPair per (signal, verdict)
+        → CorrelationPair per (signal, verdict), newest signal first per trace
         → UserSignalCorrelator.correlate → CorrelationReport (printed)
 
 Usage (live storage):
@@ -32,6 +32,8 @@ Usage (offline demo — zero setup, deterministic):
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -65,35 +67,105 @@ def _overall_verdict(judgment) -> str | None:
 # Build CorrelationPairs from storage
 # --------------------------------------------------------------------------- #
 
-def _collect_judgments_by_trace(storage, traces) -> dict[str, object]:
+def _judgment_identity(judgment) -> tuple[str, str]:
+    """Return a stable identity ID and human-readable label for one judgment."""
+    complete = bool(getattr(judgment, "evaluator_identity_complete", False))
+    canonical = {
+        "provider": judgment.evaluator_provider if complete else "",
+        "models": judgment.judge_models,
+        "rubric_name": judgment.rubric_name,
+        "rubric_version": judgment.rubric_version,
+        "config": judgment.evaluator_config if complete else {},
+        "fingerprint": judgment.evaluator_fingerprint if complete else "",
+        "expected_dimensions": judgment.expected_dimensions if complete else [],
+    }
+    encoded = json.dumps(canonical, sort_keys=True, separators=(",", ":"))
+    identity_id = hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:20]
+    models = "+".join(judgment.judge_models) or "unknown judge"
+    label = f"{models} · {judgment.rubric_name} v{judgment.rubric_version}"
+    label += (
+        f" · fp {judgment.evaluator_fingerprint[:8]}"
+        if complete
+        else " · historical identity incomplete"
+    )
+    return identity_id, label
+
+
+def _collect_judgments_by_trace(
+    storage, traces, *, evaluator_id: str | None = None,
+) -> tuple[dict[str, object], dict]:
     """Map trace_id → its (latest) Judgment, pulled per cluster.
 
     Storage exposes judgments per cluster (`list_judgments_for_cluster`), so we
     walk the distinct cluster_ids of the known traces and index by trace_id.
     """
-    by_trace: dict[str, object] = {}
+    all_judgments = []
     cluster_ids = {t.cluster_id for t in traces if t.cluster_id}
     # Traces with no cluster_id can still have judgments keyed under "" in some
     # adapters; include the empty bucket defensively.
     cluster_ids.add("")
     for cid in cluster_ids:
-        try:
-            for j in storage.list_judgments_for_cluster(cid, limit=10**9):
-                by_trace[j.trace_id] = j
-        except Exception:
+        for j in storage.list_judgments_for_cluster(cid, limit=10**9):
+            all_judgments.append(j)
+
+    identities: dict[str, str] = {}
+    identity_for_judgment: dict[str, str] = {}
+    for judgment in all_judgments:
+        identity_id, label = _judgment_identity(judgment)
+        identities.setdefault(identity_id, label)
+        identity_for_judgment[judgment.judgment_id] = identity_id
+
+    if evaluator_id is not None and evaluator_id not in identities:
+        raise ValueError(
+            f"unknown evaluator identity {evaluator_id!r}; available identities: "
+            + ", ".join(f"{key} ({label})" for key, label in sorted(identities.items()))
+        )
+    if evaluator_id is None and len(identities) > 1:
+        raise ValueError(
+            "multiple evaluator identities are present; rerun with --evaluator-id. "
+            "Available identities: "
+            + ", ".join(f"{key} ({label})" for key, label in sorted(identities.items()))
+        )
+    selected_id = evaluator_id or (next(iter(identities)) if identities else None)
+
+    latest_by_trace: dict[str, object] = {}
+    for judgment in all_judgments:
+        if identity_for_judgment[judgment.judgment_id] != selected_id:
             continue
-    return by_trace
+        previous = latest_by_trace.get(judgment.trace_id)
+        if previous is None or (judgment.created_at, judgment.judgment_id) > (
+            previous.created_at,
+            previous.judgment_id,
+        ):
+            latest_by_trace[judgment.trace_id] = judgment
+    by_trace = {
+        trace_id: judgment
+        for trace_id, judgment in latest_by_trace.items()
+        if getattr(judgment.status, "value", judgment.status) == "completed"
+    }
+    return by_trace, {
+        "selected_evaluator_id": selected_id,
+        "selected_evaluator_label": identities.get(selected_id),
+        "available_evaluators": identities,
+    }
 
 
-def _build_pairs(storage):
+def _build_pairs(storage, *, evaluator_id: str | None = None):
     """Join persisted user signals to overall judge verdicts → CorrelationPairs."""
+    from verdict.redaction import redact
     from verdict_eval.correlator import CorrelationPair
 
     traces = storage.list_traces(limit=10**9)
     trace_by_id = {t.trace_id: t for t in traces}
-    judgments_by_trace = _collect_judgments_by_trace(storage, traces)
+    judgments_by_trace, evaluator = _collect_judgments_by_trace(
+        storage, traces, evaluator_id=evaluator_id
+    )
 
-    signals = storage.list_user_signals(limit=10**9)
+    signals = sorted(
+        storage.list_user_signals(limit=10**9),
+        key=lambda signal: (signal.created_at, signal.signal_id),
+        reverse=True,
+    )
 
     pairs: list[CorrelationPair] = []
     n_no_judgment = 0
@@ -108,8 +180,10 @@ def _build_pairs(storage):
             n_no_verdict += 1
             continue
         trace = trace_by_id.get(sig.trace_id)
-        prompt_preview = (trace.prompt_redacted or "")[:160] if trace else ""
-        response_preview = (trace.response_redacted or "")[:160] if trace else ""
+        # Reapply redaction at the output boundary so legacy rows written before
+        # recursive redaction cannot be printed verbatim by this report.
+        prompt_preview = redact(trace.prompt_redacted or "")[:160] if trace else ""
+        response_preview = redact(trace.response_redacted or "")[:160] if trace else ""
         pairs.append(CorrelationPair(
             trace_id=sig.trace_id,
             judge_verdict=verdict,        # "PASS" | "FAIL"
@@ -122,6 +196,7 @@ def _build_pairs(storage):
         "skipped_no_judgment": n_no_judgment,
         "skipped_no_verdict": n_no_verdict,
         "pairs_built": len(pairs),
+        **evaluator,
     }
 
 
@@ -232,18 +307,37 @@ def _print_report(report, join_stats: dict) -> None:
     print(f"  skipped (no judgment):   {join_stats['skipped_no_judgment']}")
     print(f"  skipped (no verdict):    {join_stats['skipped_no_verdict']}")
     print(f"  pairs built:             {join_stats['pairs_built']}")
+    if join_stats.get("selected_evaluator_id"):
+        print(
+            "Selected evaluator:        "
+            f"{join_stats['selected_evaluator_id']} "
+            f"({join_stats['selected_evaluator_label']})"
+        )
     print(f"  skipped (no usable label): {report.n_skipped_no_label}")
+    print(f"  skipped (judge UNCLEAR):   {report.n_skipped_unclear_judge}")
+    print(f"  skipped (duplicate trace): {report.n_skipped_duplicate_trace}")
     print(f"Usable label pairs:        {report.n_pairs}")
+    print(f"Status:                    {report.status} (minimum n={report.minimum_pairs})")
     print()
-    print("Confusion matrix (judge × user):")
+    print("Confusion matrix (judge x user):")
     print(f"  judge PASS / user POS:   {report.judge_pos_user_pos}")
     print(f"  judge PASS / user NEG:   {report.judge_pos_user_neg}")
     print(f"  judge FAIL / user POS:   {report.judge_neg_user_pos}")
     print(f"  judge FAIL / user NEG:   {report.judge_neg_user_neg}")
     print()
     print(f"Raw agreement:             {report.raw_agreement:.3f}")
+    if report.raw_agreement_ci_low is not None:
+        print(
+            "  95% Wilson CI:          "
+            f"[{report.raw_agreement_ci_low:.3f}, {report.raw_agreement_ci_high:.3f}]"
+        )
     print(f"Cohen's kappa:             {report.cohens_kappa:.3f}")
     print(f"Gwet's AC2:                {report.gwet_ac2:.3f}")
+    if report.gwet_ac2_ci_low is not None:
+        print(
+            "  95% bootstrap CI:       "
+            f"[{report.gwet_ac2_ci_low:.3f}, {report.gwet_ac2_ci_high:.3f}]"
+        )
     print(f"Judge positive rate:       {report.judge_positive_rate:.3f}")
     print(f"User positive rate:        {report.user_positive_rate:.3f}")
 
@@ -277,6 +371,14 @@ def main() -> int:
                         "and run the report. Zero setup, deterministic.")
     p.add_argument("--max-examples", type=int, default=5,
                    help="Max disagreement examples per category.")
+    p.add_argument("--min-pairs", type=int, default=30,
+                   help="Minimum usable pairs before status can be ready.")
+    p.add_argument(
+        "--evaluator-id",
+        default="",
+        help="Evaluator identity ID to correlate. Required when a store contains "
+             "multiple judge/rubric/fingerprint definitions.",
+    )
     args = p.parse_args()
 
     if args.demo:
@@ -287,10 +389,19 @@ def main() -> int:
         print(f"Storage: {args.storage}")
         storage = _resolve_storage(args.storage)
 
-    pairs, join_stats = _build_pairs(storage)
+    try:
+        pairs, join_stats = _build_pairs(
+            storage, evaluator_id=args.evaluator_id or None
+        )
+    except ValueError as exc:
+        print(f"ERROR: {exc}")
+        return 2
 
     from verdict_eval.correlator import UserSignalCorrelator
-    correlator = UserSignalCorrelator(max_examples_per_disagreement=args.max_examples)
+    correlator = UserSignalCorrelator(
+        max_examples_per_disagreement=args.max_examples,
+        minimum_pairs=args.min_pairs,
+    )
     report = correlator.correlate(pairs)
 
     _print_report(report, join_stats)

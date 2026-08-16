@@ -246,7 +246,7 @@ rate dropped materially" reading.
 - **Robust to outliers and weird distributions.** Doesn't break on binary data.
 - **Directly interpretable.** "The probability your post-regression response is worse than a pre-regression response is 39 percentage points higher than the reverse."
 
-This is what we use for drift gating in v0.5+.
+This is what the current drift detector uses for effect-size gating.
 
 ---
 
@@ -340,11 +340,15 @@ Industry-standard thresholds:
 - Captures distributional shift on binned data.
 - Easy to compute and interpret.
 
-### Our known quirk
+### Discrete and constant data
 
-For binary data where the baseline has zero variance (e.g., all PASS), PSI's histogram-bin logic hits a degenerate case (min == max). Our implementation returns 0.0 in that case, which under-reports drift. **Wasserstein covers the same ground without this degeneracy.** We report PSI for users who recognize it; Wasserstein is the more honest signal for us.
-
-A real fix would be to always bin over [0, 1] for binary data. That's a v0.5 improvement.
+The implementation uses one category bin per distinct value when there are few
+unique values, including binary PASS/FAIL. This avoids empty linear bins and
+still detects a shift from an all-PASS baseline to a mixed current window. If
+both windows contain the same single constant value, PSI is correctly zero. For
+continuous data it uses baseline-driven linear edges; a constant continuous
+baseline remains a limitation, so read PSI alongside Wasserstein and the
+primary Fisher/Cliff gates rather than as an independent alert.
 
 ---
 
@@ -382,7 +386,20 @@ The procedure:
 
 ### Our application
 
-When we run drift detection across N (cluster, dimension) pairs, we apply BH to those N p-values together. The "family" of tests is one detection run.
+When we run drift detection across N eligible scored (cluster, dimension) pairs,
+we apply BH to those N p-values together. The declared family is one call to
+`DriftDetector.detect()`: every scored hypothesis that could emit an alert in
+that run. Deterministic `UNCLEAR`-rate alerts have no p-value and are outside the
+BH family.
+
+If a future caller mixes binary and continuous windows, Fisher's-exact and
+Mann-Whitney p-values remain in that same family. They test different data types,
+but each is a valid null p-value for a simultaneously alertable hypothesis.
+Splitting the family by test implementation would make the correction change as
+data types change and would no longer match the product question, "which cells
+alerted in this run?" Today the production judge emits binary PASS/FAIL scores,
+so its scored drift path uses Fisher's exact throughout and the mixed-test
+distinction is normally inactive.
 
 For a customer with 50 intent clusters × 5 dimensions = 250 tests:
 - Smallest p-value needs to be < 0.0002 to pass BH at α=0.05
@@ -516,6 +533,16 @@ methodology note. Readers familiar with κ get their reference number, while
 readers who know about the paradox get the methodologically safer statistic for
 skewed rubric data.
 
+For user-signal correlation, Verdict computes the binary confusion matrix only
+from one unambiguous PASS/FAIL plus positive/negative observation per trace.
+`UNCLEAR` and non-label signals are coverage skips, exact duplicates collapse,
+and contradictory usable duplicates are excluded and counted. Raw agreement
+gets a Wilson interval; Cohen's κ and Gwet's coefficient get deterministic
+bootstrap intervals. A leniency rate means “user-negative among responses the
+judge called PASS,” while a strictness rate means “user-positive among responses
+the judge called FAIL,” so each uses the judge decision it conditions on as its
+denominator.
+
 ---
 
 ## 14. Bradley-Terry — turning pairwise wins into rankings
@@ -583,6 +610,12 @@ For each (cluster, dimension):
 5. **Benjamini-Hochberg correction** across all simultaneous tests → adjusted p-values
 6. **Emit a DriftSignal** when BH-adjusted p < 0.01 AND |Cliff's δ| > 0.147
 
+Separately, Verdict tracks evaluability. `UNCLEAR` is excluded from PASS/FAIL,
+but an alert is emitted when the current UNCLEAR fraction rises by at least 15
+percentage points and both windows meet the total-sample floor. This is a
+deterministic coverage rule, not a p-value test, so the signal reports p-value
+and Cliff's δ as not applicable and stays outside the BH family.
+
 This is `packages/verdict_eval/src/verdict_eval/drift.py`.
 
 ### Flavor 2: "Is our judge any good?"
@@ -615,7 +648,7 @@ This is `packages/verdict_eval/src/verdict_eval/compare.py` plus `pairwise.py`.
 
 Notice that every pipeline does the same three things in different ways:
 
-1. **Compare two distributions** (Mann-Whitney, Cliff's δ, Wasserstein)
+1. **Compare two distributions** (Fisher/Mann-Whitney, Cliff's δ, Wasserstein)
 2. **Quantify the disagreement** between observations (κ, AC2, BT win rate)
 3. **Correct for chance / multiple testing** (BH adjustment, chance-corrected agreement)
 
@@ -634,6 +667,7 @@ That's basically all of frequentist statistics in three sentences.
 | How much mass shifted from one distribution to the other? | Wasserstein distance | ≥ 0 |
 | Is the distributional shift industry-significant? | PSI | < 0.1 stable, ≥ 0.25 shifted |
 | I ran many tests — am I just getting false positives? | Benjamini-Hochberg correction | adjusted p-values |
+| Did judge evaluability deteriorate? | Deterministic UNCLEAR-rate gate | ≥15-point increase with total-n floor |
 | Do two raters agree (chance-corrected)? | Cohen's κ | -1 to +1; ≥ 0.6 acceptable |
 | Same but doesn't break on skewed marginals? | Gwet's AC2 | same scale |
 | Turn pairwise wins into a ranking with CIs? | Bradley-Terry + bootstrap | per-model rating + CI |

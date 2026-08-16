@@ -5,7 +5,9 @@ adapter but not the other, the Protocol is leaking implementation details.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import inspect
+import sqlite3
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -13,6 +15,8 @@ from verdict.schema import (
     DimensionScore,
     DriftDirection,
     DriftSignal,
+    EvaluatorHealthRecord,
+    EvaluatorHealthStatus,
     Judgment,
     Operation,
     SpanRecord,
@@ -20,7 +24,10 @@ from verdict.schema import (
     UserSignalRecord,
     Verdict,
 )
+from verdict.storage.base import Storage
+from verdict.storage.buffered import BufferedStorage
 from verdict.storage.memory import InMemoryStorage
+from verdict.storage.postgres import PostgresStorage
 from verdict.storage.sqlite import SQLiteStorage
 
 
@@ -50,14 +57,283 @@ def _trace(**overrides):
     return Trace(**base)
 
 
+def test_all_storage_adapters_match_protocol_parameter_kinds_and_defaults():
+    adapters = (InMemoryStorage, SQLiteStorage, PostgresStorage, BufferedStorage)
+    for method_name, protocol_method in inspect.getmembers(
+        Storage, predicate=inspect.isfunction
+    ):
+        if method_name.startswith("_"):
+            continue
+        expected = list(inspect.signature(protocol_method).parameters.values())[1:]
+        for adapter in adapters:
+            actual_method = getattr(adapter, method_name)
+            actual = list(inspect.signature(actual_method).parameters.values())[1:]
+            assert [
+                (parameter.name, parameter.kind, parameter.default)
+                for parameter in actual
+            ] == [
+                (parameter.name, parameter.kind, parameter.default)
+                for parameter in expected
+            ], f"{adapter.__name__}.{method_name} diverges from Storage"
+
+
 def test_insert_and_get_trace(storage):
-    t = _trace()
+    t = _trace(parent_span_id="span-parent")
     storage.insert_trace(t)
     fetched = storage.get_trace(t.trace_id)
     assert fetched is not None
     assert fetched.trace_id == t.trace_id
     assert fetched.provider == "anthropic"
     assert fetched.input_tokens == 100
+    assert fetched.parent_span_id == "span-parent"
+
+
+def test_sqlite_migrates_trace_parent_span_link(tmp_path):
+    path = tmp_path / "legacy-traces.db"
+    connection = sqlite3.connect(path)
+    connection.executescript(
+        """
+        CREATE TABLE traces (
+            trace_id TEXT PRIMARY KEY, started_at TEXT NOT NULL, ended_at TEXT,
+            provider TEXT, operation TEXT, request_model TEXT, response_model TEXT,
+            input_tokens INTEGER, output_tokens INTEGER, temperature REAL,
+            max_tokens INTEGER, finish_reason TEXT, error TEXT, latency_ms REAL,
+            prompt_redacted TEXT, response_redacted TEXT, raw_messages_json TEXT,
+            tenant_id TEXT, session_id TEXT, user_id_hash TEXT, cluster_id TEXT,
+            tags_json TEXT, cost_usd REAL
+        );
+        """
+    )
+    connection.execute(
+        "INSERT INTO traces (trace_id, started_at, operation) VALUES (?, ?, ?)",
+        ("legacy", "2026-08-01T00:00:00+00:00", "chat"),
+    )
+    connection.commit()
+    connection.close()
+
+    storage = SQLiteStorage(str(path))
+    try:
+        legacy = storage.get_trace("legacy")
+        linked = _trace(trace_id="linked", parent_span_id="span-1")
+        storage.insert_trace(linked)
+        round_trip = storage.get_trace("linked")
+    finally:
+        storage.close()
+
+    assert legacy is not None and legacy.parent_span_id is None
+    assert round_trip is not None and round_trip.parent_span_id == "span-1"
+
+
+def test_sqlite_migrates_pre_cluster_id_trace_schema_before_creating_indexes(tmp_path):
+    path = tmp_path / "pre-cluster-traces.db"
+    connection = sqlite3.connect(path)
+    connection.executescript(
+        """
+        CREATE TABLE traces (
+            trace_id TEXT PRIMARY KEY, parent_span_id TEXT,
+            started_at TEXT NOT NULL, ended_at TEXT, provider TEXT,
+            operation TEXT, request_model TEXT, response_model TEXT,
+            input_tokens INTEGER, output_tokens INTEGER, temperature REAL,
+            max_tokens INTEGER, finish_reason TEXT, error TEXT, latency_ms REAL,
+            prompt_redacted TEXT, response_redacted TEXT, raw_messages_json TEXT,
+            tenant_id TEXT, session_id TEXT, user_id_hash TEXT,
+            tags_json TEXT, cost_usd REAL
+        );
+        """
+    )
+    connection.execute(
+        "INSERT INTO traces (trace_id, started_at, operation) VALUES (?, ?, ?)",
+        ("legacy", "2026-08-01T00:00:00+00:00", "chat"),
+    )
+    connection.commit()
+    connection.close()
+
+    storage = SQLiteStorage(str(path))
+    try:
+        legacy = storage.get_trace("legacy")
+        storage.insert_trace(_trace(trace_id="new", cluster_id="cluster-new"))
+        clustered = storage.list_traces(cluster_id="cluster-new")
+    finally:
+        storage.close()
+
+    assert legacy is not None and legacy.cluster_id is None
+    assert [trace.trace_id for trace in clustered] == ["new"]
+
+
+def test_sqlite_migrates_legacy_spans_without_parent_name(tmp_path):
+    path = tmp_path / "legacy-spans.db"
+    connection = sqlite3.connect(path)
+    connection.executescript(
+        """
+        CREATE TABLE spans (
+            span_id TEXT PRIMARY KEY, name TEXT, trace_id TEXT,
+            started_at TEXT NOT NULL, ended_at TEXT, duration_ms REAL,
+            attributes_json TEXT, error TEXT
+        );
+        """
+    )
+    connection.execute(
+        "INSERT INTO spans (span_id, name, started_at) VALUES (?, ?, ?)",
+        ("legacy", "legacy-span", "2026-08-01T00:00:00+00:00"),
+    )
+    connection.commit()
+    connection.close()
+
+    storage = SQLiteStorage(str(path))
+    try:
+        legacy = storage.list_spans()[0]
+        storage.insert_span(SpanRecord(span_id="new", name="child", parent_name="root"))
+        records = {record.span_id: record for record in storage.list_spans()}
+    finally:
+        storage.close()
+
+    assert legacy.parent_name is None
+    assert records["new"].parent_name == "root"
+
+
+def test_storage_sanitizes_every_content_bearing_trace_field(storage):
+    canaries = [
+        "storage@example.com",
+        "123-45-6789",
+        "4111111111111111",
+        "203.0.113.8",
+    ]
+    trace = _trace(
+        prompt_redacted=f"email {canaries[0]}",
+        response_redacted=f"ssn {canaries[1]}",
+        error=f"card {canaries[2]}",
+        raw_messages=[{
+            "role": "assistant",
+            "content": [{"type": "tool_result", "content": {"ip": canaries[3]}}],
+        }],
+        tags={"contact": canaries[0]},
+    )
+
+    storage.insert_trace(trace)
+    fetched = storage.get_trace(trace.trace_id)
+
+    assert fetched is not None
+    serialized = repr(fetched)
+    for canary in canaries:
+        assert canary not in serialized
+        assert canary not in repr(trace)
+
+
+def test_sqlite_serialized_record_contains_no_content_canary(tmp_path):
+    path = tmp_path / "privacy.db"
+    storage = SQLiteStorage(str(path))
+    canary = "sqlite-record@example.com"
+    trace = _trace(
+        prompt_redacted=canary,
+        raw_messages=[{
+            "role": "assistant",
+            "content": [{"type": "tool_result", "content": {"email": canary}}],
+        }],
+        tags={"email": canary},
+    )
+    storage.insert_trace(trace)
+    storage.close()
+
+    connection = sqlite3.connect(path)
+    try:
+        row = connection.execute(
+            "SELECT prompt_redacted, raw_messages_json, tags_json FROM traces"
+        ).fetchone()
+    finally:
+        connection.close()
+
+    assert canary not in repr(row)
+
+
+def test_storage_sanitizes_judge_reasoning_and_manual_span_content(storage):
+    canary = "reviewer@example.com"
+    trace = _trace(cluster_id="privacy")
+    storage.insert_trace(trace)
+    judgment = Judgment(
+        trace_id=trace.trace_id,
+        error=f"judge failed for {canary}",
+        dimensions=[DimensionScore(
+            name="quality",
+            verdict=Verdict.FAIL,
+            reasoning=f"The response quoted {canary}",
+        )],
+    )
+    span = SpanRecord(
+        name=f"tool for {canary}",
+        trace_id=trace.trace_id,
+        attributes={"nested": {"contact": canary}},
+        error=f"tool failed for {canary}",
+    )
+
+    storage.insert_judgment(judgment)
+    storage.insert_span(span)
+
+    fetched_judgment = storage.list_judgments_for_cluster("privacy")[0]
+    fetched_span = storage.list_spans(trace_id=trace.trace_id)[0]
+    assert canary not in repr(fetched_judgment)
+    assert canary not in repr(fetched_span)
+    assert canary not in repr(judgment)
+    assert canary not in repr(span)
+
+
+def test_sqlite_serialized_judgment_and_span_contain_no_content_canary(tmp_path):
+    path = tmp_path / "privacy-surfaces.db"
+    canary = "serialized@example.com"
+    storage = SQLiteStorage(str(path))
+    trace = _trace(cluster_id="privacy")
+    storage.insert_trace(trace)
+    storage.insert_judgment(Judgment(
+        trace_id=trace.trace_id,
+        error=canary,
+        dimensions=[DimensionScore(
+            name="quality", verdict=Verdict.FAIL, reasoning=canary
+        )],
+    ))
+    storage.insert_span(SpanRecord(
+        name=canary,
+        trace_id=trace.trace_id,
+        attributes={"contact": canary},
+        error=canary,
+    ))
+    storage.close()
+
+    connection = sqlite3.connect(path)
+    try:
+        judgment_row = connection.execute(
+            "SELECT dimensions_json, error FROM judgments"
+        ).fetchone()
+        span_row = connection.execute(
+            "SELECT name, attributes_json, error FROM spans"
+        ).fetchone()
+    finally:
+        connection.close()
+
+    assert canary not in repr(judgment_row)
+    assert canary not in repr(span_row)
+
+
+def test_sqlite_span_redaction_bounds_shared_graph_serialization(tmp_path):
+    path = tmp_path / "bounded-redaction.db"
+    shared = {"email": "shared@example.com"}
+    for _ in range(22):
+        shared = {"left": shared, "right": shared}
+
+    storage = SQLiteStorage(str(path))
+    try:
+        storage.insert_span(SpanRecord(name="shared-dag", attributes=shared))
+    finally:
+        storage.close()
+
+    connection = sqlite3.connect(path)
+    try:
+        [serialized] = connection.execute(
+            "SELECT attributes_json FROM spans WHERE name = ?", ("shared-dag",)
+        ).fetchone()
+    finally:
+        connection.close()
+
+    assert "shared@example.com" not in serialized
+    assert len(serialized.encode("utf-8")) < 100_000
 
 
 def test_trace_accepts_enum_value_string(storage):
@@ -134,6 +410,140 @@ def test_insert_and_list_judgments_for_cluster(storage):
     assert fetched[0].pass_rate == 0.5
 
 
+def test_evaluator_health_round_trip_and_identity_filter(storage):
+    older = EvaluatorHealthRecord(
+        evaluator_fingerprint="judge-a",
+        sentinel_set_name="support-v1",
+        sentinel_set_fingerprint="set-a",
+        correct_labels=27,
+        total_labels=30,
+        agreement=0.9,
+        confidence_low=0.74,
+        confidence_high=0.97,
+        status=EvaluatorHealthStatus.HEALTHY,
+    )
+    other = EvaluatorHealthRecord(
+        evaluator_fingerprint="judge-b",
+        sentinel_set_name="support-v1",
+        sentinel_set_fingerprint="set-a",
+        correct_labels=10,
+        total_labels=30,
+        agreement=1 / 3,
+        confidence_low=0.19,
+        confidence_high=0.51,
+        status=EvaluatorHealthStatus.DEGRADED,
+        error_count=2,
+    )
+    storage.insert_evaluator_health(older)
+    storage.insert_evaluator_health(other)
+
+    fetched = storage.list_evaluator_health(
+        evaluator_fingerprint="judge-b", limit=10
+    )
+
+    assert len(fetched) == 1
+    assert fetched[0].health_id == other.health_id
+    assert fetched[0].status == EvaluatorHealthStatus.DEGRADED
+    assert fetched[0].error_count == 2
+
+
+def test_sqlite_migrates_legacy_judgment_identity_as_explicitly_incomplete(tmp_path):
+    path = tmp_path / "legacy.db"
+    connection = sqlite3.connect(path)
+    connection.executescript(
+        """
+        CREATE TABLE traces (
+            trace_id TEXT PRIMARY KEY, started_at TEXT NOT NULL, ended_at TEXT,
+            provider TEXT, operation TEXT, request_model TEXT, response_model TEXT,
+            input_tokens INTEGER, output_tokens INTEGER, temperature REAL,
+            max_tokens INTEGER, finish_reason TEXT, error TEXT, latency_ms REAL,
+            prompt_redacted TEXT, response_redacted TEXT, raw_messages_json TEXT,
+            tenant_id TEXT, session_id TEXT, user_id_hash TEXT, cluster_id TEXT,
+            tags_json TEXT, cost_usd REAL
+        );
+        CREATE TABLE judgments (
+            judgment_id TEXT PRIMARY KEY, trace_id TEXT NOT NULL,
+            rubric_name TEXT, rubric_version TEXT, created_at TEXT NOT NULL,
+            judge_models_json TEXT, dimensions_json TEXT,
+            position_swap_consistent INTEGER
+        );
+        """
+    )
+    connection.execute(
+        "INSERT INTO traces (trace_id, started_at, operation, cluster_id) "
+        "VALUES ('legacy-trace', '2026-08-01T00:00:00+00:00', 'chat', 'c1')"
+    )
+    connection.execute(
+        "INSERT INTO judgments VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            "legacy-judgment",
+            "legacy-trace",
+            "default",
+            "1",
+            "2026-08-01T00:00:00+00:00",
+            '["legacy-model"]',
+            '[]',
+            None,
+        ),
+    )
+    connection.commit()
+    connection.close()
+
+    storage = SQLiteStorage(str(path))
+    try:
+        judgment = storage.list_judgments_for_cluster("c1")[0]
+    finally:
+        storage.close()
+
+    assert judgment.judge_models == ["legacy-model"]
+    assert judgment.evaluator_identity_complete is False
+    assert judgment.evaluator_fingerprint == ""
+    assert judgment.status.value == "completed"
+
+
+def test_sqlite_migrates_historical_drift_table_with_unattributed_identity(tmp_path):
+    path = tmp_path / "historical-drift.db"
+    connection = sqlite3.connect(path)
+    connection.executescript(
+        """
+        CREATE TABLE drift_signals (
+            signal_id TEXT PRIMARY KEY, detected_at TEXT NOT NULL,
+            cluster_id TEXT, dimension TEXT, direction TEXT,
+            statistic_name TEXT, statistic_value REAL, p_value REAL,
+            p_value_adjusted REAL, effect_size_cohens_d REAL,
+            effect_size_cliffs_delta REAL DEFAULT 0.0,
+            wasserstein_distance REAL DEFAULT 0.0, psi REAL DEFAULT 0.0,
+            sample_size_current INTEGER, sample_size_baseline INTEGER,
+            contributing_layers_json TEXT, example_trace_ids_json TEXT,
+            recommended_action TEXT
+        );
+        """
+    )
+    connection.execute(
+        "INSERT INTO drift_signals (signal_id, detected_at, dimension) VALUES (?, ?, ?)",
+        ("historical", "2026-08-01T00:00:00+00:00", "quality"),
+    )
+    connection.commit()
+    connection.close()
+
+    storage = SQLiteStorage(str(path))
+    try:
+        historical = storage.list_drift_signals()[0]
+        storage.insert_drift_signal(DriftSignal(
+            signal_id="current",
+            evaluator_fingerprint="evaluator-v2",
+        ))
+        current = next(
+            signal for signal in storage.list_drift_signals()
+            if signal.signal_id == "current"
+        )
+    finally:
+        storage.close()
+
+    assert historical.evaluator_fingerprint == ""
+    assert current.evaluator_fingerprint == "evaluator-v2"
+
+
 def test_reinsert_with_null_cluster_id_preserves_existing(storage):
     """Re-writing the SAME trace_id with cluster_id=None must NOT wipe a
     previously-assigned cluster_id. The clusterer assigns cluster_id *after* the
@@ -160,6 +570,22 @@ def test_reinsert_with_null_cluster_id_preserves_existing(storage):
     assert fetched.response_model == "claude-opus"
 
 
+def test_reinsert_with_null_parent_span_id_preserves_existing(storage):
+    linked = _trace(parent_span_id="span-parent")
+    storage.insert_trace(linked)
+
+    storage.insert_trace(_trace(
+        trace_id=linked.trace_id,
+        parent_span_id=None,
+        output_tokens=999,
+    ))
+
+    fetched = storage.get_trace(linked.trace_id)
+    assert fetched is not None
+    assert fetched.parent_span_id == "span-parent"
+    assert fetched.output_tokens == 999
+
+
 def test_reinsert_with_new_cluster_id_overwrites(storage):
     """A non-null cluster_id on re-write DOES replace the old one (COALESCE only
     protects against NULL, not a real reassignment)."""
@@ -176,6 +602,7 @@ def test_drift_signals_round_trip(storage):
         cluster_id="c0001",
         dimension="groundedness",
         direction="regression",
+        evaluator_fingerprint="evaluator-v1",
         statistic_name="fisher_exact",
         statistic_value=1234.5,
         p_value=0.001,
@@ -196,6 +623,7 @@ def test_drift_signals_round_trip(storage):
     s = fetched[0]
     assert s.cluster_id == "c0001"
     assert s.direction == DriftDirection.REGRESSION
+    assert s.evaluator_fingerprint == "evaluator-v1"
     assert s.effect_size_cohens_d == 0.7
     # The primary effect size + distributional diagnostics must survive the
     # round trip — losing these silently was a real Postgres bug.
@@ -259,6 +687,29 @@ def test_delete_drift_signals_between_uses_half_open_window(storage):
     assert {s.signal_id for s in storage.list_drift_signals()} == {"before", "end"}
 
 
+def test_delete_drift_signals_between_can_isolate_evaluator(storage):
+    start = datetime(2026, 8, 11, 12, tzinfo=timezone.utc)
+    end = start + timedelta(hours=1)
+    storage.insert_drift_signal(DriftSignal(
+        signal_id="evaluator-a",
+        detected_at=start,
+        evaluator_fingerprint="fingerprint-a",
+    ))
+    storage.insert_drift_signal(DriftSignal(
+        signal_id="evaluator-b",
+        detected_at=start,
+        evaluator_fingerprint="fingerprint-b",
+    ))
+
+    storage.delete_drift_signals_between(
+        start, end, evaluator_fingerprint="fingerprint-a"
+    )
+
+    assert [signal.signal_id for signal in storage.list_drift_signals()] == [
+        "evaluator-b"
+    ]
+
+
 def test_drift_signal_columns_cover_all_stat_fields():
     """DB-free guard: every adapter must persist the same DriftSignal stat
     fields. The Postgres adapter once silently omitted Cliff's δ, Wasserstein
@@ -273,6 +724,7 @@ def test_drift_signal_columns_cover_all_stat_fields():
         "wasserstein_distance",
         "psi",
         "p_value_adjusted",
+        "evaluator_fingerprint",
         "sample_size_current",
         "sample_size_baseline",
     ]
@@ -285,7 +737,7 @@ def test_drift_signal_columns_cover_all_stat_fields():
     # The number of placeholders in the column list must match the count of
     # columns, or positional binding silently shifts.
     n_cols = len([c for c in pg.PostgresStorage._SIGNAL_COLUMNS.split(",")])
-    assert n_cols == 18, f"expected 18 drift-signal columns, got {n_cols}"
+    assert n_cols == 19, f"expected 19 drift-signal columns, got {n_cols}"
 
     # DB-free guard only: the live Postgres path still needs integration
     # coverage in an environment that provides a Postgres instance.
@@ -293,6 +745,93 @@ def test_drift_signal_columns_cover_all_stat_fields():
 
     insert_source = inspect.getsource(pg.PostgresStorage.insert_drift_signal)
     assert "ON CONFLICT (signal_id) DO UPDATE SET" in insert_source
+
+
+def test_postgres_trace_columns_include_stable_parent_span_link():
+    import inspect
+
+    from verdict.storage import postgres as pg
+
+    assert "parent_span_id" in pg._SCHEMA
+    assert "parent_span_id" in pg.PostgresStorage._TRACE_COLUMNS
+    assert len(pg.PostgresStorage._TRACE_COLUMNS.split(",")) == 24
+    insert_source = inspect.getsource(pg.PostgresStorage.insert_trace)
+    assert "INSERT INTO traces (" in insert_source
+    assert "COALESCE(" in insert_source
+    assert "INSERT INTO traces VALUES" not in insert_source
+
+
+def test_postgres_judgment_query_uses_fixed_columns_and_maps_them_in_order():
+    from verdict.storage import postgres as pg
+
+    storage = object.__new__(pg.PostgresStorage)
+    captured = {}
+    created_at = datetime(2026, 8, 16, tzinfo=timezone.utc)
+    row = (
+        "judgment-1", "trace-1", "rubric", "2", created_at,
+        ["judge-a"],
+        [{"name": "quality", "verdict": "pass", "reasoning": "ok", "judge_model": "judge-a"}],
+        True, "openai", {"model": "judge-a"}, "fp-1", ["quality"],
+        "completed", None,
+    )
+
+    def fetchall(sql, params):
+        captured["sql"] = sql
+        captured["params"] = params
+        return [row]
+
+    storage._fetchall = fetchall
+    [judgment] = storage.list_judgments_for_cluster("cluster-1", limit=3)
+
+    assert "j.*" not in captured["sql"]
+    assert f"SELECT {storage._JUDGMENT_COLUMNS}" in captured["sql"]
+    assert captured["params"] == ("cluster-1", 3)
+    assert judgment.judgment_id == "judgment-1"
+    assert judgment.position_swap_consistent is True
+    assert judgment.evaluator_fingerprint == "fp-1"
+    assert judgment.dimensions[0].verdict is Verdict.PASS
+
+
+def test_postgres_span_upsert_can_add_a_delayed_trace_link():
+    """Late stream finalization must update the trace_id on an existing span."""
+    import inspect
+
+    from verdict.storage import postgres as pg
+
+    insert_source = inspect.getsource(pg.PostgresStorage.insert_span)
+    update_clause = insert_source.split("ON CONFLICT (span_id) DO UPDATE SET", 1)[1]
+    assert "trace_id    = COALESCE(EXCLUDED.trace_id, spans.trace_id)" in update_clause
+
+
+def test_postgres_identity_upserts_replace_every_non_primary_key_column():
+    """Postgres must match memory/SQLite replacement semantics on conflicts."""
+    import inspect
+
+    from verdict.storage import postgres as pg
+
+    judgment_source = inspect.getsource(pg.PostgresStorage.insert_judgment)
+    judgment_update = judgment_source.split(
+        "ON CONFLICT (judgment_id) DO UPDATE SET", 1
+    )[1]
+    for column in (
+        "trace_id", "rubric_name", "rubric_version", "created_at",
+        "judge_models", "dimensions", "position_swap_consistent",
+        "evaluator_provider", "evaluator_config", "evaluator_fingerprint",
+        "expected_dimensions", "status", "error",
+    ):
+        assert f"{column} = EXCLUDED.{column}" in judgment_update
+
+    health_source = inspect.getsource(pg.PostgresStorage.insert_evaluator_health)
+    health_update = health_source.split(
+        "ON CONFLICT (health_id) DO UPDATE SET", 1
+    )[1]
+    for column in (
+        "evaluated_at", "evaluator_fingerprint", "sentinel_set_name",
+        "sentinel_set_fingerprint", "correct_labels", "total_labels",
+        "agreement", "confidence_low", "confidence_high", "status",
+        "error_count",
+    ):
+        assert f"{column} = EXCLUDED.{column}" in health_update
 
 
 def test_delete_trace_removes_trace_and_judgments(storage):

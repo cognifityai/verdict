@@ -21,8 +21,13 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from verdict_eval.judge import DEFAULT_RUBRIC, Judge, Rubric
+from verdict.metrics import verdict_label
+from verdict.redaction import redact
+
+from verdict_eval.judge import DEFAULT_RUBRIC, Judge, JudgeEnsemble, Rubric
 from verdict_eval.probes.schema import (
+    PROBE_JUDGE_METHOD_VERSION,
+    PROBE_METRIC_SCHEMA_VERSION,
     Probe,
     ProbeExpectation,
     ProbeResult,
@@ -39,7 +44,7 @@ def _norm_verdict(v: object) -> str:
     comparing it directly to "PASS" always returns False. Normalizing both
     sides through this helper fixes that.
     """
-    return str(getattr(v, "value", v)).upper()
+    return verdict_label(v)
 
 
 @dataclass
@@ -64,15 +69,63 @@ class ProbeRunner:
     judge_model: str
     rubric: Rubric = DEFAULT_RUBRIC
     sleep_between_calls: float = 0.2
+    judge: Judge | JudgeEnsemble | None = None
 
     def __post_init__(self) -> None:
-        self._judge = Judge(
+        self._judge = self.judge or Judge(
             provider=self.judge_provider,
             model=self.judge_model,
             rubric=self.rubric,
             temperature=0.0,
             max_tokens=1024,
         )
+        # A supplied judge is a complete evaluator configuration. Its rubric is
+        # authoritative just like its provider/model/temperature; replacing it
+        # with the runner default can silently skip custom dimensions.
+        if isinstance(self.judge, Judge):
+            self.rubric = self.judge.rubric
+        elif isinstance(self.judge, JudgeEnsemble):
+            self.rubric = self.judge.judges[0].rubric
+        identity = self._judge.evaluator_identity()
+        identity_models = identity.get("judge_models", [])
+        self._artifact_judge_model = (
+            "+".join(str(model) for model in identity_models)
+            if identity_models
+            else self.judge_model
+        )
+        self._dimension_judges: dict[str, object] = {}
+
+    @staticmethod
+    def _narrow_judge(active_judge: object, rubric: Rubric) -> object:
+        if isinstance(active_judge, Judge):
+            return Judge(
+                provider=active_judge.provider,
+                model=active_judge.model,
+                rubric=rubric,
+                temperature=active_judge.temperature,
+                max_tokens=active_judge.max_tokens,
+                skip_context_dependent_when_missing=(
+                    active_judge.skip_context_dependent_when_missing
+                ),
+            )
+        if isinstance(active_judge, JudgeEnsemble):
+            return JudgeEnsemble([
+                ProbeRunner._narrow_judge(judge, rubric)
+                for judge in active_judge.judges
+            ])
+        return active_judge
+
+    @staticmethod
+    def _provenance(active_judge: object) -> dict[str, str | None]:
+        identity = (
+            active_judge.evaluator_identity()
+            if hasattr(active_judge, "evaluator_identity")
+            else {}
+        )
+        return {
+            "judgeMethodVersion": PROBE_JUDGE_METHOD_VERSION,
+            "evaluatorFingerprint": identity.get("evaluator_fingerprint"),
+        }
 
     # ------------------------------------------------------------------ #
     # Probe execution
@@ -101,9 +154,47 @@ class ProbeRunner:
             f"PROBE EXPECTATION on dimension '{exp.dimension}': "
             f"{exp.judge_notes}\n\nORIGINAL PROMPT:\n{prompt}"
         )
-        # We run the full judge and pick out only the dimension we care about
+        rubric_dimension = next(
+            (
+                dimension
+                for dimension in self.rubric.dimensions
+                if dimension.name == exp.dimension
+            ),
+            None,
+        )
+        if rubric_dimension is None:
+            return {
+                "name": exp.dimension,
+                "expected": _norm_verdict(exp.verdict),
+                "observed": "MISSING",
+                "passed": False,
+                "judge_reasoning": (
+                    f"Judge rubric did not contain dimension '{exp.dimension}'."
+                ),
+                "judgeMethodVersion": PROBE_JUDGE_METHOD_VERSION,
+                "evaluatorFingerprint": None,
+            }
+
+        # Production Judge instances receive a one-dimension rubric so the
+        # prompt, parser, expected dimensions, and evaluator fingerprint all
+        # describe exactly the expectation under test. Tests/custom callers may
+        # replace _judge with a compatible stub, which is used as supplied.
+        active_judge = self._judge
+        if isinstance(active_judge, (Judge, JudgeEnsemble)):
+            active_judge = self._dimension_judges.get(exp.dimension)
+            if active_judge is None:
+                active_judge = self._narrow_judge(
+                    self._judge,
+                    Rubric(
+                        name=self.rubric.name,
+                        version=self.rubric.version,
+                        dimensions=(rubric_dimension,),
+                    ),
+                )
+                self._dimension_judges[exp.dimension] = active_judge
+        provenance = self._provenance(active_judge)
         try:
-            judgment = self._judge.judge(
+            judgment = active_judge.judge(
                 query=narrowed_query,
                 response=response,
             )
@@ -113,7 +204,8 @@ class ProbeRunner:
                 "expected": exp.verdict,
                 "observed": "ERROR",
                 "passed": False,
-                "judge_reasoning": f"judge call failed: {e}",
+                "judge_reasoning": redact(f"judge call failed: {e}") or "judge call failed",
+                **provenance,
             }
         observed: str | None = None
         reasoning: str = ""
@@ -123,10 +215,9 @@ class ProbeRunner:
                 # lowercase values, so comparing the raw enum to "PASS" always
                 # failed (the same bug that zeroed out the internal validation judge run).
                 observed = _norm_verdict(d.verdict)
-                reasoning = d.reasoning
+                reasoning = redact(d.reasoning) or ""
                 break
         if observed is None:
-            # Judge rubric didn't include the expected dimension
             return {
                 "name": exp.dimension,
                 "expected": _norm_verdict(exp.verdict),
@@ -135,6 +226,7 @@ class ProbeRunner:
                 "judge_reasoning": (
                     f"Judge rubric did not contain dimension '{exp.dimension}'."
                 ),
+                **provenance,
             }
         return {
             "name": exp.dimension,
@@ -142,6 +234,7 @@ class ProbeRunner:
             "observed": observed,
             "passed": observed == _norm_verdict(exp.verdict),
             "judge_reasoning": reasoning,
+            **provenance,
         }
 
     def run_one(self, probe: Probe) -> ProbeResult:
@@ -150,14 +243,19 @@ class ProbeRunner:
         try:
             response_text, latency_ms = self._call_target(messages)
         except Exception as e:
+            safe_error = redact(f"target call failed: {e}") or "target call failed"
             return ProbeResult(
                 probe_id=probe.id,
                 category=probe.category,
                 response_text="",
-                judge_model=self.judge_model,
+                judge_model=self._artifact_judge_model,
                 target_model=self.target_model,
                 latency_ms=0.0,
-                error=f"target call failed: {e}",
+                dimensions=self._error_dimensions(probe, safe_error),
+                error=safe_error,
+                weight=probe.weight,
+                metric_schema_version=PROBE_METRIC_SCHEMA_VERSION,
+                judge_method_version=PROBE_JUDGE_METHOD_VERSION,
             )
 
         follow_up_text: str | None = None
@@ -168,7 +266,24 @@ class ProbeRunner:
             try:
                 follow_up_text, _ = self._call_target(messages)
             except Exception as e:
-                follow_up_text = f"(follow-up call failed: {e})"
+                safe_error = (
+                    redact(f"follow-up call failed: {e}")
+                    or "follow-up call failed"
+                )
+                return ProbeResult(
+                    probe_id=probe.id,
+                    category=probe.category,
+                    response_text=redact(response_text) or "",
+                    dimensions=self._error_dimensions(probe, safe_error),
+                    overall_passed=False,
+                    judge_model=self._artifact_judge_model,
+                    target_model=self.target_model,
+                    latency_ms=latency_ms,
+                    error=safe_error,
+                    weight=probe.weight,
+                    metric_schema_version=PROBE_METRIC_SCHEMA_VERSION,
+                    judge_method_version=PROBE_JUDGE_METHOD_VERSION,
+                )
 
         # Use the follow-up response for evaluation if present; that's the
         # final stance the model takes, which is what we want to score on
@@ -187,21 +302,40 @@ class ProbeRunner:
         return ProbeResult(
             probe_id=probe.id,
             category=probe.category,
-            response_text=response_text,
-            follow_up_response_text=follow_up_text,
+            response_text=redact(response_text) or "",
+            follow_up_response_text=redact(follow_up_text),
             dimensions=dimensions,
             overall_passed=all_passed,
-            judge_model=self.judge_model,
+            judge_model=self._artifact_judge_model,
             target_model=self.target_model,
             latency_ms=latency_ms,
+            weight=probe.weight,
+            metric_schema_version=PROBE_METRIC_SCHEMA_VERSION,
+            judge_method_version=PROBE_JUDGE_METHOD_VERSION,
         )
+
+    @staticmethod
+    def _error_dimensions(probe: Probe, message: str) -> list[dict]:
+        """Represent infrastructure errors in every declared denominator."""
+        return [
+            {
+                "name": expectation.dimension,
+                "expected": _norm_verdict(expectation.verdict),
+                "observed": "ERROR",
+                "passed": False,
+                "judge_reasoning": message,
+                "judgeMethodVersion": PROBE_JUDGE_METHOD_VERSION,
+                "evaluatorFingerprint": None,
+            }
+            for expectation in probe.expectations
+        ]
 
     def run_suite(self, suite: ProbeSuite) -> ProbeRun:
         """Run every probe in `suite`, return the aggregated ProbeRun."""
         run = ProbeRun.new(
             suite=suite,
             target_model=self.target_model,
-            judge_model=self.judge_model,
+            judge_model=self._artifact_judge_model,
         )
         for probe in suite.probes:
             result = self.run_one(probe)

@@ -40,7 +40,7 @@ class CorruptedSample:
     original_response: str
     corrupted_response: str
     kind: CorruptionKind
-    strength: float          # 0.0–1.0; subtle to blatant
+    strength: float          # 0.0-1.0; subtle to blatant
     metadata: dict[str, str] = field(default_factory=dict)
 
 
@@ -173,7 +173,7 @@ def build_corruption_battery(
     strengths: list[float] = (0.5, 1.0),
     seed: int = 42,
 ) -> list[CorruptedSample]:
-    """Cross every (query, response) pair with every CorruptionKind × strength.
+    """Cross every (query, response) pair with every CorruptionKind x strength.
 
     Returns a flat list of CorruptedSample, including a `NONE` baseline copy
     per input pair so callers can measure false-positive rates.

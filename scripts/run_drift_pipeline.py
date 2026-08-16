@@ -44,6 +44,25 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Provider for the judge LLM.")
     p.add_argument("--judge-model", default="fake-judge",
                    help="Judge model name (use 'fake-judge' for offline).")
+    p.add_argument(
+        "--judge-sentinel-file",
+        default="",
+        help="Optional JSONL human-labeled anchor set. Agreement is persisted "
+             "as judge health, separately from production drift.",
+    )
+    p.add_argument(
+        "--judge-health-min-labels",
+        type=int,
+        default=30,
+        help="Minimum human labels before judge health can be marked healthy/degraded.",
+    )
+    p.add_argument(
+        "--judge-health-threshold",
+        type=float,
+        default=0.8,
+        help="Minimum 95%% Wilson-CI lower bound for healthy sentinel status "
+             "after the label floor.",
+    )
     p.add_argument("--current-hours", type=int, default=24,
                    help="Current window size in hours (default 24).")
     p.add_argument("--baseline-days", type=int, default=7,
@@ -112,7 +131,13 @@ def _parse_analysis_time(value: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
-def _signal_id_for_window(signal, args, analysis_time: datetime, tenant_scope: str) -> str:
+def _signal_id_for_window(
+    signal,
+    args,
+    analysis_time: datetime,
+    tenant_scope: str,
+    evaluator_fingerprint: str,
+) -> str:
     """Return a stable ID for one signal cell in an hourly analysis window.
 
     Re-running the same hourly window replaces the existing record instead of
@@ -126,6 +151,7 @@ def _signal_id_for_window(signal, args, analysis_time: datetime, tenant_scope: s
         args.clustering_version,
         args.judge_provider,
         args.judge_model,
+        evaluator_fingerprint,
         str(args.current_hours),
         str(args.baseline_days),
         str(args.baseline_lag_hours),
@@ -337,23 +363,84 @@ def main() -> int:
         provider = GoogleAdapter()
 
     judge = Judge(provider=provider, model=args.judge_model, rubric=DEFAULT_RUBRIC)
+    current_evaluator = judge.evaluator_identity(context=None)
+
+    # A fixed human-labeled sentinel set is the independent anchor for judge
+    # behavior. Its aggregate is stored in evaluator_health and never mixed into
+    # production judgments or target-model drift windows.
+    if args.judge_sentinel_file:
+        from verdict_eval.judge_health import (
+            evaluate_judge_health,
+            load_sentinel_set,
+        )
+
+        try:
+            set_name, sentinels = load_sentinel_set(args.judge_sentinel_file)
+            health = evaluate_judge_health(
+                judge,
+                sentinels,
+                set_name=set_name,
+                minimum_labels=args.judge_health_min_labels,
+                agreement_threshold=args.judge_health_threshold,
+            )
+        except (OSError, ValueError) as exc:
+            print(f"ERROR: invalid judge sentinel set: {exc}")
+            return 2
+        storage.insert_evaluator_health(health)
+        low = health.confidence_low or 0.0
+        high = health.confidence_high or 0.0
+        print(
+            f"Judge health ({health.sentinel_set_name}): {health.status.value}; "
+            f"agreement={health.correct_labels}/{health.total_labels} "
+            f"({health.agreement:.1%}, 95% CI {low:.1%}-{high:.1%}); "
+            f"errors={health.error_count}."
+        )
+        print(
+            "  Sentinel agreement is monitored separately from production drift; "
+            "it cannot rule out silent behavior changes outside the anchor set."
+        )
+        if health.status.value != "healthy":
+            print(
+                "ERROR: production judging and drift detection are blocked because "
+                f"judge health is {health.status.value}, not healthy."
+            )
+            storage.close()
+            return 2
 
     def matches_current_evaluator(judgment) -> bool:
         """Keep one statistical run on one judge/rubric definition."""
         return (
-            judgment.judge_models == [args.judge_model]
-            and judgment.rubric_name == judge.rubric.name
-            and judgment.rubric_version == judge.rubric.version
+            judgment.evaluator_provider
+            == current_evaluator["evaluator_provider"]
+            and judgment.judge_models == current_evaluator["judge_models"]
+            and judgment.rubric_name == current_evaluator["rubric_name"]
+            and judgment.rubric_version == current_evaluator["rubric_version"]
+            and judgment.evaluator_config == current_evaluator["evaluator_config"]
+            and judgment.expected_dimensions
+            == current_evaluator["expected_dimensions"]
+            and judgment.evaluator_fingerprint
+            == current_evaluator["evaluator_fingerprint"]
         )
 
     # Re-runs top up only the current evaluator definition. A judgment from a
     # different model or rubric is valid historical evidence, but pooling it
     # into this run would change the measuring instrument mid-window.
-    already_judged: set[str] = set()
+    latest_existing_by_trace = {}
     for cid in set(t.cluster_id for t in judgeable if t.cluster_id):
         for existing in storage.list_judgments_for_cluster(cid, limit=10**9):
-            if matches_current_evaluator(existing):
-                already_judged.add(existing.trace_id)
+            if not matches_current_evaluator(existing):
+                continue
+            previous = latest_existing_by_trace.get(existing.trace_id)
+            if previous is None or (existing.created_at, existing.judgment_id) > (
+                previous.created_at,
+                previous.judgment_id,
+            ):
+                latest_existing_by_trace[existing.trace_id] = existing
+    already_judged = {
+        trace_id
+        for trace_id, judgment in latest_existing_by_trace.items()
+        if judgment.status.value == "completed"
+    }
 
     if args.sampling == "stratified":
         # Allocate judgments PER (cluster, window) so each cluster reaches the
@@ -394,6 +481,7 @@ def main() -> int:
 
     print(f"Judging {len(to_judge)} traces (sampling={args.sampling})...")
     judged = 0
+    judge_errors = 0
     for t in to_judge:
         try:
             j = judge.judge(query=t.prompt_redacted or "", response=t.response_redacted or "",
@@ -401,8 +489,22 @@ def main() -> int:
             storage.insert_judgment(j)
             judged += 1
         except Exception as e:
-            print(f"  WARN: judge failed for {t.trace_id}: {e}")
-    print(f"  Persisted {judged} judgments.")
+            from verdict.redaction import redact
+            from verdict.schema import Judgment, JudgmentStatus
+
+            safe_error = redact(str(e)) or "judge error"
+            storage.insert_judgment(Judgment(
+                trace_id=t.trace_id,
+                status=JudgmentStatus.ERROR,
+                error=safe_error,
+                **current_evaluator,
+            ))
+            judge_errors += 1
+            print(f"  WARN: judge failed for {t.trace_id}: {safe_error}")
+    print(
+        f"  Persisted {judged} completed judgment(s) and "
+        f"{judge_errors} error record(s)."
+    )
 
     # -- Step 4: compute drift ----------------------------------------------
     from verdict_eval.drift import (
@@ -420,10 +522,17 @@ def main() -> int:
             if not matches_current_evaluator(j):
                 continue
             previous = latest_judgment_for_trace.get(j.trace_id)
-            if previous is None or j.created_at > previous.created_at:
+            if previous is None or (j.created_at, j.judgment_id) > (
+                previous.created_at,
+                previous.judgment_id,
+            ):
                 latest_judgment_for_trace[j.trace_id] = j
                 cluster_for_trace[j.trace_id] = cid
-    all_judgments = list(latest_judgment_for_trace.values())
+    all_judgments = [
+        judgment
+        for judgment in latest_judgment_for_trace.values()
+        if judgment.status.value == "completed"
+    ]
 
     cur_windows, base_windows = split_windows_by_time(
         all_judgments,
@@ -459,9 +568,17 @@ def main() -> int:
     signal_bucket_start = analysis_time.replace(minute=0, second=0, microsecond=0)
     storage.delete_drift_signals_between(
         signal_bucket_start, signal_bucket_start + timedelta(hours=1),
+        evaluator_fingerprint=current_evaluator["evaluator_fingerprint"],
     )
     for sig in signals:
-        sig.signal_id = _signal_id_for_window(sig, args, analysis_time, tenant_scope)
+        sig.evaluator_fingerprint = current_evaluator["evaluator_fingerprint"]
+        sig.signal_id = _signal_id_for_window(
+            sig,
+            args,
+            analysis_time,
+            tenant_scope,
+            current_evaluator["evaluator_fingerprint"],
+        )
         sig.detected_at = analysis_time
         storage.insert_drift_signal(sig)
         print(

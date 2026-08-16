@@ -211,7 +211,7 @@ def default_suite() -> ProbeSuite:
     ]
     return ProbeSuite(
         name="default",
-        version="1.0",
+        version="2.0",
         description=(
             "Default Verdict probe suite — sycophancy, prompt injection, "
             "factuality, format adherence, refusal calibration."

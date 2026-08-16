@@ -38,6 +38,18 @@ def test_stationary_signal_does_not_alert():
     assert signals == []
 
 
+def test_effect_size_must_strictly_clear_configured_threshold():
+    detector = DriftDetector(
+        min_sample_size=30,
+        p_threshold=0.01,
+        effect_size_threshold=1.0,
+    )
+    current = [DriftWindow("c", "quality", [0.0] * 30)]
+    baseline = [DriftWindow("c", "quality", [1.0] * 30)]
+
+    assert detector.detect(current=current, baseline=baseline) == []
+
+
 def test_real_regression_is_detected():
     """Baseline 85% pass-rate, current drops to 50% → must alert."""
     detector = DriftDetector(min_sample_size=30, p_threshold=0.01, effect_size_threshold=0.147)
@@ -165,6 +177,81 @@ def test_benjamini_hochberg_preserves_order():
     assert adj[1] < adj[0]                # tiny p stays tiny
 
 
+def test_benjamini_hochberg_matches_independent_known_answer_vector():
+    """Exact vector calculated from p*m/rank plus reverse cumulative minima."""
+    adjusted = _benjamini_hochberg([0.01, 0.04, 0.03, 0.002])
+    assert adjusted == pytest.approx([0.02, 0.04, 0.04, 0.008], abs=1e-15)
+
+
+def test_detector_requires_both_significance_and_effect_gates(monkeypatch):
+    import verdict_eval.drift as drift
+
+    current = [DriftWindow("c", "d", [0.0] * 30)]
+    baseline = [DriftWindow("c", "d", [1.0] * 30)]
+    detector = DriftDetector(
+        min_sample_size=30,
+        p_threshold=0.01,
+        effect_size_threshold=0.2,
+    )
+
+    monkeypatch.setattr(drift, "fisher_exact", lambda *_args, **_kwargs: (0.0, 0.02))
+    monkeypatch.setattr(drift, "_cliffs_delta", lambda *_args: -1.0)
+    assert detector.detect(current=current, baseline=baseline) == []
+
+    monkeypatch.setattr(drift, "fisher_exact", lambda *_args, **_kwargs: (0.0, 0.001))
+    monkeypatch.setattr(drift, "_cliffs_delta", lambda *_args: -0.1)
+    assert detector.detect(current=current, baseline=baseline) == []
+
+
+def test_detector_gate_boundaries_are_strict(monkeypatch):
+    import verdict_eval.drift as drift
+
+    current = [DriftWindow("c", "d", [0.0] * 30)]
+    baseline = [DriftWindow("c", "d", [1.0] * 30)]
+    detector = DriftDetector(
+        min_sample_size=30,
+        p_threshold=0.01,
+        effect_size_threshold=0.2,
+    )
+
+    monkeypatch.setattr(drift, "_cliffs_delta", lambda *_args: -0.21)
+    monkeypatch.setattr(drift, "fisher_exact", lambda *_args, **_kwargs: (0.0, 0.01))
+    assert detector.detect(current=current, baseline=baseline) == []
+
+    monkeypatch.setattr(drift, "_cliffs_delta", lambda *_args: -0.2)
+    monkeypatch.setattr(drift, "fisher_exact", lambda *_args, **_kwargs: (0.0, 0.009))
+    assert detector.detect(current=current, baseline=baseline) == []
+
+    monkeypatch.setattr(drift, "_cliffs_delta", lambda *_args: -0.200001)
+    monkeypatch.setattr(drift, "fisher_exact", lambda *_args, **_kwargs: (0.0, 0.009))
+    assert len(detector.detect(current=current, baseline=baseline)) == 1
+
+
+def test_detector_applies_known_bh_results_before_emission(monkeypatch):
+    import verdict_eval.drift as drift
+
+    p_values = iter([0.001, 0.02, 0.04])
+    monkeypatch.setattr(
+        drift,
+        "fisher_exact",
+        lambda *_args, **_kwargs: (0.0, next(p_values)),
+    )
+    monkeypatch.setattr(drift, "_cliffs_delta", lambda *_args: -1.0)
+    current = [DriftWindow(f"c{i}", "d", [0.0] * 30) for i in range(3)]
+    baseline = [DriftWindow(f"c{i}", "d", [1.0] * 30) for i in range(3)]
+
+    signals = DriftDetector(
+        min_sample_size=30,
+        p_threshold=0.035,
+        effect_size_threshold=0.2,
+    ).detect(current=current, baseline=baseline)
+
+    assert [signal.cluster_id for signal in signals] == ["c0", "c1"]
+    assert [signal.p_value_adjusted for signal in signals] == pytest.approx(
+        [0.003, 0.03], abs=1e-15
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Unclear-rate drift — a dimension going UNCLEAR is a silent regression
 # --------------------------------------------------------------------------- #
@@ -215,14 +302,12 @@ def test_unclear_drift_detected_when_scored_window_too_small():
 
 
 # --------------------------------------------------------------------------- #
-# Benjamini-Hochberg must run PER test type (exchangeability)
+# Benjamini-Hochberg family is the complete detection invocation
 # --------------------------------------------------------------------------- #
 
-def test_bh_applied_per_test_type():
+def test_bh_pools_mixed_test_types_in_one_detection_family():
     """When the detector mixes binary (Fisher) and continuous (Mann-Whitney)
-    windows, BH must be run separately within each test family, so each
-    window's adjusted p matches running BH on its own subgroup — not on the
-    pooled family."""
+    windows, every eligible scored cell belongs to the same alerting family."""
     detector = DriftDetector(min_sample_size=30, p_threshold=0.99, effect_size_threshold=0.0)
 
     # Two binary windows (Fisher's exact) with clear regressions.
@@ -242,25 +327,18 @@ def test_bh_applied_per_test_type():
     baseline = [bin_base_1, bin_base_2, cont_base_1, cont_base_2]
 
     signals = detector.detect(current=current, baseline=baseline)
-    by_key = {(s.cluster_id, s.statistic_name): s for s in signals}
+    by_cluster = {signal.cluster_id: signal for signal in signals}
+    order = ["cb1", "cb2", "cc1", "cc2"]
+    assert set(by_cluster) == set(order)
+    assert {by_cluster[key].statistic_name for key in order} == {
+        "fisher_exact", "mann_whitney_u",
+    }
 
-    # Collect raw p-values grouped by test type from the emitted signals.
-    fisher = {k: s for k, s in by_key.items() if s.statistic_name == "fisher_exact"}
-    mw = {k: s for k, s in by_key.items() if s.statistic_name == "mann_whitney_u"}
-    assert len(fisher) == 2
-    assert len(mw) == 2
+    raw = [by_cluster[key].p_value for key in order]
+    expected_pooled = _benjamini_hochberg(raw)
+    emitted = [by_cluster[key].p_value_adjusted for key in order]
 
-    # Recompute BH within each subgroup and confirm the adjusted p-values match.
-    fisher_raw = sorted(s.p_value for s in fisher.values())
-    fisher_adj_direct = _benjamini_hochberg(fisher_raw)
-    mw_raw = sorted(s.p_value for s in mw.values())
-    mw_adj_direct = _benjamini_hochberg(mw_raw)
-
-    fisher_adj_emitted = sorted(s.p_value_adjusted for s in fisher.values())
-    mw_adj_emitted = sorted(s.p_value_adjusted for s in mw.values())
-
-    assert np.allclose(fisher_adj_emitted, fisher_adj_direct, atol=1e-9)
-    assert np.allclose(mw_adj_emitted, mw_adj_direct, atol=1e-9)
+    assert np.allclose(emitted, expected_pooled, atol=1e-12)
 
 
 def test_build_windows_populates_n_unclear():

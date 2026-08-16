@@ -1,7 +1,7 @@
 """Pairwise judge — direct A-vs-B comparison with position-swap consistency.
 
 This is the methodology Arena-Hard-Auto and MT-Bench use, and it's what we
-should be using for cross-LLM ranking + judge–human alignment, NOT the
+should be using for cross-LLM ranking + judge-human alignment, NOT the
 independent-rubric-then-compare approach.
 
 The judge sees both responses to the same prompt and returns one of:
@@ -39,7 +39,7 @@ class PairwiseJudgment:
     reasoning_ab: str = ""
     reasoning_ba: str = ""
     judge_model: str = ""
-    component_judgments: list["PairwiseJudgment"] = field(default_factory=list)
+    component_judgments: list[PairwiseJudgment] = field(default_factory=list)
 
 
 SYSTEM_PROMPT = """You are an impartial evaluator comparing two AI assistant responses
@@ -69,7 +69,7 @@ What to focus on:
 - Does it follow any constraints the user stated?
 - Is its reasoning sound?
 
-Write 1–3 sentences of specific reasoning, then end with exactly one line containing:
+Write 1-3 sentences of specific reasoning, then end with exactly one line containing:
 [[A]]   if Assistant A's response is better in at least one concrete way
 [[B]]   if Assistant B's response is better in at least one concrete way
 [[C]]   ONLY if neither response has any identifiable advantage over the other"""

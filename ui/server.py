@@ -14,13 +14,19 @@ writes. The aggregation in build_bundle() mirrors the dashboard's data shape.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import math
 import os
 import sqlite3
 from collections import Counter, defaultdict
-from datetime import datetime
+from copy import deepcopy
+from datetime import datetime, timezone
 from pathlib import Path
+
+from verdict.metrics import ScoreCounts, verdict_label
+from verdict.redaction import redact, redact_structure
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent  # .../verdict
@@ -63,14 +69,125 @@ PROVIDER_ORDER = ["anthropic", "openai", "google"]
 PROVIDER_ALIAS = {"haiku": "anthropic", "gpt": "openai", "gpt-4o-mini": "openai",
                   "gemini": "google", "flash": "google"}
 DIM_ORDER = ["groundedness", "relevance", "completeness", "safety", "instruction_following"]
+MAX_SERIES_POINTS = 1000
 
 
 def _dt(ts: str) -> datetime:
-    return datetime.fromisoformat(ts)
+    normalized = ts[:-1] + "+00:00" if ts.endswith("Z") else ts
+    parsed = datetime.fromisoformat(normalized)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _label_for(provider: str, model: str) -> str:
     return PRETTY.get(model, model or provider)
+
+
+def _provider_key(provider: object) -> str:
+    """Return a chart-safe key without erasing the raw provider value."""
+    if provider in PROVIDER_ORDER:
+        return str(provider)
+    encoded = json.dumps(
+        {"type": type(provider).__name__, "value": provider},
+        sort_keys=True,
+        ensure_ascii=False,
+        default=str,
+    )
+    return f"provider_{hashlib.sha256(encoded.encode('utf-8')).hexdigest()[:16]}"
+
+
+def _row_value(row: sqlite3.Row, key: str, default=None):
+    """Read a column from both current and pre-migration judgment rows."""
+    return row[key] if key in row.keys() else default
+
+
+def _json_value(raw: object, default):
+    if raw in (None, ""):
+        return default
+    try:
+        return json.loads(raw) if isinstance(raw, str) else raw
+    except (TypeError, json.JSONDecodeError):
+        return default
+
+
+def _evaluator_identity(row: sqlite3.Row) -> dict:
+    """Build a stable evaluator discriminator, including legacy rows.
+
+    The August dashboard blocker can already separate model/rubric definitions.
+    Newer schema fields are included whenever present so complete identities
+    never collapse into historical incomplete identities.
+    """
+    models = _json_value(_row_value(row, "judge_models_json"), [])
+    config = _json_value(_row_value(row, "evaluator_config_json"), {})
+    expected_dimensions = _json_value(_row_value(row, "expected_dimensions_json"), [])
+    provider = _row_value(row, "evaluator_provider", "") or ""
+    fingerprint = _row_value(row, "evaluator_fingerprint", "") or ""
+    canonical = {
+        "provider": provider,
+        "models": models if isinstance(models, list) else [],
+        "rubricName": _row_value(row, "rubric_name", "default") or "default",
+        "rubricVersion": _row_value(row, "rubric_version", "1") or "1",
+        "config": config if isinstance(config, dict) else {},
+        "expectedDimensions": (
+            expected_dimensions if isinstance(expected_dimensions, list) else []
+        ),
+        "fingerprint": fingerprint,
+    }
+    complete = bool(
+        provider
+        and fingerprint
+        and canonical["models"]
+        and canonical["expectedDimensions"]
+    )
+    encoded = json.dumps(canonical, sort_keys=True, separators=(",", ":"))
+    identity_id = hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:20]
+    model_label = "+".join(str(model) for model in canonical["models"]) or "unknown judge"
+    rubric_label = f"{canonical['rubricName']} v{canonical['rubricVersion']}"
+    identity_suffix = (
+        f" · fp {fingerprint[:8]}"
+        if complete
+        else " · historical identity incomplete"
+    )
+    return {
+        "id": identity_id,
+        "provider": provider or None,
+        "models": canonical["models"],
+        "rubricName": canonical["rubricName"],
+        "rubricVersion": canonical["rubricVersion"],
+        "fingerprint": fingerprint or None,
+        "config": canonical["config"],
+        "expectedDimensions": canonical["expectedDimensions"],
+        "complete": complete,
+        "label": f"{model_label} · {rubric_label}{identity_suffix}",
+    }
+
+
+def _score_rate(counts: Counter) -> float | None:
+    """Canonical PASS / (PASS + FAIL), excluding every unknown state."""
+    rate = ScoreCounts(
+        passed=counts.get("pass", 0),
+        failed=counts.get("fail", 0),
+        unclear=counts.get("unclear", 0),
+    ).pass_rate
+    return round(100 * rate, 1) if rate is not None else None
+
+
+def _table_exists(cur: sqlite3.Cursor, table: str) -> bool:
+    return bool(cur.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (table,),
+    ).fetchone())
+
+
+def _round_or_none(value: object, digits: int) -> float | None:
+    if value is None:
+        return None
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    return round(numeric, digits) if math.isfinite(numeric) else None
 
 
 def _signal_provider(
@@ -78,13 +195,16 @@ def _signal_provider(
     provider_keys: set[str],
     cluster_providers: dict[str, set[str]],
 ) -> str | None:
-    if alias in PROVIDER_ALIAS:
-        return PROVIDER_ALIAS[alias]
     if alias in provider_keys:
         return alias
 
     providers = cluster_providers.get(alias, set())
-    return next(iter(providers)) if len(providers) == 1 else None
+    if providers:
+        return next(iter(providers)) if len(providers) == 1 else None
+    if alias in PROVIDER_ALIAS:
+        mapped = PROVIDER_ALIAS[alias]
+        return mapped if mapped in provider_keys else None
+    return None
 
 
 def resolve_db() -> Path:
@@ -101,10 +221,17 @@ def resolve_db() -> Path:
 # --------------------------------------------------------------------------- #
 #  Aggregation — produces the exact shape the dashboard consumes
 # --------------------------------------------------------------------------- #
-def build_bundle(db_path: str | os.PathLike) -> dict:
+def build_bundle(
+    db_path: str | os.PathLike,
+    *,
+    evaluator_id: str | None = None,
+) -> dict:
     path = str(db_path)
     try:
-        return _build_from_connection(sqlite3.connect(f"file:{path}?mode=ro", uri=True))
+        return _build_from_connection(
+            sqlite3.connect(f"file:{path}?mode=ro", uri=True),
+            evaluator_id=evaluator_id,
+        )
     except sqlite3.OperationalError as exc:
         if "unable to open database file" not in str(exc).lower():
             raise
@@ -116,14 +243,19 @@ def build_bundle(db_path: str | os.PathLike) -> dict:
         _log.warning("read-only SQLite URI failed; retrying with query-only connection: %s", exc)
         con = sqlite3.connect(path)
         con.execute("PRAGMA query_only = ON")
-        return _build_from_connection(con)
+        return _build_from_connection(con, evaluator_id=evaluator_id)
 
 
-def _build_from_connection(con: sqlite3.Connection) -> dict:
+def _build_from_connection(
+    con: sqlite3.Connection,
+    *,
+    evaluator_id: str | None = None,
+) -> dict:
     con.row_factory = sqlite3.Row
     cur = con.cursor()
     try:
-        return _build(cur)
+        bundle = redact_structure(_build(cur, evaluator_id=evaluator_id))
+        return bundle if isinstance(bundle, dict) else {}
     finally:
         con.close()
 
@@ -154,96 +286,356 @@ def _cluster_health(cluster_ids: list[str | None], min_sample_size: int = 30) ->
     }
 
 
-def _build(cur) -> dict:
+def _empty_bundle() -> dict:
+    return {
+        "meta": {
+            "runStart": None,
+            "durationHours": 0,
+            "totalTraces": 0,
+            "totalJudged": 0,
+            "totalCost": None,
+            "totalCostStatus": "unavailable",
+            "regressionHour": 0,
+            "providers": 0,
+            "clusters": 0,
+        },
+        "providers": [],
+        "clusters": [],
+        "driftSignals": [],
+        "clusterHealth": _cluster_health([]),
+        "evaluation": {
+            "status": "empty",
+            "selectedId": None,
+            "availableIdentities": [],
+            "driftStatus": "empty",
+            "unattributedDriftSignals": 0,
+        },
+        "evaluatorHealth": [],
+        "scoreCoverage": {
+            "pass": 0,  # nosec B105
+            "fail": 0,
+            "unclear": 0,
+            "missing": 0,
+            "error": 0,
+            "evaluable": 0,
+        },
+        "dimensionOverall": [],
+        "tsRows": [],
+        "passrate": [],
+        "clusterPassrate": [],
+        "haikuDim": [],
+        "focusProvider": None,
+        "focusProviderLabel": None,
+        "samples": [],
+        "providerDimension": [],
+    }
+
+
+def _build(cur, *, evaluator_id: str | None = None) -> dict:
+    if not _table_exists(cur, "traces"):
+        return _empty_bundle()
     t0row = cur.execute("SELECT MIN(started_at) m, MAX(started_at) x FROM traces").fetchone()
     if not t0row or not t0row["m"]:
-        # empty DB — return a minimal, valid-but-empty bundle
-        return {"meta": {"runStart": None, "durationHours": 0, "totalTraces": 0,
-                         "totalJudged": 0, "totalCost": None,
-                         "totalCostStatus": "unavailable", "regressionHour": 0,
-                         "providers": 0, "clusters": 0},
-                "providers": [], "clusters": [], "driftSignals": [],
-                "clusterHealth": _cluster_health([]),
-                "dimensionOverall": [], "tsRows": [], "passrate": [], "haikuDim": [],
-                "samples": [], "providerDimension": []}
+        return _empty_bundle()
     t0, tmax = _dt(t0row["m"]), _dt(t0row["x"])
+    trace_columns = {
+        row["name"] for row in cur.execute("PRAGMA table_info(traces)")
+    }
+    cluster_select = (
+        "cluster_id" if "cluster_id" in trace_columns else "NULL AS cluster_id"
+    )
 
     # trace_id -> (provider, started_at) and provider model
-    tp, ttime, model_of = {}, {}, {}
-    for r in cur.execute("SELECT trace_id, provider, request_model, started_at FROM traces"):
-        tp[r["trace_id"]] = r["provider"]
+    tp, ttime, tcluster, model_of, models_of, raw_provider_of = (
+        {}, {}, {}, {}, defaultdict(set), {}
+    )
+    for r in cur.execute(
+        # ``cluster_select`` is selected from the two literals above; it never
+        # contains request data or a database value.
+        "SELECT trace_id, provider, request_model, started_at, "
+        f"{cluster_select} FROM traces"  # nosec B608
+    ):
+        provider_key = _provider_key(r["provider"])
+        tp[r["trace_id"]] = provider_key
         ttime[r["trace_id"]] = r["started_at"]
-        model_of.setdefault(r["provider"], r["request_model"])
+        tcluster[r["trace_id"]] = r["cluster_id"]
+        models_of[provider_key].add(r["request_model"])
+        raw_provider_of.setdefault(provider_key, r["provider"])
+    for provider_key, models in models_of.items():
+        known_models = sorted(str(model) for model in models if model not in (None, ""))
+        model_of[provider_key] = (
+            known_models[0]
+            if len(known_models) == 1
+            else f"multiple models ({len(known_models)})"
+            if known_models
+            else ""
+        )
 
-    # judgments -> per provider / per dimension tallies + per-trace dims
+    # Group persisted judgments by evaluator identity before calculating any
+    # score. Multiple identities require an explicit API/UI selection.
+    identity_rows: list[tuple[dict, sqlite3.Row]] = []
+    identity_by_id: dict[str, dict] = {}
+    judgment_rows = (
+        cur.execute("SELECT * FROM judgments")
+        if _table_exists(cur, "judgments")
+        else ()
+    )
+    for row in judgment_rows:
+        identity = _evaluator_identity(row)
+        identity_by_id.setdefault(identity["id"], identity)
+        identity_rows.append((identity, row))
+    available_identities = sorted(
+        identity_by_id.values(), key=lambda identity: (identity["label"], identity["id"])
+    )
+
+    selected_id = evaluator_id
+    if selected_id is not None and selected_id not in identity_by_id:
+        evaluation_status = "invalid_selection"
+        selected_id = None
+    elif selected_id is not None:
+        evaluation_status = "selected"
+    elif len(available_identities) == 1:
+        selected_id = available_identities[0]["id"]
+        evaluation_status = "selected"
+    elif available_identities:
+        evaluation_status = "selection_required"
+    else:
+        evaluation_status = "empty"
+    evaluation = {
+        "status": evaluation_status,
+        "selectedId": selected_id,
+        # Do not expose aliased mutable containers in two response locations.
+        # Besides being surprising to clients, shared graphs are rejected by
+        # the redaction boundary to prevent exponential serialization.
+        "selectedIdentity": deepcopy(identity_by_id.get(selected_id)),
+        "availableIdentities": available_identities,
+    }
+
+    # Fixed human-labeled sentinel agreement is independent judge-health
+    # evidence. Historical databases may predate this table, so absence means
+    # "not monitored", never zero agreement.
+    evaluator_health = []
+    selected_identity = identity_by_id.get(selected_id)
+    selected_fingerprint = (
+        selected_identity.get("fingerprint") if selected_identity else None
+    )
+    has_drift_table = _table_exists(cur, "drift_signals")
+    drift_columns = (
+        {row["name"] for row in cur.execute("PRAGMA table_info(drift_signals)")}
+        if has_drift_table
+        else set()
+    )
+    drift_signal_count = (
+        cur.execute("SELECT COUNT(*) AS n FROM drift_signals").fetchone()["n"]
+        if has_drift_table
+        else 0
+    )
+    if has_drift_table and "evaluator_fingerprint" in drift_columns:
+        unattributed_drift = cur.execute(
+            """SELECT COUNT(*) AS n FROM drift_signals
+                 WHERE evaluator_fingerprint IS NULL OR evaluator_fingerprint = ''"""
+        ).fetchone()["n"]
+    else:
+        unattributed_drift = drift_signal_count
+    if not drift_signal_count:
+        drift_status = "empty"
+    elif selected_id is None:
+        drift_status = evaluation_status
+    elif not selected_fingerprint or "evaluator_fingerprint" not in drift_columns:
+        drift_status = "historical_unattributed"
+    else:
+        drift_status = "selected"
+    evaluation.update({
+        "driftStatus": drift_status,
+        "unattributedDriftSignals": unattributed_drift,
+    })
+    has_health_table = _table_exists(cur, "evaluator_health")
+    if selected_fingerprint and has_health_table:
+        for row in cur.execute(
+            """SELECT * FROM evaluator_health
+                 WHERE evaluator_fingerprint = ?
+                 ORDER BY evaluated_at DESC LIMIT 30""",
+            (selected_fingerprint,),
+        ):
+            evaluator_health.append({
+                "id": row["health_id"],
+                "evaluatedAt": row["evaluated_at"],
+                "sentinelSetName": row["sentinel_set_name"] or "",
+                "sentinelSetFingerprint": row["sentinel_set_fingerprint"],
+                "correctLabels": row["correct_labels"],
+                "totalLabels": row["total_labels"],
+                "agreement": (
+                    round(100 * row["agreement"], 1)
+                    if row["agreement"] is not None else None
+                ),
+                "confidenceLow": (
+                    round(100 * row["confidence_low"], 1)
+                    if row["confidence_low"] is not None else None
+                ),
+                "confidenceHigh": (
+                    round(100 * row["confidence_high"], 1)
+                    if row["confidence_high"] is not None else None
+                ),
+                "status": row["status"],
+                "errorCount": row["error_count"],
+            })
+
+    # A trace can have retries or historical duplicate rows for one evaluator.
+    # Latest (created_at, judgment_id) wins, independent of insertion/scan order.
+    latest_row_by_trace: dict[str, sqlite3.Row] = {}
+    if selected_id is not None:
+        for identity, row in identity_rows:
+            if identity["id"] != selected_id:
+                continue
+            previous = latest_row_by_trace.get(row["trace_id"])
+            row_key = (row["created_at"] or "", row["judgment_id"] or "")
+            if previous is None:
+                latest_row_by_trace[row["trace_id"]] = row
+                continue
+            previous_key = (
+                previous["created_at"] or "",
+                previous["judgment_id"] or "",
+            )
+            if row_key > previous_key:
+                latest_row_by_trace[row["trace_id"]] = row
+
+    # Selected judgments -> provider/dimension tallies and per-trace detail.
     dim_overall = defaultdict(Counter)
     prov_dim = defaultdict(lambda: defaultdict(Counter))
+    score_coverage = Counter({
+        "pass": 0, "fail": 0, "unclear": 0,  # nosec B105
+        "missing": 0, "error": 0, "evaluable": 0,
+    })
     judg_by_trace = {}
-    for r in cur.execute("SELECT trace_id, dimensions_json, judge_models_json FROM judgments"):
-        dims = json.loads(r["dimensions_json"])
-        prov = tp.get(r["trace_id"], "?")
-        judg_by_trace[r["trace_id"]] = {
-            "judges": json.loads(r["judge_models_json"] or "[]"),
-            "dims": [{"name": d["name"], "verdict": d["verdict"], "reasoning": d.get("reasoning", "")} for d in dims],
+    for trace_id, row in latest_row_by_trace.items():
+        status = (_row_value(row, "status", "completed") or "completed").lower()
+        if status == "error":
+            score_coverage["error"] += 1
+            continue
+        dims_raw = _json_value(row["dimensions_json"], [])
+        dims_raw = dims_raw if isinstance(dims_raw, list) else []
+        expected = _json_value(_row_value(row, "expected_dimensions_json"), [])
+        if not isinstance(expected, list) or not expected:
+            expected = [d.get("name") for d in dims_raw if isinstance(d, dict) and d.get("name")]
+        normalized_dims = []
+        present_names = set()
+        nameless_unclear = 0
+        prov = tp.get(trace_id, "__provider_unknown__")
+        for dimension in dims_raw:
+            if not isinstance(dimension, dict) or not dimension.get("name"):
+                score_coverage["unclear"] += 1
+                nameless_unclear += 1
+                continue
+            name = str(dimension["name"])
+            verdict = verdict_label(dimension.get("verdict", "unclear")).lower()
+            present_names.add(name)
+            normalized_dims.append({
+                "name": name,
+                "verdict": verdict,
+                "reasoning": redact(str(dimension.get("reasoning", ""))) or "",
+            })
+            dim_overall[name][verdict] += 1
+            prov_dim[prov][name][verdict] += 1
+            score_coverage[verdict] += 1
+        score_coverage["missing"] += len(set(expected) - present_names)
+        trace_counts = Counter(dimension["verdict"] for dimension in normalized_dims)
+        trace_status = (
+            "fail" if trace_counts["fail"]
+            else "unclear" if trace_counts["unclear"] or nameless_unclear or set(expected) - present_names
+            else "pass" if trace_counts["pass"]
+            else "unavailable"
+        )
+        judg_by_trace[trace_id] = {
+            "judges": _json_value(row["judge_models_json"], []),
+            "dims": normalized_dims,
+            "summary": {
+                "status": trace_status,
+                "pass": trace_counts["pass"],
+                "fail": trace_counts["fail"],
+                "unclear": trace_counts["unclear"] + nameless_unclear,
+                "missing": len(set(expected) - present_names),
+                "passRate": _score_rate(trace_counts),
+            },
         }
-        for d in dims:
-            dim_overall[d["name"]][d["verdict"]] += 1
-            prov_dim[prov][d["name"]][d["verdict"]] += 1
+    score_coverage["evaluable"] = score_coverage["pass"] + score_coverage["fail"]
 
-    keys = _provider_order({r["provider"] for r in cur.execute("SELECT DISTINCT provider FROM traces")})
+    keys = _provider_order(set(raw_provider_of))
     # Providers present in each cluster. Used ONLY to attribute a drift signal
     # to a provider when the attribution is factual (cluster is single-provider).
     # Drift is detected per (cluster, dimension) and may span providers; the
     # detector does not establish a causal provider, so we never guess one.
     cluster_providers: dict[str, set] = {}
-    for r in cur.execute(
-        """SELECT DISTINCT cluster_id, provider
-             FROM traces
-            WHERE cluster_id IS NOT NULL AND cluster_id <> ''"""
-    ):
-        cluster_providers.setdefault(r["cluster_id"], set()).add(r["provider"])
+    if "cluster_id" in trace_columns:
+        for r in cur.execute(
+            """SELECT DISTINCT cluster_id, provider
+                 FROM traces
+                WHERE cluster_id IS NOT NULL AND cluster_id <> ''"""
+        ):
+            cluster_providers.setdefault(r["cluster_id"], set()).add(
+                _provider_key(r["provider"])
+            )
 
     # ---- providers ----
     providers = []
     for p in keys:
+        raw_provider = raw_provider_of[p]
         r = cur.execute(
             """SELECT COUNT(*) n,
                       SUM(CASE WHEN error IS NOT NULL AND error<>'' THEN 1 ELSE 0 END) errors,
                       AVG(latency_ms) lat, SUM(input_tokens) it, SUM(output_tokens) ot,
                       SUM(cost_usd) cost,
                       SUM(CASE WHEN cost_usd IS NULL THEN 1 ELSE 0 END) cost_unknown
-               FROM traces WHERE provider=?""", (p,)).fetchone()
-        pas = tot = 0
+               FROM traces WHERE provider IS ?""", (raw_provider,)).fetchone()
+        provider_counts = Counter()
         for c in prov_dim[p].values():
             for v, cnt in c.items():
-                tot += cnt
-                if v == "pass":
-                    pas += cnt
+                provider_counts[v] += cnt
+        judged = provider_counts["pass"] + provider_counts["fail"]
         providers.append({
-            "key": p, "label": _label_for(p, model_of.get(p, "")), "model": model_of.get(p, ""),
+            "key": p, "rawProvider": raw_provider,
+            "label": _label_for(str(raw_provider or ""), model_of.get(p, "")),
+            "model": model_of.get(p, ""),
+            "models": sorted(
+                str(model) for model in models_of[p] if model not in (None, "")
+            ),
             "n": r["n"], "errors": r["errors"] or 0,
             "errorRate": round(100 * (r["errors"] or 0) / r["n"], 1) if r["n"] else 0.0,
             "avgLatency": round((r["lat"] or 0) / 1000, 2),
             "inTok": r["it"] or 0, "outTok": r["ot"] or 0,
             "cost": round(r["cost"], 4) if r["cost"] is not None else None,
             "costUnknown": r["cost_unknown"] or 0,
-            "passRate": round(100 * pas / tot, 1) if tot else None, "judged": tot,
+            "passRate": _score_rate(provider_counts), "judged": judged,
+            "unclear": provider_counts["unclear"],
         })
 
     # ---- clusters ----
-    clusters = [dict(cluster_id=r["cluster_id"], n=r["n"]) for r in cur.execute(
-        """SELECT cluster_id, COUNT(*) n FROM traces
-           WHERE cluster_id IS NOT NULL AND cluster_id <> ''
-           GROUP BY cluster_id ORDER BY n DESC"""
-    )]
-    cluster_ids = [r["cluster_id"] for r in cur.execute("SELECT cluster_id FROM traces")]
+    clusters = (
+        [dict(cluster_id=r["cluster_id"], n=r["n"]) for r in cur.execute(
+            """SELECT cluster_id, COUNT(*) n FROM traces
+               WHERE cluster_id IS NOT NULL AND cluster_id <> ''
+               GROUP BY cluster_id ORDER BY n DESC"""
+        )]
+        if "cluster_id" in trace_columns
+        else []
+    )
+    cluster_ids = (
+        [r["cluster_id"] for r in cur.execute("SELECT cluster_id FROM traces")]
+        if "cluster_id" in trace_columns
+        else []
+    )
     cluster_health = _cluster_health(cluster_ids)
 
     # ---- drift signals ----
     drift = []
-    for s in cur.execute("SELECT * FROM drift_signals"):
+    drift_rows = []
+    if selected_fingerprint and "evaluator_fingerprint" in drift_columns:
+        drift_rows = cur.execute(
+            "SELECT * FROM drift_signals WHERE evaluator_fingerprint = ?",
+            (selected_fingerprint,),
+        )
+    for s in drift_rows:
         s = dict(s)
-        alias = s["cluster_id"]
+        alias = s.get("cluster_id") or "unknown cluster"
         # Attribute a provider only when it is a fact, not an inference:
         #   1. demo alias mapping (cluster IS a provider bucket), or
         #   2. cluster_id is itself a provider key, or
@@ -251,21 +643,35 @@ def _build(cur) -> dict:
         # Otherwise attribute to the cluster itself — the detector's real unit.
         prov = _signal_provider(alias, set(keys), cluster_providers)
         drift.append({
-            "id": s["signal_id"][:8], "dimension": s["dimension"], "direction": s["direction"],
+            "id": s.get("signal_id") or "unknown-signal", "clusterId": alias,
+            "dimension": s.get("dimension") or "unknown",
+            "direction": s.get("direction") or "change",
             "provider": prov or "",
             "providerLabel": (_label_for(prov, model_of.get(prov, "")) if prov
                               else f"cluster {alias} (mixed providers)"),
-            "statName": s["statistic_name"], "stat": round(s["statistic_value"], 1),
-            "p": s["p_value"], "pAdj": s["p_value_adjusted"],
-            "cliffsDelta": round(s["effect_size_cliffs_delta"], 3) if s["effect_size_cliffs_delta"] is not None else None,
-            "cohensD": round(s["effect_size_cohens_d"], 2),
-            "nCur": s["sample_size_current"], "nBase": s["sample_size_baseline"],
-            "layers": json.loads(s["contributing_layers_json"] or "[]"),
-            "exampleTraceIds": json.loads(s["example_trace_ids_json"] or "[]"),
-            "action": s["recommended_action"], "detectedAt": s["detected_at"],
+            "statName": s.get("statistic_name") or "unknown",
+            "stat": _round_or_none(
+                s.get("statistic_value"),
+                6,
+            ),
+            "p": s.get("p_value"), "pAdj": s.get("p_value_adjusted"),
+            "cliffsDelta": _round_or_none(s.get("effect_size_cliffs_delta"), 3),
+            "cohensD": _round_or_none(s.get("effect_size_cohens_d"), 2),
+            "nCur": s.get("sample_size_current"),
+            "nBase": s.get("sample_size_baseline"),
+            "layers": _json_value(s.get("contributing_layers_json"), []),
+            "exampleTraceIds": _json_value(s.get("example_trace_ids_json"), []),
+            "action": s.get("recommended_action") or "Review the affected traces.",
+            "detectedAt": s.get("detected_at"),
         })
     # Sort by the primary effect size (Cliff's δ) when present, else Cohen's d.
-    drift.sort(key=lambda x: x["cliffsDelta"] if x["cliffsDelta"] is not None else x["cohensD"])
+    drift.sort(key=lambda x: (
+        x["cliffsDelta"]
+        if x["cliffsDelta"] is not None
+        else x["cohensD"]
+        if x["cohensD"] is not None
+        else 0.0
+    ))
 
     # ---- dimension overall ----
     dims_present = [d for d in DIM_ORDER if d in dim_overall] + \
@@ -274,7 +680,7 @@ def _build(cur) -> dict:
     for d in dims_present:
         c = dim_overall[d]
         tot = sum(c.values())
-        dimensionOverall.append({"dim": d, "passRate": round(100 * c.get("pass", 0) / tot, 1) if tot else None,
+        dimensionOverall.append({"dim": d, "passRate": _score_rate(c),
                                  "pass": c.get("pass", 0), "fail": c.get("fail", 0),
                                  "unclear": c.get("unclear", 0), "tot": tot})
 
@@ -284,8 +690,7 @@ def _build(cur) -> dict:
         row = {"dim": d}
         for p in keys:
             c = prov_dim[p].get(d, {})
-            tot = sum(c.values())
-            row[p] = round(100 * c.get("pass", 0) / tot, 1) if tot else None
+            row[p] = _score_rate(c)
         providerDimension.append(row)
 
     # ---- time series: 30-min bins ----
@@ -293,15 +698,16 @@ def _build(cur) -> dict:
     bins = defaultdict(lambda: defaultdict(lambda: {"n": 0, "err": 0, "lat": []}))
     for r in cur.execute("SELECT provider, started_at, latency_ms, error FROM traces"):
         b = int((_dt(r["started_at"]) - t0).total_seconds() // BIN)
-        cell = bins[r["provider"]][b]
+        cell = bins[_provider_key(r["provider"])][b]
         cell["n"] += 1
         if r["error"]:
             cell["err"] += 1
-        if r["latency_ms"] is not None:
-            cell["lat"].append(r["latency_ms"])
-    maxbin = max((b for p in bins for b in bins[p]), default=0)
+        latency = _round_or_none(r["latency_ms"], 6)
+        if latency is not None:
+            cell["lat"].append(latency)
+    observed_bins = sorted({b for p in bins for b in bins[p]})[-MAX_SERIES_POINTS:]
     tsRows = []
-    for b in range(maxbin + 1):
+    for b in observed_bins:
         row = {"hour": round(b * 0.5, 1)}
         for p in keys:
             cell = bins[p].get(b)
@@ -315,48 +721,77 @@ def _build(cur) -> dict:
                 row[f"{p}_n"] = 0
         tsRows.append(row)
 
-    # ---- pass rate over time (hourly, all dims) + per-dim for first provider w/ drift ----
+    # ---- hourly pass rate by provider and cluster + per-dim drift focus ----
     HB = 60 * 60
-    pr = defaultdict(lambda: defaultdict(lambda: {"p": 0, "t": 0}))
-    dim_hr = defaultdict(lambda: defaultdict(lambda: {"p": 0, "t": 0}))
-    focus = drift[0]["provider"] if drift else (keys[0] if keys else None)
+    pr = defaultdict(lambda: defaultdict(Counter))
+    cluster_pr = defaultdict(lambda: defaultdict(Counter))
+    dim_hr = defaultdict(lambda: defaultdict(Counter))
+    focus = (drift[0].get("provider") or keys[0]) if drift and keys else (
+        keys[0] if keys else None
+    )
+    focus_provider_label = (
+        _label_for(
+            str(raw_provider_of.get(focus) or ""),
+            model_of.get(focus, ""),
+        )
+        if focus is not None
+        else None
+    )
     for tid, j in judg_by_trace.items():
         st = ttime.get(tid)
         if not st:
             continue
         prov = tp.get(tid)
+        cluster = tcluster.get(tid)
         hb = int((_dt(st) - t0).total_seconds() // HB)
         for d in j["dims"]:
-            pr[prov][hb]["t"] += 1
-            if d["verdict"] == "pass":
-                pr[prov][hb]["p"] += 1
+            verdict = d["verdict"]
+            pr[prov][hb][verdict] += 1
+            if cluster:
+                cluster_pr[cluster][hb][verdict] += 1
             if prov == focus:
-                dim_hr[d["name"]][hb]["t"] += 1
-                if d["verdict"] == "pass":
-                    dim_hr[d["name"]][hb]["p"] += 1
-    maxh = max((h for p in pr for h in pr[p]), default=0)
+                dim_hr[d["name"]][hb][verdict] += 1
+    observed_hours = sorted({h for p in pr for h in pr[p]})[-MAX_SERIES_POINTS:]
     passrate = []
-    for h in range(maxh + 1):
+    for h in observed_hours:
         row = {"hour": h}
         for p in keys:
             cell = pr[p].get(h)
-            row[p] = round(100 * cell["p"] / cell["t"], 1) if cell and cell["t"] else None
+            row[p] = _score_rate(cell) if cell else None
         passrate.append(row)
+    clusterPassrate = []
+    if len(keys) == 1:
+        cluster_keys = [cluster["cluster_id"] for cluster in clusters]
+        for h in observed_hours:
+            row = {"hour": h}
+            for cluster in cluster_keys:
+                cell = cluster_pr[cluster].get(h)
+                row[cluster] = _score_rate(cell) if cell else None
+            clusterPassrate.append(row)
     haikuDim = []
-    for h in range(maxh + 1):
+    for h in observed_hours:
         row = {"hour": h}
-        for d in DIM_ORDER:
+        for d in dims_present:
             cell = dim_hr[d].get(h)
-            row[d] = round(100 * cell["p"] / cell["t"], 1) if cell and cell["t"] else None
+            row[d] = _score_rate(cell) if cell else None
         haikuDim.append(row)
 
     # ---- sample traces for the explorer ----
     rows = [dict(r) for r in cur.execute(
-        """SELECT trace_id, provider, request_model, cluster_id, input_tokens, output_tokens,
-                  latency_ms, cost_usd, finish_reason, error, started_at, prompt_redacted, response_redacted
-           FROM traces WHERE prompt_redacted IS NOT NULL AND prompt_redacted<>'' ORDER BY started_at""")]
+        # ``cluster_select`` is the same closed-set schema compatibility
+        # expression used above, not user-controlled SQL.
+        "SELECT trace_id, provider, request_model, "
+        f"{cluster_select}, input_tokens, output_tokens, "  # nosec B608
+        "latency_ms, cost_usd, finish_reason, error, started_at, "
+        "prompt_redacted, response_redacted FROM traces "
+        "WHERE prompt_redacted IS NOT NULL AND prompt_redacted<>'' ORDER BY started_at"
+    )]
     errs = [r for r in rows if r["error"]]
-    late = [r for r in rows if r["provider"] == focus and (_dt(r["started_at"]) - t0).total_seconds() > 4 * 3600]
+    late = [
+        r for r in rows
+        if _provider_key(r["provider"]) == focus
+        and (_dt(r["started_at"]) - t0).total_seconds() > 4 * 3600
+    ]
     pick, seen = [], set()
     for r in errs[:4] + late[:6]:
         if r["trace_id"] not in seen:
@@ -371,8 +806,12 @@ def _build(cur) -> dict:
     samples = []
     for r in pick:
         s = dict(r)
+        for content_field in ("prompt_redacted", "response_redacted", "error"):
+            s[content_field] = redact(s.get(content_field))
+        s["providerKey"] = _provider_key(r["provider"])
         s["hour"] = round((_dt(r["started_at"]) - t0).total_seconds() / 3600, 2)
-        s["latency_ms"] = round(r["latency_ms"]) if r["latency_ms"] else None
+        latency = _round_or_none(r["latency_ms"], 0)
+        s["latency_ms"] = int(latency) if latency is not None else None
         if s.get("response_redacted"):
             s["response_redacted"] = s["response_redacted"][:600]
         j = judg_by_trace.get(r["trace_id"])
@@ -403,11 +842,17 @@ def _build(cur) -> dict:
         "providers": providers,
         "clusters": clusters,
         "clusterHealth": cluster_health,
+        "evaluation": evaluation,
+        "evaluatorHealth": evaluator_health,
+        "scoreCoverage": dict(score_coverage),
         "driftSignals": drift,
         "dimensionOverall": dimensionOverall,
         "tsRows": tsRows,
         "passrate": passrate,
+        "clusterPassrate": clusterPassrate,
         "haikuDim": haikuDim,
+        "focusProvider": focus,
+        "focusProviderLabel": focus_provider_label,
         "samples": samples,
         "providerDimension": providerDimension,
     }
@@ -450,14 +895,16 @@ def create_app():
         """
         user = os.environ.get("VERDICT_USER")
         pw = os.environ.get("VERDICT_PASS")
-        if user and pw and _is_gated(request.url.path):
+        if user and pw and request.method != "OPTIONS" and _is_gated(request.url.path):
             header = request.headers.get("authorization", "")
             ok = False
             if header.startswith("Basic "):
                 try:
                     raw = base64.b64decode(header[6:]).decode("utf-8")
                     u, _, p = raw.partition(":")
-                    ok = secrets.compare_digest(u, user) and secrets.compare_digest(p, pw)
+                    user_ok = secrets.compare_digest(u, user)
+                    password_ok = secrets.compare_digest(p, pw)
+                    ok = user_ok & password_ok
                 except Exception:
                     ok = False
             if not ok:
@@ -491,7 +938,7 @@ def create_app():
         return {"status": "ok", "db_configured": db.exists()}
 
     @app.get("/api/data")
-    def data():
+    def data(evaluator: str | None = None):
         db = resolve_db()
         if not db.exists():
             # Do NOT leak the absolute DB path in the HTTP body — log it
@@ -500,7 +947,7 @@ def create_app():
             _log.warning("data unavailable: database not found at %s", db)
             return JSONResponse({"error": "data unavailable"}, status_code=503)
         try:
-            return build_bundle(db)
+            return build_bundle(db, evaluator_id=evaluator)
         except Exception:  # pragma: no cover - defensive: corrupt/locked DB
             _log.exception("failed to build data bundle from %s", db)
             return JSONResponse({"error": "data unavailable"}, status_code=503)
