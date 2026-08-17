@@ -7,13 +7,19 @@ provides an ephemeral PostgreSQL service; these are not mocked SQL tests.
 from __future__ import annotations
 
 import os
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
+import verdict
+import verdict.client as client_module
+from verdict.instrumentors.base import apply_routing_context, persist_trace
 from verdict.schema import (
     DimensionScore,
     DriftDirection,
+    DriftRun,
     DriftSignal,
     EvaluatorHealthRecord,
     EvaluatorHealthStatus,
@@ -23,9 +29,17 @@ from verdict.schema import (
     UserSignalRecord,
     Verdict,
 )
+from verdict.storage import BufferedStorage
 from verdict.storage.postgres import PostgresStorage
+from verdict.trace import span
 
 DSN = os.environ.get("VERDICT_TEST_POSTGRES_DSN")
+if os.environ.get("VERDICT_REQUIRE_POSTGRES_TESTS") == "1" and not DSN:
+    raise RuntimeError(
+        "VERDICT_REQUIRE_POSTGRES_TESTS=1 requires VERDICT_TEST_POSTGRES_DSN; "
+        "refusing to silently skip the live PostgreSQL contract tests"
+    )
+
 pytestmark = [
     pytest.mark.skipif(not DSN, reason="no disposable live Postgres DSN"),
     pytest.mark.filterwarnings("error::DeprecationWarning:psycopg_pool.*"),
@@ -73,6 +87,30 @@ def test_live_postgres_migrates_legacy_tables_before_creating_indexes():
                     contributing_layers JSONB, example_trace_ids JSONB,
                     recommended_action TEXT
                 );
+                CREATE TABLE evaluator_health (
+                    health_id TEXT PRIMARY KEY,
+                    evaluated_at TIMESTAMPTZ NOT NULL,
+                    evaluator_fingerprint TEXT NOT NULL,
+                    sentinel_set_name TEXT,
+                    sentinel_set_fingerprint TEXT NOT NULL,
+                    correct_labels INTEGER NOT NULL,
+                    total_labels INTEGER NOT NULL,
+                    agreement DOUBLE PRECISION,
+                    confidence_low DOUBLE PRECISION,
+                    confidence_high DOUBLE PRECISION,
+                    status TEXT NOT NULL,
+                    error_count INTEGER NOT NULL DEFAULT 0
+                );
+                INSERT INTO evaluator_health (
+                    health_id, evaluated_at, evaluator_fingerprint,
+                    sentinel_set_name, sentinel_set_fingerprint,
+                    correct_labels, total_labels, agreement,
+                    confidence_low, confidence_high, status, error_count
+                ) VALUES (
+                    'legacy-health', '2026-08-16T12:00:00Z',
+                    'legacy-evaluator', 'anchors', 'anchor-set',
+                    200, 229, 0.8733624454, 0.82, 0.91, 'healthy', 0
+                );
                 CREATE TABLE spans (
                     span_id TEXT PRIMARY KEY, name TEXT, trace_id TEXT,
                     started_at TIMESTAMPTZ NOT NULL, ended_at TIMESTAMPTZ,
@@ -97,10 +135,24 @@ def test_live_postgres_migrates_legacy_tables_before_creating_indexes():
                 ("judgments", "evaluator_fingerprint"),
                 ("judgments", "status"),
                 ("drift_signals", "evaluator_fingerprint"),
+                ("drift_signals", "run_id"),
                 ("drift_signals", "effect_size_cliffs_delta"),
                 ("drift_signals", "wasserstein_distance"),
                 ("drift_signals", "psi"),
+                ("evaluator_health", "correct_examples"),
+                ("evaluator_health", "total_examples"),
+                ("evaluator_health", "example_agreement"),
+                ("evaluator_health", "method_version"),
             } <= columns
+
+            [legacy_health] = storage.list_evaluator_health(
+                evaluator_fingerprint="legacy-evaluator"
+            )
+            assert legacy_health.method_version == "1"
+            assert legacy_health.status is EvaluatorHealthStatus.INSUFFICIENT_DATA
+            assert legacy_health.total_examples == 0
+            assert legacy_health.example_agreement is None
+            assert legacy_health.label_agreement is None
 
             trace = Trace(
                 trace_id=f"legacy-upgrade-{uuid4().hex}",
@@ -189,11 +241,14 @@ def test_live_postgres_round_trip_and_mutation_contracts():
             evaluator_fingerprint=fingerprint,
             sentinel_set_name="anchors",
             sentinel_set_fingerprint=f"{prefix}-anchors",
+            correct_examples=30,
+            total_examples=30,
+            example_agreement=1.0,
+            example_confidence_low=0.88,
+            example_confidence_high=1.0,
             correct_labels=30,
             total_labels=30,
-            agreement=1.0,
-            confidence_low=0.88,
-            confidence_high=1.0,
+            label_agreement=1.0,
             status=EvaluatorHealthStatus.HEALTHY,
         )
         storage.insert_evaluator_health(health)
@@ -208,6 +263,7 @@ def test_live_postgres_round_trip_and_mutation_contracts():
             dimension="quality",
             direction=DriftDirection.REGRESSION,
             evaluator_fingerprint=fingerprint,
+            run_id=f"{prefix}-run",
             statistic_name="fisher_exact",
             statistic_value=0.04,
             p_value=0.001,
@@ -219,7 +275,18 @@ def test_live_postgres_round_trip_and_mutation_contracts():
             sample_size_current=30,
             sample_size_baseline=30,
         )
-        storage.insert_drift_signal(signal)
+        run = DriftRun(
+            run_id=signal.run_id,
+            analysis_time=now,
+            completed_at=now + timedelta(seconds=1),
+            evaluator_fingerprint=fingerprint,
+            signal_count=1,
+        )
+        storage.replace_drift_run(run, [signal])
+        snapshot = storage.get_latest_drift_run_snapshot(fingerprint)
+        assert snapshot is not None
+        assert snapshot[0].run_id == run.run_id
+        assert [item.signal_id for item in snapshot[1]] == [signal.signal_id]
         persisted_signal = next(
             item for item in storage.list_drift_signals() if item.signal_id == signal.signal_id
         )
@@ -259,6 +326,7 @@ def test_live_postgres_round_trip_and_mutation_contracts():
             ("evaluator_health", "health_id", f"{prefix}-health"),
             ("cluster_registries", "version", registry_version),
             ("drift_signals", "evaluator_fingerprint", fingerprint),
+            ("drift_runs", "evaluator_fingerprint", fingerprint),
             ("user_signals", "trace_id", trace_id),
             ("spans", "trace_id", trace_id),
             ("judgments", "trace_id", trace_id),
@@ -268,13 +336,134 @@ def test_live_postgres_round_trip_and_mutation_contracts():
         storage.close()
 
 
-def test_live_postgres_span_upsert_retracts_a_failed_trace_link():
-    """The retraction direction (non-NULL -> NULL) on the real backend.
+def test_live_postgres_drift_run_replacement_rolls_back_as_one_transaction():
+    prefix = f"drift-rollback-{uuid4().hex}"
+    fingerprint = f"{prefix}-evaluator"
+    run = DriftRun(
+        run_id=f"{prefix}-run",
+        evaluator_fingerprint=fingerprint,
+        signal_count=1,
+    )
+    original = DriftSignal(
+        signal_id=f"{prefix}-original",
+        evaluator_fingerprint=fingerprint,
+        run_id=run.run_id,
+    )
+    storage = PostgresStorage(DSN, min_pool=1, max_pool=2)
+    try:
+        storage.replace_drift_run(run, [original])
+        replacement_run = DriftRun(
+            run_id=run.run_id,
+            analysis_time=run.analysis_time,
+            completed_at=run.completed_at + timedelta(minutes=1),
+            evaluator_fingerprint=fingerprint,
+            signal_count=1,
+        )
+        malformed = DriftSignal(
+            signal_id=f"{prefix}-malformed",
+            evaluator_fingerprint=fingerprint,
+            run_id=run.run_id,
+            contributing_layers=[object()],
+        )
+
+        with pytest.raises(TypeError):
+            storage.replace_drift_run(replacement_run, [malformed])
+
+        snapshot = storage.get_latest_drift_run_snapshot(fingerprint)
+        assert snapshot is not None
+        assert snapshot[0].completed_at == run.completed_at
+        assert [signal.signal_id for signal in snapshot[1]] == [original.signal_id]
+    finally:
+        storage._exec(
+            "DELETE FROM drift_signals WHERE evaluator_fingerprint = %s",
+            (fingerprint,),
+        )
+        storage._exec(
+            "DELETE FROM drift_runs WHERE evaluator_fingerprint = %s",
+            (fingerprint,),
+        )
+        storage.close()
+
+
+def test_live_postgres_concurrent_runs_cannot_claim_the_same_signal_id():
+    prefix = f"drift-owner-race-{uuid4().hex}"
+    fingerprint = f"{prefix}-evaluator"
+    signal_id = f"{prefix}-shared-signal"
+    storages = [
+        PostgresStorage(DSN, min_pool=1, max_pool=2),
+        PostgresStorage(DSN, min_pool=1, max_pool=2),
+    ]
+    gate = threading.Barrier(3)
+    completed: list[str] = []
+    errors: list[BaseException] = []
+
+    def replace(storage: PostgresStorage, suffix: str) -> None:
+        run_id = f"{prefix}-run-{suffix}"
+        try:
+            gate.wait()
+            storage.replace_drift_run(
+                DriftRun(
+                    run_id=run_id,
+                    evaluator_fingerprint=fingerprint,
+                    signal_count=1,
+                ),
+                [DriftSignal(
+                    signal_id=signal_id,
+                    evaluator_fingerprint=fingerprint,
+                    run_id=run_id,
+                )],
+            )
+            completed.append(run_id)
+        except BaseException as exc:
+            errors.append(exc)
+
+    threads = [
+        threading.Thread(target=replace, args=(storages[0], "a")),
+        threading.Thread(target=replace, args=(storages[1], "b")),
+    ]
+    try:
+        for thread in threads:
+            thread.start()
+        gate.wait()
+        for thread in threads:
+            thread.join(timeout=5)
+
+        assert all(not thread.is_alive() for thread in threads)
+        assert len(completed) == 1
+        assert len(errors) == 1
+        assert isinstance(errors[0], ValueError)
+        assert "another drift run" in str(errors[0])
+        run_rows = storages[0]._fetchall(
+            "SELECT run_id FROM drift_runs WHERE evaluator_fingerprint = %s",
+            (fingerprint,),
+        )
+        assert run_rows == [(completed[0],)]
+        snapshot = storages[0].get_latest_drift_run_snapshot(fingerprint)
+        assert snapshot is not None
+        assert snapshot[0].run_id == completed[0]
+        assert [signal.signal_id for signal in snapshot[1]] == [signal_id]
+    finally:
+        for thread in threads:
+            thread.join(timeout=5)
+        storages[0]._exec(
+            "DELETE FROM drift_signals WHERE evaluator_fingerprint = %s",
+            (fingerprint,),
+        )
+        storages[0]._exec(
+            "DELETE FROM drift_runs WHERE evaluator_fingerprint = %s",
+            (fingerprint,),
+        )
+        for storage in storages:
+            storage.close()
+
+
+def test_live_postgres_span_upsert_can_clear_an_explicit_trace_link():
+    """The non-NULL -> NULL update direction on the real backend.
 
     Only the NULL -> non-NULL direction was covered before. A COALESCE-based
     upsert passes that one and silently keeps a stale link on this one, which
-    would make the "no span points at a trace that never landed" guarantee
-    hold on SQLite/memory but not on Postgres.
+    Explicit links may be cleared when their trace is deleted while another
+    provider Trace still references the same manual span.
     """
     storage = PostgresStorage(DSN)
     try:
@@ -283,30 +472,393 @@ def test_live_postgres_span_upsert_retracts_a_failed_trace_link():
         span_id = f"span-{suffix}"
         storage.insert_trace(Trace(trace_id=trace_id, provider="anthropic"))
 
-        # 1. Span written while its trace link was still unconfirmed.
         storage.insert_span(
             SpanRecord(span_id=span_id, name="retrieve", trace_id=trace_id)
         )
         linked = [s for s in storage.list_spans(limit=500) if s.span_id == span_id]
         assert linked and linked[0].trace_id == trace_id
 
-        # 2. The trace write is acknowledged as failed; the link is retracted.
         storage.insert_span(
             SpanRecord(
                 span_id=span_id,
                 name="retrieve",
                 trace_id=None,
-                attributes={"verdict.link_status": "trace_write_failed"},
             )
         )
-        retracted = [s for s in storage.list_spans(limit=500) if s.span_id == span_id]
-        assert retracted, "span disappeared on retraction"
-        assert retracted[0].trace_id is None, "COALESCE kept a stale trace link"
-        assert (
-            retracted[0].attributes.get("verdict.link_status")
-            == "trace_write_failed"
-        )
+        cleared = [s for s in storage.list_spans(limit=500) if s.span_id == span_id]
+        assert cleared, "span disappeared while clearing its explicit link"
+        assert cleared[0].trace_id is None, "COALESCE kept a stale trace link"
 
         storage.delete_trace(trace_id)
     finally:
         storage.close()
+
+
+def test_live_postgres_prune_removes_expired_standalone_and_orphan_spans():
+    storage = PostgresStorage(DSN)
+    suffix = uuid4().hex[:8]
+    old_standalone = SpanRecord(
+        span_id=f"old-standalone-{suffix}",
+        name="old-standalone",
+        started_at=datetime(2020, 1, 1, tzinfo=timezone.utc),
+    )
+    old_orphan = SpanRecord(
+        span_id=f"old-orphan-{suffix}",
+        name="old-orphan",
+        trace_id=f"missing-trace-{suffix}",
+        started_at=datetime(2020, 2, 1, tzinfo=timezone.utc),
+    )
+    recent_standalone = SpanRecord(
+        span_id=f"recent-standalone-{suffix}",
+        name="recent-standalone",
+        started_at=datetime(2026, 2, 1, tzinfo=timezone.utc),
+    )
+    try:
+        for record in (old_standalone, old_orphan, recent_standalone):
+            storage.insert_span(record)
+
+        assert storage.prune_before(
+            datetime(2021, 1, 1, tzinfo=timezone.utc).isoformat()
+        ) == 0
+
+        persisted = {
+            record.span_id for record in storage.list_spans(limit=500)
+        }
+        assert old_standalone.span_id not in persisted
+        assert old_orphan.span_id not in persisted
+        assert recent_standalone.span_id in persisted
+    finally:
+        for record in (old_standalone, old_orphan, recent_standalone):
+            storage._exec("DELETE FROM spans WHERE span_id = %s", (record.span_id,))
+        storage.close()
+
+
+def test_live_postgres_prune_preserves_span_referenced_by_retained_trace():
+    storage = PostgresStorage(DSN)
+    suffix = uuid4().hex[:8]
+    parent = SpanRecord(
+        span_id=f"retained-parent-{suffix}",
+        name="long-running-parent",
+        started_at=datetime(2020, 1, 1, tzinfo=timezone.utc),
+    )
+    child = Trace(
+        trace_id=f"retained-child-{suffix}",
+        parent_span_id=parent.span_id,
+        started_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+    try:
+        storage.insert_span(parent)
+        storage.insert_trace(child)
+
+        storage.prune_before(datetime(2021, 1, 1, tzinfo=timezone.utc).isoformat())
+
+        persisted = {record.span_id for record in storage.list_spans(limit=500)}
+        assert parent.span_id in persisted
+        assert storage.get_trace(child.trace_id) is not None
+    finally:
+        storage._exec("DELETE FROM traces WHERE trace_id = %s", (child.trace_id,))
+        storage._exec("DELETE FROM spans WHERE span_id = %s", (parent.span_id,))
+        storage.close()
+
+
+def test_live_postgres_delete_clears_explicit_link_but_preserves_shared_span():
+    storage = PostgresStorage(DSN)
+    suffix = uuid4().hex[:8]
+    explicit_id = f"explicit-{suffix}"
+    provider_id = f"provider-{suffix}"
+    parent = SpanRecord(
+        span_id=f"shared-{suffix}",
+        name="shared-parent",
+        trace_id=explicit_id,
+    )
+    try:
+        storage.insert_trace(Trace(trace_id=explicit_id))
+        storage.insert_span(parent)
+        storage.insert_trace(Trace(trace_id=provider_id, parent_span_id=parent.span_id))
+
+        storage.delete_trace(explicit_id)
+
+        [persisted] = [
+            record for record in storage.list_spans(limit=500)
+            if record.span_id == parent.span_id
+        ]
+        assert persisted.trace_id is None
+        assert storage.get_trace(provider_id).parent_span_id == parent.span_id
+    finally:
+        storage._exec("DELETE FROM traces WHERE trace_id = %s", (provider_id,))
+        storage._exec("DELETE FROM spans WHERE span_id = %s", (parent.span_id,))
+        storage.close()
+
+
+def test_live_postgres_delete_trace_rolls_back_every_cleanup_write_on_failure():
+    import psycopg
+    from psycopg import sql
+
+    storage = PostgresStorage(DSN)
+    suffix = uuid4().hex[:8]
+    owner_id = f"atomic-owner-{suffix}"
+    retained_id = f"atomic-retained-{suffix}"
+    span_id = f"atomic-span-{suffix}"
+    trigger_name = f"fail_span_clear_{suffix}"
+    function_name = f"fail_span_clear_fn_{suffix}"
+    try:
+        storage.insert_trace(Trace(trace_id=owner_id))
+        storage.insert_span(SpanRecord(
+            span_id=span_id,
+            name="atomic-shared",
+            trace_id=owner_id,
+        ))
+        storage.insert_trace(Trace(
+            trace_id=retained_id,
+            parent_span_id=span_id,
+        ))
+        with storage._pool.connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(sql.SQL(
+                    """CREATE FUNCTION {}() RETURNS trigger LANGUAGE plpgsql AS $$
+                       BEGIN
+                         IF OLD.trace_id = {} THEN
+                           RAISE EXCEPTION 'forced cleanup failure';
+                         END IF;
+                         RETURN NEW;
+                       END
+                       $$"""
+                ).format(sql.Identifier(function_name), sql.Literal(owner_id)))
+                cursor.execute(sql.SQL(
+                    """CREATE TRIGGER {} BEFORE UPDATE OF trace_id ON spans
+                       FOR EACH ROW EXECUTE FUNCTION {}()"""
+                ).format(
+                    sql.Identifier(trigger_name),
+                    sql.Identifier(function_name),
+                ))
+
+        with pytest.raises(psycopg.DatabaseError, match="forced cleanup failure"):
+            storage.delete_trace(owner_id)
+
+        assert storage.get_trace(owner_id) is not None
+        [persisted] = [
+            record for record in storage.list_spans(limit=500)
+            if record.span_id == span_id
+        ]
+        assert persisted.trace_id == owner_id
+    finally:
+        with storage._pool.connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(sql.SQL("DROP TRIGGER IF EXISTS {} ON spans").format(
+                    sql.Identifier(trigger_name)
+                ))
+                cursor.execute(sql.SQL("DROP FUNCTION IF EXISTS {}()").format(
+                    sql.Identifier(function_name)
+                ))
+        storage._exec("DELETE FROM traces WHERE trace_id = %s", (retained_id,))
+        storage._exec("DELETE FROM spans WHERE span_id = %s", (span_id,))
+        storage._exec("DELETE FROM traces WHERE trace_id = %s", (owner_id,))
+        storage.close()
+
+
+def test_live_postgres_delete_trace_serializes_concurrent_trace_insertion():
+    import psycopg
+    from psycopg import sql
+
+    storage = PostgresStorage(DSN)
+    inserting = PostgresStorage(DSN)
+    suffix = uuid4().hex[:8]
+    owner_id = f"concurrent-owner-{suffix}"
+    child_id = f"concurrent-child-{suffix}"
+    span_id = f"concurrent-span-{suffix}"
+    trigger_name = f"pause_span_delete_{suffix}"
+    function_name = f"pause_span_delete_fn_{suffix}"
+    insert_done = threading.Event()
+    delete_error: list[BaseException] = []
+    try:
+        storage.insert_trace(Trace(trace_id=owner_id))
+        storage.insert_span(SpanRecord(
+            span_id=span_id,
+            name="concurrent-shared",
+            trace_id=owner_id,
+        ))
+        with storage._pool.connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(sql.SQL(
+                    """CREATE FUNCTION {}() RETURNS trigger LANGUAGE plpgsql AS $$
+                       BEGIN
+                         IF OLD.trace_id = {} THEN
+                           PERFORM pg_sleep(1.5);
+                         END IF;
+                         RETURN OLD;
+                       END
+                       $$"""
+                ).format(sql.Identifier(function_name), sql.Literal(owner_id)))
+                cursor.execute(sql.SQL(
+                    """CREATE TRIGGER {} BEFORE DELETE ON spans
+                       FOR EACH ROW EXECUTE FUNCTION {}()"""
+                ).format(
+                    sql.Identifier(trigger_name),
+                    sql.Identifier(function_name),
+                ))
+
+        def delete_owner() -> None:
+            try:
+                storage.delete_trace(owner_id)
+            except BaseException as exc:
+                delete_error.append(exc)
+
+        delete_thread = threading.Thread(target=delete_owner)
+        delete_thread.start()
+
+        with psycopg.connect(DSN, autocommit=True) as observer:
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                sleeping = observer.execute(
+                    """SELECT EXISTS (
+                         SELECT 1 FROM pg_stat_activity
+                         WHERE wait_event = 'PgSleep'
+                           AND query LIKE 'DELETE FROM spans AS candidate%'
+                       )"""
+                ).fetchone()[0]
+                if sleeping:
+                    break
+                time.sleep(0.01)
+            else:
+                pytest.fail("delete never reached the PostgreSQL cleanup trigger")
+
+        def insert_child() -> None:
+            inserting.insert_trace(Trace(
+                trace_id=child_id,
+                parent_span_id=span_id,
+            ))
+            insert_done.set()
+
+        insert_thread = threading.Thread(target=insert_child)
+        insert_thread.start()
+        inserted_during_cleanup = insert_done.wait(timeout=0.25)
+        delete_thread.join(timeout=5)
+        insert_thread.join(timeout=5)
+
+        assert not delete_thread.is_alive()
+        assert not insert_thread.is_alive()
+        assert delete_error == []
+        assert not inserted_during_cleanup
+    finally:
+        with storage._pool.connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(sql.SQL("DROP TRIGGER IF EXISTS {} ON spans").format(
+                    sql.Identifier(trigger_name)
+                ))
+                cursor.execute(sql.SQL("DROP FUNCTION IF EXISTS {}()").format(
+                    sql.Identifier(function_name)
+                ))
+        storage._exec("DELETE FROM traces WHERE trace_id = %s", (child_id,))
+        storage._exec("DELETE FROM spans WHERE span_id = %s", (span_id,))
+        storage._exec("DELETE FROM traces WHERE trace_id = %s", (owner_id,))
+        inserting.close()
+        storage.close()
+
+
+def test_live_postgres_provider_span_correlation_succeeds_and_fails_independently():
+    class FailingTraceOnly:
+        def __init__(self, inner):
+            self.inner = inner
+
+        def insert_trace(self, trace):
+            raise RuntimeError("simulated trace failure")
+
+        def __getattr__(self, name):
+            return getattr(self.inner, name)
+
+    suffix = uuid4().hex[:8]
+    success_trace_id = f"lifecycle-success-{suffix}"
+    failed_trace_id = f"lifecycle-failed-{suffix}"
+    span_names = {
+        f"success-parent-{suffix}",
+        f"success-child-{suffix}",
+        f"failed-parent-{suffix}",
+        f"failed-child-{suffix}",
+    }
+    storage = PostgresStorage(DSN)
+    try:
+        client_module.shutdown()
+        client = verdict.init(storage=storage, instrumentors=["none"])
+        with span(f"success-parent-{suffix}") as success_parent:
+            trace = Trace(trace_id=success_trace_id)
+            apply_routing_context(client, trace)
+            persist_trace(client, trace)
+            with span(f"success-child-{suffix}"):
+                pass
+
+        success_records = [
+            record for record in storage.list_spans(limit=500)
+            if record.name in span_names
+        ]
+        assert len(success_records) == 2
+        assert all(record.trace_id is None for record in success_records)
+        assert storage.get_trace(success_trace_id).parent_span_id == success_parent.span_id
+
+        client_module._client = None
+        failing = FailingTraceOnly(storage)
+        client = verdict.init(storage=failing, instrumentors=["none"])
+        with span(f"failed-parent-{suffix}"):
+            trace = Trace(trace_id=failed_trace_id)
+            apply_routing_context(client, trace)
+            with pytest.raises(RuntimeError, match="simulated trace failure"):
+                persist_trace(client, trace)
+            with span(f"failed-child-{suffix}"):
+                pass
+
+        failed_records = [
+            record for record in storage.list_spans(limit=500)
+            if record.name in span_names
+        ]
+        assert len(failed_records) == 4
+        failed_records = [
+            record for record in failed_records if record.name.startswith("failed-")
+        ]
+        assert all(record.trace_id is None for record in failed_records)
+    finally:
+        client_module._client = None
+        storage._exec("DELETE FROM spans WHERE name = ANY(%s)", (list(span_names),))
+        storage.delete_trace(success_trace_id)
+        storage.close()
+
+
+def test_live_buffered_postgres_inserts_each_manual_span_once():
+    class CountingPostgres:
+        def __init__(self, inner):
+            self.inner = inner
+            self.span_writes = 0
+
+        def insert_span(self, record):
+            self.span_writes += 1
+            self.inner.insert_span(record)
+
+        def __getattr__(self, name):
+            return getattr(self.inner, name)
+
+    suffix = uuid4().hex[:8]
+    trace_id = f"buffered-{suffix}"
+    names = {f"buffered-parent-{suffix}", f"buffered-child-{suffix}"}
+    postgres = PostgresStorage(DSN)
+    counting = CountingPostgres(postgres)
+    buffered = BufferedStorage(counting, flush_interval=10.0)
+    try:
+        client_module.shutdown()
+        client = verdict.init(storage=buffered, instrumentors=["none"])
+        with span(f"buffered-parent-{suffix}") as parent:
+            trace = Trace(trace_id=trace_id)
+            apply_routing_context(client, trace)
+            persist_trace(client, trace)
+            with span(f"buffered-child-{suffix}"):
+                pass
+        buffered.flush(timeout=5)
+
+        records = [record for record in postgres.list_spans(limit=500) if record.name in names]
+        assert len(records) == 2
+        assert counting.span_writes == 2
+        assert all(record.trace_id is None for record in records)
+        assert postgres.get_trace(trace_id).parent_span_id == parent.span_id
+    finally:
+        client_module._client = None
+        buffered.flush(timeout=5)
+        postgres._exec("DELETE FROM spans WHERE name = ANY(%s)", (list(names),))
+        postgres._exec("DELETE FROM traces WHERE trace_id = %s", (trace_id,))
+        buffered.close()

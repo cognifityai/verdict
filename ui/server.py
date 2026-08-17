@@ -254,8 +254,15 @@ def _build_from_connection(
     con.row_factory = sqlite3.Row
     cur = con.cursor()
     try:
+        # Keep run metadata and its signals (and the rest of the bundle) on one
+        # SQLite read snapshot while a pipeline process may replace a run.
+        cur.execute("BEGIN")
         bundle = redact_structure(_build(cur, evaluator_id=evaluator_id))
+        con.commit()
         return bundle if isinstance(bundle, dict) else {}
+    except BaseException:
+        con.rollback()
+        raise
     finally:
         con.close()
 
@@ -302,6 +309,7 @@ def _empty_bundle() -> dict:
         "providers": [],
         "clusters": [],
         "driftSignals": [],
+        "driftRun": None,
         "clusterHealth": _cluster_health([]),
         "evaluation": {
             "status": "empty",
@@ -420,6 +428,7 @@ def _build(cur, *, evaluator_id: str | None = None) -> dict:
         selected_identity.get("fingerprint") if selected_identity else None
     )
     has_drift_table = _table_exists(cur, "drift_signals")
+    has_drift_run_table = _table_exists(cur, "drift_runs")
     drift_columns = (
         {row["name"] for row in cur.execute("PRAGMA table_info(drift_signals)")}
         if has_drift_table
@@ -437,47 +446,97 @@ def _build(cur, *, evaluator_id: str | None = None) -> dict:
         ).fetchone()["n"]
     else:
         unattributed_drift = drift_signal_count
-    if not drift_signal_count:
-        drift_status = "empty"
-    elif selected_id is None:
+    drift_run = None
+    if selected_fingerprint and has_drift_run_table:
+        latest_run = cur.execute(
+            """SELECT * FROM drift_runs
+                 WHERE evaluator_fingerprint = ?
+                 ORDER BY analysis_time DESC, completed_at DESC, run_id DESC
+                 LIMIT 1""",
+            (selected_fingerprint,),
+        ).fetchone()
+        if latest_run is not None:
+            drift_run = {
+                "id": latest_run["run_id"],
+                "analysisTime": latest_run["analysis_time"],
+                "completedAt": latest_run["completed_at"],
+                "signalCount": latest_run["signal_count"],
+            }
+    if selected_id is None and (drift_signal_count or has_drift_run_table):
         drift_status = evaluation_status
     elif not selected_fingerprint or "evaluator_fingerprint" not in drift_columns:
-        drift_status = "historical_unattributed"
-    else:
+        drift_status = "historical_unattributed" if drift_signal_count else "empty"
+    elif drift_run is not None:
         drift_status = "selected"
+    elif cur.execute(
+        "SELECT COUNT(*) AS n FROM drift_signals WHERE evaluator_fingerprint = ?",
+        (selected_fingerprint,),
+    ).fetchone()["n"]:
+        drift_status = "historical_without_run"
+    else:
+        drift_status = "empty"
     evaluation.update({
         "driftStatus": drift_status,
         "unattributedDriftSignals": unattributed_drift,
     })
     has_health_table = _table_exists(cur, "evaluator_health")
     if selected_fingerprint and has_health_table:
+        health_columns = {
+            row["name"] for row in cur.execute("PRAGMA table_info(evaluator_health)")
+        }
         for row in cur.execute(
             """SELECT * FROM evaluator_health
                  WHERE evaluator_fingerprint = ?
                  ORDER BY evaluated_at DESC LIMIT 30""",
             (selected_fingerprint,),
         ):
+            method_version = (
+                row["method_version"]
+                if "method_version" in health_columns else "1"
+            ) or "1"
+            legacy = method_version == "1"
             evaluator_health.append({
                 "id": row["health_id"],
                 "evaluatedAt": row["evaluated_at"],
                 "sentinelSetName": row["sentinel_set_name"] or "",
                 "sentinelSetFingerprint": row["sentinel_set_fingerprint"],
+                "correctExamples": (
+                    None if legacy else row["correct_examples"]
+                ),
+                "totalExamples": None if legacy else row["total_examples"],
+                "exampleAgreement": (
+                    None if legacy or row["example_agreement"] is None
+                    else round(100 * row["example_agreement"], 1)
+                ),
+                "exampleConfidenceLow": (
+                    None if legacy or row["example_confidence_low"] is None
+                    else round(100 * row["example_confidence_low"], 1)
+                ),
+                "exampleConfidenceHigh": (
+                    None if legacy or row["example_confidence_high"] is None
+                    else round(100 * row["example_confidence_high"], 1)
+                ),
                 "correctLabels": row["correct_labels"],
                 "totalLabels": row["total_labels"],
-                "agreement": (
-                    round(100 * row["agreement"], 1)
-                    if row["agreement"] is not None else None
+                "labelAgreement": (
+                    round(
+                        100 * (
+                            row["agreement"] if legacy
+                            else row["label_agreement"]
+                        ),
+                        1,
+                    )
+                    if (
+                        (legacy and "agreement" in health_columns and row["agreement"] is not None)
+                        or (
+                            not legacy
+                            and row["label_agreement"] is not None
+                        )
+                    ) else None
                 ),
-                "confidenceLow": (
-                    round(100 * row["confidence_low"], 1)
-                    if row["confidence_low"] is not None else None
-                ),
-                "confidenceHigh": (
-                    round(100 * row["confidence_high"], 1)
-                    if row["confidence_high"] is not None else None
-                ),
-                "status": row["status"],
+                "status": "insufficient_data" if legacy else row["status"],
                 "errorCount": row["error_count"],
+                "methodVersion": method_version,
             })
 
     # A trace can have retries or historical duplicate rows for one evaluator.
@@ -628,11 +687,16 @@ def _build(cur, *, evaluator_id: str | None = None) -> dict:
     # ---- drift signals ----
     drift = []
     drift_rows = []
-    if selected_fingerprint and "evaluator_fingerprint" in drift_columns:
-        drift_rows = cur.execute(
-            "SELECT * FROM drift_signals WHERE evaluator_fingerprint = ?",
-            (selected_fingerprint,),
-        )
+    if drift_run is not None and "run_id" in drift_columns:
+        drift_rows = list(cur.execute(
+            """SELECT * FROM drift_signals
+                 WHERE run_id = ? AND evaluator_fingerprint = ?
+                 ORDER BY signal_id""",
+            (drift_run["id"], selected_fingerprint),
+        ))
+        if len(drift_rows) != drift_run["signalCount"]:
+            drift_rows = []
+            evaluation["driftStatus"] = "inconsistent_run"
     for s in drift_rows:
         s = dict(s)
         alias = s.get("cluster_id") or "unknown cluster"
@@ -846,6 +910,7 @@ def _build(cur, *, evaluator_id: str | None = None) -> dict:
         "evaluatorHealth": evaluator_health,
         "scoreCoverage": dict(score_coverage),
         "driftSignals": drift,
+        "driftRun": drift_run,
         "dimensionOverall": dimensionOverall,
         "tsRows": tsRows,
         "passrate": passrate,

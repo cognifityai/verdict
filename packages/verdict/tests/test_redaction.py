@@ -2,7 +2,6 @@ import json
 import random
 from copy import deepcopy
 
-import pytest
 import verdict.redaction as redaction_module
 from verdict.redaction import redact, redact_messages, redact_structure
 
@@ -378,29 +377,6 @@ def test_redact_multiple_in_one_string():
     assert "<SSN>" in out
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "OPEN VULNERABILITY: the EMAIL pattern backtracks quadratically. "
-        "Unbounded `[\\w.+-]+` before `@` rescans to end-of-string from every "
-        "start position, so colon-free, at-free text is O(n^2): 64 KB takes "
-        "17 s and 128 KB 69 s. `redact` runs synchronously on the caller's "
-        "thread inside `_safe_persist` over attacker-controlled prompt and "
-        "response text, so one large prompt stalls the instrumented call and "
-        "the BufferedStorage drain behind it. This predates the current "
-        "candidate: the pattern is byte-identical in published 0.1.0a3. "
-        "Two fixes were measured and REJECTED for under-redacting, and must "
-        "not be retried: (1) RFC length bounds "
-        "`[\\w.+-]{1,64}@[\\w-]{1,255}\\.[\\w.-]{1,255}` leaks the head of a "
-        "65+ character local part (`xxx...@x.com` -> `x<EMAIL>`); "
-        "(2) a `(?<![\\w.+-])` start guard leaks the second of two adjacent "
-        "addresses (`a@b.co+c@d.co` -> `<EMAIL>+c@d.co`), because the "
-        "lookbehind inspects the pre-substitution string. A correct fix needs "
-        "an at-anchored scan or atomic grouping plus property-based tests. "
-        "When it lands, delete this marker: strict=True fails the suite the "
-        "moment this test starts passing."
-    ),
-)
 def test_redact_is_linear_on_pathological_text():
     """`redact` must not backtrack quadratically on attacker-controlled text.
 
@@ -417,6 +393,28 @@ def test_redact_is_linear_on_pathological_text():
             f"redact() took {elapsed:.1f}s on {len(probe)} chars; "
             "a candidate matcher is backtracking quadratically"
         )
+
+
+def test_email_redaction_is_linear_when_malformed_text_contains_at_signs():
+    """An at-sign must not re-enable the old quadratic candidate search."""
+    import time
+
+    for probe in ("a" * 64_000 + "@", "患" * 64_000 + "@"):
+        start = time.perf_counter()
+        assert redact(probe) == probe
+        elapsed = time.perf_counter() - start
+        assert elapsed < 0.1, (
+            f"redact() took {elapsed:.3f}s on malformed {len(probe)}-char email"
+        )
+
+
+def test_email_scanner_redacts_long_and_adjacent_addresses_without_leaking_heads():
+    long_address = f"{'x' * 512}@example.com"
+
+    assert redact(long_address) == "<EMAIL>"
+    adjacent = redact("a@b.co+c@d.co")
+    assert adjacent == "<EMAIL><EMAIL>"
+    assert "@" not in adjacent
 
 
 def test_ipv6_redaction_boundaries_are_unchanged_by_the_candidate_bound():

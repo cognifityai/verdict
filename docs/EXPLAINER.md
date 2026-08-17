@@ -57,10 +57,11 @@ they go through a supported provider SDK.
 5. **Detect**: Verdict compares current and baseline judgments using each
    trace's capture timestamp. It emits per-cluster, per-dimension signals only
    when both statistical and practical thresholds clear, and retains up to five
-   current-window trace IDs as review evidence. Re-running the same hourly
-   analysis bucket replaces stale results from that bucket for that evaluator
-   only. Drift signals retain the evaluator fingerprint; historical signals
-   without one are unavailable for evaluator-scoped reporting.
+   current-window trace IDs as review evidence. Each completed analysis is an
+   atomic run snapshot containing its exact signal set, including an explicit
+   zero-signal result. Re-running the same hourly analysis identity replaces its
+   snapshot. Consumers select only the latest completed run for an evaluator;
+   historical signals without a run identity are unavailable, not current.
 6. **Inspect**: use the CLI, Python APIs, or dashboard to review traces, scores,
    clusters, and drift reports.
 
@@ -111,23 +112,28 @@ and is eligible for a later retry.
 
 Optional fixed human-labeled sentinel runs monitor the selected evaluator
 fingerprint separately from production drift. `healthy` requires the configured
-label floor and Wilson confidence-interval lower bound, using independently
-judged examples rather than correlated dimension labels as the effective sample
-size. When a sentinel file is supplied, any non-healthy result is persisted and
+independent-example floor and Wilson confidence-interval lower bound. An example
+passes only when every declared label matches; label-level agreement is a
+separate diagnostic and is not the gate's statistical unit. When a sentinel
+file is supplied, any non-healthy result is persisted and
 blocks production judging/drift with exit status 2. The anchor set cannot detect
-changes outside the examples it covers.
+changes outside the examples it covers. Any sentinel execution error prevents a
+healthy result: the status is insufficient when too few usable examples remain and
+degraded otherwise.
 
 Streaming trace persistence is deterministic after full consumption, iteration
 error, explicit `close()` / `aclose()`, context-manager exit, or async
 cancellation. Garbage collection of a never-iterated, unclosed stream is not a
 supported finalization boundary. Supported instrumented provider calls made
-inside manual spans persist `Trace.parent_span_id` automatically and link the
-span back only after the Trace write succeeds. Explicit `trace_context(...)` or
-`set_context(trace_id=...)` still links manual-only work to an existing stored
-trace. Nested spans inherit an outer provider link until they make a provider
-call of their own, which replaces only the child's inherited link. Unknown
-explicit IDs become unlinked spans with a link-status attribute;
-standalone spans remain explicit.
+inside manual spans persist `Trace.parent_span_id` automatically. That is the
+only automatic direction: several provider traces may point to one span, while
+`SpanRecord.trace_id` is used only by explicit `trace_context(...)` or
+`set_context(trace_id=...)` binding to an existing stored trace. Unknown
+explicit IDs become unlinked spans with a link-status attribute; standalone
+spans remain explicit. Provider buffering cannot decide whether a span survives
+and does not trigger repair writes: every ended span is written once. Retention
+removes expired standalone and orphan records but preserves a span referenced by
+a retained trace.
 
 ## Security And Privacy Notes
 

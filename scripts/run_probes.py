@@ -49,9 +49,38 @@ def _pass_rate(value: str) -> float:
 
 def probe_run_exit_code(run, *, min_pass_rate: float) -> int:
     """Return 2 for execution errors, 1 for a failed quality gate, else 0."""
-    if any(result.error for result in run.results):
+    has_execution_error = any(
+        result.error
+        or any(
+            isinstance(dimension, dict)
+            and dimension.get("observed") == "ERROR"
+            for dimension in (
+                result.dimensions if isinstance(result.dimensions, list) else []
+            )
+        )
+        for result in run.results
+    )
+    if has_execution_error:
         return 2
     return 0 if run.pass_rate >= min_pass_rate else 1
+
+
+def probe_run_payload(run) -> dict[str, object]:
+    """Serialize a run with the derived metrics that operators gate on."""
+    passed_weight, total_weight = run.weighted_probe_counts()
+    expectation_passed, expectation_total = run.weighted_expectation_counts()
+    payload = asdict(run)
+    payload["summary"] = {
+        "probe_pass_rate": run.pass_rate,
+        "probe_passed_weight": passed_weight,
+        "probe_total_weight": total_weight,
+        "probe_pass_rate_by_category": run.pass_rate_by_category(),
+        "expectation_agreement": run.expectation_agreement,
+        "expectation_passed_weight": expectation_passed,
+        "expectation_total_weight": expectation_total,
+        "expectation_agreement_by_dimension": run.pass_rate_by_dimension(),
+    }
+    return payload
 
 
 def _provider_for_model(model: str):
@@ -82,8 +111,10 @@ def main(argv: list[str] | None = None) -> int:
         "--min-pass-rate",
         type=_pass_rate,
         default=1.0,
-        help="Required weighted pass rate (default 1.0). Below it exits 1; "
-             "provider/judge execution errors exit 2.",
+        help=(
+            "Required weighted probe pass rate (default 1.0). Below it "
+            "exits 1; provider/judge execution errors exit 2."
+        ),
     )
     args = parser.parse_args(argv)
 
@@ -103,14 +134,17 @@ def main(argv: list[str] | None = None) -> int:
     print("Running probes...")
     run = runner.run_suite(suite)
 
-    passed_weight = sum(r.weight for r in run.results if r.overall_passed)
-    total_weight = sum(r.weight for r in run.results)
-    passed_probes = sum(1 for r in run.results if r.overall_passed)
+    passed_weight, total_weight = run.weighted_probe_counts()
+    expectation_passed, expectation_total = run.weighted_expectation_counts()
     print(
-        f"\nWeighted pass rate: {run.pass_rate:.2%} "
+        f"\nWeighted probe pass rate: {run.pass_rate:.2%} "
         f"({passed_weight:g}/{total_weight:g} weight passed)"
     )
-    print(f"Unweighted probes passed: {passed_probes}/{len(run.results)}")
+    print(
+        f"Weighted expectation agreement (diagnostic): "
+        f"{run.expectation_agreement:.2%} "
+        f"({expectation_passed:g}/{expectation_total:g} weight passed)"
+    )
     print(
         "Methodology: metric schema "
         f"v{run.metric_schema_version}; judge method v{run.judge_method_version}"
@@ -143,7 +177,7 @@ def main(argv: list[str] | None = None) -> int:
             f"{run.suite_name}_{run.target_model.replace('/', '_')}_{ts}.json"
         )
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(json.dumps(asdict(run), indent=2, default=str))
+    out_path.write_text(json.dumps(probe_run_payload(run), indent=2, default=str))
     print(f"\nWrote: {out_path}")
 
     exit_code = probe_run_exit_code(run, min_pass_rate=args.min_pass_rate)
@@ -151,8 +185,9 @@ def main(argv: list[str] | None = None) -> int:
         print("ERROR: one or more probes had target/judge execution errors.")
     elif exit_code == 1:
         print(
-            f"ERROR: weighted pass rate {run.pass_rate:.2%} is below the "
-            f"required {args.min_pass_rate:.2%}."
+            "ERROR: weighted probe pass rate "
+            f"{run.pass_rate:.2%} is below the required "
+            f"{args.min_pass_rate:.2%}."
         )
     return exit_code
 

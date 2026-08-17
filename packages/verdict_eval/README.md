@@ -29,17 +29,27 @@ identity: provider, model list, rubric name/version, behavior-relevant
 configuration, expected dimensions, and effective prompt/rubric fingerprint. A
 latest error is excluded from PASS/FAIL and can be retried. Other evaluator
 definitions are retained but not pooled. Persisted drift signals carry the same
-fingerprint. Optional fixed human-labeled sentinel runs store independent judge-
-health aggregates; a healthy status requires both the label floor and the 95%
-Wilson-interval lower bound to clear the configured threshold. The interval's
-effective sample size is the number of independently judged sentinel examples,
-not the number of correlated dimension labels. When a sentinel file is supplied,
+fingerprint. Each completed analysis atomically persists a `DriftRun` marker and
+its exact signal set, including zero-signal runs; latest-run consumers exclude
+legacy ungrouped signals. Optional fixed human-labeled sentinel runs store independent judge-
+health aggregates. A healthy status requires both the independent-example floor
+and the 95% Wilson-interval lower bound to clear the configured threshold. An
+example passes only when every declared label matches; label agreement is a
+separate diagnostic, not the gate's statistical unit. Legacy label-only records
+remain unavailable for health gating. Any sentinel execution error prevents a
+`healthy` result: too few usable examples remain `insufficient_data`;
+otherwise the result is `degraded`. When a sentinel file is supplied,
 the runner persists the health record and exits 2 before production judgments or
 drift unless status is `healthy`.
 
-Probe weights affect suite, category, and per-dimension expectation agreement.
-The bundled weighted suite is version `2.0`. New `ProbeRun` and `ProbeResult`
-artifacts stamp metric-schema version `2` and one-dimension judge-method version
+Probe weights enter suite and category quality gates once per probe. A probe
+passes only when every declared expectation passes. Weighted expectation
+agreement and its per-dimension breakdown remain separate diagnostics; adding
+expectations cannot make a failing probe count less in the quality gate.
+The bundled weighted suite is version `2.1`; its direct prompt-injection probe
+defines the quoted-text instruction precedence independently for both safety
+and instruction-following judgments. New `ProbeRun` and `ProbeResult`
+artifacts stamp metric-schema version `3` and one-dimension judge-method version
 `2`; historical artifacts without those fields remain version `1` when loaded
 through the dataclasses, so scheduled comparisons cannot silently cross the
 methodology boundary. Each expectation is judged with a one-dimension rubric
@@ -50,10 +60,13 @@ only the exact labels `PASS` and `FAIL`; malformed programmatic or YAML suite
 definitions fail during construction instead of being normalized into a scored
 outcome. Target or follow-up execution errors emit an `ERROR` result for every
 declared expectation, so outages remain in every dimension denominator. The
-scheduled CLI requires a 100% weighted pass rate by default, exits 1 below the
-configured threshold, and exits 2 on provider/judge execution errors.
-Non-positive or non-finite weights in historical result JSON contribute zero
-rather than crashing or corrupting an aggregate. The user-signal correlator
+scheduled CLI requires a 100% weighted probe pass rate by default, exits
+1 below the configured threshold, and exits 2 on provider/judge execution errors.
+Non-positive, non-finite, or non-numeric weights in historical result JSON
+contribute zero rather than crashing or corrupting an aggregate. Historical
+dimension entries whose `passed` field is not a literal boolean fail closed.
+Current artifacts with missing, unnamed, duplicate, non-dictionary, or
+contradictory expectation rows cannot pass the probe gate. The user-signal correlator
 reports usable sample size, Wilson raw-agreement bounds, and deterministic
 bootstrap intervals for both Cohen's kappa and Gwet's coefficient. It refuses to
 call low-data output calibrated, excludes `UNCLEAR` judge results from its binary

@@ -3,7 +3,8 @@
 Reads traces from the configured storage, assigns stable intent clusters,
 runs the configured judge on a stratified or uniform sample, computes per-cluster
 per-dimension drift signals across a current-vs-baseline window split, and
-persists the resulting DriftSignal records back to storage.
+persists one atomic DriftRun snapshot and its exact DriftSignal set to storage,
+including a completed zero-signal run.
 
 This is the first script that wires the full pipeline together:
 
@@ -11,7 +12,7 @@ This is the first script that wires the full pipeline together:
         → StableIntentClusterer.assign (persists stable cluster IDs)
         → Judge (produces Judgment per selected trace)
         → DriftDetector (compares current window vs baseline)
-        → DriftSignals persisted
+        → DriftRun + exact DriftSignals persisted atomically
 
 Usage (offline, FakeProvider judge — runs without API keys):
     python scripts/run_drift_pipeline.py --storage sqlite:///./verdict.db \\
@@ -26,7 +27,7 @@ from __future__ import annotations
 
 import argparse
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from uuid import NAMESPACE_URL, uuid5
 
@@ -51,17 +52,17 @@ def build_parser() -> argparse.ArgumentParser:
              "as judge health, separately from production drift.",
     )
     p.add_argument(
-        "--judge-health-min-labels",
+        "--judge-health-min-examples",
         type=int,
         default=30,
-        help="Minimum human labels before judge health can be marked healthy/degraded.",
+        help="Minimum independently judged examples before health can be certified.",
     )
     p.add_argument(
         "--judge-health-threshold",
         type=float,
         default=0.8,
         help="Minimum 95%% Wilson-CI lower bound for healthy sentinel status "
-             "after the label floor.",
+             "after the independently judged example floor.",
     )
     p.add_argument("--current-hours", type=int, default=24,
                    help="Current window size in hours (default 24).")
@@ -131,31 +132,46 @@ def _parse_analysis_time(value: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
-def _signal_id_for_window(
-    signal,
+def _drift_run_id(
     args,
     analysis_time: datetime,
     tenant_scope: str,
     evaluator_fingerprint: str,
 ) -> str:
-    """Return a stable ID for one signal cell in an hourly analysis window.
-
-    Re-running the same hourly window replaces the existing record instead of
-    appending a duplicate. The next hourly window intentionally gets a new ID,
-    preserving a coarse signal history without requiring a new run table in v0.
-    """
+    """Return the deterministic identity of one completed hourly snapshot."""
     window_bucket = analysis_time.replace(minute=0, second=0, microsecond=0)
     identity = "|".join([
-        "verdict-drift-v1",
+        "verdict-drift-run-v1",
         tenant_scope,
-        args.clustering_version,
-        args.judge_provider,
-        args.judge_model,
         evaluator_fingerprint,
+        args.clustering_version,
+        args.embedder,
+        str(args.cluster_threshold),
+        str(args.recluster),
+        str(args.trust_existing_clusters),
+        args.sampling,
+        str(args.target_per_cluster),
+        str(args.sample_rate),
         str(args.current_hours),
         str(args.baseline_days),
         str(args.baseline_lag_hours),
+        str(args.min_sample_size),
+        str(args.p_threshold),
+        str(args.effect_size_threshold),
         window_bucket.isoformat(),
+    ])
+    return uuid5(NAMESPACE_URL, identity).hex
+
+
+def _signal_id_for_run(signal, run_id: str) -> str:
+    """Return a stable ID for one statistical cell within a run snapshot.
+
+    Run identity includes evaluator, scope, configuration, and analysis bucket,
+    so signals from distinct snapshots cannot overwrite one another.
+    """
+    identity = "|".join([
+        "verdict-drift-signal-v2",
+        run_id,
         signal.cluster_id,
         signal.dimension,
         signal.direction.value,
@@ -380,19 +396,21 @@ def main() -> int:
                 judge,
                 sentinels,
                 set_name=set_name,
-                minimum_labels=args.judge_health_min_labels,
+                minimum_examples=args.judge_health_min_examples,
                 agreement_threshold=args.judge_health_threshold,
             )
         except (OSError, ValueError) as exc:
             print(f"ERROR: invalid judge sentinel set: {exc}")
             return 2
         storage.insert_evaluator_health(health)
-        low = health.confidence_low or 0.0
-        high = health.confidence_high or 0.0
+        low = health.example_confidence_low or 0.0
+        high = health.example_confidence_high or 0.0
         print(
             f"Judge health ({health.sentinel_set_name}): {health.status.value}; "
-            f"agreement={health.correct_labels}/{health.total_labels} "
-            f"({health.agreement:.1%}, 95% CI {low:.1%}-{high:.1%}); "
+            f"examples={health.correct_examples}/{health.total_examples} "
+            f"({health.example_agreement:.1%}, 95% CI {low:.1%}-{high:.1%}); "
+            f"labels={health.correct_labels}/{health.total_labels} "
+            f"({health.label_agreement:.1%}); "
             f"errors={health.error_count}."
         )
         print(
@@ -562,25 +580,33 @@ def main() -> int:
         print(f"  WARN: {diagnostic}")
     print(f"  Detected {len(signals)} drift signal(s).")
 
-    # Treat one hourly bucket as a replaceable analysis result. This removes
-    # signals that were present on an earlier rerun but no longer clear the
-    # gates after more judgments arrive or configuration is corrected.
-    signal_bucket_start = analysis_time.replace(minute=0, second=0, microsecond=0)
-    storage.delete_drift_signals_between(
-        signal_bucket_start, signal_bucket_start + timedelta(hours=1),
-        evaluator_fingerprint=current_evaluator["evaluator_fingerprint"],
+    # Persist one completed snapshot even when no signal clears the gates. The
+    # adapter replaces its marker and exact signal set atomically.
+    from verdict.schema import DriftRun
+
+    evaluator_fingerprint = current_evaluator["evaluator_fingerprint"]
+    run_id = _drift_run_id(
+        args,
+        analysis_time,
+        tenant_scope,
+        evaluator_fingerprint,
     )
     for sig in signals:
-        sig.evaluator_fingerprint = current_evaluator["evaluator_fingerprint"]
-        sig.signal_id = _signal_id_for_window(
-            sig,
-            args,
-            analysis_time,
-            tenant_scope,
-            current_evaluator["evaluator_fingerprint"],
-        )
+        sig.evaluator_fingerprint = evaluator_fingerprint
+        sig.run_id = run_id
+        sig.signal_id = _signal_id_for_run(sig, run_id)
         sig.detected_at = analysis_time
-        storage.insert_drift_signal(sig)
+    storage.replace_drift_run(
+        DriftRun(
+            run_id=run_id,
+            analysis_time=analysis_time,
+            completed_at=datetime.now(timezone.utc),
+            evaluator_fingerprint=evaluator_fingerprint,
+            signal_count=len(signals),
+        ),
+        signals,
+    )
+    for sig in signals:
         print(
             f"    • cluster={sig.cluster_id} dim={sig.dimension} "
             f"dir={sig.direction.value} delta={sig.effect_size_cliffs_delta:.3f} "

@@ -45,12 +45,14 @@ def test_judge_health_marks_sufficient_high_agreement_healthy():
     )
 
     assert record.status == EvaluatorHealthStatus.HEALTHY
+    assert record.correct_examples == record.total_examples == 30
+    assert record.example_agreement == 1.0
     assert record.correct_labels == record.total_labels == 30
-    assert record.agreement == 1.0
-    assert record.confidence_low is not None
-    assert record.confidence_high is not None
-    assert record.confidence_low < record.confidence_high
-    assert record.confidence_high == pytest.approx(1.0)
+    assert record.label_agreement == 1.0
+    assert record.example_confidence_low is not None
+    assert record.example_confidence_high is not None
+    assert record.example_confidence_low < record.example_confidence_high
+    assert record.example_confidence_high == pytest.approx(1.0)
     assert record.evaluator_fingerprint == judge.evaluator_identity()[
         "evaluator_fingerprint"
     ]
@@ -88,7 +90,7 @@ def test_judge_health_marks_sufficient_low_agreement_degraded():
     )
 
     assert record.status == EvaluatorHealthStatus.DEGRADED
-    assert record.agreement == 0.0
+    assert record.example_agreement == 0.0
 
 
 def test_complete_judge_outage_is_insufficient_data_not_degraded():
@@ -106,8 +108,33 @@ def test_complete_judge_outage_is_insufficient_data_not_degraded():
     assert record.total_labels == 0
     assert record.correct_labels == 0
     assert record.error_count == 30
-    assert record.confidence_low is None
-    assert record.confidence_high is None
+    assert record.example_confidence_low is None
+    assert record.example_confidence_high is None
+
+
+def test_execution_errors_prevent_a_partial_sentinel_run_from_reporting_healthy():
+    calls = 0
+
+    def mostly_unavailable(_request):
+        nonlocal calls
+        calls += 1
+        if calls <= 270:
+            raise RuntimeError("provider unavailable")
+        return _payload("PASS")
+
+    judge = Judge(
+        provider=FakeProvider(mostly_unavailable), model="judge-a", rubric=RUBRIC
+    )
+    record = evaluate_judge_health(
+        judge,
+        [_example(index) for index in range(300)],
+        set_name="support-v1",
+        minimum_examples=30,
+    )
+
+    assert record.correct_labels == record.total_labels == 30
+    assert record.error_count == 270
+    assert record.status == EvaluatorHealthStatus.DEGRADED
 
 
 def test_confidence_interval_uses_independent_examples_not_correlated_labels():
@@ -137,14 +164,62 @@ def test_confidence_interval_uses_independent_examples_not_correlated_labels():
         judge,
         examples,
         set_name="multi",
-        minimum_labels=30,
+        minimum_examples=6,
         agreement_threshold=0.8,
     )
 
     assert record.total_labels == 30
-    assert record.agreement == 1.0
-    assert record.confidence_low < 0.8
+    assert record.example_agreement == 1.0
+    assert record.label_agreement == 1.0
+    assert record.example_confidence_low < 0.8
     assert record.status == EvaluatorHealthStatus.DEGRADED
+
+
+def test_label_rich_example_cannot_certify_a_judge_that_fails_most_examples():
+    """The health gate's statistical unit is one independently judged example.
+
+    One label-rich example must not outweigh many failed examples. This is the
+    adversarial shape that previously reported a mostly-wrong judge as healthy.
+    """
+    dimensions = tuple(
+        RubricDimension(f"d{index}", "quality") for index in range(200)
+    )
+    rubric = Rubric(name="unequal-labels", version="1", dimensions=dimensions)
+    payload = json.dumps({
+        dimension.name: {"reasoning": "fixed", "verdict": "PASS"}
+        for dimension in dimensions
+    })
+    judge = Judge(provider=FakeProvider(payload), model="judge-a", rubric=rubric)
+    examples = [
+        SentinelExample(
+            sentinel_id="label-rich-correct",
+            query="q",
+            response="r",
+            labels={dimension.name: Verdict.PASS for dimension in dimensions},
+        ),
+        *[
+            SentinelExample(
+                sentinel_id=f"single-label-wrong-{index}",
+                query="q",
+                response="r",
+                labels={"d0": Verdict.FAIL},
+            )
+            for index in range(29)
+        ],
+    ]
+
+    record = evaluate_judge_health(
+        judge,
+        examples,
+        set_name="unequal-labels",
+        agreement_threshold=0.6,
+    )
+
+    assert record.status == EvaluatorHealthStatus.DEGRADED
+    assert record.correct_examples == 1
+    assert record.total_examples == 30
+    assert record.example_agreement == pytest.approx(1 / 30)
+    assert record.label_agreement == pytest.approx(200 / 229)
 
 
 def test_health_threshold_must_be_cleared_by_confidence_lower_bound():
@@ -161,8 +236,8 @@ def test_health_threshold_must_be_cleared_by_confidence_lower_bound():
         agreement_threshold=0.8,
     )
 
-    assert record.agreement == 0.9
-    assert record.confidence_low < 0.8
+    assert record.example_agreement == 0.9
+    assert record.example_confidence_low < 0.8
     assert record.status == EvaluatorHealthStatus.DEGRADED
 
 

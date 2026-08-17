@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Literal
 
-PROBE_METRIC_SCHEMA_VERSION = "2"
+PROBE_METRIC_SCHEMA_VERSION = "3"
 PROBE_JUDGE_METHOD_VERSION = "2"
 LEGACY_PROBE_METRIC_SCHEMA_VERSION = "1"
 LEGACY_PROBE_JUDGE_METHOD_VERSION = "1"
@@ -101,11 +101,104 @@ class ProbeResult:
 
 def _aggregation_weight(result: ProbeResult) -> float:
     """Return a safe weight for current and historical result artifacts."""
-    return (
-        result.weight
-        if math.isfinite(result.weight) and result.weight > 0
-        else 0.0
-    )
+    weight = result.weight
+    if isinstance(weight, bool) or not isinstance(weight, (int, float)):
+        return 0.0
+    return float(weight) if math.isfinite(weight) and weight > 0 else 0.0
+
+
+def _named_expectation_outcomes(result: ProbeResult) -> list[tuple[str, bool]]:
+    """Normalize named dimensions; malformed ``passed`` values fail closed."""
+    outcomes: list[tuple[str, bool]] = []
+    dimensions = result.dimensions
+    if not isinstance(dimensions, list):
+        return outcomes
+    for dimension in dimensions:
+        if not isinstance(dimension, dict):
+            continue
+        raw_name = dimension.get("name")
+        name = str(raw_name).strip() if raw_name is not None else ""
+        if not name:
+            continue
+        outcomes.append((name, dimension.get("passed") is True))
+    return outcomes
+
+
+def _expectation_outcomes(result: ProbeResult) -> list[bool]:
+    """Return every stored expectation outcome, failing corrupt rows closed."""
+    dimensions = result.dimensions
+    if not isinstance(dimensions, list):
+        return [False]
+    if dimensions:
+        return [
+            isinstance(dimension, dict) and dimension.get("passed") is True
+            for dimension in dimensions
+        ]
+    # Historical v1 artifacts could contain only the probe-level outcome.
+    # Current artifacts must contain at least one declared expectation.
+    return [
+        result.overall_passed is True
+        if result.metric_schema_version == LEGACY_PROBE_METRIC_SCHEMA_VERSION
+        else False
+    ]
+
+
+def _dimensions_are_well_formed(result: ProbeResult) -> bool:
+    """Validate the expectation rows required by the probe-level gate."""
+    dimensions = result.dimensions
+    if not isinstance(dimensions, list):
+        return False
+    if not dimensions:
+        return result.metric_schema_version == LEGACY_PROBE_METRIC_SCHEMA_VERSION
+    seen: set[str] = set()
+    for dimension in dimensions:
+        if not isinstance(dimension, dict):
+            return False
+        name = dimension.get("name")
+        normalized_name = name.strip() if isinstance(name, str) else ""
+        if not normalized_name or normalized_name in seen:
+            return False
+        if not isinstance(dimension.get("passed"), bool):
+            return False
+        seen.add(normalized_name)
+    return True
+
+
+def _weighted_expectation_counts(
+    results: list[ProbeResult],
+) -> tuple[float, float]:
+    passed_weight = 0.0
+    total_weight = 0.0
+    for result in results:
+        weight = _aggregation_weight(result)
+        for passed in _expectation_outcomes(result):
+            total_weight += weight
+            if passed:
+                passed_weight += weight
+    return passed_weight, total_weight
+
+
+def _probe_passed(result: ProbeResult) -> bool:
+    """Return the fail-closed probe outcome used by suite quality gates."""
+    if (
+        result.error
+        or result.overall_passed is not True
+        or not _dimensions_are_well_formed(result)
+    ):
+        return False
+    outcomes = _expectation_outcomes(result)
+    return bool(outcomes) and all(outcome is True for outcome in outcomes)
+
+
+def _weighted_probe_counts(results: list[ProbeResult]) -> tuple[float, float]:
+    passed_weight = 0.0
+    total_weight = 0.0
+    for result in results:
+        weight = _aggregation_weight(result)
+        total_weight += weight
+        if _probe_passed(result):
+            passed_weight += weight
+    return passed_weight, total_weight
 
 
 @dataclass
@@ -128,14 +221,24 @@ class ProbeRun:
     def pass_rate(self) -> float:
         if not self.results:
             return 0.0
-        total_weight = sum(_aggregation_weight(result) for result in self.results)
+        passed_weight, total_weight = self.weighted_probe_counts()
         if total_weight <= 0:
             return 0.0
-        return sum(
-            _aggregation_weight(result)
-            for result in self.results
-            if result.overall_passed
-        ) / total_weight
+        return passed_weight / total_weight
+
+    @property
+    def expectation_agreement(self) -> float:
+        """Diagnostic agreement across expectations; never used as the gate."""
+        passed_weight, total_weight = self.weighted_expectation_counts()
+        return passed_weight / total_weight if total_weight > 0 else 0.0
+
+    def weighted_probe_counts(self) -> tuple[float, float]:
+        """Return passed and total probe weight, counting each probe once."""
+        return _weighted_probe_counts(self.results)
+
+    def weighted_expectation_counts(self) -> tuple[float, float]:
+        """Return passed and total probe-weighted expectation mass."""
+        return _weighted_expectation_counts(self.results)
 
     def pass_rate_by_category(self) -> dict[str, float]:
         by_cat: dict[str, list[ProbeResult]] = {}
@@ -143,14 +246,9 @@ class ProbeRun:
             by_cat.setdefault(r.category, []).append(r)
         rates: dict[str, float] = {}
         for category, items in by_cat.items():
-            total_weight = sum(_aggregation_weight(result) for result in items)
+            passed_weight, total_weight = _weighted_probe_counts(items)
             rates[category] = (
-                sum(
-                    _aggregation_weight(result)
-                    for result in items
-                    if result.overall_passed
-                )
-                / total_weight
+                passed_weight / total_weight
                 if total_weight > 0
                 else 0.0
             )
@@ -161,13 +259,10 @@ class ProbeRun:
         passed_weight: dict[str, float] = {}
         total_weight: dict[str, float] = {}
         for result in self.results:
-            for dimension in result.dimensions:
-                name = str(dimension.get("name", ""))
-                if not name:
-                    continue
+            for name, passed in _named_expectation_outcomes(result):
                 weight = _aggregation_weight(result)
                 total_weight[name] = total_weight.get(name, 0.0) + weight
-                if dimension.get("passed") is True:
+                if passed:
                     passed_weight[name] = passed_weight.get(name, 0.0) + weight
         return {
             name: passed_weight.get(name, 0.0) / weight

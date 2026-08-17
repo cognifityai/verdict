@@ -12,7 +12,7 @@ Five-line install pattern:
 from __future__ import annotations
 
 from verdict.client import VerdictClient, init
-from verdict.schema import DriftSignal, Judgment, Trace
+from verdict.schema import DriftRun, DriftSignal, Judgment, Trace
 from verdict.signals import record_user_signal
 from verdict.trace import (
     clear_context,
@@ -26,6 +26,7 @@ from verdict.trace import (
 __version__ = "0.1.0a3"
 
 __all__ = [
+    "DriftRun",
     "DriftSignal",
     "Judgment",
     "Trace",

@@ -29,14 +29,10 @@ for the parts that remain aspirational.)
 work (retrieval, reranking, business logic) that auto-instrumentation can't see.
 Manual spans are persisted to the `spans` table alongside captured traces. When
 a supported instrumented provider call starts inside a manual span, its Trace
-automatically stores the innermost `parent_span_id`. Only after that Trace is
-accepted by storage does the active span chain retain the trace ID, preventing a
-sampled or failed write from creating an orphan. Multiple provider calls keep
-distinct Trace IDs and point to the same parent span; `SpanRecord.trace_id`
-retains the first successfully persisted or explicitly bound trace. A nested
-child inherits an outer provider link for correlation, but its first child-local
-provider call replaces that inherited link; the outer span keeps its own first
-link. For
+automatically stores the innermost `parent_span_id`. This Trace-to-span pointer
+is the sole automatic direction. Multiple provider calls keep distinct Trace IDs
+and can all point to the same parent span without selecting an arbitrary reverse
+owner. `SpanRecord.trace_id` is reserved for explicit caller binding. For
 manual-only work, callers can bind an existing stored LLM trace with
 `trace_context(trace_id)` or `set_context(trace_id=...)`. The binding uses
 `contextvars`, is inherited by nested work and child async tasks, and is restored
@@ -108,10 +104,13 @@ target deployment before relying on them.
   collide after redaction receive deterministic suffixes so no value is lost.
 - Judge reasoning/errors and manual-span names, errors, and nested attributes are
   sanitized at persistence as well.
-- Redaction uses regex candidate discovery plus format-specific validation: a
-  **Luhn checksum + valid card-length gate** keeps non-card digit runs (order
-  IDs, tracking numbers) intact, while standard-library IPv6 validation keeps
-  colon-delimited clock values such as `12:34:56` intact.
+- Redaction uses linear candidate scanning for emails plus regex discovery and
+  format-specific validation for other patterns. The email scanner anchors at
+  each `@` and advances monotonically, avoiding pathological backtracking on
+  malformed or very long input. A **Luhn checksum + valid card-length gate**
+  keeps non-card digit runs (order IDs, tracking numbers) intact, while
+  standard-library IPv6 validation keeps colon-delimited clock values such as
+  `12:34:56` intact.
 - Two redaction modes are implemented:
   - `redact` — replace the match with a placeholder (e.g. `<REDACTED>`).
   - `hash` — HMAC-SHA-256 the matched value (requires a `redaction_secret`).
@@ -121,12 +120,19 @@ target deployment before relying on them.
 - User IDs are never stored raw: they are HMAC/SHA-256 hashed (keyed with the
   redaction secret when configured).
 
-With buffered persistence, a provider/manual-span link changes from pending to
-linked only after the inner trace write acknowledges success. Failure clears the
-reservation and persists the manual span standalone with
-`verdict.link_status=trace_write_failed`. Durable-link verification uses the
-non-flushing `trace_exists()` storage operation, so closing manual spans does not
-force unrelated queued trace writes onto the request path.
+Buffered persistence does not add a trace/span acknowledgement protocol. Every
+ended manual span is persisted exactly once, independently of whether a provider
+trace is sampled, succeeds, fails, is delayed, or is dropped during shutdown.
+Because automatic capture never writes a provider trace ID into the span, it
+needs no pending state, reconciliation callback, record mutation, or compensating
+upsert. Reverse lookup uses the indexed `Trace.parent_span_id` field.
+
+Retention pruning deletes expired standalone span rows and expired spans whose
+referenced trace no longer exists, in addition to deleting spans attached to
+expired traces. A retained Trace protects its `parent_span_id` span even when the
+span began before the retention cutoff. SQL adapters perform the related
+multi-table cleanup in one transaction and serialize concurrent trace writers
+while deciding which shared parent spans remain protected.
 
 ## Consequences
 

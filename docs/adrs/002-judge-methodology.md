@@ -59,10 +59,12 @@ alerts or model rankings:
 For recurring monitoring, the runner can evaluate a fixed human-labeled JSONL
 sentinel set. It stores only the aggregate, evaluator fingerprint, and sentinel-
 set fingerprint in a separate `evaluator_health` record. `healthy` requires both
-the configured minimum label count and a 95% Wilson confidence-interval lower
-bound at or above the configured agreement threshold. The interval uses the
-number of independently judged examples, not correlated dimension labels, as
-its effective sample size. When the caller supplies a sentinel set, a
+the configured minimum independently judged example count and a 95% Wilson
+confidence-interval lower bound at or above the configured agreement threshold.
+An example is correct only when every declared label matches. The interval and
+health gate therefore use exact-match examples; label-level agreement is stored
+and displayed separately as a diagnostic. Legacy label-only health rows remain
+explicitly unavailable for health gating. When the caller supplies a sentinel set, a
 non-healthy aggregate is persisted and blocks production judging and drift with
 exit status 2. This is an anchor, not a guarantee: unchanged sentinel agreement
 cannot exclude silent changes elsewhere in the provider's behavior.

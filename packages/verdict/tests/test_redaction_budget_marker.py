@@ -63,6 +63,17 @@ def test_redaction_of_whitespace_free_text_stays_within_the_overhead_budget():
     assert elapsed_ms < 25.0, f"redact() took {elapsed_ms:.1f} ms on 8.8k CJK chars"
 
 
+def test_malformed_email_candidates_stay_within_the_overhead_budget():
+    for text in ("a" * 8_800 + "@", "患" * 8_800 + "@"):
+        start = time.perf_counter()
+        redact(text)
+        elapsed_ms = (time.perf_counter() - start) * 1000.0
+
+        assert elapsed_ms < 25.0, (
+            f"redact() took {elapsed_ms:.1f} ms on malformed email candidate"
+        )
+
+
 def test_emails_are_still_redacted_in_whitespace_free_text():
     """The fast path must not skip a real address."""
     assert redact("連絡先ops@corp.comまで") == "<EMAIL>"  # CJK is \\w, so the local part over-matches (pre-existing)

@@ -65,6 +65,7 @@ from datetime import datetime
 from typing import Any
 
 from verdict.schema import (
+    DriftRun,
     DriftSignal,
     EvaluatorHealthRecord,
     Judgment,
@@ -76,13 +77,11 @@ from verdict.schema import (
 
 @dataclass(frozen=True)
 class _Op:
-    """One queued write plus acknowledgements of the *inner* write result."""
+    """One queued storage write."""
 
     fn: Callable[..., Any]
     args: tuple[Any, ...]
     kwargs: dict[str, Any]
-    on_success: Callable[[], None] | None = None
-    on_failure: Callable[[BaseException], None] | None = None
 
 
 @dataclass(frozen=True)
@@ -124,12 +123,15 @@ class BufferedStorage:
         self.written = 0
         self.dropped_to_sync = 0
         self.write_errors = 0
-        self.callback_errors = 0
 
         # Serializes actual calls into `inner`. The bg thread holds it while
         # draining; the sync fallback and read-flush paths take it too, so
         # there is never more than one thread inside `inner` at a time.
         self._write_lock = threading.Lock()
+        # One lifecycle boundary makes check+enqueue, flush/read, and close
+        # mutually ordered. The worker deliberately never takes this lock: it
+        # must be able to reach a flush barrier while the caller waits here.
+        self._lifecycle_lock = threading.RLock()
 
         self._stopping = threading.Event()
         # Signalled by the drainer each time queue.unfinished_tasks hits zero,
@@ -197,9 +199,8 @@ class BufferedStorage:
                 self._queue.task_done()
 
             if barrier is not None:
-                # All earlier FIFO items (including callback-derived writes, which
-                # execute synchronously on this worker) are durable now. Later
-                # producers cannot extend this flush.
+                # All earlier FIFO items are durable now. Later producers cannot
+                # extend this flush.
                 barrier.reached.set()
                 self._queue.task_done()
 
@@ -227,25 +228,13 @@ class BufferedStorage:
             self._queue.task_done()
 
     def _execute(self, op: _Op) -> None:
-        """Apply one write and notify its acknowledgement outside the lock."""
+        """Apply one write without letting failures kill the worker."""
         try:
             with self._write_lock:
                 op.fn(*op.args, **op.kwargs)
             self.written += 1
-        except Exception as exc:
+        except Exception:
             self.write_errors += 1
-            if op.on_failure is not None:
-                try:
-                    op.on_failure(exc)
-                except Exception:
-                    self.callback_errors += 1
-            return
-
-        if op.on_success is not None:
-            try:
-                op.on_success()
-            except Exception:
-                self.callback_errors += 1
 
     # -- internal: enqueue with sync fallback -------------------------------
 
@@ -253,8 +242,6 @@ class BufferedStorage:
         self,
         fn: Callable[..., Any],
         *args: Any,
-        _on_success: Callable[[], None] | None = None,
-        _on_failure: Callable[[BaseException], None] | None = None,
         **kwargs: Any,
     ) -> None:
         """Queue a write, or apply it synchronously if the queue is full.
@@ -263,20 +250,20 @@ class BufferedStorage:
         write (counted in dropped_to_sync) rather than blocking the caller
         forever or dropping the datum.
         """
-        op = _Op(fn, args, kwargs, _on_success, _on_failure)
-        if self._closed or threading.current_thread() is self._thread:
-            # After close() the thread is gone; be safe and write through.
-            # Callback-derived writes also execute here on the worker so they
-            # complete before a following flush barrier is acknowledged.
-            self._execute(op)
-            return
-        try:
-            self._queue.put_nowait(op)
-            self.enqueued += 1
-        except queue.Full:
-            # Back-pressure: apply this one write inline. Not lost, just slow.
-            self.dropped_to_sync += 1
-            self._execute(op)
+        with self._lifecycle_lock:
+            if self._closed:
+                raise RuntimeError("BufferedStorage is closed")
+            op = _Op(fn, args, kwargs)
+            if threading.current_thread() is self._thread:
+                self._execute(op)
+                return
+            try:
+                self._queue.put_nowait(op)
+                self.enqueued += 1
+            except queue.Full:
+                # Back-pressure: apply this one write inline. Not lost, just slow.
+                self.dropped_to_sync += 1
+                self._execute(op)
 
     # -- internal: flush ----------------------------------------------------
 
@@ -287,6 +274,13 @@ class BufferedStorage:
         barrier do not extend this wait. ``timeout`` bounds both placing and
         waiting for the barrier and raises ``TimeoutError`` if it expires.
         """
+        with self._lifecycle_lock:
+            if self._closed:
+                return
+            self._flush_locked(timeout)
+
+    def _flush_locked(self, timeout: float | None = None) -> None:
+        """Flush accepted work while the caller holds ``_lifecycle_lock``."""
         if threading.current_thread() is self._thread:
             return
         barrier = _FlushBarrier(threading.Event())
@@ -304,21 +298,6 @@ class BufferedStorage:
     def insert_trace(self, trace: Trace) -> None:
         self._enqueue(self._inner.insert_trace, trace)
 
-    def insert_trace_with_ack(
-        self,
-        trace: Trace,
-        *,
-        on_success: Callable[[], None],
-        on_failure: Callable[[BaseException], None],
-    ) -> None:
-        """Enqueue a trace and acknowledge only the actual inner write result."""
-        self._enqueue(
-            self._inner.insert_trace,
-            trace,
-            _on_success=on_success,
-            _on_failure=on_failure,
-        )
-
     def insert_judgment(self, judgment: Judgment) -> None:
         self._enqueue(self._inner.insert_judgment, judgment)
 
@@ -327,6 +306,15 @@ class BufferedStorage:
 
     def insert_drift_signal(self, signal: DriftSignal) -> None:
         self._enqueue(self._inner.insert_drift_signal, signal)
+
+    def replace_drift_run(
+        self,
+        run: DriftRun,
+        signals: list[DriftSignal],
+    ) -> None:
+        # A completed run and its exact signal set are one transaction. Queueing
+        # delete/insert fragments would expose partial or signal-less snapshots.
+        self._maintenance(self._inner.replace_drift_run, run, signals)
 
     def delete_drift_signals_between(
         self,
@@ -353,17 +341,17 @@ class BufferedStorage:
     # ======================================================================
 
     def get_trace(self, trace_id: str) -> Trace | None:
-        self.flush()
-        with self._write_lock:
-            return self._inner.get_trace(trace_id)
+        return self._read(self._inner.get_trace, trace_id)
 
     def trace_exists(self, trace_id: str) -> bool:
         """Check durable inner state without flushing unrelated queued writes."""
-        with self._write_lock:
-            exists = getattr(self._inner, "trace_exists", None)
-            if callable(exists):
-                return bool(exists(trace_id))
-            return self._inner.get_trace(trace_id) is not None
+        with self._lifecycle_lock:
+            self._require_open_locked()
+            with self._write_lock:
+                exists = getattr(self._inner, "trace_exists", None)
+                if callable(exists):
+                    return bool(exists(trace_id))
+                return self._inner.get_trace(trace_id) is not None
 
     def list_traces(
         self,
@@ -372,11 +360,12 @@ class BufferedStorage:
         cluster_id: str | None = None,
         limit: int = 100,
     ) -> list[Trace]:
-        self.flush()
-        with self._write_lock:
-            return self._inner.list_traces(
-                tenant_id=tenant_id, cluster_id=cluster_id, limit=limit
-            )
+        return self._read(
+            self._inner.list_traces,
+            tenant_id=tenant_id,
+            cluster_id=cluster_id,
+            limit=limit,
+        )
 
     def list_judgments_for_cluster(
         self,
@@ -385,16 +374,24 @@ class BufferedStorage:
         since_iso: str | None = None,
         limit: int = 1000,
     ) -> list[Judgment]:
-        self.flush()
-        with self._write_lock:
-            return self._inner.list_judgments_for_cluster(
-                cluster_id, since_iso=since_iso, limit=limit
-            )
+        return self._read(
+            self._inner.list_judgments_for_cluster,
+            cluster_id,
+            since_iso=since_iso,
+            limit=limit,
+        )
 
     def list_drift_signals(self, *, limit: int = 100) -> list[DriftSignal]:
-        self.flush()
-        with self._write_lock:
-            return self._inner.list_drift_signals(limit=limit)
+        return self._read(self._inner.list_drift_signals, limit=limit)
+
+    def get_latest_drift_run_snapshot(
+        self,
+        evaluator_fingerprint: str,
+    ) -> tuple[DriftRun, list[DriftSignal]] | None:
+        return self._read(
+            self._inner.get_latest_drift_run_snapshot,
+            evaluator_fingerprint,
+        )
 
     def list_evaluator_health(
         self,
@@ -402,28 +399,22 @@ class BufferedStorage:
         evaluator_fingerprint: str | None = None,
         limit: int = 100,
     ) -> list[EvaluatorHealthRecord]:
-        self.flush()
-        with self._write_lock:
-            return self._inner.list_evaluator_health(
-                evaluator_fingerprint=evaluator_fingerprint, limit=limit
-            )
+        return self._read(
+            self._inner.list_evaluator_health,
+            evaluator_fingerprint=evaluator_fingerprint,
+            limit=limit,
+        )
 
     def list_spans(
         self, *, trace_id: str | None = None, limit: int = 100
     ) -> list[SpanRecord]:
-        self.flush()
-        with self._write_lock:
-            return self._inner.list_spans(trace_id=trace_id, limit=limit)
+        return self._read(self._inner.list_spans, trace_id=trace_id, limit=limit)
 
     def list_user_signals(self, *, limit: int = 1000) -> list[UserSignalRecord]:
-        self.flush()
-        with self._write_lock:
-            return self._inner.list_user_signals(limit=limit)
+        return self._read(self._inner.list_user_signals, limit=limit)
 
     def load_cluster_registry(self, version: str) -> str | None:
-        self.flush()
-        with self._write_lock:
-            return self._inner.load_cluster_registry(version)
+        return self._read(self._inner.load_cluster_registry, version)
 
     # ======================================================================
     # Storage Protocol — mutating-but-rare (flush-then-delegate, synchronous)
@@ -432,20 +423,37 @@ class BufferedStorage:
     # prior enqueued writes, then apply synchronously for straightforward
     # ordering semantics.
 
+    def _require_open_locked(self) -> None:
+        if self._closed:
+            raise RuntimeError("BufferedStorage is closed")
+
+    def _read(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        with self._lifecycle_lock:
+            self._require_open_locked()
+            self._flush_locked()
+            with self._write_lock:
+                return fn(*args, **kwargs)
+
+    def _maintenance(
+        self,
+        fn: Callable[..., Any],
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        with self._lifecycle_lock:
+            self._require_open_locked()
+            self._flush_locked()
+            with self._write_lock:
+                return fn(*args, **kwargs)
+
     def delete_trace(self, trace_id: str) -> None:
-        self.flush()
-        with self._write_lock:
-            self._inner.delete_trace(trace_id)
+        self._maintenance(self._inner.delete_trace, trace_id)
 
     def prune_before(self, cutoff_iso: str) -> int:
-        self.flush()
-        with self._write_lock:
-            return self._inner.prune_before(cutoff_iso)
+        return self._maintenance(self._inner.prune_before, cutoff_iso)
 
     def save_cluster_registry(self, version: str, payload_json: str) -> None:
-        self.flush()
-        with self._write_lock:
-            self._inner.save_cluster_registry(version, payload_json)
+        self._maintenance(self._inner.save_cluster_registry, version, payload_json)
 
     # ======================================================================
     # Lifecycle
@@ -456,22 +464,16 @@ class BufferedStorage:
 
         Idempotent: safe to call more than once.
         """
-        if self._closed:
-            return
-        # Prevent new writes from joining the async queue behind our barrier.
-        self._closed = True
-        # Flush what's already queued so nothing is lost.
-        self.flush()
-        # Signal shutdown and wake the drainer with a sentinel.
-        self._stopping.set()
-        try:
-            self._queue.put_nowait(_SHUTDOWN)
-        except queue.Full:
-            # Queue somehow full; the timeout-based wakeup in _run will still
-            # notice _stopping and exit once drained.
-            pass
-        self._thread.join(timeout=self._flush_interval * 4 + 5.0)
-        # Any stragglers the thread didn't get to (shouldn't happen after
-        # flush + join, but be safe): apply synchronously.
-        self._drain_remaining()
-        self._inner.close()
+        if threading.current_thread() is self._thread:
+            raise RuntimeError("BufferedStorage cannot close from its worker thread")
+        with self._lifecycle_lock:
+            if self._closed:
+                return
+            # Reject new operations before draining. _flush_locked is private
+            # specifically so close can flush accepted work in this state.
+            self._closed = True
+            self._flush_locked()
+            self._queue.put(_SHUTDOWN)
+            self._stopping.set()
+            self._thread.join()
+            self._inner.close()

@@ -234,13 +234,17 @@ class EvaluatorHealthRecord:
     evaluator_fingerprint: str = ""
     sentinel_set_name: str = ""
     sentinel_set_fingerprint: str = ""
+    correct_examples: int = 0
+    total_examples: int = 0
+    example_agreement: float | None = None
+    example_confidence_low: float | None = None
+    example_confidence_high: float | None = None
     correct_labels: int = 0
     total_labels: int = 0
-    agreement: float | None = None
-    confidence_low: float | None = None
-    confidence_high: float | None = None
+    label_agreement: float | None = None
     status: EvaluatorHealthStatus = EvaluatorHealthStatus.INSUFFICIENT_DATA
     error_count: int = 0
+    method_version: str = "2"
 
     def __post_init__(self) -> None:
         if not isinstance(self.status, EvaluatorHealthStatus):
@@ -294,6 +298,30 @@ class DriftDirection(str, Enum):
 
 
 @dataclass
+class DriftRun:
+    """One completed, immutable drift-analysis snapshot.
+
+    A run record exists even when no signal clears the gates. That explicit
+    zero-signal snapshot is what lets consumers distinguish "no current drift"
+    from "the pipeline has not run" and from legacy ungrouped signals.
+    """
+
+    run_id: str = field(default_factory=_id)
+    analysis_time: datetime = field(default_factory=_now)
+    completed_at: datetime = field(default_factory=_now)
+    evaluator_fingerprint: str = ""
+    signal_count: int = 0
+
+    def __post_init__(self) -> None:
+        if not self.run_id.strip():
+            raise ValueError("run_id must not be empty")
+        if not self.evaluator_fingerprint.strip():
+            raise ValueError("evaluator_fingerprint must not be empty")
+        if self.signal_count < 0:
+            raise ValueError("signal_count must not be negative")
+
+
+@dataclass
 class DriftSignal:
     """A statistically significant deviation between current window and baseline.
 
@@ -338,6 +366,10 @@ class DriftSignal:
     # appended after every field published in 0.1.0a3 to preserve positional
     # constructor compatibility.
     evaluator_fingerprint: str = ""
+
+    # Completed run snapshot that owns this signal. Empty identifies a legacy
+    # signal that cannot be presented as current evidence.
+    run_id: str = ""
 
     def __post_init__(self) -> None:
         if not isinstance(self.direction, DriftDirection):

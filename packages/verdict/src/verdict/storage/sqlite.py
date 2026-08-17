@@ -17,6 +17,7 @@ from verdict.redaction import sanitize_judgment, sanitize_span, sanitize_trace
 from verdict.schema import (
     DimensionScore,
     DriftDirection,
+    DriftRun,
     DriftSignal,
     EvaluatorHealthRecord,
     EvaluatorHealthStatus,
@@ -28,6 +29,7 @@ from verdict.schema import (
     UserSignalRecord,
     Verdict,
 )
+from verdict.storage.base import _validate_drift_run_snapshot
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS traces (
@@ -86,16 +88,30 @@ CREATE TABLE IF NOT EXISTS evaluator_health (
     evaluator_fingerprint TEXT NOT NULL,
     sentinel_set_name TEXT,
     sentinel_set_fingerprint TEXT NOT NULL,
+    correct_examples INTEGER NOT NULL,
+    total_examples INTEGER NOT NULL,
+    example_agreement REAL,
+    example_confidence_low REAL,
+    example_confidence_high REAL,
     correct_labels INTEGER NOT NULL,
     total_labels INTEGER NOT NULL,
-    agreement REAL,
-    confidence_low REAL,
-    confidence_high REAL,
+    label_agreement REAL,
     status TEXT NOT NULL,
-    error_count INTEGER NOT NULL DEFAULT 0
+    error_count INTEGER NOT NULL DEFAULT 0,
+    method_version TEXT NOT NULL DEFAULT '2'
 );
 CREATE INDEX IF NOT EXISTS idx_evaluator_health_identity
     ON evaluator_health(evaluator_fingerprint, evaluated_at);
+
+CREATE TABLE IF NOT EXISTS drift_runs (
+    run_id TEXT PRIMARY KEY,
+    analysis_time TEXT NOT NULL,
+    completed_at TEXT NOT NULL,
+    evaluator_fingerprint TEXT NOT NULL,
+    signal_count INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_drift_runs_latest
+    ON drift_runs(evaluator_fingerprint, analysis_time, completed_at, run_id);
 
 CREATE TABLE IF NOT EXISTS drift_signals (
     signal_id TEXT PRIMARY KEY,
@@ -104,6 +120,7 @@ CREATE TABLE IF NOT EXISTS drift_signals (
     dimension TEXT,
     direction TEXT,
     evaluator_fingerprint TEXT,
+    run_id TEXT,
     statistic_name TEXT,
     statistic_value REAL,
     p_value REAL,
@@ -122,6 +139,7 @@ CREATE TABLE IF NOT EXISTS drift_signals (
 -- (SQLite ignores errors from duplicate-column ALTERs via separate execs)
 CREATE INDEX IF NOT EXISTS idx_signals_detected ON drift_signals(detected_at);
 CREATE INDEX IF NOT EXISTS idx_signals_cluster_dim ON drift_signals(cluster_id, dimension);
+CREATE INDEX IF NOT EXISTS idx_signals_run ON drift_signals(run_id);
 
 CREATE TABLE IF NOT EXISTS cluster_registries (
     version TEXT PRIMARY KEY,
@@ -230,6 +248,15 @@ class SQLiteStorage:
                     self._conn.execute(
                         "ALTER TABLE spans ADD COLUMN parent_name TEXT"
                     )
+            if "drift_signals" in existing_tables:
+                drift_columns = {
+                    row[1]
+                    for row in self._conn.execute("PRAGMA table_info(drift_signals)")
+                }
+                if "run_id" not in drift_columns:
+                    self._conn.execute(
+                        "ALTER TABLE drift_signals ADD COLUMN run_id TEXT"
+                    )
             self._conn.executescript(_SCHEMA)
             try:
                 self._conn.execute(
@@ -247,6 +274,7 @@ class SQLiteStorage:
                 ("wasserstein_distance", "REAL DEFAULT 0.0"),
                 ("psi", "REAL DEFAULT 0.0"),
                 ("evaluator_fingerprint", "TEXT"),
+                ("run_id", "TEXT"),
             ]:
                 try:
                     self._conn.execute(f"ALTER TABLE drift_signals ADD COLUMN {col} {ddl}")
@@ -263,6 +291,21 @@ class SQLiteStorage:
             ]:
                 try:
                     self._conn.execute(f"ALTER TABLE judgments ADD COLUMN {col} {ddl}")
+                except sqlite3.OperationalError:
+                    pass
+            for col, ddl in [
+                ("correct_examples", "INTEGER NOT NULL DEFAULT 0"),
+                ("total_examples", "INTEGER NOT NULL DEFAULT 0"),
+                ("example_agreement", "REAL"),
+                ("example_confidence_low", "REAL"),
+                ("example_confidence_high", "REAL"),
+                ("label_agreement", "REAL"),
+                ("method_version", "TEXT NOT NULL DEFAULT '1'"),
+            ]:
+                try:
+                    self._conn.execute(
+                        f"ALTER TABLE evaluator_health ADD COLUMN {col} {ddl}"
+                    )
                 except sqlite3.OperationalError:
                     pass
 
@@ -403,22 +446,99 @@ class SQLiteStorage:
 
     def delete_trace(self, trace_id: str) -> None:
         with self._lock:
-            self._conn.execute("DELETE FROM judgments WHERE trace_id = ?", (trace_id,))
-            self._conn.execute("DELETE FROM spans WHERE trace_id = ?", (trace_id,))
-            self._conn.execute("DELETE FROM user_signals WHERE trace_id = ?", (trace_id,))
-            self._conn.execute("DELETE FROM traces WHERE trace_id = ?", (trace_id,))
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                self._conn.execute(
+                    "DELETE FROM judgments WHERE trace_id = ?", (trace_id,)
+                )
+                self._conn.execute(
+                    "DELETE FROM user_signals WHERE trace_id = ?", (trace_id,)
+                )
+                self._conn.execute(
+                    "DELETE FROM traces WHERE trace_id = ?", (trace_id,)
+                )
+                self._conn.execute(
+                    """DELETE FROM spans
+                       WHERE trace_id = ?
+                         AND NOT EXISTS (
+                           SELECT 1 FROM traces
+                           WHERE traces.parent_span_id = spans.span_id
+                         )""",
+                    (trace_id,),
+                )
+                self._conn.execute(
+                    """UPDATE spans SET trace_id = NULL
+                       WHERE trace_id = ?
+                         AND EXISTS (
+                           SELECT 1 FROM traces
+                           WHERE traces.parent_span_id = spans.span_id
+                         )""",
+                    (trace_id,),
+                )
+            except BaseException:
+                self._conn.execute("ROLLBACK")
+                raise
+            else:
+                self._conn.execute("COMMIT")
 
     def prune_before(self, cutoff_iso: str) -> int:
         with self._lock:
-            cur = self._conn.execute(
-                "SELECT trace_id FROM traces WHERE started_at < ?", (cutoff_iso,),
-            )
-            ids = [r["trace_id"] for r in cur.fetchall()]
-            for tid in ids:
-                self._conn.execute("DELETE FROM judgments WHERE trace_id = ?", (tid,))
-                self._conn.execute("DELETE FROM spans WHERE trace_id = ?", (tid,))
-                self._conn.execute("DELETE FROM user_signals WHERE trace_id = ?", (tid,))
-            self._conn.execute("DELETE FROM traces WHERE started_at < ?", (cutoff_iso,))
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                cur = self._conn.execute(
+                    "SELECT trace_id FROM traces WHERE started_at < ?", (cutoff_iso,),
+                )
+                ids = [r["trace_id"] for r in cur.fetchall()]
+                for tid in ids:
+                    self._conn.execute(
+                        "DELETE FROM judgments WHERE trace_id = ?", (tid,)
+                    )
+                    self._conn.execute(
+                        "DELETE FROM user_signals WHERE trace_id = ?", (tid,)
+                    )
+                self._conn.execute(
+                    "DELETE FROM traces WHERE started_at < ?", (cutoff_iso,)
+                )
+                for tid in ids:
+                    self._conn.execute(
+                        """DELETE FROM spans
+                           WHERE trace_id = ?
+                             AND NOT EXISTS (
+                               SELECT 1 FROM traces
+                               WHERE traces.parent_span_id = spans.span_id
+                             )""",
+                        (tid,),
+                    )
+                    self._conn.execute(
+                        """UPDATE spans SET trace_id = NULL
+                           WHERE trace_id = ?
+                             AND EXISTS (
+                               SELECT 1 FROM traces
+                               WHERE traces.parent_span_id = spans.span_id
+                             )""",
+                        (tid,),
+                    )
+                self._conn.execute(
+                    """DELETE FROM spans
+                       WHERE started_at < ?
+                         AND (
+                           trace_id IS NULL
+                           OR NOT EXISTS (
+                             SELECT 1 FROM traces
+                             WHERE traces.trace_id = spans.trace_id
+                           )
+                         )
+                         AND NOT EXISTS (
+                           SELECT 1 FROM traces
+                           WHERE traces.parent_span_id = spans.span_id
+                         )""",
+                    (cutoff_iso,),
+                )
+            except BaseException:
+                self._conn.execute("ROLLBACK")
+                raise
+            else:
+                self._conn.execute("COMMIT")
         return len(ids)
 
     # -- Judgments ---------------------------------------------------------
@@ -531,22 +651,28 @@ class SQLiteStorage:
                 """INSERT OR REPLACE INTO evaluator_health (
                     health_id, evaluated_at, evaluator_fingerprint,
                     sentinel_set_name, sentinel_set_fingerprint,
-                    correct_labels, total_labels, agreement, confidence_low,
-                    confidence_high, status, error_count
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    correct_examples, total_examples, example_agreement,
+                    example_confidence_low, example_confidence_high,
+                    correct_labels, total_labels, label_agreement,
+                    status, error_count, method_version
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     record.health_id,
                     _iso(record.evaluated_at),
                     record.evaluator_fingerprint,
                     record.sentinel_set_name,
                     record.sentinel_set_fingerprint,
+                    record.correct_examples,
+                    record.total_examples,
+                    record.example_agreement,
+                    record.example_confidence_low,
+                    record.example_confidence_high,
                     record.correct_labels,
                     record.total_labels,
-                    record.agreement,
-                    record.confidence_low,
-                    record.confidence_high,
+                    record.label_agreement,
                     record.status.value,
                     record.error_count,
+                    record.method_version,
                 ),
             )
 
@@ -572,69 +698,190 @@ class SQLiteStorage:
                 sql,
                 params,
             ).fetchall()
-        return [
-            EvaluatorHealthRecord(
+        records = []
+        for row in rows:
+            method_version = row["method_version"] or "1"
+            legacy = method_version == "1"
+            row_keys = set(row.keys())
+            records.append(EvaluatorHealthRecord(
                 health_id=row["health_id"],
                 evaluated_at=_parse_iso(row["evaluated_at"])
                 or datetime.now(timezone.utc),
                 evaluator_fingerprint=row["evaluator_fingerprint"],
                 sentinel_set_name=row["sentinel_set_name"] or "",
                 sentinel_set_fingerprint=row["sentinel_set_fingerprint"],
+                correct_examples=0 if legacy else row["correct_examples"],
+                total_examples=0 if legacy else row["total_examples"],
+                example_agreement=None if legacy else row["example_agreement"],
+                example_confidence_low=(
+                    None if legacy else row["example_confidence_low"]
+                ),
+                example_confidence_high=(
+                    None if legacy else row["example_confidence_high"]
+                ),
                 correct_labels=row["correct_labels"],
                 total_labels=row["total_labels"],
-                agreement=row["agreement"],
-                confidence_low=row["confidence_low"],
-                confidence_high=row["confidence_high"],
-                status=EvaluatorHealthStatus(row["status"]),
+                label_agreement=(
+                    row["agreement"]
+                    if legacy and "agreement" in row_keys
+                    else row["label_agreement"]
+                ),
+                status=(
+                    EvaluatorHealthStatus.INSUFFICIENT_DATA
+                    if legacy else EvaluatorHealthStatus(row["status"])
+                ),
                 error_count=row["error_count"],
-            )
-            for row in rows
-        ]
+                method_version=method_version,
+            ))
+        return records
 
     # -- Drift signals -----------------------------------------------------
 
+    @staticmethod
+    def _drift_signal_params(signal: DriftSignal) -> dict[str, object]:
+        return {
+            "signal_id": signal.signal_id,
+            "detected_at": _iso(signal.detected_at),
+            "cluster_id": signal.cluster_id,
+            "dimension": signal.dimension,
+            "direction": signal.direction.value,
+            "evaluator_fingerprint": signal.evaluator_fingerprint,
+            "run_id": signal.run_id or None,
+            "statistic_name": signal.statistic_name,
+            "statistic_value": signal.statistic_value,
+            "p_value": signal.p_value,
+            "p_value_adjusted": signal.p_value_adjusted,
+            "effect_size_cohens_d": signal.effect_size_cohens_d,
+            "effect_size_cliffs_delta": signal.effect_size_cliffs_delta,
+            "wasserstein_distance": signal.wasserstein_distance,
+            "psi": signal.psi,
+            "sample_size_current": signal.sample_size_current,
+            "sample_size_baseline": signal.sample_size_baseline,
+            "contributing_layers_json": json.dumps(signal.contributing_layers),
+            "example_trace_ids_json": json.dumps(signal.example_trace_ids),
+            "recommended_action": signal.recommended_action,
+        }
+
+    def _insert_drift_signal_locked(self, signal: DriftSignal) -> None:
+        self._conn.execute(
+            """INSERT OR REPLACE INTO drift_signals (
+                signal_id, detected_at, cluster_id, dimension, direction,
+                evaluator_fingerprint, run_id,
+                statistic_name, statistic_value, p_value, p_value_adjusted,
+                effect_size_cohens_d, effect_size_cliffs_delta,
+                wasserstein_distance, psi,
+                sample_size_current, sample_size_baseline,
+                contributing_layers_json, example_trace_ids_json, recommended_action
+            ) VALUES (
+                :signal_id, :detected_at, :cluster_id, :dimension, :direction,
+                :evaluator_fingerprint, :run_id,
+                :statistic_name, :statistic_value, :p_value, :p_value_adjusted,
+                :effect_size_cohens_d, :effect_size_cliffs_delta,
+                :wasserstein_distance, :psi,
+                :sample_size_current, :sample_size_baseline,
+                :contributing_layers_json, :example_trace_ids_json, :recommended_action
+            )""",
+            self._drift_signal_params(signal),
+        )
+
     def insert_drift_signal(self, signal: DriftSignal) -> None:
         with self._lock:
-            self._conn.execute(
-                """INSERT OR REPLACE INTO drift_signals (
-                    signal_id, detected_at, cluster_id, dimension, direction,
-                    evaluator_fingerprint,
-                    statistic_name, statistic_value, p_value, p_value_adjusted,
-                    effect_size_cohens_d, effect_size_cliffs_delta,
-                    wasserstein_distance, psi,
-                    sample_size_current, sample_size_baseline,
-                    contributing_layers_json, example_trace_ids_json, recommended_action
-                ) VALUES (
-                    :signal_id, :detected_at, :cluster_id, :dimension, :direction,
-                    :evaluator_fingerprint,
-                    :statistic_name, :statistic_value, :p_value, :p_value_adjusted,
-                    :effect_size_cohens_d, :effect_size_cliffs_delta,
-                    :wasserstein_distance, :psi,
-                    :sample_size_current, :sample_size_baseline,
-                    :contributing_layers_json, :example_trace_ids_json, :recommended_action
-                )""",
-                {
-                    "signal_id": signal.signal_id,
-                    "detected_at": _iso(signal.detected_at),
-                    "cluster_id": signal.cluster_id,
-                    "dimension": signal.dimension,
-                    "direction": signal.direction.value,
-                    "evaluator_fingerprint": signal.evaluator_fingerprint,
-                    "statistic_name": signal.statistic_name,
-                    "statistic_value": signal.statistic_value,
-                    "p_value": signal.p_value,
-                    "p_value_adjusted": signal.p_value_adjusted,
-                    "effect_size_cohens_d": signal.effect_size_cohens_d,
-                    "effect_size_cliffs_delta": signal.effect_size_cliffs_delta,
-                    "wasserstein_distance": signal.wasserstein_distance,
-                    "psi": signal.psi,
-                    "sample_size_current": signal.sample_size_current,
-                    "sample_size_baseline": signal.sample_size_baseline,
-                    "contributing_layers_json": json.dumps(signal.contributing_layers),
-                    "example_trace_ids_json": json.dumps(signal.example_trace_ids),
-                    "recommended_action": signal.recommended_action,
-                },
-            )
+            self._insert_drift_signal_locked(signal)
+
+    def replace_drift_run(
+        self,
+        run: DriftRun,
+        signals: list[DriftSignal],
+    ) -> None:
+        _validate_drift_run_snapshot(run, signals)
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                existing = self._conn.execute(
+                    "SELECT evaluator_fingerprint FROM drift_runs WHERE run_id = ?",
+                    (run.run_id,),
+                ).fetchone()
+                if (
+                    existing
+                    and existing["evaluator_fingerprint"]
+                    != run.evaluator_fingerprint
+                ):
+                    raise ValueError("run_id already belongs to another evaluator")
+                for signal in signals:
+                    owner = self._conn.execute(
+                        "SELECT run_id FROM drift_signals WHERE signal_id = ?",
+                        (signal.signal_id,),
+                    ).fetchone()
+                    if owner and owner["run_id"] and owner["run_id"] != run.run_id:
+                        raise ValueError(
+                            "signal_id already belongs to another drift run"
+                        )
+                self._conn.execute(
+                    """INSERT INTO drift_runs (
+                        run_id, analysis_time, completed_at,
+                        evaluator_fingerprint, signal_count
+                    ) VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(run_id) DO UPDATE SET
+                        analysis_time = excluded.analysis_time,
+                        completed_at = excluded.completed_at,
+                        evaluator_fingerprint = excluded.evaluator_fingerprint,
+                        signal_count = excluded.signal_count""",
+                    (
+                        run.run_id,
+                        _iso(run.analysis_time),
+                        _iso(run.completed_at),
+                        run.evaluator_fingerprint,
+                        run.signal_count,
+                    ),
+                )
+                self._conn.execute(
+                    "DELETE FROM drift_signals WHERE run_id = ?", (run.run_id,)
+                )
+                for signal in signals:
+                    self._insert_drift_signal_locked(signal)
+                self._conn.execute("COMMIT")
+            except BaseException:
+                self._conn.execute("ROLLBACK")
+                raise
+
+    def get_latest_drift_run_snapshot(
+        self,
+        evaluator_fingerprint: str,
+    ) -> tuple[DriftRun, list[DriftSignal]] | None:
+        with self._lock:
+            self._conn.execute("BEGIN")
+            try:
+                row = self._conn.execute(
+                    """SELECT * FROM drift_runs
+                       WHERE evaluator_fingerprint = ?
+                       ORDER BY analysis_time DESC, completed_at DESC, run_id DESC
+                       LIMIT 1""",
+                    (evaluator_fingerprint,),
+                ).fetchone()
+                if row is None:
+                    self._conn.execute("COMMIT")
+                    return None
+                signal_rows = self._conn.execute(
+                    "SELECT * FROM drift_signals WHERE run_id = ? ORDER BY signal_id",
+                    (row["run_id"],),
+                ).fetchall()
+                run = DriftRun(
+                    run_id=row["run_id"],
+                    analysis_time=_parse_iso(row["analysis_time"])
+                    or datetime.now(timezone.utc),
+                    completed_at=_parse_iso(row["completed_at"])
+                    or datetime.now(timezone.utc),
+                    evaluator_fingerprint=row["evaluator_fingerprint"],
+                    signal_count=row["signal_count"],
+                )
+                signals = [self._row_to_drift_signal(item) for item in signal_rows]
+                if len(signals) != run.signal_count:
+                    raise RuntimeError("stored drift run signal_count is inconsistent")
+                self._conn.execute("COMMIT")
+                return run, signals
+            except BaseException:
+                self._conn.execute("ROLLBACK")
+                raise
 
     def delete_drift_signals_between(
         self,
@@ -644,12 +891,38 @@ class SQLiteStorage:
         evaluator_fingerprint: str | None = None,
     ) -> None:
         with self._lock:
-            sql = "DELETE FROM drift_signals WHERE detected_at >= ? AND detected_at < ?"
+            match_sql = "detected_at >= ? AND detected_at < ?"
             params: tuple = (_iso(start), _iso(end))
             if evaluator_fingerprint is not None:
-                sql += " AND evaluator_fingerprint = ?"
+                match_sql += " AND evaluator_fingerprint = ?"
                 params += (evaluator_fingerprint,)
-            self._conn.execute(sql, params)
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                run_ids = [
+                    row["run_id"]
+                    for row in self._conn.execute(
+                        f"SELECT DISTINCT run_id FROM drift_signals "  # nosec B608
+                        f"WHERE {match_sql} AND run_id IS NOT NULL "
+                        "AND run_id <> ''",
+                        params,
+                    ).fetchall()
+                ]
+                for run_id in run_ids:
+                    self._conn.execute(
+                        "DELETE FROM drift_signals WHERE run_id = ?", (run_id,)
+                    )
+                    self._conn.execute(
+                        "DELETE FROM drift_runs WHERE run_id = ?", (run_id,)
+                    )
+                self._conn.execute(
+                    f"DELETE FROM drift_signals WHERE {match_sql} "  # nosec B608
+                    "AND (run_id IS NULL OR run_id = '')",
+                    params,
+                )
+                self._conn.execute("COMMIT")
+            except BaseException:
+                self._conn.execute("ROLLBACK")
+                raise
 
     def list_drift_signals(self, *, limit: int = 100) -> list[DriftSignal]:
         with self._lock:
@@ -657,21 +930,24 @@ class SQLiteStorage:
                 "SELECT * FROM drift_signals ORDER BY detected_at DESC LIMIT ?", (limit,),
             )
             rows = cur.fetchall()
+        return [self._row_to_drift_signal(r) for r in rows]
+
+    def _row_to_drift_signal(self, r: sqlite3.Row) -> DriftSignal:
         def _get(row, key, default=0.0):
             try:
-                v = row[key]
-                return v if v is not None else default
+                value = row[key]
+                return value if value is not None else default
             except (IndexError, KeyError):
                 return default
 
-        return [
-            DriftSignal(
+        return DriftSignal(
                 signal_id=r["signal_id"],
                 detected_at=_parse_iso(r["detected_at"]) or datetime.now(timezone.utc),
                 cluster_id=r["cluster_id"] or "",
                 dimension=r["dimension"] or "",
                 direction=DriftDirection(r["direction"] or "change"),
                 evaluator_fingerprint=_get(r, "evaluator_fingerprint", ""),
+                run_id=_get(r, "run_id", ""),
                 statistic_name=r["statistic_name"] or "",
                 statistic_value=r["statistic_value"] or 0.0,
                 p_value=r["p_value"] or 1.0,
@@ -686,8 +962,6 @@ class SQLiteStorage:
                 example_trace_ids=json.loads(r["example_trace_ids_json"]) if r["example_trace_ids_json"] else [],
                 recommended_action=r["recommended_action"] or "",
             )
-            for r in rows
-        ]
 
     # -- Spans -------------------------------------------------------------
 

@@ -101,6 +101,7 @@ jobs:
           --health-retries 10
     env:
       VERDICT_TEST_POSTGRES_DSN: postgresql://verdict:verdict-test@127.0.0.1:5432/verdict_test
+      VERDICT_REQUIRE_POSTGRES_TESTS: "1"
 
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5

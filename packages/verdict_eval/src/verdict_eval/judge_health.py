@@ -141,12 +141,12 @@ def evaluate_judge_health(
     examples: list[SentinelExample],
     *,
     set_name: str,
-    minimum_labels: int = 30,
+    minimum_examples: int = 30,
     agreement_threshold: float = 0.8,
 ) -> EvaluatorHealthRecord:
     """Evaluate a judge on a fixed anchor set without persisting raw examples."""
-    if minimum_labels < 1:
-        raise ValueError("minimum_labels must be at least 1")
+    if minimum_examples < 1:
+        raise ValueError("minimum_examples must be at least 1")
     if not 0 <= agreement_threshold <= 1:
         raise ValueError("agreement_threshold must be between 0 and 1")
     if not examples:
@@ -165,6 +165,7 @@ def evaluate_judge_health(
 
     correct = 0
     total = 0
+    correct_examples = 0
     completed_examples = 0
     errors = 0
     for example in examples:
@@ -181,22 +182,26 @@ def evaluate_judge_health(
         completed_examples += 1
         total += len(example.labels)
         actual = {score.name: score.verdict for score in judgment.dimensions}
-        correct += sum(
+        example_correct = sum(
             actual.get(dimension) == expected
             for dimension, expected in example.labels.items()
         )
+        correct += example_correct
+        correct_examples += example_correct == len(example.labels)
 
-    agreement = correct / total if total else 0.0
-    # Labels within one response share the same prompt, provider call, and model
-    # failure modes; treating them as independent makes the interval far too
-    # confident. Use the number of independently judged sentinel examples as
-    # the effective sample size while retaining label-level agreement/reporting.
-    low, high = _wilson_interval(
-        agreement * completed_examples,
-        completed_examples,
+    example_agreement = (
+        correct_examples / completed_examples if completed_examples else 0.0
     )
-    if total < minimum_labels:
+    label_agreement = correct / total if total else 0.0
+    low, high = _wilson_interval(correct_examples, completed_examples)
+    if completed_examples < minimum_examples:
         status = EvaluatorHealthStatus.INSUFFICIENT_DATA
+    elif errors:
+        # Agreement among successful calls cannot certify a run whose sentinel
+        # coverage was incomplete. Preserve INSUFFICIENT_DATA when errors leave
+        # too few labels; otherwise report a measured but operationally degraded
+        # evaluator rather than silently calling the partial sample healthy.
+        status = EvaluatorHealthStatus.DEGRADED
     elif low is not None and low >= agreement_threshold:
         status = EvaluatorHealthStatus.HEALTHY
     else:
@@ -205,11 +210,15 @@ def evaluate_judge_health(
         evaluator_fingerprint=evaluator_fingerprint,
         sentinel_set_name=set_name,
         sentinel_set_fingerprint=sentinel_set_fingerprint(examples),
+        correct_examples=correct_examples,
+        total_examples=completed_examples,
+        example_agreement=example_agreement,
+        example_confidence_low=low,
+        example_confidence_high=high,
         correct_labels=correct,
         total_labels=total,
-        agreement=agreement,
-        confidence_low=low,
-        confidence_high=high,
+        label_agreement=label_agreement,
         status=status,
         error_count=errors,
+        method_version="2",
     )

@@ -1,8 +1,9 @@
 """PII redaction. Modes: redact, hash. ("encrypt" is planned, not implemented —
 rejected at init().)
 
-Redaction uses built-in regex candidate discovery, Luhn card checks, and
-standard-library IP validation; it needs no extra dependencies. A deeper
+Redaction uses built-in pattern matching, a linear ``@``-anchored email scanner,
+Luhn card checks, and standard-library IP validation; it needs no extra
+dependencies. A deeper
 Presidio-based pass is a possible future addition but is NOT currently wired in.
 """
 
@@ -55,11 +56,9 @@ _MESSAGE_FIELDS = (
 # compliance guarantee. A deeper entity-aware pass (e.g. Presidio) is a possible
 # future addition but is NOT wired in today.
 _PATTERNS = {
-    # Order matters: EMAIL runs before URL so an email embedded in a URL is
-    # matched (and hashed) as an EMAIL first, keeping hash-mode values stable
-    # across prose vs. URL contexts. More-specific numeric patterns run before
-    # greedier ones like PHONE.
-    "EMAIL": re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+"),
+    # Email candidates are handled by the linear at-sign scanner below before
+    # this mapping, so an email embedded in a URL is still classified as EMAIL.
+    # More-specific numeric patterns run before greedier ones like PHONE.
     "URL": re.compile(r"https?://\S+"),
     "SSN": re.compile(r"\b\d{3}-\d{2}-\d{4}\b"),
     # CANDIDATE matcher only — a 13-19 digit run (optionally space/dash grouped)
@@ -82,6 +81,95 @@ _PATTERNS = {
     "IP": re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b"),
     "PHONE": re.compile(r"(?:\+\d{1,3}[ -]?)?(?:\(\d{3}\)[ -]?|\d{3}[ -])\d{3}[ -]?\d{4}\b"),
 }
+
+
+def _is_word_character(character: str) -> bool:
+    """Match the practical Unicode behavior of regex ``\\w`` per code point."""
+    return character == "_" or character.isalnum()
+
+
+def _is_email_local_character(character: str) -> bool:
+    return _is_word_character(character) or character in ".+-"
+
+
+def _is_email_domain_label_character(character: str) -> bool:
+    return _is_word_character(character) or character == "-"
+
+
+def _is_email_domain_tail_character(character: str) -> bool:
+    return _is_email_domain_label_character(character) or character == "."
+
+
+def _redact_emails(
+    text: str,
+    mode: RedactionMode,
+    secret: str | None,
+) -> str:
+    """Redact email-shaped candidates in one monotonic scan.
+
+    The previous search regex began with an unbounded local-part expression, so
+    every possible start position rescanned a long token when the eventual
+    candidate was malformed. Anchoring discovery on each ``@`` means every code
+    point is visited a bounded number of times. Deliberately retain the previous
+    permissive candidate grammar; validation breadth is unchanged here.
+    """
+    if "@" not in text:
+        return text
+
+    output: list[str] = []
+    output_cursor = 0
+    search_cursor = 0
+    text_length = len(text)
+
+    while True:
+        at_index = text.find("@", search_cursor)
+        if at_index < 0:
+            break
+
+        start = at_index
+        while (
+            start > output_cursor
+            and _is_email_local_character(text[start - 1])
+        ):
+            start -= 1
+
+        domain_end = at_index + 1
+        while (
+            domain_end < text_length
+            and _is_email_domain_label_character(text[domain_end])
+        ):
+            domain_end += 1
+
+        has_local = start < at_index
+        has_domain_label = domain_end > at_index + 1
+        has_dot = domain_end < text_length and text[domain_end] == "."
+        tail_end = domain_end + 1
+        if has_dot:
+            while (
+                tail_end < text_length
+                and _is_email_domain_tail_character(text[tail_end])
+            ):
+                tail_end += 1
+        has_domain_tail = has_dot and tail_end > domain_end + 1
+
+        if not (has_local and has_domain_label and has_domain_tail):
+            search_cursor = at_index + 1
+            continue
+
+        candidate = text[start:tail_end]
+        output.append(text[output_cursor:start])
+        output.append(
+            _hash_match(candidate, "EMAIL", secret)
+            if mode == "hash"
+            else "<EMAIL>"
+        )
+        output_cursor = tail_end
+        search_cursor = tail_end
+
+    if not output:
+        return text
+    output.append(text[output_cursor:])
+    return "".join(output)
 
 
 def redact(
@@ -109,14 +197,9 @@ def redact(
     if mode == "hash" and not secret:
         raise ValueError("hash mode requires a redaction_secret")
 
-    out = text
+    # Email discovery is first for classification stability in URL contexts.
+    out = _redact_emails(text, mode, secret)
     for label, pat in _PATTERNS.items():
-        # The EMAIL pattern's leading [\w.+-]+ backtracks across an unbroken
-        # word-character run, which is quadratic in text without whitespace
-        # (CJK prose, base64 data URLs). Skipping it when there is no "@" at all
-        # keeps the common case inside the SDK's capture-overhead budget.
-        if label == "EMAIL" and "@" not in out:
-            continue
         if label == "CREDIT_CARD":
             # Gate on Luhn + valid length so non-card digit runs survive intact.
             out = pat.sub(

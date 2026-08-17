@@ -27,9 +27,9 @@ anthropic = ["anthropic>=0.30"]
 openai = ["openai>=1.30"]
 google = ["google-genai>=1.0"]
 postgres = ["psycopg[binary,pool]>=3.1"]
-# NOTE: Redaction is built-in (regex + Luhn, see redaction.py) and needs no
-# extra dependencies. Presidio-based redaction is a planned option, not yet
-# wired, so no `redaction` extra is published.
+# NOTE: Redaction is built in (pattern scanners + Luhn; see redaction.py) and
+# needs no extra dependencies. Presidio-based redaction is a planned option,
+# not yet wired, so no `redaction` extra is published.
 all = ["cognifity-verdict[anthropic,openai,google,postgres]"]
 dev = [
     "pytest>=8",

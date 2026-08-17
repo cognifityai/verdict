@@ -106,10 +106,17 @@ For Verdict, the matrix must include these cases whenever the subsystem changes:
   adoption, nested spans, concurrent tasks/tenants, sampling, synchronous and
   delayed buffered failure, backpressure, late stream completion, and shutdown.
   An enqueued write is not a durable write and may not authorize a persisted
-  foreign link.
+  foreign link. Automatic provider correlation is one-way through
+  `Trace.parent_span_id`; `SpanRecord.trace_id` is reserved for validated
+  explicit context. Do not reintroduce an automatic reverse span link without a
+  new schema and deletion/retention ownership design for the one-to-many case.
+  Trace deletion and retention pruning must be atomic across every affected
+  record/table, serialized against concurrent trace writers, adapter-parity
+  tested, and linear rather than a spans-times-traces scan.
 - **Evaluation:** permute duplicate/conflicting/unusable signals; cover empty,
   missing, error, outage, UNCLEAR, and zero-denominator states; assert one
-  contract across persisted artifacts, scripts, API, and UI.
+  contract across persisted artifacts, scripts, API, and UI. Malformed stored
+  booleans must fail closed without disappearing from one aggregate denominator.
 - **Compatibility:** compare every affected public dataclass field order and
   callable signature with the latest published wheel, then exercise old
   positional construction and stored fixtures against the built candidate.
@@ -138,7 +145,7 @@ correctness depends on a later callback finding objects it does not own.
 Before implementation, the design review must:
 
 1. define the invariants and terminal outcome for every created record;
-2. cover objects created before, during, and after asynchronous acknowledgement,
+2. cover objects created before, during, and after asynchronous persistence,
    plus success, failure, sampling, cancellation, retry, timeout, and shutdown;
 3. compare the proposed patch with a design that removes or collapses existing
    machinery, counting states, transitions, callbacks, writes, adapter branches,
@@ -151,13 +158,13 @@ Before implementation, the design review must:
    parallel.
 
 For trace/span persistence specifically, every ended span must be durably
-accounted for exactly once regardless of buffer timing. A trace acknowledgement
-may change link resolution, but it may never determine whether the span itself
-survives. Tests must create and close descendants both before and after the
-provider trace is enqueued and before and after its acknowledgement. Run the
-same lifecycle contract against memory, SQLite, buffered storage, and live
-Postgres. Do not add another trace-link state or acknowledgement special case
-without completing and approving the redesign gate.
+accounted for exactly once regardless of buffer timing. Automatic correlation
+is one-way: the provider trace may record `parent_span_id`, while a manual span
+receives `trace_id` only from validated explicit context. Tests must create and
+close descendants before, during, and after provider-trace persistence and run
+the same lifecycle contract against memory, SQLite, buffered storage, and live
+Postgres. Do not add an acknowledgement mechanism, reverse-link repair, or
+another trace-link state without completing and approving the redesign gate.
 
 ### Verdict-Specific Regression Matrix
 
@@ -175,6 +182,20 @@ The following cases are mandatory whenever their area changes:
   paid-call portion explicitly unverified.
 - Stored records from supported earlier schemas still load or fail with a clear
   migration error.
+- Judge-health gates count exact-match sentinel examples, never correlated
+  labels. Keep label agreement as a separately named diagnostic and test
+  unequal label counts per example.
+- Probe quality gates count each probe weight once; expectation agreement is a
+  separately named diagnostic. Test malformed, contradictory, and historical
+  artifacts fail closed without changing published constructor positions.
+- Drift consumers read one atomic latest `DriftRun` snapshot, including an
+  explicit zero-signal run. Test rollback, concurrent replacement, legacy
+  signals without run identity, and deletion without partial snapshots.
+- Dashboard request tests must execute reordered and failed fetches plus stale
+  trace/drift selection. JSX substring checks are not evidence for state
+  behavior.
+- Buffered storage lifecycle tests must cover accepted writes at shutdown,
+  concurrent close/read/write/flush, post-close behavior, and a real adapter.
 
 Before merge or release, run focused regressions, the complete Python and UI
 test suites, the applicable smoke/end-to-end paths, `git diff --check`, a review

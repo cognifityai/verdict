@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 
 from verdict.schema import (
     DimensionScore,
+    DriftRun,
     DriftSignal,
     EvaluatorHealthRecord,
     Judgment,
@@ -13,6 +14,27 @@ from verdict.schema import (
 from verdict.storage import SQLiteStorage
 
 from ui.server import _CSP, _cluster_health, _signal_provider, build_bundle, create_app
+
+
+def _persist_drift_snapshot(storage, *signals, run_id=None, analysis_time=None):
+    assert signals
+    fingerprints = {signal.evaluator_fingerprint for signal in signals}
+    assert len(fingerprints) == 1 and "" not in fingerprints
+    fingerprint = next(iter(fingerprints))
+    run_id = run_id or f"test-run-{fingerprint}-{signals[0].signal_id}"
+    analysis_time = analysis_time or max(signal.detected_at for signal in signals)
+    for signal in signals:
+        signal.run_id = run_id
+    storage.replace_drift_run(
+        DriftRun(
+            run_id=run_id,
+            analysis_time=analysis_time,
+            completed_at=analysis_time + timedelta(seconds=1),
+            evaluator_fingerprint=fingerprint,
+            signal_count=len(signals),
+        ),
+        list(signals),
+    )
 
 
 def test_signal_provider_resolves_demo_alias():
@@ -86,7 +108,7 @@ def test_bundle_marks_unknown_cost_and_exposes_signal_examples(tmp_path):
         judge_models=["judge-model"],
         dimensions=[DimensionScore(name="relevance", verdict=Verdict.FAIL)],
     ))
-    storage.insert_drift_signal(DriftSignal(
+    _persist_drift_snapshot(storage, DriftSignal(
         cluster_id="support",
         dimension="relevance",
         evaluator_fingerprint="cost-test-evaluator",
@@ -125,7 +147,7 @@ def test_bundle_filters_drift_by_selected_evaluator_and_excludes_historical_rows
             judge_models=[f"judge-{suffix}"],
             dimensions=[DimensionScore(name="quality", verdict=verdict)],
         ))
-        storage.insert_drift_signal(DriftSignal(
+        _persist_drift_snapshot(storage, DriftSignal(
             signal_id=f"signal-{suffix}",
             cluster_id="support",
             dimension=f"quality-{suffix}",
@@ -151,6 +173,60 @@ def test_bundle_filters_drift_by_selected_evaluator_and_excludes_historical_rows
     assert [signal["id"] for signal in selected["driftSignals"]] == ["signal-a"]
     assert selected["evaluation"]["driftStatus"] == "selected"
     assert selected["evaluation"]["unattributedDriftSignals"] == 1
+
+
+def test_bundle_uses_latest_completed_drift_run_even_when_it_has_zero_signals(tmp_path):
+    path = tmp_path / "latest-zero-drift.db"
+    storage = SQLiteStorage(str(path))
+    trace = Trace(
+        trace_id="trace-latest-run",
+        provider="openai",
+        cluster_id="support",
+        prompt_redacted="Prompt",
+        response_redacted="Response",
+    )
+    storage.insert_trace(trace)
+    storage.insert_judgment(Judgment(
+        trace_id=trace.trace_id,
+        evaluator_provider="fake",
+        evaluator_config={"temperature": 0},
+        evaluator_fingerprint="latest-run-evaluator",
+        expected_dimensions=["quality"],
+        judge_models=["judge"],
+        dimensions=[DimensionScore(name="quality", verdict=Verdict.PASS)],
+    ))
+    historical_signal = DriftSignal(
+        signal_id="historical-drift",
+        detected_at=datetime(2026, 8, 15, 12, tzinfo=timezone.utc),
+        cluster_id="support",
+        dimension="quality",
+        evaluator_fingerprint="latest-run-evaluator",
+    )
+    _persist_drift_snapshot(
+        storage,
+        historical_signal,
+        run_id="historical-run",
+        analysis_time=historical_signal.detected_at,
+    )
+    latest_time = datetime(2026, 8, 16, 12, tzinfo=timezone.utc)
+    storage.replace_drift_run(
+        DriftRun(
+            run_id="latest-zero-run",
+            analysis_time=latest_time,
+            completed_at=latest_time + timedelta(minutes=1),
+            evaluator_fingerprint="latest-run-evaluator",
+            signal_count=0,
+        ),
+        [],
+    )
+    storage.close()
+
+    bundle = build_bundle(path)
+
+    assert bundle["driftSignals"] == []
+    assert bundle["driftRun"]["id"] == "latest-zero-run"
+    assert bundle["driftRun"]["signalCount"] == 0
+    assert bundle["evaluation"]["driftStatus"] == "selected"
 
 
 def test_bundle_builds_independent_cluster_pass_rate_series(tmp_path):
@@ -255,22 +331,28 @@ def test_bundle_exposes_only_selected_evaluator_sentinel_health(tmp_path):
         evaluator_fingerprint="selected-fingerprint",
         sentinel_set_name="support-v1",
         sentinel_set_fingerprint="set-one",
+        correct_examples=27,
+        total_examples=30,
+        example_agreement=0.9,
+        example_confidence_low=0.74,
+        example_confidence_high=0.97,
         correct_labels=27,
         total_labels=30,
-        agreement=0.9,
-        confidence_low=0.74,
-        confidence_high=0.97,
+        label_agreement=0.9,
         status="healthy",
     ))
     storage.insert_evaluator_health(EvaluatorHealthRecord(
         evaluator_fingerprint="other-fingerprint",
         sentinel_set_name="other-v1",
         sentinel_set_fingerprint="set-two",
+        correct_examples=0,
+        total_examples=30,
+        example_agreement=0,
+        example_confidence_low=0,
+        example_confidence_high=0.11,
         correct_labels=0,
         total_labels=30,
-        agreement=0,
-        confidence_low=0,
-        confidence_high=0.11,
+        label_agreement=0,
         status="degraded",
     ))
     storage.close()
@@ -285,13 +367,17 @@ def test_bundle_exposes_only_selected_evaluator_sentinel_health(tmp_path):
         "evaluatedAt": bundle["evaluatorHealth"][0]["evaluatedAt"],
         "sentinelSetName": "support-v1",
         "sentinelSetFingerprint": "set-one",
+        "correctExamples": 27,
+        "totalExamples": 30,
+        "exampleAgreement": 90.0,
+        "exampleConfidenceLow": 74.0,
+        "exampleConfidenceHigh": 97.0,
         "correctLabels": 27,
         "totalLabels": 30,
-        "agreement": 90.0,
-        "confidenceLow": 74.0,
-        "confidenceHigh": 97.0,
+        "labelAgreement": 90.0,
         "status": "healthy",
         "errorCount": 0,
+        "methodVersion": "2",
     }]
 
 
@@ -564,7 +650,7 @@ def test_bundle_preserves_nullable_historical_drift_statistics(tmp_path):
         judge_models=["judge"],
         dimensions=[DimensionScore(name="quality", verdict=Verdict.PASS)],
     ))
-    storage.insert_drift_signal(DriftSignal(
+    _persist_drift_snapshot(storage, DriftSignal(
         signal_id="legacy-null",
         cluster_id="support",
         dimension="quality",
@@ -603,15 +689,18 @@ def test_bundle_preserves_unclear_coverage_statistic_precision(tmp_path):
         judge_models=["judge"],
         dimensions=[DimensionScore(name="quality", verdict=Verdict.PASS)],
     ))
-    for signal_id, statistic in (("coverage-42", 0.42), ("coverage-37", 0.37)):
-        storage.insert_drift_signal(DriftSignal(
+    coverage_signals = [
+        DriftSignal(
             signal_id=signal_id,
             cluster_id="support",
             dimension="quality",
             evaluator_fingerprint="coverage-evaluator",
             statistic_name="unclear_rate_increase",
             statistic_value=statistic,
-        ))
+        )
+        for signal_id, statistic in (("coverage-42", 0.42), ("coverage-37", 0.37))
+    ]
+    _persist_drift_snapshot(storage, *coverage_signals)
     storage.close()
 
     statistics = {
@@ -688,7 +777,7 @@ def test_bundle_treats_malformed_historical_drift_numbers_as_unavailable(tmp_pat
         judge_models=["judge"],
         dimensions=[DimensionScore(name="quality", verdict=Verdict.PASS)],
     ))
-    storage.insert_drift_signal(DriftSignal(
+    _persist_drift_snapshot(storage, DriftSignal(
         signal_id="legacy-malformed-number",
         cluster_id="support",
         dimension="quality",
@@ -714,7 +803,7 @@ def test_bundle_treats_malformed_historical_drift_numbers_as_unavailable(tmp_pat
     assert signal["cohensD"] is None
 
 
-def test_bundle_handles_drift_table_missing_additive_effect_columns(tmp_path):
+def test_bundle_excludes_legacy_drift_table_missing_run_metadata(tmp_path):
     path = tmp_path / "pre-effect-columns.db"
     storage = SQLiteStorage(str(path))
     trace = Trace(
@@ -785,11 +874,11 @@ def test_bundle_handles_drift_table_missing_additive_effect_columns(tmp_path):
     finally:
         connection.close()
 
-    signal = build_bundle(path)["driftSignals"][0]
+    bundle = build_bundle(path)
 
-    assert signal["id"] == "legacy-effects"
-    assert signal["cliffsDelta"] is None
-    assert signal["cohensD"] == -0.4
+    assert bundle["driftSignals"] == []
+    assert bundle["driftRun"] is None
+    assert bundle["evaluation"]["driftStatus"] == "historical_without_run"
 
 
 def test_bundle_normalizes_mixed_naive_and_aware_historical_timestamps(tmp_path):
@@ -921,7 +1010,7 @@ def test_mixed_provider_lead_signal_falls_back_to_real_chart_series(tmp_path):
             judge_models=["judge"],
             dimensions=[DimensionScore(name="relevance", verdict=Verdict.PASS)],
         ))
-    storage.insert_drift_signal(DriftSignal(
+    _persist_drift_snapshot(storage, DriftSignal(
         cluster_id="mixed-support",
         dimension="relevance",
         evaluator_fingerprint="mixed-evaluator",
@@ -1056,7 +1145,7 @@ def test_fisher_odds_ratio_keeps_small_nonzero_value(tmp_path):
         judge_models=["judge"],
         dimensions=[DimensionScore(name="quality", verdict=Verdict.FAIL)],
     ))
-    storage.insert_drift_signal(DriftSignal(
+    _persist_drift_snapshot(storage, DriftSignal(
         cluster_id="support",
         dimension="quality",
         evaluator_fingerprint="evaluator",
@@ -1098,7 +1187,7 @@ def test_custom_provider_late_trace_is_selected_using_chart_safe_key(tmp_path):
         judge_models=["judge"],
         dimensions=[DimensionScore(name="relevance", verdict=Verdict.FAIL)],
     ))
-    storage.insert_drift_signal(DriftSignal(
+    _persist_drift_snapshot(storage, DriftSignal(
         cluster_id="custom-cluster",
         dimension="relevance",
         evaluator_fingerprint="custom-evaluator",

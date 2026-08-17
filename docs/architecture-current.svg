@@ -50,11 +50,11 @@
   <text x="880" y="205" class="node-title" text-anchor="middle">@verdict.trace decorator</text>
   <text x="880" y="222" class="node-sub" text-anchor="middle">manual instrumentation for</text>
   <text x="880" y="237" class="node-sub" text-anchor="middle">RAG, tools, business logic</text>
-  <text x="880" y="252" class="node-sub" text-anchor="middle">automatic provider-trace linkage</text>
+  <text x="880" y="252" class="node-sub" text-anchor="middle">Trace → parent span ID</text>
 
   <rect x="1000" y="180" width="180" height="80" rx="10" fill="#0B1730"/>
   <text x="1090" y="205" class="node-title" text-anchor="middle" style="fill:#F5F7FA">PII Redaction</text>
-  <text x="1090" y="222" class="node-sub" text-anchor="middle" style="fill:#00C2FF">regex + Luhn</text>
+  <text x="1090" y="222" class="node-sub" text-anchor="middle" style="fill:#00C2FF">scanner + regex + Luhn</text>
   <text x="1090" y="237" class="node-sub" text-anchor="middle" style="fill:#00C2FF">recursive JSON · redact / hash</text>
   <text x="1090" y="252" class="node-sub" text-anchor="middle" style="fill:#00C2FF">best effort · fail closed</text>
 

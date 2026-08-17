@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import {
   LineChart, Line, AreaChart, Area, BarChart, Bar, XAxis, YAxis, CartesianGrid,
   Tooltip, ResponsiveContainer, ReferenceLine, ReferenceArea, Cell,
@@ -41,8 +41,10 @@ const SEED = (() => {
     scoreCoverage: { pass: 223, fail: 17, unclear: 0, missing: 0, error: 0, evaluable: 240 },
     evaluatorHealth: [{
       id: "sample-health", evaluatedAt: "sample-data", sentinelSetName: "sample-anchor-v1",
-      correctLabels: 27, totalLabels: 30, agreement: 90, confidenceLow: 74.4,
-      confidenceHigh: 96.5, status: "healthy", errorCount: 0,
+      correctExamples: 27, totalExamples: 30, exampleAgreement: 90,
+      exampleConfidenceLow: 74.4, exampleConfidenceHigh: 96.5,
+      correctLabels: 135, totalLabels: 150, labelAgreement: 90,
+      status: "healthy", errorCount: 0, methodVersion: "2",
     }],
     providers: [
       { key: 'anthropic', label: 'Anthropic sample', model: 'sample-model-a', n: 32, errors: 0, errorRate: 0, avgLatency: 2.25, inTok: 2400, outTok: 9600, cost: 0.19, passRate: 82, judged: 16 },
@@ -63,6 +65,10 @@ const SEED = (() => {
       { id: 'sample-01', clusterId: 'support', dimension: 'completeness', direction: 'regression', provider: 'anthropic', providerLabel: 'Anthropic sample', statName: 'fisher_exact', stat: 7.2, p: 0.0009, pAdj: 0.0042, cliffsDelta: -0.42, cohensD: -1.1, nCur: 12, nBase: 12, layers: ['judge_rubric'], exampleTraceIds: ['sample-trace-001'], action: 'Review affected traces and compare the current prompt/model configuration against the reference window.', detectedAt: 'sample-data' },
       { id: 'sample-02', clusterId: 'support', dimension: 'instruction_following', direction: 'regression', provider: 'anthropic', providerLabel: 'Anthropic sample', statName: 'fisher_exact', stat: 5.8, p: 0.0021, pAdj: 0.0095, cliffsDelta: -0.35, cohensD: -0.9, nCur: 12, nBase: 12, layers: ['judge_rubric'], exampleTraceIds: ['sample-trace-001'], action: 'Inspect sampled failures and confirm whether the change is meaningful for this workload.', detectedAt: 'sample-data' },
     ],
+    driftRun: {
+      id: "sample-run", analysisTime: "sample-data", completedAt: "sample-data",
+      signalCount: 2,
+    },
     dimensionOverall: [
       { dim: 'groundedness', passRate: 96, pass: 46, fail: 2, unclear: 0, tot: 48 },
       { dim: 'relevance', passRate: 94, pass: 45, fail: 3, unclear: 0, tot: 48 },
@@ -118,12 +124,75 @@ const SEED = (() => {
 
 // API endpoint for live data; overridable via window.VERDICT_API. Falls back to SEED.
 const API_URL = (typeof window !== "undefined" && window.VERDICT_API) || "/api/data";
-let DATA = SEED;
 
 function apiUrlForEvaluator(evaluatorId) {
   if (!evaluatorId) return API_URL;
   const separator = API_URL.includes("?") ? "&" : "?";
   return `${API_URL}${separator}evaluator=${encodeURIComponent(evaluatorId)}`;
+}
+
+function useDashboardData() {
+  const [state, setState] = useState({
+    snapshot: SEED,
+    source: "sample",
+    loading: false,
+    error: null,
+  });
+  const requestSequence = useRef(0);
+  const activeController = useRef(null);
+
+  const load = React.useCallback(async (evaluatorId = null) => {
+    const requestId = requestSequence.current + 1;
+    requestSequence.current = requestId;
+    if (activeController.current) activeController.current.abort();
+    const controller = new AbortController();
+    activeController.current = controller;
+    setState((current) => ({ ...current, loading: true, error: null }));
+    try {
+      const response = await fetch(apiUrlForEvaluator(evaluatorId), {
+        headers: { Accept: "application/json" },
+        signal: controller.signal,
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const snapshot = await response.json();
+      if (!snapshot || !snapshot.meta || !Array.isArray(snapshot.providers)) {
+        throw new Error("invalid dashboard response");
+      }
+      if (requestId !== requestSequence.current) return false;
+      setState({ snapshot, source: "live", loading: false, error: null });
+      return true;
+    } catch (error) {
+      if (requestId !== requestSequence.current) return false;
+      if (error?.name === "AbortError") return false;
+      setState((current) => {
+        const confirmed = current.snapshot.evaluation?.selectedId;
+        const requested = evaluatorId || "the default evaluator";
+        const shown = confirmed || "the current snapshot";
+        return {
+          ...current,
+          loading: false,
+          error: `Could not load ${requested}. Still showing ${shown}.`,
+        };
+      });
+      return false;
+    } finally {
+      if (requestId === requestSequence.current) activeController.current = null;
+    }
+  }, []);
+
+  useEffect(() => {
+    load();
+    return () => {
+      requestSequence.current += 1;
+      if (activeController.current) activeController.current.abort();
+    };
+  }, [load]);
+
+  return {
+    ...state,
+    load,
+    reload: () => load(state.snapshot.evaluation?.selectedId || null),
+  };
 }
 
 /* ---------------------------------------------------------------- palette */
@@ -385,7 +454,8 @@ function Section({ title, subtitle, children }) {
 }
 
 /* ============================================================== DASHBOARD */
-function Dashboard({ onExit, source = "sample", onReload, onEvaluatorChange, reloading }) {
+function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluatorChange, reloading, loadError }) {
+  const DATA = data;
   const [tab, setTab] = useState("overview");
   const evaluation = DATA.evaluation || { status: "empty", selectedId: null, availableIdentities: [] };
   const evaluatorSelectionNeeded = ["selection_required", "invalid_selection"].includes(evaluation.status);
@@ -458,6 +528,7 @@ function Dashboard({ onExit, source = "sample", onReload, onEvaluatorChange, rel
               </div>
             </div>
             <select aria-label="Evaluator identity" value={evaluation.selectedId || ""}
+              disabled={reloading}
               onChange={(event) => onEvaluatorChange(event.target.value)}
               className="text-xs px-3 py-2 border max-w-full"
               style={{ color: C.text, background: C.panel, borderColor: C.border, borderRadius: 3 }}>
@@ -468,22 +539,33 @@ function Dashboard({ onExit, source = "sample", onReload, onEvaluatorChange, rel
             </select>
           </div>
         )}
-        {(evaluation.driftStatus === "historical_unattributed" || evaluation.unattributedDriftSignals > 0) && (
+        {loadError && (
+          <div role="alert" className="mb-5 px-3 py-3 border flex items-start gap-2 text-sm"
+            style={{ borderColor: "#6b5529", background: C.amberBg, color: C.text, borderRadius: 3 }}>
+            <AlertTriangle size={16} style={{ color: C.amber, marginTop: 1, flexShrink: 0 }} />
+            <span>{loadError}</span>
+          </div>
+        )}
+        {(["historical_unattributed", "historical_without_run", "inconsistent_run"].includes(evaluation.driftStatus) || evaluation.unattributedDriftSignals > 0) && (
           <div className="mb-5 px-3 py-3 border flex items-start gap-2 text-sm"
             style={{ borderColor: "#6b5529", background: C.amberBg, color: C.text, borderRadius: 3 }}>
             <AlertTriangle size={16} style={{ color: C.amber, marginTop: 1, flexShrink: 0 }} />
             <span>
               {evaluation.driftStatus === "historical_unattributed"
                 ? "Historical drift signals have no evaluator fingerprint, so Verdict cannot attribute them to the selected evaluator. They are excluded; this is unavailable evidence, not zero drift."
+                : evaluation.driftStatus === "historical_without_run"
+                  ? "Historical drift signals predate run snapshots. They are excluded because Verdict cannot prove that they belong to the latest completed analysis; this is unavailable evidence, not zero drift."
+                  : evaluation.driftStatus === "inconsistent_run"
+                    ? "The latest drift run is incomplete or inconsistent. Its signals are excluded until the pipeline reruns successfully."
                 : `${evaluation.unattributedDriftSignals} historical drift signal${evaluation.unattributedDriftSignals === 1 ? "" : "s"} without evaluator identity ${evaluation.unattributedDriftSignals === 1 ? "is" : "are"} excluded.`}
             </span>
           </div>
         )}
-        {tab === "overview" && <Overview />}
-        {tab === "drift" && <Drift />}
-        {tab === "traces" && <Traces />}
-        {tab === "judge" && <Judge />}
-        {tab === "compare" && <Compare />}
+        {tab === "overview" && <Overview data={DATA} />}
+        {tab === "drift" && <Drift data={DATA} />}
+        {tab === "traces" && <Traces key={evaluation.selectedId || "none"} data={DATA} />}
+        {tab === "judge" && <Judge data={DATA} />}
+        {tab === "compare" && <Compare data={DATA} />}
       </main>
     </div>
   );
@@ -502,7 +584,8 @@ function MetricCell({ label, value, sub, icon: Icon, accent }) {
   );
 }
 
-function Overview() {
+function Overview({ data = SEED }) {
+  const DATA = data;
   const m = DATA.meta;
   const health = DATA.clusterHealth || { status: "empty", messages: [], minSampleSize: 30, clustersMeetingSampleFloor: 0, nClusters: 0 };
   const healthColor = health.status === "ready" ? C.green : health.status === "fragmented" ? C.red : C.amber;
@@ -512,7 +595,7 @@ function Overview() {
   const leadIsImprovement = leadSignal?.direction === "improvement";
   const leadColor = leadIsImprovement ? C.green : C.red;
   const leadBg = leadIsImprovement ? C.greenBg : C.redBg;
-  const driftUnavailable = ["selection_required", "invalid_selection", "historical_unattributed"].includes(DATA.evaluation?.driftStatus);
+  const driftUnavailable = DATA.evaluation?.driftStatus !== "selected";
   const seriesColors = [C.accent, C.accent2, C.amber, C.green, C.blue, C.cyan];
   const providerSeries = DATA.providers.map((provider, index) => {
     const presentation = providerPresentation(
@@ -545,7 +628,7 @@ function Overview() {
             {driftUnavailable ? <AlertTriangle size={16} style={{ color: C.amber }} /> : DATA.driftSignals.length ? leadIsImprovement ? <TrendingUp size={16} style={{ color: leadColor }} /> : <AlertTriangle size={16} style={{ color: leadColor }} /> : <CheckCircle2 size={16} style={{ color: C.green }} />}
           </div>
           <div className="min-w-0">
-            <div className="text-xs font-mono" style={{ color: driftUnavailable ? C.amber : DATA.driftSignals.length ? leadColor : C.green }}>LATEST PIPELINE RUN</div>
+            <div className="text-xs font-mono" style={{ color: driftUnavailable ? C.amber : DATA.driftSignals.length ? leadColor : C.green }}>LATEST COMPLETED RUN{DATA.driftRun?.analysisTime ? ` · ${DATA.driftRun.analysisTime}` : ""}</div>
             <div className="font-semibold mt-0.5">{driftUnavailable ? "Drift evidence unavailable" : `${DATA.driftSignals.length} persisted drift signal${DATA.driftSignals.length === 1 ? "" : "s"}`}</div>
             <div className="text-sm mt-0.5" style={{ color: C.sub }}>
               {driftUnavailable ? "Select an evaluator with attributed drift signals, or rerun the pipeline with the current schema." : DATA.driftSignals.length ? DATA.driftSignals.map((s) => dimensionLabel(s.dimension)).join(" and ") : "No dimensions currently clear both alert gates."}
@@ -678,8 +761,9 @@ function SeriesLegend({ series }) {
 }
 
 /* ----------------------------------------------------------------- DRIFT */
-function Drift() {
-  const [open, setOpen] = useState(DATA.driftSignals[0]?.dimension);
+function Drift({ data = SEED }) {
+  const DATA = data;
+  const [open, setOpen] = useState(DATA.driftSignals[0]?.id);
   const seriesColors = [C.accent, C.accent2, C.amber, C.green, C.blue, C.cyan];
   const dimensionSeries = DATA.dimensionOverall.map((dimension, index) => ({
     key: dimension.dim,
@@ -693,14 +777,14 @@ function Drift() {
         UNCLEAR coverage signals instead use a deterministic 15-point increase and the configured sample floor. Signals come from the latest persisted pipeline run.
       </div>
       {DATA.driftSignals.map((s) => {
-        const isOpen = open === s.dimension;
+        const isOpen = open === s.id;
         const isCoverage = s.statName === "unclear_rate_increase";
         const isImprovement = s.direction === "improvement";
         const signalColor = isImprovement ? C.green : C.red;
         const signalBg = isImprovement ? C.greenBg : C.redBg;
         return (
           <Panel key={s.id} className="overflow-hidden">
-            <button onClick={() => setOpen(isOpen ? null : s.dimension)} className="w-full flex items-center gap-4 p-4 text-left">
+            <button onClick={() => setOpen(isOpen ? null : s.id)} className="w-full flex items-center gap-4 p-4 text-left">
               <div className="w-10 h-10 flex items-center justify-center shrink-0" style={{ background: signalBg, borderRadius: 3 }}>
                 {isImprovement ? <TrendingUp size={19} style={{ color: signalColor }} /> : <TrendingDown size={19} style={{ color: signalColor }} />}
               </div>
@@ -795,10 +879,12 @@ function Stat({ label, value, note }) {
 }
 
 /* ---------------------------------------------------------------- TRACES */
-function Traces() {
+function Traces({ data = SEED }) {
+  const DATA = data;
   const [prov, setProv] = useState("all");
   const [q, setQ] = useState("");
-  const [sel, setSel] = useState(null);
+  const [selectedTraceId, setSelectedTraceId] = useState(null);
+  const sel = DATA.samples.find((sample) => sample.trace_id === selectedTraceId) || null;
   const providerOptions = DATA.providers.map((provider) => {
     const presentation = providerPresentation(
       provider.rawProvider ?? provider.key,
@@ -849,7 +935,7 @@ function Traces() {
               );
               const provider = providerPresentation(s.provider, s.request_model);
               return (
-                <button key={s.trace_id} onClick={() => setSel(s)}
+                <button key={s.trace_id} onClick={() => setSelectedTraceId(s.trace_id)}
                   className="w-full grid items-center text-left px-4 py-2.5 border-b text-sm"
                   style={{ borderColor: C.grid, gridTemplateColumns: "44px 1fr 88px 96px 70px 64px", background: on ? C.raised : "transparent" }}>
                   <span className="text-xs font-mono" style={{ color: C.faint }}>{s.hour}h</span>
@@ -879,7 +965,7 @@ function Traces() {
 
       {/* detail */}
       <div className="shrink-0" style={{ width: "min(100%, 360px)" }}>
-        {sel ? <TraceDetail s={sel} onClose={() => setSel(null)} /> : (
+        {sel ? <TraceDetail s={sel} onClose={() => setSelectedTraceId(null)} /> : (
           <Panel className="p-8 text-center">
             <Eye size={22} style={{ color: C.faint, margin: "0 auto" }} />
             <div className="text-sm mt-2" style={{ color: C.sub }}>Select a trace to see the captured prompt, response, and judge verdicts.</div>
@@ -953,7 +1039,8 @@ function TraceDetail({ s, onClose }) {
 }
 
 /* ----------------------------------------------------------------- JUDGE */
-function Judge() {
+function Judge({ data = SEED }) {
+  const DATA = data;
   const providerKeys = DATA.providers.map((provider) => provider.key);
   const providerPresentations = Object.fromEntries(DATA.providers.map((provider) => [
     provider.key,
@@ -1050,7 +1137,7 @@ function Judge() {
             <div className="font-semibold text-sm">Judge health · independent sentinel agreement</div>
             {latestHealth ? (
               <div className="text-sm mt-1" style={{ color: C.sub }}>
-                <span style={{ color: C.text }}>{latestHealth.sentinelSetName || "Unnamed anchor set"}</span>: {pct(latestHealth.agreement)} ({latestHealth.correctLabels}/{latestHealth.totalLabels} labels; 95% CI {pct(latestHealth.confidenceLow)}–{pct(latestHealth.confidenceHigh)}), status <span style={{ color: latestHealth.status === "healthy" ? C.green : latestHealth.status === "degraded" ? C.red : C.amber }}>{latestHealth.status.replaceAll("_", " ")}</span>{latestHealth.errorCount ? `; ${latestHealth.errorCount} judge errors` : ""}.
+                <span style={{ color: C.text }}>{latestHealth.sentinelSetName || "Unnamed anchor set"}</span>: {latestHealth.methodVersion === "1" ? "legacy label-only methodology; unavailable for health gating" : <>{pct(latestHealth.exampleAgreement)} ({latestHealth.correctExamples}/{latestHealth.totalExamples} exact-match examples; 95% CI {pct(latestHealth.exampleConfidenceLow)}–{pct(latestHealth.exampleConfidenceHigh)}). Label agreement: {pct(latestHealth.labelAgreement)} ({latestHealth.correctLabels}/{latestHealth.totalLabels})</>}, status <span style={{ color: latestHealth.status === "healthy" ? C.green : latestHealth.status === "degraded" ? C.red : C.amber }}>{latestHealth.status.replaceAll("_", " ")}</span>{latestHealth.errorCount ? `; ${latestHealth.errorCount} judge errors` : ""}.
               </div>
             ) : (
               <div className="text-sm mt-1" style={{ color: C.sub }}>No fixed human-labeled sentinel run is recorded for this evaluator fingerprint.</div>
@@ -1076,7 +1163,8 @@ function Judge() {
 }
 
 /* --------------------------------------------------------------- COMPARE */
-function Compare() {
+function Compare({ data = SEED }) {
+  const DATA = data;
   const provs = DATA.providers.map((provider) => ({
     ...provider,
     presentation: providerPresentation(
@@ -1166,14 +1254,14 @@ function MiniBar({ title, data, fmt }) {
 }
 
 /* ------------------------------------------------------------------- APP */
-function App({ source = "sample", onReload, onEvaluatorChange, reloading }) {
+function App({ data = SEED, source = "sample", onReload, onEvaluatorChange, reloading, loadError }) {
   const [mode, setMode] = useState("landing");
   return (
     <div style={{ fontFamily: "ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif", height: "100%", background: C.bg }}>
       {mode === "landing"
         ? <Landing onEnter={() => setMode("dashboard")} />
-        : <Dashboard onExit={() => setMode("landing")} source={source} onReload={onReload}
-          onEvaluatorChange={onEvaluatorChange} reloading={reloading} />}
+        : <Dashboard data={data} onExit={() => setMode("landing")} source={source} onReload={onReload}
+          onEvaluatorChange={onEvaluatorChange} reloading={reloading} loadError={loadError} />}
     </div>
   );
 }
@@ -1187,50 +1275,17 @@ export function LandingRoot() {
 }
 
 export function DashboardRoot() {
-  const [source, setSource] = useState("sample");
-  const [reloading, setReloading] = useState(false);
-  const [, setVersion] = useState(0);
-  const load = React.useCallback((evaluatorId = null) => {
-    setReloading(true);
-    fetch(apiUrlForEvaluator(evaluatorId), { headers: { Accept: "application/json" } })
-      .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
-      .then((d) => {
-        if (d && d.meta && d.providers) {
-          DATA = d;
-          setSource("live");
-          setVersion((v) => v + 1);
-        }
-      })
-      .catch(() => { /* no API reachable - keep SEED */ })
-      .finally(() => setReloading(false));
-  }, []);
-  useEffect(() => { load(); }, [load]);
+  const data = useDashboardData();
   return (
     <div style={{ fontFamily: "ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif", minHeight: "100%", background: C.bg }}>
-      <Dashboard onExit={() => { window.location.href = "/"; }} source={source}
-        onReload={() => load(DATA.evaluation?.selectedId)} onEvaluatorChange={load} reloading={reloading} />
+      <Dashboard data={data.snapshot} onExit={() => { window.location.href = "/"; }} source={data.source}
+        onReload={data.reload} onEvaluatorChange={data.load} reloading={data.loading} loadError={data.error} />
     </div>
   );
 }
 
-// Root owns live-data loading. On mount it fetches API_URL; on success it swaps the
-// module-level DATA to the live bundle and flips the indicator to "live". Any failure
-// (e.g. in-chat preview with no server) silently keeps the embedded SEED snapshot.
 export default function Root() {
-  const [source, setSource] = useState("sample");
-  const [reloading, setReloading] = useState(false);
-  const [, setVersion] = useState(0);
-  const load = React.useCallback((evaluatorId = null) => {
-    setReloading(true);
-    fetch(apiUrlForEvaluator(evaluatorId), { headers: { Accept: "application/json" } })
-      .then((r) => { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
-      .then((d) => {
-        if (d && d.meta && d.providers) { DATA = d; setSource("live"); setVersion((v) => v + 1); }
-      })
-      .catch(() => { /* no API reachable — keep SEED */ })
-      .finally(() => setReloading(false));
-  }, []);
-  useEffect(() => { load(); }, [load]);
-  return <App source={source} onReload={() => load(DATA.evaluation?.selectedId)}
-    onEvaluatorChange={load} reloading={reloading} />;
+  const data = useDashboardData();
+  return <App data={data.snapshot} source={data.source} onReload={data.reload}
+    onEvaluatorChange={data.load} reloading={data.loading} loadError={data.error} />;
 }

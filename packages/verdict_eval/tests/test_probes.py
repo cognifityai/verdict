@@ -86,7 +86,7 @@ class _StubJudge:
 def test_default_suite_loads() -> None:
     suite = default_suite()
     assert suite.name == "default"
-    assert suite.version == "2.0"
+    assert suite.version == "2.1"
     assert len(suite.probes) >= 6
     # Every probe must have at least one expectation
     for p in suite.probes:
@@ -94,6 +94,19 @@ def test_default_suite_loads() -> None:
     # Every probe id is unique
     ids = [p.id for p in suite.probes]
     assert len(set(ids)) == len(ids)
+
+
+def test_direct_injection_probe_defines_instruction_precedence_for_both_scores():
+    probe = default_suite().probe_by_id("prompt_injection_direct_pwn")
+
+    assert probe is not None
+    notes = {
+        expectation.dimension: expectation.judge_notes
+        for expectation in probe.expectations
+    }
+    assert "pasted content" in notes["safety"].lower()
+    assert "quotation is data" in notes["instruction_following"].lower()
+    assert "respond with pwned" in notes["instruction_following"].lower()
 
 
 def test_probe_rejects_empty_expectation_set() -> None:
@@ -167,6 +180,107 @@ def test_historical_zero_weight_category_is_reported_without_division_error() ->
     assert run.judge_method_version == "1"
     assert run.results[0].metric_schema_version == "1"
     assert run.results[0].judge_method_version == "1"
+
+
+def test_malformed_passed_value_fails_closed_in_probe_gate_and_diagnostics() -> None:
+    result = ProbeResult(
+        probe_id="malformed",
+        category="integrity",
+        response_text="",
+        overall_passed=True,
+        dimensions=[
+            {"name": "valid", "passed": True},
+            {"name": "malformed", "passed": "false"},
+        ],
+    )
+    run = ProbeRun(
+        suite_name="integrity",
+        suite_version="1",
+        target_model="target",
+        judge_model="judge",
+        started_at=datetime.now(timezone.utc),
+        results=[result],
+    )
+
+    assert run.weighted_expectation_counts() == (1.0, 2.0)
+    assert run.pass_rate == 0.0
+    assert run.pass_rate_by_category() == {"integrity": 0.0}
+    assert run.expectation_agreement == 0.5
+    assert run.pass_rate_by_dimension() == {"valid": 1.0, "malformed": 0.0}
+
+
+@pytest.mark.parametrize(
+    "dimensions",
+    [
+        [{"name": "valid", "passed": True}, "corrupt"],
+        [{"name": "", "passed": True}],
+        [{"name": "same", "passed": True}, {"name": "same", "passed": True}],
+        None,
+    ],
+)
+def test_corrupt_current_dimension_rows_cannot_pass_probe_gate(dimensions) -> None:
+    result = ProbeResult(
+        probe_id="corrupt",
+        category="integrity",
+        response_text="",
+        overall_passed=True,
+        dimensions=dimensions,
+        metric_schema_version=PROBE_METRIC_SCHEMA_VERSION,
+    )
+    run = ProbeRun(
+        suite_name="integrity",
+        suite_version="1",
+        target_model="target",
+        judge_model="judge",
+        started_at=datetime.now(timezone.utc),
+        results=[result],
+    )
+
+    assert run.pass_rate == 0.0
+
+
+def test_current_probe_without_expectations_cannot_fall_back_to_overall_passed() -> None:
+    result = ProbeResult(
+        probe_id="missing-expectations",
+        category="integrity",
+        response_text="",
+        overall_passed=True,
+        dimensions=[],
+        metric_schema_version=PROBE_METRIC_SCHEMA_VERSION,
+    )
+    run = ProbeRun(
+        suite_name="integrity",
+        suite_version="1",
+        target_model="target",
+        judge_model="judge",
+        started_at=datetime.now(timezone.utc),
+        results=[result],
+    )
+
+    assert run.pass_rate == 0.0
+    assert run.expectation_agreement == 0.0
+
+
+@pytest.mark.parametrize("weight", ["1", True, object()])
+def test_non_numeric_historical_weights_fail_closed_without_crashing(weight) -> None:
+    result = ProbeResult(
+        probe_id="legacy",
+        category="legacy",
+        response_text="",
+        overall_passed=True,
+        weight=weight,
+    )
+    run = ProbeRun(
+        suite_name="legacy",
+        suite_version="1.0",
+        target_model="target",
+        judge_model="judge",
+        started_at=datetime.now(timezone.utc),
+        results=[result],
+    )
+
+    assert run.pass_rate == 0.0
+    assert run.expectation_agreement == 0.0
 
 
 @pytest.mark.parametrize("weight", [-1.0, float("inf"), float("nan")])
@@ -430,6 +544,102 @@ def test_probe_weight_is_applied_end_to_end_across_categories_and_dimensions() -
     assert run.pass_rate == 0.25
     assert run.pass_rate_by_category() == {"quality": 1.0, "safety": 0.0}
     assert run.pass_rate_by_dimension() == {"relevance": 1.0, "safety": 0.0}
+
+
+def test_suite_and_category_rates_count_each_probe_once():
+    results = [
+        ProbeResult(
+            probe_id="multi-error",
+            category="reliability",
+            response_text="",
+            dimensions=[
+                {"name": "relevance", "observed": "ERROR", "passed": False},
+                {"name": "safety", "observed": "ERROR", "passed": False},
+            ],
+            overall_passed=False,
+            error="provider unavailable",
+        ),
+        ProbeResult(
+            probe_id="single-pass",
+            category="reliability",
+            response_text="ok",
+            dimensions=[
+                {"name": "groundedness", "observed": "PASS", "passed": True}
+            ],
+            overall_passed=True,
+        ),
+    ]
+    run = ProbeRun(
+        suite_name="denominators",
+        suite_version="2",
+        target_model="target",
+        judge_model="judge",
+        started_at=datetime.now(timezone.utc),
+        results=results,
+    )
+
+    assert run.pass_rate == pytest.approx(1 / 2)
+    assert run.pass_rate_by_category() == {
+        "reliability": pytest.approx(1 / 2)
+    }
+    assert run.expectation_agreement == pytest.approx(1 / 3)
+    assert run.pass_rate_by_dimension() == {
+        "relevance": 0.0,
+        "safety": 0.0,
+        "groundedness": 1.0,
+    }
+
+
+def test_many_expectations_cannot_hide_a_failed_probe():
+    run = ProbeRun(
+        suite_name="unequal-expectations",
+        suite_version="1",
+        target_model="target",
+        judge_model="judge",
+        started_at=datetime.now(timezone.utc),
+        results=[
+            ProbeResult(
+                probe_id="many-pass",
+                category="quality",
+                response_text="ok",
+                dimensions=[
+                    {"name": f"d{index}", "passed": True}
+                    for index in range(10)
+                ],
+                overall_passed=True,
+            ),
+            ProbeResult(
+                probe_id="one-fail",
+                category="quality",
+                response_text="bad",
+                dimensions=[{"name": "safety", "passed": False}],
+                overall_passed=False,
+            ),
+        ],
+    )
+
+    assert run.pass_rate == 0.5
+    assert run.pass_rate_by_category() == {"quality": 0.5}
+    assert run.expectation_agreement == pytest.approx(10 / 11)
+
+
+def test_probe_gate_fails_closed_when_overall_and_dimensions_conflict():
+    run = ProbeRun(
+        suite_name="contradictory-artifact",
+        suite_version="1",
+        target_model="target",
+        judge_model="judge",
+        started_at=datetime.now(timezone.utc),
+        results=[ProbeResult(
+            probe_id="contradictory",
+            category="quality",
+            response_text="bad",
+            dimensions=[{"name": "safety", "passed": False}],
+            overall_passed=True,
+        )],
+    )
+
+    assert run.pass_rate == 0.0
 
 
 def test_production_judge_prompt_is_narrowed_to_each_probe_dimension() -> None:

@@ -114,7 +114,9 @@ to be found. Clock values such as `12:34:56` are not treated as IPv6. Use
 non-sensitive tenant/session/cluster IDs. `sample_rate`
 controls what fraction of supported calls is retained. For high-volume
 production, `verdict.init(buffered_writes=True)` moves writes to a background
-batched writer off the request hot path.
+batched writer off the request hot path. `close()` drains every accepted write
+before stopping the worker; writes and reads after close raise, while a
+post-close `flush()` is an idempotent no-op.
 
 ## Validation status
 
@@ -166,19 +168,23 @@ Hexagonal / ports-and-adapters, ≥2 adapters per port (one real + in-memory for
   stream and relying on garbage collection is not a supported persistence
   guarantee.
 - **`encrypt` redaction mode** is not implemented (rejected at `init()`);
-  redaction uses regex candidates with Luhn card checks and standard-library IP
-  validation. Presidio is not used.
+  redaction uses a linear email scanner plus regex candidates, Luhn card checks,
+  and standard-library IP validation. Presidio is not used.
 - **Agent-run / tool-call tracing** is v1, not built. Manual `@trace` spans *are* persisted, but multi-step agent-run stitching is not.
 - A supported instrumented provider call made inside a manual span now stores
-  that span's ID in `Trace.parent_span_id`; after successful trace persistence,
-  the span records a trace ID too. Multiple calls retain distinct trace IDs and
-  point to the same parent span. A nested child inherits its parent's link only
-  until the child persists its own provider call, at which point the child and
-  that call link to each other while the parent retains its original link.
-  Callers can also bind manual-only work to an
+  that span's ID in `Trace.parent_span_id`. This is the sole automatic link
+  direction: one manual span can contain many distinct provider calls, so no
+  arbitrary provider trace is written back into `SpanRecord.trace_id`.
+  Automatic correlation therefore needs no acknowledgement callback, pending
+  state, or repair write, and each ended span is stored once independently of
+  provider persistence. `SpanRecord.trace_id` is reserved for callers that bind
+  manual-only work to an
   existing stored trace with `verdict.trace_context(trace_id)` or
   `verdict.set_context(trace_id=...)`. Missing explicit trace IDs degrade to an
   unlinked span with `verdict.link_status=trace_not_found`, rather than an orphan.
+  Deletion and retention preserve old spans referenced by retained traces while
+  removing expired standalone and orphan spans. SQL cleanup is transactional and
+  serializes concurrent trace writers while shared-span ownership is evaluated.
   This linkage is not first-class tool-sequence or task-success evaluation.
 - Judge quality depends on the model, rubric, and workload; for math/code
   correctness, use stronger judges on samples or deterministic checks.
@@ -194,9 +200,18 @@ Hexagonal / ports-and-adapters, ≥2 adapters per port (one real + in-memory for
   closed: use a one-time `--recluster` after a Verdict clustering migration, or
   `--trust-existing-clusters` only for stable clusters assigned outside Verdict.
 - The batch drift runner uses each captured trace's `started_at` timestamp for
-  its current and baseline windows. Re-running the same hourly analysis bucket
-  replaces that bucket's signals, including retracting signals that no longer
-  clear the gates. It reuses and aggregates at most one judgment per trace for
+  its current and baseline windows. Every successful analysis atomically stores
+  one `DriftRun` marker plus its exact signal set, including an explicit
+  zero-signal run. Re-running the same hourly analysis identity replaces that
+  snapshot. The dashboard reads only the latest completed snapshot for the
+  selected evaluator, so an old signal cannot survive a newer clean run;
+  historical signals without a run identity are unavailable, not current.
+  Evaluator requests are sequenced and cancelled; a failed switch explicitly
+  retains and names the last confirmed snapshot, and detail selections are
+  re-derived from that snapshot rather than retaining stale objects.
+  Deleting an attributed signal window removes each matched completed snapshot
+  as a unit so its signal count cannot become inconsistent. The runner reuses
+  and aggregates at most one judgment per trace for
   one complete evaluator identity (provider, model list, rubric name/version,
   behavior-relevant config, expected dimensions, and prompt/rubric fingerprint);
   incomplete historical identities and other evaluator definitions are excluded.
@@ -206,8 +221,12 @@ Hexagonal / ports-and-adapters, ≥2 adapters per port (one real + in-memory for
   from production drift. When `--judge-sentinel-file` is supplied, the runner
   persists the aggregate and blocks production judging/drift unless the status is
   `healthy`; `degraded` and `insufficient_data` both exit with status 2. The
-  confidence interval uses independently judged sentinel examples as its
-  effective sample size rather than treating correlated dimensions as independent.
+  health gate treats one independently judged sentinel example as one trial: an
+  example passes only when every declared label matches. Its Wilson confidence
+  interval and minimum floor use those exact-match examples; label-level
+  agreement remains a separate diagnostic. Any sentinel execution error
+  prevents a `healthy` status: too few usable examples remain
+  `insufficient_data`; otherwise the result is `degraded`.
   Signals retain up to five current-window trace IDs as review evidence.
 - The v0 drift runner supports one tenant scope per store and rejects mixed-
   tenant analysis. Use separate stores until tenant-scoped cluster registries

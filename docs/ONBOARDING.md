@@ -92,9 +92,11 @@ closed at every occurrence so sanitized output cannot alias caller-owned data;
 redacted mapping-key collisions preserve every value under deterministic
 suffixed keys. The pattern detector uses Luhn validation
 for card candidates and standard-library validation for IP candidates, so a
-clock value such as `12:34:56` is not classified as IPv6. It remains best effort,
-not a compliance control, and opaque metadata such as tenant/session/cluster IDs
-must be non-sensitive. For high volume, add `buffered_writes=True`.
+clock value such as `12:34:56` is not classified as IPv6. Email discovery uses a
+linear `@`-anchored scanner to keep malformed and long inputs bounded. It remains
+best effort, not a compliance control, and opaque metadata such as
+tenant/session/cluster IDs must be non-sensitive. For high volume, add
+`buffered_writes=True`.
 
 ### Verify capture on your own SDK versions (recommended before you trust it)
 
@@ -162,23 +164,31 @@ python scripts/run_drift_pipeline.py \
     --storage sqlite:///./verdict.db \
     --judge-provider anthropic --judge-model claude-haiku-4-5 \
     --judge-sentinel-file ./support-sentinels.jsonl \
-    --judge-health-min-labels 30 --judge-health-threshold 0.80
+    --judge-health-min-examples 30 --judge-health-threshold 0.80
 ```
 
-The health status is `healthy` only when the label floor is met and the 95%
-Wilson-interval lower bound clears the threshold. The interval uses the number
-of independently judged sentinel examples as its effective sample size; labels
-from multiple dimensions on one example are not treated as independent.
+The health status is `healthy` only when the independent-example floor is met
+and the 95% Wilson-interval lower bound clears the threshold. One example is
+correct only when every declared label matches. The interval and gate use those
+exact-match examples; label-level agreement is reported separately as a
+diagnostic and cannot outweigh many failed examples.
 Sentinel evidence is stored separately from production judgments and cannot
-rule out behavior changes outside the anchor set. When the sentinel option is
+rule out behavior changes outside the anchor set. Any sentinel execution error
+prevents a `healthy` status: too few usable examples remain `insufficient_data`;
+otherwise the status is `degraded`. When the sentinel option is
 present, `degraded` or `insufficient_data` status is a hard gate: the command
 persists the health record, exits 2, and does not write production judgments or
 drift signals.
 
 For scheduled synthetic probes, `scripts/run_probes.py` requires a weighted
-pass rate of 100% by default. Use `--min-pass-rate` only for an intentionally
-chosen workload gate. A below-threshold run exits 1; target, follow-up, or judge
-execution errors remain visible in each declared dimension and exit 2.
+probe pass rate of 100% by default. Each probe's weight enters the suite and
+category gate once, and a probe passes only when every declared expectation
+passes. Weighted expectation agreement, including its per-dimension breakdown,
+is a separate diagnostic and never the quality-gate denominator. Persisted JSON
+contains both summaries under metric-schema version 3. Use `--min-pass-rate`
+only for an intentionally chosen workload gate. A below-threshold run exits 1;
+malformed or contradictory results fail closed, while target, follow-up, or
+judge execution errors remain visible in each declared dimension and exit 2.
 
 The dashboard shows per-provider traffic (trace counts, error rate, latency,
 tokens, **estimated cost**), intent clusters, pass-rate by dimension, and the
@@ -196,8 +206,15 @@ the database, select one before reading judgment or drift results. Identity
 includes provider, model list, rubric name/version, behavior-relevant config,
 expected dimensions, and a prompt/rubric fingerprint. Drift signals carry that
 fingerprint too. Historical drift rows without it are excluded and labeled
-unavailable rather than counted as zero drift. The SDK's Postgres adapter does
-not make this dashboard a Postgres read UI.
+unavailable rather than counted as zero drift. Completed analyses are persisted
+as atomic run snapshots, including explicit zero-signal runs. The dashboard
+shows only the latest completed snapshot for the selected evaluator; legacy
+signals without a run identity are excluded rather than presented as current.
+Evaluator requests are sequenced and cancelled so an older response cannot
+replace a newer selection. If a load fails, the dashboard explicitly names the
+last confirmed evaluator that remains on screen, and trace/drift detail is
+derived from IDs in that confirmed snapshot.
+The SDK's Postgres adapter does not make this dashboard a Postgres read UI.
 
 Set both `VERDICT_USER` and `VERDICT_PASS` before starting the server to require
 HTTP Basic authentication for `/dashboard` and `/api/data`; `/` and
@@ -242,6 +259,9 @@ the other captured workloads.
   the associated trace's `started_at`, not the time the judgment was created.
   Re-running the same hourly analysis bucket replaces that bucket's signals, so
   a signal is removed if it no longer clears the gates after new evidence arrives.
+  The completed run marker and exact signal set are one atomic snapshot, and a
+  clean run is stored explicitly with zero signals. Consumers select the latest
+  completed snapshot instead of treating all historical signals as current.
   A rerun uses the latest attempt per trace for one complete evaluator identity:
   provider, model list, rubric name/version, behavior-relevant configuration,
   expected dimensions, and immutable prompt/rubric fingerprint. A latest judge
@@ -259,15 +279,16 @@ the other captured workloads.
   collected has no persistence guarantee.
 - **Manual/provider linkage is automatic on the supported capture path.** A
   supported instrumented provider call inside a manual span persists the
-  innermost span ID on `Trace.parent_span_id`; after the Trace write succeeds,
-  the span also retains a trace ID. Multiple calls remain distinct and point to
-  one parent span. A nested child initially inherits the parent's provider link,
-  but replaces that inherited link if a provider call starts in the child; the
-  parent keeps its original trace. For manual-only work, use
+  innermost span ID on `Trace.parent_span_id`. That is the sole automatic
+  direction because several provider traces can share one span; automatic
+  capture does not choose one lossy reverse `SpanRecord.trace_id`. For
+  manual-only work, use
   `with verdict.trace_context(existing_trace_id): ...` or
   `verdict.set_context(trace_id=existing_trace_id)`. Context is task-local and
   scoped contexts restore the prior value. A missing explicit trace ID produces
   an unlinked span with `verdict.link_status=trace_not_found`, not an orphan.
+  Buffered provider writes do not control span survival or trigger a later span
+  repair: each ended span is persisted exactly once.
 
 ## What needs a key vs. not
 

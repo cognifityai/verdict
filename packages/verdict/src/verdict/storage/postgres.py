@@ -23,6 +23,7 @@ from verdict.redaction import sanitize_judgment, sanitize_span, sanitize_trace
 from verdict.schema import (
     DimensionScore,
     DriftDirection,
+    DriftRun,
     DriftSignal,
     EvaluatorHealthRecord,
     EvaluatorHealthStatus,
@@ -34,6 +35,7 @@ from verdict.schema import (
     UserSignalRecord,
     Verdict,
 )
+from verdict.storage.base import _validate_drift_run_snapshot
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS traces (
@@ -93,16 +95,30 @@ CREATE TABLE IF NOT EXISTS evaluator_health (
     evaluator_fingerprint    TEXT NOT NULL,
     sentinel_set_name        TEXT,
     sentinel_set_fingerprint TEXT NOT NULL,
+    correct_examples         INTEGER NOT NULL,
+    total_examples           INTEGER NOT NULL,
+    example_agreement        DOUBLE PRECISION,
+    example_confidence_low   DOUBLE PRECISION,
+    example_confidence_high  DOUBLE PRECISION,
     correct_labels           INTEGER NOT NULL,
     total_labels             INTEGER NOT NULL,
-    agreement                DOUBLE PRECISION,
-    confidence_low           DOUBLE PRECISION,
-    confidence_high          DOUBLE PRECISION,
+    label_agreement          DOUBLE PRECISION,
     status                   TEXT NOT NULL,
-    error_count              INTEGER NOT NULL DEFAULT 0
+    error_count              INTEGER NOT NULL DEFAULT 0,
+    method_version           TEXT NOT NULL DEFAULT '2'
 );
 CREATE INDEX IF NOT EXISTS idx_evaluator_health_identity
     ON evaluator_health(evaluator_fingerprint, evaluated_at DESC);
+
+CREATE TABLE IF NOT EXISTS drift_runs (
+    run_id                TEXT PRIMARY KEY,
+    analysis_time         TIMESTAMPTZ NOT NULL,
+    completed_at          TIMESTAMPTZ NOT NULL,
+    evaluator_fingerprint TEXT NOT NULL,
+    signal_count          INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_drift_runs_latest
+    ON drift_runs(evaluator_fingerprint, analysis_time DESC, completed_at DESC, run_id DESC);
 
 CREATE TABLE IF NOT EXISTS drift_signals (
     signal_id              TEXT PRIMARY KEY,
@@ -111,6 +127,7 @@ CREATE TABLE IF NOT EXISTS drift_signals (
     dimension              TEXT,
     direction              TEXT,
     evaluator_fingerprint  TEXT,
+    run_id                 TEXT,
     statistic_name         TEXT,
     statistic_value        DOUBLE PRECISION,
     p_value                DOUBLE PRECISION,
@@ -125,8 +142,10 @@ CREATE TABLE IF NOT EXISTS drift_signals (
     example_trace_ids      JSONB,
     recommended_action     TEXT
 );
+ALTER TABLE drift_signals ADD COLUMN IF NOT EXISTS run_id TEXT;
 CREATE INDEX IF NOT EXISTS idx_signals_detected     ON drift_signals(detected_at DESC);
 CREATE INDEX IF NOT EXISTS idx_signals_cluster_dim  ON drift_signals(cluster_id, dimension);
+CREATE INDEX IF NOT EXISTS idx_signals_run          ON drift_signals(run_id);
 
 CREATE TABLE IF NOT EXISTS cluster_registries (
     version      TEXT PRIMARY KEY,
@@ -195,6 +214,7 @@ class PostgresStorage:
                     ("wasserstein_distance", "DOUBLE PRECISION DEFAULT 0.0"),
                     ("psi", "DOUBLE PRECISION DEFAULT 0.0"),
                     ("evaluator_fingerprint", "TEXT"),
+                    ("run_id", "TEXT"),
                 ]:
                     cur.execute(
                         f"ALTER TABLE drift_signals ADD COLUMN IF NOT EXISTS {col} {ddl}"
@@ -209,6 +229,19 @@ class PostgresStorage:
                 ]:
                     cur.execute(
                         f"ALTER TABLE judgments ADD COLUMN IF NOT EXISTS {col} {ddl}"
+                    )
+                for col, ddl in [
+                    ("correct_examples", "INTEGER NOT NULL DEFAULT 0"),
+                    ("total_examples", "INTEGER NOT NULL DEFAULT 0"),
+                    ("example_agreement", "DOUBLE PRECISION"),
+                    ("example_confidence_low", "DOUBLE PRECISION"),
+                    ("example_confidence_high", "DOUBLE PRECISION"),
+                    ("label_agreement", "DOUBLE PRECISION"),
+                    ("method_version", "TEXT NOT NULL DEFAULT '1'"),
+                ]:
+                    cur.execute(
+                        "ALTER TABLE evaluator_health ADD COLUMN IF NOT EXISTS "
+                        f"{col} {ddl}"
                     )
                 cur.execute(
                     "ALTER TABLE traces ADD COLUMN IF NOT EXISTS parent_span_id TEXT"
@@ -377,21 +410,87 @@ class PostgresStorage:
     def delete_trace(self, trace_id: str) -> None:
         # judgments cascade via ON DELETE CASCADE, but spans/user_signals do
         # not declare an FK, so delete them explicitly for parity.
-        self._exec("DELETE FROM spans WHERE trace_id = %s", (trace_id,))
-        self._exec("DELETE FROM user_signals WHERE trace_id = %s", (trace_id,))
-        self._exec("DELETE FROM judgments WHERE trace_id = %s", (trace_id,))
-        self._exec("DELETE FROM traces WHERE trace_id = %s", (trace_id,))
+        with self._lock, self._pool.connection() as conn, conn.transaction():
+            with conn.cursor() as cur:
+                # Cleanup decides whether spans are still referenced by retained
+                # traces. Serialize trace writers until that decision and all
+                # related deletes commit so a concurrent insert cannot interleave.
+                cur.execute("LOCK TABLE traces IN SHARE ROW EXCLUSIVE MODE")
+                cur.execute("DELETE FROM user_signals WHERE trace_id = %s", (trace_id,))
+                cur.execute("DELETE FROM judgments WHERE trace_id = %s", (trace_id,))
+                cur.execute("DELETE FROM traces WHERE trace_id = %s", (trace_id,))
+                cur.execute(
+                    """DELETE FROM spans AS candidate
+                       WHERE candidate.trace_id = %s
+                         AND NOT EXISTS (
+                           SELECT 1 FROM traces
+                           WHERE traces.parent_span_id = candidate.span_id
+                         )""",
+                    (trace_id,),
+                )
+                cur.execute(
+                    """UPDATE spans AS candidate SET trace_id = NULL
+                       WHERE candidate.trace_id = %s
+                         AND EXISTS (
+                           SELECT 1 FROM traces
+                           WHERE traces.parent_span_id = candidate.span_id
+                         )""",
+                    (trace_id,),
+                )
 
     def prune_before(self, cutoff_iso: str) -> int:
-        rows = self._fetchall(
-            "SELECT trace_id FROM traces WHERE started_at < %s", (cutoff_iso,),
-        )
-        ids = [r[0] for r in rows]
-        if ids:
-            self._exec("DELETE FROM spans WHERE trace_id = ANY(%s)", (ids,))
-            self._exec("DELETE FROM user_signals WHERE trace_id = ANY(%s)", (ids,))
-            self._exec("DELETE FROM judgments WHERE trace_id = ANY(%s)", (ids,))
-            self._exec("DELETE FROM traces WHERE trace_id = ANY(%s)", (ids,))
+        with self._lock, self._pool.connection() as conn, conn.transaction():
+            with conn.cursor() as cur:
+                # See delete_trace(): this makes the multi-table cleanup one
+                # linearizable maintenance operation across storage instances.
+                cur.execute("LOCK TABLE traces IN SHARE ROW EXCLUSIVE MODE")
+                cur.execute(
+                    "SELECT trace_id FROM traces WHERE started_at < %s",
+                    (cutoff_iso,),
+                )
+                ids = [row[0] for row in cur.fetchall()]
+                if ids:
+                    cur.execute(
+                        "DELETE FROM user_signals WHERE trace_id = ANY(%s)", (ids,)
+                    )
+                    cur.execute(
+                        "DELETE FROM judgments WHERE trace_id = ANY(%s)", (ids,)
+                    )
+                    cur.execute("DELETE FROM traces WHERE trace_id = ANY(%s)", (ids,))
+                    cur.execute(
+                        """DELETE FROM spans AS candidate
+                           WHERE candidate.trace_id = ANY(%s)
+                             AND NOT EXISTS (
+                               SELECT 1 FROM traces
+                               WHERE traces.parent_span_id = candidate.span_id
+                             )""",
+                        (ids,),
+                    )
+                    cur.execute(
+                        """UPDATE spans AS candidate SET trace_id = NULL
+                           WHERE candidate.trace_id = ANY(%s)
+                             AND EXISTS (
+                               SELECT 1 FROM traces
+                               WHERE traces.parent_span_id = candidate.span_id
+                             )""",
+                        (ids,),
+                    )
+                cur.execute(
+                    """DELETE FROM spans AS candidate
+                       WHERE candidate.started_at < %s
+                         AND (
+                           candidate.trace_id IS NULL
+                           OR NOT EXISTS (
+                             SELECT 1 FROM traces
+                             WHERE traces.trace_id = candidate.trace_id
+                           )
+                         )
+                         AND NOT EXISTS (
+                           SELECT 1 FROM traces
+                           WHERE traces.parent_span_id = candidate.span_id
+                         )""",
+                    (cutoff_iso,),
+                )
         return len(ids)
 
     # -- Judgments --------------------------------------------------------
@@ -509,34 +608,44 @@ class PostgresStorage:
             """INSERT INTO evaluator_health (
                 health_id, evaluated_at, evaluator_fingerprint,
                 sentinel_set_name, sentinel_set_fingerprint,
-                correct_labels, total_labels, agreement, confidence_low,
-                confidence_high, status, error_count
-            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                correct_examples, total_examples, example_agreement,
+                example_confidence_low, example_confidence_high,
+                correct_labels, total_labels, label_agreement,
+                status, error_count, method_version
+            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             ON CONFLICT (health_id) DO UPDATE SET
                 evaluated_at = EXCLUDED.evaluated_at,
                 evaluator_fingerprint = EXCLUDED.evaluator_fingerprint,
                 sentinel_set_name = EXCLUDED.sentinel_set_name,
                 sentinel_set_fingerprint = EXCLUDED.sentinel_set_fingerprint,
+                correct_examples = EXCLUDED.correct_examples,
+                total_examples = EXCLUDED.total_examples,
+                example_agreement = EXCLUDED.example_agreement,
+                example_confidence_low = EXCLUDED.example_confidence_low,
+                example_confidence_high = EXCLUDED.example_confidence_high,
                 correct_labels = EXCLUDED.correct_labels,
                 total_labels = EXCLUDED.total_labels,
-                agreement = EXCLUDED.agreement,
-                confidence_low = EXCLUDED.confidence_low,
-                confidence_high = EXCLUDED.confidence_high,
+                label_agreement = EXCLUDED.label_agreement,
                 status = EXCLUDED.status,
-                error_count = EXCLUDED.error_count""",
+                error_count = EXCLUDED.error_count,
+                method_version = EXCLUDED.method_version""",
             (
                 record.health_id,
                 record.evaluated_at,
                 record.evaluator_fingerprint,
                 record.sentinel_set_name,
                 record.sentinel_set_fingerprint,
+                record.correct_examples,
+                record.total_examples,
+                record.example_agreement,
+                record.example_confidence_low,
+                record.example_confidence_high,
                 record.correct_labels,
                 record.total_labels,
-                record.agreement,
-                record.confidence_low,
-                record.confidence_high,
+                record.label_agreement,
                 record.status.value,
                 record.error_count,
+                record.method_version,
             ),
         )
 
@@ -555,32 +664,42 @@ class PostgresStorage:
         # `where` is one of two fixed strings; fingerprint and limit are bound.
         sql = (
             "SELECT health_id, evaluated_at, evaluator_fingerprint, "
-            "sentinel_set_name, sentinel_set_fingerprint, correct_labels, "
-            "total_labels, agreement, confidence_low, confidence_high, status, "
-            f"error_count FROM evaluator_health {where} "  # nosec B608
+            "sentinel_set_name, sentinel_set_fingerprint, correct_examples, "
+            "total_examples, example_agreement, example_confidence_low, "
+            "example_confidence_high, correct_labels, total_labels, "
+            "label_agreement, status, error_count, method_version "
+            f"FROM evaluator_health {where} "  # nosec B608
             "ORDER BY evaluated_at DESC LIMIT %s"
         )
         rows = self._fetchall(
             sql,
             tuple(params),
         )
-        return [
-            EvaluatorHealthRecord(
+        records = []
+        for row in rows:
+            legacy = (row[15] or "1") == "1"
+            records.append(EvaluatorHealthRecord(
                 health_id=row[0],
                 evaluated_at=row[1],
                 evaluator_fingerprint=row[2],
                 sentinel_set_name=row[3] or "",
                 sentinel_set_fingerprint=row[4],
-                correct_labels=row[5],
-                total_labels=row[6],
-                agreement=row[7],
-                confidence_low=row[8],
-                confidence_high=row[9],
-                status=EvaluatorHealthStatus(row[10]),
-                error_count=row[11],
-            )
-            for row in rows
-        ]
+                correct_examples=0 if legacy else row[5],
+                total_examples=0 if legacy else row[6],
+                example_agreement=None if legacy else row[7],
+                example_confidence_low=None if legacy else row[8],
+                example_confidence_high=None if legacy else row[9],
+                correct_labels=row[10],
+                total_labels=row[11],
+                label_agreement=None if legacy else row[12],
+                status=(
+                    EvaluatorHealthStatus.INSUFFICIENT_DATA
+                    if legacy else EvaluatorHealthStatus(row[13])
+                ),
+                error_count=row[14],
+                method_version=row[15] or "1",
+            ))
+        return records
 
     # -- Drift signals ----------------------------------------------------
 
@@ -589,23 +708,49 @@ class PostgresStorage:
     # Wasserstein, and PSI on Postgres before the May-2026 fix).
     _SIGNAL_COLUMNS = (
         "signal_id, detected_at, cluster_id, dimension, direction, "
-        "evaluator_fingerprint, "
+        "evaluator_fingerprint, run_id, "
         "statistic_name, statistic_value, p_value, p_value_adjusted, "
         "effect_size_cohens_d, effect_size_cliffs_delta, wasserstein_distance, psi, "
         "sample_size_current, sample_size_baseline, "
         "contributing_layers, example_trace_ids, recommended_action"
     )
 
-    def insert_drift_signal(self, signal: DriftSignal) -> None:
-        self._exec(
+    @staticmethod
+    def _signal_params(signal: DriftSignal) -> tuple:
+        return (
+            signal.signal_id,
+            signal.detected_at,
+            signal.cluster_id,
+            signal.dimension,
+            signal.direction.value,
+            signal.evaluator_fingerprint,
+            signal.run_id or None,
+            signal.statistic_name,
+            signal.statistic_value,
+            signal.p_value,
+            signal.p_value_adjusted,
+            signal.effect_size_cohens_d,
+            signal.effect_size_cliffs_delta,
+            signal.wasserstein_distance,
+            signal.psi,
+            signal.sample_size_current,
+            signal.sample_size_baseline,
+            json.dumps(signal.contributing_layers),
+            json.dumps(signal.example_trace_ids),
+            signal.recommended_action,
+        )
+
+    def _insert_drift_signal_cursor(self, cur, signal: DriftSignal) -> None:
+        cur.execute(
             f"""INSERT INTO drift_signals ({self._SIGNAL_COLUMNS}) VALUES (
-                %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb,%s
+                %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb,%s
             ) ON CONFLICT (signal_id) DO UPDATE SET
                 detected_at = EXCLUDED.detected_at,
                 cluster_id = EXCLUDED.cluster_id,
                 dimension = EXCLUDED.dimension,
                 direction = EXCLUDED.direction,
                 evaluator_fingerprint = EXCLUDED.evaluator_fingerprint,
+                run_id = EXCLUDED.run_id,
                 statistic_name = EXCLUDED.statistic_name,
                 statistic_value = EXCLUDED.statistic_value,
                 p_value = EXCLUDED.p_value,
@@ -619,28 +764,114 @@ class PostgresStorage:
                 contributing_layers = EXCLUDED.contributing_layers,
                 example_trace_ids = EXCLUDED.example_trace_ids,
                 recommended_action = EXCLUDED.recommended_action""",
-            (
-                signal.signal_id,
-                signal.detected_at,
-                signal.cluster_id,
-                signal.dimension,
-                signal.direction.value,
-                signal.evaluator_fingerprint,
-                signal.statistic_name,
-                signal.statistic_value,
-                signal.p_value,
-                signal.p_value_adjusted,
-                signal.effect_size_cohens_d,
-                signal.effect_size_cliffs_delta,
-                signal.wasserstein_distance,
-                signal.psi,
-                signal.sample_size_current,
-                signal.sample_size_baseline,
-                json.dumps(signal.contributing_layers),
-                json.dumps(signal.example_trace_ids),
-                signal.recommended_action,
-            ),
+            self._signal_params(signal),
         )
+
+    def insert_drift_signal(self, signal: DriftSignal) -> None:
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                self._insert_drift_signal_cursor(cur, signal)
+
+    def replace_drift_run(
+        self,
+        run: DriftRun,
+        signals: list[DriftSignal],
+    ) -> None:
+        _validate_drift_run_snapshot(run, signals)
+        with self._pool.connection() as conn:
+            with conn.transaction():
+                with conn.cursor() as cur:
+                    # Advisory locks close the absent-row race: two transactions
+                    # must not both claim the same signal_id for different runs.
+                    lock_names = {
+                        f"verdict:drift-run:{run.run_id}",
+                        *(f"verdict:drift-signal:{signal.signal_id}" for signal in signals),
+                    }
+                    for lock_name in sorted(lock_names):
+                        cur.execute(
+                            "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                            (lock_name,),
+                        )
+                    cur.execute(
+                        "SELECT evaluator_fingerprint FROM drift_runs "
+                        "WHERE run_id = %s",
+                        (run.run_id,),
+                    )
+                    existing = cur.fetchone()
+                    if existing and existing[0] != run.evaluator_fingerprint:
+                        raise ValueError("run_id already belongs to another evaluator")
+                    for signal in signals:
+                        cur.execute(
+                            "SELECT run_id FROM drift_signals WHERE signal_id = %s",
+                            (signal.signal_id,),
+                        )
+                        owner = cur.fetchone()
+                        if owner and owner[0] and owner[0] != run.run_id:
+                            raise ValueError(
+                                "signal_id already belongs to another drift run"
+                            )
+                    cur.execute(
+                        """INSERT INTO drift_runs (
+                            run_id, analysis_time, completed_at,
+                            evaluator_fingerprint, signal_count
+                        ) VALUES (%s,%s,%s,%s,%s)
+                        ON CONFLICT (run_id) DO UPDATE SET
+                            analysis_time = EXCLUDED.analysis_time,
+                            completed_at = EXCLUDED.completed_at,
+                            evaluator_fingerprint = EXCLUDED.evaluator_fingerprint,
+                            signal_count = EXCLUDED.signal_count""",
+                        (
+                            run.run_id,
+                            run.analysis_time,
+                            run.completed_at,
+                            run.evaluator_fingerprint,
+                            run.signal_count,
+                        ),
+                    )
+                    cur.execute(
+                        "DELETE FROM drift_signals WHERE run_id = %s",
+                        (run.run_id,),
+                    )
+                    for signal in signals:
+                        self._insert_drift_signal_cursor(cur, signal)
+
+    def get_latest_drift_run_snapshot(
+        self,
+        evaluator_fingerprint: str,
+    ) -> tuple[DriftRun, list[DriftSignal]] | None:
+        with self._pool.connection() as conn:
+            with conn.transaction():
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """SELECT run_id, analysis_time, completed_at,
+                                  evaluator_fingerprint, signal_count
+                             FROM drift_runs
+                            WHERE evaluator_fingerprint = %s
+                            ORDER BY analysis_time DESC, completed_at DESC,
+                                     run_id DESC
+                            LIMIT 1""",
+                        (evaluator_fingerprint,),
+                    )
+                    row = cur.fetchone()
+                    if row is None:
+                        return None
+                    cur.execute(
+                        f"SELECT {self._SIGNAL_COLUMNS} FROM drift_signals "
+                        "WHERE run_id = %s ORDER BY signal_id",  # nosec B608
+                        (row[0],),
+                    )
+                    signal_rows = cur.fetchall()
+        run = DriftRun(
+            run_id=row[0],
+            analysis_time=row[1],
+            completed_at=row[2],
+            evaluator_fingerprint=row[3],
+            signal_count=row[4],
+        )
+        signals = [self._row_to_drift_signal(item) for item in signal_rows]
+        if len(signals) != run.signal_count:
+            raise RuntimeError("stored drift run signal_count is inconsistent")
+        return run, signals
 
     def delete_drift_signals_between(
         self,
@@ -649,12 +880,40 @@ class PostgresStorage:
         *,
         evaluator_fingerprint: str | None = None,
     ) -> None:
-        sql = "DELETE FROM drift_signals WHERE detected_at >= %s AND detected_at < %s"
+        match_sql = "detected_at >= %s AND detected_at < %s"
         params: tuple = (start, end)
         if evaluator_fingerprint is not None:
-            sql += " AND evaluator_fingerprint = %s"
+            match_sql += " AND evaluator_fingerprint = %s"
             params += (evaluator_fingerprint,)
-        self._exec(sql, params)
+        with self._pool.connection() as conn:
+            with conn.transaction():
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"SELECT DISTINCT run_id FROM drift_signals "  # nosec B608
+                        f"WHERE {match_sql} AND run_id IS NOT NULL "
+                        "AND run_id <> ''",
+                        params,
+                    )
+                    run_ids = sorted(row[0] for row in cur.fetchall())
+                    for run_id in run_ids:
+                        cur.execute(
+                            "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                            (f"verdict:drift-run:{run_id}",),
+                        )
+                    if run_ids:
+                        cur.execute(
+                            "DELETE FROM drift_signals WHERE run_id = ANY(%s)",
+                            (run_ids,),
+                        )
+                        cur.execute(
+                            "DELETE FROM drift_runs WHERE run_id = ANY(%s)",
+                            (run_ids,),
+                        )
+                    cur.execute(
+                        f"DELETE FROM drift_signals WHERE {match_sql} "  # nosec B608
+                        "AND (run_id IS NULL OR run_id = '')",
+                        params,
+                    )
 
     def list_drift_signals(self, *, limit: int = 100) -> list[DriftSignal]:
         rows = self._fetchall(
@@ -662,30 +921,38 @@ class PostgresStorage:
             "ORDER BY detected_at DESC LIMIT %s",
             (limit,),
         )
-        return [
-            DriftSignal(
+        return [self._row_to_drift_signal(r) for r in rows]
+
+    @staticmethod
+    def _row_to_drift_signal(r) -> DriftSignal:
+        return DriftSignal(
                 signal_id=r[0],
                 detected_at=r[1],
                 cluster_id=r[2] or "",
                 dimension=r[3] or "",
                 direction=DriftDirection(r[4] or "change"),
                 evaluator_fingerprint=r[5] or "",
-                statistic_name=r[6] or "",
-                statistic_value=r[7] or 0.0,
-                p_value=r[8] or 1.0,
-                p_value_adjusted=r[9] or 1.0,
-                effect_size_cohens_d=r[10] or 0.0,
-                effect_size_cliffs_delta=r[11] or 0.0,
-                wasserstein_distance=r[12] or 0.0,
-                psi=r[13] or 0.0,
-                sample_size_current=r[14] or 0,
-                sample_size_baseline=r[15] or 0,
-                contributing_layers=r[16] if isinstance(r[16], list) else (json.loads(r[16]) if r[16] else []),
-                example_trace_ids=r[17] if isinstance(r[17], list) else (json.loads(r[17]) if r[17] else []),
-                recommended_action=r[18] or "",
+                run_id=r[6] or "",
+                statistic_name=r[7] or "",
+                statistic_value=r[8] or 0.0,
+                p_value=r[9] or 1.0,
+                p_value_adjusted=r[10] or 1.0,
+                effect_size_cohens_d=r[11] or 0.0,
+                effect_size_cliffs_delta=r[12] or 0.0,
+                wasserstein_distance=r[13] or 0.0,
+                psi=r[14] or 0.0,
+                sample_size_current=r[15] or 0,
+                sample_size_baseline=r[16] or 0,
+                contributing_layers=(
+                    r[17] if isinstance(r[17], list)
+                    else (json.loads(r[17]) if r[17] else [])
+                ),
+                example_trace_ids=(
+                    r[18] if isinstance(r[18], list)
+                    else (json.loads(r[18]) if r[18] else [])
+                ),
+                recommended_action=r[19] or "",
             )
-            for r in rows
-        ]
 
     # -- Spans ------------------------------------------------------------
 

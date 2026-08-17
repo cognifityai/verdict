@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import inspect
 import sqlite3
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -14,6 +15,7 @@ import pytest
 from verdict.schema import (
     DimensionScore,
     DriftDirection,
+    DriftRun,
     DriftSignal,
     EvaluatorHealthRecord,
     EvaluatorHealthStatus,
@@ -415,22 +417,28 @@ def test_evaluator_health_round_trip_and_identity_filter(storage):
         evaluator_fingerprint="judge-a",
         sentinel_set_name="support-v1",
         sentinel_set_fingerprint="set-a",
+        correct_examples=27,
+        total_examples=30,
+        example_agreement=0.9,
+        example_confidence_low=0.74,
+        example_confidence_high=0.97,
         correct_labels=27,
         total_labels=30,
-        agreement=0.9,
-        confidence_low=0.74,
-        confidence_high=0.97,
+        label_agreement=0.9,
         status=EvaluatorHealthStatus.HEALTHY,
     )
     other = EvaluatorHealthRecord(
         evaluator_fingerprint="judge-b",
         sentinel_set_name="support-v1",
         sentinel_set_fingerprint="set-a",
+        correct_examples=10,
+        total_examples=30,
+        example_agreement=1 / 3,
+        example_confidence_low=0.19,
+        example_confidence_high=0.51,
         correct_labels=10,
         total_labels=30,
-        agreement=1 / 3,
-        confidence_low=0.19,
-        confidence_high=0.51,
+        label_agreement=1 / 3,
         status=EvaluatorHealthStatus.DEGRADED,
         error_count=2,
     )
@@ -445,6 +453,70 @@ def test_evaluator_health_round_trip_and_identity_filter(storage):
     assert fetched[0].health_id == other.health_id
     assert fetched[0].status == EvaluatorHealthStatus.DEGRADED
     assert fetched[0].error_count == 2
+
+
+def test_sqlite_legacy_label_health_is_not_treated_as_example_health(tmp_path):
+    path = tmp_path / "legacy-health.db"
+    connection = sqlite3.connect(path)
+    connection.executescript(
+        """
+        CREATE TABLE evaluator_health (
+            health_id TEXT PRIMARY KEY,
+            evaluated_at TEXT NOT NULL,
+            evaluator_fingerprint TEXT NOT NULL,
+            sentinel_set_name TEXT,
+            sentinel_set_fingerprint TEXT NOT NULL,
+            correct_labels INTEGER NOT NULL,
+            total_labels INTEGER NOT NULL,
+            agreement REAL,
+            confidence_low REAL,
+            confidence_high REAL,
+            status TEXT NOT NULL,
+            error_count INTEGER NOT NULL DEFAULT 0
+        );
+        """
+    )
+    connection.execute(
+        """INSERT INTO evaluator_health (
+            health_id, evaluated_at, evaluator_fingerprint,
+            sentinel_set_name, sentinel_set_fingerprint,
+            correct_labels, total_labels, agreement,
+            confidence_low, confidence_high, status, error_count
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            "legacy-health",
+            "2026-08-16T12:00:00+00:00",
+            "legacy-evaluator",
+            "anchors",
+            "anchor-set",
+            200,
+            229,
+            200 / 229,
+            0.82,
+            0.91,
+            "healthy",
+            0,
+        ),
+    )
+    connection.commit()
+    connection.close()
+
+    storage = SQLiteStorage(str(path))
+    [record] = storage.list_evaluator_health(
+        evaluator_fingerprint="legacy-evaluator"
+    )
+    storage.close()
+
+    assert record.method_version == "1"
+    assert record.status is EvaluatorHealthStatus.INSUFFICIENT_DATA
+    assert record.correct_examples == 0
+    assert record.total_examples == 0
+    assert record.example_agreement is None
+    assert record.example_confidence_low is None
+    assert record.example_confidence_high is None
+    assert record.correct_labels == 200
+    assert record.total_labels == 229
+    assert record.label_agreement == pytest.approx(200 / 229)
 
 
 def test_sqlite_migrates_legacy_judgment_identity_as_explicitly_incomplete(tmp_path):
@@ -666,6 +738,234 @@ def test_reinsert_drift_signal_updates_in_place(storage):
     assert fetched[0].recommended_action == "refreshed result"
 
 
+def test_drift_run_snapshot_can_replace_signals_with_an_explicit_zero(storage):
+    evaluator = "snapshot-evaluator"
+    old_time = datetime(2026, 8, 15, 12, tzinfo=timezone.utc)
+    latest_time = datetime(2026, 8, 16, 12, tzinfo=timezone.utc)
+    old_run = DriftRun(
+        run_id="old-run",
+        analysis_time=old_time,
+        completed_at=old_time + timedelta(minutes=1),
+        evaluator_fingerprint=evaluator,
+        signal_count=1,
+    )
+    old_signal = DriftSignal(
+        signal_id="old-signal",
+        detected_at=old_time,
+        evaluator_fingerprint=evaluator,
+        run_id=old_run.run_id,
+        dimension="quality",
+    )
+    storage.replace_drift_run(old_run, [old_signal])
+    latest_run = DriftRun(
+        run_id="latest-zero-run",
+        analysis_time=latest_time,
+        completed_at=latest_time + timedelta(minutes=1),
+        evaluator_fingerprint=evaluator,
+        signal_count=0,
+    )
+    storage.replace_drift_run(latest_run, [])
+
+    snapshot = storage.get_latest_drift_run_snapshot(evaluator)
+
+    assert snapshot is not None
+    run, signals = snapshot
+    assert run.run_id == latest_run.run_id
+    assert run.signal_count == 0
+    assert signals == []
+
+
+def test_same_drift_run_rerun_replaces_its_exact_signal_set(storage):
+    evaluator = "rerun-evaluator"
+    analysis_time = datetime(2026, 8, 16, 12, tzinfo=timezone.utc)
+    run = DriftRun(
+        run_id="same-run",
+        analysis_time=analysis_time,
+        completed_at=analysis_time + timedelta(minutes=1),
+        evaluator_fingerprint=evaluator,
+        signal_count=2,
+    )
+    original = [
+        DriftSignal(
+            signal_id=signal_id,
+            evaluator_fingerprint=evaluator,
+            run_id=run.run_id,
+        )
+        for signal_id in ("stale", "keep")
+    ]
+    storage.replace_drift_run(run, original)
+    replacement_run = DriftRun(
+        run_id=run.run_id,
+        analysis_time=run.analysis_time,
+        completed_at=run.completed_at + timedelta(minutes=1),
+        evaluator_fingerprint=evaluator,
+        signal_count=1,
+    )
+    replacement = DriftSignal(
+        signal_id="keep",
+        evaluator_fingerprint=evaluator,
+        run_id=run.run_id,
+        recommended_action="refreshed",
+    )
+
+    storage.replace_drift_run(replacement_run, [replacement])
+
+    snapshot = storage.get_latest_drift_run_snapshot(evaluator)
+    assert snapshot is not None
+    stored_run, stored_signals = snapshot
+    assert stored_run.signal_count == 1
+    assert [signal.signal_id for signal in stored_signals] == ["keep"]
+    assert stored_signals[0].recommended_action == "refreshed"
+
+
+def test_invalid_drift_run_replacement_rolls_back_without_changing_latest(storage):
+    evaluator = "atomic-evaluator"
+    analysis_time = datetime(2026, 8, 16, 12, tzinfo=timezone.utc)
+    original_run = DriftRun(
+        run_id="atomic-original",
+        analysis_time=analysis_time,
+        evaluator_fingerprint=evaluator,
+        signal_count=1,
+    )
+    owned_signal = DriftSignal(
+        signal_id="owned-signal",
+        evaluator_fingerprint=evaluator,
+        run_id=original_run.run_id,
+    )
+    storage.replace_drift_run(original_run, [owned_signal])
+    conflicting_run = DriftRun(
+        run_id="atomic-conflict",
+        analysis_time=analysis_time + timedelta(hours=1),
+        evaluator_fingerprint=evaluator,
+        signal_count=1,
+    )
+    conflicting_signal = DriftSignal(
+        signal_id=owned_signal.signal_id,
+        evaluator_fingerprint=evaluator,
+        run_id=conflicting_run.run_id,
+    )
+
+    with pytest.raises(ValueError, match="another drift run"):
+        storage.replace_drift_run(conflicting_run, [conflicting_signal])
+
+    snapshot = storage.get_latest_drift_run_snapshot(evaluator)
+    assert snapshot is not None
+    assert snapshot[0].run_id == original_run.run_id
+    assert [signal.signal_id for signal in snapshot[1]] == ["owned-signal"]
+
+
+def test_latest_drift_run_orders_by_analysis_time_before_completion_time(storage):
+    evaluator = "backfill-evaluator"
+    current_analysis = datetime(2026, 8, 16, 12, tzinfo=timezone.utc)
+    current = DriftRun(
+        run_id="current-analysis",
+        analysis_time=current_analysis,
+        completed_at=current_analysis + timedelta(minutes=1),
+        evaluator_fingerprint=evaluator,
+        signal_count=0,
+    )
+    backfill = DriftRun(
+        run_id="later-backfill",
+        analysis_time=current_analysis - timedelta(days=1),
+        completed_at=current_analysis + timedelta(days=1),
+        evaluator_fingerprint=evaluator,
+        signal_count=0,
+    )
+    storage.replace_drift_run(current, [])
+    storage.replace_drift_run(backfill, [])
+
+    snapshot = storage.get_latest_drift_run_snapshot(evaluator)
+
+    assert snapshot is not None
+    assert snapshot[0].run_id == current.run_id
+
+
+def test_concurrent_same_run_replacements_never_expose_a_mixed_snapshot(storage):
+    evaluator = "concurrent-run-evaluator"
+    run_id = "concurrent-run"
+    analysis_time = datetime(2026, 8, 16, 12, tzinfo=timezone.utc)
+    gate = threading.Barrier(3)
+    errors = []
+
+    def replace(signal_id: str) -> None:
+        try:
+            gate.wait()
+            storage.replace_drift_run(
+                DriftRun(
+                    run_id=run_id,
+                    analysis_time=analysis_time,
+                    completed_at=analysis_time + timedelta(minutes=1),
+                    evaluator_fingerprint=evaluator,
+                    signal_count=1,
+                ),
+                [DriftSignal(
+                    signal_id=signal_id,
+                    evaluator_fingerprint=evaluator,
+                    run_id=run_id,
+                )],
+            )
+        except Exception as exc:  # assertion reports unexpected adapter failure
+            errors.append(exc)
+
+    threads = [
+        threading.Thread(target=replace, args=("signal-a",)),
+        threading.Thread(target=replace, args=("signal-b",)),
+    ]
+    for thread in threads:
+        thread.start()
+    gate.wait()
+    for thread in threads:
+        thread.join(timeout=2.0)
+
+    assert errors == []
+    assert all(not thread.is_alive() for thread in threads)
+    snapshot = storage.get_latest_drift_run_snapshot(evaluator)
+    assert snapshot is not None
+    assert snapshot[0].signal_count == 1
+    assert {signal.signal_id for signal in snapshot[1]} in (
+        {"signal-a"},
+        {"signal-b"},
+    )
+
+
+def test_sqlite_drift_run_rolls_back_marker_and_signal_delete_on_insert_error(tmp_path):
+    storage = SQLiteStorage(str(tmp_path / "drift-rollback.db"))
+    evaluator = "rollback-evaluator"
+    run = DriftRun(
+        run_id="rollback-run",
+        evaluator_fingerprint=evaluator,
+        signal_count=1,
+    )
+    original = DriftSignal(
+        signal_id="original-signal",
+        evaluator_fingerprint=evaluator,
+        run_id=run.run_id,
+    )
+    storage.replace_drift_run(run, [original])
+    replacement_run = DriftRun(
+        run_id=run.run_id,
+        analysis_time=run.analysis_time,
+        completed_at=run.completed_at + timedelta(minutes=1),
+        evaluator_fingerprint=evaluator,
+        signal_count=1,
+    )
+    malformed = DriftSignal(
+        signal_id="malformed-signal",
+        evaluator_fingerprint=evaluator,
+        run_id=run.run_id,
+        contributing_layers=[object()],
+    )
+
+    with pytest.raises(TypeError):
+        storage.replace_drift_run(replacement_run, [malformed])
+
+    snapshot = storage.get_latest_drift_run_snapshot(evaluator)
+    storage.close()
+    assert snapshot is not None
+    assert snapshot[0].completed_at == run.completed_at
+    assert [signal.signal_id for signal in snapshot[1]] == ["original-signal"]
+
+
 def test_delete_drift_signals_between_uses_half_open_window(storage):
     start = datetime(2026, 8, 11, 12, tzinfo=timezone.utc)
     for signal_id, detected_at in [
@@ -710,6 +1010,79 @@ def test_delete_drift_signals_between_can_isolate_evaluator(storage):
     ]
 
 
+def test_delete_drift_signals_between_removes_whole_completed_snapshot(storage):
+    evaluator = "snapshot-delete-evaluator"
+    start = datetime(2026, 8, 16, 12, tzinfo=timezone.utc)
+    older_run = DriftRun(
+        run_id="retained-run",
+        analysis_time=start - timedelta(hours=1),
+        evaluator_fingerprint=evaluator,
+        signal_count=1,
+    )
+    retained = DriftSignal(
+        signal_id="retained-signal",
+        detected_at=start - timedelta(hours=1),
+        evaluator_fingerprint=evaluator,
+        run_id=older_run.run_id,
+    )
+    current_run = DriftRun(
+        run_id="deleted-run",
+        analysis_time=start,
+        evaluator_fingerprint=evaluator,
+        signal_count=2,
+    )
+    matched = DriftSignal(
+        signal_id="matched-signal",
+        detected_at=start,
+        evaluator_fingerprint=evaluator,
+        run_id=current_run.run_id,
+    )
+    same_snapshot_outside_window = DriftSignal(
+        signal_id="same-snapshot-outside-window",
+        detected_at=start + timedelta(days=1),
+        evaluator_fingerprint=evaluator,
+        run_id=current_run.run_id,
+    )
+    storage.replace_drift_run(older_run, [retained])
+    storage.replace_drift_run(
+        current_run,
+        [matched, same_snapshot_outside_window],
+    )
+
+    storage.delete_drift_signals_between(start, start + timedelta(hours=1))
+
+    snapshot = storage.get_latest_drift_run_snapshot(evaluator)
+    assert snapshot is not None
+    assert snapshot[0].run_id == older_run.run_id
+    assert [signal.signal_id for signal in snapshot[1]] == [retained.signal_id]
+    assert {
+        signal.signal_id for signal in storage.list_drift_signals(limit=20)
+    } == {retained.signal_id}
+
+
+def test_in_memory_close_clears_drift_run_markers_with_their_signals():
+    storage = InMemoryStorage()
+    evaluator = "close-clears-drift-state"
+    run = DriftRun(
+        run_id="close-run",
+        evaluator_fingerprint=evaluator,
+        signal_count=1,
+    )
+    storage.replace_drift_run(
+        run,
+        [DriftSignal(
+            signal_id="close-signal",
+            evaluator_fingerprint=evaluator,
+            run_id=run.run_id,
+        )],
+    )
+
+    storage.close()
+
+    assert storage.get_latest_drift_run_snapshot(evaluator) is None
+    assert storage.list_drift_signals() == []
+
+
 def test_drift_signal_columns_cover_all_stat_fields():
     """DB-free guard: every adapter must persist the same DriftSignal stat
     fields. The Postgres adapter once silently omitted Cliff's δ, Wasserstein
@@ -737,13 +1110,13 @@ def test_drift_signal_columns_cover_all_stat_fields():
     # The number of placeholders in the column list must match the count of
     # columns, or positional binding silently shifts.
     n_cols = len([c for c in pg.PostgresStorage._SIGNAL_COLUMNS.split(",")])
-    assert n_cols == 19, f"expected 19 drift-signal columns, got {n_cols}"
+    assert n_cols == 20, f"expected 20 drift-signal columns, got {n_cols}"
 
     # DB-free guard only: the live Postgres path still needs integration
     # coverage in an environment that provides a Postgres instance.
     import inspect
 
-    insert_source = inspect.getsource(pg.PostgresStorage.insert_drift_signal)
+    insert_source = inspect.getsource(pg.PostgresStorage._insert_drift_signal_cursor)
     assert "ON CONFLICT (signal_id) DO UPDATE SET" in insert_source
 
 
@@ -834,9 +1207,10 @@ def test_postgres_identity_upserts_replace_every_non_primary_key_column():
     )[1]
     for column in (
         "evaluated_at", "evaluator_fingerprint", "sentinel_set_name",
-        "sentinel_set_fingerprint", "correct_labels", "total_labels",
-        "agreement", "confidence_low", "confidence_high", "status",
-        "error_count",
+        "sentinel_set_fingerprint", "correct_examples", "total_examples",
+        "example_agreement", "example_confidence_low",
+        "example_confidence_high", "correct_labels", "total_labels",
+        "label_agreement", "status", "error_count", "method_version",
     ):
         assert f"{column} = EXCLUDED.{column}" in health_update
 
@@ -861,12 +1235,157 @@ def test_delete_trace_removes_trace_and_judgments(storage):
     assert [s for s in storage.list_user_signals() if s.trace_id == trace.trace_id] == []
 
 
+def test_memory_trace_cleanup_precomputes_retained_parent_ids() -> None:
+    accesses = 0
+
+    class CountingTrace:
+        @property
+        def parent_span_id(self):
+            nonlocal accesses
+            accesses += 1
+            return None
+
+    storage = InMemoryStorage()
+    trace_count = 200
+    span_count = 200
+    storage._traces = {
+        f"retained-{index}": CountingTrace()  # type: ignore[assignment]
+        for index in range(trace_count)
+    }
+    storage._spans = {
+        f"span-{index}": SpanRecord(
+            span_id=f"span-{index}",
+            name="linked",
+            trace_id="owner",
+        )
+        for index in range(span_count)
+    }
+
+    storage.delete_trace("owner")
+
+    assert accesses <= trace_count * 2
+
+
+def test_sqlite_delete_trace_is_atomic_against_cleanup_failure(tmp_path):
+    storage = SQLiteStorage(str(tmp_path / "atomic-delete.db"))
+    owner = _trace(trace_id="owner")
+    shared = SpanRecord(span_id="shared", name="shared", trace_id=owner.trace_id)
+    retained = _trace(trace_id="retained", parent_span_id=shared.span_id)
+    try:
+        storage.insert_trace(owner)
+        storage.insert_span(shared)
+        storage.insert_trace(retained)
+        storage._conn.execute(
+            """CREATE TRIGGER fail_span_link_clear
+               BEFORE UPDATE OF trace_id ON spans
+               WHEN OLD.trace_id = 'owner'
+               BEGIN
+                 SELECT RAISE(ABORT, 'forced cleanup failure');
+               END"""
+        )
+
+        with pytest.raises(sqlite3.IntegrityError, match="forced cleanup failure"):
+            storage.delete_trace(owner.trace_id)
+
+        assert storage.get_trace(owner.trace_id) is not None
+        [persisted] = storage.list_spans(trace_id=owner.trace_id)
+        assert persisted.span_id == shared.span_id
+    finally:
+        storage.close()
+
+
+def test_sqlite_delete_trace_serializes_concurrent_parent_insertion(tmp_path):
+    path = str(tmp_path / "concurrent-delete.db")
+    deleting = SQLiteStorage(path)
+    inserting = SQLiteStorage(path)
+    owner = _trace(trace_id="owner")
+    shared = SpanRecord(span_id="shared", name="shared", trace_id=owner.trace_id)
+    paused = threading.Event()
+    release = threading.Event()
+    insert_started = threading.Event()
+    insert_done = threading.Event()
+
+    class PausingConnection:
+        def __init__(self, inner):
+            self._inner = inner
+            self._paused_once = False
+
+        def execute(self, sql, *args, **kwargs):
+            normalized = " ".join(sql.split())
+            if (
+                not self._paused_once
+                and normalized.startswith("DELETE FROM spans")
+                and "WHERE trace_id = ?" in normalized
+            ):
+                self._paused_once = True
+                paused.set()
+                assert release.wait(timeout=5), "test did not release span cleanup"
+            return self._inner.execute(sql, *args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+    deleting.insert_trace(owner)
+    deleting.insert_span(shared)
+    deleting._conn = PausingConnection(deleting._conn)  # type: ignore[assignment]
+
+    delete_thread = threading.Thread(target=deleting.delete_trace, args=(owner.trace_id,))
+
+    def insert_child() -> None:
+        insert_started.set()
+        inserting.insert_trace(_trace(trace_id="child", parent_span_id=shared.span_id))
+        insert_done.set()
+
+    insert_thread = threading.Thread(target=insert_child)
+    try:
+        delete_thread.start()
+        assert paused.wait(timeout=5), "delete never reached span cleanup"
+        insert_thread.start()
+        assert insert_started.wait(timeout=5)
+        inserted_during_cleanup = insert_done.wait(timeout=0.25)
+        release.set()
+        delete_thread.join(timeout=5)
+        insert_thread.join(timeout=5)
+
+        assert not delete_thread.is_alive()
+        assert not insert_thread.is_alive()
+        assert not inserted_during_cleanup
+        assert all(
+            record.trace_id != owner.trace_id
+            for record in inserting.list_spans(limit=20)
+        )
+    finally:
+        release.set()
+        delete_thread.join(timeout=5)
+        insert_thread.join(timeout=5)
+        deleting.close()
+        inserting.close()
+
+
 def test_prune_before_deletes_only_older_and_returns_count(storage):
     old1 = _trace(started_at=datetime(2020, 1, 1, tzinfo=timezone.utc))
     old2 = _trace(started_at=datetime(2020, 6, 1, tzinfo=timezone.utc))
     recent = _trace(started_at=datetime(2026, 1, 1, tzinfo=timezone.utc))
     for t in (old1, old2, recent):
         storage.insert_trace(t)
+
+    old_standalone = SpanRecord(
+        name="old-standalone",
+        trace_id=None,
+        started_at=datetime(2020, 3, 1, tzinfo=timezone.utc),
+    )
+    old_orphan = SpanRecord(
+        name="old-orphan",
+        trace_id="missing-trace",
+        started_at=datetime(2020, 4, 1, tzinfo=timezone.utc),
+    )
+    recent_standalone = SpanRecord(
+        name="recent-standalone",
+        trace_id=None,
+        started_at=datetime(2026, 2, 1, tzinfo=timezone.utc),
+    )
+    for record in (old_standalone, old_orphan, recent_standalone):
+        storage.insert_span(record)
 
     # Judgments on an old trace should go away with it.
     storage.insert_judgment(Judgment(
@@ -881,8 +1400,33 @@ def test_prune_before_deletes_only_older_and_returns_count(storage):
     assert storage.get_trace(old1.trace_id) is None
     assert storage.get_trace(old2.trace_id) is None
     assert storage.get_trace(recent.trace_id) is not None
+    remaining_span_ids = {record.span_id for record in storage.list_spans(limit=20)}
+    assert old_standalone.span_id not in remaining_span_ids
+    assert old_orphan.span_id not in remaining_span_ids
+    assert recent_standalone.span_id in remaining_span_ids
     # Judgments belonging to a pruned trace are gone too.
     assert storage.list_judgments_for_cluster(recent.cluster_id) is not None
+
+
+def test_prune_preserves_old_span_referenced_by_retained_trace(storage):
+    """A long-running parent span remains while a newer child trace remains."""
+    old_parent = SpanRecord(
+        name="long-running-agent",
+        started_at=datetime(2020, 1, 1, tzinfo=timezone.utc),
+    )
+    retained_trace = _trace(
+        trace_id="retained-child",
+        parent_span_id=old_parent.span_id,
+        started_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+    storage.insert_span(old_parent)
+    storage.insert_trace(retained_trace)
+
+    storage.prune_before(datetime(2021, 1, 1, tzinfo=timezone.utc).isoformat())
+
+    remaining_span_ids = {record.span_id for record in storage.list_spans(limit=20)}
+    assert old_parent.span_id in remaining_span_ids
+    assert storage.get_trace(retained_trace.trace_id) is not None
 
 
 def test_span_insert_list_round_trip_and_filter(storage):

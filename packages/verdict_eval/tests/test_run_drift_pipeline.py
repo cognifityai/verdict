@@ -124,8 +124,16 @@ def test_real_pipeline_uses_trace_time_and_replaces_hourly_result(tmp_path, monk
     assert "Detected 0 drift signal(s)." in third_output
 
     check = SQLiteStorage(str(db_path))
-    assert check.list_drift_signals(limit=20) == []
+    snapshot = check.get_latest_drift_run_snapshot(
+        evaluator_identity["evaluator_fingerprint"]
+    )
+    historical_signals = check.list_drift_signals(limit=20)
     check.close()
+
+    assert snapshot is not None
+    assert snapshot[0].signal_count == 0
+    assert snapshot[1] == []
+    assert len(historical_signals) == 1
 
 
 def test_pipeline_rejects_metadata_only_capture(tmp_path, monkeypatch, capsys):

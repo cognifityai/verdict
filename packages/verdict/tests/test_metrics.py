@@ -1,8 +1,16 @@
 from dataclasses import fields
 from datetime import datetime, timezone
 
+import verdict
 from verdict.metrics import count_scores, verdict_label
-from verdict.schema import DimensionScore, DriftSignal, Judgment, Trace, Verdict
+from verdict.schema import (
+    DimensionScore,
+    DriftRun,
+    DriftSignal,
+    Judgment,
+    Trace,
+    Verdict,
+)
 
 
 def test_shared_verdict_label_uses_one_uppercase_contract():
@@ -35,6 +43,10 @@ def test_eval_and_core_imports_share_the_same_normalizer():
 
     assert eval_verdict_label is verdict_label
     assert Judgment().pass_rate is None
+
+
+def test_drift_run_is_available_from_the_published_package_namespace():
+    assert verdict.DriftRun is DriftRun
 
 
 def test_judgment_preserves_the_published_positional_constructor_order():

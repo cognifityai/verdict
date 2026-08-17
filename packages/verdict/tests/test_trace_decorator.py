@@ -345,7 +345,7 @@ def _openai_response():
     )
 
 
-def test_manual_span_automatically_links_instrumented_provider_trace():
+def test_instrumented_provider_trace_points_to_active_manual_span():
     from verdict.instrumentors.openai import OpenAIInstrumentor
 
     storage = InMemoryStorage()
@@ -364,7 +364,7 @@ def test_manual_span_automatically_links_instrumented_provider_trace():
         [captured] = storage.list_traces()
         [manual] = storage.list_spans()
         assert captured.parent_span_id == manual.span_id
-        assert manual.trace_id == captured.trace_id
+        assert manual.trace_id is None
     finally:
         client_mod.shutdown()
 
@@ -397,7 +397,7 @@ def test_automatic_trace_link_does_not_read_storage_when_span_closes():
 
         assert storage.get_trace_calls == 0
         [record] = storage.list_spans()
-        assert record.trace_id is not None
+        assert record.trace_id is None
     finally:
         client_mod.shutdown()
 
@@ -433,7 +433,7 @@ def test_explicit_trace_spans_do_not_flush_buffer_on_close():
 
 
 def test_buffered_trace_failure_never_creates_a_dangling_span_link():
-    """A trace link is committed only after the background trace write succeeds."""
+    """A failed provider write cannot affect independent manual-span storage."""
     from verdict.instrumentors.openai import OpenAIInstrumentor
 
     class FailingTraceStorage(InMemoryStorage):
@@ -457,14 +457,15 @@ def test_buffered_trace_failure_never_creates_a_dangling_span_link():
         buffered.flush()
         [record] = inner.list_spans()
         assert record.trace_id is None
-        assert record.attributes["verdict.link_status"] == "trace_write_failed"
+        assert "verdict.link_status" not in record.attributes
+        assert buffered.write_errors == 1
         assert inner.list_traces() == []
     finally:
         client_mod.shutdown()
 
 
-def test_invalid_explicit_context_adopts_successful_provider_trace():
-    """A missing caller ID must not block a valid automatic provider link."""
+def test_invalid_explicit_context_stays_fail_closed_during_provider_call():
+    """Automatic correlation must not replace a caller's invalid explicit link."""
     from verdict.instrumentors.openai import OpenAIInstrumentor
 
     storage = InMemoryStorage()
@@ -483,14 +484,15 @@ def test_invalid_explicit_context_adopts_successful_provider_trace():
 
         [captured] = storage.list_traces()
         [record] = storage.list_spans()
-        assert record.trace_id == captured.trace_id
-        assert "verdict.link_status" not in record.attributes
+        assert captured.parent_span_id == record.span_id
+        assert record.trace_id is None
+        assert record.attributes["verdict.link_status"] == "trace_not_found"
     finally:
         client_mod.shutdown()
 
 
-def test_stream_finalized_after_manual_span_exit_updates_persisted_link():
-    """A lazily consumed provider stream must repair the already-written span."""
+def test_stream_finalized_after_manual_span_exit_keeps_parent_span_id():
+    """Late stream persistence uses the captured parent ID without span repair."""
     from verdict.instrumentors.openai import OpenAIInstrumentor
 
     storage = InMemoryStorage()
@@ -520,7 +522,7 @@ def test_stream_finalized_after_manual_span_exit_updates_persisted_link():
         [captured] = storage.list_traces()
         [after] = storage.list_spans()
         assert captured.parent_span_id == after.span_id
-        assert after.trace_id == captured.trace_id
+        assert after.trace_id is None
     finally:
         client_mod.shutdown()
 
@@ -572,14 +574,13 @@ def test_nested_manual_spans_link_provider_trace_to_innermost_span():
         [captured] = storage.list_traces()
         records = {record.name: record for record in storage.list_spans()}
         assert captured.parent_span_id == records["inner"].span_id
-        assert records["inner"].trace_id == captured.trace_id
-        assert records["outer"].trace_id == captured.trace_id
+        assert records["inner"].trace_id is None
+        assert records["outer"].trace_id is None
     finally:
         client_mod.shutdown()
 
 
-def test_child_provider_call_replaces_inherited_outer_trace_link():
-    """A child's own provider trace must not be misattributed to its parent."""
+def test_nested_provider_calls_point_to_their_exact_manual_parents():
     from verdict.instrumentors.openai import OpenAIInstrumentor
 
     storage = InMemoryStorage()
@@ -604,9 +605,10 @@ def test_child_provider_call_replaces_inherited_outer_trace_link():
 
         records = {record.name: record for record in storage.list_spans()}
         traces = {trace.parent_span_id: trace for trace in storage.list_traces()}
-        assert records["outer"].trace_id == traces[records["outer"].span_id].trace_id
-        assert records["inner"].trace_id == traces[records["inner"].span_id].trace_id
-        assert records["inner"].trace_id != records["outer"].trace_id
+        assert traces[records["outer"].span_id].request_model == "outer-model"
+        assert traces[records["inner"].span_id].request_model == "inner-model"
+        assert records["outer"].trace_id is None
+        assert records["inner"].trace_id is None
     finally:
         client_mod.shutdown()
 
@@ -632,7 +634,7 @@ def test_multiple_provider_calls_point_to_one_manual_span_without_reusing_trace_
         [record] = storage.list_spans()
         assert len({trace.trace_id for trace in traces}) == 2
         assert {trace.parent_span_id for trace in traces} == {record.span_id}
-        assert record.trace_id in {trace.trace_id for trace in traces}
+        assert record.trace_id is None
     finally:
         client_mod.shutdown()
 
@@ -663,9 +665,10 @@ def test_concurrent_async_provider_calls_keep_automatic_span_links_isolated():
 
     try:
         asyncio.run(run())
-        spans = {record.trace_id: record for record in storage.list_spans()}
+        spans = {record.span_id: record for record in storage.list_spans()}
         traces = storage.list_traces()
         assert len(traces) == 2
-        assert all(trace.parent_span_id == spans[trace.trace_id].span_id for trace in traces)
+        assert {trace.parent_span_id for trace in traces} == set(spans)
+        assert all(record.trace_id is None for record in spans.values())
     finally:
         client_mod.shutdown()
