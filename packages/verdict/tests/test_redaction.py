@@ -395,6 +395,23 @@ def test_redact_is_linear_on_pathological_text():
         )
 
 
+def test_colon_free_text_never_enters_ipv6_candidate_search(monkeypatch):
+    """A necessary delimiter must gate the permissive IPv6 candidate regex."""
+
+    class UnexpectedIPv6Search:
+        def sub(self, *_args, **_kwargs):
+            raise AssertionError("IPv6 candidate search ran without a colon")
+
+    monkeypatch.setitem(
+        redaction_module._PATTERNS,
+        "IPV6",
+        UnexpectedIPv6Search(),
+    )
+
+    probe = "a" * 64_000
+    assert redact(probe) == probe
+
+
 def test_email_redaction_is_linear_when_malformed_text_contains_at_signs():
     """An at-sign must not re-enable the old quadratic candidate search."""
     import time
