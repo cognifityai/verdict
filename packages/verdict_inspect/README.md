@@ -60,6 +60,10 @@ lexical embedding-distribution changes; it is not a semantic model, and the
 report labels it explicitly. Install the local semantic embedder with
 `pip install "cognifity-verdict-eval[semantic]"`.
 
+Triggered and non-triggered semantic rows use the same L2-normalized detector
+statistics. Each comparison embeds its current and baseline windows once; the
+report does not re-embed or independently recompute non-triggered rows.
+
 Turns with fewer than 10 assistant-response words are excluded from windowed
 analysis. At least 16 substantive turns are required for a two-window
 comparison; 24 create the default early/middle/late split. Each window's judge
