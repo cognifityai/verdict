@@ -12,7 +12,8 @@ Usage:
     python scripts/verify_judge_alignment.py --mode offline
 
     python scripts/verify_judge_alignment.py --mode online \\
-        --provider anthropic --judge-model claude-haiku-4-5 --n 100
+        --provider anthropic --judge-model claude-haiku-4-5 --n 100 \\
+        --json-output alignment.json
 
     # Reproduce the old extraction for A/B comparison:
     python scripts/verify_judge_alignment.py --mode online \\
@@ -29,6 +30,7 @@ Interpretation (Landis & Koch 1977; see docs/adrs/002-judge-methodology.md):
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import textwrap
 from pathlib import Path
@@ -36,6 +38,9 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "packages" / "verdict" / "src"))
 sys.path.insert(0, str(HERE.parent / "packages" / "verdict_eval" / "src"))
+
+MT_BENCH_DATASET = "lmsys/mt_bench_human_judgments"
+MT_BENCH_DATASET_REVISION = "f7d2896d2cc5d80f8b55c2bbc722613555233c25"
 
 
 def cohens_kappa(y_a: list[int], y_b: list[int], n_categories: int = 3) -> float:
@@ -321,7 +326,83 @@ def _build_legacy_pair(ex: dict) -> tuple[str, str, str]:
     )
 
 
-def run_offline() -> int:
+def _write_json_report(path: str | None, report: dict) -> None:
+    """Atomically persist the stable machine-readable alignment report."""
+    if path is None:
+        return
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(f".{destination.name}.tmp")
+    temporary.write_text(
+        json.dumps(report, allow_nan=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    temporary.replace(destination)
+
+
+def _report_payload(
+    args: argparse.Namespace,
+    *,
+    mode: str,
+    pairs_available: int,
+    pairs_scored: int,
+    inconsistent_count: int,
+    agree3: float,
+    kappa3: float,
+    ac2_3: float,
+    ac2_3_ci: tuple[float, float],
+    bin_pairs: list[tuple[int, int]],
+    agree_bin: float,
+    kappa_bin: float,
+    kappa_bin_ci: tuple[float, float],
+    ac2_bin: float,
+    ac2_bin_ci: tuple[float, float],
+    human_nontie_count: int,
+    agree_human_nontie: float,
+) -> dict:
+    return {
+        "schemaVersion": 1,
+        "mode": mode,
+        "dataset": (
+            {
+                "name": MT_BENCH_DATASET,
+                "revision": MT_BENCH_DATASET_REVISION,
+            }
+            if mode == "online"
+            else {"name": "synthetic", "revision": None}
+        ),
+        "judge": {
+            "provider": args.provider,
+            "model": args.judge_model,
+        },
+        "contextMode": args.context_mode,
+        "pairs": {
+            "available": pairs_available,
+            "scored": pairs_scored,
+        },
+        "metrics": {
+            "threeWay": {
+                "rawAgreement": agree3,
+                "cohensKappa": kappa3,
+                "gwetsAc2": ac2_3,
+                "gwetsAc2Ci95": list(ac2_3_ci),
+            },
+            "binarized": {
+                "pairsKept": len(bin_pairs),
+                "rawAgreement": agree_bin,
+                "cohensKappa": kappa_bin,
+                "cohensKappaCi95": list(kappa_bin_ci),
+                "gwetsAc2": ac2_bin,
+                "gwetsAc2Ci95": list(ac2_bin_ci),
+            },
+            "nonTiePairsKept": human_nontie_count,
+            "nonTieAgreement": agree_human_nontie,
+            "inconsistentCount": inconsistent_count,
+        },
+    }
+
+
+def run_offline(args: argparse.Namespace) -> int:
     """Run with synthetic data to verify the harness end-to-end.
 
     The human labels are a realistic MIX of A/B/tie (not a degenerate all-one-
@@ -345,6 +426,20 @@ def run_offline() -> int:
     agreement = sum(1 for h, j in zip(human, judge, strict=True) if h == j) / len(human)
     kappa = cohens_kappa(human, judge, n_categories=3)
     ac2 = gwets_ac2(human, judge, n_categories=3)
+    pairs3 = list(zip(human, judge, strict=True))
+    ac2_ci = bootstrap_ci(pairs3, gwets_ac2, 3)
+    bin_pairs = [(h, jl) for h, jl in pairs3 if h != 2 and jl != 2]
+    bin_h = [pair[0] for pair in bin_pairs]
+    bin_j = [pair[1] for pair in bin_pairs]
+    agree_bin = sum(1 for h, jl in bin_pairs if h == jl) / len(bin_pairs)
+    kappa_bin = cohens_kappa(bin_h, bin_j, n_categories=2)
+    ac2_bin = gwets_ac2(bin_h, bin_j, n_categories=2)
+    kappa_bin_ci = bootstrap_ci(bin_pairs, cohens_kappa, 2)
+    ac2_bin_ci = bootstrap_ci(bin_pairs, gwets_ac2, 2)
+    human_nontie = [(h, jl) for h, jl in pairs3 if h != 2]
+    agree_human_nontie = (
+        sum(1 for h, jl in human_nontie if h == jl) / len(human_nontie)
+    )
     print(f"  n={len(human)}  agreement={agreement:.3f}  Cohen's κ={kappa:.3f}  Gwet's AC2={ac2:.3f}")
     if not (0.4 <= kappa <= 0.9 and 0.4 <= ac2 <= 0.95):
         print("  WARNING: offline κ/AC2 outside expected band — harness may be miswired.")
@@ -352,6 +447,28 @@ def run_offline() -> int:
     print("  Harness wiring OK (κ and AC2 both in the expected band for ~80% agreement).")
     print("  NOTE: this is a WIRING check only. The real judge-vs-human number")
     print("  comes from `--mode online` against lmsys/mt_bench_human_judgments.")
+    _write_json_report(
+        args.json_output,
+        _report_payload(
+            args,
+            mode="offline",
+            pairs_available=len(pairs3),
+            pairs_scored=len(pairs3),
+            inconsistent_count=0,
+            agree3=agreement,
+            kappa3=kappa,
+            ac2_3=ac2,
+            ac2_3_ci=ac2_ci,
+            bin_pairs=bin_pairs,
+            agree_bin=agree_bin,
+            kappa_bin=kappa_bin,
+            kappa_bin_ci=kappa_bin_ci,
+            ac2_bin=ac2_bin,
+            ac2_bin_ci=ac2_bin_ci,
+            human_nontie_count=len(human_nontie),
+            agree_human_nontie=agree_human_nontie,
+        ),
+    )
     return 0
 
 
@@ -373,8 +490,12 @@ def run_online(args: argparse.Namespace) -> int:
         OpenAIAdapter,
     )
 
-    print("Loading lmsys/mt_bench_human_judgments...")
-    ds = load_dataset("lmsys/mt_bench_human_judgments", split="human")
+    print(f"Loading {MT_BENCH_DATASET} @ {MT_BENCH_DATASET_REVISION}...")
+    ds = load_dataset(
+        MT_BENCH_DATASET,
+        split="human",
+        revision=MT_BENCH_DATASET_REVISION,
+    )
     ds = ds.shuffle(seed=42).select(range(min(args.n, len(ds))))
 
     # Build the judge (or judge ensemble)
@@ -654,6 +775,28 @@ def run_online(args: argparse.Namespace) -> int:
         print("  WIDE — do not read a single category's point estimate as a verdict.")
         print("  Categories with < 5 binarized pairs are skipped, not zero-scored.")
     print("──────────────────────────────────────────────────")
+    _write_json_report(
+        args.json_output,
+        _report_payload(
+            args,
+            mode="online",
+            pairs_available=n_total,
+            pairs_scored=n_used,
+            inconsistent_count=n_inconsistent,
+            agree3=agree3,
+            kappa3=kappa3,
+            ac2_3=ac2_3,
+            ac2_3_ci=ac2_3_ci,
+            bin_pairs=bin_pairs,
+            agree_bin=agree_bin,
+            kappa_bin=kappa_bin,
+            kappa_bin_ci=kappa_bin_ci,
+            ac2_bin=ac2_bin,
+            ac2_bin_ci=ac2_bin_ci,
+            human_nontie_count=len(human_nontie),
+            agree_human_nontie=agree_human_nontie,
+        ),
+    )
     return 0
 
 
@@ -669,9 +812,13 @@ def main() -> int:
                          "final-answer extraction for comparison."))
     p.add_argument("--ensemble", action="store_true",
                    help="Use a 3-judge cross-family ensemble (more accurate, ~3x cost).")
+    p.add_argument(
+        "--json-output",
+        help="Write a stable machine-readable result to this path on success.",
+    )
     args = p.parse_args()
     if args.mode == "offline":
-        return run_offline()
+        return run_offline(args)
     return run_online(args)
 
 

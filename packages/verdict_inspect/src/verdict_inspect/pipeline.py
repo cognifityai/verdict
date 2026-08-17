@@ -164,17 +164,11 @@ def _semantic_drift(windows: list[Window], embedder: object) -> list[SemanticDri
     """Run SemanticDriftDetector pairwise: each later window vs the early baseline."""
     if len(windows) < 2:
         return []
-    import numpy as np
-    from verdict_eval.semantic_drift import (
-        SemanticDriftDetector,
-        _cosine_distance,
-        _psi_1d,
-    )
+    from verdict_eval.semantic_drift import SemanticDriftDetector
 
     detector = SemanticDriftDetector(
         embedder=embedder,
         centroid_distance_threshold=0.10,
-        wasserstein_threshold=0.05,
         min_sample_size=MIN_TURNS_PER_WINDOW,
     )
 
@@ -183,45 +177,25 @@ def _semantic_drift(windows: list[Window], embedder: object) -> list[SemanticDri
     rows: list[SemanticDriftRow] = []
     for w in windows[1:]:
         cur_texts = [t.assistant_text for t in w.turns]
-        signal = detector.detect(
+        analysis = detector.analyze(
             cluster_id=f"{baseline.name}->{w.name}",
             current_responses=cur_texts,
             baseline_responses=baseline_texts,
         )
-        if signal is not None:
-            rows.append(SemanticDriftRow(
-                comparison=f"{baseline.name}->{w.name}",
-                triggered=True,
-                centroid_distance=signal.centroid_distance,
-                p_value=signal.p_value,
-                mean_wasserstein=signal.mean_wasserstein,
-                max_wasserstein=signal.max_wasserstein,
-                cluster_psi=signal.cluster_psi,
-                n_current=signal.sample_size_current,
-                n_baseline=signal.sample_size_baseline,
-                recommended_action=signal.recommended_action,
-            ))
-        else:
-            # Compute the underlying numbers anyway for transparency
-            cur_emb = embedder.embed(cur_texts) if cur_texts else None
-            base_emb = embedder.embed(baseline_texts) if baseline_texts else None
-            if cur_emb is None or base_emb is None or cur_emb.size == 0 or base_emb.size == 0:
-                continue
-            cd = _cosine_distance(cur_emb.mean(axis=0), base_emb.mean(axis=0))
-            var_per_dim = base_emb.var(axis=0)
-            dominant = int(np.argmax(var_per_dim))
-            psi = _psi_1d(cur_emb[:, dominant], base_emb[:, dominant])
-            rows.append(SemanticDriftRow(
-                comparison=f"{baseline.name}->{w.name}",
-                triggered=False,
-                centroid_distance=float(cd),
-                p_value=float("nan"),   # not significant / not gated; full test not retained
-                mean_wasserstein=0.0,
-                max_wasserstein=0.0,
-                cluster_psi=float(psi),
-                n_current=len(cur_texts),
-                n_baseline=len(baseline_texts),
-            ))
+        if analysis is None:
+            continue
+        rows.append(SemanticDriftRow(
+            comparison=f"{baseline.name}->{w.name}",
+            triggered=analysis.triggered,
+            centroid_distance=analysis.centroid_distance,
+            p_value=analysis.p_value,
+            mean_wasserstein=analysis.mean_wasserstein,
+            max_wasserstein=analysis.max_wasserstein,
+            cluster_psi=analysis.cluster_psi,
+            n_current=analysis.sample_size_current,
+            n_baseline=analysis.sample_size_baseline,
+            recommended_action=analysis.recommended_action,
+        ))
     return rows
 
 

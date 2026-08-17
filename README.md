@@ -135,7 +135,12 @@ What this repo includes:
   windows, the n>=30 cell floor, planted regressions, clean controls, and
   `UNCLEAR`-rate drift across 12 separate runs (`scripts/validate_multirun.py`).
 - A pairwise judge-alignment harness for comparing model-ranking judgments
-  against human-labeled public data (`scripts/verify_judge_alignment.py`).
+  against human-labeled public data (`scripts/verify_judge_alignment.py`). Pass
+  `--json-output <path>` for its versioned machine-readable result. The
+  four-judge `scripts/run_alignment_sweep.sh` writes one JSON and text report
+  per judge, builds `SUMMARY.md` from JSON rather than formatted prose, and
+  exits non-zero if any run fails or produces an invalid result. Online runs
+  pin the public MT-Bench dataset revision and record it in each JSON report.
 - A rubric-alignment harness for measuring PASS/FAIL judge consistency against
   your own labeled traces (`scripts/verify_rubric_alignment.py`).
 

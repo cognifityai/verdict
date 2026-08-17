@@ -25,8 +25,10 @@ from __future__ import annotations
 import sys
 import types
 
+import numpy as np
 import pytest
 from verdict_inspect import pipeline
+from verdict_inspect.parsers.base import ParsedTurn
 
 
 def _install_fake_clustering(monkeypatch, *, strans_raises: Exception | None,
@@ -111,3 +113,58 @@ def test_real_hashing_embedder_takes_no_args() -> None:
     assert emb.dim == 128
     vecs = emb.embed(["hello", "world"])
     assert vecs.shape == (2, 128)
+
+
+def test_semantic_report_uses_detector_statistics_without_reembedding() -> None:
+    base = np.array(
+        [[100.0, 0.0], [1.0, 1.0]] * 4,
+        dtype=np.float64,
+    )
+    current = np.array(
+        [[1.0, 0.0], [100.0, 100.0]] * 4,
+        dtype=np.float64,
+    )
+
+    class RecordingEmbedder:
+        def __init__(self) -> None:
+            # The old pipeline embeds current/baseline in the detector, then
+            # repeats both calls when the row does not trigger.
+            self.arrays = [current, base, current, base]
+            self.calls = 0
+
+        def embed(self, _texts):
+            value = self.arrays[self.calls]
+            self.calls += 1
+            return value
+
+    def turns(prefix: str) -> list[ParsedTurn]:
+        return [
+            ParsedTurn(
+                conversation_id=prefix,
+                turn_index=index,
+                timestamp=None,
+                user_text="question",
+                assistant_text=f"{prefix} answer {index}",
+            )
+            for index in range(8)
+        ]
+
+    embedder = RecordingEmbedder()
+    rows = pipeline._semantic_drift(
+        [
+            pipeline.Window(name="early", turns=turns("early")),
+            pipeline.Window(name="late", turns=turns("late")),
+        ],
+        embedder,
+    )
+
+    from verdict_eval.semantic_drift import _cosine_distance, _l2_normalize_rows
+
+    expected = _cosine_distance(
+        _l2_normalize_rows(current).mean(axis=0),
+        _l2_normalize_rows(base).mean(axis=0),
+    )
+    assert len(rows) == 1
+    assert rows[0].triggered is False
+    assert rows[0].centroid_distance == pytest.approx(expected)
+    assert embedder.calls == 2

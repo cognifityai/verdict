@@ -13,6 +13,7 @@ from __future__ import annotations
 import numpy as np
 from verdict_eval.semantic_drift import (
     SemanticDriftDetector,
+    SemanticDriftSignal,
     _cosine_distance,
     _l2_normalize_rows,
     _permutation_p_value,
@@ -147,3 +148,12 @@ def test_normalization_preserves_same_distribution_contract() -> None:
                      current_responses=["a"] * 40,
                      baseline_responses=["b"] * 40)
     assert sig is None
+
+
+def test_signal_positional_constructor_keeps_published_field_order() -> None:
+    signal = SemanticDriftSignal("cluster", "shift", 0.25)
+
+    assert signal.cluster_id == "cluster"
+    assert signal.direction == "shift"
+    assert signal.centroid_distance == 0.25
+    assert signal.triggered is True

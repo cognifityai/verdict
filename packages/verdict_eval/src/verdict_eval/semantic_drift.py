@@ -16,13 +16,13 @@ Two complementary signals from the same observation:
 
 Methodology:
 
-1. Embed every response (or sample) via the configured embedder
-2. Maintain a baseline distribution of embeddings (stored centroid + per-dim variance)
-3. For each new window, compute:
-   - Mean cosine distance from current centroid to baseline centroid
-   - Wasserstein-1 distance on a low-dim projection (or per-axis)
-   - PSI on cluster-membership distribution
-4. Emit a SemanticDriftSignal when any signal crosses threshold
+1. Embed current and baseline responses via the configured embedder.
+2. L2-normalize each embedding row.
+3. Compute centroid cosine distance, a two-sample permutation p-value, and
+   diagnostic per-axis Wasserstein and quantile-binned PSI values.
+4. Mark the comparison triggered only when both the significance and centroid
+   effect-size gates pass. ``analyze()`` retains all computed comparisons;
+   ``detect()`` preserves the signal-only public contract.
 
 References:
 - "Drift detection in NLP using semantic embeddings" — Feldhans et al. 2021
@@ -40,8 +40,13 @@ from scipy.stats import wasserstein_distance
 
 @dataclass
 class SemanticDriftSignal:
-    """Output of the semantic drift detector. Complements DriftSignal from
-    the judge-based detector — same conceptual shape, different evidence."""
+    """Statistics from one semantic-drift comparison.
+
+    ``detect()`` returns this object only for a triggered comparison, preserving
+    the original public contract. ``analyze()`` returns it for every comparison
+    with enough data so reporting callers can show the exact same statistics
+    without embedding or calculating them a second time.
+    """
 
     cluster_id: str = ""
     direction: str = "change"     # "change", "shift" — semantic drift doesn't have an inherent good/bad direction
@@ -55,6 +60,8 @@ class SemanticDriftSignal:
     sample_size_baseline: int = 0
     contributing_layer: str = "semantic_embedding"
     recommended_action: str = ""
+    # Appended to preserve the positional order of the published signal fields.
+    triggered: bool = True
 
 
 @dataclass
@@ -130,6 +137,26 @@ class SemanticDriftDetector:
         distribution differs from baseline by more than natural variation
         (permutation p < significance_level) AND by a meaningful amount
         (centroid distance >= effect-size floor). Otherwise None."""
+        analysis = self.analyze(
+            cluster_id=cluster_id,
+            current_responses=current_responses,
+            baseline_responses=baseline_responses,
+        )
+        return analysis if analysis is not None and analysis.triggered else None
+
+    def analyze(
+        self,
+        *,
+        cluster_id: str,
+        current_responses: list[str],
+        baseline_responses: list[str],
+    ) -> SemanticDriftSignal | None:
+        """Return normalized statistics for every comparison with enough data.
+
+        Unlike :meth:`detect`, this method retains non-triggered comparisons and
+        marks them with ``triggered=False``. Embedding, normalization, effect
+        size, significance, and diagnostics are computed exactly once here.
+        """
         if len(current_responses) < self.min_sample_size:
             return None
         if len(baseline_responses) < self.min_sample_size:
@@ -187,11 +214,9 @@ class SemanticDriftDetector:
             p_value < self.significance_level
             and cosine_dist >= self.centroid_distance_threshold
         )
-        if not triggered:
-            return None
-
         return SemanticDriftSignal(
             cluster_id=cluster_id,
+            triggered=triggered,
             direction="shift",
             centroid_distance=cosine_dist,
             p_value=p_value,
@@ -201,7 +226,9 @@ class SemanticDriftDetector:
             cluster_psi=cluster_psi,
             sample_size_current=len(current_responses),
             sample_size_baseline=len(baseline_responses),
-            recommended_action=_recommend(cosine_dist, p_value),
+            recommended_action=(
+                _recommend(cosine_dist, p_value) if triggered else ""
+            ),
         )
 
 
