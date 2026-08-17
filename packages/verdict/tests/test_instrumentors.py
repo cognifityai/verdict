@@ -336,6 +336,39 @@ def test_anthropic_unknown_opus_response_is_persisted_without_a_cost_estimate():
     assert trace.cost_usd is None
 
 
+def test_anthropic_known_opus_41_response_persists_verified_cost():
+    from verdict.client import VerdictClient
+    from verdict.instrumentors.anthropic import AnthropicInstrumentor
+    from verdict.storage.memory import InMemoryStorage
+
+    storage = InMemoryStorage()
+    instrumentor = AnthropicInstrumentor(VerdictClient(storage=storage))
+    response = SimpleNamespace(
+        model="claude-opus-4-1-20250805",
+        usage=SimpleNamespace(input_tokens=1000, output_tokens=1000),
+        stop_reason="end_turn",
+        content=[],
+    )
+
+    returned = instrumentor._wrap_create_sync(
+        lambda *args, **kwargs: response,
+        None,
+        (),
+        {
+            "model": "claude-opus-4-1-20250805",
+            "max_tokens": 1000,
+            "messages": [{"role": "user", "content": "hello"}],
+        },
+    )
+
+    [trace] = storage.list_traces()
+    assert returned is response
+    assert trace.request_model == "claude-opus-4-1-20250805"
+    assert trace.input_tokens == 1000
+    assert trace.output_tokens == 1000
+    assert trace.cost_usd == pytest.approx(0.09)
+
+
 # ---------------------------------------------------------------------------
 # Integration-ish: control flow against a fake wrapped call + InMemoryStorage,
 # without importing any provider SDK. Drives a tiny fake instrumentor that uses

@@ -96,6 +96,32 @@ def test_known_anthropic_opus_version_remains_priced():
     assert compute_cost_usd("claude-3-opus-20240229", 1000, 1000) == in_rate + out_rate
 
 
+def test_opus_4_and_41_known_release_ids_keep_their_verified_rate():
+    known_ids = (
+        "claude-opus-4-1-20250805",
+        "anthropic/claude-opus-4-1",
+        "us.anthropic.claude-opus-4-1-20250805-v1:0",
+        "claude-opus-4-1@20250805",
+        "claude-opus-4-20250514",
+        "anthropic/claude-opus-4",
+        "claude-opus-4@20250514",
+    )
+
+    for model in known_ids:
+        assert math.isclose(
+            compute_cost_usd(model, 1000, 1000) or 0.0,
+            0.09,
+            rel_tol=1e-9,
+        ), model
+
+    assert math.isclose(
+        compute_cost_usd("claude-opus-4-5-20251101", 1000, 1000) or 0.0,
+        0.03,
+        rel_tol=1e-9,
+    )
+    assert compute_cost_usd("claude-opus-4-9-20260901", 1000, 1000) is None
+
+
 def test_anthropic_family_catchalls_cannot_price_unknown_versions():
     forbidden_family_catchalls = {"claude-opus", "claude-sonnet", "claude-haiku"}
 

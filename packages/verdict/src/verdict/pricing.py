@@ -6,9 +6,9 @@ public list prices (USD per 1,000 tokens, input/output) — provider prices chan
 over time, so this table MUST be reviewed and updated periodically. It is a best-
 effort estimate, not a billing source of truth.
 
-Matching is by substring of the model name (longest matching key wins), so a
-versioned/suffixed model id like "claude-3-5-sonnet-20241022" still resolves to
-the "claude-3-5-sonnet" entry.
+Known exact aliases resolve to an immutable release entry first. Other matching
+is by substring of the model name (longest matching key wins), so a provider-
+prefixed/suffixed model ID still resolves to its dated or versioned entry.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ log = logging.getLogger("verdict.pricing")
 
 # This is deliberately visible to callers and tests. Static pricing without an
 # audit date looks authoritative long after it has become stale.
-PRICING_LAST_VERIFIED = date(2026, 8, 11)
+PRICING_LAST_VERIFIED = date(2026, 8, 17)
 PRICING_REVIEW_AFTER = date(2026, 8, 31)
 PRICING_SOURCE_URLS = (
     "https://platform.claude.com/docs/en/about-claude/pricing",
@@ -47,6 +47,8 @@ PRICE_PER_1K: dict[str, tuple[float, float]] = {
     "claude-opus-4-7": (0.005, 0.025),
     "claude-opus-4-6": (0.005, 0.025),
     "claude-opus-4-5": (0.005, 0.025),
+    "claude-opus-4-1-20250805": (0.015, 0.075),
+    "claude-opus-4-20250514": (0.015, 0.075),
     "claude-sonnet-4-6": (0.003, 0.015),
     "claude-haiku-4-5": (0.001, 0.005),
     "claude-sonnet-4-5": (0.003, 0.015),
@@ -78,6 +80,14 @@ PRICE_PER_1K: dict[str, tuple[float, float]] = {
     "gemini-2.5-pro": (0.00125, 0.01),
     "gemini-1.5-flash": (0.000075, 0.0003),
     "gemini-1.5-pro": (0.00125, 0.005),
+}
+
+# These retired/deprecated Claude API aliases previously resolved to the dated
+# releases above. Keep alias recognition exact so a future "claude-opus-4-x"
+# identifier cannot inherit a stale rate.
+EXACT_MODEL_ALIASES: dict[str, str] = {
+    "claude-opus-4-1": "claude-opus-4-1-20250805",
+    "claude-opus-4": "claude-opus-4-20250514",
 }
 
 
@@ -112,11 +122,18 @@ def compute_cost_usd(
             output_tokens is not None and output_tokens < 0
         ):
             return None
-        # Longest substring match wins.
-        best_key: str | None = None
-        for key in PRICE_PER_1K:
-            if key in normalized_model and (best_key is None or len(key) > len(best_key)):
-                best_key = key
+        # Google Cloud uses @ before the snapshot date; the API and Bedrock use
+        # a hyphen. Normalize only that separator, then match immutable releases.
+        lookup_model = normalized_model.replace("@", "-")
+        model_leaf = normalized_model.rsplit("/", 1)[-1]
+        best_key = EXACT_MODEL_ALIASES.get(model_leaf)
+        if best_key is None:
+            # Longest substring match wins for dated/versioned entries.
+            for key in PRICE_PER_1K:
+                if key in lookup_model and (
+                    best_key is None or len(key) > len(best_key)
+                ):
+                    best_key = key
         if best_key is None:
             if (
                 normalized_model not in _warned_unknown_models
