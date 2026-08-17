@@ -41,6 +41,9 @@ sys.path.insert(0, str(HERE.parent / "packages" / "verdict_eval" / "src"))
 
 MT_BENCH_DATASET = "lmsys/mt_bench_human_judgments"
 MT_BENCH_DATASET_REVISION = "f7d2896d2cc5d80f8b55c2bbc722613555233c25"
+# This floor only rejects degenerate reports; it is not a claim that 50 pairs
+# guarantee a narrow interval. The CI gate below still decides usability.
+MIN_ALIGNMENT_PAIRS = 50
 
 
 def cohens_kappa(y_a: list[int], y_b: list[int], n_categories: int = 3) -> float:
@@ -131,6 +134,54 @@ def bootstrap_ci(pairs: list[tuple[int, int]], metric_fn, n_categories: int,
     lo = vals[max(0, int(0.025 * len(vals)))]
     hi = vals[min(len(vals) - 1, int(0.975 * len(vals)))]
     return (lo, hi)
+
+
+def _ci_payload(ci: tuple[float, float] | None) -> list[float] | None:
+    return list(ci) if ci is not None else None
+
+
+def _format_ci(ci: tuple[float, float] | None) -> str:
+    if ci is None:
+        return "not computed"
+    return f"{ci[0]:.3f}, {ci[1]:.3f}"
+
+
+def _alignment_verdict(
+    ac2_ci: tuple[float, float] | None,
+) -> tuple[str, str, bool]:
+    """Return the serialized status, explanation, and evidence-gate outcome."""
+    if ac2_ci is None:
+        return (
+            "unreliable",
+            "UNRELIABLE — no binarized confidence interval could be computed; "
+            "do not rely on rankings.",
+            False,
+        )
+    lo, hi = ac2_ci
+    if lo >= 0.60:
+        return (
+            "acceptable",
+            "ACCEPTABLE — CI lower bound ≥ 0.60; use rankings with CIs.",
+            True,
+        )
+    if lo >= 0.40:
+        return (
+            "preliminary",
+            "PRELIMINARY — CI lower bound ≥ 0.40 but < 0.60; gather more data.",
+            True,
+        )
+    if hi < 0.40:
+        return (
+            "unreliable",
+            "UNRELIABLE — even the CI UPPER bound is < 0.40; do not rely on rankings.",
+            False,
+        )
+    return (
+        "inconclusive",
+        "INCONCLUSIVE — CI straddles 0.40; sample too small to tell. "
+        "Increase --n before concluding.",
+        False,
+    )
 
 
 def _binarized_ac2(pairs3: list[tuple[int, int]]) -> tuple[float, tuple[float, float], int]:
@@ -350,15 +401,17 @@ def _report_payload(
     agree3: float,
     kappa3: float,
     ac2_3: float,
-    ac2_3_ci: tuple[float, float],
+    ac2_3_ci: tuple[float, float] | None,
     bin_pairs: list[tuple[int, int]],
     agree_bin: float,
     kappa_bin: float,
-    kappa_bin_ci: tuple[float, float],
+    kappa_bin_ci: tuple[float, float] | None,
     ac2_bin: float,
-    ac2_bin_ci: tuple[float, float],
+    ac2_bin_ci: tuple[float, float] | None,
     human_nontie_count: int,
     agree_human_nontie: float,
+    verdict_status: str,
+    verdict_message: str,
 ) -> dict:
     return {
         "schemaVersion": 1,
@@ -380,20 +433,24 @@ def _report_payload(
             "available": pairs_available,
             "scored": pairs_scored,
         },
+        "verdict": {
+            "status": verdict_status,
+            "message": verdict_message,
+        },
         "metrics": {
             "threeWay": {
                 "rawAgreement": agree3,
                 "cohensKappa": kappa3,
                 "gwetsAc2": ac2_3,
-                "gwetsAc2Ci95": list(ac2_3_ci),
+                "gwetsAc2Ci95": _ci_payload(ac2_3_ci),
             },
             "binarized": {
                 "pairsKept": len(bin_pairs),
                 "rawAgreement": agree_bin,
                 "cohensKappa": kappa_bin,
-                "cohensKappaCi95": list(kappa_bin_ci),
+                "cohensKappaCi95": _ci_payload(kappa_bin_ci),
                 "gwetsAc2": ac2_bin,
-                "gwetsAc2Ci95": list(ac2_bin_ci),
+                "gwetsAc2Ci95": _ci_payload(ac2_bin_ci),
             },
             "nonTiePairsKept": human_nontie_count,
             "nonTieAgreement": agree_human_nontie,
@@ -467,6 +524,10 @@ def run_offline(args: argparse.Namespace) -> int:
             ac2_bin_ci=ac2_bin_ci,
             human_nontie_count=len(human_nontie),
             agree_human_nontie=agree_human_nontie,
+            verdict_status="synthetic",
+            verdict_message=(
+                "SYNTHETIC WIRING ONLY — no provider judge or public dataset was used."
+            ),
         ),
     )
     return 0
@@ -592,6 +653,13 @@ def run_online(args: argparse.Namespace) -> int:
             agree_so_far = sum(1 for h, jl in zip(human_labels, judge_labels, strict=True) if h == jl) / len(human_labels)
             print(f"  {n_used}/{len(ds)} pairs scored  agree={agree_so_far:.3f}")
 
+    if n_used != len(ds):
+        print(
+            f"Incomplete run: scored {n_used} of {len(ds)} selected pairs. "
+            "Judge errors or unusable rows make this evidence invalid."
+        )
+        return 1
+
     if not human_labels:
         print("No usable comparisons.")
         return 1
@@ -617,8 +685,8 @@ def run_online(args: argparse.Namespace) -> int:
         kappa_bin = 0.0
         ac2_bin = 0.0
         agree_bin = 0.0
-        ac2_bin_ci = (0.0, 0.0)
-        kappa_bin_ci = (0.0, 0.0)
+        ac2_bin_ci = None
+        kappa_bin_ci = None
 
     # Non-tie agreement rate (drop only HUMAN ties; treat judge ties as wrong):
     # this is what some practitioners report — "of the cases where humans had
@@ -670,16 +738,7 @@ def run_online(args: argparse.Namespace) -> int:
 
     # Honest verdict: a threshold is "cleared" only if the CI LOWER bound clears
     # it — not the point estimate. With small n the interval is wide on purpose.
-    lo, hi = ac2_bin_ci
-    if lo >= 0.60:
-        verdict = "ACCEPTABLE — CI lower bound ≥ 0.60; use rankings with CIs."
-    elif lo >= 0.40:
-        verdict = "PRELIMINARY — CI lower bound ≥ 0.40 but < 0.60; gather more data."
-    elif hi < 0.40:
-        verdict = "UNRELIABLE — even the CI UPPER bound is < 0.40; do not rely on rankings."
-    else:
-        verdict = ("INCONCLUSIVE — CI straddles 0.40; sample too small to tell. "
-                   "Increase --n before concluding.")
+    verdict_status, verdict, verdict_passed = _alignment_verdict(ac2_bin_ci)
 
     print(textwrap.dedent(f"""
         ─ Results ───────────────────────────────────────
@@ -698,8 +757,8 @@ def run_online(args: argparse.Namespace) -> int:
         Binarized (Arena-Hard style — ties dropped from BOTH sides):
           Pairs kept:           {len(bin_pairs)}
           Raw agreement:        {agree_bin:.3f}
-          Cohen's κ:            {kappa_bin:.3f}   [95% CI {kappa_bin_ci[0]:.3f}, {kappa_bin_ci[1]:.3f}]
-          Gwet's AC2:           {ac2_bin:.3f}   [95% CI {ac2_bin_ci[0]:.3f}, {ac2_bin_ci[1]:.3f}]   ← headline
+          Cohen's κ:            {kappa_bin:.3f}   [95% CI {_format_ci(kappa_bin_ci)}]
+          Gwet's AC2:           {ac2_bin:.3f}   [95% CI {_format_ci(ac2_bin_ci)}]   ← headline
 
         Non-tie agreement (humans had clear winner, judge agreed):
           Pairs kept:           {len(human_nontie)}
@@ -750,7 +809,7 @@ def run_online(args: argparse.Namespace) -> int:
              F1:                  {tie_stats['f1']:.3f}
 
         3) Binarized AC2 (ties dropped from both sides): {ac2_bin:.3f}
-             [95% CI {ac2_bin_ci[0]:.3f}, {ac2_bin_ci[1]:.3f}]  — see Results block above.
+             [95% CI {_format_ci(ac2_bin_ci)}]  — see Results block above.
         ──────────────────────────────────────────────────
     """).strip())
 
@@ -795,9 +854,11 @@ def run_online(args: argparse.Namespace) -> int:
             ac2_bin_ci=ac2_bin_ci,
             human_nontie_count=len(human_nontie),
             agree_human_nontie=agree_human_nontie,
+            verdict_status=verdict_status,
+            verdict_message=verdict,
         ),
     )
-    return 0
+    return 0 if verdict_passed else 1
 
 
 def main() -> int:
@@ -817,6 +878,11 @@ def main() -> int:
         help="Write a stable machine-readable result to this path on success.",
     )
     args = p.parse_args()
+    if args.mode == "online" and args.n < MIN_ALIGNMENT_PAIRS:
+        p.error(
+            f"--n must be at least {MIN_ALIGNMENT_PAIRS} in online mode; "
+            "smaller samples produce degenerate or unusably wide intervals"
+        )
     if args.mode == "offline":
         return run_offline(args)
     return run_online(args)

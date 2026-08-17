@@ -139,8 +139,13 @@ What this repo includes:
   `--json-output <path>` for its versioned machine-readable result. The
   four-judge `scripts/run_alignment_sweep.sh` writes one JSON and text report
   per judge, builds `SUMMARY.md` from JSON rather than formatted prose, and
-  exits non-zero if any run fails or produces an invalid result. Online runs
-  pin the public MT-Bench dataset revision and record it in each JSON report.
+  exits non-zero if any run fails, is incomplete, produces an invalid result,
+  or does not clear the binarized-AC2 confidence-interval gate. Online runs
+  require at least 50 requested pairs, pin the public MT-Bench dataset revision,
+  and record the scored/available counts, verdict, Gwet's AC2, Cohen's κ, and
+  their 95% confidence intervals. Offline rows are labeled `SYNTHETIC WIRING
+  ONLY` inside the headline table and always use a fixed 120-pair synthetic
+  fixture; they are not judge-quality evidence.
 - A rubric-alignment harness for measuring PASS/FAIL judge consistency against
   your own labeled traces (`scripts/verify_rubric_alignment.py`).
 
