@@ -53,7 +53,6 @@ PRICE_PER_1K: dict[str, tuple[float, float]] = {
     "claude-3-5-haiku": (0.0008, 0.004),
     "claude-3-5-sonnet": (0.003, 0.015),
     "claude-3-opus": (0.015, 0.075),
-    "claude-opus": (0.015, 0.075),
     "claude-3-haiku": (0.00025, 0.00125),
     "claude-3-sonnet": (0.003, 0.015),
     # OpenAI (USD per 1K tokens)

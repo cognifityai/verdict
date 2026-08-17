@@ -9,6 +9,7 @@ flow rule directly.
 from __future__ import annotations
 
 import random
+from types import SimpleNamespace
 
 import pytest
 from verdict.instrumentors.base import decide_persist, normalize_finish_reason
@@ -300,6 +301,39 @@ def test_anthropic_sync_exception_persists_error_trace():
     assert len(traces) == 1
     assert traces[0].request_model == "claude-test"
     assert traces[0].error == "RuntimeError: boom"
+
+
+def test_anthropic_unknown_opus_response_is_persisted_without_a_cost_estimate():
+    from verdict.client import VerdictClient
+    from verdict.instrumentors.anthropic import AnthropicInstrumentor
+    from verdict.storage.memory import InMemoryStorage
+
+    storage = InMemoryStorage()
+    instrumentor = AnthropicInstrumentor(VerdictClient(storage=storage))
+    response = SimpleNamespace(
+        model="claude-opus-4-9-20260901",
+        usage=SimpleNamespace(input_tokens=1000, output_tokens=1000),
+        stop_reason="end_turn",
+        content=[],
+    )
+
+    returned = instrumentor._wrap_create_sync(
+        lambda *args, **kwargs: response,
+        None,
+        (),
+        {
+            "model": "claude-opus-4-9-20260901",
+            "max_tokens": 1000,
+            "messages": [{"role": "user", "content": "hello"}],
+        },
+    )
+
+    [trace] = storage.list_traces()
+    assert returned is response
+    assert trace.request_model == "claude-opus-4-9-20260901"
+    assert trace.input_tokens == 1000
+    assert trace.output_tokens == 1000
+    assert trace.cost_usd is None
 
 
 # ---------------------------------------------------------------------------

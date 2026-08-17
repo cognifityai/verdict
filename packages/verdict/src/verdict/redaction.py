@@ -28,6 +28,13 @@ _MAX_NESTING_DEPTH = 64
 _MAX_STRUCTURE_NODES = 10_000
 _MAX_STRUCTURE_CHARACTERS = 1_000_000
 
+# Longest textual IPv6 address:
+# ``ffff:ffff:ffff:ffff:ffff:ffff:255.255.255.255``. Bounding each candidate
+# side to this length keeps discovery linear even when an unrelated colon
+# appears elsewhere in attacker-controlled text. Validation below remains the
+# authority on whether the bounded candidate is actually an address.
+_IPV6_MAX_TEXT_LEN = 45
+
 # Provider message fields whose shape Verdict currently preserves in
 # Trace.raw_messages. Values inside these fields are recursively sanitized.
 # Unknown top-level fields are dropped rather than copied across the persistence
@@ -71,10 +78,13 @@ _PATTERNS = {
     # values and namespace separators. Match a whole token (including an IPv4
     # tail or scope ID) and validate it with ipaddress.IPv6Address below. The
     # word boundaries prevent a valid suffix such as ``d::`` from being carved
-    # out of ``std::vector``.
+    # out of ``std::vector``. Both halves are bounded because the earlier
+    # unbounded stars rescanned a long candidate-shaped run from every start
+    # position whenever any unrelated colon existed later in the text.
     "IPV6": re.compile(
         r"(?<![0-9A-Za-z_])"
-        r"[0-9A-Fa-f:.]*:[0-9A-Fa-f:.]*"
+        rf"[0-9A-Fa-f:.]{{0,{_IPV6_MAX_TEXT_LEN}}}:"
+        rf"[0-9A-Fa-f:.]{{0,{_IPV6_MAX_TEXT_LEN}}}"
         r"(?:%[0-9A-Za-z_.-]+)?"
         r"(?![0-9A-Za-z_])"
     ),
