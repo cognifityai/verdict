@@ -286,3 +286,30 @@ test("judge view renders the server's executable coverage snapshot", async () =>
     assert.match(rendered.replace(/\s+/g, " "), new RegExp(expected));
   }
 });
+
+test("dashboard visibly reports every bounded response resource", async () => {
+  const ui = await loadUiModule();
+  const hooks = createHooks();
+  const data = bundle("evaluator-a");
+  data.truncation = {
+    applied: true,
+    resources: {
+      latencyPoints: { available: 1000, shown: 100, limit: 100 },
+      clusters: { available: 75, shown: 20, limit: 20 },
+    },
+  };
+
+  const tree = render(ui.Dashboard, hooks, {
+    data,
+    source: "live",
+    onReload() {},
+    onEvaluatorChange() {},
+    reloading: false,
+    loadError: null,
+  });
+  const rendered = textOf(tree).replace(/\s+/g, " ");
+
+  assert.match(rendered, /Showing a bounded dashboard view/);
+  assert.match(rendered, /latency points: 100 of 1,000/);
+  assert.match(rendered, /clusters: 20 of 75/);
+});

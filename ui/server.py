@@ -69,7 +69,18 @@ PROVIDER_ORDER = ["anthropic", "openai", "google"]
 PROVIDER_ALIAS = {"haiku": "anthropic", "gpt": "openai", "gpt-4o-mini": "openai",
                   "gemini": "google", "flash": "google"}
 DIM_ORDER = ["groundedness", "relevance", "completeness", "safety", "instruction_following"]
-MAX_SERIES_POINTS = 1000
+MAX_SERIES_POINTS = 100
+MAX_DASHBOARD_PROVIDERS = 8
+MAX_DASHBOARD_CLUSTERS = 20
+MAX_DASHBOARD_DIMENSIONS = 12
+MAX_DASHBOARD_EVALUATORS = 20
+MAX_DASHBOARD_DRIFT_SIGNALS = 40
+MAX_PROVIDER_MODELS = 20
+MAX_TRACE_SAMPLES = 30
+
+
+class DashboardBundleLimitError(RuntimeError):
+    """The bounded dashboard bundle still exceeded the redaction boundary."""
 
 
 def _dt(ts: str) -> datetime:
@@ -190,6 +201,20 @@ def _round_or_none(value: object, digits: int) -> float | None:
     return round(numeric, digits) if math.isfinite(numeric) else None
 
 
+def _resource_limit(available: int, shown: int, limit: int) -> dict[str, int]:
+    return {"available": available, "shown": shown, "limit": limit}
+
+
+def _truncation_metadata(resources: dict[str, dict[str, int]]) -> dict:
+    return {
+        "applied": any(
+            resource["shown"] < resource["available"]
+            for resource in resources.values()
+        ),
+        "resources": resources,
+    }
+
+
 def _signal_provider(
     alias: str,
     provider_keys: set[str],
@@ -258,8 +283,12 @@ def _build_from_connection(
         # SQLite read snapshot while a pipeline process may replace a run.
         cur.execute("BEGIN")
         bundle = redact_structure(_build(cur, evaluator_id=evaluator_id))
+        if not isinstance(bundle, dict):
+            raise DashboardBundleLimitError(
+                "bounded dashboard bundle exceeded the redaction structure budget"
+            )
         con.commit()
-        return bundle if isinstance(bundle, dict) else {}
+        return bundle
     except BaseException:
         con.rollback()
         raise
@@ -294,6 +323,17 @@ def _cluster_health(cluster_ids: list[str | None], min_sample_size: int = 30) ->
 
 
 def _empty_bundle() -> dict:
+    truncation = _truncation_metadata({
+        "providers": _resource_limit(0, 0, MAX_DASHBOARD_PROVIDERS),
+        "providerModels": _resource_limit(0, 0, MAX_PROVIDER_MODELS),
+        "clusters": _resource_limit(0, 0, MAX_DASHBOARD_CLUSTERS),
+        "dimensions": _resource_limit(0, 0, MAX_DASHBOARD_DIMENSIONS),
+        "evaluatorIdentities": _resource_limit(0, 0, MAX_DASHBOARD_EVALUATORS),
+        "driftSignals": _resource_limit(0, 0, MAX_DASHBOARD_DRIFT_SIGNALS),
+        "latencyPoints": _resource_limit(0, 0, MAX_SERIES_POINTS),
+        "hourlyPoints": _resource_limit(0, 0, MAX_SERIES_POINTS),
+        "traceSamples": _resource_limit(0, 0, MAX_TRACE_SAMPLES),
+    })
     return {
         "meta": {
             "runStart": None,
@@ -336,6 +376,7 @@ def _empty_bundle() -> dict:
         "focusProviderLabel": None,
         "samples": [],
         "providerDimension": [],
+        "truncation": truncation,
     }
 
 
@@ -357,6 +398,7 @@ def _build(cur, *, evaluator_id: str | None = None) -> dict:
     tp, ttime, tcluster, model_of, models_of, raw_provider_of = (
         {}, {}, {}, {}, defaultdict(set), {}
     )
+    provider_trace_counts = Counter()
     for r in cur.execute(
         # ``cluster_select`` is selected from the two literals above; it never
         # contains request data or a database value.
@@ -369,6 +411,7 @@ def _build(cur, *, evaluator_id: str | None = None) -> dict:
         tcluster[r["trace_id"]] = r["cluster_id"]
         models_of[provider_key].add(r["request_model"])
         raw_provider_of.setdefault(provider_key, r["provider"])
+        provider_trace_counts[provider_key] += 1
     for provider_key, models in models_of.items():
         known_models = sorted(str(model) for model in models if model not in (None, ""))
         model_of[provider_key] = (
@@ -392,7 +435,7 @@ def _build(cur, *, evaluator_id: str | None = None) -> dict:
         identity = _evaluator_identity(row)
         identity_by_id.setdefault(identity["id"], identity)
         identity_rows.append((identity, row))
-    available_identities = sorted(
+    all_available_identities = sorted(
         identity_by_id.values(), key=lambda identity: (identity["label"], identity["id"])
     )
 
@@ -402,13 +445,24 @@ def _build(cur, *, evaluator_id: str | None = None) -> dict:
         selected_id = None
     elif selected_id is not None:
         evaluation_status = "selected"
-    elif len(available_identities) == 1:
-        selected_id = available_identities[0]["id"]
+    elif len(all_available_identities) == 1:
+        selected_id = all_available_identities[0]["id"]
         evaluation_status = "selected"
-    elif available_identities:
+    elif all_available_identities:
         evaluation_status = "selection_required"
     else:
         evaluation_status = "empty"
+    available_identities = all_available_identities[:MAX_DASHBOARD_EVALUATORS]
+    selected_identity = identity_by_id.get(selected_id)
+    if (
+        selected_identity is not None
+        and selected_identity not in available_identities
+        and available_identities
+    ):
+        available_identities[-1] = selected_identity
+        available_identities.sort(
+            key=lambda identity: (identity["label"], identity["id"])
+        )
     evaluation = {
         "status": evaluation_status,
         "selectedId": selected_id,
@@ -618,7 +672,16 @@ def _build(cur, *, evaluator_id: str | None = None) -> dict:
         }
     score_coverage["evaluable"] = score_coverage["pass"] + score_coverage["fail"]
 
-    keys = _provider_order(set(raw_provider_of))
+    all_keys = _provider_order(set(raw_provider_of))
+    provider_rank = {provider: index for index, provider in enumerate(all_keys)}
+    ranked_provider_keys = sorted(
+        all_keys,
+        key=lambda provider: (
+            -provider_trace_counts[provider],
+            provider_rank[provider],
+        ),
+    )
+    keys = _provider_order(ranked_provider_keys[:MAX_DASHBOARD_PROVIDERS])
     # Providers present in each cluster. Used ONLY to attribute a drift signal
     # to a provider when the attribution is factual (cluster is single-provider).
     # Drift is detected per (cluster, dimension) and may span providers; the
@@ -656,7 +719,7 @@ def _build(cur, *, evaluator_id: str | None = None) -> dict:
             "model": model_of.get(p, ""),
             "models": sorted(
                 str(model) for model in models_of[p] if model not in (None, "")
-            ),
+            )[:MAX_PROVIDER_MODELS],
             "n": r["n"], "errors": r["errors"] or 0,
             "errorRate": round(100 * (r["errors"] or 0) / r["n"], 1) if r["n"] else 0.0,
             "avgLatency": round((r["lat"] or 0) / 1000, 2),
@@ -668,11 +731,16 @@ def _build(cur, *, evaluator_id: str | None = None) -> dict:
         })
 
     # ---- clusters ----
+    from verdict_eval.stable_clustering import UNCLUSTERED_ID
+
     clusters = (
         [dict(cluster_id=r["cluster_id"], n=r["n"]) for r in cur.execute(
             """SELECT cluster_id, COUNT(*) n FROM traces
                WHERE cluster_id IS NOT NULL AND cluster_id <> ''
-               GROUP BY cluster_id ORDER BY n DESC"""
+                 AND cluster_id <> ?
+               GROUP BY cluster_id ORDER BY n DESC, cluster_id
+               LIMIT ?""",
+            (UNCLUSTERED_ID, MAX_DASHBOARD_CLUSTERS),
         )]
         if "cluster_id" in trace_columns
         else []
@@ -728,18 +796,32 @@ def _build(cur, *, evaluator_id: str | None = None) -> dict:
             "action": s.get("recommended_action") or "Review the affected traces.",
             "detectedAt": s.get("detected_at"),
         })
-    # Sort by the primary effect size (Cliff's δ) when present, else Cohen's d.
+    # Keep the largest effects under the cap for both regressions and
+    # improvements. The database's signal-id ordering breaks equal-magnitude
+    # ties deterministically.
     drift.sort(key=lambda x: (
-        x["cliffsDelta"]
-        if x["cliffsDelta"] is not None
-        else x["cohensD"]
-        if x["cohensD"] is not None
-        else 0.0
+        -abs(
+            x["cliffsDelta"]
+            if x["cliffsDelta"] is not None
+            else x["cohensD"]
+            if x["cohensD"] is not None
+            else 0.0
+        )
     ))
+    total_drift_signals = len(drift)
+    drift = drift[:MAX_DASHBOARD_DRIFT_SIGNALS]
 
     # ---- dimension overall ----
-    dims_present = [d for d in DIM_ORDER if d in dim_overall] + \
-                   [d for d in dim_overall if d not in DIM_ORDER]
+    all_dims_present = [d for d in DIM_ORDER if d in dim_overall] + \
+                       [d for d in dim_overall if d not in DIM_ORDER]
+    dims_present = all_dims_present[:MAX_DASHBOARD_DIMENSIONS]
+    shown_dimensions = set(dims_present)
+    for judgment in judg_by_trace.values():
+        judgment["dims"] = [
+            dimension
+            for dimension in judgment["dims"]
+            if dimension["name"] in shown_dimensions
+        ]
     dimensionOverall = []
     for d in dims_present:
         c = dim_overall[d]
@@ -761,15 +843,19 @@ def _build(cur, *, evaluator_id: str | None = None) -> dict:
     BIN = 30 * 60
     bins = defaultdict(lambda: defaultdict(lambda: {"n": 0, "err": 0, "lat": []}))
     for r in cur.execute("SELECT provider, started_at, latency_ms, error FROM traces"):
+        provider_key = _provider_key(r["provider"])
+        if provider_key not in keys:
+            continue
         b = int((_dt(r["started_at"]) - t0).total_seconds() // BIN)
-        cell = bins[_provider_key(r["provider"])][b]
+        cell = bins[provider_key][b]
         cell["n"] += 1
         if r["error"]:
             cell["err"] += 1
         latency = _round_or_none(r["latency_ms"], 6)
         if latency is not None:
             cell["lat"].append(latency)
-    observed_bins = sorted({b for p in bins for b in bins[p]})[-MAX_SERIES_POINTS:]
+    all_observed_bins = sorted({b for p in bins for b in bins[p]})
+    observed_bins = all_observed_bins[-MAX_SERIES_POINTS:]
     tsRows = []
     for b in observed_bins:
         row = {"hour": round(b * 0.5, 1)}
@@ -790,9 +876,8 @@ def _build(cur, *, evaluator_id: str | None = None) -> dict:
     pr = defaultdict(lambda: defaultdict(Counter))
     cluster_pr = defaultdict(lambda: defaultdict(Counter))
     dim_hr = defaultdict(lambda: defaultdict(Counter))
-    focus = (drift[0].get("provider") or keys[0]) if drift and keys else (
-        keys[0] if keys else None
-    )
+    drift_focus = drift[0].get("provider") if drift else None
+    focus = drift_focus if drift_focus in keys else (keys[0] if keys else None)
     focus_provider_label = (
         _label_for(
             str(raw_provider_of.get(focus) or ""),
@@ -810,12 +895,14 @@ def _build(cur, *, evaluator_id: str | None = None) -> dict:
         hb = int((_dt(st) - t0).total_seconds() // HB)
         for d in j["dims"]:
             verdict = d["verdict"]
-            pr[prov][hb][verdict] += 1
-            if cluster:
+            if prov in keys:
+                pr[prov][hb][verdict] += 1
+            if cluster and len(all_keys) == 1:
                 cluster_pr[cluster][hb][verdict] += 1
             if prov == focus:
                 dim_hr[d["name"]][hb][verdict] += 1
-    observed_hours = sorted({h for p in pr for h in pr[p]})[-MAX_SERIES_POINTS:]
+    all_observed_hours = sorted({h for p in pr for h in pr[p]})
+    observed_hours = all_observed_hours[-MAX_SERIES_POINTS:]
     passrate = []
     for h in observed_hours:
         row = {"hour": h}
@@ -824,7 +911,7 @@ def _build(cur, *, evaluator_id: str | None = None) -> dict:
             row[p] = _score_rate(cell) if cell else None
         passrate.append(row)
     clusterPassrate = []
-    if len(keys) == 1:
+    if len(all_keys) == 1:
         cluster_keys = [cluster["cluster_id"] for cluster in clusters]
         for h in observed_hours:
             row = {"hour": h}
@@ -862,7 +949,7 @@ def _build(cur, *, evaluator_id: str | None = None) -> dict:
             pick.append(r)
             seen.add(r["trace_id"])
     for r in rows:
-        if len(pick) >= 40:
+        if len(pick) >= MAX_TRACE_SAMPLES:
             break
         if r["trace_id"] not in seen:
             pick.append(r)
@@ -883,14 +970,70 @@ def _build(cur, *, evaluator_id: str | None = None) -> dict:
             s["judgment"] = j
         samples.append(s)
 
-    total_traces = sum(p["n"] for p in providers)
-    priced_traces = sum(p["n"] - p["costUnknown"] for p in providers)
-    total_cost = sum(p["cost"] or 0 for p in providers)
+    totals = cur.execute(
+        """SELECT COUNT(*) n, SUM(cost_usd) cost,
+                  SUM(CASE WHEN cost_usd IS NULL THEN 1 ELSE 0 END) cost_unknown
+             FROM traces"""
+    ).fetchone()
+    total_traces = totals["n"]
+    priced_traces = total_traces - (totals["cost_unknown"] or 0)
+    total_cost = totals["cost"] or 0
     total_cost_status = (
         "unavailable" if priced_traces == 0
         else "complete" if priced_traces == total_traces
         else "partial"
     )
+    provider_model_counts = [
+        len({model for model in models_of[provider] if model not in (None, "")})
+        for provider in keys
+    ]
+    available_provider_models = max(provider_model_counts, default=0)
+    shown_provider_models = min(available_provider_models, MAX_PROVIDER_MODELS)
+    truncation = _truncation_metadata({
+        "providers": _resource_limit(
+            len(all_keys), len(keys), MAX_DASHBOARD_PROVIDERS
+        ),
+        "providerModels": _resource_limit(
+            available_provider_models,
+            shown_provider_models,
+            MAX_PROVIDER_MODELS,
+        ),
+        "clusters": _resource_limit(
+            cluster_health["nClusters"],
+            len(clusters),
+            MAX_DASHBOARD_CLUSTERS,
+        ),
+        "dimensions": _resource_limit(
+            len(all_dims_present),
+            len(dims_present),
+            MAX_DASHBOARD_DIMENSIONS,
+        ),
+        "evaluatorIdentities": _resource_limit(
+            len(all_available_identities),
+            len(available_identities),
+            MAX_DASHBOARD_EVALUATORS,
+        ),
+        "driftSignals": _resource_limit(
+            total_drift_signals,
+            len(drift),
+            MAX_DASHBOARD_DRIFT_SIGNALS,
+        ),
+        "latencyPoints": _resource_limit(
+            len(all_observed_bins),
+            len(observed_bins),
+            MAX_SERIES_POINTS,
+        ),
+        "hourlyPoints": _resource_limit(
+            len(all_observed_hours),
+            len(observed_hours),
+            MAX_SERIES_POINTS,
+        ),
+        "traceSamples": _resource_limit(
+            len(rows),
+            len(samples),
+            MAX_TRACE_SAMPLES,
+        ),
+    })
     return {
         "meta": {
             "runStart": t0row["m"],
@@ -900,8 +1043,8 @@ def _build(cur, *, evaluator_id: str | None = None) -> dict:
             "totalCost": round(total_cost, 3) if priced_traces else None,
             "totalCostStatus": total_cost_status,
             "regressionHour": int(os.environ.get("VERDICT_REGRESSION_HOUR", "4")),
-            "providers": len(providers),
-            "clusters": len(clusters),
+            "providers": len(all_keys),
+            "clusters": cluster_health["nClusters"],
         },
         "providers": providers,
         "clusters": clusters,
@@ -920,6 +1063,7 @@ def _build(cur, *, evaluator_id: str | None = None) -> dict:
         "focusProviderLabel": focus_provider_label,
         "samples": samples,
         "providerDimension": providerDimension,
+        "truncation": truncation,
     }
 
 
@@ -1013,6 +1157,12 @@ def create_app():
             return JSONResponse({"error": "data unavailable"}, status_code=503)
         try:
             return build_bundle(db, evaluator_id=evaluator)
+        except DashboardBundleLimitError:
+            _log.exception("dashboard bundle exceeded its safety budget for %s", db)
+            return JSONResponse(
+                {"error": "dashboard bundle limit exceeded"},
+                status_code=503,
+            )
         except Exception:  # pragma: no cover - defensive: corrupt/locked DB
             _log.exception("failed to build data bundle from %s", db)
             return JSONResponse({"error": "data unavailable"}, status_code=503)
