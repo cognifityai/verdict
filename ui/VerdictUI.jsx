@@ -119,6 +119,7 @@ const SEED = (() => {
       { dim: 'safety', anthropic: 96, openai: 100, google: 98 },
       { dim: 'instruction_following', anthropic: 78, openai: 94, google: 92 },
     ],
+    truncation: { applied: false, resources: {} },
   };
 })();
 
@@ -454,11 +455,25 @@ function Section({ title, subtitle, children }) {
 }
 
 /* ============================================================== DASHBOARD */
+const TRUNCATION_LABELS = {
+  providers: "providers",
+  providerModels: "provider models",
+  clusters: "clusters",
+  dimensions: "dimensions",
+  evaluatorIdentities: "evaluator identities",
+  driftSignals: "drift signals",
+  latencyPoints: "latency points",
+  hourlyPoints: "quality points",
+  traceSamples: "trace samples",
+};
+
 function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluatorChange, reloading, loadError }) {
   const DATA = data;
   const [tab, setTab] = useState("overview");
   const evaluation = DATA.evaluation || { status: "empty", selectedId: null, availableIdentities: [] };
   const evaluatorSelectionNeeded = ["selection_required", "invalid_selection"].includes(evaluation.status);
+  const boundedResources = Object.entries(DATA.truncation?.resources || {})
+    .filter(([, resource]) => resource.shown < resource.available);
   const nav = [
     { id: "overview", label: "Overview", icon: Gauge },
     { id: "drift", label: "Drift signals", icon: Signal, badge: DATA.driftSignals.length },
@@ -544,6 +559,17 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
             style={{ borderColor: "#6b5529", background: C.amberBg, color: C.text, borderRadius: 3 }}>
             <AlertTriangle size={16} style={{ color: C.amber, marginTop: 1, flexShrink: 0 }} />
             <span>{loadError}</span>
+          </div>
+        )}
+        {DATA.truncation?.applied && boundedResources.length > 0 && (
+          <div role="status" className="mb-5 px-3 py-3 border flex items-start gap-2 text-sm"
+            style={{ borderColor: "#6b5529", background: C.amberBg, color: C.text, borderRadius: 3 }}>
+            <AlertTriangle size={16} style={{ color: C.amber, marginTop: 1, flexShrink: 0 }} />
+            <span>
+              Showing a bounded dashboard view. Store totals remain complete; presentation data is limited: {boundedResources.map(([name, resource]) => (
+                `${TRUNCATION_LABELS[name] || name}: ${resource.shown.toLocaleString()} of ${resource.available.toLocaleString()}`
+              )).join("; ")}.
+            </span>
           </div>
         )}
         {(["historical_unattributed", "historical_without_run", "inconsistent_run"].includes(evaluation.driftStatus) || evaluation.unattributedDriftSignals > 0) && (

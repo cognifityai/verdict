@@ -241,6 +241,12 @@ Hexagonal / ports-and-adapters, ≥2 adapters per port (one real + in-memory for
 - This is a **public alpha** release — not a hosted monitoring service and not a substitute for workload-specific calibration.
 - The bundled dashboard server is a read-only **SQLite** view. The SDK also has
   a Postgres adapter, but the dashboard does not read Postgres directly.
+- Dashboard responses keep full-store totals but bound presentation data to the
+  latest 100 observed chart points, 8 providers, 20 clusters, 12 dimensions,
+  20 models per displayed provider, 20 evaluator identities, 40 drift signals,
+  and 30 trace samples. A visible banner reports every omitted count; a bundle
+  that still exceeds the redaction safety budget returns an explicit service
+  error instead of an empty successful dashboard.
 
 ## License
 

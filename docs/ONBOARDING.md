@@ -220,8 +220,13 @@ Set both `VERDICT_USER` and `VERDICT_PASS` before starting the server to require
 HTTP Basic authentication for `/dashboard` and `/api/data`; `/` and
 `/api/health` remain public. Do not bind beyond localhost without that gate or a
 trusted reverse proxy. Dashboard time series include only observed hourly bins
-and are capped at 1,000 points, so a sparse database with a long timestamp range
-does not allocate one row for every empty hour.
+and half-hour latency bins. Presentation data is capped at the latest 100
+observed chart points, 8 providers, 20 clusters, 12 dimensions, 20 evaluator
+identities, 20 models per displayed provider, 40 drift signals, and 30 trace
+samples. Full-store totals remain in the summary, while a visible banner
+reports every shown-versus-available count. A bundle that still exceeds the
+redaction safety budget returns an explicit service error instead of an empty
+successful dashboard.
 
 The overview pass-rate chart compares providers when multiple providers are
 present. For a single-provider store with multiple judged intent clusters, it

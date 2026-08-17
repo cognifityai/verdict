@@ -1,4 +1,5 @@
 import asyncio
+import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
@@ -13,6 +14,7 @@ from verdict.schema import (
 )
 from verdict.storage import SQLiteStorage
 
+import ui.server as server_module
 from ui.server import _CSP, _cluster_health, _signal_provider, build_bundle, create_app
 
 
@@ -121,6 +123,254 @@ def test_bundle_marks_unknown_cost_and_exposes_signal_examples(tmp_path):
     assert bundle["meta"]["totalCost"] is None
     assert bundle["meta"]["totalCostStatus"] == "unavailable"
     assert bundle["driftSignals"][0]["exampleTraceIds"] == [trace.trace_id]
+
+
+def test_large_store_api_returns_a_bounded_truthful_bundle(monkeypatch, tmp_path):
+    import httpx
+
+    path = tmp_path / "large-dashboard.db"
+    storage = SQLiteStorage(str(path))
+    started_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    providers = ("anthropic", "openai", "google")
+    for index in range(1000):
+        storage.insert_trace(Trace(
+            trace_id=f"large-trace-{index:04d}",
+            started_at=started_at + timedelta(minutes=30 * index),
+            provider=providers[index % len(providers)],
+            request_model="known-model",
+            cluster_id=f"cluster-{index % 20:02d}",
+            prompt_redacted="safe prompt",
+        ))
+    storage.close()
+    monkeypatch.setenv("VERDICT_DB", str(path))
+
+    async def request_data():
+        transport = httpx.ASGITransport(app=create_app())
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            return await client.get("/api/data")
+
+    response = asyncio.run(request_data())
+    payload = response.json()
+
+    assert response.status_code == 200
+    assert payload["meta"]["totalTraces"] == 1000
+    assert payload["truncation"]["applied"] is True
+    assert payload["truncation"]["resources"]["latencyPoints"] == {
+        "available": 1000,
+        "shown": 100,
+        "limit": 100,
+    }
+    assert len(payload["tsRows"]) == 100
+    assert len(json.dumps(payload).encode("utf-8")) < 500_000
+
+
+def test_redaction_budget_failure_returns_an_explicit_service_error(
+    monkeypatch,
+    tmp_path,
+):
+    import httpx
+
+    path = tmp_path / "budget-error.db"
+    storage = SQLiteStorage(str(path))
+    storage.insert_trace(Trace(prompt_redacted="safe prompt"))
+    storage.close()
+    monkeypatch.setenv("VERDICT_DB", str(path))
+    monkeypatch.setattr(server_module, "redact_structure", lambda _bundle: "<REDACTED>")
+
+    async def request_data():
+        transport = httpx.ASGITransport(app=create_app())
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            return await client.get("/api/data")
+
+    response = asyncio.run(request_data())
+
+    assert response.status_code == 503
+    assert response.json() == {"error": "dashboard bundle limit exceeded"}
+
+
+def test_bundle_reports_every_high_cardinality_presentation_axis(tmp_path):
+    path = tmp_path / "high-cardinality-dashboard.db"
+    storage = SQLiteStorage(str(path))
+    started_at = datetime(2026, 2, 1, tzinfo=timezone.utc)
+    dimensions = [f"dimension-{index:02d}" for index in range(15)]
+    traces = []
+    for index in range(100):
+        trace = Trace(
+            trace_id=f"cardinality-trace-{index:03d}",
+            started_at=started_at + timedelta(minutes=30 * index),
+            provider="anthropic" if index < 25 else f"custom-provider-{index:03d}",
+            request_model=f"model-{index:03d}",
+            cluster_id=f"cluster-{index:03d}",
+            prompt_redacted="safe prompt",
+        )
+        traces.append(trace)
+        storage.insert_trace(trace)
+
+    storage.insert_judgment(Judgment(
+        trace_id=traces[0].trace_id,
+        evaluator_provider="fake",
+        evaluator_config={"temperature": 0},
+        evaluator_fingerprint="target-fingerprint",
+        expected_dimensions=dimensions,
+        judge_models=["a-target-judge"],
+        dimensions=[
+            DimensionScore(name=dimension, verdict=Verdict.PASS)
+            for dimension in dimensions
+        ],
+    ))
+    for index in range(1, 25):
+        storage.insert_judgment(Judgment(
+            trace_id=traces[index].trace_id,
+            evaluator_provider="fake",
+            evaluator_config={"temperature": index},
+            evaluator_fingerprint=f"other-fingerprint-{index:02d}",
+            expected_dimensions=["quality"],
+            judge_models=[f"z-other-judge-{index:02d}"],
+            dimensions=[DimensionScore(name="quality", verdict=Verdict.PASS)],
+        ))
+    _persist_drift_snapshot(storage, *[
+        DriftSignal(
+            signal_id=f"cardinality-signal-{index:03d}",
+            cluster_id=f"cluster-{index:03d}",
+            dimension=dimensions[index % len(dimensions)],
+            evaluator_fingerprint="target-fingerprint",
+        )
+        for index in range(60)
+    ])
+    storage.close()
+
+    unselected = build_bundle(path)
+    target_identity = next(
+        identity
+        for identity in unselected["evaluation"]["availableIdentities"]
+        if identity["fingerprint"] == "target-fingerprint"
+    )
+    bundle = build_bundle(path, evaluator_id=target_identity["id"])
+    resources = bundle["truncation"]["resources"]
+
+    assert bundle["truncation"]["applied"] is True
+    assert resources["providers"] == {"available": 76, "shown": 8, "limit": 8}
+    assert resources["providerModels"] == {"available": 25, "shown": 20, "limit": 20}
+    assert resources["clusters"] == {"available": 100, "shown": 20, "limit": 20}
+    assert resources["dimensions"] == {"available": 15, "shown": 12, "limit": 12}
+    assert resources["evaluatorIdentities"] == {
+        "available": 25,
+        "shown": 20,
+        "limit": 20,
+    }
+    assert resources["driftSignals"] == {"available": 60, "shown": 40, "limit": 40}
+    assert resources["traceSamples"] == {"available": 100, "shown": 30, "limit": 30}
+    assert bundle["meta"]["providers"] == 76
+    assert bundle["meta"]["clusters"] == 100
+
+
+def test_fragmented_single_provider_store_has_bounded_cluster_matrix(tmp_path):
+    import time
+
+    path = tmp_path / "fragmented-dashboard.db"
+    storage = SQLiteStorage(str(path))
+    started_at = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    for index in range(3000):
+        trace = Trace(
+            trace_id=f"fragmented-trace-{index:04d}",
+            started_at=started_at + timedelta(hours=3 * index),
+            provider="openai",
+            request_model="known-model",
+            cluster_id=f"fragmented-cluster-{index:04d}",
+            prompt_redacted="safe prompt",
+        )
+        storage.insert_trace(trace)
+        storage.insert_judgment(Judgment(
+            trace_id=trace.trace_id,
+            evaluator_provider="fake",
+            evaluator_config={"temperature": 0},
+            evaluator_fingerprint="fragmented-evaluator",
+            expected_dimensions=["quality"],
+            judge_models=["judge-model"],
+            dimensions=[DimensionScore(name="quality", verdict=Verdict.PASS)],
+        ))
+    storage.close()
+
+    start = time.perf_counter()
+    bundle = build_bundle(path)
+    elapsed = time.perf_counter() - start
+
+    assert bundle["meta"]["clusters"] == 3000
+    assert bundle["truncation"]["resources"]["clusters"] == {
+        "available": 3000,
+        "shown": 20,
+        "limit": 20,
+    }
+    assert len(bundle["clusters"]) == 20
+    assert len(bundle["clusterPassrate"]) == 100
+    assert all(len(row) <= 21 for row in bundle["clusterPassrate"])
+    assert len(json.dumps(bundle).encode("utf-8")) < 500_000
+    assert elapsed < 5.0, f"bounded dashboard bundle took {elapsed:.2f}s"
+
+
+def test_composite_presentation_limits_stay_below_redaction_budget(tmp_path):
+    path = tmp_path / "composite-dashboard.db"
+    storage = SQLiteStorage(str(path))
+    started_at = datetime(2026, 3, 1, tzinfo=timezone.utc)
+    dimensions = [f"dimension-{index:02d}" for index in range(12)]
+    scores = [
+        DimensionScore(name=dimension, verdict=Verdict.PASS)
+        for dimension in dimensions
+    ]
+    for index in range(800):
+        trace = Trace(
+            trace_id=f"composite-trace-{index:04d}",
+            started_at=started_at + timedelta(minutes=7.5 * index),
+            provider=f"provider-{index % 8}",
+            request_model="known-model",
+            cluster_id=f"cluster-{index % 20:02d}",
+            prompt_redacted="safe prompt",
+            response_redacted="safe response",
+        )
+        storage.insert_trace(trace)
+        storage.insert_judgment(Judgment(
+            trace_id=trace.trace_id,
+            evaluator_provider="fake",
+            evaluator_config={"temperature": 0},
+            evaluator_fingerprint="composite-evaluator",
+            expected_dimensions=dimensions,
+            judge_models=["judge-model"],
+            dimensions=scores,
+        ))
+    _persist_drift_snapshot(storage, *[
+        DriftSignal(
+            signal_id=f"composite-signal-{index:03d}",
+            cluster_id=f"cluster-{index % 20:02d}",
+            dimension=dimensions[index % len(dimensions)],
+            evaluator_fingerprint="composite-evaluator",
+        )
+        for index in range(40)
+    ])
+    storage.close()
+
+    bundle = build_bundle(path)
+
+    def count_nodes(value):
+        if isinstance(value, dict):
+            return 1 + sum(count_nodes(child) for child in value.values())
+        if isinstance(value, list):
+            return 1 + sum(count_nodes(child) for child in value)
+        return 1
+
+    assert len(bundle["providers"]) == 8
+    assert len(bundle["dimensionOverall"]) == 12
+    assert len(bundle["tsRows"]) == 100
+    assert len(bundle["passrate"]) == 100
+    assert len(bundle["haikuDim"]) == 100
+    assert len(bundle["driftSignals"]) == 40
+    assert len(bundle["samples"]) == 30
+    assert count_nodes(bundle) < 9000
 
 
 def test_bundle_filters_drift_by_selected_evaluator_and_excludes_historical_rows(tmp_path):
