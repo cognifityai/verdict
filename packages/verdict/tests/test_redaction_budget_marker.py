@@ -74,6 +74,18 @@ def test_malformed_email_candidates_stay_within_the_overhead_budget():
         )
 
 
+def test_ipv6_candidate_scan_stays_bounded_when_only_an_unrelated_colon_exists():
+    """One colon outside a long candidate run must not re-enable quadratic work."""
+    text = ("a." * 32_000) + "g:"
+    start = time.perf_counter()
+    assert redact(text) == text
+    elapsed_ms = (time.perf_counter() - start) * 1000.0
+
+    assert elapsed_ms < 250.0, (
+        f"redact() took {elapsed_ms:.1f} ms after an unrelated colon enabled the IPv6 scan"
+    )
+
+
 def test_emails_are_still_redacted_in_whitespace_free_text():
     """The fast path must not skip a real address."""
     assert redact("連絡先ops@corp.comまで") == "<EMAIL>"  # CJK is \\w, so the local part over-matches (pre-existing)
