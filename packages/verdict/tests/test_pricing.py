@@ -80,6 +80,54 @@ def test_unknown_model_warns_that_cost_is_unavailable(caplog):
     assert "cost_usd will be unavailable" in caplog.text
 
 
+def test_unknown_anthropic_opus_version_is_unpriced_and_warned(monkeypatch, caplog):
+    model = "anthropic/claude-opus-4-9-20260901"
+    monkeypatch.setattr(pricing, "_warned_unknown_models", set())
+
+    with caplog.at_level(logging.WARNING, logger="verdict.pricing"):
+        assert compute_cost_usd(model, 1000, 1000) is None
+
+    assert "cost_usd will be unavailable" in caplog.text
+
+
+def test_known_anthropic_opus_version_remains_priced():
+    in_rate, out_rate = PRICE_PER_1K["claude-3-opus"]
+
+    assert compute_cost_usd("claude-3-opus-20240229", 1000, 1000) == in_rate + out_rate
+
+
+def test_opus_4_and_41_known_release_ids_keep_their_verified_rate():
+    known_ids = (
+        "claude-opus-4-1-20250805",
+        "anthropic/claude-opus-4-1",
+        "us.anthropic.claude-opus-4-1-20250805-v1:0",
+        "claude-opus-4-1@20250805",
+        "claude-opus-4-20250514",
+        "anthropic/claude-opus-4",
+        "claude-opus-4@20250514",
+    )
+
+    for model in known_ids:
+        assert math.isclose(
+            compute_cost_usd(model, 1000, 1000) or 0.0,
+            0.09,
+            rel_tol=1e-9,
+        ), model
+
+    assert math.isclose(
+        compute_cost_usd("claude-opus-4-5-20251101", 1000, 1000) or 0.0,
+        0.03,
+        rel_tol=1e-9,
+    )
+    assert compute_cost_usd("claude-opus-4-9-20260901", 1000, 1000) is None
+
+
+def test_anthropic_family_catchalls_cannot_price_unknown_versions():
+    forbidden_family_catchalls = {"claude-opus", "claude-sonnet", "claude-haiku"}
+
+    assert forbidden_family_catchalls.isdisjoint(PRICE_PER_1K)
+
+
 def test_pricing_table_has_a_visible_verification_date():
     assert PRICING_LAST_VERIFIED.isoformat() >= "2026-08-01"
     assert PRICING_REVIEW_AFTER >= PRICING_LAST_VERIFIED
