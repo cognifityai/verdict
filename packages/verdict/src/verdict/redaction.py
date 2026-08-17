@@ -207,6 +207,12 @@ def redact(
                 out,
             )
         elif label == "IPV6":
+            # A colon is required by every IPv6 spelling.  Avoid entering the
+            # candidate regex when one is absent: its permissive ``[0-9a-f:.]*``
+            # prefix would otherwise rescan long digit/dot runs from every
+            # position before proving that no candidate exists.
+            if ":" not in out:
+                continue
             out = pat.sub(
                 lambda m, lbl=label: _ipv6_repl(m.group(0), lbl, mode, secret),
                 out,
