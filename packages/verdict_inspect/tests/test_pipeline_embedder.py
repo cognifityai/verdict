@@ -26,7 +26,6 @@ import sys
 import types
 
 import pytest
-
 from verdict_inspect import pipeline
 
 

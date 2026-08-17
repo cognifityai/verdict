@@ -32,8 +32,7 @@ References:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Iterable
+from dataclasses import dataclass
 
 import numpy as np
 from scipy.stats import wasserstein_distance

@@ -14,6 +14,8 @@ import hashlib
 import hmac
 import logging
 import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -55,7 +57,7 @@ class VerdictClient:
     enabled_instrumentors: list[str] = field(default_factory=list)
 
     # Internal — bound instrumentors after init() runs
-    _instrumentors: list["BaseInstrumentor"] = field(default_factory=list, repr=False)
+    _instrumentors: list[BaseInstrumentor] = field(default_factory=list, repr=False)
     _initialized: bool = False
 
 
@@ -89,7 +91,7 @@ def init(
         capture_content: If True, prompts/completions are stored (redacted).
         redaction_mode: "redact" | "hash" ("encrypt" is planned, not implemented).
         redaction_secret: HMAC secret (required for hash mode).
-        sample_rate: Fraction of traces to capture (0.0–1.0). Default 1.0.
+        sample_rate: Fraction of traces to capture (0.0-1.0). Default 1.0.
         tenant_id: Optional tenant identifier stamped onto every captured trace.
         instrumentors: Optional explicit list, e.g. ["anthropic", "openai"].
                        Default: install all available.
@@ -229,6 +231,9 @@ _ctx_session_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 _ctx_user_id_hash: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "verdict_user_id_hash", default=None,
 )
+_ctx_trace_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "verdict_trace_id", default=None,
+)
 
 
 def _hash_user_id(user_id: str) -> str:
@@ -252,17 +257,22 @@ def set_context(
     *,
     session_id: str | None = None,
     user_id: str | None = None,
+    trace_id: str | None = None,
 ) -> None:
     """Bind per-request context for subsequently captured traces.
 
     Call this at the start of handling a request/task. ``session_id`` is stored
     as-is; ``user_id`` is HMAC/SHA-256 hashed (never stored raw). Passing None
-    leaves the existing value unchanged; pass "" to clear a value.
+    leaves the existing value unchanged; pass "" to clear a value. ``trace_id``
+    links manual spans to an existing captured LLM trace without using a
+    process-global mutable value.
     """
     if session_id is not None:
         _ctx_session_id.set(session_id or None)
     if user_id is not None:
         _ctx_user_id_hash.set(_hash_user_id(user_id) if user_id else None)
+    if trace_id is not None:
+        _ctx_trace_id.set(trace_id or None)
 
 
 def get_context_session_id() -> str | None:
@@ -275,10 +285,26 @@ def get_context_user_id_hash() -> str | None:
     return _ctx_user_id_hash.get()
 
 
+def get_context_trace_id() -> str | None:
+    """Return the trace_id bound to the current logical request/task, if any."""
+    return _ctx_trace_id.get()
+
+
+@contextmanager
+def trace_context(trace_id: str | None) -> Iterator[None]:
+    """Temporarily bind a trace ID and restore the prior value on every exit."""
+    token = _ctx_trace_id.set(trace_id or None)
+    try:
+        yield
+    finally:
+        _ctx_trace_id.reset(token)
+
+
 def clear_context() -> None:
     """Clear any per-request context (useful between requests / in tests)."""
     _ctx_session_id.set(None)
     _ctx_user_id_hash.set(None)
+    _ctx_trace_id.set(None)
 
 
 def shutdown() -> None:
@@ -286,6 +312,7 @@ def shutdown() -> None:
     global _client
     with _lock:
         if _client is None:
+            clear_context()
             return
         for instr in _client._instrumentors:
             try:
@@ -297,3 +324,4 @@ def shutdown() -> None:
         except Exception:
             pass
         _client = None
+        clear_context()

@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import math
 import random
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import numpy as np
 from sklearn.linear_model import LogisticRegression
@@ -117,7 +117,7 @@ class BradleyTerryComparator:
         # Build design matrix: rows are pairwise samples, columns are model effects.
         # A tie (Davidson extension) contributes half a win + half a loss. We carry
         # that as sample_weight rather than two full-weight duplicate rows — the
-        # latter gives every tie 2× the influence of a decisive result, which also
+        # latter gives every tie 2x the influence of a decisive result, which also
         # skews the bootstrap (a tie would resample as two rows). With weights, each
         # result — decisive or tied — contributes total weight 1.0.
         X_rows: list[np.ndarray] = []
@@ -128,12 +128,20 @@ class BradleyTerryComparator:
             x[idx[r.model_a]] = 1
             x[idx[r.model_b]] = -1
             if r.winner == r.model_a:
-                X_rows.append(x); y.append(1.0); w.append(1.0)
+                X_rows.append(x)
+                y.append(1.0)
+                w.append(1.0)
             elif r.winner == r.model_b:
-                X_rows.append(x); y.append(0.0); w.append(1.0)
+                X_rows.append(x)
+                y.append(0.0)
+                w.append(1.0)
             else:  # tie → half win, half loss, total weight 1.0
-                X_rows.append(x); y.append(1.0); w.append(0.5)
-                X_rows.append(x); y.append(0.0); w.append(0.5)
+                X_rows.append(x)
+                y.append(1.0)
+                w.append(0.5)
+                X_rows.append(x)
+                y.append(0.0)
+                w.append(0.5)
         X = np.vstack(X_rows)
         y_arr = np.asarray(y, dtype=np.float64)
         w_arr = np.asarray(w, dtype=np.float64)

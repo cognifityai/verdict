@@ -7,9 +7,16 @@ from __future__ import annotations
 
 import json
 
+import pytest
 from verdict.schema import Verdict
-from verdict_eval.judge import DEFAULT_RUBRIC, Judge, JudgeEnsemble
-from verdict_eval.providers import CompletionResponse, FakeProvider
+from verdict_eval.judge import (
+    DEFAULT_RUBRIC,
+    Judge,
+    JudgeEnsemble,
+    Rubric,
+    RubricDimension,
+)
+from verdict_eval.providers import FakeProvider
 
 
 def _fake_json_for(verdicts: dict[str, str]) -> str:
@@ -34,6 +41,32 @@ def test_judge_parses_clean_json_and_assigns_per_dimension_verdicts():
     assert by_name["completeness"].verdict == Verdict.FAIL
     assert j.pass_count == 4
     assert j.fail_count == 1
+    assert j.evaluator_identity_complete
+    assert j.evaluator_provider == "fake"
+    assert j.expected_dimensions == [d.name for d in DEFAULT_RUBRIC.dimensions]
+
+
+def test_evaluator_fingerprint_changes_for_behavior_relevant_configuration():
+    base = Judge(provider=FakeProvider("{}"), model="judge-a")
+    changed_temperature = Judge(
+        provider=FakeProvider("{}"), model="judge-a", temperature=0.1
+    )
+    changed_rubric_text = Judge(
+        provider=FakeProvider("{}"),
+        model="judge-a",
+        rubric=Rubric(
+            name=DEFAULT_RUBRIC.name,
+            version=DEFAULT_RUBRIC.version,
+            dimensions=(RubricDimension("relevance", "A changed definition."),),
+        ),
+    )
+
+    fingerprints = {
+        judge.evaluator_identity()["evaluator_fingerprint"]
+        for judge in (base, changed_temperature, changed_rubric_text)
+    }
+
+    assert len(fingerprints) == 3
 
 
 def test_judge_tolerates_code_fence_wrapper():
@@ -86,3 +119,22 @@ def test_ensemble_tie_becomes_unclear():
     ]
     j = JudgeEnsemble(judges).judge(query="q", response="r")
     assert all(d.verdict == Verdict.UNCLEAR for d in j.dimensions)
+
+
+def test_ensemble_rejects_same_named_dimensions_with_different_context_contracts():
+    first = Rubric(
+        name="same",
+        version="1",
+        dimensions=(RubricDimension("quality", "definition", requires_context=False),),
+    )
+    second = Rubric(
+        name="same",
+        version="1",
+        dimensions=(RubricDimension("quality", "definition", requires_context=True),),
+    )
+
+    with pytest.raises(ValueError, match="same rubric"):
+        JudgeEnsemble([
+            Judge(FakeProvider("{}"), "a", rubric=first),
+            Judge(FakeProvider("{}"), "b", rubric=second),
+        ])

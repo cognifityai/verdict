@@ -20,6 +20,20 @@ Binary dimensions are preferred over broad numeric scales because they are easie
 to calibrate, easier for humans to label consistently, and better suited to
 pass-rate drift detection.
 
+PASS rate is defined once as `PASS / (PASS + FAIL)`. `UNCLEAR`, missing
+dimensions, malformed output normalized to `UNCLEAR`, and judge errors are
+reported as coverage states and do not enter that denominator. No scored values
+means unavailable, not zero percent.
+
+The measuring instrument is a complete evaluator identity: provider, model
+list, rubric name/version, behavior-relevant configuration, expected dimensions,
+and a SHA-256 fingerprint over the effective rubric plus system/user prompt
+templates. Pipeline reuse, drift windows, persisted drift signals, correlator
+input, dashboard summaries, and sampled trace judgments must describe one such
+identity. Historical rows without complete fields stay labeled incomplete and
+are not combined with complete identities. The latest attempt per trace wins;
+a latest error is coverage failure and may be retried later.
+
 Bias mitigations:
 
 1. **Position swap** for pairwise judgment. If order changes the result, treat
@@ -42,6 +56,19 @@ alerts or model rankings:
 5. Treat low-agreement dimensions as review-only until the rubric, judge model,
    or label set improves.
 
+For recurring monitoring, the runner can evaluate a fixed human-labeled JSONL
+sentinel set. It stores only the aggregate, evaluator fingerprint, and sentinel-
+set fingerprint in a separate `evaluator_health` record. `healthy` requires both
+the configured minimum independently judged example count and a 95% Wilson
+confidence-interval lower bound at or above the configured agreement threshold.
+An example is correct only when every declared label matches. The interval and
+health gate therefore use exact-match examples; label-level agreement is stored
+and displayed separately as a diagnostic. Legacy label-only health rows remain
+explicitly unavailable for health gating. When the caller supplies a sentinel set, a
+non-healthy aggregate is persisted and blocks production judging and drift with
+exit status 2. This is an anchor, not a guarantee: unchanged sentinel agreement
+cannot exclude silent changes elsewhere in the provider's behavior.
+
 Pairwise model ranking is a different task from binary rubric drift. It should be
 validated separately with `scripts/verify_judge_alignment.py` or a customer-owned
 labeled comparison set.
@@ -51,6 +78,10 @@ labeled comparison set.
 - Verdict does not assume a judge is universally correct.
 - Calibration data is workload-specific.
 - Rubric versions should be tracked when alerts or reports depend on them.
+- Provider/model names alone are insufficient evaluator identity. Local prompt,
+  rubric, and configuration changes must change the fingerprint; a fixed
+  sentinel set is still needed to observe provider-side changes that happen
+  without a local identity change.
 - Deterministic checks should be used where they are more reliable than a judge,
   especially for schema validity, exact math, and executable code behavior.
 

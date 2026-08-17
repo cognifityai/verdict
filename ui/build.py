@@ -11,6 +11,7 @@ Run from the repository root:
 """
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -22,7 +23,14 @@ PAGES = {
 }
 
 
+def asset_url(filename: str) -> str:
+    digest = hashlib.sha256((HERE / "assets" / filename).read_bytes()).hexdigest()[:12]
+    return f"assets/{filename}?v={digest}"
+
+
 def page(title: str, script: str) -> str:
+    stylesheet_url = asset_url("verdict.css")
+    script_url = asset_url(script)
     return f'''<!doctype html>
 <html lang="en">
 <head>
@@ -30,11 +38,11 @@ def page(title: str, script: str) -> str:
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <meta name="color-scheme" content="dark" />
 <title>{title}</title>
-<link rel="stylesheet" href="assets/verdict.css" />
+<link rel="stylesheet" href="{stylesheet_url}" />
 </head>
 <body>
 <div id="root"><div id="loading">Loading...</div></div>
-<script type="module" src="assets/{script}"></script>
+<script type="module" src="{script_url}"></script>
 </body>
 </html>
 '''

@@ -15,8 +15,10 @@ from __future__ import annotations
 
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 
-from verdict.schema import Trace
+import pytest
+from verdict.schema import DriftRun, DriftSignal, Trace
 from verdict.storage.buffered import BufferedStorage
 from verdict.storage.memory import InMemoryStorage
 
@@ -44,6 +46,29 @@ def test_writes_visible_after_flush():
         assert len(inner.list_traces(limit=1000)) == 50
         assert buf.written == 50
         assert buf.write_errors == 0
+    finally:
+        buf.close()
+
+
+def test_each_queued_operation_reaches_inner_exactly_once():
+    """Idempotent upserts must not hide duplicate worker invocations."""
+    class CountingInner(InMemoryStorage):
+        def __init__(self) -> None:
+            super().__init__()
+            self.insert_calls = 0
+
+        def insert_trace(self, trace: Trace) -> None:
+            self.insert_calls += 1
+            super().insert_trace(trace)
+
+    inner = CountingInner()
+    buf = BufferedStorage(inner, flush_interval=10.0, batch_size=100)
+    try:
+        buf.insert_trace(_trace("exactly-once"))
+        buf.flush()
+
+        assert inner.insert_calls == 1
+        assert buf.written == 1
     finally:
         buf.close()
 
@@ -219,12 +244,266 @@ def test_background_exception_counted_thread_survives():
 
 
 # ---------------------------------------------------------------------------
+# 6. flush() is a point-in-time barrier, not a wait for future producers
+# ---------------------------------------------------------------------------
+
+def test_flush_does_not_wait_for_writes_enqueued_after_its_barrier():
+    """A live producer must not be able to extend an in-progress flush forever."""
+    inner = InMemoryStorage()
+    first_started = threading.Event()
+    release_first = threading.Event()
+    late_started = threading.Event()
+    release_late = threading.Event()
+    real_insert = inner.insert_trace
+
+    def controlled_insert(trace: Trace) -> None:
+        if trace.trace_id == "first":
+            first_started.set()
+            assert release_first.wait(timeout=2.0)
+        elif trace.trace_id == "late":
+            late_started.set()
+            assert release_late.wait(timeout=2.0)
+        real_insert(trace)
+
+    inner.insert_trace = controlled_insert  # type: ignore[method-assign]
+    buf = BufferedStorage(inner, flush_interval=10.0, batch_size=100)
+    flush_returned = threading.Event()
+    late_enqueue_returned = threading.Event()
+
+    def do_flush() -> None:
+        buf.flush()
+        flush_returned.set()
+
+    def enqueue_late() -> None:
+        buf.insert_trace(_trace("late"))
+        late_enqueue_returned.set()
+
+    try:
+        buf.insert_trace(_trace("first"))
+        assert first_started.wait(timeout=1.0)
+        flush_thread = threading.Thread(target=do_flush)
+        flush_thread.start()
+
+        # The flush marker is now queued behind the blocked first write.
+        deadline = time.monotonic() + 1.0
+        while buf._queue.qsize() < 1 and time.monotonic() < deadline:
+            time.sleep(0.001)
+        assert buf._queue.qsize() >= 1
+        late_thread = threading.Thread(target=enqueue_late)
+        late_thread.start()
+        assert not late_enqueue_returned.wait(timeout=0.05), (
+            "producer crossed the lifecycle boundary during flush"
+        )
+
+        release_first.set()
+        assert flush_returned.wait(timeout=1.0), (
+            "flush incorrectly waited for a write queued after its barrier"
+        )
+        flush_thread.join(timeout=1.0)
+        assert inner.get_trace("first") is not None
+
+        # The producer can enqueue only after the snapshot flush releases the
+        # lifecycle lock, so the later write cannot extend that flush.
+        assert late_enqueue_returned.wait(timeout=1.0)
+        assert late_started.wait(timeout=1.0)
+        late_thread.join(timeout=1.0)
+    finally:
+        release_first.set()
+        release_late.set()
+        buf.close()
+
+
+# ---------------------------------------------------------------------------
+# 7. Keyword-only write contracts survive the async queue
+# ---------------------------------------------------------------------------
+
+def test_delete_drift_signals_forwards_keyword_only_evaluator_filter():
+    """Buffered writes must preserve keyword-only adapter arguments.
+
+    InMemoryStorage intentionally makes ``evaluator_fingerprint`` keyword-only.
+    Passing it positionally makes the background write fail silently and leaves
+    the stale drift signal in place.
+    """
+    inner = InMemoryStorage()
+    buf = BufferedStorage(inner, flush_interval=10.0, batch_size=100)
+    start = datetime(2026, 8, 16, 12, tzinfo=timezone.utc)
+    end = start + timedelta(hours=1)
+    try:
+        for signal_id, fingerprint in (("delete-me", "eval-a"), ("keep-me", "eval-b")):
+            buf.insert_drift_signal(DriftSignal(
+                signal_id=signal_id,
+                detected_at=start,
+                evaluator_fingerprint=fingerprint,
+            ))
+
+        buf.delete_drift_signals_between(
+            start,
+            end,
+            evaluator_fingerprint="eval-a",
+        )
+
+        assert [signal.signal_id for signal in buf.list_drift_signals()] == ["keep-me"]
+        assert buf.write_errors == 0
+    finally:
+        buf.close()
+
+
+def test_flush_after_close_is_an_immediate_noop():
+    buf = BufferedStorage(InMemoryStorage(), flush_interval=0.01)
+    buf.close()
+
+    # A timeout keeps the regression test finite on the old implementation,
+    # whose worker is gone but whose flush still queues a barrier.
+    buf.flush(timeout=0.05)
+
+
+def test_reads_and_writes_after_close_raise_instead_of_touching_closed_inner():
+    buf = BufferedStorage(InMemoryStorage(), flush_interval=0.01)
+    buf.close()
+
+    with pytest.raises(RuntimeError, match="closed"):
+        buf.insert_trace(_trace("after-close"))
+    with pytest.raises(RuntimeError, match="closed"):
+        buf.trace_exists("after-close")
+
+
+def test_close_drains_accepted_write_and_rejects_concurrent_late_operations():
+    class ControlledInner(InMemoryStorage):
+        def __init__(self) -> None:
+            super().__init__()
+            self.write_started = threading.Event()
+            self.release_write = threading.Event()
+            self.close_calls = 0
+
+        def insert_trace(self, trace: Trace) -> None:
+            self.write_started.set()
+            assert self.release_write.wait(timeout=2.0)
+            super().insert_trace(trace)
+
+        def close(self) -> None:
+            self.close_calls += 1
+
+    inner = ControlledInner()
+    buf = BufferedStorage(inner, flush_interval=10.0)
+    buf.insert_trace(_trace("accepted-before-close"))
+    assert inner.write_started.wait(timeout=1.0)
+
+    close_returned = threading.Event()
+    close_thread = threading.Thread(
+        target=lambda: (buf.close(), close_returned.set())
+    )
+    close_thread.start()
+    deadline = time.monotonic() + 1.0
+    while not buf._closed and time.monotonic() < deadline:
+        time.sleep(0.001)
+    assert buf._closed
+
+    late_errors = []
+
+    def late_write() -> None:
+        try:
+            buf.insert_trace(_trace("late-write"))
+        except Exception as exc:  # assertion inspects the exact type below
+            late_errors.append(exc)
+
+    def late_read() -> None:
+        try:
+            buf.trace_exists("accepted-before-close")
+        except Exception as exc:  # assertion inspects the exact type below
+            late_errors.append(exc)
+
+    late_threads = [
+        threading.Thread(target=late_write),
+        threading.Thread(target=late_read),
+    ]
+    for thread in late_threads:
+        thread.start()
+    assert not close_returned.wait(timeout=0.05)
+
+    inner.release_write.set()
+    assert close_returned.wait(timeout=1.0)
+    close_thread.join(timeout=1.0)
+    for thread in late_threads:
+        thread.join(timeout=1.0)
+
+    assert inner.get_trace("accepted-before-close") is not None
+    assert inner.get_trace("late-write") is None
+    assert len(late_errors) == 2
+    assert all(isinstance(error, RuntimeError) for error in late_errors)
+    assert inner.close_calls == 1
+    assert not buf._thread.is_alive()
+
+
+def test_concurrent_close_calls_close_inner_once():
+    class CountingCloseInner(InMemoryStorage):
+        def __init__(self) -> None:
+            super().__init__()
+            self.close_calls = 0
+
+        def close(self) -> None:
+            self.close_calls += 1
+
+    inner = CountingCloseInner()
+    buf = BufferedStorage(inner, flush_interval=0.01)
+    gate = threading.Barrier(3)
+
+    def close_together() -> None:
+        gate.wait()
+        buf.close()
+
+    threads = [threading.Thread(target=close_together) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    gate.wait()
+    for thread in threads:
+        thread.join(timeout=1.0)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert inner.close_calls == 1
+
+
+def test_buffered_drift_run_replacement_is_one_synchronous_inner_operation():
+    class CountingRunInner(InMemoryStorage):
+        def __init__(self) -> None:
+            super().__init__()
+            self.replace_calls = 0
+
+        def replace_drift_run(self, run, signals) -> None:
+            self.replace_calls += 1
+            super().replace_drift_run(run, signals)
+
+    inner = CountingRunInner()
+    buf = BufferedStorage(inner, flush_interval=10.0)
+    run = DriftRun(
+        run_id="buffered-run",
+        evaluator_fingerprint="buffered-evaluator",
+        signal_count=1,
+    )
+    signal = DriftSignal(
+        signal_id="buffered-signal",
+        evaluator_fingerprint=run.evaluator_fingerprint,
+        run_id=run.run_id,
+    )
+    try:
+        buf.replace_drift_run(run, [signal])
+        snapshot = inner.get_latest_drift_run_snapshot(run.evaluator_fingerprint)
+
+        assert inner.replace_calls == 1
+        assert snapshot is not None
+        assert [item.signal_id for item in snapshot[1]] == [signal.signal_id]
+        assert buf.enqueued == 0
+    finally:
+        buf.close()
+
+
+# ---------------------------------------------------------------------------
 # Standalone harness (stdlib only) — runs every test above and reports.
 # ---------------------------------------------------------------------------
 
 def _run_all() -> int:
     tests = [
         test_writes_visible_after_flush,
+        test_each_queued_operation_reaches_inner_exactly_once,
         test_many_concurrent_writers_all_land,
         test_read_after_write_via_get_trace,
         test_read_after_write_via_list,
@@ -232,6 +511,13 @@ def _run_all() -> int:
         test_close_flushes_remaining_observable,
         test_queue_full_falls_back_to_sync_no_loss,
         test_background_exception_counted_thread_survives,
+        test_flush_does_not_wait_for_writes_enqueued_after_its_barrier,
+        test_delete_drift_signals_forwards_keyword_only_evaluator_filter,
+        test_flush_after_close_is_an_immediate_noop,
+        test_reads_and_writes_after_close_raise_instead_of_touching_closed_inner,
+        test_close_drains_accepted_write_and_rejects_concurrent_late_operations,
+        test_concurrent_close_calls_close_inner_once,
+        test_buffered_drift_run_replacement_is_one_synchronous_inner_operation,
     ]
     failures = 0
     for t in tests:

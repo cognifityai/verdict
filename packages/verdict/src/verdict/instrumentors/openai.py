@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import random
 import time
 from datetime import datetime, timezone
@@ -13,9 +14,10 @@ from verdict.instrumentors.base import (
     decide_persist,
     is_verdict_wrapt_wrapper,
     normalize_finish_reason,
+    persist_trace,
 )
 from verdict.pricing import compute_cost_usd
-from verdict.redaction import redact, redact_messages
+from verdict.redaction import redact, redact_messages, sanitize_trace
 from verdict.schema import Operation, Trace
 
 # Dedicated RNG so an app calling random.seed() can't perturb our sampling.
@@ -254,7 +256,12 @@ class OpenAIInstrumentor(BaseInstrumentor):
 
     def _safe_persist(self, trace: Trace) -> None:
         try:
-            self.client.storage.insert_trace(trace)
+            sanitize_trace(
+                trace,
+                mode=self.client.redaction_mode,  # type: ignore[arg-type]
+                secret=self.client.redaction_secret,
+            )
+            persist_trace(self.client, trace)
         except Exception:
             pass
 
@@ -264,9 +271,9 @@ class _StreamingWrapper:
 
     Yields every upstream chunk unchanged so the caller's streaming UX is
     preserved, while accumulating text + finish_reason + (optional) usage for
-    the trace. Finalizes in a `finally` so a cancelled / partially-consumed
-    stream still records. A mid-stream raise is recorded as an error, not a
-    truncated success. Mirrors Anthropic's _StreamingWrapper.
+    the trace. Normal exhaustion, iteration failure, explicit close, and context
+    exit finalize deterministically. Async cancellation is recorded as an error.
+    A dropped, never-iterated stream is not a supported finalization boundary.
 
     Token usage on streamed responses is only present when the caller passes
     ``stream_options={"include_usage": True}`` (the SDK then emits a final
@@ -274,7 +281,7 @@ class _StreamingWrapper:
     available we record text + finish_reason and leave tokens None.
     """
 
-    def __init__(self, inner: Any, trace: Trace, t0: float, instr: "OpenAIInstrumentor") -> None:
+    def __init__(self, inner: Any, trace: Trace, t0: float, instr: OpenAIInstrumentor) -> None:
         self._inner = inner
         self._trace = trace
         self._t0 = t0
@@ -307,14 +314,32 @@ class _StreamingWrapper:
     def __exit__(self, exc_type, exc, tb):
         if exc is not None and self._error is None:
             self._error = f"{type(exc).__name__}: {exc}"
+        suppressed = False
         if hasattr(self._inner, "__exit__"):
             try:
-                self._inner.__exit__(exc_type, exc, tb)
+                suppressed = bool(self._inner.__exit__(exc_type, exc, tb))
+            except Exception as inner_exc:
+                if self._error is None:
+                    self._error = f"{type(inner_exc).__name__}: {inner_exc}"
+                raise
             finally:
                 self._finalize()
         else:
             self._finalize()
-        return False
+        return suppressed
+
+    def close(self) -> None:
+        """Close the upstream stream and finalize this trace exactly once."""
+        try:
+            inner_close = getattr(self._inner, "close", None)
+            if inner_close is not None:
+                inner_close()
+        except Exception as exc:
+            if self._error is None:
+                self._error = f"{type(exc).__name__}: {exc}"
+            raise
+        finally:
+            self._finalize()
 
     def _on_chunk(self, chunk: Any) -> None:
         try:
@@ -390,6 +415,9 @@ class _AsyncStreamingWrapper(_StreamingWrapper):
             async for chunk in self._inner:
                 self._on_chunk(chunk)
                 yield chunk
+        except asyncio.CancelledError as e:
+            self._error = f"{type(e).__name__}: {e}"
+            raise
         except Exception as e:
             self._error = f"{type(e).__name__}: {e}"
             raise
@@ -404,11 +432,41 @@ class _AsyncStreamingWrapper(_StreamingWrapper):
     async def __aexit__(self, exc_type, exc, tb):
         if exc is not None and self._error is None:
             self._error = f"{type(exc).__name__}: {exc}"
+        suppressed = False
         if hasattr(self._inner, "__aexit__"):
             try:
-                await self._inner.__aexit__(exc_type, exc, tb)
+                suppressed = bool(await self._inner.__aexit__(exc_type, exc, tb))
+            except asyncio.CancelledError as inner_exc:
+                if self._error is None:
+                    self._error = f"{type(inner_exc).__name__}: {inner_exc}"
+                raise
+            except Exception as inner_exc:
+                if self._error is None:
+                    self._error = f"{type(inner_exc).__name__}: {inner_exc}"
+                raise
             finally:
                 self._finalize()
         else:
             self._finalize()
-        return False
+        return suppressed
+
+    async def aclose(self) -> None:
+        """Close the upstream async stream and finalize this trace exactly once."""
+        try:
+            inner_aclose = getattr(self._inner, "aclose", None)
+            if inner_aclose is not None:
+                await inner_aclose()
+            else:
+                inner_close = getattr(self._inner, "close", None)
+                if inner_close is not None:
+                    inner_close()
+        except asyncio.CancelledError as exc:
+            if self._error is None:
+                self._error = f"{type(exc).__name__}: {exc}"
+            raise
+        except Exception as exc:
+            if self._error is None:
+                self._error = f"{type(exc).__name__}: {exc}"
+            raise
+        finally:
+            self._finalize()

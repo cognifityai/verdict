@@ -21,8 +21,8 @@ Usage:
 
 Interpretation (Landis & Koch 1977; see docs/adrs/002-judge-methodology.md):
     κ ≥ 0.80   strong agreement
-    κ 0.60–0.80   acceptable — use rankings with CIs
-    κ 0.40–0.60   preliminary — gather more data
+    κ 0.60-0.80   acceptable — use rankings with CIs
+    κ 0.40-0.60   preliminary — gather more data
     κ < 0.40    unreliable — do not rely on rankings for this judge
 """
 
@@ -540,7 +540,7 @@ def run_online(args: argparse.Namespace) -> int:
     label = {0: "A", 1: "B", 2: "T"}
     print()
     print("Confusion matrix (rows = human, cols = judge):")
-    print(f"          judge:A   judge:B   judge:T")
+    print("          judge:A   judge:B   judge:T")
     for h in range(3):
         row = f"  human:{label[h]}   "
         for jl in range(3):
@@ -589,8 +589,8 @@ def run_online(args: argparse.Namespace) -> int:
 
         Interpretation (Landis & Koch thresholds; apply to the CI LOWER bound):
           ≥ 0.80    strong
-          0.60–0.80 acceptable — use rankings with CIs
-          0.40–0.60 preliminary — gather more data
+          0.60-0.80 acceptable — use rankings with CIs
+          0.40-0.60 preliminary — gather more data
           < 0.40    unreliable — do not rely on rankings
 
         Honesty notes:
@@ -668,7 +668,7 @@ def main() -> int:
                          "assistant turns; 'legacy' reproduces the old first-user/"
                          "final-answer extraction for comparison."))
     p.add_argument("--ensemble", action="store_true",
-                   help="Use a 3-judge cross-family ensemble (more accurate, ~3× cost).")
+                   help="Use a 3-judge cross-family ensemble (more accurate, ~3x cost).")
     args = p.parse_args()
     if args.mode == "offline":
         return run_offline()

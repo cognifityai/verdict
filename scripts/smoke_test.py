@@ -6,12 +6,13 @@ scipy/sklearn. Run from repo root:
 For the full pytest suite (which exercises drift/clustering/Bradley-Terry too),
 install the heavy deps: pip install -e packages/verdict packages/verdict_eval[dev]
 """
+# Imports intentionally appear beside the sequential stage they exercise.
+# ruff: noqa: E402
 
 from __future__ import annotations
 
 import json
 import sys
-import tempfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -89,7 +90,8 @@ for label, storage in [("memory", InMemoryStorage()), ("sqlite", SQLiteStorage("
     print(f"✓ storage:{label}")
 
 # ---- 4. trace decorator ----------------------------------------------------
-from verdict.trace import current_span, span, trace as trace_decorator
+from verdict.trace import current_span, span
+from verdict.trace import trace as trace_decorator
 
 with span("retrieve", k=10) as s:
     assert current_span() is s
@@ -104,6 +106,8 @@ def add(a, b):
 assert add(1, 2) == 3
 
 import asyncio
+
+
 @trace_decorator("acompute")
 async def aadd(a, b):
     await asyncio.sleep(0)
@@ -146,6 +150,7 @@ print(f"✓ injector ({len(battery)} samples across {len(kinds)} kinds)")
 # ---- 6. judge (using FakeProvider) ----------------------------------------
 from verdict_eval.judge import DEFAULT_RUBRIC, Judge, JudgeEnsemble
 from verdict_eval.providers import FakeProvider
+
 
 def fake_payload(**verdicts) -> str:
     return json.dumps({k: {"reasoning": "r", "verdict": v} for k, v in verdicts.items()})

@@ -10,11 +10,11 @@ from verdict.storage.memory import InMemoryStorage
 from verdict.storage.sqlite import SQLiteStorage
 
 __all__ = [
-    "Storage",
-    "SQLiteStorage",
-    "InMemoryStorage",
     "BufferedStorage",
+    "InMemoryStorage",
     "PostgresStorage",
+    "SQLiteStorage",
+    "Storage",
 ]
 
 

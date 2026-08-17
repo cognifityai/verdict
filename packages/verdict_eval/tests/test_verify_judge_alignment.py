@@ -3,7 +3,6 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
-
 SCRIPT = Path(__file__).resolve().parents[3] / "scripts" / "verify_judge_alignment.py"
 SPEC = importlib.util.spec_from_file_location("verify_judge_alignment", SCRIPT)
 assert SPEC is not None

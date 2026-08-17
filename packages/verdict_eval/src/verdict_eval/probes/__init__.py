@@ -29,6 +29,8 @@ Reference probe-style methodologies:
   - OpenAI Evals (open-source) — pre-canned test suites
 """
 
+from verdict_eval.probes.library import default_suite, load_suite_yaml
+from verdict_eval.probes.runner import ProbeRunner
 from verdict_eval.probes.schema import (
     Probe,
     ProbeExpectation,
@@ -36,16 +38,14 @@ from verdict_eval.probes.schema import (
     ProbeRun,
     ProbeSuite,
 )
-from verdict_eval.probes.runner import ProbeRunner
-from verdict_eval.probes.library import default_suite, load_suite_yaml
 
 __all__ = [
     "Probe",
     "ProbeExpectation",
     "ProbeResult",
     "ProbeRun",
-    "ProbeSuite",
     "ProbeRunner",
+    "ProbeSuite",
     "default_suite",
     "load_suite_yaml",
 ]

@@ -11,7 +11,6 @@ centroid-distance effect-size floor. These tests pin that behavior:
 from __future__ import annotations
 
 import numpy as np
-
 from verdict_eval.semantic_drift import (
     SemanticDriftDetector,
     _cosine_distance,

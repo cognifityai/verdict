@@ -10,11 +10,13 @@ Decisions (see ADR-002):
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
-from dataclasses import dataclass, field
-from typing import Sequence
+from collections.abc import Sequence
+from dataclasses import dataclass
 
+from verdict.metrics import verdict_label
 from verdict.schema import DimensionScore, Judgment, Verdict
 
 from verdict_eval.providers import CompletionRequest, LLMProvider
@@ -140,6 +142,22 @@ def _user_prompt(
     return "\n".join(parts)
 
 
+def _fingerprint(payload: dict) -> str:
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _rubric_payload(rubric: Rubric) -> list[dict]:
+    return [
+        {
+            "name": dimension.name,
+            "description": dimension.description,
+            "requires_context": dimension.requires_context,
+        }
+        for dimension in rubric.dimensions
+    ]
+
+
 @dataclass
 class Judge:
     """LLM-as-judge for a single response.
@@ -172,6 +190,39 @@ class Judge:
                               dimensions=dims)
         return self.rubric
 
+    def evaluator_identity(self, context: str | None = None) -> dict:
+        """Return the complete behavior-relevant identity for one evaluation."""
+        rubric = self._effective_rubric(context)
+        provider = str(getattr(self.provider, "name", type(self.provider).__name__))
+        config = {
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
+            "skip_context_dependent_when_missing": (
+                self.skip_context_dependent_when_missing
+            ),
+        }
+        fingerprint_payload = {
+            "provider": provider,
+            "models": [self.model],
+            "rubric_name": rubric.name,
+            "rubric_version": rubric.version,
+            "rubric": _rubric_payload(rubric),
+            "system_prompt": SYSTEM_PROMPT,
+            "user_prompt_template": _user_prompt(
+                "__QUERY__", "__RESPONSE__", "__CONTEXT__", rubric
+            ),
+            "config": config,
+        }
+        return {
+            "evaluator_provider": provider,
+            "evaluator_config": config,
+            "evaluator_fingerprint": _fingerprint(fingerprint_payload),
+            "expected_dimensions": [dimension.name for dimension in rubric.dimensions],
+            "rubric_name": rubric.name,
+            "rubric_version": rubric.version,
+            "judge_models": [self.model],
+        }
+
     def judge(
         self,
         *,
@@ -182,6 +233,7 @@ class Judge:
     ) -> Judgment:
         """Run the judge on a single (query, response, optional context) tuple."""
         rubric = self._effective_rubric(context)
+        identity = self.evaluator_identity(context)
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": _user_prompt(query, response, context, rubric)},
@@ -206,10 +258,8 @@ class Judge:
         ]
         return Judgment(
             trace_id=trace_id,
-            rubric_name=rubric.name,
-            rubric_version=rubric.version,
-            judge_models=[self.model],
             dimensions=dimensions,
+            **identity,
         )
 
 
@@ -230,15 +280,41 @@ class JudgeEnsemble:
         # rubric, dimensions silently go missing and the majority denominator
         # shifts per dimension. Require a consistent rubric so the vote is sound.
         ref = self._judges[0].rubric
-        ref_dims = tuple(d.name for d in ref.dimensions)
         for j in self._judges[1:]:
             if (j.rubric.name, j.rubric.version) != (ref.name, ref.version) or \
-                    tuple(d.name for d in j.rubric.dimensions) != ref_dims:
+                    j.rubric.dimensions != ref.dimensions or \
+                    j.skip_context_dependent_when_missing != \
+                    self._judges[0].skip_context_dependent_when_missing:
                 raise ValueError(
                     "JudgeEnsemble requires all judges to share the same rubric "
-                    f"(name, version, dimensions). Got {ref.name}/{ref.version} "
+                    "and context-skip behavior. "
+                    f"Got {ref.name}/{ref.version} "
                     f"vs {j.rubric.name}/{j.rubric.version}."
                 )
+
+    @property
+    def judges(self) -> tuple[Judge, ...]:
+        """Return the panel as an immutable public view."""
+        return tuple(self._judges)
+
+    def evaluator_identity(self, context: str | None = None) -> dict:
+        component_identities = [judge.evaluator_identity(context) for judge in self._judges]
+        first = component_identities[0]
+        payload = {
+            "strategy": "majority_vote",
+            "components": component_identities,
+        }
+        return {
+            "evaluator_provider": "+".join(
+                identity["evaluator_provider"] for identity in component_identities
+            ),
+            "evaluator_config": payload,
+            "evaluator_fingerprint": _fingerprint(payload),
+            "expected_dimensions": first["expected_dimensions"],
+            "rubric_name": first["rubric_name"],
+            "rubric_version": first["rubric_version"],
+            "judge_models": [judge.model for judge in self._judges],
+        }
 
     def judge(
         self,
@@ -253,7 +329,7 @@ class JudgeEnsemble:
             for j in self._judges
         ]
         # Aggregate per-dimension by majority
-        first_rubric = self._judges[0].rubric
+        first_rubric = self._judges[0]._effective_rubric(context)
         aggregated: list[DimensionScore] = []
         for dim in first_rubric.dimensions:
             verdicts = [
@@ -281,10 +357,8 @@ class JudgeEnsemble:
             )
         return Judgment(
             trace_id=trace_id,
-            rubric_name=first_rubric.name,
-            rubric_version=first_rubric.version,
-            judge_models=[j.model for j in self._judges],
             dimensions=aggregated,
+            **self.evaluator_identity(context),
         )
 
 
@@ -339,20 +413,6 @@ def _to_verdict(s: str) -> Verdict:
     if s in {"FAIL", "FALSE", "NO", "0"}:
         return Verdict.FAIL
     return Verdict.UNCLEAR
-
-
-def verdict_label(verdict: object) -> str:
-    """Normalize a Verdict enum or raw string to 'PASS' / 'FAIL' / 'UNCLEAR'.
-
-    The Verdict enum stores lowercase values (Verdict.PASS == "pass"), so
-    naive string comparisons against "PASS" are always False. Routing every
-    consumer through this normalizer fixes that, and exposes the three-way
-    label so callers can exclude UNCLEAR from pass-rate denominators (a PASS
-    rate should be PASS / (PASS + FAIL), not PASS / total — otherwise a
-    dimension the judge can't evaluate, e.g. groundedness with no retrieved
-    context, gets miscounted as a failure).
-    """
-    return str(getattr(verdict, "value", verdict)).upper()
 
 
 def verdict_is_pass(verdict: object) -> bool:

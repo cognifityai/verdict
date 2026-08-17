@@ -33,7 +33,7 @@
   <text x="220" y="205" class="node-title" text-anchor="middle">AnthropicInstrumentor</text>
   <text x="220" y="222" class="node-sub" text-anchor="middle">sync + async + streaming</text>
   <text x="220" y="237" class="node-sub" text-anchor="middle">passthrough iterator</text>
-  <text x="220" y="252" class="node-sub" text-anchor="middle">finalize on cancellation</text>
+  <text x="220" y="252" class="node-sub" text-anchor="middle">close / context / async cancel</text>
 
   <rect x="340" y="180" width="200" height="80" rx="10" fill="#FFFFFF" stroke="#0B1730" stroke-width="1.5"/>
   <text x="440" y="205" class="node-title" text-anchor="middle">OpenAIInstrumentor</text>
@@ -50,11 +50,13 @@
   <text x="880" y="205" class="node-title" text-anchor="middle">@verdict.trace decorator</text>
   <text x="880" y="222" class="node-sub" text-anchor="middle">manual instrumentation for</text>
   <text x="880" y="237" class="node-sub" text-anchor="middle">RAG, tools, business logic</text>
+  <text x="880" y="252" class="node-sub" text-anchor="middle">Trace → parent span ID</text>
 
   <rect x="1000" y="180" width="180" height="80" rx="10" fill="#0B1730"/>
   <text x="1090" y="205" class="node-title" text-anchor="middle" style="fill:#F5F7FA">PII Redaction</text>
-  <text x="1090" y="222" class="node-sub" text-anchor="middle" style="fill:#00C2FF">regex + Luhn</text>
-  <text x="1090" y="237" class="node-sub" text-anchor="middle" style="fill:#00C2FF">redact · hash</text>
+  <text x="1090" y="222" class="node-sub" text-anchor="middle" style="fill:#00C2FF">scanner + regex + Luhn</text>
+  <text x="1090" y="237" class="node-sub" text-anchor="middle" style="fill:#00C2FF">recursive JSON · redact / hash</text>
+  <text x="1090" y="252" class="node-sub" text-anchor="middle" style="fill:#00C2FF">best effort · fail closed</text>
 
   <line x1="380" y1="150" x2="220" y2="180" class="arrow-cyan" marker-end="url(#arrow-cyan)"/>
   <line x1="380" y1="150" x2="440" y2="180" class="arrow-cyan" marker-end="url(#arrow-cyan)"/>
@@ -82,7 +84,7 @@
   <rect x="780" y="300" width="380" height="80" rx="10" fill="#FFFFFF" stroke="#0B1730" stroke-width="1.5" stroke-dasharray="4 4"/>
   <text x="970" y="325" class="node-title" text-anchor="middle">Storage Protocol + BufferedStorage</text>
   <text x="970" y="343" class="node-sub" text-anchor="middle">optional background batched writes</text>
-  <text x="970" y="358" class="node-sub" text-anchor="middle">traces · judgments · signals · evidence IDs</text>
+  <text x="970" y="358" class="node-sub" text-anchor="middle">traces · evaluator IDs · signals · evidence IDs</text>
   <text x="970" y="373" class="node-sub" text-anchor="middle">delete / prune · persistent cluster registry</text>
 
   <line x1="220" y1="260" x2="220" y2="300" class="arrow-cyan" marker-end="url(#arrow-cyan)"/>
@@ -96,8 +98,8 @@
   <text x="220" y="445" class="node-title" text-anchor="middle">Judge (single)</text>
   <text x="220" y="463" class="node-sub" text-anchor="middle">5-dim binary rubric</text>
   <text x="220" y="478" class="node-sub" text-anchor="middle">short rationale + verdict</text>
-  <text x="220" y="493" class="node-sub" text-anchor="middle">JSON output, fault-tolerant</text>
-  <text x="220" y="508" class="node-sub" text-anchor="middle">JudgeEnsemble for cross-family</text>
+  <text x="220" y="493" class="node-sub" text-anchor="middle">prompt/rubric fingerprint</text>
+  <text x="220" y="508" class="node-sub" text-anchor="middle">sentinel health · ensemble option</text>
 
   <rect x="340" y="420" width="200" height="100" rx="10" fill="#FFFFFF" stroke="#0B1730" stroke-width="1.5"/>
   <text x="440" y="445" class="node-title" text-anchor="middle">PairwiseJudge</text>
@@ -165,13 +167,13 @@
   <rect x="840" y="680" width="340" height="80" rx="10" fill="#FFFFFF" stroke="#0B1730" stroke-width="1.5"/>
   <text x="1010" y="705" class="node-title" text-anchor="middle">Test suite</text>
   <text x="1010" y="723" class="node-sub" text-anchor="middle">pytest suite for SDK, eval, and inspect packages</text>
-  <text x="1010" y="738" class="node-sub" text-anchor="middle">GitHub Actions CI on push/PR (Python 3.10/3.11/3.12)</text>
+  <text x="1010" y="738" class="node-sub" text-anchor="middle">CI: Python 3.10/3.11/3.12 · Ruff · live PostgreSQL 16</text>
 
   <!-- LOCAL DASHBOARD -->
   <text x="40" y="780" class="plane">LOCAL DASHBOARD</text>
   <rect x="220" y="790" width="280" height="70" rx="10" fill="#FFFFFF" stroke="#0B1730" stroke-width="1.5"/>
   <text x="360" y="815" class="node-title" text-anchor="middle">FastAPI read API</text>
-  <text x="360" y="833" class="node-sub" text-anchor="middle">explicit DB selection · optional Basic Auth</text>
+  <text x="360" y="833" class="node-sub" text-anchor="middle">SQLite read view · optional Basic Auth</text>
   <text x="360" y="848" class="node-sub" text-anchor="middle">localhost / trusted-network scope</text>
 
   <rect x="520" y="790" width="280" height="70" rx="10" fill="#FFFFFF" stroke="#0B1730" stroke-width="1.5"/>
@@ -181,6 +183,6 @@
 
   <rect x="820" y="790" width="280" height="70" rx="10" fill="#FFFFFF" stroke="#0B1730" stroke-width="1.5"/>
   <text x="960" y="815" class="node-title" text-anchor="middle">Operational review view</text>
-  <text x="960" y="833" class="node-sub" text-anchor="middle">traffic · clusters · quality · signals</text>
+  <text x="960" y="833" class="node-sub" text-anchor="middle">evaluator-scoped quality · drift signals</text>
   <text x="960" y="848" class="node-sub" text-anchor="middle">current-window evidence trace IDs</text>
 </svg>

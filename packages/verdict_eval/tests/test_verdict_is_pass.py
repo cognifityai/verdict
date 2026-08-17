@@ -9,7 +9,6 @@ verdict_is_pass() is the canonical fix; this test locks the behavior down.
 from __future__ import annotations
 
 from verdict.schema import Verdict
-
 from verdict_eval.judge import verdict_is_pass, verdict_label
 
 
@@ -49,8 +48,8 @@ def test_unclear_excluded_from_pass_rate() -> None:
     """A dimension the judge can't evaluate (all UNCLEAR) yields no applicable
     judgments, so pass rate is None — not a misleading 0%."""
     labels = [verdict_label(v) for v in (Verdict.UNCLEAR, Verdict.UNCLEAR)]
-    applicable = sum(1 for l in labels if l in ("PASS", "FAIL"))
-    passes = sum(1 for l in labels if l == "PASS")
+    applicable = sum(1 for label in labels if label in ("PASS", "FAIL"))
+    passes = sum(1 for label in labels if label == "PASS")
     rate = (passes / applicable) if applicable else None
     assert rate is None
 

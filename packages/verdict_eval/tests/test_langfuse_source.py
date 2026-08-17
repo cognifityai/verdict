@@ -17,7 +17,6 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
-
 from verdict.schema import Operation, Trace
 from verdict_eval.langfuse_source import LangfuseSource
 

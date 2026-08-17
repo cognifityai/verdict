@@ -73,3 +73,13 @@ raw.jsonl
 labels.jsonl
 *.labels.jsonl
 live_capture_check.db
+
+# review scratch (auto-added)
+_review*
+_rev*
+_snap*
+_verdict_src*
+_verdict_snapshot*
+_r*.tgz
+_r*.txt
+_to_delete/

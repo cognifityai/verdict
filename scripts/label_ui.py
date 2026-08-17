@@ -122,7 +122,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path not in ("/", "/index.html"):
-            self.send_response(404); self.end_headers(); return
+            self.send_response(404)
+            self.end_headers()
+            return
         rows = _load(FILE_PATH)
         data = json.dumps(rows).replace("</", "<\\/")
         html = _PAGE.replace("__DATA__", data).replace("__DIMS__", json.dumps(DIMENSIONS))
@@ -135,14 +137,20 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         if self.path != "/save":
-            self.send_response(404); self.end_headers(); return
+            self.send_response(404)
+            self.end_headers()
+            return
         n = int(self.headers.get("Content-Length", 0))
         try:
             rows = json.loads(self.rfile.read(n).decode("utf-8"))
             _save(FILE_PATH, rows)
-            self.send_response(200); self.end_headers(); self.wfile.write(b"ok")
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"ok")
         except Exception as e:
-            self.send_response(500); self.end_headers(); self.wfile.write(str(e).encode())
+            self.send_response(500)
+            self.end_headers()
+            self.wfile.write(str(e).encode())
 
 
 def main() -> int:
@@ -156,7 +164,8 @@ def main() -> int:
     try:
         rows = _load(FILE_PATH)
     except OSError as e:
-        print(f"Could not read {FILE_PATH!r}: {e}"); return 1
+        print(f"Could not read {FILE_PATH!r}: {e}")
+        return 1
     _save(FILE_PATH, rows)  # normalize (adds label slots if it was raw.jsonl)
     srv = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     url = f"http://127.0.0.1:{args.port}/"

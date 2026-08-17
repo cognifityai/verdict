@@ -11,9 +11,7 @@ from __future__ import annotations
 import random
 
 import pytest
-
 from verdict.instrumentors.base import decide_persist, normalize_finish_reason
-
 
 # ---------------------------------------------------------------------------
 # normalize_finish_reason
@@ -133,6 +131,60 @@ def test_openai_flatten_handles_list_content():
     assert _flatten_content(None) == ""
 
 
+def test_openai_input_trace_recursively_redacts_tool_arguments_before_persistence():
+    from verdict.client import VerdictClient
+    from verdict.instrumentors.openai import OpenAIInstrumentor
+    from verdict.storage.memory import InMemoryStorage
+
+    canary = "tool-secret@example.com"
+    client = VerdictClient(storage=InMemoryStorage(), capture_content=True)
+    instrumentor = OpenAIInstrumentor(client)
+
+    trace = instrumentor._build_input_trace({
+        "model": "custom-model",
+        "messages": [{
+            "role": "assistant",
+            "content": "safe",
+            "tool_calls": [{
+                "type": "function",
+                "function": {
+                    "name": "lookup",
+                    "arguments": f'{{"email": "{canary}"}}',
+                },
+            }],
+            "metadata": {"contact": canary},
+        }],
+    })
+
+    assert canary not in repr(trace.raw_messages)
+    assert trace.raw_messages[0]["tool_calls"][0]["function"]["name"] == "lookup"
+
+
+def test_provider_exception_content_is_redacted_before_storage():
+    from verdict.client import VerdictClient
+    from verdict.instrumentors.anthropic import AnthropicInstrumentor
+    from verdict.storage.memory import InMemoryStorage
+
+    storage = InMemoryStorage()
+    instrumentor = AnthropicInstrumentor(VerdictClient(storage=storage))
+    canary = "provider-error@example.com"
+
+    def raises(*args, **kwargs):
+        raise RuntimeError(f"request failed for {canary}")
+
+    with pytest.raises(RuntimeError, match="request failed"):
+        instrumentor._wrap_create_sync(
+            raises,
+            None,
+            (),
+            {"model": "claude-test", "max_tokens": 8, "messages": []},
+        )
+
+    [trace] = storage.list_traces()
+    assert canary not in trace.error
+    assert "<EMAIL>" in trace.error
+
+
 def test_anthropic_flatten_handles_list_content():
     from verdict.instrumentors.anthropic import _flatten_content
 
@@ -192,7 +244,6 @@ def test_native_sdk_wrapped_attribute_does_not_skip_install_guard():
 
 def test_verdict_wrapt_wrapper_is_detected_for_double_wrap_guard():
     import wrapt
-
     from verdict.instrumentors.anthropic import AnthropicInstrumentor
     from verdict.instrumentors.anthropic import _is_wrapped as anthropic_is_wrapped
     from verdict.instrumentors.base import is_verdict_wrapt_wrapper
@@ -213,7 +264,7 @@ def test_verdict_wrapt_wrapper_is_detected_for_double_wrap_guard():
         Messages = FakeWrappedSDKMethods
         Completions = FakeWrappedSDKMethods
 
-    bound = getattr(FakeWrappedSDKMethods, "create")
+    bound = FakeWrappedSDKMethods.create
     assert is_verdict_wrapt_wrapper(bound)
     assert is_verdict_wrapt_wrapper(bound, owner=instr)
     assert not is_verdict_wrapt_wrapper(bound, owner=object())

@@ -34,7 +34,7 @@ def is_verdict_wrapt_wrapper(obj: object, *, owner: object | None = None) -> boo
     return owner_cls.__module__.startswith("verdict.instrumentors.")
 
 
-def apply_routing_context(client: "VerdictClient", trace: "Trace") -> None:
+def apply_routing_context(client: VerdictClient, trace: Trace) -> None:
     """Stamp tenant_id (from client config) and session_id / user_id_hash (from
     the per-request contextvars) onto a freshly built trace.
 
@@ -54,8 +54,22 @@ def apply_routing_context(client: "VerdictClient", trace: "Trace") -> None:
         uid = get_context_user_id_hash()
         if uid is not None:
             trace.user_id_hash = uid
+
+        # Automatic provider/manual-span correlation is deliberately one-way.
+        # Multiple provider traces can share one manual parent, so choosing one
+        # Trace as a reverse SpanRecord.trace_id owner would be lossy.
+        from verdict.trace import current_span
+
+        parent_span = current_span()
+        if parent_span is not None:
+            trace.parent_span_id = parent_span.span_id
     except Exception:
         pass
+
+
+def persist_trace(client: VerdictClient, trace: Trace) -> None:
+    """Persist a provider trace; parent_span_id already carries correlation."""
+    client.storage.insert_trace(trace)
 
 
 def normalize_finish_reason(raw: object) -> str | None:
@@ -114,7 +128,7 @@ class BaseInstrumentor(abc.ABC):
 
     name: str = ""
 
-    def __init__(self, client: "VerdictClient") -> None:
+    def __init__(self, client: VerdictClient) -> None:
         self.client = client
         self._installed: bool = False
 

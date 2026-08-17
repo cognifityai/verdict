@@ -10,7 +10,37 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Protocol, runtime_checkable
 
-from verdict.schema import DriftSignal, Judgment, SpanRecord, Trace, UserSignalRecord
+from verdict.schema import (
+    DriftRun,
+    DriftSignal,
+    EvaluatorHealthRecord,
+    Judgment,
+    SpanRecord,
+    Trace,
+    UserSignalRecord,
+)
+
+
+def _validate_drift_run_snapshot(
+    run: DriftRun,
+    signals: list[DriftSignal],
+) -> None:
+    """Validate a completed run before any adapter mutates durable state."""
+    if run.signal_count != len(signals):
+        raise ValueError(
+            "drift run signal_count does not match the provided signal list"
+        )
+    signal_ids: set[str] = set()
+    for signal in signals:
+        if signal.run_id != run.run_id:
+            raise ValueError("every drift signal must reference the owning run_id")
+        if signal.evaluator_fingerprint != run.evaluator_fingerprint:
+            raise ValueError(
+                "every drift signal must match the run evaluator_fingerprint"
+            )
+        if signal.signal_id in signal_ids:
+            raise ValueError("drift run contains duplicate signal_id values")
+        signal_ids.add(signal.signal_id)
 
 
 @runtime_checkable
@@ -23,6 +53,8 @@ class Storage(Protocol):
     def insert_trace(self, trace: Trace) -> None: ...
 
     def get_trace(self, trace_id: str) -> Trace | None: ...
+
+    def trace_exists(self, trace_id: str) -> bool: ...
 
     def list_traces(
         self,
@@ -46,10 +78,28 @@ class Storage(Protocol):
         limit: int = 1000,
     ) -> list[Judgment]: ...
 
+    def insert_evaluator_health(self, record: EvaluatorHealthRecord) -> None: ...
+
+    def list_evaluator_health(
+        self, *, evaluator_fingerprint: str | None = None, limit: int = 100,
+    ) -> list[EvaluatorHealthRecord]: ...
+
     def insert_drift_signal(self, signal: DriftSignal) -> None: ...
 
+    def replace_drift_run(
+        self, run: DriftRun, signals: list[DriftSignal],
+    ) -> None: ...
+
+    def get_latest_drift_run_snapshot(
+        self, evaluator_fingerprint: str,
+    ) -> tuple[DriftRun, list[DriftSignal]] | None: ...
+
     def delete_drift_signals_between(
-        self, start: datetime, end: datetime,
+        self,
+        start: datetime,
+        end: datetime,
+        *,
+        evaluator_fingerprint: str | None = None,
     ) -> None: ...
 
     def list_drift_signals(self, *, limit: int = 100) -> list[DriftSignal]: ...

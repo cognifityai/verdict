@@ -1,10 +1,8 @@
 from verdict_eval.injector import (
-    CorruptedSample,
     CorruptionInjector,
     CorruptionKind,
     build_corruption_battery,
 )
-
 
 SAMPLE_Q = "What is the capital of France?"
 SAMPLE_R = "The capital of France is Paris, located in the north of the country."
@@ -66,7 +64,7 @@ def test_deterministic_with_seed():
 def test_build_corruption_battery_includes_baseline_and_all_kinds():
     samples = [(SAMPLE_Q, SAMPLE_R), ("What's 2+2?", "Two plus two equals four.")]
     battery = build_corruption_battery(samples, strengths=[1.0])
-    # 2 inputs × (1 baseline + 7 kinds × 1 strength) = 16
+    # 2 inputs x (1 baseline + 7 kinds x 1 strength) = 16
     assert len(battery) == 2 * (1 + 7)
     kinds = {s.kind for s in battery}
     # All categories should appear

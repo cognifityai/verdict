@@ -37,8 +37,9 @@ Statistical methodology (June 2026 refresh):
   edges for continuous data, so it stays meaningful on PASS/FAIL instead of
   degenerating to two populated bins. Reported, does not gate.
 
-- **Benjamini-Hochberg** (1995) — False Discovery Rate control across multiple
-  simultaneous tests. Still the standard.
+- **Benjamini-Hochberg** (1995) — False Discovery Rate control across every
+  eligible scored (cluster, dimension) hypothesis in one `detect()` invocation.
+  Fisher and Mann-Whitney p-values share that detection-run family.
 
 A DriftSignal is emitted when:
   BH-adjusted p < p_threshold  AND  |Cliff's δ| > effect_size_threshold
@@ -57,7 +58,8 @@ from datetime import datetime, timedelta, timezone
 
 import numpy as np
 from scipy.stats import fisher_exact, mannwhitneyu, wasserstein_distance
-from verdict.schema import DriftDirection, DriftSignal, Judgment, Verdict
+from verdict.metrics import verdict_label
+from verdict.schema import DriftDirection, DriftSignal, Judgment
 
 log = logging.getLogger("verdict_eval.drift")
 
@@ -230,26 +232,21 @@ class DriftDetector:
         if not raw_results:
             return unclear_signals
 
-        # Benjamini-Hochberg adjustment. BH assumes the p-values in a family
-        # come from exchangeable tests; pooling Fisher's-exact and Mann-Whitney
-        # p-values into one family violates that. So we group by the test that
-        # produced each p-value and run BH separately within each group, then
-        # recombine into the original order.
-        adjusted = [1.0] * len(raw_results)
-        groups: dict[str, list[int]] = {}
-        for i, r in enumerate(raw_results):
-            groups.setdefault(r["stat_name"], []).append(i)
-        for idxs in groups.values():
-            group_adj = _benjamini_hochberg([raw_results[i]["p"] for i in idxs])
-            for i, p_adj in zip(idxs, group_adj, strict=True):
-                adjusted[i] = p_adj
+        # One detect() invocation is one declared hypothesis family: every
+        # eligible scored (cluster, dimension) comparison that could emit a
+        # production alert. Valid p-values from Fisher's exact and Mann-Whitney
+        # may be pooled under BH; splitting by test implementation would shrink
+        # the correction opportunistically as data types change. UNCLEAR-rate
+        # alerts use a deterministic effect threshold, not p-values, so they are
+        # not part of this family.
+        adjusted = _benjamini_hochberg([result["p"] for result in raw_results])
 
         signals: list[DriftSignal] = []
         for r, p_adj in zip(raw_results, adjusted, strict=True):
             # Gate on adjusted p AND Cliff's δ (NOT Cohen's d)
-            if p_adj > self.p_threshold:
+            if p_adj >= self.p_threshold:
                 continue
-            if abs(r["cliffs"]) < self.effect_size_threshold:
+            if abs(r["cliffs"]) <= self.effect_size_threshold:
                 continue
             signals.append(
                 DriftSignal(
@@ -357,9 +354,10 @@ def build_windows_from_judgments(
             continue
         for dim in j.dimensions:
             key = (cluster, dim.name)
-            if dim.verdict == Verdict.PASS:
+            label = verdict_label(dim.verdict)
+            if label == "PASS":
                 v = 1.0
-            elif dim.verdict == Verdict.FAIL:
+            elif label == "FAIL":
                 v = 0.0
             else:
                 unclear[key] = unclear.get(key, 0) + 1

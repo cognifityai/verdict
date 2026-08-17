@@ -12,9 +12,11 @@ vocabulary). The correlator surfaces those disagreement cases and gives
 you an agreement metric (Cohen's κ — same statistic we use for judge
 alignment in `verify_judge_alignment.py`).
 
-Storage contract: caller delivers `CorrelationPair` records — one per
-trace where both a judge verdict and a user signal exist. The correlator
-doesn't fetch from storage itself; that's the SDK / pipeline's job.
+Storage contract: caller delivers `CorrelationPair` records. The correlator
+doesn't fetch from storage itself; that's the SDK / pipeline's job. It accepts
+at most one usable binary observation per trace; unusable signals and UNCLEAR
+judge results are counted as coverage skips but do not consume that trace's
+duplicate slot.
 
 Output: `CorrelationReport` with:
   - n_pairs total
@@ -31,15 +33,18 @@ User signal interpretation:
 
 from __future__ import annotations
 
+import math
+import random
 from dataclasses import dataclass, field
 from typing import Literal
 
+from verdict.metrics import verdict_label
 
 # --------------------------------------------------------------------------- #
 # Schema
 # --------------------------------------------------------------------------- #
 
-JudgeVerdict = Literal["PASS", "FAIL"]
+JudgeVerdict = Literal["PASS", "FAIL", "UNCLEAR"]
 UserSignalKind = Literal[
     "thumbs_up", "thumbs_down",
     "copy", "regenerate", "retry", "abandon", "accept",
@@ -61,15 +66,14 @@ def user_signal_polarity(signal: UserSignalKind) -> Literal["POS", "NEG", "NA"]:
     return "NA"
 
 
-def _judge_is_pass(verdict: object) -> bool:
-    """Case-insensitive PASS check that also tolerates a Verdict enum.
-
-    The contract is an uppercase "PASS"/"FAIL" string, but the Verdict enum
-    stores lowercase values ("pass"), so a caller that passes a DimensionScore
-    verdict straight through would otherwise have every comparison read as FAIL.
-    Mirrors verdict_eval.judge.verdict_is_pass without the import cost.
-    """
-    return str(getattr(verdict, "value", verdict)).upper() == "PASS"
+def _judge_polarity(verdict: object) -> Literal["POS", "NEG", "NA"]:
+    """Map only scored verdicts to binary polarity; keep UNCLEAR unscored."""
+    label = verdict_label(verdict)
+    if label == "PASS":
+        return "POS"
+    if label == "FAIL":
+        return "NEG"
+    return "NA"
 
 
 @dataclass
@@ -91,7 +95,7 @@ class CorrelationReport:
     n_pairs: int = 0
     n_skipped_no_label: int = 0
 
-    # Confusion matrix (judge × user)
+    # Confusion matrix (judge x user)
     judge_pos_user_pos: int = 0
     judge_pos_user_neg: int = 0
     judge_neg_user_pos: int = 0
@@ -110,6 +114,20 @@ class CorrelationReport:
 
     interpretation: str = ""
 
+    # New fields stay after the complete 0.1.0a3 constructor so positional
+    # callers retain their historical bindings.
+    n_skipped_unclear_judge: int = 0
+    n_skipped_duplicate_trace: int = 0
+    n_skipped_conflicting_trace: int = 0
+    minimum_pairs: int = 30
+    status: str = "no_data"
+    raw_agreement_ci_low: float | None = None
+    raw_agreement_ci_high: float | None = None
+    cohens_kappa_ci_low: float | None = None
+    cohens_kappa_ci_high: float | None = None
+    gwet_ac2_ci_low: float | None = None
+    gwet_ac2_ci_high: float | None = None
+
 
 # --------------------------------------------------------------------------- #
 # Correlator
@@ -125,17 +143,50 @@ class UserSignalCorrelator:
         How many disagreement examples to include in the report. Default 5.
     """
     max_examples_per_disagreement: int = 5
+    minimum_pairs: int = 30
+    bootstrap_samples: int = 1000
 
     def correlate(self, pairs: list[CorrelationPair]) -> CorrelationReport:
-        report = CorrelationReport()
+        if self.minimum_pairs < 1:
+            raise ValueError("minimum_pairs must be at least 1")
+        if self.bootstrap_samples < 1:
+            raise ValueError("bootstrap_samples must be at least 1")
+        report = CorrelationReport(minimum_pairs=self.minimum_pairs)
+        observations: list[tuple[bool, bool]] = []
+        usable_by_trace: dict[str, list[tuple[CorrelationPair, bool, bool]]] = {}
         for p in pairs:
             polarity = user_signal_polarity(p.user_signal)
             if polarity == "NA":
                 report.n_skipped_no_label += 1
                 continue
+            judge_polarity = _judge_polarity(p.judge_verdict)
+            if judge_polarity == "NA":
+                report.n_skipped_unclear_judge += 1
+                continue
+            usable_by_trace.setdefault(p.trace_id, []).append(
+                (p, judge_polarity == "POS", polarity == "POS")
+            )
+
+        # Resolve duplicates as a group so contradictory usable rows do not let
+        # input order decide the confusion matrix. Exact duplicates collapse to
+        # one observation; conflicting labels make the trace ineligible.
+        for trace_id in sorted(usable_by_trace):
+            candidates = usable_by_trace[trace_id]
+            report.n_skipped_duplicate_trace += max(0, len(candidates) - 1)
+            labels = {(judge_pos, user_pos) for _, judge_pos, user_pos in candidates}
+            if len(labels) != 1:
+                report.n_skipped_conflicting_trace += 1
+                continue
+            p, judge_pos, user_pos = min(
+                candidates,
+                key=lambda item: (
+                    item[0].user_signal,
+                    item[0].prompt_preview,
+                    item[0].response_preview,
+                ),
+            )
             report.n_pairs += 1
-            judge_pos = _judge_is_pass(p.judge_verdict)
-            user_pos = polarity == "POS"
+            observations.append((judge_pos, user_pos))
 
             if judge_pos and user_pos:
                 report.judge_pos_user_pos += 1
@@ -175,6 +226,15 @@ class UserSignalCorrelator:
             (report.raw_agreement - p_e_cohen) / (1 - p_e_cohen)
             if (1 - p_e_cohen) > 1e-9 else 0.0
         )
+        (
+            report.cohens_kappa_ci_low,
+            report.cohens_kappa_ci_high,
+        ) = _bootstrap_metric_interval(
+            observations,
+            self.bootstrap_samples,
+            _cohen_from_observations,
+            report.cohens_kappa,
+        )
 
         # Gwet's AC2 (binary) — π is mean marginal probability of "positive"
         # AC2(2|2) = (Pa - Pe) / (1 - Pe), Pe = 2 * π * (1 - π)
@@ -185,15 +245,121 @@ class UserSignalCorrelator:
             if (1 - p_e_gwet) > 1e-9 else 0.0
         )
 
-        report.interpretation = _interpret(report)
+        (
+            report.raw_agreement_ci_low,
+            report.raw_agreement_ci_high,
+        ) = _wilson_interval(tp + tn, n)
+        (
+            report.gwet_ac2_ci_low,
+            report.gwet_ac2_ci_high,
+        ) = _bootstrap_gwet_interval(observations, self.bootstrap_samples)
+
+        if n < self.minimum_pairs:
+            report.status = "low_data"
+            report.interpretation = (
+                f"Low data: n={n} usable pairs is below the configured minimum "
+                f"of {self.minimum_pairs}. Metrics and confidence intervals are "
+                "descriptive only; do not label this judge calibrated from this run."
+            )
+        else:
+            report.status = "ready"
+            report.interpretation = _interpret(report)
         return report
+
+
+def _wilson_interval(correct: int, total: int) -> tuple[float | None, float | None]:
+    if total <= 0:
+        return None, None
+    z = 1.959963984540054
+    observed = correct / total
+    denominator = 1 + z * z / total
+    center = (observed + z * z / (2 * total)) / denominator
+    half_width = (
+        z
+        * math.sqrt(
+            observed * (1 - observed) / total + z * z / (4 * total * total)
+        )
+        / denominator
+    )
+    low = 0.0 if correct == 0 else max(0.0, center - half_width)
+    high = 1.0 if correct == total else min(1.0, center + half_width)
+    return low, high
+
+
+def _gwet_from_observations(observations: list[tuple[bool, bool]]) -> float:
+    n = len(observations)
+    if n == 0:
+        return 0.0
+    agreements = sum(judge == user for judge, user in observations)
+    judge_positive = sum(judge for judge, _ in observations) / n
+    user_positive = sum(user for _, user in observations) / n
+    observed_agreement = agreements / n
+    pi = (judge_positive + user_positive) / 2.0
+    expected = 2.0 * pi * (1.0 - pi)
+    return (
+        (observed_agreement - expected) / (1 - expected)
+        if (1 - expected) > 1e-9 else 0.0
+    )
+
+
+def _cohen_from_observations(observations: list[tuple[bool, bool]]) -> float:
+    n = len(observations)
+    if n == 0:
+        return 0.0
+    observed = sum(judge == user for judge, user in observations) / n
+    judge_positive = sum(judge for judge, _ in observations) / n
+    user_positive = sum(user for _, user in observations) / n
+    expected = (
+        judge_positive * user_positive
+        + (1.0 - judge_positive) * (1.0 - user_positive)
+    )
+    return (observed - expected) / (1.0 - expected) if expected < 1.0 - 1e-9 else 0.0
+
+
+def _bootstrap_metric_interval(
+    observations: list[tuple[bool, bool]],
+    samples: int,
+    metric,
+    point_estimate: float,
+) -> tuple[float | None, float | None]:
+    if not observations:
+        return None, None
+    rng = random.Random(0)  # nosec B311
+    n = len(observations)
+    estimates = sorted(
+        metric([observations[rng.randrange(n)] for _ in range(n)])
+        for _ in range(samples)
+    )
+    low_index = max(0, math.floor(0.025 * (samples - 1)))
+    high_index = min(samples - 1, math.ceil(0.975 * (samples - 1)))
+    return (
+        min(point_estimate, estimates[low_index]),
+        max(point_estimate, estimates[high_index]),
+    )
+
+
+def _bootstrap_gwet_interval(
+    observations: list[tuple[bool, bool]], samples: int,
+) -> tuple[float | None, float | None]:
+    return _bootstrap_metric_interval(
+        observations,
+        samples,
+        _gwet_from_observations,
+        _gwet_from_observations(observations),
+    )
 
 
 def _interpret(report: CorrelationReport) -> str:
     """Plain-language summary of the calibration state."""
     kappa = report.gwet_ac2  # use AC2 — more honest on skewed marginals
-    fp_rate = report.judge_pos_user_neg / max(report.n_pairs, 1)
-    fn_rate = report.judge_neg_user_pos / max(report.n_pairs, 1)
+    judge_positive = report.judge_pos_user_pos + report.judge_pos_user_neg
+    judge_negative = report.judge_neg_user_pos + report.judge_neg_user_neg
+    fp_rate = (
+        report.judge_pos_user_neg / judge_positive if judge_positive else 0.0
+    )
+    fn_rate = (
+        report.judge_neg_user_pos / judge_negative if judge_negative else 0.0
+    )
 
     if kappa >= 0.80:
         agreement_word = "excellent"
@@ -207,7 +373,7 @@ def _interpret(report: CorrelationReport) -> str:
         agreement_word = "poor"
 
     lines = [
-        f"Judge–user agreement is {agreement_word} (Gwet's AC2 = {kappa:.2f}).",
+        f"Judge-user agreement is {agreement_word} (Gwet's AC2 = {kappa:.2f}).",
     ]
     if fp_rate > 0.10:
         lines.append(
@@ -222,5 +388,8 @@ def _interpret(report: CorrelationReport) -> str:
             "Rubric may be too strict for this workload."
         )
     if fp_rate <= 0.10 and fn_rate <= 0.10:
-        lines.append("Disagreement is balanced and low — judge is well-calibrated for this workload.")
+        lines.append(
+            "Disagreement is balanced and low in this sample; continue monitoring "
+            "against independent human labels."
+        )
     return " ".join(lines)

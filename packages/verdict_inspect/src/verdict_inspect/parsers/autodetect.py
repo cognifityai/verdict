@@ -14,15 +14,15 @@ If detection fails the user can pass `--format` explicitly.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable, Literal
+from typing import Literal
 
 from verdict_inspect.parsers.base import ParsedConversation
 from verdict_inspect.parsers.chatgpt import parse_chatgpt_export
 from verdict_inspect.parsers.claude_ai import parse_claude_ai_export
 from verdict_inspect.parsers.cowork import parse_cowork_jsonl
 from verdict_inspect.parsers.openai_jsonl import parse_openai_jsonl
-
 
 FormatName = Literal["chatgpt", "claude_ai", "cowork", "openai_jsonl"]
 
@@ -77,8 +77,10 @@ def detect_format(path: str | Path) -> FormatName:
         first_line = stripped.split("\n", 1)[0].strip()
         try:
             first = json.loads(first_line)
-        except json.JSONDecodeError:
-            raise ValueError("Looks like JSONL but first line isn't valid JSON")
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                "Looks like JSONL but first line isn't valid JSON"
+            ) from exc
         # Agent-session records have type + (sessionId or message)
         if isinstance(first, dict) and first.get("type") in (
             "user", "assistant", "queue-operation", "ai-title", "last-prompt"

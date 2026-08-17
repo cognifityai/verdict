@@ -7,12 +7,7 @@ substring matched "I won't recommend that" — a real false positive.
 
 from __future__ import annotations
 
-import pytest
-
 from verdict_eval.structural import (
-    APOLOGY_STARTERS,
-    HEDGE_PATTERNS,
-    REFUSAL_SIGNATURES,
     StructuralChecker,
     _word_count,
     count_hedges,
@@ -20,7 +15,6 @@ from verdict_eval.structural import (
     is_refusal,
     is_valid_json,
 )
-
 
 # --------------------------------------------------------------------------- #
 # Refusal detection — the regression cases that prompted this module

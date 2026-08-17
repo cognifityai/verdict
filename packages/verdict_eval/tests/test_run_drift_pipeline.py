@@ -3,8 +3,16 @@ from __future__ import annotations
 import sys
 from datetime import datetime, timedelta, timezone
 
-from verdict.schema import DimensionScore, Judgment, Trace, Verdict
+from verdict.schema import (
+    DimensionScore,
+    Judgment,
+    JudgmentStatus,
+    Trace,
+    Verdict,
+)
 from verdict.storage.sqlite import SQLiteStorage
+from verdict_eval.judge import DEFAULT_RUBRIC, Judge
+from verdict_eval.providers import FakeProvider
 
 from scripts.run_drift_pipeline import build_parser, main
 
@@ -18,6 +26,18 @@ def test_pipeline_defaults_to_semantic_clustering_and_discloses_effect_floor():
     assert args.effect_size_threshold == 0.147
 
 
+def test_pipeline_help_renders_percent_signs(capsys):
+    try:
+        build_parser().parse_args(["--help"])
+    except SystemExit as exc:
+        assert exc.code == 0
+    else:  # pragma: no cover - argparse always exits after rendering help
+        raise AssertionError("--help did not exit")
+
+    output = capsys.readouterr().out
+    assert "Minimum 95% Wilson-CI lower bound" in output
+
+
 def test_real_pipeline_uses_trace_time_and_replaces_hourly_result(tmp_path, monkeypatch, capsys):
     """Exercise the actual CLI entrypoint repeatedly over one SQLite store.
 
@@ -29,6 +49,11 @@ def test_real_pipeline_uses_trace_time_and_replaces_hourly_result(tmp_path, monk
     """
     db_path = tmp_path / "pipeline.db"
     analysis_time = datetime(2026, 8, 11, 12, tzinfo=timezone.utc)
+    evaluator_identity = Judge(
+        provider=FakeProvider("{}"),
+        model="precomputed-test-judge",
+        rubric=DEFAULT_RUBRIC,
+    ).evaluator_identity(context=None)
     storage = SQLiteStorage(str(db_path))
     for period, started_at, verdict in [
         ("baseline", analysis_time - timedelta(days=3), Verdict.PASS),
@@ -50,8 +75,8 @@ def test_real_pipeline_uses_trace_time_and_replaces_hourly_result(tmp_path, monk
             storage.insert_judgment(Judgment(
                 trace_id=trace.trace_id,
                 created_at=analysis_time,
-                judge_models=["precomputed-test-judge"],
                 dimensions=[DimensionScore(name="completeness", verdict=verdict)],
+                **evaluator_identity,
             ))
     storage.close()
 
@@ -76,7 +101,7 @@ def test_real_pipeline_uses_trace_time_and_replaces_hourly_result(tmp_path, monk
 
     assert main() == 0
     second_output = capsys.readouterr().out
-    assert "Persisted 0 judgments." in second_output
+    assert "Persisted 0 completed judgment(s) and 0 error record(s)." in second_output
     assert "Detected 1 drift signal(s)." in second_output
 
     check = SQLiteStorage(str(db_path))
@@ -87,6 +112,9 @@ def test_real_pipeline_uses_trace_time_and_replaces_hourly_result(tmp_path, monk
     assert len(judgments) == 80
     assert len(signals) == 1
     assert signals[0].dimension == "completeness"
+    assert signals[0].evaluator_fingerprint == evaluator_identity[
+        "evaluator_fingerprint"
+    ]
     assert signals[0].example_trace_ids
     assert all(trace_id.startswith("current-") for trace_id in signals[0].example_trace_ids)
 
@@ -96,8 +124,16 @@ def test_real_pipeline_uses_trace_time_and_replaces_hourly_result(tmp_path, monk
     assert "Detected 0 drift signal(s)." in third_output
 
     check = SQLiteStorage(str(db_path))
-    assert check.list_drift_signals(limit=20) == []
+    snapshot = check.get_latest_drift_run_snapshot(
+        evaluator_identity["evaluator_fingerprint"]
+    )
+    historical_signals = check.list_drift_signals(limit=20)
     check.close()
+
+    assert snapshot is not None
+    assert snapshot[0].signal_count == 0
+    assert snapshot[1] == []
+    assert len(historical_signals) == 1
 
 
 def test_pipeline_rejects_metadata_only_capture(tmp_path, monkeypatch, capsys):
@@ -188,12 +224,12 @@ def test_pipeline_keeps_judge_models_separate_and_uniform_reruns_do_not_duplicat
 
     assert main() == 0
     first_output = capsys.readouterr().out
-    assert "Persisted 1 judgments." in first_output
+    assert "Persisted 1 completed judgment(s) and 0 error record(s)." in first_output
     assert "Current windows:  5  (total n = 5)" in first_output
 
     assert main() == 0
     second_output = capsys.readouterr().out
-    assert "Persisted 0 judgments." in second_output
+    assert "Persisted 0 completed judgment(s) and 0 error record(s)." in second_output
     assert "Current windows:  5  (total n = 5)" in second_output
 
     check = SQLiteStorage(str(db_path))
@@ -204,6 +240,72 @@ def test_pipeline_keeps_judge_models_separate_and_uniform_reruns_do_not_duplicat
         ("old-judge",),
         ("new-judge",),
     }
+
+
+def test_pipeline_retries_when_latest_attempt_for_current_evaluator_is_error(
+    tmp_path, monkeypatch, capsys,
+):
+    db_path = tmp_path / "retry-latest-error.db"
+    analysis_time = datetime(2026, 8, 11, 12, tzinfo=timezone.utc)
+    evaluator_identity = Judge(
+        provider=FakeProvider("{}"),
+        model="retry-judge",
+        rubric=DEFAULT_RUBRIC,
+    ).evaluator_identity(context=None)
+    storage = SQLiteStorage(str(db_path))
+    trace = Trace(
+        trace_id="current-1",
+        started_at=analysis_time - timedelta(hours=1),
+        provider="test",
+        request_model="test-model",
+        prompt_redacted="Explain the refund policy.",
+        response_redacted="A captured response.",
+        cluster_id="c1",
+    )
+    storage.insert_trace(trace)
+    storage.insert_judgment(Judgment(
+        judgment_id="completed-old",
+        trace_id=trace.trace_id,
+        created_at=analysis_time - timedelta(minutes=2),
+        dimensions=[
+            DimensionScore(name="relevance", verdict=Verdict.PASS)
+        ],
+        **evaluator_identity,
+    ))
+    storage.insert_judgment(Judgment(
+        judgment_id="error-new",
+        trace_id=trace.trace_id,
+        created_at=analysis_time - timedelta(minutes=1),
+        dimensions=[],
+        status=JudgmentStatus.ERROR,
+        error="provider unavailable",
+        **evaluator_identity,
+    ))
+    storage.close()
+
+    monkeypatch.setattr(sys, "argv", [
+        "run_drift_pipeline.py",
+        "--storage", f"sqlite:///{db_path}",
+        "--judge-provider", "fake",
+        "--judge-model", "retry-judge",
+        "--embedder", "deterministic",
+        "--trust-existing-clusters",
+        "--sampling", "uniform",
+        "--sample-rate", "1.0",
+        "--as-of", analysis_time.isoformat(),
+    ])
+
+    assert main() == 0
+    assert "Persisted 1 completed judgment(s) and 0 error record(s)." in (
+        capsys.readouterr().out
+    )
+
+    check = SQLiteStorage(str(db_path))
+    try:
+        judgments = check.list_judgments_for_cluster("c1", limit=100)
+    finally:
+        check.close()
+    assert len(judgments) == 3
 
 
 def test_pipeline_rejects_cluster_ids_from_an_unrelated_registry(
@@ -257,3 +359,103 @@ def test_trusted_external_clusters_require_every_judgeable_trace_to_be_assigned(
 
     assert main() == 2
     assert "requires every judgeable trace" in capsys.readouterr().out
+
+
+def test_pipeline_persists_sentinel_health_separately_from_judgments(
+    tmp_path, monkeypatch, capsys,
+):
+    db_path = tmp_path / "judge-health.db"
+    sentinel_path = tmp_path / "sentinels.jsonl"
+    sentinel_rows = ['{"set_name":"support-v1"}']
+    sentinel_rows.extend(
+        '{"sentinel_id":"anchor-' + str(index) + '","query":"q","response":"r",'
+        '"labels":{"groundedness":"pass","relevance":"pass",'
+        '"completeness":"pass","safety":"pass",'
+        '"instruction_following":"pass"}}'
+        for index in range(30)
+    )
+    sentinel_path.write_text('\n'.join(sentinel_rows))
+    storage = SQLiteStorage(str(db_path))
+    storage.insert_trace(Trace(
+        provider="test",
+        request_model="test-model",
+        prompt_redacted="A production prompt",
+        response_redacted="A production response",
+        cluster_id="external-cluster",
+    ))
+    storage.close()
+
+    monkeypatch.setattr(sys, "argv", [
+        "run_drift_pipeline.py",
+        "--storage", f"sqlite:///{db_path}",
+        "--judge-provider", "fake",
+        "--judge-model", "health-judge",
+        "--judge-sentinel-file", str(sentinel_path),
+        "--embedder", "deterministic",
+        "--trust-existing-clusters",
+        "--sampling", "uniform",
+    ])
+
+    assert main() == 0
+    output = capsys.readouterr().out
+    assert "Judge health (support-v1): healthy" in output
+    assert "monitored separately from production drift" in output
+
+    check = SQLiteStorage(str(db_path))
+    try:
+        health = check.list_evaluator_health()
+        judgments = check.list_judgments_for_cluster("external-cluster")
+    finally:
+        check.close()
+    assert len(health) == 1
+    assert health[0].total_labels == 150
+    assert len(judgments) == 1
+    assert judgments[0].trace_id != "sentinel:anchor-1"
+
+
+def test_pipeline_stops_before_production_judging_when_sentinel_health_degraded(
+    tmp_path, monkeypatch, capsys,
+):
+    db_path = tmp_path / "degraded-judge.db"
+    sentinel_path = tmp_path / "degraded.jsonl"
+    rows = ['{"set_name":"degraded"}']
+    rows.extend(
+        '{"sentinel_id":"anchor-' + str(index) + '","query":"q","response":"r",'
+        '"labels":{"groundedness":"fail","relevance":"fail",'
+        '"completeness":"fail","safety":"fail",'
+        '"instruction_following":"fail"}}'
+        for index in range(30)
+    )
+    sentinel_path.write_text('\n'.join(rows))
+    storage = SQLiteStorage(str(db_path))
+    storage.insert_trace(Trace(
+        provider="test",
+        request_model="test-model",
+        prompt_redacted="A production prompt",
+        response_redacted="A production response",
+        cluster_id="external-cluster",
+    ))
+    storage.close()
+
+    monkeypatch.setattr(sys, "argv", [
+        "run_drift_pipeline.py",
+        "--storage", f"sqlite:///{db_path}",
+        "--judge-provider", "fake",
+        "--judge-model", "unhealthy-judge",
+        "--judge-sentinel-file", str(sentinel_path),
+        "--embedder", "deterministic",
+        "--trust-existing-clusters",
+        "--sampling", "uniform",
+    ])
+
+    assert main() == 2
+    output = capsys.readouterr().out
+    assert "Judge health (degraded): degraded" in output
+    assert "production judging and drift detection are blocked" in output
+
+    check = SQLiteStorage(str(db_path))
+    try:
+        assert len(check.list_evaluator_health()) == 1
+        assert check.list_judgments_for_cluster("external-cluster") == []
+    finally:
+        check.close()
