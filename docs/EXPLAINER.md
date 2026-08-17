@@ -163,8 +163,10 @@ When `VERDICT_USER` and `VERDICT_PASS` are both set, HTTP Basic authentication
 gates `/dashboard` and `/api/data` while the landing and health endpoints remain
 public. Chart series contain observed bins only. The response keeps full-store
 totals while bounding presentation data to the latest 100 chart points, 8
-providers, 20 clusters, 12 dimensions, 20 evaluator identities, 40 drift
-signals, 20 models per displayed provider, and 30 trace samples. The UI reports
+providers, 20 usable intent clusters, 12 dimensions, 20 evaluator identities,
+40 drift signals, 20 models per displayed provider, and 30 trace samples. The
+non-intent `unclustered` bucket is outside the cluster chart and cap counts;
+capped drift signals retain the largest absolute effect sizes. The UI reports
 shown-versus-available counts whenever a bound applies.
 
 ## Validation Position

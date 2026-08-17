@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 from verdict.schema import (
     DimensionScore,
+    DriftDirection,
     DriftRun,
     DriftSignal,
     EvaluatorHealthRecord,
@@ -268,6 +269,100 @@ def test_bundle_reports_every_high_cardinality_presentation_axis(tmp_path):
     assert resources["traceSamples"] == {"available": 100, "shown": 30, "limit": 30}
     assert bundle["meta"]["providers"] == 76
     assert bundle["meta"]["clusters"] == 100
+
+
+def test_cluster_cap_excludes_unclustered_from_both_count_and_payload(tmp_path):
+    path = tmp_path / "cluster-cap-boundary.db"
+    storage = SQLiteStorage(str(path))
+    expected_clusters = {f"cluster-{index:02d}" for index in range(20)}
+    for cluster_id in sorted(expected_clusters):
+        storage.insert_trace(Trace(cluster_id=cluster_id))
+    # Make the non-intent bucket large enough to displace a real cluster under
+    # the old ORDER BY ... LIMIT query.
+    storage.insert_trace(Trace(cluster_id="unclustered"))
+    storage.insert_trace(Trace(cluster_id="unclustered"))
+    storage.close()
+
+    bundle = build_bundle(path)
+    shown_clusters = {row["cluster_id"] for row in bundle["clusters"]}
+
+    assert shown_clusters == expected_clusters
+    assert bundle["truncation"]["resources"]["clusters"] == {
+        "available": 20,
+        "shown": 20,
+        "limit": 20,
+    }
+    assert bundle["truncation"]["applied"] is False
+
+
+def _bundle_with_drift_effects(tmp_path, effects):
+    path = tmp_path / "drift-priority.db"
+    storage = SQLiteStorage(str(path))
+    trace = Trace(cluster_id="support")
+    storage.insert_trace(trace)
+    storage.insert_judgment(Judgment(
+        trace_id=trace.trace_id,
+        evaluator_provider="fake",
+        evaluator_fingerprint="drift-priority-evaluator",
+        expected_dimensions=["quality"],
+        judge_models=["judge-model"],
+        dimensions=[DimensionScore(name="quality", verdict=Verdict.PASS)],
+    ))
+    signals = []
+    for index, (direction, effect) in enumerate(effects):
+        signals.append(DriftSignal(
+            signal_id=f"priority-signal-{index:03d}",
+            cluster_id="support",
+            dimension="quality",
+            direction=direction,
+            evaluator_fingerprint="drift-priority-evaluator",
+            effect_size_cliffs_delta=effect,
+        ))
+    _persist_drift_snapshot(storage, *signals)
+    storage.close()
+    return build_bundle(path)
+
+
+def test_drift_cap_keeps_strongest_improvements(tmp_path):
+    effects = [
+        (DriftDirection.IMPROVEMENT, index / 100)
+        for index in range(1, 61)
+    ]
+
+    bundle = _bundle_with_drift_effects(tmp_path, effects)
+    shown = [signal["cliffsDelta"] for signal in bundle["driftSignals"]]
+
+    assert len(shown) == 40
+    assert shown == [index / 100 for index in range(60, 20, -1)]
+
+
+def test_drift_cap_keeps_strongest_regressions(tmp_path):
+    effects = [
+        (DriftDirection.REGRESSION, -(index / 100))
+        for index in range(1, 61)
+    ]
+
+    bundle = _bundle_with_drift_effects(tmp_path, effects)
+    shown = [signal["cliffsDelta"] for signal in bundle["driftSignals"]]
+
+    assert shown == [-(index / 100) for index in range(60, 20, -1)]
+
+
+def test_drift_cap_uses_effect_magnitude_for_mixed_directions(tmp_path):
+    effects = [
+        (DriftDirection.REGRESSION, -(index / 100))
+        for index in range(1, 22)
+    ] + [
+        (DriftDirection.IMPROVEMENT, index / 100)
+        for index in range(1, 22)
+    ]
+
+    bundle = _bundle_with_drift_effects(tmp_path, effects)
+    shown = [signal["cliffsDelta"] for signal in bundle["driftSignals"]]
+
+    assert len(shown) == 40
+    assert all(abs(effect) >= 0.02 for effect in shown)
+    assert {-0.21, 0.21}.issubset(shown)
 
 
 def test_fragmented_single_provider_store_has_bounded_cluster_matrix(tmp_path):

@@ -731,13 +731,16 @@ def _build(cur, *, evaluator_id: str | None = None) -> dict:
         })
 
     # ---- clusters ----
+    from verdict_eval.stable_clustering import UNCLUSTERED_ID
+
     clusters = (
         [dict(cluster_id=r["cluster_id"], n=r["n"]) for r in cur.execute(
             """SELECT cluster_id, COUNT(*) n FROM traces
                WHERE cluster_id IS NOT NULL AND cluster_id <> ''
+                 AND cluster_id <> ?
                GROUP BY cluster_id ORDER BY n DESC, cluster_id
                LIMIT ?""",
-            (MAX_DASHBOARD_CLUSTERS,),
+            (UNCLUSTERED_ID, MAX_DASHBOARD_CLUSTERS),
         )]
         if "cluster_id" in trace_columns
         else []
@@ -793,13 +796,17 @@ def _build(cur, *, evaluator_id: str | None = None) -> dict:
             "action": s.get("recommended_action") or "Review the affected traces.",
             "detectedAt": s.get("detected_at"),
         })
-    # Sort by the primary effect size (Cliff's δ) when present, else Cohen's d.
+    # Keep the largest effects under the cap for both regressions and
+    # improvements. The database's signal-id ordering breaks equal-magnitude
+    # ties deterministically.
     drift.sort(key=lambda x: (
-        x["cliffsDelta"]
-        if x["cliffsDelta"] is not None
-        else x["cohensD"]
-        if x["cohensD"] is not None
-        else 0.0
+        -abs(
+            x["cliffsDelta"]
+            if x["cliffsDelta"] is not None
+            else x["cohensD"]
+            if x["cohensD"] is not None
+            else 0.0
+        )
     ))
     total_drift_signals = len(drift)
     drift = drift[:MAX_DASHBOARD_DRIFT_SIGNALS]
