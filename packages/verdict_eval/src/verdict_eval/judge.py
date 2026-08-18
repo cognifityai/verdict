@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -363,10 +362,39 @@ class JudgeEnsemble:
 
 
 # ---------------------------------------------------------------------------
-# JSON parsing — tolerant of the typical mistakes models make
+# JSON parsing — tolerant of the typical wrappers models add
 # ---------------------------------------------------------------------------
 
-_JSON_FENCE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL)
+_MAX_JSON_OBJECT_STARTS = 64
+
+
+def _decode_verdict_object(text: str, rubric: Rubric) -> dict[str, object] | None:
+    """Decode the first bounded JSON object containing a rubric dimension.
+
+    ``JSONDecoder.raw_decode`` identifies the structural end of the object, so
+    Markdown fences, braces, and escapes inside JSON strings remain ordinary
+    string content. Limiting candidate starts keeps malformed model output from
+    causing unbounded repeated decode attempts.
+    """
+    expected_dimensions = {dimension.name for dimension in rubric.dimensions}
+    decoder = json.JSONDecoder()
+    starts_checked = 0
+
+    for start, character in enumerate(text):
+        if character != "{":
+            continue
+        starts_checked += 1
+        if starts_checked > _MAX_JSON_OBJECT_STARTS:
+            break
+        try:
+            candidate, _ = decoder.raw_decode(text, start)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(candidate, dict) and (
+            not expected_dimensions or expected_dimensions.intersection(candidate)
+        ):
+            return candidate
+    return None
 
 
 def _parse_verdict_json(text: str, rubric: Rubric) -> dict[str, dict[str, object]]:
@@ -375,23 +403,7 @@ def _parse_verdict_json(text: str, rubric: Rubric) -> dict[str, dict[str, object
     Returns a dict mapping every rubric dimension to {"reasoning": str, "verdict": Verdict}.
     Missing or malformed dimensions are recorded as UNCLEAR with a flagged reason.
     """
-    raw = text.strip()
-    # Strip ``` fences if present
-    m = _JSON_FENCE.search(raw)
-    if m:
-        raw = m.group(1)
-    # Try strict parse first; fall back to the first {...} block
-    parsed: dict[str, object] | None = None
-    try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError:
-        brace = raw.find("{")
-        last = raw.rfind("}")
-        if brace != -1 and last > brace:
-            try:
-                parsed = json.loads(raw[brace : last + 1])
-            except json.JSONDecodeError:
-                parsed = None
+    parsed = _decode_verdict_object(text.strip(), rubric)
 
     out: dict[str, dict[str, object]] = {}
     for d in rubric.dimensions:
