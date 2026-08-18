@@ -181,7 +181,10 @@ def test_alignment_sweep_rejects_incomplete_online_report(tmp_path) -> None:
         "'revision': 'f7d2896d2cc5d80f8b55c2bbc722613555233c25'},\n"
         "  'judge': {'provider': provider, 'model': model},\n"
         "  'contextMode': 'full',\n"
-        "  'pairs': {'available': 50, 'scored': 1},\n"
+        "  'pairs': {'available': 50, 'scored': 1, 'inputErrors': 0, "
+        "'invalidOutputs': 49, 'providerErrors': 0, 'coverageRate': 0.02},\n"
+        "  'components': {'attempted': 0, 'usable': 0, 'invalidOutputs': 0, "
+        "'providerErrors': 0, 'inconsistent': 0},\n"
         "  'verdict': {'status': 'acceptable', 'message': 'not enough evidence'},\n"
         "  'metrics': {\n"
         "    'threeWay': {'cohensKappa': 1.0, 'gwetsAc2': 1.0, 'gwetsAc2Ci95': [1.0, 1.0]},\n"
@@ -266,7 +269,10 @@ def test_online_all_tie_judge_is_not_a_success(monkeypatch, tmp_path) -> None:
     assert report["metrics"]["binarized"]["gwetsAc2Ci95"] is None
 
 
-def test_online_partial_judge_failures_do_not_publish_a_report(monkeypatch, tmp_path) -> None:
+def test_online_partial_judge_failures_are_reported_and_fail_coverage(
+    monkeypatch,
+    tmp_path,
+) -> None:
     from verdict_eval import pairwise, providers
 
     class Dataset(list):
@@ -314,7 +320,166 @@ def test_online_partial_judge_failures_do_not_publish_a_report(monkeypatch, tmp_
     )
 
     assert verifier.run_online(args) != 0
-    assert not report_path.exists()
+    report = json.loads(report_path.read_text())
+    assert report["pairs"] == {
+        "available": 50,
+        "coverageRate": 0.02,
+        "inputErrors": 0,
+        "invalidOutputs": 0,
+        "providerErrors": 49,
+        "scored": 1,
+    }
+    assert report["verdict"]["status"] == "invalid_coverage"
+    assert report["metrics"]["threeWay"]["rawAgreement"] == 1.0
+
+
+def test_online_invalid_output_is_excluded_from_metrics_and_fails_coverage(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from verdict_eval import pairwise, providers
+
+    class Dataset(list):
+        def shuffle(self, seed):
+            return self
+
+        def select(self, indexes):
+            return Dataset(self[index] for index in indexes)
+
+    rows = Dataset([
+        {**_mtbench_row(), "winner": "model_a", "category": "writing"}
+        for _ in range(50)
+    ])
+
+    class OneInvalidJudge:
+        calls = 0
+
+        def __init__(self, **_kwargs):
+            pass
+
+        def compare(self, **_kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                return pairwise.PairwiseJudgment(
+                    verdict=None,
+                    raw_verdict_ab=None,
+                    raw_verdict_ba=None,
+                    status=pairwise.PairwiseStatus.INVALID,
+                    status_ab=pairwise.PairwiseStatus.INVALID,
+                    status_ba=pairwise.PairwiseStatus.INVALID,
+                )
+            return pairwise.PairwiseJudgment(
+                verdict=pairwise.PairwiseVerdict.A_BETTER,
+                raw_verdict_ab=pairwise.PairwiseVerdict.A_BETTER,
+                raw_verdict_ba=pairwise.PairwiseVerdict.A_BETTER,
+            )
+
+    monkeypatch.setitem(
+        sys.modules,
+        "datasets",
+        SimpleNamespace(load_dataset=lambda *_args, **_kwargs: rows),
+    )
+    monkeypatch.setattr(pairwise, "PairwiseJudge", OneInvalidJudge)
+    monkeypatch.setattr(providers, "AnthropicAdapter", lambda: object())
+    report_path = tmp_path / "invalid-output.json"
+    args = SimpleNamespace(
+        provider="anthropic",
+        judge_model="one-invalid-judge",
+        ensemble=False,
+        context_mode="full",
+        n=50,
+        json_output=str(report_path),
+    )
+
+    assert verifier.run_online(args) != 0
+    report = json.loads(report_path.read_text())
+    assert report["pairs"]["scored"] == 49
+    assert report["pairs"]["invalidOutputs"] == 1
+    assert report["pairs"]["providerErrors"] == 0
+    assert report["pairs"]["coverageRate"] == 0.98
+    assert report["verdict"]["status"] == "invalid_coverage"
+    # The 49 usable A wins all match the human label. The invalid row was not
+    # converted into a tie and therefore cannot lower this diagnostic metric.
+    assert report["metrics"]["threeWay"]["rawAgreement"] == 1.0
+
+
+def test_online_partial_ensemble_components_fail_the_coverage_gate(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from verdict_eval import pairwise, providers
+
+    class Dataset(list):
+        def shuffle(self, seed):
+            return self
+
+        def select(self, indexes):
+            return Dataset(self[index] for index in indexes)
+
+    rows = Dataset([
+        {**_mtbench_row(), "winner": "model_a", "category": "writing"}
+        for _ in range(50)
+    ])
+
+    class PartiallyAvailableEnsemble:
+        def __init__(self, _judges):
+            pass
+
+        def compare(self, **_kwargs):
+            valid = pairwise.PairwiseJudgment(
+                verdict=pairwise.PairwiseVerdict.A_BETTER,
+                raw_verdict_ab=pairwise.PairwiseVerdict.A_BETTER,
+                raw_verdict_ba=pairwise.PairwiseVerdict.A_BETTER,
+                judge_model="available",
+            )
+            failed = pairwise.PairwiseJudgment(
+                verdict=None,
+                raw_verdict_ab=None,
+                raw_verdict_ba=None,
+                judge_model="unavailable",
+                status=pairwise.PairwiseStatus.ERROR,
+                status_ab=pairwise.PairwiseStatus.ERROR,
+                status_ba=pairwise.PairwiseStatus.ERROR,
+            )
+            return pairwise.PairwiseJudgment(
+                verdict=pairwise.PairwiseVerdict.A_BETTER,
+                raw_verdict_ab=pairwise.PairwiseVerdict.A_BETTER,
+                raw_verdict_ba=pairwise.PairwiseVerdict.A_BETTER,
+                component_judgments=[valid, failed],
+            )
+
+    monkeypatch.setitem(
+        sys.modules,
+        "datasets",
+        SimpleNamespace(load_dataset=lambda *_args, **_kwargs: rows),
+    )
+    monkeypatch.setattr(pairwise, "PairwiseJudge", lambda **_kwargs: object())
+    monkeypatch.setattr(pairwise, "PairwiseJudgeEnsemble", PartiallyAvailableEnsemble)
+    monkeypatch.setattr(providers, "AnthropicAdapter", lambda: object())
+    monkeypatch.setattr(providers, "OpenAIAdapter", lambda: object())
+    monkeypatch.setattr(providers, "GoogleAdapter", lambda: object())
+    report_path = tmp_path / "partial-ensemble.json"
+    args = SimpleNamespace(
+        provider="anthropic",
+        judge_model="partial-ensemble",
+        ensemble=True,
+        context_mode="full",
+        n=50,
+        json_output=str(report_path),
+    )
+
+    assert verifier.run_online(args) != 0
+    report = json.loads(report_path.read_text())
+    assert report["pairs"]["scored"] == 50
+    assert report["pairs"]["coverageRate"] == 1.0
+    assert report["components"] == {
+        "attempted": 100,
+        "inconsistent": 0,
+        "invalidOutputs": 0,
+        "providerErrors": 50,
+        "usable": 50,
+    }
+    assert report["verdict"]["status"] == "invalid_coverage"
 
 
 def test_online_cli_rejects_sample_below_minimum(monkeypatch) -> None:

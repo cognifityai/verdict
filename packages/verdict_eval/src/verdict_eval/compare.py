@@ -40,6 +40,18 @@ class PairwiseResult:
     position_consistent: bool = True
     judge_text_length: int = 0
 
+    def __post_init__(self) -> None:
+        _validate_winner(self)
+
+
+def _validate_winner(result: PairwiseResult) -> None:
+    allowed = (result.model_a, result.model_b, "tie")
+    if result.winner not in allowed:
+        raise ValueError(
+            "pairwise winner must be model_a, model_b, or 'tie'; "
+            f"got {result.winner!r}"
+        )
+
 
 @dataclass
 class ModelRating:
@@ -66,6 +78,8 @@ class BradleyTerryComparator:
     drop_position_inconsistent: bool = True
 
     def fit(self, results: list[PairwiseResult]) -> list[ModelRating]:
+        for result in results:
+            _validate_winner(result)
         if self.drop_position_inconsistent:
             results = [r for r in results if r.position_consistent]
         if not results:

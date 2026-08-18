@@ -8,6 +8,41 @@ for binary PASS/FAIL dimensions, Mann-Whitney U for continuous metrics),
 Bradley-Terry pairwise comparator for cross-LLM evaluation, and a synthetic
 regression injector for verifying the pipeline catches what it should.
 
+## Pairwise result contract
+
+`PairwiseJudge.compare()` separates preference from execution state. A usable
+`PairwiseJudgment` has `status == PairwiseStatus.VALID`, `is_usable == True`,
+and a verdict of `A_BETTER`, `B_BETTER`, `TIE`, or `INCONSISTENT`. Exactly one
+complete `[[A]]`, `[[B]]`, or `[[C]]` marker is required in each position-swap
+round. Missing, empty, truncated, repeated, or conflicting markers produce
+`PairwiseStatus.INVALID`; provider failures produce `PairwiseStatus.ERROR`.
+Both unusable states carry `verdict=None` and must not be converted to ties.
+
+Ensembles preserve one component record per configured judge and vote using
+only usable components. An aggregate can remain usable when at least one
+component is usable, but failed components remain visible in
+`component_judgments`. A total component failure is unusable. The alignment
+harness reports pair and component coverage separately and fails its evidence
+gate when either is incomplete.
+
+This does not change captured traces, spans, or storage schemas. Existing
+successful 0.1.0a3 positional construction retains its original field order;
+the status fields were appended. Consumers should check `is_usable` before
+reading `verdict`:
+
+```python
+from verdict_eval import PairwiseJudge, PairwiseStatus
+
+judgment = PairwiseJudge(provider=provider, model=model).compare(
+    query=query,
+    response_a=response_a,
+    response_b=response_b,
+)
+if judgment.status is not PairwiseStatus.VALID:
+    raise RuntimeError("pairwise comparison was not usable")
+winner = judgment.verdict
+```
+
 The repository pipeline uses a persisted cluster registry rather than
 re-clustering the full dataset on every run. Local
 `sentence-transformers/all-MiniLM-L6-v2` embeddings are the semantic default;
@@ -86,6 +121,7 @@ from verdict_eval import (
     DriftDetector,
     Judge,
     PairwiseJudge,
+    PairwiseStatus,
 )
 ```
 

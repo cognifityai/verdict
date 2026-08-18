@@ -167,6 +167,29 @@ def _generate(provider, model: str, prompt: str, max_tokens: int) -> str:
     return provider.complete(req).text
 
 
+def _pairwise_result_fields(
+    judgment,
+    model_a: str,
+    model_b: str,
+) -> tuple[str, bool]:
+    """Map only a usable judgment into Bradley-Terry input fields."""
+    from verdict_eval.pairwise import PairwiseVerdict
+
+    if not judgment.is_usable:
+        raise RuntimeError(
+            "pairwise judge returned an unusable result; refusing to count it as a tie"
+        )
+    if judgment.verdict == PairwiseVerdict.A_BETTER:
+        return model_a, True
+    if judgment.verdict == PairwiseVerdict.B_BETTER:
+        return model_b, True
+    if judgment.verdict == PairwiseVerdict.TIE:
+        return "tie", True
+    if judgment.verdict == PairwiseVerdict.INCONSISTENT:
+        return "tie", False
+    raise RuntimeError(f"unsupported pairwise verdict: {judgment.verdict!r}")
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description="Bradley-Terry pairwise comparator runner.")
     p.add_argument("--provider", default="fake", choices=["fake", "anthropic"],
@@ -224,7 +247,7 @@ def main() -> int:
 
     # -- Step 2: pairwise judge (position-swap consistent) -------------------
     from verdict_eval.compare import PairwiseResult
-    from verdict_eval.pairwise import PairwiseJudge, PairwiseVerdict
+    from verdict_eval.pairwise import PairwiseJudge
 
     judge = PairwiseJudge(provider=judge_provider, model=judge_model,
                           temperature=0.0, max_tokens=256)
@@ -238,15 +261,7 @@ def main() -> int:
                 response_a=responses[(model_a, i)],
                 response_b=responses[(model_b, i)],
             )
-            # Map PairwiseVerdict → winner model id (or "tie").
-            if j.verdict == PairwiseVerdict.A_BETTER:
-                winner = model_a
-            elif j.verdict == PairwiseVerdict.B_BETTER:
-                winner = model_b
-            else:
-                winner = "tie"
-            # INCONSISTENT means the position swap disagreed → not consistent.
-            consistent = j.verdict != PairwiseVerdict.INCONSISTENT
+            winner, consistent = _pairwise_result_fields(j, model_a, model_b)
             results.append(PairwiseResult(
                 model_a=model_a,
                 model_b=model_b,

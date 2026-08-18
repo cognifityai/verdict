@@ -7,10 +7,12 @@ treated as TIE.
 
 from __future__ import annotations
 
+import pytest
 from verdict_eval.pairwise import (
     PairwiseJudge,
     PairwiseJudgeEnsemble,
     PairwiseJudgment,
+    PairwiseStatus,
     PairwiseVerdict,
     _parse_verdict,
 )
@@ -20,9 +22,11 @@ from verdict_eval.providers import CompletionResponse, FakeProvider
 def test_pairwise_judges_are_available_from_the_package_root() -> None:
     from verdict_eval import PairwiseJudge as RootPairwiseJudge
     from verdict_eval import PairwiseJudgeEnsemble as RootPairwiseJudgeEnsemble
+    from verdict_eval import PairwiseStatus as RootPairwiseStatus
 
     assert RootPairwiseJudge is PairwiseJudge
     assert RootPairwiseJudgeEnsemble is PairwiseJudgeEnsemble
+    assert RootPairwiseStatus is PairwiseStatus
 
 
 class _StubJudge:
@@ -63,9 +67,93 @@ def test_parse_verdict_handles_whitespace():
     assert v == PairwiseVerdict.A_BETTER
 
 
-def test_parse_verdict_defaults_to_tie_when_marker_absent():
-    v, _ = _parse_verdict("I don't know which is better honestly.")
-    assert v == PairwiseVerdict.TIE
+@pytest.mark.parametrize(
+    "response",
+    [
+        "I don't know which is better honestly.",
+        "",
+        "The first response is better.\n[[A]",
+        "First thought: [[A]]\nCorrection: [[B]]",
+        "Repeated marker: [[A]]\n[[A]]",
+    ],
+    ids=["missing", "empty", "truncated", "conflicting-markers", "repeated-markers"],
+)
+def test_parse_verdict_rejects_output_without_exactly_one_marker(response: str) -> None:
+    with pytest.raises(ValueError, match="exactly one"):
+        _parse_verdict(response)
+
+
+def test_malformed_round_is_not_reported_as_a_tie() -> None:
+    judge = PairwiseJudge(
+        provider=_make_provider("The responses seem comparable."),
+        model="malformed-judge",
+    )
+
+    judgment = judge.compare(query="Q", response_a="a", response_b="b")
+
+    assert judgment.verdict is None
+    assert judgment.status == "invalid"
+    assert judgment.raw_verdict_ab is None
+    assert judgment.raw_verdict_ba is None
+
+
+def test_one_failed_position_swap_round_makes_the_comparison_unusable() -> None:
+    class PartiallyFailingProvider:
+        name = "partial"
+        calls = 0
+
+        def complete(self, req):
+            self.calls += 1
+            if self.calls == 1:
+                return CompletionResponse(text="A is better.\n[[A]]")
+            raise RuntimeError("provider unavailable")
+
+    judge = PairwiseJudge(provider=PartiallyFailingProvider(), model="partial")
+
+    judgment = judge.compare(query="Q", response_a="a", response_b="b")
+
+    assert judgment.verdict is None
+    assert judgment.status == "error"
+    assert judgment.raw_verdict_ab == PairwiseVerdict.A_BETTER
+    assert judgment.raw_verdict_ba is None
+    assert "provider unavailable" not in judgment.error_ba
+
+
+def test_published_positional_judgment_constructor_retains_its_field_order() -> None:
+    component = PairwiseJudgment(
+        PairwiseVerdict.TIE,
+        PairwiseVerdict.TIE,
+        PairwiseVerdict.TIE,
+    )
+
+    judgment = PairwiseJudgment(
+        PairwiseVerdict.A_BETTER,
+        PairwiseVerdict.A_BETTER,
+        PairwiseVerdict.A_BETTER,
+        "reason-ab",
+        "reason-ba",
+        "judge-model",
+        [component],
+    )
+
+    assert judgment.reasoning_ab == "reason-ab"
+    assert judgment.reasoning_ba == "reason-ba"
+    assert judgment.judge_model == "judge-model"
+    assert judgment.component_judgments == [component]
+    assert judgment.status == PairwiseStatus.VALID
+
+
+def test_judgment_rejects_contradictory_status_and_verdict() -> None:
+    with pytest.raises(ValueError, match="cannot carry a verdict"):
+        PairwiseJudgment(
+            PairwiseVerdict.TIE,
+            PairwiseVerdict.TIE,
+            PairwiseVerdict.TIE,
+            status=PairwiseStatus.INVALID,
+        )
+
+    with pytest.raises(ValueError, match="requires a verdict"):
+        PairwiseJudgment(None, None, None)
 
 
 def test_position_swap_consistent_judge_returns_clear_winner():
@@ -229,3 +317,64 @@ def test_ensemble_one_a_one_b_is_tie():
     ensemble = PairwiseJudgeEnsemble(judges)
     j = ensemble.compare(query="Q", response_a="a", response_b="b")
     assert j.verdict == PairwiseVerdict.TIE
+
+
+def test_ensemble_preserves_failed_components_while_using_valid_votes() -> None:
+    class RaisingJudge:
+        model = "broken"
+
+        def compare(self, **_kwargs):
+            raise RuntimeError("provider unavailable")
+
+    ensemble = PairwiseJudgeEnsemble([
+        _StubJudge(PairwiseVerdict.A_BETTER, "healthy"),
+        RaisingJudge(),
+    ])
+
+    judgment = ensemble.compare(query="Q", response_a="a", response_b="b")
+
+    assert judgment.verdict == PairwiseVerdict.A_BETTER
+    assert judgment.status == "valid"
+    assert len(judgment.component_judgments) == 2
+    failed = next(vote for vote in judgment.component_judgments if vote.judge_model == "broken")
+    assert failed.verdict is None
+    assert failed.status == "error"
+
+
+def test_ensemble_total_provider_failure_is_not_reported_as_a_tie() -> None:
+    class RaisingJudge:
+        def __init__(self, model: str) -> None:
+            self.model = model
+
+        def compare(self, **_kwargs):
+            raise RuntimeError("provider unavailable")
+
+    ensemble = PairwiseJudgeEnsemble([RaisingJudge("broken-1"), RaisingJudge("broken-2")])
+
+    judgment = ensemble.compare(query="Q", response_a="a", response_b="b")
+
+    assert judgment.verdict is None
+    assert judgment.status == "error"
+    assert len(judgment.component_judgments) == 2
+    assert all(component.verdict is None for component in judgment.component_judgments)
+
+
+def test_ensemble_total_invalid_output_is_not_reported_as_a_tie() -> None:
+    judges = [
+        PairwiseJudge(provider=_make_provider("missing marker"), model="invalid-1"),
+        PairwiseJudge(provider=_make_provider("still missing"), model="invalid-2"),
+    ]
+
+    judgment = PairwiseJudgeEnsemble(judges).compare(
+        query="Q",
+        response_a="a",
+        response_b="b",
+    )
+
+    assert judgment.verdict is None
+    assert judgment.status == PairwiseStatus.INVALID
+    assert len(judgment.component_judgments) == 2
+    assert all(
+        component.status == PairwiseStatus.INVALID
+        for component in judgment.component_judgments
+    )

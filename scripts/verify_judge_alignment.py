@@ -397,7 +397,15 @@ def _report_payload(
     mode: str,
     pairs_available: int,
     pairs_scored: int,
+    input_error_count: int,
+    invalid_output_count: int,
+    provider_error_count: int,
+    component_attempted_count: int,
+    component_usable_count: int,
+    component_invalid_output_count: int,
+    component_provider_error_count: int,
     inconsistent_count: int,
+    component_inconsistent_count: int,
     agree3: float,
     kappa3: float,
     ac2_3: float,
@@ -432,6 +440,19 @@ def _report_payload(
         "pairs": {
             "available": pairs_available,
             "scored": pairs_scored,
+            "inputErrors": input_error_count,
+            "invalidOutputs": invalid_output_count,
+            "providerErrors": provider_error_count,
+            "coverageRate": (
+                pairs_scored / pairs_available if pairs_available else 0.0
+            ),
+        },
+        "components": {
+            "attempted": component_attempted_count,
+            "usable": component_usable_count,
+            "invalidOutputs": component_invalid_output_count,
+            "providerErrors": component_provider_error_count,
+            "inconsistent": component_inconsistent_count,
         },
         "verdict": {
             "status": verdict_status,
@@ -511,7 +532,15 @@ def run_offline(args: argparse.Namespace) -> int:
             mode="offline",
             pairs_available=len(pairs3),
             pairs_scored=len(pairs3),
+            input_error_count=0,
+            invalid_output_count=0,
+            provider_error_count=0,
+            component_attempted_count=0,
+            component_usable_count=0,
+            component_invalid_output_count=0,
+            component_provider_error_count=0,
             inconsistent_count=0,
+            component_inconsistent_count=0,
             agree3=agreement,
             kappa3=kappa,
             ac2_3=ac2,
@@ -543,6 +572,7 @@ def run_online(args: argparse.Namespace) -> int:
     from verdict_eval.pairwise import (
         PairwiseJudge,
         PairwiseJudgeEnsemble,
+        PairwiseStatus,
         PairwiseVerdict,
     )
     from verdict_eval.providers import (
@@ -606,8 +636,14 @@ def run_online(args: argparse.Namespace) -> int:
 
     n_total = 0
     n_used = 0
+    n_input_errors = 0
+    n_invalid_outputs = 0
+    n_provider_errors = 0
     n_inconsistent = 0
-    n_component_votes = 0
+    n_component_attempted = 0
+    n_component_usable = 0
+    n_component_invalid_outputs = 0
+    n_component_provider_errors = 0
     n_component_inconsistent = 0
     human_labels: list[int] = []
     judge_labels: list[int] = []
@@ -617,6 +653,7 @@ def run_online(args: argparse.Namespace) -> int:
         n_total += 1
         winner = ex.get("winner")
         if winner not in {"model_a", "model_b", "tie"}:
+            n_input_errors += 1
             continue
 
         try:
@@ -625,27 +662,62 @@ def run_online(args: argparse.Namespace) -> int:
             else:
                 q, resp_a, resp_b = _build_legacy_pair(ex)
         except (KeyError, IndexError, TypeError, ValueError):
+            n_input_errors += 1
             continue
 
         try:
             j = judge.compare(query=q, response_a=resp_a, response_b=resp_b)
         except Exception as e:
             print(f"  judge error: {e}")
+            n_provider_errors += 1
             continue
 
-        if j.verdict == PairwiseVerdict.INCONSISTENT:
+        component_judgments = getattr(j, "component_judgments", [])
+        for component in component_judgments:
+            n_component_attempted += 1
+            try:
+                component_status = PairwiseStatus(
+                    getattr(component, "status", PairwiseStatus.VALID)
+                )
+            except (TypeError, ValueError):
+                component_status = PairwiseStatus.INVALID
+            if component_status == PairwiseStatus.ERROR:
+                n_component_provider_errors += 1
+                continue
+            if component_status == PairwiseStatus.INVALID:
+                n_component_invalid_outputs += 1
+                continue
+            try:
+                component_verdict = PairwiseVerdict(component.verdict)
+            except (AttributeError, TypeError, ValueError):
+                n_component_invalid_outputs += 1
+                continue
+            n_component_usable += 1
+            if component_verdict == PairwiseVerdict.INCONSISTENT:
+                n_component_inconsistent += 1
+
+        try:
+            status = PairwiseStatus(getattr(j, "status", PairwiseStatus.VALID))
+        except (TypeError, ValueError):
+            status = PairwiseStatus.INVALID
+        if status == PairwiseStatus.ERROR:
+            n_provider_errors += 1
+            continue
+        if status == PairwiseStatus.INVALID:
+            n_invalid_outputs += 1
+            continue
+        try:
+            verdict = PairwiseVerdict(j.verdict)
+        except (AttributeError, TypeError, ValueError):
+            n_invalid_outputs += 1
+            continue
+
+        if verdict == PairwiseVerdict.INCONSISTENT:
             n_inconsistent += 1
             # Treat as tie for kappa — but still counted as a sample
-        component_judgments = getattr(j, "component_judgments", [])
-        if component_judgments:
-            n_component_votes += len(component_judgments)
-            n_component_inconsistent += sum(
-                1 for vote in component_judgments
-                if vote.verdict == PairwiseVerdict.INCONSISTENT
-            )
         n_used += 1
         human_labels.append(_encode_human(winner))
-        judge_labels.append(_encode_pairwise(j.verdict.value))
+        judge_labels.append(_encode_pairwise(verdict.value))
         categories.append(_example_category(ex))
 
         # Live progress every 10
@@ -653,23 +725,30 @@ def run_online(args: argparse.Namespace) -> int:
             agree_so_far = sum(1 for h, jl in zip(human_labels, judge_labels, strict=True) if h == jl) / len(human_labels)
             print(f"  {n_used}/{len(ds)} pairs scored  agree={agree_so_far:.3f}")
 
-    if n_used != len(ds):
+    coverage_complete = (
+        n_used == len(ds)
+        and n_component_invalid_outputs == 0
+        and n_component_provider_errors == 0
+    )
+    if not coverage_complete:
         print(
             f"Incomplete run: scored {n_used} of {len(ds)} selected pairs. "
-            "Judge errors or unusable rows make this evidence invalid."
+            f"input errors={n_input_errors}, invalid judge outputs={n_invalid_outputs}, "
+            f"provider errors={n_provider_errors}, component invalid outputs="
+            f"{n_component_invalid_outputs}, component provider errors="
+            f"{n_component_provider_errors}. This evidence is invalid."
         )
-        return 1
-
-    if not human_labels:
-        print("No usable comparisons.")
-        return 1
 
     # 3-way kappa (includes ties as a real category)
     pairs3 = list(zip(human_labels, judge_labels, strict=True))
     kappa3 = cohens_kappa(human_labels, judge_labels, n_categories=3)
     ac2_3 = gwets_ac2(human_labels, judge_labels, n_categories=3)
-    agree3 = sum(1 for h, jl in pairs3 if h == jl) / len(human_labels)
-    ac2_3_ci = bootstrap_ci(pairs3, gwets_ac2, 3)
+    agree3 = (
+        sum(1 for h, jl in pairs3 if h == jl) / len(human_labels)
+        if human_labels
+        else 0.0
+    )
+    ac2_3_ci = bootstrap_ci(pairs3, gwets_ac2, 3) if pairs3 else None
 
     # Binarized kappa (Arena-Hard / MT-Bench standard: drop ties from BOTH sides
     # before computing kappa). This is the number most papers publish.
@@ -739,20 +818,34 @@ def run_online(args: argparse.Namespace) -> int:
     # Honest verdict: a threshold is "cleared" only if the CI LOWER bound clears
     # it — not the point estimate. With small n the interval is wide on purpose.
     verdict_status, verdict, verdict_passed = _alignment_verdict(ac2_bin_ci)
+    if not coverage_complete:
+        verdict_status = "invalid_coverage"
+        verdict = (
+            "INVALID COVERAGE — one or more selected pairs or ensemble components "
+            "were unusable; diagnostic metrics exclude them and must not be "
+            "treated as judge-quality evidence."
+        )
+        verdict_passed = False
 
     print(textwrap.dedent(f"""
         ─ Results ───────────────────────────────────────
         Context mode:           {args.context_mode} ({context_desc})
         Pairs available:        {n_total}
         Pairs scored:           {n_used}
+        Input errors:           {n_input_errors}
+        Invalid judge output:   {n_invalid_outputs}
+        Provider errors:        {n_provider_errors}
         Inconsistent (swap):    {n_inconsistent} ({100*n_inconsistent/max(1,n_used):.1f}%)
-        Component inconsistent: {n_component_inconsistent} / {n_component_votes}
-                                ({100*n_component_inconsistent/max(1,n_component_votes):.1f}% of individual judge votes)
+        Component usable:       {n_component_usable} / {n_component_attempted}
+        Component invalid:      {n_component_invalid_outputs}
+        Component errors:       {n_component_provider_errors}
+        Component inconsistent: {n_component_inconsistent} / {n_component_usable}
+                                ({100*n_component_inconsistent/max(1,n_component_usable):.1f}% of usable individual judge votes)
 
         3-way agreement (A/B/Tie):
           Raw agreement:        {agree3:.3f}
           Cohen's κ:            {kappa3:.3f}   (paradox-vulnerable on skewed marginals)
-          Gwet's AC2:           {ac2_3:.3f}   [95% CI {ac2_3_ci[0]:.3f}, {ac2_3_ci[1]:.3f}]
+          Gwet's AC2:           {ac2_3:.3f}   [95% CI {_format_ci(ac2_3_ci)}]
 
         Binarized (Arena-Hard style — ties dropped from BOTH sides):
           Pairs kept:           {len(bin_pairs)}
@@ -841,7 +934,15 @@ def run_online(args: argparse.Namespace) -> int:
             mode="online",
             pairs_available=n_total,
             pairs_scored=n_used,
+            input_error_count=n_input_errors,
+            invalid_output_count=n_invalid_outputs,
+            provider_error_count=n_provider_errors,
+            component_attempted_count=n_component_attempted,
+            component_usable_count=n_component_usable,
+            component_invalid_output_count=n_component_invalid_outputs,
+            component_provider_error_count=n_component_provider_errors,
             inconsistent_count=n_inconsistent,
+            component_inconsistent_count=n_component_inconsistent,
             agree3=agree3,
             kappa3=kappa3,
             ac2_3=ac2_3,
