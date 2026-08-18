@@ -34,6 +34,12 @@ trace ID is recorded as an unlinked span with a link-status attribute rather
 than as an orphan; spans with no provider call or explicit context remain
 standalone.
 
+Provider SDK unset sentinels and other non-primitive numeric metadata are
+normalized to unavailable (`None`) before a `Trace` reaches storage. A
+synchronous telemetry persistence failure never replaces the provider call's
+result or exception; Verdict emits one warning per provider, storage type, and
+exception type instead of flooding application logs.
+
 `sample_rate` controls the fraction of supported calls retained, and
 `buffered_writes=True` moves persistence to a background batched writer. Stored
 manual spans do not wait for provider acknowledgement or receive repair writes;

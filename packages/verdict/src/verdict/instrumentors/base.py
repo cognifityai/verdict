@@ -3,11 +3,20 @@
 from __future__ import annotations
 
 import abc
+import logging
+import threading
 from typing import TYPE_CHECKING
+
+from verdict.redaction import sanitize_trace
+from verdict.schema import Trace
 
 if TYPE_CHECKING:
     from verdict.client import VerdictClient
-    from verdict.schema import Trace
+
+
+log = logging.getLogger("verdict.instrumentors")
+_persistence_warning_lock = threading.Lock()
+_warned_persistence_failures: set[tuple[str, str, type[BaseException]]] = set()
 
 
 def is_verdict_wrapt_wrapper(obj: object, *, owner: object | None = None) -> bool:
@@ -69,7 +78,50 @@ def apply_routing_context(client: VerdictClient, trace: Trace) -> None:
 
 def persist_trace(client: VerdictClient, trace: Trace) -> None:
     """Persist a provider trace; parent_span_id already carries correlation."""
+    # Provider response fields are filled after Trace.__post_init__, so repeat
+    # the schema guard at the final synchronous persistence boundary.
+    trace.normalize_scalars()
     client.storage.insert_trace(trace)
+
+
+def _warn_persistence_failure_once(
+    client: VerdictClient,
+    trace: Trace,
+    exc: BaseException,
+) -> None:
+    """Emit one non-sensitive warning for each provider/backend/error class."""
+    provider = trace.provider if isinstance(trace.provider, str) else type(trace.provider).__name__
+    storage_type = type(client.storage)
+    storage_name = f"{storage_type.__module__}.{storage_type.__qualname__}"
+    key = (provider, storage_name, type(exc))
+    with _persistence_warning_lock:
+        if key in _warned_persistence_failures:
+            return
+        _warned_persistence_failures.add(key)
+    try:
+        log.warning(
+            "Verdict discarded a %s trace after %s persistence failed with %s",
+            provider or "unknown-provider",
+            storage_name,
+            type(exc).__name__,
+        )
+    except Exception:
+        # A user-supplied logging handler must not turn telemetry into an
+        # application-path exception.
+        pass
+
+
+def safe_persist_trace(client: VerdictClient, trace: Trace) -> None:
+    """Sanitize and persist telemetry without raising into provider calls."""
+    try:
+        sanitize_trace(
+            trace,
+            mode=client.redaction_mode,  # type: ignore[arg-type]
+            secret=client.redaction_secret,
+        )
+        persist_trace(client, trace)
+    except Exception as exc:
+        _warn_persistence_failure_once(client, trace, exc)
 
 
 def normalize_finish_reason(raw: object) -> str | None:
@@ -131,6 +183,10 @@ class BaseInstrumentor(abc.ABC):
     def __init__(self, client: VerdictClient) -> None:
         self.client = client
         self._installed: bool = False
+
+    def _safe_persist(self, trace: Trace) -> None:
+        """Persist through the single non-raising instrumentor sink."""
+        safe_persist_trace(self.client, trace)
 
     @abc.abstractmethod
     def available(self) -> bool:

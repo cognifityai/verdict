@@ -338,6 +338,35 @@ def test_live_postgres_round_trip_and_mutation_contracts():
         storage.close()
 
 
+def test_live_postgres_persists_normalized_trace_scalars():
+    """Schema normalization must protect the real PostgreSQL bind boundary."""
+    trace_id = f"scalar-normalization-{uuid4().hex}"
+    trace = Trace(
+        trace_id=trace_id,
+        provider="custom-provider",
+        temperature=object(),
+        max_tokens=True,
+        input_tokens=object(),
+        output_tokens=2**31,
+        latency_ms=float("inf"),
+        cost_usd=-1.0,
+    )
+    storage = PostgresStorage(DSN, min_pool=1, max_pool=2)
+    try:
+        storage.insert_trace(trace)
+        persisted = storage.get_trace(trace_id)
+        assert persisted is not None
+        assert persisted.temperature is None
+        assert persisted.max_tokens is None
+        assert persisted.input_tokens is None
+        assert persisted.output_tokens is None
+        assert persisted.latency_ms is None
+        assert persisted.cost_usd is None
+    finally:
+        storage.delete_trace(trace_id)
+        storage.close()
+
+
 def test_live_postgres_drift_run_replacement_rolls_back_as_one_transaction():
     prefix = f"drift-rollback-{uuid4().hex}"
     fingerprint = f"{prefix}-evaluator"

@@ -178,7 +178,10 @@ The following cases are mandatory whenever their area changes:
 - Custom dimensions and unknown provider/model names render without crashing or
   silently disappearing.
 - Instrumentor changes run against the current real provider SDK through the
-  cold initialization and streaming/error paths. Without credentials, mark the
+  cold initialization and streaming/error paths. Assert exactly one final
+  stored row per call, including SDK-owned unset sentinels; wrapper execution
+  alone is not capture evidence. Persistence failures must remain non-raising
+  but emit bounded, non-sensitive diagnostics. Without credentials, mark the
   paid-call portion explicitly unverified.
 - Stored records from supported earlier schemas still load or fail with a clear
   migration error.

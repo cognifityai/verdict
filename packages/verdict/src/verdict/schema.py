@@ -5,6 +5,7 @@ These types are the lingua franca of Verdict. Every adapter speaks them.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -66,6 +67,48 @@ def _id() -> str:
     return uuid4().hex
 
 
+# PostgreSQL ``INTEGER`` is the narrowest integer storage type used by Verdict.
+# Keeping Trace token fields inside that common range prevents adapter-specific
+# bind/overflow behavior.
+_MAX_TRACE_INTEGER = 2**31 - 1
+
+
+def normalize_optional_float(
+    value: object,
+    *,
+    minimum: float | None = None,
+) -> float | None:
+    """Return a finite primitive float or ``None``.
+
+    Provider SDKs use object sentinels for omitted values.  ``bool`` is also
+    rejected even though Python considers it an ``int``: storing ``True`` as a
+    temperature, latency, or cost would give it an accidental numeric meaning.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    normalized = float(value)
+    if not math.isfinite(normalized):
+        return None
+    if minimum is not None and normalized < minimum:
+        return None
+    return normalized
+
+
+def normalize_optional_integer(
+    value: object,
+    *,
+    minimum: int = 0,
+    maximum: int = _MAX_TRACE_INTEGER,
+) -> int | None:
+    """Return a database-portable primitive integer or ``None``."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    normalized = int(value)
+    if normalized < minimum or normalized > maximum:
+        return None
+    return normalized
+
+
 @dataclass
 class Trace:
     """A single captured LLM request/response pair plus metadata.
@@ -116,20 +159,34 @@ class Trace:
     parent_span_id: str | None = None
 
     def __post_init__(self) -> None:
-        """Normalize enum values supplied by manual instrumentation."""
-        if isinstance(self.operation, Operation):
-            return
-        try:
-            self.operation = Operation(self.operation)
-        except (TypeError, ValueError) as exc:
-            alias = _OPERATION_ALIASES.get(str(self.operation).lower())
-            if alias is not None:
-                self.operation = alias
-                return
-            supported = ", ".join(op.value for op in Operation)
-            raise ValueError(
-                f"Unsupported operation {self.operation!r}; expected one of: {supported}"
-            ) from exc
+        """Normalize enum and scalar values supplied at the public boundary."""
+        self.normalize_scalars()
+        if not isinstance(self.operation, Operation):
+            try:
+                self.operation = Operation(self.operation)
+            except (TypeError, ValueError) as exc:
+                alias = _OPERATION_ALIASES.get(str(self.operation).lower())
+                if alias is not None:
+                    self.operation = alias
+                else:
+                    supported = ", ".join(op.value for op in Operation)
+                    raise ValueError(
+                        f"Unsupported operation {self.operation!r}; expected one of: "
+                        f"{supported}"
+                    ) from exc
+
+    def normalize_scalars(self) -> None:
+        """Normalize mutable database scalar fields in place.
+
+        Instrumentors call this again immediately before persistence because
+        response usage, latency, and cost are populated after construction.
+        """
+        self.input_tokens = normalize_optional_integer(self.input_tokens)
+        self.output_tokens = normalize_optional_integer(self.output_tokens)
+        self.temperature = normalize_optional_float(self.temperature)
+        self.max_tokens = normalize_optional_integer(self.max_tokens)
+        self.latency_ms = normalize_optional_float(self.latency_ms, minimum=0.0)
+        self.cost_usd = normalize_optional_float(self.cost_usd, minimum=0.0)
 
 
 # ---------------------------------------------------------------------------
