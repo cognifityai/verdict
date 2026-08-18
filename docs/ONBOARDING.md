@@ -31,6 +31,9 @@ pip install -r ui/requirements.txt              # repo-local dashboard server
 pip install pytest pytest-asyncio httpx         # only needed for the source test suite
 ```
 
+For a customer POC on the public alpha, use the pinned commands and provider
+coverage matrix in [`POC_RELEASE_PROFILE.md`](POC_RELEASE_PROFILE.md).
+
 You do **not** need a separate `pip install scipy scikit-learn` — `verdict_eval`
 lists them as hard dependencies, so the line above brings them in.
 
@@ -77,7 +80,12 @@ roughly 30 or more per window gives more useful evidence.
 import verdict
 from anthropic import Anthropic     # or openai / google
 
-verdict.init(service_name="my-app", storage="sqlite:///./verdict.db")
+verdict.init(
+    service_name="my-app",
+    storage="sqlite:///./verdict.db",
+    buffered_writes=False,
+    capture_content=False,
+)
 client = Anthropic()
 # use the client normally — supported SDK calls are captured
 ```
@@ -95,8 +103,15 @@ for card candidates and standard-library validation for IP candidates, so a
 clock value such as `12:34:56` is not classified as IPv6. Email discovery uses a
 linear `@`-anchored scanner to keep malformed and long inputs bounded. It remains
 best effort, not a compliance control, and opaque metadata such as
-tenant/session/cluster IDs must be non-sensitive. For high volume, add
-`buffered_writes=True`.
+tenant/session/cluster IDs must be non-sensitive. Keep content capture off for
+customer POC data. The `0.1.0a4` POC profile also keeps
+`buffered_writes=False`; buffered mode requires an explicit `shutdown()`
+imported from `verdict.client` before process exit.
+
+Use only the provider methods listed in the
+[`POC release profile`](POC_RELEASE_PROFILE.md). In particular, Anthropic
+`messages.stream(...)` and the OpenAI Responses API are not captured in
+`0.1.0a4`.
 
 ### Verify capture on your own SDK versions (recommended before you trust it)
 
@@ -109,9 +124,10 @@ python scripts/live_capture_check.py
 python scripts/live_capture_check.py --providers anthropic,openai --no-streaming
 ```
 
-A pass confirms traces land with tokens, estimated cost for recognized models,
-finish reason, and errors populated — non-streaming and streaming — on the SDK
-versions you actually have.
+A pass confirms the entry points exercised by the script land traces with
+tokens, estimated cost for recognized models, finish reason, and errors on the
+SDK versions you actually have. It does not expand the supported-entry-point
+matrix in the POC release profile.
 
 ## 5. Judge calibration with `verdict_eval` (only if you want quality-drift)
 
@@ -283,7 +299,8 @@ the other captured workloads.
 - **Streaming has explicit persistence boundaries.** Full consumption,
   iteration error, `close()` / `aclose()`, context exit, and async cancellation
   finalize traces. A never-iterated unclosed stream that is only garbage-
-  collected has no persistence guarantee.
+  collected has no persistence guarantee. These guarantees apply only to the
+  provider entry points listed in the POC release profile.
 - **Manual/provider linkage is automatic on the supported capture path.** A
   supported instrumented provider call inside a manual span persists the
   innermost span ID on `Trace.parent_span_id`. That is the sole automatic
