@@ -76,6 +76,67 @@ def test_judge_tolerates_code_fence_wrapper():
     assert j.pass_count == len(DEFAULT_RUBRIC.dimensions)
 
 
+def test_judge_preserves_verdict_when_fenced_reasoning_contains_markdown_fence():
+    expected = {
+        dimension.name: {
+            "reasoning": "The response included ```python\nprint('ok')\n``` correctly.",
+            "verdict": "FAIL" if dimension.name == "completeness" else "PASS",
+        }
+        for dimension in DEFAULT_RUBRIC.dimensions
+    }
+    payload = f"```json\n{json.dumps(expected)}\n```"
+
+    judgment = Judge(provider=FakeProvider(payload), model="fake-judge").judge(
+        query="hi", response="hello"
+    )
+
+    by_name = {dimension.name: dimension for dimension in judgment.dimensions}
+    assert by_name["completeness"].verdict == Verdict.FAIL
+    assert by_name["completeness"].reasoning == expected["completeness"]["reasoning"]
+    assert judgment.pass_count == len(DEFAULT_RUBRIC.dimensions) - 1
+    assert judgment.fail_count == 1
+
+
+def test_judge_preserves_json_delimiters_and_escapes_inside_reasoning():
+    reasoning = 'Compared {"nested": "value"}, a \\path, and a "quoted" phrase.'
+    payload = json.dumps({
+        "groundedness": {"reasoning": reasoning, "verdict": "FAIL"},
+    })
+
+    judgment = Judge(provider=FakeProvider(payload), model="fake-judge").judge(
+        query="hi", response="hello"
+    )
+
+    groundedness = next(
+        dimension
+        for dimension in judgment.dimensions
+        if dimension.name == "groundedness"
+    )
+    assert groundedness.verdict == Verdict.FAIL
+    assert groundedness.reasoning == reasoning
+
+
+def test_judge_ignores_unrelated_json_object_before_verdict_object():
+    verdicts = _fake_json_for({d.name: "PASS" for d in DEFAULT_RUBRIC.dimensions})
+    payload = f'preface metadata: {{"attempt": 1}}\nverdict: {verdicts}'
+
+    judgment = Judge(provider=FakeProvider(payload), model="fake-judge").judge(
+        query="hi", response="hello"
+    )
+
+    assert judgment.pass_count == len(DEFAULT_RUBRIC.dimensions)
+
+
+def test_judge_keeps_malformed_json_unclear():
+    payload = '```json\n{"groundedness": {"reasoning": "broken", "verdict": "FAIL"}'
+
+    judgment = Judge(provider=FakeProvider(payload), model="fake-judge").judge(
+        query="hi", response="hello"
+    )
+
+    assert all(dimension.verdict == Verdict.UNCLEAR for dimension in judgment.dimensions)
+
+
 def test_judge_tolerates_garbage_before_json():
     payload = "Sure, here's my evaluation:\n" + _fake_json_for(
         {d.name: "PASS" for d in DEFAULT_RUBRIC.dimensions}
