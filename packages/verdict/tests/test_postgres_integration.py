@@ -185,8 +185,8 @@ def test_live_postgres_round_trip_and_mutation_contracts():
             provider="custom-provider",
             request_model="custom/model",
             response_model="custom/model-v2",
-            prompt_redacted="prompt",
-            response_redacted="response",
+            prompt_redacted="Prompt from ::ffff:203.0.113.42.",
+            response_redacted="Response to ::ffff:203.0.113.42.",
             tenant_id=f"{prefix}-tenant",
             session_id=f"{prefix}-session",
             cluster_id=f"{prefix}-cluster",
@@ -198,6 +198,8 @@ def test_live_postgres_round_trip_and_mutation_contracts():
         assert fetched is not None
         assert fetched.parent_span_id == trace.parent_span_id
         assert fetched.tags == {"source": "integration"}
+        assert fetched.prompt_redacted == "Prompt from <IPV6>."
+        assert fetched.response_redacted == "Response to <IPV6>."
         assert [item.trace_id for item in storage.list_traces(
             tenant_id=trace.tenant_id,
             cluster_id=trace.cluster_id,
