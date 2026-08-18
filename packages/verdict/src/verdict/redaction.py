@@ -277,14 +277,28 @@ def _ipv6_repl(
     mode: RedactionMode,
     secret: str | None,
 ) -> str:
-    """Replace only candidates that the standard library validates as IPv6."""
+    """Replace validated IPv6 while preserving adjacent ASCII periods.
+
+    Periods remain in the candidate grammar for mapped tails and scope IDs.
+    Treat edge period runs as surrounding prose punctuation so sentence
+    boundaries do not make the whole candidate fail closed into cleartext.
+    Internal periods remain untouched and authoritative validation still comes
+    from ``IPv6Address``.
+    """
+    leading_periods = len(value) - len(value.lstrip("."))
+    address_end = len(value.rstrip("."))
+    address = value[leading_periods:address_end]
     try:
-        ipaddress.IPv6Address(value)
+        ipaddress.IPv6Address(address)
     except ipaddress.AddressValueError:
         return value
+    prefix = value[:leading_periods]
+    suffix = value[address_end:]
     if mode == "hash":
-        return _hash_match(value, label, secret)
-    return f"<{label}>"
+        replacement = _hash_match(address, label, secret)
+    else:
+        replacement = f"<{label}>"
+    return f"{prefix}{replacement}{suffix}"
 
 
 def _hash_match(value: str, label: str, secret: str | None) -> str:

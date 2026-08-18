@@ -90,6 +90,25 @@ def test_insert_and_get_trace(storage):
     assert fetched.parent_span_id == "span-parent"
 
 
+def test_storage_redacts_sentence_final_ipv6_without_consuming_punctuation(storage):
+    canary = "::ffff:203.0.113.42"
+    trace = _trace(
+        prompt_redacted=f"Prompt from {canary}.",
+        response_redacted=f"Response to {canary}.",
+        error=f"Failure from {canary}.",
+        tags={"peer": f"{canary}."},
+    )
+
+    storage.insert_trace(trace)
+    fetched = storage.get_trace(trace.trace_id)
+
+    assert fetched is not None
+    assert fetched.prompt_redacted == "Prompt from <IPV6>."
+    assert fetched.response_redacted == "Response to <IPV6>."
+    assert fetched.error == "Failure from <IPV6>."
+    assert fetched.tags["peer"] == "<IPV6>."
+
+
 def test_sqlite_migrates_trace_parent_span_link(tmp_path):
     path = tmp_path / "legacy-traces.db"
     connection = sqlite3.connect(path)

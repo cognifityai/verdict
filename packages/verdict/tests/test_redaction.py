@@ -205,6 +205,20 @@ def test_ipv6_redaction_consumes_mapped_and_scoped_addresses_completely():
         assert redact(raw) == expected
 
 
+def test_ipv6_redaction_preserves_surrounding_periods_without_leaking_the_address():
+    cases = {
+        "Connection from 2001:db8::1.": "Connection from <IPV6>.",
+        "Peer ...2001:db8:85a3::8a2e:370:7334...": "Peer ...<IPV6>...",
+        "Hosts 2001:db8::1, 2001:db8::2.": "Hosts <IPV6>, <IPV6>.",
+        "Mapped ::ffff:203.0.113.42.": "Mapped <IPV6>.",
+        "Scoped fe80::1%eth0.": "Scoped <IPV6>.",
+        "Dotted scope fe80::1%eth0.1.": "Dotted scope <IPV6>.",
+    }
+
+    for raw, expected in cases.items():
+        assert redact(raw) == expected
+
+
 def test_ipv6_redaction_does_not_corrupt_namespaced_source_code():
     examples = [
         "Use std::vector<int> v; then call v::size()",
@@ -223,6 +237,20 @@ def test_hash_mode_hashes_the_complete_mapped_or_scoped_ipv6_token():
         assert "<IPV6:" in output
         assert "%eth0" not in output
         assert ".0.113.42" not in output
+
+
+def test_ipv6_hash_mode_preserves_sentence_punctuation_outside_the_hash():
+    address = "::ffff:203.0.113.42"
+
+    output = redact(f"address={address}.", mode="hash", secret="test-secret")
+    bare = redact(f"address={address}", mode="hash", secret="test-secret")
+
+    assert output is not None
+    assert bare is not None
+    assert address not in output
+    assert output.startswith("address=<IPV6:")
+    assert output.endswith(">.")
+    assert output == f"{bare}."
 
 
 def test_redacted_mapping_key_collisions_preserve_every_entry_deterministically():
@@ -457,6 +485,10 @@ def test_ipv6_redaction_boundaries_are_unchanged_by_the_candidate_bound():
         "Use std::vector<int> v": "Use std::vector<int> v",
         "mac 00:1A:2B:3C:4D:5E ok": "mac 00:1A:2B:3C:4D:5E ok",
         "ratio 3:4 ok": "ratio 3:4 ok",
+        "time 12:34:56.": "time 12:34:56.",
+        "Use std::vector<int>.": "Use std::vector<int>.",
+        "mac 00:1A:2B:3C:4D:5E.": "mac 00:1A:2B:3C:4D:5E.",
+        "ratio 3:4.": "ratio 3:4.",
         # IPv4 must still be handled by the IP pattern, not swallowed as a
         # partial IPv6 candidate.
         "ip 203.0.113.42 here": "ip <IP> here",
@@ -494,18 +526,20 @@ def test_ipv6_canary_is_absent_from_storage_and_the_dashboard_bundle():
         trace = Trace(
             provider="openai",
             request_model="gpt-4o-mini",
-            prompt_redacted=f"Prompt from {canary}",
-            response_redacted=f"Response to {canary}",
-            error=f"Error contacting {canary}",
-            tags={"peer": canary},
+            prompt_redacted=f"Prompt from {canary}.",
+            response_redacted=f"Response to {canary}.",
+            error=f"Error contacting {canary}.",
+            tags={"peer": f"{canary}."},
         )
         storage.insert_trace(trace)
         stored = storage.get_trace(trace.trace_id)
         storage.close()
 
         # The address must be replaced whole, not merely reduced.
-        assert stored.prompt_redacted == "Prompt from <IPV6>"
-        assert stored.tags["peer"] == "<IPV6>"
+        assert stored.prompt_redacted == "Prompt from <IPV6>."
+        assert stored.response_redacted == "Response to <IPV6>."
+        assert stored.error == "Error contacting <IPV6>."
+        assert stored.tags["peer"] == "<IPV6>."
 
         stored_repr = repr(stored)
         for fragment in leaked_fragments:
