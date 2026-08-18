@@ -61,6 +61,11 @@ pip install "cognifity-verdict[anthropic,openai,google]"
 pip install "cognifity-verdict-eval[semantic]" cognifity-verdict-inspect
 ```
 
+For a customer proof of concept on `0.1.0a4`, follow the bounded
+[`POC release profile`](docs/POC_RELEASE_PROFILE.md). It names the provider
+entry points exercised for this release, keeps persistence synchronous, and
+separates a workflow demonstration from a production-readiness claim.
+
 Extras for `cognifity-verdict`: `anthropic`, `openai`, `google`, `postgres`, or
 `all`. Google capture specifically needs the `google` extra (`google-genai`).
 The dashboard is intentionally a repo-local app; from a source checkout,
@@ -97,7 +102,12 @@ python scripts/smoke_test.py
 import verdict
 from anthropic import Anthropic
 
-verdict.init(service_name="my-app", storage="sqlite:///./verdict.db")
+verdict.init(
+    service_name="my-app",
+    storage="sqlite:///./verdict.db",
+    buffered_writes=False,
+    capture_content=False,
+)
 client = Anthropic()
 # Use Anthropic normally; supported calls are captured.
 # Run scripts/run_drift_pipeline.py separately for sampling, judging, and drift.
@@ -112,11 +122,14 @@ address validation, not a compliance control; names, addresses, many
 international identifiers, and opaque application metadata are not guaranteed
 to be found. Clock values such as `12:34:56` are not treated as IPv6. Use
 non-sensitive tenant/session/cluster IDs. `sample_rate`
-controls what fraction of supported calls is retained. For high-volume
-production, `verdict.init(buffered_writes=True)` moves writes to a background
-batched writer off the request hot path. `close()` drains every accepted write
-before stopping the worker; writes and reads after close raise, while a
-post-close `flush()` is an idempotent no-op.
+controls what fraction of supported calls is retained. The `0.1.0a4` POC
+profile keeps `buffered_writes=False`, so a normal process exit cannot strand
+queued telemetry. `buffered_writes=True` moves writes to a background batched
+writer but requires an explicit `shutdown()` imported from `verdict.client`
+before process exit. The storage wrapper's `close()` drains every accepted
+write before
+stopping the worker; writes and reads after close raise, while a post-close
+`flush()` is an idempotent no-op.
 
 ## Validation status
 
@@ -174,7 +187,14 @@ Hexagonal / ports-and-adapters, ≥2 adapters per port (one real + in-memory for
 ## Honest limits / not in v0
 
 - **No OpenTelemetry/OpenInference span emission** yet (vendor-neutral schema today; exporter is planned).
-- **Streaming:** Anthropic, OpenAI, and Google modern-SDK streaming are captured and confirmed against live SDKs via `scripts/live_capture_check.py`. Keep that script in the release checklist, because provider SDK stream chunk shapes can drift.
+- **Capture coverage for the `0.1.0a4` POC profile:** Anthropic
+  `messages.create(...)` (including `stream=True`), OpenAI
+  `chat.completions.create(...)` and its stream helper, and Google
+  `models.generate_content(...)` / `generate_content_stream(...)` are the
+  supported entry points. Anthropic `messages.stream(...)` and the OpenAI
+  Responses API are not captured in this release. See the
+  [`POC release profile`](docs/POC_RELEASE_PROFILE.md) before instrumenting an
+  existing application.
 - Stream traces finalize deterministically on full iteration, an iteration
   error, explicit `close()` / `aclose()`, or context-manager exit. Async
   cancellation is recorded as an error. Dropping a never-iterated or unclosed
@@ -241,6 +261,9 @@ Hexagonal / ports-and-adapters, ≥2 adapters per port (one real + in-memory for
   prevents a `healthy` status: too few usable examples remain
   `insufficient_data`; otherwise the result is `degraded`.
   Signals retain up to five current-window trace IDs as review evidence.
+- The `0.1.0a4` POC drift demonstration assumes independently sampled calls.
+  Do not treat repeated turns from the same conversation as independent
+  evidence or use that profile for a production decision.
 - The v0 drift runner supports one tenant scope per store and rejects mixed-
   tenant analysis. Use separate stores until tenant-scoped cluster registries
   and signals are implemented.
@@ -269,6 +292,9 @@ Apache 2.0 — see [LICENSE](LICENSE).
 
 ## Docs
 
+- [`CHANGELOG.md`](CHANGELOG.md) — curated release changes and version history.
+- [`docs/POC_RELEASE_PROFILE.md`](docs/POC_RELEASE_PROFILE.md) — the exact
+  provider, persistence, privacy, and evidence boundaries for customer POCs.
 - [`docs/STATS_PRIMER.md`](docs/STATS_PRIMER.md) — plain-language explanation of every statistical method Verdict uses (Fisher's exact, Cliff's δ, Wasserstein, PSI, Benjamini-Hochberg, Cohen's κ / Gwet's AC2, Bradley-Terry) and *why* each was chosen.
 - [`docs/EXPLAINER.md`](docs/EXPLAINER.md) — how the pipeline works end to end.
 - [`docs/adrs/`](docs/adrs/) — architecture decision records.

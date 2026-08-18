@@ -21,6 +21,11 @@ under deterministic suffixed keys rather than overwriting one entry.
 This is best-effort matching, not a compliance guarantee; keep content capture
 off when its documented coverage is insufficient.
 
+For a customer proof of concept, follow the versioned
+[`0.1.0a4 POC release profile`](https://github.com/cognifityai/verdict/blob/v0.1.0a4/docs/POC_RELEASE_PROFILE.md).
+It pins the package set, provider entry points, persistence mode, and privacy
+boundary used for release verification.
+
 Supported streams finalize after full consumption, iteration error, explicit
 `close()` / `aclose()`, context exit, or async cancellation. Garbage collection
 of a never-iterated unclosed stream is not a persistence guarantee. A supported
@@ -47,6 +52,8 @@ each ended span is persisted once independently of provider success. `flush()` i
 a FIFO point-in-time barrier and accepts an optional timeout. `close()` rejects
 new reads/writes, drains every accepted FIFO write, stops and joins the worker,
 then closes the inner adapter; post-close `flush()` is an idempotent no-op.
+The `0.1.0a4` POC profile uses `buffered_writes=False`. Buffered mode requires
+an explicit `shutdown()` imported from `verdict.client` before process exit.
 Completed drift analyses use atomic `DriftRun` snapshots, including explicit
 zero-signal runs. Storage readers select a run marker and its exact signals from
 one snapshot; deleting a matched attributed signal window removes the completed
@@ -66,6 +73,13 @@ verdict.init(service_name="my-app", storage="sqlite:///./verdict.db")
 client = Anthropic()
 # Use Anthropic normally — supported SDK calls are captured.
 ```
+
+For `0.1.0a4`, supported POC entry points are Anthropic
+`messages.create(...)` (including `stream=True`), OpenAI
+`chat.completions.create(...)` and its stream helper, and Google
+`models.generate_content(...)` / `generate_content_stream(...)`. Anthropic
+`messages.stream(...)` and the OpenAI Responses API are not captured in this
+release.
 
 See the
 [repository README](https://github.com/cognifityai/verdict#readme) for the full

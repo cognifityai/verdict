@@ -23,6 +23,8 @@ they go through a supported provider SDK.
 - Captures Anthropic, OpenAI, and Google GenAI calls through lightweight Python
   instrumentation.
 - Supports non-streaming and streaming responses for the supported SDK paths.
+  The versioned [`0.1.0a4 POC release profile`](POC_RELEASE_PROFILE.md) names
+  those entry points explicitly.
 - Stores traces in SQLite by default, with Postgres support for deployments that
   need a server database.
 - Recursively redacts common sensitive patterns in supported JSON-compatible
@@ -44,7 +46,8 @@ they go through a supported provider SDK.
    controls the retained fraction.
 2. **Store**: traces are written through a storage interface. SQLite is the
    default local store; Postgres is available for shared environments. Optional
-   buffered writes move persistence to a background batched writer.
+   buffered writes move persistence to a background batched writer and require
+   explicit client shutdown. The `0.1.0a4` POC profile uses synchronous writes.
 3. **Group**: on a pipeline run, prompt embeddings are assigned against a
    persisted cluster registry so existing cluster IDs remain stable. Local
    MiniLM is the semantic default; the explicit hash fallback is lexical.
@@ -124,8 +127,9 @@ degraded otherwise.
 Streaming trace persistence is deterministic after full consumption, iteration
 error, explicit `close()` / `aclose()`, context-manager exit, or async
 cancellation. Garbage collection of a never-iterated, unclosed stream is not a
-supported finalization boundary. Supported instrumented provider calls made
-inside manual spans persist `Trace.parent_span_id` automatically. That is the
+supported finalization boundary. These guarantees apply only to the entry
+points named in the POC release profile. Supported instrumented provider calls
+made inside manual spans persist `Trace.parent_span_id` automatically. That is the
 only automatic direction: several provider traces may point to one span, while
 `SpanRecord.trace_id` is used only by explicit `trace_context(...)` or
 `set_context(trace_id=...)` binding to an existing stored trace. Unknown
