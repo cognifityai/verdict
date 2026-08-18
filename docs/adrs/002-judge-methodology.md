@@ -44,6 +44,22 @@ Bias mitigations:
 4. **Per-dimension scoring** so one broad quality score does not hide the reason
    for a change.
 
+Pairwise preference and pairwise execution status are separate axes. A valid
+preference is `A_BETTER`, `B_BETTER`, `TIE`, or `INCONSISTENT`. Each position-
+swap round must contain exactly one complete verdict marker. Missing, empty,
+truncated, repeated, or conflicting markers are `INVALID`; provider execution
+failures are `ERROR`. Invalid and error judgments have no preference verdict
+and never enter a tie denominator.
+
+An ensemble retains a component record for every configured judge and votes
+only over usable components. Partial component failure remains visible even if
+the remaining votes produce a usable aggregate; total failure produces no
+verdict. Evidence workflows exclude unusable pairs from diagnostic agreement
+metrics, report pair and component coverage, and fail their coverage gate when
+any selected pair or configured component is unusable. Bradley-Terry input
+accepts only the two participating model identifiers or the literal `tie` and
+rejects every other winner value.
+
 ## Calibration Guidance
 
 Users should calibrate a judge on their own workload before relying on quality
@@ -71,7 +87,8 @@ cannot exclude silent changes elsewhere in the provider's behavior.
 
 Pairwise model ranking is a different task from binary rubric drift. It should be
 validated separately with `scripts/verify_judge_alignment.py` or a customer-owned
-labeled comparison set.
+labeled comparison set. A successful alignment artifact requires complete pair
+and ensemble-component coverage in addition to clearing its agreement interval.
 
 ## Consequences
 

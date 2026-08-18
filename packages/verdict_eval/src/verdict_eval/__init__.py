@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     from verdict_eval.drift import DriftDetector, DriftWindow
     from verdict_eval.injector import CorruptionInjector, CorruptionKind
     from verdict_eval.judge import DEFAULT_RUBRIC, Judge, Rubric
-    from verdict_eval.pairwise import PairwiseJudge, PairwiseJudgeEnsemble
+    from verdict_eval.pairwise import PairwiseJudge, PairwiseJudgeEnsemble, PairwiseStatus
     from verdict_eval.providers import LLMProvider
 
 
@@ -38,11 +38,12 @@ def __getattr__(name: str):
     if name in {"BradleyTerryComparator", "PairwiseResult"}:
         from verdict_eval.compare import BradleyTerryComparator, PairwiseResult
         return {"BradleyTerryComparator": BradleyTerryComparator, "PairwiseResult": PairwiseResult}[name]
-    if name in {"PairwiseJudge", "PairwiseJudgeEnsemble"}:
-        from verdict_eval.pairwise import PairwiseJudge, PairwiseJudgeEnsemble
+    if name in {"PairwiseJudge", "PairwiseJudgeEnsemble", "PairwiseStatus"}:
+        from verdict_eval.pairwise import PairwiseJudge, PairwiseJudgeEnsemble, PairwiseStatus
         return {
             "PairwiseJudge": PairwiseJudge,
             "PairwiseJudgeEnsemble": PairwiseJudgeEnsemble,
+            "PairwiseStatus": PairwiseStatus,
         }[name]
     if name in {"CorruptionInjector", "CorruptionKind"}:
         from verdict_eval.injector import CorruptionInjector, CorruptionKind
@@ -110,6 +111,7 @@ __all__ = [
     "PairwiseJudge",
     "PairwiseJudgeEnsemble",
     "PairwiseResult",
+    "PairwiseStatus",
     "Probe",
     "ProbeExpectation",
     "ProbeResult",

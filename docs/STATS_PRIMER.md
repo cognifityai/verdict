@@ -574,6 +574,13 @@ Given a bunch of pairwise outcomes, find the β values that maximize the likelih
 - Features: a vector of zeros except +1 in position of model A, −1 in position of model B.
 - Label: 1 if A won, 0 if B won, 0.5 if tie.
 
+That last label is valid only when the judge explicitly returned a usable tie.
+Malformed or missing verdict markers and provider failures are not games and
+are not coded as `0.5`. Verdict excludes them from the fit, reports them as
+coverage loss, and rejects unknown winner values before constructing the design
+matrix. Otherwise an outage could pull two models artificially toward equal
+ratings.
+
 Hand this to scikit-learn's `LogisticRegression(fit_intercept=False)` and you get back β coefficients. Those are the model strengths.
 
 ### Confidence intervals via bootstrap
@@ -623,10 +630,12 @@ This is `packages/verdict_eval/src/verdict_eval/drift.py`.
 For a sample of MT-Bench pairs (or a customer's labeled subset):
 
 1. Run our pairwise judge with position-swap on each pair.
-2. Compare verdicts to the human ground truth.
-3. **Cohen's κ** → chance-corrected agreement (paradox-vulnerable on skewed marginals)
-4. **Gwet's AC2** → chance-corrected agreement (paradox-corrected; preferred for our data)
-5. **Non-tie agreement** → raw agreement on cases where humans had a clear winner
+2. Exclude invalid/error outputs, report their pair and component coverage, and
+   fail the evidence gate if the selected run is incomplete.
+3. Compare the remaining usable verdicts to the human ground truth.
+4. **Cohen's κ** → chance-corrected agreement (paradox-vulnerable on skewed marginals)
+5. **Gwet's AC2** → chance-corrected agreement (paradox-corrected; preferred for our data)
+6. **Non-tie agreement** → raw agreement on cases where humans had a clear winner
 
 Both κ and AC2 are reported side by side. Workload-specific calibration should
 determine whether rankings are shown as decision support or treated as
@@ -638,9 +647,13 @@ This is `scripts/verify_judge_alignment.py`.
 
 For a customer who shadow-routes some traffic to multiple providers:
 
-1. For each shadow pair, the **pairwise judge** with **position-swap consistency** picks a winner (or tie).
+1. For each shadow pair, the **pairwise judge** with **position-swap consistency** returns a usable winner/tie or an explicit invalid/error state.
 2. Across all pairs, fit **Bradley-Terry** logistic regression with **bootstrap confidence intervals**.
 3. Report per-cluster rankings + win-rate vs. anchor model.
+
+Only usable outcomes enter step 2. An invalid/error outcome must stop or fail the
+owning workflow's coverage gate; silently turning it into a tie changes the
+measurement rather than handling the failure.
 
 This is `packages/verdict_eval/src/verdict_eval/compare.py` plus `pairwise.py`.
 

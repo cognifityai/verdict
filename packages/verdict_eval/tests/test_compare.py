@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import random
 
+import pytest
 from verdict_eval.compare import BradleyTerryComparator, PairwiseResult
 
 
@@ -83,3 +84,19 @@ def test_ties_split_credit():
     # All ties → ratings ~equal
     by = {r.model: r.rating for r in ratings}
     assert abs(by["a"] - by["b"]) < 0.1
+
+
+@pytest.mark.parametrize("winner", ["invalid", "error", "", "unknown-model"])
+def test_pairwise_result_rejects_unknown_winner_instead_of_counting_a_tie(
+    winner: str,
+) -> None:
+    with pytest.raises(ValueError, match="winner"):
+        PairwiseResult("a", "b", winner)
+
+
+def test_comparator_revalidates_mutated_results_before_fitting() -> None:
+    result = PairwiseResult("a", "b", "a")
+    result.winner = "invalid"
+
+    with pytest.raises(ValueError, match="winner"):
+        BradleyTerryComparator(bootstrap_iterations=1).fit([result])

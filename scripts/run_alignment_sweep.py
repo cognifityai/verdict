@@ -113,6 +113,26 @@ def _load_report(
         raise ValueError("result JSON did not use the full-context comparison")
     available = _integer(report, "pairs", "available")
     scored = _integer(report, "pairs", "scored")
+    input_errors = _integer(report, "pairs", "inputErrors")
+    invalid_outputs = _integer(report, "pairs", "invalidOutputs")
+    provider_errors = _integer(report, "pairs", "providerErrors")
+    coverage_rate = float(_number(report, "pairs", "coverageRate"))
+    if not 0.0 <= coverage_rate <= 1.0:
+        raise ValueError("pairs.coverageRate must be between 0 and 1")
+    expected_coverage_rate = scored / available if available else 0.0
+    if not math.isclose(coverage_rate, expected_coverage_rate):
+        raise ValueError("pairs.coverageRate does not match scored/available")
+    if input_errors + invalid_outputs + provider_errors + scored != available:
+        raise ValueError("pair coverage counts do not add up to pairs.available")
+    component_attempted = _integer(report, "components", "attempted")
+    component_usable = _integer(report, "components", "usable")
+    component_invalid = _integer(report, "components", "invalidOutputs")
+    component_errors = _integer(report, "components", "providerErrors")
+    component_inconsistent = _integer(report, "components", "inconsistent")
+    if component_usable + component_invalid + component_errors != component_attempted:
+        raise ValueError("component coverage counts do not add up to components.attempted")
+    if component_inconsistent > component_usable:
+        raise ValueError("component inconsistent count exceeds usable count")
     required = expected_pairs if mode == "online" else OFFLINE_SYNTHETIC_PAIRS
     if available != required:
         raise ValueError(f"expected {required} available pairs, found {available}")
@@ -124,7 +144,13 @@ def _load_report(
     status = verdict.get("status")
     message = verdict.get("message")
     allowed_statuses = (
-        {"acceptable", "preliminary", "inconclusive", "unreliable"}
+        {
+            "acceptable",
+            "preliminary",
+            "inconclusive",
+            "invalid_coverage",
+            "unreliable",
+        }
         if mode == "online"
         else {"synthetic"}
     )
