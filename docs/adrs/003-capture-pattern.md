@@ -70,6 +70,14 @@ context-manager exit, and async cancellation finalize exactly once. A dropped,
 never-iterated, unclosed stream is not a supported garbage-collection
 finalization boundary.
 
+Provider request scalars cross one typed boundary before Trace construction and
+are normalized again before persistence because response usage and latency are
+filled later. SDK-specific unset objects, booleans, non-finite numbers, and
+values outside the common SQLite/PostgreSQL representation become unavailable
+rather than being handed to a database driver. Synchronous persistence remains
+non-raising on the application path, but failures emit a bounded warning keyed
+by provider, storage type, and exception type.
+
 ## Wire format / schema
 
 There is **no OpenTelemetry/OpenInference span emission today.** Instead we use an

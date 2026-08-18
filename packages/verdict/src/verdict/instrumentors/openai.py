@@ -14,11 +14,15 @@ from verdict.instrumentors.base import (
     decide_persist,
     is_verdict_wrapt_wrapper,
     normalize_finish_reason,
-    persist_trace,
 )
 from verdict.pricing import compute_cost_usd
-from verdict.redaction import redact, redact_messages, sanitize_trace
-from verdict.schema import Operation, Trace
+from verdict.redaction import redact, redact_messages
+from verdict.schema import (
+    Operation,
+    Trace,
+    normalize_optional_float,
+    normalize_optional_integer,
+)
 
 # Dedicated RNG so an app calling random.seed() can't perturb our sampling.
 _rng = random.Random()
@@ -195,13 +199,16 @@ class OpenAIInstrumentor(BaseInstrumentor):
 
     def _build_input_trace(self, kwargs: dict[str, Any]) -> Trace:
         model = str(kwargs.get("model", ""))
+        max_tokens = normalize_optional_integer(kwargs.get("max_tokens"))
+        if max_tokens is None:
+            max_tokens = normalize_optional_integer(kwargs.get("max_completion_tokens"))
         trace = Trace(
             provider="openai",
             operation=Operation.CHAT,
             request_model=model,
             response_model=model,
-            temperature=kwargs.get("temperature"),
-            max_tokens=kwargs.get("max_tokens") or kwargs.get("max_completion_tokens"),
+            temperature=normalize_optional_float(kwargs.get("temperature")),
+            max_tokens=max_tokens,
         )
         apply_routing_context(self.client, trace)
         if self.client.capture_content:
@@ -253,18 +260,6 @@ class OpenAIInstrumentor(BaseInstrumentor):
                     )
         except Exception:
             pass
-
-    def _safe_persist(self, trace: Trace) -> None:
-        try:
-            sanitize_trace(
-                trace,
-                mode=self.client.redaction_mode,  # type: ignore[arg-type]
-                secret=self.client.redaction_secret,
-            )
-            persist_trace(self.client, trace)
-        except Exception:
-            pass
-
 
 class _StreamingWrapper:
     """Pass-through iterator around an OpenAI chat-completions stream.

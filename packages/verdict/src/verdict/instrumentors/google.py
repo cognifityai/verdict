@@ -32,11 +32,15 @@ from verdict.instrumentors.base import (
     decide_persist,
     is_verdict_wrapt_wrapper,
     normalize_finish_reason,
-    persist_trace,
 )
 from verdict.pricing import compute_cost_usd
-from verdict.redaction import redact, redact_messages, sanitize_trace
-from verdict.schema import Operation, Trace
+from verdict.redaction import redact, redact_messages
+from verdict.schema import (
+    Operation,
+    Trace,
+    normalize_optional_float,
+    normalize_optional_integer,
+)
 
 # Dedicated RNG so an app calling random.seed() can't perturb our sampling.
 _rng = random.Random()
@@ -322,8 +326,10 @@ class GoogleInstrumentor(BaseInstrumentor):
         temperature = None
         max_tokens = None
         if config is not None:
-            temperature = getattr(config, "temperature", None)
-            max_tokens = getattr(config, "max_output_tokens", None)
+            temperature = normalize_optional_float(getattr(config, "temperature", None))
+            max_tokens = normalize_optional_integer(
+                getattr(config, "max_output_tokens", None)
+            )
 
         trace = Trace(
             provider="google",
@@ -389,18 +395,6 @@ class GoogleInstrumentor(BaseInstrumentor):
         trace.latency_ms = (time.perf_counter() - t0) * 1000.0
         trace.error = f"{type(e).__name__}: {e}"
         self._safe_persist(trace)
-
-    def _safe_persist(self, trace: Trace) -> None:
-        try:
-            sanitize_trace(
-                trace,
-                mode=self.client.redaction_mode,  # type: ignore[arg-type]
-                secret=self.client.redaction_secret,
-            )
-            persist_trace(self.client, trace)
-        except Exception:
-            pass
-
 
 class _StreamingWrapper:
     """Pass-through iterator around a Google Gemini streaming response.
