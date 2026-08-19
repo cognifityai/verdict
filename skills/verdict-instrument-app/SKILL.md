@@ -30,7 +30,11 @@ python3 <skill-root>/scripts/verify_verdict_checkout.py \
 ```
 
 Stop if it does not report `"ready": true`; do not silently substitute another
-checkout or package version.
+checkout or package version. Full checkouts verify the immutable release tag. Shallow
+checkouts, where that tag object is absent, must match the bundled immutable Git-object
+manifest for every runtime path instead. It also hashes the actual checked-out runtime
+bytes and rejects hidden `assume-unchanged` or `skip-worktree` index flags. The verifier
+never fetches or mutates the checkout.
 
 ## Preserve the authority boundary
 

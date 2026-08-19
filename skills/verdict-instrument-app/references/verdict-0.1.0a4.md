@@ -18,6 +18,10 @@ carrying these claims forward.
 - A native agent-skill install does not supply those repository files either. Resolve
   the source checkout separately and run the skill's
   `scripts/verify_verdict_checkout.py` before using it.
+- The checkout verifier accepts a shallow clone only when every runtime path matches
+  its pinned immutable Git-object manifest. A present release tag must still resolve
+  to the expected commit. It independently hashes checked-out runtime bytes, rejects
+  hidden index flags, and performs no implicit fetch.
 
 ## Released auto-instrumentors
 

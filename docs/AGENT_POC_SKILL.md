@@ -42,7 +42,10 @@ Agents with a native skill installer may install the
 mechanism. A native install copies the skill but does not install the
 repository-local pipeline or dashboard. Give the agent a separate absolute path
 to a pinned Verdict source checkout and require the bundled checkout verifier
-to pass before those tools run. The direct-file prompt above is the
+to pass before those tools run. The verifier checks the release tag in a full
+checkout and falls back to pinned runtime object identities in a shallow checkout;
+it also hashes the checked-out runtime bytes and rejects hidden Git index flags. It
+does not fetch or modify the checkout. The direct-file prompt above is the
 cross-host fallback and is the only usage assumed by this repository.
 
 ## Expect three separate milestones

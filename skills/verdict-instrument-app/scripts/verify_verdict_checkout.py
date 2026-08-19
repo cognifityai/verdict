@@ -4,8 +4,11 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
 import re
+import stat
 import subprocess
 import sys
 from collections.abc import Sequence
@@ -22,6 +25,13 @@ RUNTIME_PATHS = (
     "scripts/run_probes.py",
     "ui/server.py",
 )
+RUNTIME_OBJECT_IDS = {
+    "packages/verdict": "e5e0a7a32c372a254c003d0c53e5ba6d1dde40ea",
+    "packages/verdict_eval": "b8904fb8ca85c4bb9655c90cbf06184fd329f968",
+    "scripts/run_drift_pipeline.py": "a9537bd474acd41fc6e5fcaccfc2dd2773c3c674",
+    "scripts/run_probes.py": "2e000292e5fb991be2964228d574bafd69ee19be",
+    "ui/server.py": "114c3f5e749c190be911b91796898a3ebf72ee1e",
+}
 REQUIRED_FILES = (*RUNTIME_PATHS, "pyproject.toml")
 
 
@@ -49,6 +59,69 @@ def _run(
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
+
+
+def _blob_object_id(path: Path, mode: str) -> str | None:
+    """Hash the checked-out bytes using Git's blob object format."""
+
+    try:
+        before = path.lstat()
+        if mode == "120000":
+            if not stat.S_ISLNK(before.st_mode):
+                return None
+            data = os.fsencode(os.readlink(path))
+            digest = hashlib.sha1(usedforsecurity=False)
+            digest.update(f"blob {len(data)}\0".encode())
+            digest.update(data)
+            return digest.hexdigest()
+        if not stat.S_ISREG(before.st_mode):
+            return None
+        digest = hashlib.sha1(usedforsecurity=False)
+        digest.update(f"blob {before.st_size}\0".encode())
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        after = path.lstat()
+    except (OSError, ValueError):
+        return None
+    if (
+        before.st_dev,
+        before.st_ino,
+        before.st_size,
+        before.st_mtime_ns,
+    ) != (
+        after.st_dev,
+        after.st_ino,
+        after.st_size,
+        after.st_mtime_ns,
+    ):
+        return None
+    return digest.hexdigest()
+
+
+def _worktree_bytes_match_head(root: Path) -> bool:
+    """Compare actual runtime bytes with the committed blobs, ignoring index hints."""
+
+    tree = _run(
+        ["git", "ls-tree", "-r", "-z", "HEAD", "--", *RUNTIME_PATHS],
+        cwd=root,
+    )
+    if tree is None or tree.returncode != 0:
+        return False
+    records = [record for record in tree.stdout.split("\0") if record]
+    if not records:
+        return False
+    for record in records:
+        try:
+            metadata, relative = record.split("\t", 1)
+            mode, object_type, expected = metadata.split(" ", 2)
+        except ValueError:
+            return False
+        if object_type != "blob" or not re.fullmatch(r"[0-9a-f]{40}", expected):
+            return False
+        if _blob_object_id(root / relative, mode) != expected:
+            return False
+    return True
 
 
 def verify(root: Path) -> dict[str, object]:
@@ -99,6 +172,30 @@ def verify(root: Path) -> dict[str, object]:
         )
     )
 
+    runtime_object_ids: dict[str, str] = {}
+    for path in RUNTIME_PATHS:
+        runtime_object = _run(
+            ["git", "rev-parse", "--verify", f"HEAD:{path}"],
+            cwd=root,
+        )
+        if runtime_object is None or runtime_object.returncode != 0:
+            continue
+        object_id = runtime_object.stdout.strip().lower()
+        if re.fullmatch(r"[0-9a-f]{40}", object_id):
+            runtime_object_ids[path] = object_id
+    runtime_matches = runtime_object_ids == RUNTIME_OBJECT_IDS
+
+    shallow = _run(["git", "rev-parse", "--is-shallow-repository"], cwd=root)
+    is_shallow = (
+        shallow is not None
+        and shallow.returncode == 0
+        and shallow.stdout.strip() == "true"
+    )
+
+    tag_ref = _run(
+        ["git", "tag", "--list", TARGET_TAG],
+        cwd=root,
+    )
     tag = _run(
         ["git", "rev-parse", "--verify", f"refs/tags/{TARGET_TAG}^{{commit}}"],
         cwd=root,
@@ -108,30 +205,54 @@ def verify(root: Path) -> dict[str, object]:
         and tag.returncode == 0
         and tag.stdout.strip().lower() == TARGET_COMMIT
     )
+    tag_present = (
+        tag_ref is not None
+        and tag_ref.returncode == 0
+        and tag_ref.stdout.strip() == TARGET_TAG
+    )
+    tag_absent = (
+        tag_ref is not None
+        and tag_ref.returncode == 0
+        and not tag_ref.stdout.strip()
+    )
+    target_identity_ok = has_tag or (tag_absent and is_shallow and runtime_matches)
+    identity_mode = (
+        "tag"
+        if has_tag
+        else "shallow-runtime-manifest"
+        if target_identity_ok
+        else None
+    )
     checks.append(
         Check(
-            "target-tag",
-            has_tag,
+            "target-release-identity",
+            target_identity_ok,
             f"target tag {TARGET_TAG} resolves to the expected release commit"
             if has_tag
-            else f"target tag {TARGET_TAG} is unavailable or has unexpected identity",
+            else (
+                "target tag is absent in this shallow checkout; immutable runtime "
+                "object identities match the release"
+                if target_identity_ok
+                else (
+                    f"target tag {TARGET_TAG} has unexpected identity"
+                    if tag_present
+                    else (
+                        f"target tag {TARGET_TAG} is absent from a non-shallow checkout"
+                        if tag_absent and not is_shallow
+                        else f"target tag {TARGET_TAG} could not be verified"
+                    )
+                )
+            ),
         )
     )
 
-    runtime_matches = False
-    if has_tag:
-        diff = _run(
-            ["git", "diff", "--quiet", TARGET_COMMIT, "--", *RUNTIME_PATHS],
-            cwd=root,
-        )
-        runtime_matches = diff is not None and diff.returncode == 0
     checks.append(
         Check(
             "released-runtime-match",
             runtime_matches,
-            "runtime paths match the target tag"
+            "runtime paths match the immutable release object manifest"
             if runtime_matches
-            else "runtime paths differ from the target tag or could not be compared",
+            else "runtime paths differ from the release manifest or could not be compared",
         )
     )
 
@@ -143,6 +264,38 @@ def verify(root: Path) -> dict[str, object]:
         worktree is not None
         and worktree.returncode == 0
         and not worktree.stdout.strip()
+    )
+    index = _run(
+        ["git", "ls-files", "-v", "-z", "--", *RUNTIME_PATHS],
+        cwd=root,
+    )
+    index_records = (
+        [record for record in index.stdout.split("\0") if record]
+        if index is not None and index.returncode == 0
+        else []
+    )
+    index_flags_clean = bool(index_records) and all(
+        not record[0].islower() and record[0] != "S" for record in index_records
+    )
+    checks.append(
+        Check(
+            "runtime-index-flags",
+            index_flags_clean,
+            "runtime paths do not use assume-unchanged or skip-worktree flags"
+            if index_flags_clean
+            else "runtime paths use hidden index flags or could not be enumerated",
+        )
+    )
+
+    worktree_bytes_match = _worktree_bytes_match_head(root)
+    checks.append(
+        Check(
+            "runtime-worktree-content",
+            worktree_bytes_match,
+            "checked-out runtime bytes match the committed blobs"
+            if worktree_bytes_match
+            else "checked-out runtime bytes differ from committed blobs",
+        )
     )
     checks.append(
         Check(
@@ -178,12 +331,13 @@ def verify(root: Path) -> dict[str, object]:
     )
 
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "root": str(root),
         "target_tag": TARGET_TAG,
         "target_commit": TARGET_COMMIT,
         "target_version": TARGET_VERSION,
         "commit": commit,
+        "identity_mode": identity_mode,
         "ready": all(check.ok for check in checks),
         "checks": [asdict(check) for check in checks],
         "limitations": [
