@@ -66,6 +66,11 @@ For a customer proof of concept on `0.1.0a4`, follow the bounded
 entry points exercised for this release, keeps persistence synchronous, and
 separates a workflow demonstration from a production-readiness claim.
 
+To let a customer coding agent discover and implement that POC, use the
+[`verdict-instrument-app` agent skill](docs/AGENT_POC_SKILL.md). The guide
+includes a cross-agent prompt, approval boundaries, staged acceptance criteria,
+and the current automation limits.
+
 Extras for `cognifity-verdict`: `anthropic`, `openai`, `google`, `postgres`, or
 `all`. Google capture specifically needs the `google` extra (`google-genai`).
 The dashboard is intentionally a repo-local app; from a source checkout,

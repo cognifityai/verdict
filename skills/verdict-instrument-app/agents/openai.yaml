@@ -1,0 +1,4 @@
+interface:
+  display_name: "Instrument an App with Verdict"
+  short_description: "Plan and verify safe Verdict instrumentation"
+  default_prompt: "Use $verdict-instrument-app to inspect this repository and set up a safe, verified Verdict instrumentation rollout."

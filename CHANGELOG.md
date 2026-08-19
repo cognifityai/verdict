@@ -6,6 +6,13 @@ the customer POC profile is refined.
 
 ## [Unreleased]
 
+### Added
+
+- A portable `verdict-instrument-app` coding-agent skill for discovering
+  supported customer call paths, planning a consented POC, verifying capture
+  through storage, gating clustering and judge spend, and handing off bounded
+  dashboard and scheduling instructions.
+
 ## [0.1.0a4] - 2026-08-18
 
 ### Added

@@ -23,5 +23,6 @@ testpaths = [
     "packages/verdict/tests",
     "packages/verdict_eval/tests",
     "packages/verdict_inspect/tests",
+    "skills/verdict-instrument-app/tests",
     "ui/tests",
 ]
