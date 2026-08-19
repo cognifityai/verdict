@@ -24,6 +24,39 @@ def clone_repo(destination: Path, *, shallow: bool) -> Path:
         command.extend(["--depth", "1"])
     command.extend([REPO_ROOT.as_uri(), str(destination)])
     subprocess.run(command, check=True, capture_output=True, text=True)
+    if not shallow:
+        shutil.rmtree(destination / ".git")
+        subprocess.run(
+            ["git", "init", "--quiet"],
+            cwd=destination,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            ["git", "add", "."],
+            cwd=destination,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            [
+                "git",
+                "-c",
+                "user.name=Verifier Test",
+                "-c",
+                "user.email=verifier@example.invalid",
+                "commit",
+                "--quiet",
+                "-m",
+                "test fixture",
+            ],
+            cwd=destination,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
     return destination
 
 
