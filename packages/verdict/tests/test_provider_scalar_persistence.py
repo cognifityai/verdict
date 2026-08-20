@@ -7,6 +7,8 @@ response parsing, Verdict wrapping, and SQLite persistence all execute.
 
 from __future__ import annotations
 
+import importlib
+import inspect
 import json
 import logging
 import math
@@ -115,6 +117,26 @@ def _provider_response(request: httpx.Request) -> httpx.Response:
         })
 
     return httpx.Response(404, json={"error": {"message": request.url.path}})
+
+
+def _anthropic_mock_transport(anthropic_module):
+    client_base = anthropic_module.DefaultHttpxClient.__mro__[1]
+    transport_module = importlib.import_module(client_base.__module__.split(".", 1)[0])
+    def respond(request):
+        response = _provider_response(request)
+        return transport_module.Response(
+            response.status_code,
+            headers=dict(response.headers),
+            content=response.content,
+        )
+
+    return transport_module.MockTransport(respond)
+
+
+def _anthropic_temperature_arg(create, sentinel) -> dict[str, object]:
+    if "temperature" not in inspect.signature(create).parameters:
+        return {}
+    return {"temperature": sentinel}
 
 
 def _sqlite_client(tmp_path, name: str) -> tuple[VerdictClient, SQLiteStorage]:
@@ -232,7 +254,7 @@ def test_real_openai_explicit_unset_temperature_persists_exactly_one_row(
 
 
 @pytest.mark.parametrize("sentinel_name", ["omit", "NOT_GIVEN"])
-def test_real_anthropic_explicit_unset_temperature_persists_exactly_one_row(
+def test_real_anthropic_unset_temperature_persists_exactly_one_row(
     tmp_path,
     sentinel_name,
 ):
@@ -241,7 +263,9 @@ def test_real_anthropic_explicit_unset_temperature_persists_exactly_one_row(
 
     verdict_client, storage = _sqlite_client(tmp_path, f"anthropic-{sentinel_name}")
     instrumentor = AnthropicInstrumentor(verdict_client)
-    http_client = httpx.Client(transport=httpx.MockTransport(_provider_response))
+    http_client = anthropic.DefaultHttpxClient(
+        transport=_anthropic_mock_transport(anthropic)
+    )
     instrumentor.install()
     try:
         provider = anthropic.Anthropic(
@@ -253,8 +277,11 @@ def test_real_anthropic_explicit_unset_temperature_persists_exactly_one_row(
         response = provider.messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=8,
-            temperature=getattr(anthropic, sentinel_name),
             messages=[{"role": "user", "content": "hi"}],
+            **_anthropic_temperature_arg(
+                provider.messages.create,
+                getattr(anthropic, sentinel_name),
+            ),
         )
 
         assert response.content[0].text == "OK"
@@ -278,7 +305,9 @@ async def test_real_async_anthropic_unset_temperature_persists_exactly_one_row(
 
     verdict_client, storage = _sqlite_client(tmp_path, "async-anthropic")
     instrumentor = AnthropicInstrumentor(verdict_client)
-    http_client = httpx.AsyncClient(transport=httpx.MockTransport(_provider_response))
+    http_client = anthropic.DefaultAsyncHttpxClient(
+        transport=_anthropic_mock_transport(anthropic)
+    )
     instrumentor.install()
     try:
         provider = anthropic.AsyncAnthropic(
@@ -290,8 +319,11 @@ async def test_real_async_anthropic_unset_temperature_persists_exactly_one_row(
         response = await provider.messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=8,
-            temperature=anthropic.omit,
             messages=[{"role": "user", "content": "hi"}],
+            **_anthropic_temperature_arg(
+                provider.messages.create,
+                anthropic.omit,
+            ),
         )
 
         assert response.content[0].text == "OK"
