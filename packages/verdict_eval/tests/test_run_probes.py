@@ -31,6 +31,19 @@ def test_probe_exit_code_distinguishes_quality_failure_and_execution_error():
     assert run_probes.probe_run_exit_code(_run(passed), min_pass_rate=1.0) == 0
 
 
+def test_unknown_probe_model_is_an_operator_error(capsys):
+    assert run_probes.main([
+        "--target-model",
+        "unknown/model",
+        "--judge-model",
+        "anthropic/judge",
+    ]) == 2
+
+    output = capsys.readouterr()
+    assert output.out.startswith("Suite:")
+    assert output.err.startswith("ERROR: Unknown model prefix")
+
+
 def test_probe_exit_code_treats_judge_dimension_error_as_execution_error():
     judge_error = ProbeResult(
         "judge-error",

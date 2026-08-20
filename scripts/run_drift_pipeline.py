@@ -1,4 +1,4 @@
-"""Compatibility wrapper for the installed ``verdict-pipeline`` command."""
+"""Source wrapper for an environment with ``cognifity-verdict-eval`` installed."""
 
 from verdict_eval.cli.pipeline import build_parser, main
 

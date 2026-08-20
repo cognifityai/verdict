@@ -1,4 +1,4 @@
-"""Compatibility wrapper for the installed ``verdict-probes`` command."""
+"""Source wrapper for an environment with ``cognifity-verdict-eval`` installed."""
 
 from verdict_eval.cli.probes import main, probe_run_exit_code, probe_run_payload
 

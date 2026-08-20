@@ -92,7 +92,9 @@ def _provider_for_model(model: str):
     if model.startswith("gemini/"):
         api_key = os.environ.get("GOOGLE_API_KEY") or ""
         return GoogleAdapter(api_key=api_key), model.split("/", 1)[1]
-    sys.exit(f"Unknown model prefix: {model!r}. Use anthropic/, openai/, or gemini/.")
+    raise ValueError(
+        f"Unknown model prefix: {model!r}. Use anthropic/, openai/, or gemini/."
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -104,7 +106,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--judge-model", required=True,
                         help="Judge model (different family from target recommended)")
     parser.add_argument("--out", default=None,
-                        help="Output JSON path. Default: research/results/probe_runs/<timestamp>.json")
+                        help="Output JSON path. Default: ./probe_runs/<timestamp>.json")
     parser.add_argument(
         "--min-pass-rate",
         type=_pass_rate,
@@ -119,8 +121,12 @@ def main(argv: list[str] | None = None) -> int:
     suite = load_suite_yaml(args.suite) if args.suite else default_suite()
     print(f"Suite: {suite.name} v{suite.version}  probes: {len(suite.probes)}")
 
-    target_provider, target_model = _provider_for_model(args.target_model)
-    judge_provider, judge_model = _provider_for_model(args.judge_model)
+    try:
+        target_provider, target_model = _provider_for_model(args.target_model)
+        judge_provider, judge_model = _provider_for_model(args.judge_model)
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
 
     runner = ProbeRunner(
         target_provider=target_provider,

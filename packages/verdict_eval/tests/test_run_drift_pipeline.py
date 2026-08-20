@@ -60,6 +60,22 @@ def test_pipeline_names_storage_without_exposing_credentials(monkeypatch, capsys
     assert "secret-canary" not in output
 
 
+def test_pipeline_sanitizes_storage_open_failure(monkeypatch, capsys):
+    from verdict import client
+
+    dsn = "postgresql://operator:secret-canary@db.example/verdict"
+
+    def fail(_storage):
+        raise RuntimeError(f"cannot open {dsn}")
+
+    monkeypatch.setattr(client, "_resolve_storage", fail)
+
+    assert main(["--storage", dsn]) == 2
+    output = capsys.readouterr()
+    assert output.out == "ERROR: cannot open postgresql storage\n"
+    assert "secret-canary" not in output.out + output.err
+
+
 def test_real_pipeline_uses_trace_time_and_replaces_hourly_result(tmp_path, monkeypatch, capsys):
     """Exercise the actual CLI entrypoint repeatedly over one SQLite store.
 

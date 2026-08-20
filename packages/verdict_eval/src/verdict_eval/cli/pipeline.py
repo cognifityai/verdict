@@ -199,7 +199,12 @@ def main(argv: list[str] | None = None) -> int:
 
     # -- Step 1: load traces -------------------------------------------------
     from verdict.client import _resolve_storage
-    storage = _resolve_storage(args.storage)
+
+    try:
+        storage = _resolve_storage(args.storage)
+    except Exception:
+        print(f"ERROR: cannot open {_storage_backend(args.storage)} storage")
+        return 2
     print(f"Storage backend: {_storage_backend(args.storage)}")
     traces = storage.list_traces(limit=args.limit)
     print(f"Loaded {len(traces)} traces.")

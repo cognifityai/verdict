@@ -23,7 +23,8 @@ the customer POC profile is refined.
 - Live dashboards start empty and never substitute synthetic metrics while a
   store request is pending or failed.
 - The historical `ui/server.py`, `scripts/run_drift_pipeline.py`, and
-  `scripts/run_probes.py` entry points remain as compatibility wrappers.
+  `scripts/run_probes.py` entry points remain source wrappers after installing
+  the workspace packages.
 
 ## [0.1.0a4] - 2026-08-18
 

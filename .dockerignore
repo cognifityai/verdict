@@ -22,3 +22,4 @@ docker-compose.yml
 *.db
 *.db-*
 !docker-db/verdict.db
+!docker-db/verdict.db-*

@@ -11,7 +11,7 @@ ENV PYTHONUNBUFFERED=1 \
 WORKDIR /app
 
 RUN pip install --no-cache-dir \
-    "cognifity-verdict[dashboard]==${VERDICT_VERSION}"
+    "cognifity-verdict[dashboard,postgres]==${VERDICT_VERSION}"
 
 # A maintainer may place verdict.db in docker-db/ before building. A clean
 # checkout creates an empty schema through the real storage adapter instead of
@@ -26,6 +26,9 @@ from verdict.storage import SQLiteStorage
 provided = Path("/tmp/verdict-db/verdict.db")
 target = Path("/app/verdict.db")
 if provided.is_file():
+    auxiliary = sorted(provided.parent.glob(f"{provided.name}-*"))
+    if auxiliary:
+        raise SystemExit("Checkpoint verdict.db before building; SQLite sidecar files exist")
     copy2(provided, target)
 else:
     SQLiteStorage(str(target)).close()
