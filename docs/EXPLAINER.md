@@ -161,8 +161,12 @@ a retained trace.
 - Before using Verdict with production data, review `SECURITY.md`, your
   retention requirements, and your provider data-handling settings.
 
-The bundled dashboard server reads SQLite only. Postgres is an SDK storage
-adapter, not a dashboard backend.
+The bundled dashboard server reads SQLite and PostgreSQL without creating or
+migrating either store. Install `cognifity-verdict[dashboard]` for SQLite or
+`cognifity-verdict[dashboard,postgres]` for PostgreSQL, then run
+`verdict-dashboard --storage ...`. A FastAPI host can mount
+`verdict.dashboard.create_app()` so its authenticated application and the
+packaged Verdict UI run together.
 When `VERDICT_USER` and `VERDICT_PASS` are both set, HTTP Basic authentication
 gates `/dashboard` and `/api/data` while the landing and health endpoints remain
 public. Chart series contain observed bins only. The response keeps full-store
@@ -191,7 +195,9 @@ application.
 - `docs/architecture-current.svg`: current architecture diagram.
 - `docs/adrs/`: architecture decision records for major design choices.
 - `docs/v1-roadmap.md`: planned work and known product boundaries.
-- `packages/verdict/`: SDK, instrumentation, storage, and core APIs.
+- `packages/verdict/`: SDK, instrumentation, storage, core APIs, and packaged
+  dashboard runtime.
 - `packages/verdict_eval/`: evaluation, clustering, and drift logic.
 - `packages/verdict_inspect/`: inspection CLI and report tools.
-- `ui/`: local dashboard.
+- `ui/`: dashboard source and contributor build tools; compiled customer assets
+  ship inside `cognifity-verdict`.

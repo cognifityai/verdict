@@ -15,22 +15,30 @@ import hashlib
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+DASHBOARD = (
+    HERE.parent
+    / "packages"
+    / "verdict"
+    / "src"
+    / "verdict"
+    / "dashboard"
+    / "static"
+)
 
 PAGES = {
     "landing.html": ("Verdict - LLM Observability", "landing.js"),
-    "dashboard.html": ("Verdict - Dashboard", "dashboard.js"),
     "VerdictUI.html": ("Verdict - LLM Observability", "all-in-one.js"),
 }
 
 
-def asset_url(filename: str) -> str:
-    digest = hashlib.sha256((HERE / "assets" / filename).read_bytes()).hexdigest()[:12]
+def asset_url(filename: str, root: Path = HERE) -> str:
+    digest = hashlib.sha256((root / "assets" / filename).read_bytes()).hexdigest()[:12]
     return f"assets/{filename}?v={digest}"
 
 
-def page(title: str, script: str) -> str:
-    stylesheet_url = asset_url("verdict.css")
-    script_url = asset_url(script)
+def page(title: str, script: str, root: Path = HERE) -> str:
+    stylesheet_url = asset_url("verdict.css", root)
+    script_url = asset_url(script, root)
     return f'''<!doctype html>
 <html lang="en">
 <head>
@@ -51,7 +59,10 @@ def page(title: str, script: str) -> str:
 def main() -> None:
     for filename, (title, script) in PAGES.items():
         (HERE / filename).write_text(page(title, script))
-    print("Wrote landing.html, dashboard.html, VerdictUI.html")
+    (DASHBOARD / "dashboard.html").write_text(
+        page("Verdict - Dashboard", "dashboard.js", DASHBOARD)
+    )
+    print("Wrote landing.html, VerdictUI.html, and packaged dashboard.html")
 
 
 if __name__ == "__main__":
