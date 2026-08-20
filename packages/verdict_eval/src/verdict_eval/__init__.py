@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-__version__ = "0.1.0a4"
+__version__ = "0.1.0a5"
 
 if TYPE_CHECKING:
     from verdict_eval.compare import BradleyTerryComparator, PairwiseResult

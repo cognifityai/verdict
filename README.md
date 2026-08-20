@@ -83,6 +83,25 @@ pip install "cognifity-verdict[dashboard,postgres]"
 The `all` extra preserves its existing provider-and-storage dependency set; it
 does not add the optional dashboard server.
 
+### Upgrade from 0.1.0a4
+
+Upgrade the synchronized distributions in the application's existing virtual
+environment; do not reclone the repository:
+
+```bash
+pip install --upgrade \
+  "cognifity-verdict[dashboard]==0.1.0a5" \
+  "cognifity-verdict-eval==0.1.0a5" \
+  "cognifity-verdict-inspect==0.1.0a5"
+```
+
+Add the same provider, semantic, and PostgreSQL extras that deployment already
+uses. The upgrade reuses existing SQLite files and PostgreSQL tables in place;
+it does not delete or rewrite traces, judgments, calibration records, drift
+runs, or dashboard history. Existing source-checkout commands continue through
+compatibility wrappers. Back up the store and lockfile before any alpha upgrade,
+then run the pipeline and dashboard smoke checks against a non-production copy.
+
 An unrelated project owns the `verdict` distribution on PyPI and exposes the
 same top-level `verdict` import. Do not install that distribution in the same
 environment as `cognifity-verdict`; overlapping Python package paths make the

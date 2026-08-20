@@ -64,18 +64,18 @@ def check(report: dict[str, object], check_id: str) -> dict[str, object]:
     return next(item for item in report["checks"] if item["check_id"] == check_id)
 
 
-def test_current_checkout_matches_the_pinned_a4_runtime() -> None:
+def test_current_a5_checkout_is_rejected_by_the_historical_a4_verifier() -> None:
     report = VERIFIER.verify(REPO_ROOT)
 
-    assert report["ready"] is True
+    assert report["ready"] is False
     assert report["schema_version"] == 2
     assert report["target_tag"] == "v0.1.0a4"
     assert report["target_commit"] == "49eae0a67d471b087d7c146c5abbd215e723f3ad"
     assert len(report["commit"]) == 40
-    assert all(check["ok"] for check in report["checks"])
+    assert check(report, "workspace-version")["ok"] is False
 
 
-def test_native_skill_copy_resolves_repo_from_explicit_argument(tmp_path: Path) -> None:
+def test_native_historical_verifier_rejects_current_a5_checkout(tmp_path: Path) -> None:
     installed = tmp_path / "native" / "verdict-instrument-app" / "scripts"
     installed.mkdir(parents=True)
     copied_verifier = installed / "verify_verdict_checkout.py"
@@ -95,11 +95,11 @@ def test_native_skill_copy_resolves_repo_from_explicit_argument(tmp_path: Path) 
         text=True,
     )
 
-    assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout)["ready"] is True
+    assert result.returncode == 2, result.stderr
+    assert json.loads(result.stdout)["ready"] is False
 
 
-def test_real_shallow_checkout_uses_immutable_runtime_manifest(tmp_path: Path) -> None:
+def test_real_shallow_a5_checkout_does_not_impersonate_a4(tmp_path: Path) -> None:
     checkout = clone_repo(tmp_path / "shallow", shallow=True)
     result = subprocess.run(
         ["git", "rev-parse", "--is-shallow-repository"],
@@ -112,10 +112,10 @@ def test_real_shallow_checkout_uses_immutable_runtime_manifest(tmp_path: Path) -
 
     report = VERIFIER.verify(checkout)
 
-    assert report["ready"] is True
-    assert report["identity_mode"] == "shallow-runtime-manifest"
+    assert report["ready"] is False
+    assert report["identity_mode"] is None
     target_check = check(report, "target-release-identity")
-    assert "shallow checkout" in target_check["detail"]
+    assert target_check["ok"] is False
 
 
 def test_tagless_non_shallow_checkout_fails(tmp_path: Path) -> None:
