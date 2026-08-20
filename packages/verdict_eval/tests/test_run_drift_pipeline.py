@@ -11,7 +11,12 @@ from verdict.schema import (
     Verdict,
 )
 from verdict.storage.sqlite import SQLiteStorage
-from verdict_eval.cli.pipeline import _storage_backend, build_parser, main
+from verdict_eval.cli.pipeline import (
+    _exclude_internal_workloads,
+    _storage_backend,
+    build_parser,
+    main,
+)
 from verdict_eval.judge import DEFAULT_RUBRIC, Judge
 from verdict_eval.providers import FakeProvider
 
@@ -23,6 +28,18 @@ def test_pipeline_defaults_to_semantic_clustering_and_discloses_effect_floor():
     assert args.clustering_version == "v2"
     assert args.cluster_threshold == 0.50
     assert args.effect_size_threshold == 0.147
+    assert args.capture_judge_telemetry is False
+
+
+def test_pipeline_excludes_judge_traces_from_target_workload() -> None:
+    agent = Trace(trace_id="agent", tags={"verdict.workload": "agent"})
+    judge = Trace(trace_id="judge", tags={"verdict.workload": "judge"})
+    custom = Trace(trace_id="custom", tags={"verdict.workload": "customer-specialist"})
+
+    target, excluded = _exclude_internal_workloads([agent, judge, custom])
+
+    assert [trace.trace_id for trace in target] == ["agent", "custom"]
+    assert excluded == 1
 
 
 def test_pipeline_reads_storage_from_environment_without_cli_echo(monkeypatch):

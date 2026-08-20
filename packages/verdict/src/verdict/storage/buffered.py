@@ -123,6 +123,8 @@ class BufferedStorage:
         self.written = 0
         self.dropped_to_sync = 0
         self.write_errors = 0
+        self._pending_writes = 0
+        self._metrics_lock = threading.Lock()
 
         # Serializes actual calls into `inner`. The bg thread holds it while
         # draining; the sync fallback and read-flush paths take it too, so
@@ -196,6 +198,8 @@ class BufferedStorage:
             # join() accounts for exactly the items it enqueued.
             for op in batch:
                 self._execute(op)
+                with self._metrics_lock:
+                    self._pending_writes -= 1
                 self._queue.task_done()
 
             if barrier is not None:
@@ -225,6 +229,8 @@ class BufferedStorage:
                 self._queue.task_done()
                 continue
             self._execute(item)
+            with self._metrics_lock:
+                self._pending_writes -= 1
             self._queue.task_done()
 
     def _execute(self, op: _Op) -> None:
@@ -232,9 +238,11 @@ class BufferedStorage:
         try:
             with self._write_lock:
                 op.fn(*op.args, **op.kwargs)
-            self.written += 1
+            with self._metrics_lock:
+                self.written += 1
         except Exception:
-            self.write_errors += 1
+            with self._metrics_lock:
+                self.write_errors += 1
 
     # -- internal: enqueue with sync fallback -------------------------------
 
@@ -259,11 +267,27 @@ class BufferedStorage:
                 return
             try:
                 self._queue.put_nowait(op)
-                self.enqueued += 1
+                with self._metrics_lock:
+                    self.enqueued += 1
+                    self._pending_writes += 1
             except queue.Full:
                 # Back-pressure: apply this one write inline. Not lost, just slow.
-                self.dropped_to_sync += 1
+                with self._metrics_lock:
+                    self.dropped_to_sync += 1
                 self._execute(op)
+
+    def telemetry_snapshot(self) -> dict[str, int | bool]:
+        """Return non-blocking process-local queue and outcome counters."""
+        with self._metrics_lock:
+            return {
+                "enabled": True,
+                "queue_depth": self._pending_writes,
+                "accepted": self.enqueued,
+                "written": self.written,
+                "sync_fallbacks": self.dropped_to_sync,
+                "write_errors": self.write_errors,
+                "closed": self._closed,
+            }
 
     # -- internal: flush ----------------------------------------------------
 

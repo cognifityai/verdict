@@ -23,9 +23,10 @@ and cannot safely coexist in one environment.
 uv venv --python 3.12 && source .venv/bin/activate     # or your own 3.10+ venv
 
 # Include the provider extras you want to test live. Google capture needs `google`.
-pip install "cognifity-verdict[anthropic,openai,google,dashboard]"
-pip install "cognifity-verdict-eval[semantic]" cognifity-verdict-inspect
-pip install "cognifity-verdict[dashboard]"      # packaged dashboard server
+python -m pip install \
+  "cognifity-verdict[anthropic,openai,google,dashboard]==0.1.0a6" \
+  "cognifity-verdict-eval[semantic]==0.1.0a6" \
+  "cognifity-verdict-inspect==0.1.0a6"
 ```
 
 For a customer POC on the public alpha, use the pinned commands and provider
@@ -37,8 +38,12 @@ lists them as hard dependencies, so the line above brings them in.
 Minimal alternative without the local semantic model:
 
 ```bash
-pip install cognifity-verdict-eval   # hash fallback only; lexical, not semantic
+python -m pip install "cognifity-verdict-eval==0.1.0a6"  # lexical hash fallback
 ```
+
+Already on `0.1.0a5`? Use the synchronized upgrade command in the repository
+[README](../README.md#upgrade-from-010a5). It preserves the selected SQLite or
+PostgreSQL store and does not require deleting or recloning an existing checkout.
 
 ## 2. Confirm it's healthy (30 seconds, no key)
 
@@ -169,10 +174,21 @@ verdict-pipeline \
 verdict-dashboard --storage sqlite:///./verdict.db
 ```
 
-For PostgreSQL, install `cognifity-verdict[dashboard,postgres]` and pass the
-same storage URL used by the SDK. The dashboard only reads existing Verdict
-tables; it never creates or migrates them. `python ui/server.py --db ...`
-remains a compatible source-checkout wrapper.
+Add `--capture-judge-telemetry` only when you intentionally want judge model
+cost/latency traces written to the same store. Those traces are tagged as the
+`judge` workload and excluded from future drift inputs so the evaluator does not
+become part of the workload it evaluates. The flag is off by default.
+
+For PostgreSQL, install `cognifity-verdict[dashboard,postgres]==0.1.0a6` and pass
+the same protected storage URL used by the SDK. The dashboard only reads
+existing Verdict tables; it never creates or migrates them.
+`python ui/server.py --db ...` remains a compatible source-checkout wrapper.
+
+Applications that mount the dashboard can optionally pass a same-origin
+`operations_url` to `verdict.dashboard.create_app()`. The host endpoint supplies
+normalized infrastructure/application metrics and authorized job controls;
+Verdict does not acquire cloud credentials or execute host jobs. Existing
+standalone and mounted dashboards are unchanged when the option is omitted.
 
 For independent judge-health trending, add a fixed human-labeled JSONL anchor
 set. Its first optional row is `{"set_name":"support-v1"}`; each remaining row

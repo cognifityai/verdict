@@ -276,7 +276,7 @@ RULES: tuple[Rule, ...] = (
         r"postgres(?:ql)?(?:\+[a-z0-9_]+)?://",
         "A Postgres storage URI candidate is present.",
         "supported-with-constraints",
-        "Keep secrets out of output and state that the bundled dashboard is SQLite-only.",
+        "Keep secrets out of output; the bundled dashboard reads PostgreSQL directly when the postgres extra is installed.",
         source_only=False,
     ),
     _rule(

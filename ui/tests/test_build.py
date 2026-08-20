@@ -59,6 +59,14 @@ def test_compiled_assets_exist():
         assert (build.DASHBOARD / "assets" / filename).is_file()
 
 
+def test_tailwind_scans_split_dashboard_components():
+    config = (build.HERE / "tailwind.config.cjs").read_text()
+    assert '"./*.{js,jsx}"' in config
+    css = (build.DASHBOARD / "assets" / "verdict.css").read_text()
+    assert ".sm\\:grid-cols-2" in css
+    assert ".xl\\:grid-cols-4" in css
+
+
 def test_public_landing_bundle_excludes_dashboard_sample_data():
     landing = (build.HERE / "assets" / "landing.js").read_text()
     assert "sample-trace-001" not in landing

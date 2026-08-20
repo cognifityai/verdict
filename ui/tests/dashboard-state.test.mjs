@@ -28,7 +28,7 @@ function componentStub(names) {
 }
 
 async function loadUiModule() {
-  const source = `${await readFile(UI_SOURCE, "utf8")}\nexport { Dashboard, Traces, Drift, Judge, mountedApiUrl };`;
+  const source = `${await readFile(UI_SOURCE, "utf8")}\nexport { Dashboard, Traces, Drift, Judge, mountedApiUrl };\nexport { useOperations } from "./Operations.jsx";`;
   const result = await build({
     stdin: {
       contents: source,
@@ -170,6 +170,23 @@ test("a mounted dashboard derives its API path from the host prefix", async () =
   }
 });
 
+test("operations navigation is present only when the host configures an adapter", async () => {
+  const ui = await loadUiModule();
+  const hooks = createHooks();
+
+  const withoutAdapter = render(ui.Dashboard, hooks, {
+    data: bundle("judge-a"),
+    operationsUrl: null,
+  });
+  assert.equal(textOf(withoutAdapter).includes("Operations"), false);
+
+  const withAdapter = render(ui.Dashboard, hooks, {
+    data: bundle("judge-a"),
+    operationsUrl: "/api/admin/operations",
+  });
+  assert.equal(textOf(withAdapter).includes("Operations"), true);
+});
+
 test("the live dashboard does not display synthetic metrics before confirmation", async () => {
   const ui = await loadUiModule();
   const tree = render(ui.DashboardRoot, createHooks());
@@ -201,6 +218,27 @@ test("an older evaluator response cannot overwrite the newest confirmed snapshot
   dashboard = dashboardElement(render(ui.DashboardRoot, hooks));
   dashboard.props.onReload();
   assert.match(requests[2].url, /evaluator=evaluator-b(?:&|$)/);
+});
+
+test("an older operations response cannot overwrite a newer refresh", async () => {
+  const ui = await loadUiModule();
+  const hooks = createHooks();
+  const requests = deferredFetches();
+  const renderHook = () => {
+    globalThis.__VERDICT_TEST_HOOKS__ = hooks;
+    hooks.begin();
+    return ui.useOperations("/api/admin/operations");
+  };
+  let state = renderHook();
+
+  state.load();
+  state.load();
+  assert.equal(requests.length, 2);
+  await resolveJson(requests[1], { generatedAt: "new", metrics: [] });
+  await resolveJson(requests[0], { generatedAt: "old", metrics: [] });
+
+  state = renderHook();
+  assert.equal(state.data.generatedAt, "new");
 });
 
 test("a failed evaluator request names the snapshot that remains displayed", async () => {

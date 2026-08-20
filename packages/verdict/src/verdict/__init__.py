@@ -21,9 +21,10 @@ from verdict.trace import (
     span,
     trace,
     trace_context,
+    workload_context,
 )
 
-__version__ = "0.1.0a5"
+__version__ = "0.1.0a6"
 
 __all__ = [
     "DriftRun",
@@ -40,4 +41,5 @@ __all__ = [
     "span",
     "trace",
     "trace_context",
+    "workload_context",
 ]

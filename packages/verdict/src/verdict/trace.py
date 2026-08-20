@@ -26,6 +26,7 @@ from verdict.client import (  # noqa: F401
     get_context_trace_id,
     set_context,
     trace_context,
+    workload_context,
 )
 
 T = TypeVar("T")

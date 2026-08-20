@@ -6,6 +6,34 @@ the customer POC profile is refined.
 
 ## [Unreleased]
 
+## [0.1.0a6] - 2026-08-20
+
+### Added
+
+- Optional same-origin Operations dashboard integration for authenticated host
+  applications. Standalone dashboards remain unchanged unless the host passes
+  `operations_url=` to `verdict.dashboard.create_app()`.
+- Bounded process-local capture overhead, adapter-failure, and buffered-writer
+  queue telemetry on `VerdictClient.runtime_metrics`.
+- Task-local workload provenance via `set_context(workload=...)` and
+  `workload_context(...)`, with dashboard cost attribution for `agent`, `judge`,
+  and unclassified traces.
+- Opt-in `verdict-pipeline --capture-judge-telemetry`; evaluator traces are
+  excluded from later target-workload drift analysis.
+- A secret-safe agent-skill environment inspector that distinguishes fresh
+  installs, synchronized `0.1.0a5` upgrades, current installs, mixed-package
+  repairs, editable installs, and the unrelated `verdict` distribution.
+
+### Changed
+
+- `Judge.judge()` temporarily marks its provider call as the `judge` workload
+  and restores any prior caller workload on success or failure.
+- Buffered storage exposes aggregate queue/write counters without payloads or
+  exception text.
+- The instrumentation skill preserves an existing SQLite or PostgreSQL backend
+  by default, requires approval before package changes, and no longer requires
+  the obsolete historical source-checkout verifier.
+
 ## [0.1.0a5] - 2026-08-20
 
 ### Added
@@ -68,6 +96,7 @@ the customer POC profile is refined.
 - Content capture remains off by default and is documented as best-effort rather
   than a compliance control.
 
-[Unreleased]: https://github.com/cognifityai/verdict/compare/v0.1.0a5...HEAD
+[Unreleased]: https://github.com/cognifityai/verdict/compare/v0.1.0a6...HEAD
+[0.1.0a6]: https://github.com/cognifityai/verdict/compare/v0.1.0a5...v0.1.0a6
 [0.1.0a5]: https://github.com/cognifityai/verdict/compare/v0.1.0a4...v0.1.0a5
 [0.1.0a4]: https://github.com/cognifityai/verdict/compare/v0.1.0a3...v0.1.0a4

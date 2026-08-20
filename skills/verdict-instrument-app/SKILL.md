@@ -6,7 +6,7 @@ description: Inspect an existing LLM application and plan, implement, or audit a
 # Instrument an App with Verdict
 
 Instrument only behavior supported by the released Verdict target, and distinguish
-what was executed from what was merely proposed. Verdict `0.1.0a5` is a Python
+what was executed from what was merely proposed. Verdict `0.1.0a6` is a Python
 public alpha, not a production-readiness claim.
 
 ## Resolve the installed runtime before doing anything
@@ -14,20 +14,33 @@ public alpha, not a production-readiness claim.
 Set `<skill-root>` to the absolute directory containing this `SKILL.md`. Resolve
 the customer repository independently. Normal capture, analysis, probe, and
 dashboard operation uses the released distributions and does not require a Verdict
-source checkout. Verify the interpreter, distribution names, versions, and installed
-commands before proposing customer edits:
+source checkout. Set `<python>` to the customer application's actual interpreter,
+then inspect it before proposing customer edits:
 
 ```bash
-python3 -c "from importlib.metadata import version; print(version('cognifity-verdict'), version('cognifity-verdict-eval'))"
+<python> <skill-root>/scripts/inspect_environment.py --format json
 verdict-pipeline --help
 verdict-probes --help
 verdict-dashboard --help
 ```
 
-Stop if the distributions are not the approved `0.1.0a5` set, the unrelated PyPI
-distribution named `verdict` overlaps the environment, or any required command is
-absent. A source checkout is still required for contributor tests and research-only
-calibration scripts; do not use those as an installed runtime substitute.
+The inspector emits distribution versions, editable-install flags, command
+availability, and only the storage backend name. It never emits a storage URL.
+Handle its state explicitly:
+
+| State | Required response |
+| --- | --- |
+| `absent` | Propose one pinned `0.1.0a6` install with only the approved provider, dashboard, semantic, and storage extras. |
+| `upgrade` | A synchronized `0.1.0a5` set exists. Preserve the backend and required extras, back up the store and lockfile, and propose an in-place `0.1.0a6` wheel upgrade. |
+| `current` | Continue discovery without reinstalling. Treat missing optional commands as a scope decision, not a version failure. |
+| `repair` | Missing or mixed Cognifity distributions exist. Show the mismatch and propose one synchronized `0.1.0a6` repair. |
+| `conflict` | The unrelated PyPI distribution named `verdict` is installed. Stop and propose a clean environment or its explicitly approved removal. |
+
+Never install or upgrade automatically. Present the exact command, data path,
+backup, verification, and rollback, then obtain approval. A source checkout is
+required only for contributor and research-only scripts; it is never an installed
+runtime substitute. If this skill's target is older than the approved public
+release, refresh the skill from that tagged release before continuing.
 
 ## Preserve the authority boundary
 
@@ -51,7 +64,7 @@ calibration scripts; do not use those as an installed runtime substitute.
 Read repository instructions and existing observability, privacy, deployment, and
 scheduler conventions. Identify the released Verdict version to use. For the
 compatibility target and its concrete limitations, read
-[`references/verdict-0.1.0a5.md`](references/verdict-0.1.0a5.md). Its capture
+[`references/verdict-0.1.0a6.md`](references/verdict-0.1.0a6.md). Its capture
 coverage inherits the unchanged a4 profile linked there.
 
 Do not treat an unpublished local Verdict worktree as released functionality.
@@ -107,11 +120,16 @@ Ask one batched set of questions after discovery. Cover only unresolved choices:
 - existing scheduler and dashboard exposure boundary; and
 - authorization to edit, install, launch, and schedule.
 
-Recommend an absolute SQLite path for a local single-host trial and Postgres for
-shared capture. The bundled dashboard reads either backend directly without
-creating or migrating schemas. Supply a credential-bearing Postgres URL through
-the customer's existing secret environment as `VERDICT_STORAGE`, not a checked-in
-command or generated document. The pipeline logs only the backend name. Use
+Always preserve the current backend by default. Recommend an absolute SQLite path for a
+new local single-host trial and PostgreSQL for new shared or multi-instance capture.
+Ask about switching an existing SQLite deployment only when discovery shows that
+its ownership or concurrency requirements have changed. The bundled dashboard reads
+either backend directly without creating or migrating schemas. A package upgrade
+does not migrate SQLite data to PostgreSQL or upgrade a PostgreSQL server. Treat a
+backend switch as a separate approved migration with backup, record-count and
+content-parity checks, cutover, and rollback. Supply a credential-bearing Postgres
+URL through the customer's existing secret environment as `VERDICT_STORAGE`, not a
+checked-in command or generated document. The pipeline logs only the backend name. Use
 [`references/configuration-and-risk.md`](references/configuration-and-risk.md) to
 generate the plan and risk register.
 
@@ -119,7 +137,7 @@ generate the plan and risk register.
 
 The plan must name:
 
-1. files and dependency changes;
+1. files, the current package state, exact dependency transition, and required extras;
 2. one initialization owner per process, before the first supported provider call;
 3. storage URI source, permissions, retention, dashboard data path, and
    service/environment isolation because those labels are not persisted on trace rows;
@@ -156,10 +174,15 @@ verdict.init(
 )
 ```
 
+For a fresh install or approved upgrade, pin all three distributions to `0.1.0a6`
+in the application's existing environment. Use `python -m pip`, not a bare `pip`,
+and add only the approved extras. An upgrade from an editable checkout to the
+published wheels does not require deleting or recloning that checkout.
+
 Preserve request/response semantics and existing exception handling. Do not add
 per-request initialization. If buffered writes are later approved, import
 `shutdown` from `verdict.client` and exercise `shutdown()` on every normal and
-cancellation path. It is not exported as `verdict.shutdown` in `0.1.0a5`.
+cancellation path. It is not exported as `verdict.shutdown` in `0.1.0a6`.
 
 ### 7. Verify the last affected sink
 
@@ -213,7 +236,7 @@ Run one approved command manually through its final sink before enabling its
 schedule. The bundled dashboard does not configure schedules.
 
 Generate the command from `verdict-pipeline --help` and test that exact command.
-Release `0.1.0a5` does not accept `--yes-spend` or
+Release `0.1.0a6` does not accept `--yes-spend` or
 `--max-spend-usd`; enforce approval, call ceilings, credentials, timeouts, and budget
 outside the runner. Pin the distribution versions in the deployment lockfile.
 

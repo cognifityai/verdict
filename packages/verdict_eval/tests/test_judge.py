@@ -19,6 +19,33 @@ from verdict_eval.judge import (
 from verdict_eval.providers import FakeProvider
 
 
+def test_judge_marks_provider_call_and_restores_existing_workload() -> None:
+    from verdict.client import clear_context, get_context_workload, set_context
+
+    payload = json.dumps({
+        dimension.name: {"reasoning": "ok", "verdict": "PASS"}
+        for dimension in DEFAULT_RUBRIC.dimensions
+    })
+
+    class WorkloadObservingProvider(FakeProvider):
+        observed_workload: str | None = None
+
+        def complete(self, request):
+            self.observed_workload = get_context_workload()
+            return super().complete(request)
+
+    provider = WorkloadObservingProvider(payload)
+    set_context(workload="agent")
+    try:
+        Judge(provider=provider, model="judge-a").judge(
+            query="question", response="answer"
+        )
+        assert provider.observed_workload == "judge"
+        assert get_context_workload() == "agent"
+    finally:
+        clear_context()
+
+
 def _fake_json_for(verdicts: dict[str, str]) -> str:
     return json.dumps({k: {"reasoning": "r", "verdict": v} for k, v in verdicts.items()})
 

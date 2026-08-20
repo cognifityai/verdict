@@ -1,9 +1,10 @@
 # Verdict 0.1.0a5 target
 
-This release preserves the `0.1.0a4` capture, privacy, storage-schema, evaluator,
-and statistical contracts in
-[`verdict-0.1.0a4.md`](verdict-0.1.0a4.md). It does not expand the supported
-provider-method matrix or turn the public alpha into a production-readiness claim.
+This historical release preserves the capture, privacy, storage-schema, evaluator,
+and statistical contracts in the public
+[`0.1.0a4` POC release profile](https://github.com/cognifityai/verdict/blob/v0.1.0a4/docs/POC_RELEASE_PROFILE.md).
+It does not expand the supported provider-method matrix or turn the public alpha
+into a production-readiness claim.
 
 The operational delta is intentionally small:
 

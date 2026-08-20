@@ -13,12 +13,14 @@ import contextvars
 import hashlib
 import hmac
 import logging
+import re
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from verdict.runtime_metrics import RuntimeMetrics
 from verdict.storage.base import Storage
 from verdict.storage.sqlite import SQLiteStorage
 
@@ -59,6 +61,12 @@ class VerdictClient:
     # Internal — bound instrumentors after init() runs
     _instrumentors: list[BaseInstrumentor] = field(default_factory=list, repr=False)
     _initialized: bool = False
+    runtime_metrics: RuntimeMetrics = field(
+        default_factory=RuntimeMetrics,
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
 
 _client: VerdictClient | None = None
@@ -234,6 +242,18 @@ _ctx_user_id_hash: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 _ctx_trace_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "verdict_trace_id", default=None,
 )
+_ctx_workload: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "verdict_workload", default=None,
+)
+_WORKLOAD = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,63}")
+
+
+def _validate_workload(workload: str) -> None:
+    if workload and _WORKLOAD.fullmatch(workload) is None:
+        raise ValueError(
+            "workload must be a 1-64 character identifier containing only "
+            "letters, numbers, '.', '_', ':', or '-'"
+        )
 
 
 def _hash_user_id(user_id: str) -> str:
@@ -258,6 +278,7 @@ def set_context(
     session_id: str | None = None,
     user_id: str | None = None,
     trace_id: str | None = None,
+    workload: str | None = None,
 ) -> None:
     """Bind per-request context for subsequently captured traces.
 
@@ -273,6 +294,9 @@ def set_context(
         _ctx_user_id_hash.set(_hash_user_id(user_id) if user_id else None)
     if trace_id is not None:
         _ctx_trace_id.set(trace_id or None)
+    if workload is not None:
+        _validate_workload(workload)
+        _ctx_workload.set(workload or None)
 
 
 def get_context_session_id() -> str | None:
@@ -290,6 +314,11 @@ def get_context_trace_id() -> str | None:
     return _ctx_trace_id.get()
 
 
+def get_context_workload() -> str | None:
+    """Return the workload provenance bound to the current request."""
+    return _ctx_workload.get()
+
+
 @contextmanager
 def trace_context(trace_id: str | None) -> Iterator[None]:
     """Temporarily bind a trace ID and restore the prior value on every exit."""
@@ -300,11 +329,23 @@ def trace_context(trace_id: str | None) -> Iterator[None]:
         _ctx_trace_id.reset(token)
 
 
+@contextmanager
+def workload_context(workload: str) -> Iterator[None]:
+    """Temporarily identify captured LLM calls by workload provenance."""
+    _validate_workload(workload)
+    token = _ctx_workload.set(workload or None)
+    try:
+        yield
+    finally:
+        _ctx_workload.reset(token)
+
+
 def clear_context() -> None:
     """Clear any per-request context (useful between requests / in tests)."""
     _ctx_session_id.set(None)
     _ctx_user_id_hash.set(None)
     _ctx_trace_id.set(None)
+    _ctx_workload.set(None)
 
 
 def shutdown() -> None:

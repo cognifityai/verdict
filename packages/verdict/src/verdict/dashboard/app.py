@@ -23,6 +23,7 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
+from urllib.parse import urlsplit
 
 from verdict.metrics import ScoreCounts, verdict_label
 from verdict.redaction import redact, redact_structure
@@ -285,6 +286,20 @@ def _round_or_none(value: object, digits: int) -> float | None:
     return round(numeric, digits) if math.isfinite(numeric) else None
 
 
+def _cost_summary(traces: int, priced_traces: int, cost: float) -> dict[str, Any]:
+    status = (
+        "unavailable" if priced_traces == 0
+        else "complete" if priced_traces == traces
+        else "partial"
+    )
+    return {
+        "traces": traces,
+        "pricedTraces": priced_traces,
+        "cost": round(cost, 6) if priced_traces else None,
+        "status": status,
+    }
+
+
 def _resource_limit(available: int, shown: int, limit: int) -> dict[str, int]:
     return {"available": available, "shown": shown, "limit": limit}
 
@@ -491,6 +506,10 @@ def _empty_bundle() -> dict:
             "totalJudged": 0,
             "totalCost": None,
             "totalCostStatus": "unavailable",
+            "costBreakdown": {
+                name: _cost_summary(0, 0, 0.0)
+                for name in ("agent", "judge", "unclassified")
+            },
             "regressionHour": 0,
             "providers": 0,
             "clusters": 0,
@@ -541,6 +560,16 @@ def _build(cur, *, evaluator_id: str | None = None) -> dict:
         "cluster_id" if "cluster_id" in trace_columns else "NULL AS cluster_id"
     )
 
+    tags_column = "tags_json" if "tags_json" in trace_columns else (
+        "tags" if "tags" in trace_columns else "NULL"
+    )
+    cost_counts = {
+        name: {"traces": 0, "priced": 0, "cost": 0.0}
+        for name in ("agent", "judge", "unclassified")
+    }
+    total_cost = 0.0
+    priced_traces = 0
+
     # trace_id -> (provider, started_at) and provider model
     tp, ttime, tcluster, model_of, models_of, raw_provider_of = (
         {}, {}, {}, {}, defaultdict(set), {}
@@ -549,8 +578,8 @@ def _build(cur, *, evaluator_id: str | None = None) -> dict:
     for r in cur.execute(
         # ``cluster_select`` is selected from the two literals above; it never
         # contains request data or a database value.
-        "SELECT trace_id, provider, request_model, started_at, "
-        f"{cluster_select} FROM traces"  # nosec B608
+        "SELECT trace_id, provider, request_model, started_at, cost_usd, "
+        f"{cluster_select}, {tags_column} AS workload_tags FROM traces"  # nosec B608
     ):
         provider_key = _provider_key(r["provider"])
         tp[r["trace_id"]] = provider_key
@@ -559,6 +588,16 @@ def _build(cur, *, evaluator_id: str | None = None) -> dict:
         models_of[provider_key].add(r["request_model"])
         raw_provider_of.setdefault(provider_key, r["provider"])
         provider_trace_counts[provider_key] += 1
+        tags = _json_value(r["workload_tags"], {})
+        workload = tags.get("verdict.workload") if isinstance(tags, dict) else None
+        group = workload if workload in {"agent", "judge"} else "unclassified"
+        cost_counts[group]["traces"] += 1
+        cost = _round_or_none(r["cost_usd"], 9)
+        if cost is not None:
+            cost_counts[group]["priced"] += 1
+            cost_counts[group]["cost"] += cost
+            priced_traces += 1
+            total_cost += cost
     for provider_key, models in models_of.items():
         known_models = sorted(str(model) for model in models if model not in (None, ""))
         model_of[provider_key] = (
@@ -1118,14 +1157,7 @@ def _build(cur, *, evaluator_id: str | None = None) -> dict:
             s["judgment"] = j
         samples.append(s)
 
-    totals = cur.execute(
-        """SELECT COUNT(*) n, SUM(cost_usd) cost,
-                  SUM(CASE WHEN cost_usd IS NULL THEN 1 ELSE 0 END) cost_unknown
-             FROM traces"""
-    ).fetchone()
-    total_traces = int(totals["n"] or 0)
-    priced_traces = total_traces - int(totals["cost_unknown"] or 0)
-    total_cost = _round_or_none(totals["cost"], 3) or 0.0
+    total_traces = sum(int(values["traces"]) for values in cost_counts.values())
     total_cost_status = (
         "unavailable" if priced_traces == 0
         else "complete" if priced_traces == total_traces
@@ -1190,6 +1222,14 @@ def _build(cur, *, evaluator_id: str | None = None) -> dict:
             "totalJudged": len(judg_by_trace),
             "totalCost": total_cost if priced_traces else None,
             "totalCostStatus": total_cost_status,
+            "costBreakdown": {
+                name: _cost_summary(
+                    int(values["traces"]),
+                    int(values["priced"]),
+                    float(values["cost"]),
+                )
+                for name, values in cost_counts.items()
+            },
             "regressionHour": int(os.environ.get("VERDICT_REGRESSION_HOUR", "4")),
             "providers": len(all_keys),
             "clusters": cluster_health["nClusters"],
@@ -1218,7 +1258,11 @@ def _build(cur, *, evaluator_id: str | None = None) -> dict:
 # --------------------------------------------------------------------------- #
 #  FastAPI app
 # --------------------------------------------------------------------------- #
-def create_app(*, storage: str | os.PathLike[str] | None = None):
+def create_app(
+    *,
+    storage: str | os.PathLike[str] | None = None,
+    operations_url: str | None = None,
+):
     import base64
     import secrets
 
@@ -1228,6 +1272,17 @@ def create_app(*, storage: str | os.PathLike[str] | None = None):
     from fastapi.staticfiles import StaticFiles
 
     configured_storage = resolve_storage(storage)
+    if operations_url is not None:
+        parsed_operations = urlsplit(operations_url)
+        if (
+            not operations_url.startswith("/")
+            or operations_url.startswith("//")
+            or parsed_operations.scheme
+            or parsed_operations.netloc
+            or parsed_operations.query
+            or parsed_operations.fragment
+        ):
+            raise ValueError("operations_url must be a same-origin absolute path")
     backend = "postgresql" if _is_postgres(configured_storage) else "sqlite"
     app = FastAPI(title="Verdict Dashboard", version="0.1.0")
     app.mount(
@@ -1246,7 +1301,7 @@ def create_app(*, storage: str | os.PathLike[str] | None = None):
     # The dashboard shell and live data require the password. Health and static
     # assets contain no stored telemetry and remain public.
     def _is_gated(path: str) -> bool:
-        return path in {"/", "/dashboard"} or path.startswith("/api/data")
+        return path in {"/", "/dashboard", "/api/config"} or path.startswith("/api/data")
 
     @app.middleware("http")
     async def basic_auth(request, call_next):
@@ -1301,6 +1356,10 @@ def create_app(*, storage: str | os.PathLike[str] | None = None):
             configured_storage
         ).exists()
         return {"status": "ok", "storage": backend, "configured": configured}
+
+    @app.get("/api/config")
+    def config():
+        return {"operationsUrl": operations_url}
 
     @app.get("/api/data")
     def data(evaluator: str | None = None):
