@@ -34,14 +34,15 @@ def test_every_relative_markdown_link_resolves_inside_skill() -> None:
     assert missing == []
 
 
-def test_skill_uses_resolved_paths_for_repo_local_commands() -> None:
+def test_skill_uses_resolved_skill_path_and_installed_runtime_commands() -> None:
     skill = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
 
     assert "python3 <skill-root>/scripts/scan_repository.py" in skill
-    assert "<verdict-repo>/scripts/run_drift_pipeline.py --help" in skill
+    assert "verdict-pipeline --help" in skill
+    assert "verdict-dashboard --help" in skill
     assert "python3 scripts/scan_repository.py" not in skill
-    assert re.search(r"Resolve\s+`<verdict-repo>` independently", skill)
-    assert "native skill installer may" in skill
+    assert "does not require a Verdict\nsource checkout" in skill
+    assert "<verdict-repo>" not in skill
 
 
 def test_documented_pipeline_flags_match_the_released_parser() -> None:
@@ -66,7 +67,4 @@ def test_customer_entry_document_points_to_the_committed_skill() -> None:
     assert "skills/verdict-instrument-app/SKILL.md" in guide
     assert "docs/AGENT_POC_SKILL.md" in readme
     assert "does not automatically install a skill in every coding agent" in guide
-    assert re.search(
-        r"does not install the\s+repository-local pipeline or dashboard",
-        guide,
-    )
+    assert "do not need a Verdict source\ncheckout" in guide

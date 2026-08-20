@@ -16,13 +16,15 @@ the customer POC profile is refined.
   dashboard and scheduling instructions.
 - An installable, mountable Verdict dashboard with read-only SQLite and
   PostgreSQL backends.
+- Installed `verdict-pipeline` and `verdict-probes` operator commands.
 
 ### Changed
 
 - Live dashboards start empty and never substitute synthetic metrics while a
   store request is pending or failed.
 - The historical `ui/server.py --db ...` entry point remains a compatibility
-  wrapper.
+  wrapper; `scripts/run_drift_pipeline.py` and `scripts/run_probes.py` remain
+  source wrappers after installing the workspace packages.
 - Dashboard storage auto-discovery checks the current working directory; set
   `VERDICT_STORAGE` or pass `--storage` when launching elsewhere.
 

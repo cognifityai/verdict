@@ -7,7 +7,8 @@ test is insufficient evidence of trace collection or a rendered regression.
 
 Record the interpreter and installed distributions. Confirm the imported `verdict`
 module belongs to `cognifity-verdict`, not the unrelated package named `verdict`.
-Pin the source checkout used for repository-local scripts and dashboard.
+Pin the synchronized `0.1.0a5` distributions and verify the installed pipeline,
+probe, and dashboard commands.
 
 ## Trace capture gate
 
@@ -21,7 +22,7 @@ Verify:
 - persisted provider, model, timing, status, finish reason, and token fields expected
   for the exercised path;
 - active service/environment configuration separately, while stating that release
-  `0.1.0a4` does not persist those two labels on `Trace` rows;
+  `0.1.0a5` does not persist those two labels on `Trace` rows;
 - request and response behavior is unchanged;
 - supported sync, async, and streaming variants used by the customer;
 - provider exception/cancellation semantics;
@@ -78,9 +79,9 @@ Reuse the customer's existing scheduler. For each job define:
 
 Run the exact command manually first. Then run a one-shot scheduler invocation and
 verify the final sink. Do not schedule overlapping analysis against the same store.
-Do not place a credential-bearing storage URL in the command or logs. Release
-`0.1.0a4` prints its `--storage` value; use SQLite for this bounded downstream POC
-or stop until a secret-safe Postgres connection method is verified.
+Do not place a credential-bearing storage URL in the command or logs. Supply it
+through the customer's protected `VERDICT_STORAGE` environment. The installed
+commands log only the selected backend name.
 
 ## Drift pipeline gate
 
@@ -146,9 +147,9 @@ and drift signals live. Keep the original capture store available for audit and
 rollback. A projection validated on one chat shape does not generalize to multiple
 user turns, tool-only calls, multimodal blocks, or another provider's message schema.
 
-Use `--storage` with `scripts/run_drift_pipeline.py`. Use `--db` only with
-`ui/server.py`. Reject generated schedules that mix these command-line contracts.
-Release `0.1.0a4` still constructs the selected embedder when
+Use `--storage` or `VERDICT_STORAGE` with `verdict-pipeline` and
+`verdict-dashboard`. Reject generated schedules that mix these contracts.
+Release `0.1.0a5` still constructs the selected embedder when
 `--trust-existing-clusters` is used. For that external-taxonomy path, deliberately
 select an installed local embedder such as `--embedder hashing` to avoid an
 unnecessary MiniLM download, then run the exact command manually. This is an
@@ -165,7 +166,7 @@ not live model-quality evidence. The fake judge proves wiring only.
 
 ## Dashboard gate
 
-Point the dashboard at the exact SQLite database containing the tested `DriftRun`.
+Point the dashboard at the exact SQLite or PostgreSQL store containing the tested `DriftRun`.
 Bind loopback unless a secure remote boundary is approved. Verify:
 
 1. `/api/health` reports the expected database state;

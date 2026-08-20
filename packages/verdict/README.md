@@ -74,6 +74,17 @@ client = Anthropic()
 # Use Anthropic normally — supported SDK calls are captured.
 ```
 
+Install and run the version-matched dashboard without a source checkout:
+
+```bash
+pip install "cognifity-verdict[dashboard]"
+verdict-dashboard --storage sqlite:///./verdict.db
+```
+
+Add the `postgres` extra for a PostgreSQL store. The dashboard is read-only and
+can also be mounted with `verdict.dashboard.create_app()` behind an existing
+FastAPI application's authentication.
+
 For `0.1.0a4`, supported POC entry points are Anthropic
 `messages.create(...)` (including `stream=True`), OpenAI
 `chat.completions.create(...)` and its stream helper, and Google

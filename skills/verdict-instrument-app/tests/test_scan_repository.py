@@ -266,7 +266,7 @@ class ScannerTests(unittest.TestCase):
         temporary, root = self.create_repo()
         self.addCleanup(temporary.cleanup)
         (root / "schedule.sh").write_text(
-            "python /opt/verdict/scripts/run_drift_pipeline.py \\\n"
+            "verdict-pipeline \\\n"
             "  --storage sqlite:////tmp/verdict.db \\\n"
             "  --db /tmp/verdict.db \\\n"
             "  --yes-spend\n"

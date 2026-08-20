@@ -28,13 +28,13 @@ An approval to add Verdict is not approval to store prompts and responses.
 
 - Local single-host trial or shared capture?
 - Exact storage owner and absolute SQLite path, or approved Postgres endpoint/secret?
-- Does the bundled local dashboard satisfy the need? It is SQLite-only.
+- Does the bundled dashboard satisfy the need? It reads SQLite or PostgreSQL.
 - If non-local, what authentication and TLS/reverse-proxy boundary protects it?
 
 | Need | Recommended starting point | Constraint to disclose |
 |---|---|---|
 | Isolated developer trial | absolute-path SQLite | local file durability and concurrency |
-| Shared/multi-instance capture | Postgres | dashboard cannot read it; the a4 runner echoes `--storage` |
+| Shared/multi-instance capture | Postgres | keep the DSN in `VERDICT_STORAGE` and mount the UI behind application auth |
 | Dashboard demonstration | SQLite plus localhost bind | not an outbound alerting service |
 | Production analytics | design separately | public-alpha release is not a production claim |
 
@@ -55,7 +55,7 @@ Unless the customer approves otherwise, propose:
 
 - one non-production environment and one supported provider path;
 - one service/environment scope per store because those init labels are not persisted
-  on trace rows in `0.1.0a4`;
+  on trace rows in `0.1.0a5`;
 - `capture_content=False`;
 - `buffered_writes=False`;
 - a customer-owned absolute SQLite path;
@@ -79,7 +79,7 @@ Before edits, show:
 4. collected and excluded fields, redaction tests, retention, and deletion command;
 5. job commands, scheduler, frequency basis, lock, timeout, logs, credentials, and
    cost estimate;
-6. dashboard binding/authentication and whether its source is SQLite;
+6. dashboard binding/authentication and selected storage backend;
 7. tests for success, provider error, storage error, sampling, lifecycle, privacy,
    drift/no-drift, and rollback; and
 8. rollback steps that remove instrumentation without changing provider behavior.
@@ -94,8 +94,8 @@ Include likelihood, impact, mitigation, owner, verification, and residual risk f
 - duplicate/lost traces from retries, sampling, buffering, or process exit;
 - sensitive content surviving best-effort redaction;
 - relative/ephemeral SQLite paths and shared-writer contention;
-- Postgres capture being mistaken for direct dashboard support;
-- Postgres credentials leaking because the a4 drift runner prints its storage value;
+- a credential-bearing storage URL leaking through a checked-in command, process
+  argument, or generated document;
 - weak statistical evidence from low volume or correlated conversation turns;
 - judge/provider spend, latency, rate limits, and credential exposure;
 - overlapping or partially failed scheduled jobs;

@@ -6,35 +6,28 @@ description: Inspect an existing LLM application and plan, implement, or audit a
 # Instrument an App with Verdict
 
 Instrument only behavior supported by the released Verdict target, and distinguish
-what was executed from what was merely proposed. Verdict `0.1.0a4` is a Python
+what was executed from what was merely proposed. Verdict `0.1.0a5` is a Python
 public alpha, not a production-readiness claim.
 
-## Resolve paths before doing anything
+## Resolve the installed runtime before doing anything
 
 Set `<skill-root>` to the absolute directory containing this `SKILL.md`. Resolve
-`<verdict-repo>` independently to the pinned Verdict source checkout that supplies
-`scripts/run_drift_pipeline.py` and `ui/server.py`. If this skill is being read from
-`<verdict-repo>/skills/verdict-instrument-app`, two directories above is a candidate,
-not proof: verify the Git commit and both required files. A native skill installer may
-copy the skill elsewhere, so never infer the source checkout from the installed skill
-location. If no checkout exists, ask for its absolute path or approval to create a
-pinned checkout. Resolve both paths once and use absolute paths in every command. The
-customer repository is usually a third checkout and working directory; never assume
-`scripts/` or `ui/` means the customer's current directory.
-
-Verify the selected source checkout before using repository-local tools:
+the customer repository independently. Normal capture, analysis, probe, and
+dashboard operation uses the released distributions and does not require a Verdict
+source checkout. Verify the interpreter, distribution names, versions, and installed
+commands before proposing customer edits:
 
 ```bash
-python3 <skill-root>/scripts/verify_verdict_checkout.py \
-  /absolute/path/to/verdict --format json
+python3 -c "from importlib.metadata import version; print(version('cognifity-verdict'), version('cognifity-verdict-eval'))"
+verdict-pipeline --help
+verdict-probes --help
+verdict-dashboard --help
 ```
 
-Stop if it does not report `"ready": true`; do not silently substitute another
-checkout or package version. Full checkouts verify the immutable release tag. Shallow
-checkouts, where that tag object is absent, must match the bundled immutable Git-object
-manifest for every runtime path instead. It also hashes the actual checked-out runtime
-bytes and rejects hidden `assume-unchanged` or `skip-worktree` index flags. The verifier
-never fetches or mutates the checkout.
+Stop if the distributions are not the approved `0.1.0a5` set, the unrelated PyPI
+distribution named `verdict` overlaps the environment, or any required command is
+absent. A source checkout is still required for contributor tests and research-only
+calibration scripts; do not use those as an installed runtime substitute.
 
 ## Preserve the authority boundary
 
@@ -58,7 +51,8 @@ never fetches or mutates the checkout.
 Read repository instructions and existing observability, privacy, deployment, and
 scheduler conventions. Identify the released Verdict version to use. For the
 compatibility target and its concrete limitations, read
-[`references/verdict-0.1.0a4.md`](references/verdict-0.1.0a4.md).
+[`references/verdict-0.1.0a5.md`](references/verdict-0.1.0a5.md). Its capture
+coverage inherits the unchanged a4 profile linked there.
 
 Do not treat an unpublished local Verdict worktree as released functionality.
 
@@ -114,9 +108,10 @@ Ask one batched set of questions after discovery. Cover only unresolved choices:
 - authorization to edit, install, launch, and schedule.
 
 Recommend an absolute SQLite path for a local single-host trial and Postgres for
-shared capture. State that the bundled dashboard reads SQLite only and that the
-`0.1.0a4` drift runner echoes its `--storage` value; do not pass a credential-bearing
-Postgres URL into that runner or its logs. Use
+shared capture. The bundled dashboard reads either backend directly without
+creating or migrating schemas. Supply a credential-bearing Postgres URL through
+the customer's existing secret environment as `VERDICT_STORAGE`, not a checked-in
+command or generated document. The pipeline logs only the backend name. Use
 [`references/configuration-and-risk.md`](references/configuration-and-risk.md) to
 generate the plan and risk register.
 
@@ -164,7 +159,7 @@ verdict.init(
 Preserve request/response semantics and existing exception handling. Do not add
 per-request initialization. If buffered writes are later approved, import
 `shutdown` from `verdict.client` and exercise `shutdown()` on every normal and
-cancellation path. It is not exported as `verdict.shutdown` in `0.1.0a4`.
+cancellation path. It is not exported as `verdict.shutdown` in `0.1.0a5`.
 
 ### 7. Verify the last affected sink
 
@@ -217,18 +212,17 @@ elapsed detection delay, provider latency, and evaluation cost—not a universal
 Run one approved command manually through its final sink before enabling its
 schedule. The bundled dashboard does not configure schedules.
 
-Generate the command from `<verdict-repo>/scripts/run_drift_pipeline.py --help` and
-test that exact command. Release `0.1.0a4` does not accept `--yes-spend` or
+Generate the command from `verdict-pipeline --help` and test that exact command.
+Release `0.1.0a5` does not accept `--yes-spend` or
 `--max-spend-usd`; enforce approval, call ceilings, credentials, timeouts, and budget
-outside the runner. Do not schedule a helper script that is absent from the pinned
-checkout.
+outside the runner. Pin the distribution versions in the deployment lockfile.
 
 ### 9. Show regression evidence accurately
 
-The current dashboard signal is the latest persisted `DriftRun` in SQLite. Launch it
-locally by default and verify `/api/health`, `/api/data`, and the rendered regression
-view. Postgres capture needs a separately designed, approved materialization path;
-do not imply direct dashboard support. Probes produce JSON and exit codes and do not
+The current dashboard signal is the latest persisted `DriftRun` in SQLite or
+PostgreSQL. Launch it locally by default, or mount `verdict.dashboard.create_app()`
+behind the host application's authentication, and verify `/api/health`, `/api/data`,
+and the rendered regression view. Probes produce JSON and exit codes and do not
 automatically appear as dashboard alerts. Do not promise outbound notifications
 unless the installed release actually supports them.
 
@@ -238,7 +232,7 @@ Stop and request direction when:
 
 - the live path is outside released Python instrumentors;
 - a required privacy/retention owner or content-capture decision is missing;
-- SQLite locality, Postgres sharing, and dashboard needs conflict;
+- storage ownership, tenant isolation, or dashboard authentication is unresolved;
 - live evaluator credentials, calibration, or spend limits are unresolved;
 - available volume cannot meet the requested detection delay;
 - representative clustering collapses or fragments and no approved, validated

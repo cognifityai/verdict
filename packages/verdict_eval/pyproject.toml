@@ -38,6 +38,10 @@ dev = [
     "pytest-asyncio>=0.23",
 ]
 
+[project.scripts]
+verdict-pipeline = "verdict_eval.cli.pipeline:main"
+verdict-probes = "verdict_eval.cli.probes:main"
+
 [project.urls]
 Homepage = "https://cognifity.ai/verdict"
 Documentation = "https://github.com/cognifityai/verdict/tree/main/docs"
