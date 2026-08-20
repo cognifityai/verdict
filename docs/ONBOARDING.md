@@ -236,8 +236,8 @@ last confirmed evaluator that remains on screen, and trace/drift detail is
 derived from IDs in that confirmed snapshot.
 
 Set both `VERDICT_USER` and `VERDICT_PASS` before starting the server to require
-HTTP Basic authentication for `/dashboard` and `/api/data`; `/` and
-`/api/health` remain public. Do not bind beyond localhost without that gate or a
+HTTP Basic authentication for the dashboard shells at `/` and `/dashboard` plus
+`/api/data`; `/api/health` remains public. Do not bind beyond localhost without that gate or a
 trusted reverse proxy. Dashboard time series include only observed hourly bins
 and half-hour latency bins. Presentation data is capped at the latest 100
 observed chart points, 8 providers, 20 usable intent clusters, 12 dimensions,

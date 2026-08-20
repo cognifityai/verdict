@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
@@ -94,6 +95,13 @@ def test_live_postgres_and_sqlite_produce_the_same_dashboard_bundle(tmp_path) ->
         postgres_bundle = build_bundle(scoped_dsn)
 
         assert postgres_bundle == sqlite_bundle
+        json.dumps(postgres_bundle)
+        assert type(postgres_bundle["providers"][0]["cost"]) is type(
+            sqlite_bundle["providers"][0]["cost"]
+        )
+        assert type(postgres_bundle["providers"][0]["inTok"]) is type(
+            sqlite_bundle["providers"][0]["inTok"]
+        )
         assert postgres_bundle["meta"]["totalTraces"] == 1
         assert postgres_bundle["providers"][0]["rawProvider"] == "custom-provider"
         assert postgres_bundle["driftSignals"][0]["id"] == signal.signal_id

@@ -1614,7 +1614,7 @@ def test_authenticated_cors_preflight_reaches_cors_middleware(monkeypatch):
     assert response.headers["access-control-allow-origin"] == "https://review.example"
 
 
-def test_basic_auth_gates_dashboard_and_data_but_not_public_routes(monkeypatch):
+def test_basic_auth_gates_dashboard_shells_and_data_but_not_health(monkeypatch):
     import base64
 
     import httpx
@@ -1637,11 +1637,12 @@ def test_basic_auth_gates_dashboard_and_data_but_not_public_routes(monkeypatch):
 
     landing, health, dashboard, data, authenticated = asyncio.run(requests())
 
-    assert landing.status_code == 200
+    assert landing.status_code == 401
     assert health.status_code == 200
     assert dashboard.status_code == 401
     assert data.status_code == 401
     assert dashboard.headers["www-authenticate"] == 'Basic realm="Verdict"'
+    assert landing.headers["www-authenticate"] == 'Basic realm="Verdict"'
     assert authenticated.status_code == 200
 
 

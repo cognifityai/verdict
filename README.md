@@ -98,8 +98,8 @@ pip install --upgrade \
 Add the same provider, semantic, and PostgreSQL extras that deployment already
 uses. The upgrade reuses existing SQLite files and PostgreSQL tables in place;
 it does not delete or rewrite traces, judgments, calibration records, drift
-runs, or dashboard history. Existing source-checkout commands continue through
-compatibility wrappers. Back up the store and lockfile before any alpha upgrade,
+runs, or dashboard history. Existing source entry points continue as wrappers
+after the workspace packages are installed. Back up the store and lockfile before any alpha upgrade,
 then run the pipeline and dashboard smoke checks against a non-production copy.
 
 An unrelated project owns the `verdict` distribution on PyPI and exposes the

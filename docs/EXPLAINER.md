@@ -170,8 +170,8 @@ migrating either store. Install `cognifity-verdict[dashboard]` for SQLite or
 `verdict.dashboard.create_app()` so its authenticated application and the
 packaged Verdict UI run together.
 When `VERDICT_USER` and `VERDICT_PASS` are both set, HTTP Basic authentication
-gates `/dashboard` and `/api/data` while the landing and health endpoints remain
-public. Chart series contain observed bins only. The response keeps full-store
+gates the dashboard shells at `/` and `/dashboard` plus `/api/data`, while
+`/api/health` remains public. Chart series contain observed bins only. The response keeps full-store
 totals while bounding presentation data to the latest 100 chart points, 8
 providers, 20 usable intent clusters, 12 dimensions, 20 evaluator identities,
 40 drift signals, 20 models per displayed provider, and 30 trace samples. The

@@ -859,6 +859,8 @@ def _build(cur, *, evaluator_id: str | None = None) -> dict:
             for v, cnt in c.items():
                 provider_counts[v] += cnt
         judged = provider_counts["pass"] + provider_counts["fail"]
+        trace_count = int(r["n"] or 0)
+        error_count = int(r["errors"] or 0)
         providers.append({
             "key": p, "rawProvider": raw_provider,
             "label": _label_for(str(raw_provider or ""), model_of.get(p, "")),
@@ -866,12 +868,12 @@ def _build(cur, *, evaluator_id: str | None = None) -> dict:
             "models": sorted(
                 str(model) for model in models_of[p] if model not in (None, "")
             )[:MAX_PROVIDER_MODELS],
-            "n": r["n"], "errors": r["errors"] or 0,
-            "errorRate": round(100 * (r["errors"] or 0) / r["n"], 1) if r["n"] else 0.0,
-            "avgLatency": round((r["lat"] or 0) / 1000, 2),
-            "inTok": r["it"] or 0, "outTok": r["ot"] or 0,
-            "cost": round(r["cost"], 4) if r["cost"] is not None else None,
-            "costUnknown": r["cost_unknown"] or 0,
+            "n": trace_count, "errors": error_count,
+            "errorRate": round(100 * error_count / trace_count, 1) if trace_count else 0.0,
+            "avgLatency": _round_or_none(float(r["lat"] or 0) / 1000, 2) or 0.0,
+            "inTok": int(r["it"] or 0), "outTok": int(r["ot"] or 0),
+            "cost": _round_or_none(r["cost"], 4),
+            "costUnknown": int(r["cost_unknown"] or 0),
             "passRate": _score_rate(provider_counts), "judged": judged,
             "unclear": provider_counts["unclear"],
         })
@@ -1121,9 +1123,9 @@ def _build(cur, *, evaluator_id: str | None = None) -> dict:
                   SUM(CASE WHEN cost_usd IS NULL THEN 1 ELSE 0 END) cost_unknown
              FROM traces"""
     ).fetchone()
-    total_traces = totals["n"]
-    priced_traces = total_traces - (totals["cost_unknown"] or 0)
-    total_cost = totals["cost"] or 0
+    total_traces = int(totals["n"] or 0)
+    priced_traces = total_traces - int(totals["cost_unknown"] or 0)
+    total_cost = _round_or_none(totals["cost"], 3) or 0.0
     total_cost_status = (
         "unavailable" if priced_traces == 0
         else "complete" if priced_traces == total_traces
@@ -1186,7 +1188,7 @@ def _build(cur, *, evaluator_id: str | None = None) -> dict:
             "durationHours": max(1, round((tmax - t0).total_seconds() / 3600)),
             "totalTraces": total_traces,
             "totalJudged": len(judg_by_trace),
-            "totalCost": round(total_cost, 3) if priced_traces else None,
+            "totalCost": total_cost if priced_traces else None,
             "totalCostStatus": total_cost_status,
             "regressionHour": int(os.environ.get("VERDICT_REGRESSION_HOUR", "4")),
             "providers": len(all_keys),
@@ -1241,18 +1243,18 @@ def create_app(*, storage: str | os.PathLike[str] | None = None):
         app.add_middleware(CORSMiddleware, allow_origins=_cors,
                            allow_methods=["GET"], allow_headers=["*"])
 
-    # Only these paths require the password. The landing page (/) and health
-    # check stay public; the dashboard view and the live data are gated.
+    # The dashboard shell and live data require the password. Health and static
+    # assets contain no stored telemetry and remain public.
     def _is_gated(path: str) -> bool:
-        return path == "/dashboard" or path.startswith("/api/data")
+        return path in {"/", "/dashboard"} or path.startswith("/api/data")
 
     @app.middleware("http")
     async def basic_auth(request, call_next):
         """Gate the dashboard + live data behind HTTP Basic Auth when configured.
 
         Set VERDICT_USER and VERDICT_PASS to require a login. If either is unset
-        (local dev), the gate is disabled. Only /dashboard and /api/data are
-        protected; the marketing landing at / and /api/health stay public.
+        (local dev), the gate is disabled. The dashboard shells at / and
+        /dashboard plus /api/data are protected; /api/health stays public.
         """
         user = os.environ.get("VERDICT_USER")
         pw = os.environ.get("VERDICT_PASS")
