@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 import { dimensionAxisLabel, dimensionLabel } from "./dimension-labels.js";
 import { providerPresentation } from "./provider-presentation.js";
+import { Operations } from "./Operations.jsx";
 
 // Embedded synthetic sample data. This keeps the static dashboard renderable when
 // no live API is reachable. It is not a benchmark, experiment result, or claim
@@ -136,6 +137,26 @@ function mountedApiUrl() {
   if (window.VERDICT_API) return window.VERDICT_API;
   const base = window.location.pathname.replace(/\/dashboard\/?$/, "").replace(/\/$/, "");
   return `${base}/api/data`;
+}
+
+function mountedConfigUrl() {
+  return mountedApiUrl().replace(/\/api\/data(?:\?.*)?$/, "/api/config");
+}
+
+function useOperationsConfig() {
+  const [operationsUrl, setOperationsUrl] = useState(null);
+  useEffect(() => {
+    let active = true;
+    fetch(mountedConfigUrl(), { credentials: "same-origin", headers: { Accept: "application/json" } })
+      .then((response) => response.ok ? response.json() : null)
+      .then((config) => {
+        const value = config?.operationsUrl;
+        if (active && typeof value === "string" && value.startsWith("/") && !value.startsWith("//")) setOperationsUrl(value);
+      })
+      .catch(() => {});
+    return () => { active = false; };
+  }, []);
+  return operationsUrl;
 }
 
 const API_URL = mountedApiUrl();
@@ -481,7 +502,7 @@ const TRUNCATION_LABELS = {
   traceSamples: "trace samples",
 };
 
-function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluatorChange, reloading, loadError }) {
+function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluatorChange, reloading, loadError, operationsUrl = null }) {
   const DATA = data;
   const [tab, setTab] = useState("overview");
   const evaluation = DATA.evaluation || { status: "empty", selectedId: null, availableIdentities: [] };
@@ -496,6 +517,7 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
     { id: "traces", label: "Trace explorer", icon: Activity },
     { id: "judge", label: "Judge scores", icon: Scale },
     { id: "compare", label: "Compare LLMs", icon: GitBranch },
+    ...(operationsUrl ? [{ id: "operations", label: "Operations", icon: Cpu }] : []),
   ];
   return (
     <div style={{ background: C.bg, color: C.text, minHeight: "100%" }}>
@@ -608,6 +630,7 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
         {tab === "traces" && <Traces key={evaluation.selectedId || "none"} data={DATA} />}
         {tab === "judge" && <Judge data={DATA} />}
         {tab === "compare" && <Compare data={DATA} />}
+        {tab === "operations" && operationsUrl && <Operations url={operationsUrl} costBreakdown={DATA.meta.costBreakdown} />}
       </main>
     </div>
   );
@@ -1296,14 +1319,15 @@ function MiniBar({ title, data, fmt }) {
 }
 
 /* ------------------------------------------------------------------- APP */
-function App({ data = SEED, source = "sample", onReload, onEvaluatorChange, reloading, loadError }) {
+function App({ data = SEED, source = "sample", onReload, onEvaluatorChange, reloading, loadError, operationsUrl = null }) {
   const [mode, setMode] = useState("landing");
   return (
     <div style={{ fontFamily: "ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif", height: "100%", background: C.bg }}>
       {mode === "landing"
         ? <Landing onEnter={() => setMode("dashboard")} />
         : <Dashboard data={data} onExit={() => setMode("landing")} source={source} onReload={onReload}
-          onEvaluatorChange={onEvaluatorChange} reloading={reloading} loadError={loadError} />}
+          onEvaluatorChange={onEvaluatorChange} reloading={reloading} loadError={loadError}
+          operationsUrl={operationsUrl} />}
     </div>
   );
 }
@@ -1318,16 +1342,19 @@ export function LandingRoot() {
 
 export function DashboardRoot() {
   const data = useDashboardData();
+  const operationsUrl = useOperationsConfig();
   return (
     <div style={{ fontFamily: "ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif", minHeight: "100%", background: C.bg }}>
       <Dashboard data={data.snapshot} onExit={() => { window.location.href = "/"; }} source={data.source}
-        onReload={data.reload} onEvaluatorChange={data.load} reloading={data.loading} loadError={data.error} />
+        onReload={data.reload} onEvaluatorChange={data.load} reloading={data.loading}
+        loadError={data.error} operationsUrl={operationsUrl} />
     </div>
   );
 }
 
 export default function Root() {
   const data = useDashboardData();
+  const operationsUrl = useOperationsConfig();
   return <App data={data.snapshot} source={data.source} onReload={data.reload}
-    onEvaluatorChange={data.load} reloading={data.loading} loadError={data.error} />;
+    onEvaluatorChange={data.load} reloading={data.loading} loadError={data.error} operationsUrl={operationsUrl} />;
 }

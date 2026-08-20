@@ -3,6 +3,7 @@ import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
+import pytest
 import verdict.dashboard.app as server_module
 from verdict.dashboard.app import (
     _CSP,
@@ -131,6 +132,52 @@ def test_bundle_marks_unknown_cost_and_exposes_signal_examples(tmp_path):
     assert bundle["driftSignals"][0]["exampleTraceIds"] == [trace.trace_id]
 
 
+def test_bundle_keeps_agent_judge_and_unclassified_cost_provenance_separate(tmp_path):
+    path = tmp_path / "cost-provenance.db"
+    storage = SQLiteStorage(str(path))
+    storage.insert_trace(Trace(
+        trace_id="agent-priced",
+        tags={"verdict.workload": "agent"},
+        cost_usd=0.10,
+    ))
+    storage.insert_trace(Trace(
+        trace_id="judge-priced",
+        tags={"verdict.workload": "judge"},
+        cost_usd=0.20,
+    ))
+    storage.insert_trace(Trace(
+        trace_id="unknown-unpriced",
+        tags={"verdict.workload": "customer-specialist"},
+        cost_usd=None,
+    ))
+    storage.insert_trace(Trace(
+        trace_id="legacy-priced",
+        cost_usd=0.30,
+    ))
+    storage.close()
+
+    breakdown = build_bundle(path)["meta"]["costBreakdown"]
+
+    assert breakdown["agent"] == {
+        "traces": 1,
+        "pricedTraces": 1,
+        "cost": 0.1,
+        "status": "complete",
+    }
+    assert breakdown["judge"] == {
+        "traces": 1,
+        "pricedTraces": 1,
+        "cost": 0.2,
+        "status": "complete",
+    }
+    assert breakdown["unclassified"] == {
+        "traces": 2,
+        "pricedTraces": 1,
+        "cost": 0.3,
+        "status": "partial",
+    }
+
+
 def test_installed_dashboard_accepts_a_sqlite_storage_url(tmp_path):
     path = tmp_path / "installed-dashboard.db"
     storage = SQLiteStorage(str(path))
@@ -167,6 +214,43 @@ def test_dashboard_app_can_be_mounted_below_a_host_application(tmp_path):
 
     assert response.status_code == 200
     assert response.json()["meta"]["totalTraces"] == 1
+
+
+def test_mounted_dashboard_exposes_only_a_same_origin_operations_path(tmp_path):
+    import httpx
+    from fastapi import FastAPI
+
+    path = tmp_path / "mounted-operations.db"
+    SQLiteStorage(str(path)).close()
+    host = FastAPI()
+    host.mount(
+        "/admin/verdict",
+        create_app(
+            storage=f"sqlite:///{path}",
+            operations_url="/api/admin/operations",
+        ),
+    )
+
+    async def request_config():
+        transport = httpx.ASGITransport(app=host)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            return await client.get("/admin/verdict/api/config")
+
+    response = asyncio.run(request_config())
+
+    assert response.status_code == 200
+    assert response.json() == {"operationsUrl": "/api/admin/operations"}
+
+
+def test_dashboard_rejects_cross_origin_operations_urls(tmp_path):
+    path = tmp_path / "unsafe-operations.db"
+    SQLiteStorage(str(path)).close()
+
+    with pytest.raises(ValueError, match="same-origin absolute path"):
+        create_app(
+            storage=f"sqlite:///{path}",
+            operations_url="https://attacker.example/collect",
+        )
 
 
 def test_large_store_api_returns_a_bounded_truthful_bundle(monkeypatch, tmp_path):

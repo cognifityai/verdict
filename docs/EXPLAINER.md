@@ -169,6 +169,11 @@ migrating either store. Install `cognifity-verdict[dashboard]` for SQLite or
 `verdict-dashboard --storage ...`. A FastAPI host can mount
 `verdict.dashboard.create_app()` so its authenticated application and the
 packaged Verdict UI run together.
+The mount accepts an optional same-origin `operations_url`. When configured,
+the same packaged UI adds an Operations view for normalized host telemetry and
+job controls. Collection, authorization, CSRF, and execution stay in the host;
+Verdict remains cloud-neutral. Omitting the option preserves the original
+read-only dashboard behavior.
 When `VERDICT_USER` and `VERDICT_PASS` are both set, HTTP Basic authentication
 gates the dashboard shells at `/` and `/dashboard` plus `/api/data`, while
 `/api/health` remains public. Chart series contain observed bins only. The response keeps full-store

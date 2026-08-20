@@ -65,6 +65,20 @@ they decide which shared parent spans must survive.
 Stored costs are best-effort estimates from Verdict's dated static base-price table;
 unknown models remain unpriced, and the values are not billing truth.
 
+Hosts that need agent-versus-evaluator cost provenance can bind a bounded,
+task-local workload label:
+
+```python
+with verdict.workload_context("agent"):
+    response = client.messages.create(...)
+```
+
+The packaged dashboard recognizes `agent` and `judge`; missing and custom labels
+remain visible as unclassified rather than being guessed. The SDK also exposes
+aggregate process-local capture/queue telemetry through
+`VerdictClient.runtime_metrics.snapshot(client.storage)`. It contains counts and
+latency summaries only, never prompts, responses, or exception text.
+
 ```python
 import verdict
 from anthropic import Anthropic
@@ -84,6 +98,21 @@ verdict-dashboard --storage sqlite:///./verdict.db
 Add the `postgres` extra for a PostgreSQL store. The dashboard is read-only and
 can also be mounted with `verdict.dashboard.create_app()` behind an existing
 FastAPI application's authentication.
+
+An authenticated host may add the dashboard's Operations tab by passing a
+same-origin API path:
+
+```python
+app.mount(
+    "/admin/verdict",
+    create_app(storage=storage_url, operations_url="/api/admin/operations"),
+)
+```
+
+Verdict renders the normalized metrics/jobs response, while the host remains
+responsible for cloud credentials, authorization, CSRF protection, collection,
+and job execution. Without `operations_url`, no Operations tab or extra request
+is present.
 
 For `0.1.0a4`, supported POC entry points are Anthropic
 `messages.create(...)` (including `stream=True`), OpenAI

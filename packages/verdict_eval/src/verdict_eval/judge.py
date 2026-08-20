@@ -15,6 +15,7 @@ import json
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+from verdict.client import workload_context
 from verdict.metrics import verdict_label
 from verdict.schema import DimensionScore, Judgment, Verdict
 
@@ -243,7 +244,8 @@ class Judge:
             temperature=self.temperature,
             max_tokens=self.max_tokens,
         )
-        resp = self.provider.complete(req)
+        with workload_context("judge"):
+            resp = self.provider.complete(req)
         parsed = _parse_verdict_json(resp.text, rubric)
 
         dimensions = [

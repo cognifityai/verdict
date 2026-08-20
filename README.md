@@ -90,9 +90,9 @@ environment; do not reclone the repository:
 
 ```bash
 pip install --upgrade \
-  "cognifity-verdict[dashboard]==0.1.0a5" \
-  "cognifity-verdict-eval==0.1.0a5" \
-  "cognifity-verdict-inspect==0.1.0a5"
+  "cognifity-verdict[dashboard]==0.1.0a6" \
+  "cognifity-verdict-eval==0.1.0a6" \
+  "cognifity-verdict-inspect==0.1.0a6"
 ```
 
 Add the same provider, semantic, and PostgreSQL extras that deployment already

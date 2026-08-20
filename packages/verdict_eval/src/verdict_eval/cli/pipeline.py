@@ -44,6 +44,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--judge-model", default="fake-judge",
                    help="Judge model name (use 'fake-judge' for offline).")
     p.add_argument(
+        "--capture-judge-telemetry",
+        action="store_true",
+        help="Capture judge LLM cost/latency traces into the configured Verdict "
+             "storage. Off by default; captured judge traces are excluded from "
+             "future target-workload analysis.",
+    )
+    p.add_argument(
         "--judge-sentinel-file",
         default="",
         help="Optional JSONL human-labeled anchor set. Agreement is persisted "
@@ -141,6 +148,16 @@ def _storage_backend(storage: str) -> str:
     return "configured"
 
 
+def _exclude_internal_workloads(traces):
+    """Keep evaluator traffic out of the workload it is evaluating."""
+    target = [
+        trace
+        for trace in traces
+        if trace.tags.get("verdict.workload") != "judge"
+    ]
+    return target, len(traces) - len(target)
+
+
 def _drift_run_id(
     args,
     analysis_time: datetime,
@@ -191,6 +208,34 @@ def _signal_id_for_run(signal, run_id: str) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if not args.capture_judge_telemetry:
+        return _run(args)
+
+    import verdict
+
+    try:
+        verdict.init(
+            service_name="verdict-drift-pipeline",
+            environment=os.environ.get("VERDICT_ENVIRONMENT", "production"),
+            storage=args.storage,
+            capture_content=False,
+            instrumentors=[] if args.judge_provider == "fake" else [args.judge_provider],
+        )
+        verdict.set_context(
+            session_id=os.environ.get("VERDICT_JOB_ID") or None,
+            workload="judge",
+        )
+    except Exception:
+        print("ERROR: cannot initialize judge telemetry")
+        verdict.shutdown()
+        return 2
+    try:
+        return _run(args)
+    finally:
+        verdict.shutdown()
+
+
+def _run(args) -> int:
     try:
         analysis_time = _parse_analysis_time(args.as_of)
     except ValueError as exc:
@@ -208,6 +253,9 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Storage backend: {_storage_backend(args.storage)}")
     traces = storage.list_traces(limit=args.limit)
     print(f"Loaded {len(traces)} traces.")
+    traces, excluded_internal = _exclude_internal_workloads(traces)
+    if excluded_internal:
+        print(f"  Excluded {excluded_internal} judge telemetry trace(s).")
     if not traces:
         print("No traces in storage. Run an instrumented example first "
               "(e.g. `python examples/basic_anthropic.py`).")

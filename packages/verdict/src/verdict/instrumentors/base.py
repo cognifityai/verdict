@@ -5,6 +5,7 @@ from __future__ import annotations
 import abc
 import logging
 import threading
+import time
 from typing import TYPE_CHECKING
 
 from verdict.redaction import sanitize_trace
@@ -55,6 +56,7 @@ def apply_routing_context(client: VerdictClient, trace: Trace) -> None:
         from verdict.client import (
             get_context_session_id,
             get_context_user_id_hash,
+            get_context_workload,
         )
 
         sid = get_context_session_id()
@@ -63,6 +65,9 @@ def apply_routing_context(client: VerdictClient, trace: Trace) -> None:
         uid = get_context_user_id_hash()
         if uid is not None:
             trace.user_id_hash = uid
+        workload = get_context_workload()
+        if workload is not None:
+            trace.tags = {**trace.tags, "verdict.workload": workload}
 
         # Automatic provider/manual-span correlation is deliberately one-way.
         # Multiple provider traces can share one manual parent, so choosing one
@@ -113,6 +118,8 @@ def _warn_persistence_failure_once(
 
 def safe_persist_trace(client: VerdictClient, trace: Trace) -> None:
     """Sanitize and persist telemetry without raising into provider calls."""
+    started = time.perf_counter()
+    failed = False
     try:
         sanitize_trace(
             trace,
@@ -121,7 +128,13 @@ def safe_persist_trace(client: VerdictClient, trace: Trace) -> None:
         )
         persist_trace(client, trace)
     except Exception as exc:
+        failed = True
         _warn_persistence_failure_once(client, trace, exc)
+    finally:
+        client.runtime_metrics.record_capture(
+            (time.perf_counter() - started) * 1000.0,
+            failed=failed,
+        )
 
 
 def normalize_finish_reason(raw: object) -> str | None:

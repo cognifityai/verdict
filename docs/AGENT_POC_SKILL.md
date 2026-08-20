@@ -10,7 +10,7 @@ is to give the agent the checked-out `SKILL.md` explicitly.
 
 ## Before the session
 
-1. Install the synchronized `0.1.0a5` Verdict distributions in the customer
+1. Install the synchronized `0.1.0a6` Verdict distributions in the customer
    application's environment.
 2. Create a reversible branch in the customer application.
 3. Use a non-production environment first.
@@ -93,12 +93,12 @@ The skill can direct the agent to:
 The skill cannot make unsupported SDK methods capturable, guarantee redaction,
 invent an intent field absent from captured data, calibrate a judge without
 independent labels, make correlated turns statistically independent, configure
-schedules through the dashboard, or send outbound alerts that Verdict `0.1.0a5`
+schedules through the dashboard, or send outbound alerts that Verdict `0.1.0a6`
 does not ship.
 
 ## Release-specific boundary
 
-The skill targets public Verdict `0.1.0a5`; its capture-method evidence remains
+The skill targets public Verdict `0.1.0a6`; its capture-method evidence remains
 the bounded `0.1.0a4` [POC release profile](POC_RELEASE_PROFILE.md). Re-inspect
 all commands and provider entry points before using the skill with a later
 release.

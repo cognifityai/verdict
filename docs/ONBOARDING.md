@@ -169,10 +169,21 @@ verdict-pipeline \
 verdict-dashboard --storage sqlite:///./verdict.db
 ```
 
+Add `--capture-judge-telemetry` only when you intentionally want judge model
+cost/latency traces written to the same store. Those traces are tagged as the
+`judge` workload and excluded from future drift inputs so the evaluator does not
+become part of the workload it evaluates. The flag is off by default.
+
 For PostgreSQL, install `cognifity-verdict[dashboard,postgres]` and pass the
 same storage URL used by the SDK. The dashboard only reads existing Verdict
 tables; it never creates or migrates them. `python ui/server.py --db ...`
 remains a compatible source-checkout wrapper.
+
+Applications that mount the dashboard can optionally pass a same-origin
+`operations_url` to `verdict.dashboard.create_app()`. The host endpoint supplies
+normalized infrastructure/application metrics and authorized job controls;
+Verdict does not acquire cloud credentials or execute host jobs. Existing
+standalone and mounted dashboards are unchanged when the option is omitted.
 
 For independent judge-health trending, add a fixed human-labeled JSONL anchor
 set. Its first optional row is `{"set_name":"support-v1"}`; each remaining row
