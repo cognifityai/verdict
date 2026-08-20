@@ -20,10 +20,9 @@ Verdict requires Python 3.10 or newer. From the repository root:
 ```bash
 uv venv --python 3.12
 source .venv/bin/activate
-pip install -e "packages/verdict[anthropic,openai,google]"
+pip install -e "packages/verdict[anthropic,openai,google,dashboard]"
 pip install -e packages/verdict_eval
 pip install -e packages/verdict_inspect
-pip install -r ui/requirements.txt
 pip install pytest pytest-asyncio ruff
 ```
 
@@ -46,8 +45,9 @@ pnpm --dir ui build
 python -m pytest -q ui/tests
 ```
 
-Include the updated `ui/landing.html`, `ui/dashboard.html`, and `ui/assets/`
-files in the same pull request as the source change.
+Include the updated `ui/landing.html`, `ui/assets/`, and packaged dashboard
+assets under `packages/verdict/src/verdict/dashboard/static/` in the same pull
+request as the source change.
 
 Provider instrumentation changes should also be checked with
 `scripts/live_capture_check.py` against the real SDKs they affect. That script

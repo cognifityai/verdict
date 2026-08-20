@@ -4,9 +4,8 @@ import json
 import sys
 from datetime import datetime, timezone
 
+from verdict_eval.cli import probes as run_probes
 from verdict_eval.probes import ProbeResult, ProbeRun
-
-from scripts import run_probes
 
 
 def _run(*results: ProbeResult) -> ProbeRun:

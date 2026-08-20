@@ -57,7 +57,7 @@ The judge is pluggable behind a provider interface, so you can point it at Anthr
 Install the public alpha from PyPI. Choose only the provider extras you use:
 
 ```bash
-pip install "cognifity-verdict[anthropic,openai,google]"
+pip install "cognifity-verdict[anthropic,openai,google,dashboard]"
 pip install "cognifity-verdict-eval[semantic]" cognifity-verdict-inspect
 ```
 
@@ -83,6 +83,25 @@ pip install "cognifity-verdict[dashboard,postgres]"
 The `all` extra preserves its existing provider-and-storage dependency set; it
 does not add the optional dashboard server.
 
+### Upgrade from 0.1.0a4
+
+Upgrade the synchronized distributions in the application's existing virtual
+environment; do not reclone the repository:
+
+```bash
+pip install --upgrade \
+  "cognifity-verdict[dashboard]==0.1.0a5" \
+  "cognifity-verdict-eval==0.1.0a5" \
+  "cognifity-verdict-inspect==0.1.0a5"
+```
+
+Add the same provider, semantic, and PostgreSQL extras that deployment already
+uses. The upgrade reuses existing SQLite files and PostgreSQL tables in place;
+it does not delete or rewrite traces, judgments, calibration records, drift
+runs, or dashboard history. Existing source-checkout commands continue through
+compatibility wrappers. Back up the store and lockfile before any alpha upgrade,
+then run the pipeline and dashboard smoke checks against a non-production copy.
+
 An unrelated project owns the `verdict` distribution on PyPI and exposes the
 same top-level `verdict` import. Do not install that distribution in the same
 environment as `cognifity-verdict`; overlapping Python package paths make the
@@ -102,7 +121,7 @@ pip install pytest pytest-asyncio httpx
 python -m pytest -q
 ```
 
-Key-free smoke test (needs only numpy + wrapt):
+Contributor smoke test from a source checkout (needs only numpy + wrapt):
 
 ```bash
 python scripts/smoke_test.py
@@ -122,13 +141,20 @@ verdict.init(
 )
 client = Anthropic()
 # Use Anthropic normally; supported calls are captured.
-# Run scripts/run_drift_pipeline.py separately for sampling, judging, and drift.
+# Run verdict-pipeline separately for sampling, judging, and drift.
 ```
 
 Open the read-only dashboard for a local SQLite store:
 
 ```bash
 verdict-dashboard --storage sqlite:///./verdict.db
+```
+
+Run the installed analysis pipeline without cloning this repository:
+
+```bash
+verdict-pipeline --storage sqlite:///./verdict.db \
+    --judge-provider anthropic --judge-model claude-haiku-4-5
 ```
 
 The same command accepts a PostgreSQL URL when the `postgres` extra is
@@ -193,6 +219,9 @@ data measured with the same rubric-alignment harness. Treat public benchmarks as
 sanity checks, not proof that a judge is calibrated for your workload.
 
 ## Judge calibration workflow
+
+The calibration research harness remains a source-checkout workflow; it is not
+part of the normal installed runtime.
 
 ```bash
 python scripts/sample_to_label.py --source sqlite --db verdict.db --dedupe-by-prompt --out raw.jsonl

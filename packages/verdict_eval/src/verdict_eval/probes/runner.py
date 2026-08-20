@@ -10,7 +10,7 @@ The runner is intentionally minimal:
      judge so it knows what to look for.
   4. A probe `overall_passed` iff every expectation passed.
 
-Storage / persistence is left to the caller — see `scripts/run_probes.py`
+Storage / persistence is left to the caller — see `verdict-probes`.
 for an example that writes ProbeRun results to JSON for diffing across
 scheduled runs.
 """

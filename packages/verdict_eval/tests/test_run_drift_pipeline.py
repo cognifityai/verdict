@@ -11,10 +11,9 @@ from verdict.schema import (
     Verdict,
 )
 from verdict.storage.sqlite import SQLiteStorage
+from verdict_eval.cli.pipeline import _storage_backend, build_parser, main
 from verdict_eval.judge import DEFAULT_RUBRIC, Judge
 from verdict_eval.providers import FakeProvider
-
-from scripts.run_drift_pipeline import build_parser, main
 
 
 def test_pipeline_defaults_to_semantic_clustering_and_discloses_effect_floor():
@@ -24,6 +23,12 @@ def test_pipeline_defaults_to_semantic_clustering_and_discloses_effect_floor():
     assert args.clustering_version == "v2"
     assert args.cluster_threshold == 0.50
     assert args.effect_size_threshold == 0.147
+
+
+def test_pipeline_reads_storage_from_environment_without_cli_echo(monkeypatch):
+    monkeypatch.setenv("VERDICT_STORAGE", "postgresql://user:secret@db/verdict")
+
+    assert build_parser().parse_args([]).storage.endswith("@db/verdict")
 
 
 def test_pipeline_help_renders_percent_signs(capsys):
@@ -36,6 +41,23 @@ def test_pipeline_help_renders_percent_signs(capsys):
 
     output = capsys.readouterr().out
     assert "Minimum 95% Wilson-CI lower bound" in output
+
+
+def test_pipeline_names_storage_without_exposing_credentials(monkeypatch, capsys):
+    from verdict import client
+
+    class EmptyStorage:
+        def list_traces(self, *, limit):
+            return []
+
+    dsn = "postgresql://operator:secret-canary@db.example/verdict"
+    monkeypatch.setattr(client, "_resolve_storage", lambda _storage: EmptyStorage())
+
+    assert _storage_backend(dsn) == "postgresql"
+    assert main(["--storage", dsn]) == 0
+    output = capsys.readouterr().out
+    assert "Storage backend: postgresql" in output
+    assert "secret-canary" not in output
 
 
 def test_real_pipeline_uses_trace_time_and_replaces_hourly_result(tmp_path, monkeypatch, capsys):

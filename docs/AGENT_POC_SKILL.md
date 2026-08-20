@@ -10,7 +10,8 @@ is to give the agent the checked-out `SKILL.md` explicitly.
 
 ## Before the session
 
-1. Check out this Verdict repository at the commit you intend to use.
+1. Install the synchronized `0.1.0a5` Verdict distributions in the customer
+   application's environment.
 2. Create a reversible branch in the customer application.
 3. Use a non-production environment first.
 4. Decide who can approve code edits, dependencies, content capture, storage,
@@ -39,14 +40,10 @@ separately.
 
 Agents with a native skill installer may install the
 `skills/verdict-instrument-app` directory using that host's documented
-mechanism. A native install copies the skill but does not install the
-repository-local pipeline or dashboard. Give the agent a separate absolute path
-to a pinned Verdict source checkout and require the bundled checkout verifier
-to pass before those tools run. The verifier checks the release tag in a full
-checkout and falls back to pinned runtime object identities in a shallow checkout;
-it also hashes the checked-out runtime bytes and rejects hidden Git index flags. It
-does not fetch or modify the checkout. The direct-file prompt above is the
-cross-host fallback and is the only usage assumed by this repository.
+mechanism. A skill install does not install Python dependencies; install and pin
+the three Cognifity distributions separately. The pipeline, probe runner, and
+dashboard then come from the installed packages and do not need a Verdict source
+checkout. The direct-file prompt above remains the cross-host fallback.
 
 ## Expect three separate milestones
 
@@ -54,7 +51,7 @@ cross-host fallback and is the only usage assumed by this repository.
 |---|---|---|
 | Capture | A supported SDK call creates exactly one expected stored trace | Intent quality or regression detection |
 | Quality | Approved content is safe enough for the trial, clusters match the regression question, and the judge clears a customer-label gate | A baseline/current regression exists |
-| Regression | Independent windows meet the sample floor and the latest `DriftRun` is visible in the SQLite dashboard | Production readiness or outbound alerting |
+| Regression | Independent windows meet the sample floor and the latest `DriftRun` is visible in the selected-store dashboard | Production readiness or outbound alerting |
 
 The agent must stop at the last milestone that has evidence. It must not turn on
 content merely to make quality charts appear.
@@ -74,10 +71,9 @@ After discovery, the agent asks one batch covering:
 - permission to edit, install, launch, test, and schedule.
 
 SQLite is the recommended local POC store. The bundled dashboard reads SQLite
-only. Postgres capture is supported, but a Postgres-to-dashboard
-materialization is a separate, unshipped integration. The `0.1.0a4` drift
-runner also prints its storage argument, so a credential-bearing Postgres URL
-must not be passed to that command or its logs.
+or PostgreSQL without creating or migrating schemas. Keep a credential-bearing
+Postgres URL in the customer's protected `VERDICT_STORAGE` environment; the
+installed commands report only the backend name.
 
 ## What the agent may automate after approval
 
@@ -96,13 +92,13 @@ The skill can direct the agent to:
 
 The skill cannot make unsupported SDK methods capturable, guarantee redaction,
 invent an intent field absent from captured data, calibrate a judge without
-independent labels, make correlated turns statistically independent, expose
-Postgres in the bundled dashboard, configure schedules through the dashboard,
-or send outbound alerts that Verdict `0.1.0a4` does not ship.
+independent labels, make correlated turns statistically independent, configure
+schedules through the dashboard, or send outbound alerts that Verdict `0.1.0a5`
+does not ship.
 
 ## Release-specific boundary
 
-The skill targets public Verdict `0.1.0a4` and the source tools in this
-checkout. Read the [POC release profile](POC_RELEASE_PROFILE.md) before the
-session. Re-inspect all commands and provider entry points before using the
-skill with a later release.
+The skill targets public Verdict `0.1.0a5`; its capture-method evidence remains
+the bounded `0.1.0a4` [POC release profile](POC_RELEASE_PROFILE.md). Re-inspect
+all commands and provider entry points before using the skill with a later
+release.

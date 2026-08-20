@@ -339,7 +339,7 @@ DRIFT_COMMAND_RULES: tuple[Rule, ...] = (
         r"--db(?:\s|=)",
         "The released drift pipeline does not accept the dashboard's --db flag.",
         "conflict",
-        "Use --storage for run_drift_pipeline.py; reserve --db for ui/server.py.",
+        "Use --storage or VERDICT_STORAGE with verdict-pipeline; --db is only a legacy dashboard wrapper flag.",
         source_only=False,
     ),
     _rule(
@@ -461,7 +461,7 @@ def iter_drift_command_blocks(text: str) -> Iterable[tuple[int, str]]:
 
     lines = text.splitlines(keepends=True)
     for index, line in enumerate(lines):
-        if "run_drift_pipeline.py" not in line:
+        if "run_drift_pipeline.py" not in line and "verdict-pipeline" not in line:
             continue
 
         base_indent = _indent_width(line)

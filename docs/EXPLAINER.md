@@ -73,8 +73,10 @@ For a visual overview, see `docs/architecture-current.svg`.
 ## What You Can Try Today
 
 - Run the quickstart in `README.md` to capture real provider traffic.
+- Run `verdict-pipeline` to cluster, judge, and persist a drift snapshot.
+- Run `verdict-probes` for the separately gated synthetic probe suite.
 - Run `scripts/live_capture_check.py` to verify capture against your configured
-  providers.
+  providers from a source checkout.
 - Use `scripts/sample_to_label.py`, `scripts/label_ui.py`, and
   `scripts/verify_rubric_alignment.py` to measure judge agreement on your own
   labeled examples.

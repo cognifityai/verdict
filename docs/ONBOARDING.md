@@ -1,6 +1,6 @@
 # Tester Onboarding
 
-Goal: get from `git clone` to "I can see Verdict working on my own data" in
+Goal: get from installation to "I can see Verdict working on my own data" in
 about 10 minutes. Most of this runs **key-free**; only the judge layer needs a
 provider key (bring your own — Verdict never ships one).
 
@@ -20,15 +20,12 @@ unrelated `verdict` distribution from PyPI; it exposes the same import namespace
 and cannot safely coexist in one environment.
 
 ```bash
-git clone https://github.com/cognifityai/verdict.git
-cd verdict
 uv venv --python 3.12 && source .venv/bin/activate     # or your own 3.10+ venv
 
 # Include the provider extras you want to test live. Google capture needs `google`.
-pip install "cognifity-verdict[anthropic,openai,google]"
+pip install "cognifity-verdict[anthropic,openai,google,dashboard]"
 pip install "cognifity-verdict-eval[semantic]" cognifity-verdict-inspect
 pip install "cognifity-verdict[dashboard]"      # packaged dashboard server
-pip install pytest pytest-asyncio httpx         # only needed for the source test suite
 ```
 
 For a customer POC on the public alpha, use the pinned commands and provider
@@ -46,11 +43,14 @@ pip install cognifity-verdict-eval   # hash fallback only; lexical, not semantic
 ## 2. Confirm it's healthy (30 seconds, no key)
 
 ```bash
-python scripts/smoke_test.py     # key-free; needs only numpy + wrapt
-python -m pytest -q              # full suite; needs scipy + scikit-learn (installed above)
+python -c "import verdict, verdict_eval; print(verdict.__version__, verdict_eval.__version__)"
+verdict-pipeline --help
+verdict-dashboard --help
 ```
 
-Expect the smoke test to pass and the suite to report all green.
+All three commands above come from the installed distributions. A Git checkout
+is needed only for contributor tests and the research calibration scripts later
+in this guide.
 
 ## 3. Easiest first win — `verdict-inspect` on a file you already have
 
@@ -132,8 +132,10 @@ matrix in the POC release profile.
 ## 5. Judge calibration with `verdict_eval` (only if you want quality-drift)
 
 `verdict_eval` is a library, not a separate app — you exercise it through the
-calibration scripts. This is the honest per-workload step: the shippable judge
-number is **your** held-out, human-labeled data, not a public benchmark.
+research calibration scripts in a Verdict source checkout. These scripts are
+not required for normal capture, pipeline, probe, or dashboard operation. This
+is the honest per-workload step: the shippable judge number is **your** held-out,
+human-labeled data, not a public benchmark.
 
 ```bash
 python scripts/sample_to_label.py --source sqlite --db verdict.db --dedupe-by-prompt --out raw.jsonl
@@ -159,7 +161,7 @@ they are a batch step you run, then a dashboard you read. Two commands:
 # 1. Cluster → judge a stratified sample → compute current-vs-baseline drift →
 #    write drift signals back into the DB. Use --judge-provider fake to run the
 #    whole pipeline key-free (the "judge" is a stub — no real quality signal).
-python scripts/run_drift_pipeline.py \
+verdict-pipeline \
     --storage sqlite:///./verdict.db \
     --judge-provider anthropic --judge-model claude-haiku-4-5
 
@@ -178,7 +180,7 @@ contains `sentinel_id`, `query`, `response`, optional `context`, and a `labels`
 mapping whose values are `pass` or `fail`:
 
 ```bash
-python scripts/run_drift_pipeline.py \
+verdict-pipeline \
     --storage sqlite:///./verdict.db \
     --judge-provider anthropic --judge-model claude-haiku-4-5 \
     --judge-sentinel-file ./support-sentinels.jsonl \
@@ -198,7 +200,7 @@ present, `degraded` or `insufficient_data` status is a hard gate: the command
 persists the health record, exits 2, and does not write production judgments or
 drift signals.
 
-For scheduled synthetic probes, `scripts/run_probes.py` requires a weighted
+For scheduled synthetic probes, `verdict-probes` requires a weighted
 probe pass rate of 100% by default. Each probe's weight enters the suite and
 category gate once, and a probe passes only when every declared expectation
 passes. Weighted expectation agreement, including its per-dimension breakdown,
@@ -219,8 +221,8 @@ instead of "the model feels worse," you get "instruction_following on cluster 4
 dropped, p-adj 0.003, δ −0.31," and can act — roll back a model version, fix a
 prompt, or escalate.
 
-The dashboard reads SQLite directly. If more than one evaluator identity is in
-the database, select one before reading judgment or drift results. Identity
+The dashboard reads SQLite or PostgreSQL directly. If more than one evaluator
+identity is in the database, select one before reading judgment or drift results. Identity
 includes provider, model list, rubric name/version, behavior-relevant config,
 expected dimensions, and a prompt/rubric fingerprint. Drift signals carry that
 fingerprint too. Historical drift rows without it are excluded and labeled
@@ -232,7 +234,6 @@ Evaluator requests are sequenced and cancelled so an older response cannot
 replace a newer selection. If a load fails, the dashboard explicitly names the
 last confirmed evaluator that remains on screen, and trace/drift detail is
 derived from IDs in that confirmed snapshot.
-The SDK's Postgres adapter does not make this dashboard a Postgres read UI.
 
 Set both `VERDICT_USER` and `VERDICT_PASS` before starting the server to require
 HTTP Basic authentication for `/dashboard` and `/api/data`; `/` and
@@ -257,14 +258,14 @@ the other captured workloads.
 
 - **It's periodic, not real-time.** "Live results" means "run the pipeline, then
   refresh the dashboard." The dashboard is a read view over the DB — as fresh as
-  your last pipeline run, not a streaming detector. Re-run `run_drift_pipeline.py`
+  your last pipeline run, not a streaming detector. Re-run `verdict-pipeline`
   on a schedule (cron / CI) to keep it current.
 - **Judge-based drift needs volume *and* elapsed time.** The defaults want n ≥ 30
   judgments per (cluster, dimension) and a current-vs-baseline split (24h current
   vs a 7-day baseline with a 24h gap). Capturing a trickle for an afternoon gives
   you capture stats and maybe structural/semantic drift, but **no judge drift
   signals yet** — there simply isn't enough data for the statistics. That's
-  expected, not a failure. `run_drift_pipeline.py --help` lists flags
+  expected, not a failure. `verdict-pipeline --help` lists flags
   (`--current-hours`, `--baseline-days`, `--min-sample-size`) if you want to
   shorten the windows for a quick demo on smaller data.
 - **The effect-size gate is also a sensitivity floor.** The default Cliff's

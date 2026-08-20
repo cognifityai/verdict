@@ -78,10 +78,10 @@ For SQLite, resolve the literal absolute file path after environment expansion. 
 - whether the dashboard reads that exact same file.
 
 For shared or multi-instance capture, prefer Postgres and identify database, schema,
-credentials, migrations, connection limits, and tenant boundary. Then state clearly
-that the bundled dashboard cannot read it directly. Any Postgres-to-SQLite
-materialization is a new data pipeline requiring separate design, authorization,
-privacy review, idempotency, and verification.
+credentials, migrations, connection limits, and tenant boundary. The bundled
+dashboard can read the same Verdict schema in a read-only transaction; mount it
+behind the host application's authorization and verify that it cannot migrate or
+mutate the store.
 
 ## Design stable context without sensitive identifiers
 

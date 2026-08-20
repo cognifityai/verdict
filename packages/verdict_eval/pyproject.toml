@@ -1,6 +1,6 @@
 [project]
 name = "cognifity-verdict-eval"
-version = "0.1.0a4"
+version = "0.1.0a5"
 description = "Verdict eval engine: judge, drift detection, Bradley-Terry comparator, regression injector"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -19,7 +19,7 @@ classifiers = [
 ]
 
 dependencies = [
-    "cognifity-verdict>=0.1.0a4,<0.2",
+    "cognifity-verdict>=0.1.0a5,<0.2",
     "scikit-learn>=1.4",
     "scipy>=1.11",
     "numpy>=1.26",
@@ -37,6 +37,10 @@ dev = [
     "pytest>=8",
     "pytest-asyncio>=0.23",
 ]
+
+[project.scripts]
+verdict-pipeline = "verdict_eval.cli.pipeline:main"
+verdict-probes = "verdict_eval.cli.probes:main"
 
 [project.urls]
 Homepage = "https://cognifity.ai/verdict"

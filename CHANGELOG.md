@@ -6,12 +6,24 @@ the customer POC profile is refined.
 
 ## [Unreleased]
 
+## [0.1.0a5] - 2026-08-20
+
 ### Added
 
 - A portable `verdict-instrument-app` coding-agent skill for discovering
   supported customer call paths, planning a consented POC, verifying capture
   through storage, gating clustering and judge spend, and handing off bounded
   dashboard and scheduling instructions.
+- An installable, mountable Verdict dashboard with read-only SQLite and
+  PostgreSQL backends.
+- Installed `verdict-pipeline` and `verdict-probes` operator commands.
+
+### Changed
+
+- Live dashboards start empty and never substitute synthetic metrics while a
+  store request is pending or failed.
+- The historical `ui/server.py`, `scripts/run_drift_pipeline.py`, and
+  `scripts/run_probes.py` entry points remain as compatibility wrappers.
 
 ## [0.1.0a4] - 2026-08-18
 
@@ -53,5 +65,6 @@ the customer POC profile is refined.
 - Content capture remains off by default and is documented as best-effort rather
   than a compliance control.
 
-[Unreleased]: https://github.com/cognifityai/verdict/compare/v0.1.0a4...HEAD
+[Unreleased]: https://github.com/cognifityai/verdict/compare/v0.1.0a5...HEAD
+[0.1.0a5]: https://github.com/cognifityai/verdict/compare/v0.1.0a4...v0.1.0a5
 [0.1.0a4]: https://github.com/cognifityai/verdict/compare/v0.1.0a3...v0.1.0a4
