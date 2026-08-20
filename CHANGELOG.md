@@ -20,6 +20,9 @@ the customer POC profile is refined.
   and unclassified traces.
 - Opt-in `verdict-pipeline --capture-judge-telemetry`; evaluator traces are
   excluded from later target-workload drift analysis.
+- A secret-safe agent-skill environment inspector that distinguishes fresh
+  installs, synchronized `0.1.0a5` upgrades, current installs, mixed-package
+  repairs, editable installs, and the unrelated `verdict` distribution.
 
 ### Changed
 
@@ -27,6 +30,9 @@ the customer POC profile is refined.
   and restores any prior caller workload on success or failure.
 - Buffered storage exposes aggregate queue/write counters without payloads or
   exception text.
+- The instrumentation skill preserves an existing SQLite or PostgreSQL backend
+  by default, requires approval before package changes, and no longer requires
+  the obsolete historical source-checkout verifier.
 
 ## [0.1.0a5] - 2026-08-20
 

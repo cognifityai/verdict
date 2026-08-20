@@ -179,6 +179,13 @@ class ScannerTests(unittest.TestCase):
         self.assertIn("scheduler-config", rule_ids)
         self.assertEqual(rule_ids.count("relative-sqlite-uri"), 1)
         self.assertIn("postgres-storage-uri", rule_ids)
+        postgres_finding = next(
+            item
+            for item in report["findings"]
+            if item["rule_id"] == "postgres-storage-uri"
+        )
+        self.assertIn("reads PostgreSQL directly", postgres_finding["remediation"])
+        self.assertNotIn("SQLite-only", postgres_finding["remediation"])
         self.assertIn("drift-pipeline-db-flag", rule_ids)
         budget_finding = next(
             item

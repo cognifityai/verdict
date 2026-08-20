@@ -91,13 +91,20 @@ client = Anthropic()
 Install and run the version-matched dashboard without a source checkout:
 
 ```bash
-pip install "cognifity-verdict[dashboard]"
+python -m pip install "cognifity-verdict[dashboard]==0.1.0a6"
 verdict-dashboard --storage sqlite:///./verdict.db
 ```
 
 Add the `postgres` extra for a PostgreSQL store. The dashboard is read-only and
 can also be mounted with `verdict.dashboard.create_app()` behind an existing
 FastAPI application's authentication.
+
+Upgrade an existing `0.1.0a5` environment with `python -m pip install --upgrade`
+and the same provider, dashboard, semantic, and storage extras already in use.
+The published wheels replace editable installs without a new clone and reuse the
+selected SQLite file or PostgreSQL tables in place. See the repository
+[upgrade instructions](https://github.com/cognifityai/verdict#upgrade-from-010a5)
+for the synchronized three-package command and verification steps.
 
 An authenticated host may add the dashboard's Operations tab by passing a
 same-origin API path:

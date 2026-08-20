@@ -54,11 +54,14 @@ The judge is pluggable behind a provider interface, so you can point it at Anthr
 
 **Requires Python 3.10+.** On macOS the system `/usr/bin/python3` is often 3.9 and will fail to install — use a 3.10+ interpreter (`brew install python@3.12`, `pyenv`, or `uv venv --python 3.12`).
 
-Install the public alpha from PyPI. Choose only the provider extras you use:
+Install the synchronized public alpha from PyPI. Choose only the provider extras
+you use:
 
 ```bash
-pip install "cognifity-verdict[anthropic,openai,google,dashboard]"
-pip install "cognifity-verdict-eval[semantic]" cognifity-verdict-inspect
+python -m pip install \
+  "cognifity-verdict[anthropic,openai,google,dashboard]==0.1.0a6" \
+  "cognifity-verdict-eval[semantic]==0.1.0a6" \
+  "cognifity-verdict-inspect==0.1.0a6"
 ```
 
 For a customer proof of concept on `0.1.0a4`, follow the bounded
@@ -77,29 +80,38 @@ Extras for `cognifity-verdict`: `anthropic`, `openai`, `google`, `postgres`, or
 PostgreSQL store:
 
 ```bash
-pip install "cognifity-verdict[dashboard,postgres]"
+python -m pip install \
+  "cognifity-verdict[dashboard,postgres]==0.1.0a6" \
+  "cognifity-verdict-eval==0.1.0a6" \
+  "cognifity-verdict-inspect==0.1.0a6"
 ```
 
 The `all` extra preserves its existing provider-and-storage dependency set; it
 does not add the optional dashboard server.
 
-### Upgrade from 0.1.0a4
+### Upgrade from 0.1.0a5
 
 Upgrade the synchronized distributions in the application's existing virtual
-environment; do not reclone the repository:
+environment. This also replaces editable installs from an existing Verdict clone;
+do not delete or reclone it:
 
 ```bash
-pip install --upgrade \
-  "cognifity-verdict[dashboard]==0.1.0a6" \
-  "cognifity-verdict-eval==0.1.0a6" \
+python -m pip install --upgrade \
+  "cognifity-verdict[anthropic,openai,google,dashboard]==0.1.0a6" \
+  "cognifity-verdict-eval[semantic]==0.1.0a6" \
   "cognifity-verdict-inspect==0.1.0a6"
+
+python -m pip check
+python -c "import verdict, verdict_eval, verdict_inspect; print(verdict.__version__, verdict_eval.__version__, verdict_inspect.__version__)"
 ```
 
 Add the same provider, semantic, and PostgreSQL extras that deployment already
 uses. The upgrade reuses existing SQLite files and PostgreSQL tables in place;
 it does not delete or rewrite traces, judgments, calibration records, drift
-runs, or dashboard history. Existing source entry points continue as wrappers
-after the workspace packages are installed. Back up the store and lockfile before any alpha upgrade,
+runs, or dashboard history. It does not move SQLite data to PostgreSQL or upgrade
+a PostgreSQL server. Preserve the existing backend unless a separate migration is
+approved. Existing source entry points continue as wrappers after the workspace
+packages are installed. Back up the store and lockfile before any alpha upgrade,
 then run the pipeline and dashboard smoke checks against a non-production copy.
 
 An unrelated project owns the `verdict` distribution on PyPI and exposes the
@@ -111,7 +123,7 @@ API remains `import verdict`.
 Minimal install without the local semantic model:
 
 ```bash
-pip install cognifity-verdict-eval   # hash fallback only; lexical, not semantic
+python -m pip install "cognifity-verdict-eval==0.1.0a6"  # lexical hash fallback
 ```
 
 The full test suite also needs pytest and the dashboard's HTTP test dependency:

@@ -5,13 +5,16 @@ LLM application, propose a bounded integration, instrument approved paths, and
 verify evidence through storage and the local dashboard.
 
 This is an agent instruction package, not an executable installer. A GitHub URL
-does not automatically install a skill in every coding agent. The portable path
-is to give the agent the checked-out `SKILL.md` explicitly.
+does not automatically install a skill in every coding agent. Native skill
+installers may install the tagged `skills/verdict-instrument-app` directory;
+its repository entry point is `skills/verdict-instrument-app/SKILL.md`. The
+portable fallback downloads only that directory. No `git clone` or Verdict
+source checkout is required.
 
 ## Before the session
 
-1. Install the synchronized `0.1.0a6` Verdict distributions in the customer
-   application's environment.
+1. Install or refresh the `0.1.0a6` skill using a native skill installer or the
+   tagged archive below. An older copied skill does not update itself.
 2. Create a reversible branch in the customer application.
 3. Use a non-production environment first.
 4. Decide who can approve code edits, dependencies, content capture, storage,
@@ -19,12 +22,33 @@ is to give the agent the checked-out `SKILL.md` explicitly.
 5. Keep credentials in the customer's existing secret manager or environment.
    Do not paste keys into the prompt or generated documentation.
 
+## Install or refresh the skill without cloning Verdict
+
+If the coding agent has no native GitHub skill installer, create a dedicated
+skill parent directory and extract the tagged skill from the release archive:
+
+```bash
+mkdir -p /absolute/path/to/cognifity-skills
+mkdir /absolute/path/to/cognifity-skills/verdict-instrument-app-0.1.0a6
+curl -fsSL https://github.com/cognifityai/verdict/archive/refs/tags/v0.1.0a6.tar.gz \
+  | tar -xz \
+      -C /absolute/path/to/cognifity-skills/verdict-instrument-app-0.1.0a6 \
+      --strip-components=3 \
+      verdict-0.1.0a6/skills/verdict-instrument-app
+```
+
+This creates
+`/absolute/path/to/cognifity-skills/verdict-instrument-app-0.1.0a6/SKILL.md`.
+The second `mkdir` deliberately fails if that version already exists, preventing
+two copies from being merged. The archive URL becomes valid only after
+`v0.1.0a6` is published.
+
 ## Point the customer's agent at the skill
 
 Give the agent this prompt, replacing both absolute paths:
 
 ```text
-Read /absolute/path/to/verdict/skills/verdict-instrument-app/SKILL.md completely
+Read /absolute/path/to/cognifity-skills/verdict-instrument-app-0.1.0a6/SKILL.md completely
 and follow it as the governing workflow. Work in
 /absolute/path/to/customer/application.
 
@@ -39,11 +63,28 @@ separately.
 ```
 
 Agents with a native skill installer may install the
-`skills/verdict-instrument-app` directory using that host's documented
-mechanism. A skill install does not install Python dependencies; install and pin
-the three Cognifity distributions separately. The pipeline, probe runner, and
-dashboard then come from the installed packages and do not need a Verdict source
+tagged `skills/verdict-instrument-app` directory using that host's documented
+mechanism. A skill install does not install Python dependencies. The skill first
+inspects the customer application's interpreter, then proposes a fresh install,
+`0.1.0a5` upgrade, synchronized repair, or no package change. It must obtain
+approval before running that command. The pipeline, probe runner, Inspect, and
+dashboard come from the installed packages and do not need a Verdict source
 checkout. The direct-file prompt above remains the cross-host fallback.
+
+## What happens when the skill runs again
+
+The read-only environment inspector distinguishes an absent install,
+synchronized `0.1.0a5` upgrade, current `0.1.0a6`, mixed-package repair, and
+collision with the unrelated `verdict` distribution. It reports whether the
+active `VERDICT_STORAGE` backend is SQLite or PostgreSQL without printing the
+URL.
+
+The skill preserves the existing backend by default. It asks about PostgreSQL
+only when a new shared or multi-instance deployment needs it, or when the
+existing backend is ambiguous. For an existing PostgreSQL deployment it keeps
+the same secret DSN and adds the `postgres` extra if required. It never upgrades
+the PostgreSQL server or treats a package upgrade as a SQLite-to-PostgreSQL
+migration.
 
 ## Expect three separate milestones
 
