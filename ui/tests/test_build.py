@@ -6,6 +6,9 @@ def test_tracked_dashboard_pages_match_local_asset_shells():
         if filename == "VerdictUI.html":
             continue
         assert (build.HERE / filename).read_text() == build.page(title, script)
+    assert (build.DASHBOARD / "dashboard.html").read_text() == build.page(
+        "Verdict - Dashboard", "dashboard.js", build.DASHBOARD
+    )
 
 
 def test_generated_pages_fingerprint_local_assets():
@@ -15,6 +18,9 @@ def test_generated_pages_fingerprint_local_assets():
         html = (build.HERE / filename).read_text()
         assert f'assets/{script}?v=' in html
         assert 'assets/verdict.css?v=' in html
+    packaged = (build.DASHBOARD / "dashboard.html").read_text()
+    assert 'assets/dashboard.js?v=' in packaged
+    assert 'assets/verdict.css?v=' in packaged
 
 
 def test_cluster_ids_are_not_reformatted_as_rubric_dimensions():
@@ -37,16 +43,20 @@ def test_landing_source_link_is_a_real_link():
 
 def test_pages_do_not_load_runtime_code_from_public_cdns():
     forbidden = ("cdn.tailwindcss.com", "cdnjs.cloudflare.com", "unpkg.com", "text/babel")
-    for filename in ("landing.html", "dashboard.html"):
-        html = (build.HERE / filename).read_text()
+    for html in (
+        (build.HERE / "landing.html").read_text(),
+        (build.DASHBOARD / "dashboard.html").read_text(),
+    ):
         assert all(value not in html for value in forbidden)
         assert 'type="module"' in html
 
 
 def test_compiled_assets_exist():
     assets = build.HERE / "assets"
-    for filename in ("landing.js", "dashboard.js", "all-in-one.js", "verdict.css"):
+    for filename in ("landing.js", "all-in-one.js", "verdict.css"):
         assert (assets / filename).is_file()
+    for filename in ("dashboard.js", "verdict.css"):
+        assert (build.DASHBOARD / "assets" / filename).is_file()
 
 
 def test_public_landing_bundle_excludes_dashboard_sample_data():

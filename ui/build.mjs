@@ -1,8 +1,10 @@
 import { build } from "esbuild";
-import { mkdir } from "node:fs/promises";
+import { copyFile, mkdir } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 
 await mkdir("assets", { recursive: true });
+const dashboardAssets = "../packages/verdict/src/verdict/dashboard/static/assets";
+await mkdir(dashboardAssets, { recursive: true });
 
 const shared = {
   bundle: true,
@@ -15,7 +17,7 @@ const shared = {
 
 await Promise.all([
   build({ ...shared, entryPoints: ["entries/landing.jsx"], outfile: "assets/landing.js" }),
-  build({ ...shared, entryPoints: ["entries/dashboard.jsx"], outfile: "assets/dashboard.js" }),
+  build({ ...shared, entryPoints: ["entries/dashboard.jsx"], outfile: `${dashboardAssets}/dashboard.js` }),
   build({ ...shared, entryPoints: ["entries/all-in-one.jsx"], outfile: "assets/all-in-one.js" }),
 ]);
 
@@ -29,6 +31,7 @@ const css = spawnSync(tailwind, ["-c", "tailwind.config.cjs", "-i", "styles.css"
 if (css.status !== 0) {
   process.exit(css.status ?? 1);
 }
+await copyFile("assets/verdict.css", `${dashboardAssets}/verdict.css`);
 
 const python = process.env.PYTHON || "python3";
 const html = spawnSync(python, ["build.py"], { stdio: "inherit" });

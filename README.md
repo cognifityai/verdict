@@ -72,9 +72,35 @@ includes a cross-agent prompt, approval boundaries, staged acceptance criteria,
 and the current automation limits.
 
 Extras for `cognifity-verdict`: `anthropic`, `openai`, `google`, `postgres`, or
-`all`. Google capture specifically needs the `google` extra (`google-genai`).
-The dashboard is intentionally a repo-local app; from a source checkout,
-install its server dependencies with `pip install -r ui/requirements.txt`.
+`dashboard`. Google capture specifically needs the `google` extra
+(`google-genai`). Install `dashboard` with `postgres` when the dashboard reads a
+PostgreSQL store:
+
+```bash
+pip install "cognifity-verdict[dashboard,postgres]"
+```
+
+The `all` extra preserves its existing provider-and-storage dependency set; it
+does not add the optional dashboard server.
+
+### Upgrade from 0.1.0a4
+
+Upgrade the synchronized distributions in the application's existing virtual
+environment; do not reclone the repository:
+
+```bash
+pip install --upgrade \
+  "cognifity-verdict[dashboard]==0.1.0a5" \
+  "cognifity-verdict-eval==0.1.0a5" \
+  "cognifity-verdict-inspect==0.1.0a5"
+```
+
+Add the same provider, semantic, and PostgreSQL extras that deployment already
+uses. The upgrade reuses existing SQLite files and PostgreSQL tables in place;
+it does not delete or rewrite traces, judgments, calibration records, drift
+runs, or dashboard history. Existing source entry points continue as wrappers
+after the workspace packages are installed. Back up the store and lockfile before any alpha upgrade,
+then run the pipeline and dashboard smoke checks against a non-production copy.
 
 An unrelated project owns the `verdict` distribution on PyPI and exposes the
 same top-level `verdict` import. Do not install that distribution in the same
@@ -117,6 +143,17 @@ client = Anthropic()
 # Use Anthropic normally; supported calls are captured.
 # Run scripts/run_drift_pipeline.py separately for sampling, judging, and drift.
 ```
+
+Open the read-only dashboard for a local SQLite store:
+
+```bash
+verdict-dashboard --storage sqlite:///./verdict.db
+```
+
+The same command accepts a PostgreSQL URL when the `postgres` extra is
+installed. Applications can instead mount `verdict.dashboard.create_app()`
+inside an existing FastAPI service; the browser API resolves relative to the
+mount path, so the packaged UI and server stay on the same version.
 
 Content capture is **off by default** (a PII surface). With
 `verdict.init(capture_content=True)`, Verdict recursively sanitizes supported
@@ -280,8 +317,10 @@ Hexagonal / ports-and-adapters, ≥2 adapters per port (one real + in-memory for
   automatic fragmented-cluster fusion are not implemented. Their scoped
   follow-ups are listed in [`docs/v1-roadmap.md`](docs/v1-roadmap.md).
 - This is a **public alpha** release — not a hosted monitoring service and not a substitute for workload-specific calibration.
-- The bundled dashboard server is a read-only **SQLite** view. The SDK also has
-  a Postgres adapter, but the dashboard does not read Postgres directly.
+- The bundled dashboard server is a read-only view of **SQLite or PostgreSQL**.
+  It does not create or migrate schemas. Protect it with the host application's
+  authentication when mounting it, or set `VERDICT_USER` and `VERDICT_PASS`
+  when running the standalone server outside localhost.
 - Dashboard responses keep full-store totals but bound presentation data to the
   latest 100 observed chart points, 8 providers, 20 usable intent clusters,
   12 dimensions, 20 models per displayed provider, 20 evaluator identities,

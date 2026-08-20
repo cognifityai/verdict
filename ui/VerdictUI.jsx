@@ -123,8 +123,22 @@ const SEED = (() => {
   };
 })();
 
-// API endpoint for live data; overridable via window.VERDICT_API. Falls back to SEED.
-const API_URL = (typeof window !== "undefined" && window.VERDICT_API) || "/api/data";
+const EMPTY = {
+  meta: { totalTraces: 0, totalJudged: 0, totalCost: null, providers: 0, clusters: 0 },
+  evaluation: { status: "empty", selectedId: null, availableIdentities: [], driftStatus: "empty", unattributedDriftSignals: 0 },
+  providers: [], clusters: [], driftSignals: [], dimensionOverall: [], tsRows: [],
+  passrate: [], clusterPassrate: [], haikuDim: [], samples: [], providerDimension: [],
+  evaluatorHealth: [], scoreCoverage: {}, truncation: { applied: false, resources: {} },
+};
+
+function mountedApiUrl() {
+  if (typeof window === "undefined") return "/api/data";
+  if (window.VERDICT_API) return window.VERDICT_API;
+  const base = window.location.pathname.replace(/\/dashboard\/?$/, "").replace(/\/$/, "");
+  return `${base}/api/data`;
+}
+
+const API_URL = mountedApiUrl();
 
 function apiUrlForEvaluator(evaluatorId) {
   if (!evaluatorId) return API_URL;
@@ -134,8 +148,8 @@ function apiUrlForEvaluator(evaluatorId) {
 
 function useDashboardData() {
   const [state, setState] = useState({
-    snapshot: SEED,
-    source: "sample",
+    snapshot: EMPTY,
+    source: "loading",
     loading: false,
     error: null,
   });
@@ -281,7 +295,7 @@ function Landing({ onEnter }) {
   ];
   const steps = [
     { icon: Activity, t: "Capture", d: "One line of init instruments supported provider SDK calls into Verdict's vendor-neutral Trace schema." },
-    { icon: Database, t: "Store", d: "The SDK stores traces through one protocol: SQLite locally, Postgres for shared environments, or memory for tests. The bundled dashboard reads SQLite." },
+    { icon: Database, t: "Store", d: "The SDK stores traces through one protocol: SQLite locally, Postgres for shared environments, or memory for tests. The bundled dashboard reads SQLite and Postgres." },
     { icon: Layers, t: "Cluster", d: "Persistent MiniLM-based assignment groups similar prompts so baseline and current windows compare like with like." },
     { icon: Scale, t: "Judge", d: "A configurable judge model scores sampled responses on 5 binary dimensions, reasoning before its verdict." },
     { icon: Signal, t: "Detect drift", d: "Fisher's exact test (binary dimensions) / Mann-Whitney U + Benjamini-Hochberg per (cluster, dimension), gated on Cliff's δ." },
@@ -474,6 +488,8 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
   const evaluatorSelectionNeeded = ["selection_required", "invalid_selection"].includes(evaluation.status);
   const boundedResources = Object.entries(DATA.truncation?.resources || {})
     .filter(([, resource]) => resource.shown < resource.available);
+  const sourceLabel = source === "live" ? "Live store" : source === "sample" ? "Synthetic sample" : "Waiting for live store";
+  const sourceColor = source === "live" ? C.green : C.amber;
   const nav = [
     { id: "overview", label: "Overview", icon: Gauge },
     { id: "drift", label: "Drift signals", icon: Signal, badge: DATA.driftSignals.length },
@@ -505,9 +521,9 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
             })}
           </nav>
           <div className="ml-auto flex items-center gap-2 text-xs">
-            <span className="flex items-center gap-1.5 px-1 sm:px-2 py-1" title={source === "live" ? "Live store" : "Synthetic sample"} style={{ color: source === "live" ? C.green : C.amber }}>
-              <Dot color={source === "live" ? C.green : C.amber} />
-              <span className="hidden sm:inline">{source === "live" ? "Live store" : "Synthetic sample"}</span>
+            <span className="flex items-center gap-1.5 px-1 sm:px-2 py-1" title={sourceLabel} style={{ color: sourceColor }}>
+              <Dot color={sourceColor} />
+              <span className="hidden sm:inline">{sourceLabel}</span>
             </span>
             <span className="hidden xl:inline font-mono" style={{ color: C.faint }}>{DATA.meta.totalTraces.toLocaleString()} traces</span>
             <button onClick={onReload} disabled={reloading} title="Refresh from API"
@@ -525,7 +541,7 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
             <div className="text-xs font-mono" style={{ color: C.accent }}>WORKLOAD / SAMPLE-SERVICE</div>
             <h1 className="font-semibold mt-1" style={{ fontSize: 22, letterSpacing: 0 }}>{nav.find((n) => n.id === tab).label}</h1>
           </div>
-          {source !== "live" && (
+          {source === "sample" && (
             <div className="max-w-full flex items-start gap-2 text-xs px-3 py-2 border" style={{ borderColor: "#6b5529", background: C.amberBg, color: C.amber, borderRadius: 3 }}>
               <FlaskConical size={14} style={{ flexShrink: 0 }} /> <span>Sample data, not a provider benchmark</span>
             </div>

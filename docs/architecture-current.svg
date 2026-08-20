@@ -173,7 +173,7 @@
   <text x="40" y="780" class="plane">LOCAL DASHBOARD</text>
   <rect x="220" y="790" width="280" height="70" rx="10" fill="#FFFFFF" stroke="#0B1730" stroke-width="1.5"/>
   <text x="360" y="815" class="node-title" text-anchor="middle">FastAPI read API</text>
-  <text x="360" y="833" class="node-sub" text-anchor="middle">SQLite read view · optional Basic Auth</text>
+  <text x="360" y="833" class="node-sub" text-anchor="middle">SQLite/PostgreSQL read view · optional Basic Auth</text>
   <text x="360" y="848" class="node-sub" text-anchor="middle">localhost / trusted-network scope</text>
 
   <rect x="520" y="790" width="280" height="70" rx="10" fill="#FFFFFF" stroke="#0B1730" stroke-width="1.5"/>

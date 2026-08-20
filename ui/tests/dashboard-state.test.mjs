@@ -28,7 +28,7 @@ function componentStub(names) {
 }
 
 async function loadUiModule() {
-  const source = `${await readFile(UI_SOURCE, "utf8")}\nexport { Dashboard, Traces, Drift, Judge };`;
+  const source = `${await readFile(UI_SOURCE, "utf8")}\nexport { Dashboard, Traces, Drift, Judge, mountedApiUrl };`;
   const result = await build({
     stdin: {
       contents: source,
@@ -159,6 +159,26 @@ function deferredFetches() {
   });
   return requests;
 }
+
+test("a mounted dashboard derives its API path from the host prefix", async () => {
+  globalThis.window = { location: { pathname: "/admin/verdict/dashboard" } };
+  try {
+    const ui = await loadUiModule();
+    assert.equal(ui.mountedApiUrl(), "/admin/verdict/api/data");
+  } finally {
+    delete globalThis.window;
+  }
+});
+
+test("the live dashboard does not display synthetic metrics before confirmation", async () => {
+  const ui = await loadUiModule();
+  const tree = render(ui.DashboardRoot, createHooks());
+  const dashboard = dashboardElement(tree);
+
+  assert.equal(dashboard.props.source, "loading");
+  assert.equal(dashboard.props.data.meta.totalTraces, 0);
+  assert.equal(dashboard.props.data.samples.length, 0);
+});
 
 async function resolveJson(request, payload) {
   request.resolve({ ok: true, json: async () => payload });

@@ -19,7 +19,7 @@ body:
   - type: input
     attributes:
       label: Verdict version or commit
-      placeholder: "0.1.0a4 or git commit SHA"
+      placeholder: "0.1.0a5 or git commit SHA"
     validations:
       required: true
   - type: input

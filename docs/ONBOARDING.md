@@ -27,7 +27,7 @@ uv venv --python 3.12 && source .venv/bin/activate     # or your own 3.10+ venv
 # Include the provider extras you want to test live. Google capture needs `google`.
 pip install "cognifity-verdict[anthropic,openai,google]"
 pip install "cognifity-verdict-eval[semantic]" cognifity-verdict-inspect
-pip install -r ui/requirements.txt              # repo-local dashboard server
+pip install "cognifity-verdict[dashboard]"      # packaged dashboard server
 pip install pytest pytest-asyncio httpx         # only needed for the source test suite
 ```
 
@@ -163,12 +163,14 @@ python scripts/run_drift_pipeline.py \
     --storage sqlite:///./verdict.db \
     --judge-provider anthropic --judge-model claude-haiku-4-5
 
-# 2. Launch the local dashboard and open http://127.0.0.1:8000/dashboard
-#    Pass --db explicitly so it reads YOUR capture DB. (Without it the server
-#    auto-picks verdict_experiment.db or verdict.db from the repo root, so a
-#    leftover calibration DB could show stale data instead of your traces.)
-python ui/server.py --db ./verdict.db     # FastAPI + Uvicorn (from ui/requirements.txt)
+# 2. Launch the read-only dashboard and open http://127.0.0.1:8000/dashboard.
+verdict-dashboard --storage sqlite:///./verdict.db
 ```
+
+For PostgreSQL, install `cognifity-verdict[dashboard,postgres]` and pass the
+same storage URL used by the SDK. The dashboard only reads existing Verdict
+tables; it never creates or migrates them. `python ui/server.py --db ...`
+remains a compatible source-checkout wrapper.
 
 For independent judge-health trending, add a fixed human-labeled JSONL anchor
 set. Its first optional row is `{"set_name":"support-v1"}`; each remaining row
@@ -233,8 +235,8 @@ derived from IDs in that confirmed snapshot.
 The SDK's Postgres adapter does not make this dashboard a Postgres read UI.
 
 Set both `VERDICT_USER` and `VERDICT_PASS` before starting the server to require
-HTTP Basic authentication for `/dashboard` and `/api/data`; `/` and
-`/api/health` remain public. Do not bind beyond localhost without that gate or a
+HTTP Basic authentication for the dashboard shells at `/` and `/dashboard` plus
+`/api/data`; `/api/health` remains public. Do not bind beyond localhost without that gate or a
 trusted reverse proxy. Dashboard time series include only observed hourly bins
 and half-hour latency bins. Presentation data is capped at the latest 100
 observed chart points, 8 providers, 20 usable intent clusters, 12 dimensions,

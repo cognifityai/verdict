@@ -3,6 +3,14 @@ import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
+import verdict.dashboard.app as server_module
+from verdict.dashboard.app import (
+    _CSP,
+    _cluster_health,
+    _signal_provider,
+    build_bundle,
+    create_app,
+)
 from verdict.schema import (
     DimensionScore,
     DriftDirection,
@@ -14,9 +22,6 @@ from verdict.schema import (
     Verdict,
 )
 from verdict.storage import SQLiteStorage
-
-import ui.server as server_module
-from ui.server import _CSP, _cluster_health, _signal_provider, build_bundle, create_app
 
 
 def _persist_drift_snapshot(storage, *signals, run_id=None, analysis_time=None):
@@ -124,6 +129,44 @@ def test_bundle_marks_unknown_cost_and_exposes_signal_examples(tmp_path):
     assert bundle["meta"]["totalCost"] is None
     assert bundle["meta"]["totalCostStatus"] == "unavailable"
     assert bundle["driftSignals"][0]["exampleTraceIds"] == [trace.trace_id]
+
+
+def test_installed_dashboard_accepts_a_sqlite_storage_url(tmp_path):
+    path = tmp_path / "installed-dashboard.db"
+    storage = SQLiteStorage(str(path))
+    storage.insert_trace(Trace(provider="custom-provider", request_model="custom-model"))
+    storage.close()
+
+    bundle = build_bundle(f"sqlite:///{path}")
+
+    assert bundle["meta"]["totalTraces"] == 1
+    assert bundle["providers"][0]["rawProvider"] == "custom-provider"
+
+
+def test_dashboard_app_can_be_mounted_below_a_host_application(tmp_path):
+    import httpx
+    from fastapi import FastAPI
+
+    path = tmp_path / "mounted-dashboard.db"
+    storage = SQLiteStorage(str(path))
+    storage.insert_trace(Trace(provider="openai", request_model="mounted-model"))
+    storage.close()
+
+    host = FastAPI()
+    host.mount(
+        "/admin/verdict",
+        create_app(storage=f"sqlite:///{path}"),
+    )
+
+    async def request_data():
+        transport = httpx.ASGITransport(app=host)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            return await client.get("/admin/verdict/api/data")
+
+    response = asyncio.run(request_data())
+
+    assert response.status_code == 200
+    assert response.json()["meta"]["totalTraces"] == 1
 
 
 def test_large_store_api_returns_a_bounded_truthful_bundle(monkeypatch, tmp_path):
@@ -1571,7 +1614,7 @@ def test_authenticated_cors_preflight_reaches_cors_middleware(monkeypatch):
     assert response.headers["access-control-allow-origin"] == "https://review.example"
 
 
-def test_basic_auth_gates_dashboard_and_data_but_not_public_routes(monkeypatch):
+def test_basic_auth_gates_dashboard_shells_and_data_but_not_health(monkeypatch):
     import base64
 
     import httpx
@@ -1594,11 +1637,12 @@ def test_basic_auth_gates_dashboard_and_data_but_not_public_routes(monkeypatch):
 
     landing, health, dashboard, data, authenticated = asyncio.run(requests())
 
-    assert landing.status_code == 200
+    assert landing.status_code == 401
     assert health.status_code == 200
     assert dashboard.status_code == 401
     assert data.status_code == 401
     assert dashboard.headers["www-authenticate"] == 'Basic realm="Verdict"'
+    assert landing.headers["www-authenticate"] == 'Basic realm="Verdict"'
     assert authenticated.status_code == 200
 
 
