@@ -21,8 +21,16 @@ the customer POC profile is refined.
 
 - Live dashboards start empty and never substitute synthetic metrics while a
   store request is pending or failed.
+<<<<<<< Updated upstream
 - The historical `ui/server.py --db ...` entry point remains a compatibility
   wrapper.
+=======
+- The historical `ui/server.py`, `scripts/run_drift_pipeline.py`, and
+  `scripts/run_probes.py` entry points remain source wrappers after installing
+  the workspace packages.
+- Dashboard storage auto-discovery checks the current working directory; set
+  `VERDICT_STORAGE` or pass `--storage` when launching elsewhere.
+>>>>>>> Stashed changes
 
 ## [0.1.0a4] - 2026-08-18
 
