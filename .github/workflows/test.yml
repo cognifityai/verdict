@@ -217,3 +217,5 @@ jobs:
           /tmp/verdict-sdist-venv/bin/verdict-pipeline --help
           /tmp/verdict-sdist-venv/bin/verdict-probes --help
           /tmp/verdict-sdist-venv/bin/verdict-dashboard --help
+          /tmp/verdict-sdist-venv/bin/python -c \
+            "from importlib.resources import files; root = files('verdict.dashboard').joinpath('static'); assert root.joinpath('dashboard.html').is_file(); assert root.joinpath('assets/dashboard.js').is_file()"
