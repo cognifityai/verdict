@@ -468,7 +468,9 @@ def test_persistence_failure_warns_once_under_concurrency_without_raising(caplog
 
     class FailingStorage:
         def insert_trace(self, _trace):
-            raise ForcedPersistenceError("do-not-log-this-secret@example.com")
+            raise ForcedPersistenceError(
+                "do-not-log-this-secret@example.com from 2001:db8::1: timeout"
+            )
 
     instrumentor = OpenAIInstrumentor(VerdictClient(storage=FailingStorage()))
     errors: list[BaseException] = []
@@ -495,3 +497,4 @@ def test_persistence_failure_warns_once_under_concurrency_without_raising(caplog
     assert "ForcedPersistenceError" in records[0].getMessage()
     assert "openai" in records[0].getMessage()
     assert "do-not-log-this-secret@example.com" not in records[0].getMessage()
+    assert "2001:db8::1" not in records[0].getMessage()

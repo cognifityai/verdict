@@ -11,9 +11,10 @@ capture (prompts/completions) is **off by default** — opt in with
 pattern redaction recursively across supported JSON-compatible message and tool
 structures before `Trace` assignment and again at storage. Card candidates use
 Luhn validation; IPv6 candidates use standard-library address validation so
-clock values such as `12:34:56` remain intact, and email candidates use a linear
-`@`-anchored scanner so malformed or very long input cannot trigger regex
-backtracking. Unsupported objects fail closed.
+trailing text that is not part of the validated address remains outside it
+while clock values such as `12:34:56` remain intact. Email candidates use a
+linear `@`-anchored scanner so malformed or very long input cannot trigger
+regex backtracking. Unsupported objects fail closed.
 Traversal is bounded by node and character budgets, and cycles or repeated
 container references fail closed at every occurrence so sanitized output never
 retains caller-owned aliases. Redacted mapping-key collisions keep every value

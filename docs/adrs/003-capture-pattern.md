@@ -118,7 +118,8 @@ target deployment before relying on them.
   malformed or very long input. A **Luhn checksum + valid card-length gate**
   keeps non-card digit runs (order IDs, tracking numbers) intact, while
   standard-library IPv6 validation keeps colon-delimited clock values such as
-  `12:34:56` intact.
+  `12:34:56` intact and separates a validated address from trailing text that
+  is not part of that address.
 - Two redaction modes are implemented:
   - `redact` — replace the match with a placeholder (e.g. `<REDACTED>`).
   - `hash` — HMAC-SHA-256 the matched value (requires a `redaction_secret`).

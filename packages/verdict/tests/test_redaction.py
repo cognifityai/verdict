@@ -2,6 +2,7 @@ import json
 import random
 from copy import deepcopy
 
+import pytest
 import verdict.redaction as redaction_module
 from verdict.redaction import redact, redact_messages, redact_structure
 
@@ -39,6 +40,7 @@ def test_redact_messages_recurses_through_provider_structures():
         "123-45-6789",
         "4111 1111 1111 1111",
         "203.0.113.42",
+        "2001:db8:ac1d:5eed::cafe",
         "https://example.com/private",
         "415-555-0199",
     ]
@@ -56,8 +58,11 @@ def test_redact_messages_recurses_through_provider_structures():
             {
                 "type": "tool_result",
                 "content": [
-                    {"type": "text", "text": f"IP {canaries[3]}"},
-                    {"mixed": [canaries[4], 7, None, {"phone": canaries[5]}]},
+                    {
+                        "type": "text",
+                        "text": f"IPs {canaries[3]} and {canaries[4]}: timeout",
+                    },
+                    {"mixed": [canaries[5], 7, None, {"phone": canaries[6]}]},
                 ],
             },
         ],
@@ -66,10 +71,16 @@ def test_redact_messages_recurses_through_provider_structures():
             "type": "function",
             "function": {
                 "name": "notify",
-                "arguments": json.dumps({"email": canaries[0], "phone": canaries[5]}),
+                "arguments": json.dumps({
+                    "email": canaries[0],
+                    "phone": canaries[6],
+                    "peer": f"{canaries[4]}:443: refused",
+                }),
             },
         }],
-        "metadata": {"audit_note": f"contact {canaries[0]} from {canaries[3]}"},
+        "metadata": {
+            "audit_note": f"contact {canaries[0]} from {canaries[4]}: unavailable"
+        },
     }]
 
     out = redact_messages(messages)
@@ -219,11 +230,76 @@ def test_ipv6_redaction_preserves_surrounding_periods_without_leaking_the_addres
         assert redact(raw) == expected
 
 
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (
+            "Error: cannot reach 2001:db8::1: timeout",
+            "Error: cannot reach <IPV6>: timeout",
+        ),
+        (
+            "dial tcp 2001:db8::1:5432: connect refused",
+            "dial tcp <IPV6>: connect refused",
+        ),
+        (
+            "mapped ::ffff:203.0.113.42: refused",
+            "mapped <IPV6>: refused",
+        ),
+        (
+            "bare host-port 2001:db8::1:54321",
+            "bare host-port <IPV6>:54321",
+        ),
+        (
+            "two peers 2001:db8::1: then 2001:db8::2: done",
+            "two peers <IPV6>: then <IPV6>: done",
+        ),
+    ],
+)
+def test_ipv6_redaction_preserves_non_address_colon_suffixes(raw, expected):
+    assert redact(raw) == expected
+
+
+def test_ipv6_hash_mode_hashes_only_the_valid_address_before_a_colon_suffix():
+    address = "2001:db8:ac1d:5eed::cafe"
+
+    output = redact(
+        f"peer={address}:54321",
+        mode="hash",
+        secret="test-secret",
+    )
+
+    assert output is not None
+    assert address not in output
+    assert "ac1d:5eed::cafe" not in output
+    assert output.startswith("peer=<IPV6:")
+    assert output.endswith(">:54321")
+
+
+def test_generated_ipv6_boundaries_preserve_suffixes_without_leaking_tails():
+    import ipaddress
+
+    rng = random.Random(20260821)
+    suffixes = ("", ".", ".5", ": timeout", ":54321")
+
+    for _ in range(200):
+        address = ipaddress.IPv6Address(rng.getrandbits(128)).exploded
+        hextets = address.split(":")
+        for suffix in suffixes:
+            output = redact(f"peer {address}{suffix}")
+            assert output == f"peer <IPV6>{suffix}"
+            for start in range(len(hextets) - 2):
+                assert ":".join(hextets[start:]) not in output
+
+
 def test_ipv6_redaction_does_not_corrupt_namespaced_source_code():
     examples = [
         "Use std::vector<int> v; then call v::size()",
         "In Rust: use std::collections::HashMap;",
         "PHP uses Foo::bar() and Perl can use Package::symbol",
+        "dead::beef::codec()",
+        "face::feed::detail",
+        "a::b::c::Widget",
+        "cafe::babe::f00d()",
     ]
 
     for source in examples:
@@ -296,6 +372,8 @@ def test_cycle_and_shared_node_redaction_is_independent_of_mapping_order():
 
 
 def test_sqlite_labeling_export_contains_only_sanitized_content(tmp_path):
+    import sqlite3
+
     from verdict.schema import Trace
     from verdict.storage.sqlite import SQLiteStorage
 
@@ -303,19 +381,40 @@ def test_sqlite_labeling_export_contains_only_sanitized_content(tmp_path):
 
     db_path = tmp_path / "export.db"
     out_path = tmp_path / "labels.jsonl"
-    canary = "export-secret@example.com"
+    email_canary = "export-secret@example.com"
+    ipv6_canary = "2001:db8:ac1d:5eed::cafe"
     storage = SQLiteStorage(str(db_path))
-    storage.insert_trace(Trace(
+    trace = Trace(
         provider="custom",
-        prompt_redacted=f"Prompt for {canary}",
-        response_redacted=f"Response for {canary}",
-    ))
+        prompt_redacted="initial safe prompt",
+        response_redacted="initial safe response",
+    )
+    storage.insert_trace(trace)
     storage.close()
+
+    # Simulate a row persisted before storage-boundary redaction existed. This
+    # isolates the exporter; inserting the canary through SQLiteStorage would
+    # only prove that the earlier storage sink works.
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            "UPDATE traces SET prompt_redacted=?, response_redacted=? "
+            "WHERE trace_id=?",
+            (
+                f"Prompt for {email_canary} from {ipv6_canary}: timeout",
+                f"Response for {email_canary} via {ipv6_canary}:54321",
+                trace.trace_id,
+            ),
+        )
 
     rows, skipped = from_sqlite(str(db_path), 10, "recent")
     assert skipped == 0
+    assert ipv6_canary in rows[0]["query"]
+    assert email_canary in rows[0]["response"]
     assert _write_rows(str(out_path), rows) == 1
-    assert canary not in out_path.read_text()
+    exported = out_path.read_text()
+    assert email_canary not in exported
+    assert ipv6_canary not in exported
+    assert "ac1d:5eed::cafe" not in exported
 
 
 def test_redact_email():
@@ -489,6 +588,10 @@ def test_ipv6_redaction_boundaries_are_unchanged_by_the_candidate_bound():
         "Use std::vector<int>.": "Use std::vector<int>.",
         "mac 00:1A:2B:3C:4D:5E.": "mac 00:1A:2B:3C:4D:5E.",
         "ratio 3:4.": "ratio 3:4.",
+        "time 12:34:56: logged": "time 12:34:56: logged",
+        "Use std::vector<int>::size: now": "Use std::vector<int>::size: now",
+        "mac 00:1A:2B:3C:4D:5E: active": "mac 00:1A:2B:3C:4D:5E: active",
+        "ratio 16:9: display": "ratio 16:9: display",
         # IPv4 must still be handled by the IP pattern, not swallowed as a
         # partial IPv6 candidate.
         "ip 203.0.113.42 here": "ip <IP> here",
@@ -497,59 +600,65 @@ def test_ipv6_redaction_boundaries_are_unchanged_by_the_candidate_bound():
         assert redact(text) == want, f"{text!r} redacted to {redact(text)!r}"
 
 
-def test_ipv6_canary_is_absent_from_storage_and_the_dashboard_bundle():
-    """An IPv6 canary must not survive into stored records or the API payload.
-
-    The original leak (`::ffff:203.0.113.42` reduced to `<IPV6>.0.113.42`)
-    persisted through SQLite and back out through `build_bundle`, because every
-    redaction canary in the suite was an email address. This exercises the real
-    cross-layer path the standard requires.
-    """
-    import tempfile
-    from pathlib import Path
-
+def test_ipv6_and_pii_canaries_are_absent_from_storage_api_and_dashboard_payload(
+    tmp_path,
+    caplog,
+):
+    """Nested privacy canaries must not survive any storage or UI boundary."""
+    from fastapi.testclient import TestClient
+    from verdict.dashboard import create_app
     from verdict.schema import Trace
     from verdict.storage.sqlite import SQLiteStorage
 
     from ui.server import build_bundle
 
-    canary = "::ffff:203.0.113.42"
-    # A partially consumed candidate leaves a SUFFIX behind, not the whole
-    # address: the original defect rendered "<IPV6>.0.113.42". Asserting only
-    # on the full address therefore passes while three octets leak, so every
-    # progressively shorter tail is checked too.
-    leaked_fragments = (canary, "203.0.113.42", ".0.113.42", "113.42", "0.113")
+    canary = "2001:db8:ac1d:5eed::cafe"
+    email_canary = "sink-secret@example.com"
+    # Asserting only on the full address can pass after partial redaction, so
+    # progressively shorter address tails are checked too.
+    leaked_fragments = (canary, "ac1d:5eed::cafe", "5eed::cafe", "::cafe")
 
-    with tempfile.TemporaryDirectory() as tmp:
-        path = Path(tmp) / "verdict.db"
-        storage = SQLiteStorage(str(path))
-        trace = Trace(
-            provider="openai",
-            request_model="gpt-4o-mini",
-            prompt_redacted=f"Prompt from {canary}.",
-            response_redacted=f"Response to {canary}.",
-            error=f"Error contacting {canary}.",
-            tags={"peer": f"{canary}."},
+    path = tmp_path / "verdict.db"
+    storage = SQLiteStorage(str(path))
+    trace = Trace(
+        provider="openai",
+        request_model="gpt-4o-mini",
+        prompt_redacted=f"Prompt from {canary}: timeout for {email_canary}",
+        response_redacted=f"Response to {canary}:54321 for {email_canary}",
+        error=f"Error contacting {canary}: refused for {email_canary}",
+        raw_messages=[{
+            "role": "user",
+            "content": [{
+                "type": "tool_result",
+                "content": f"peer {canary}:443: {email_canary}",
+            }],
+            "metadata": {"peer": f"{canary}: unavailable"},
+        }],
+        tags={"peer": f"{canary}: unavailable", "owner": email_canary},
+    )
+    storage.insert_trace(trace)
+    stored = storage.get_trace(trace.trace_id)
+    storage.close()
+
+    assert stored is not None
+    stored_repr = repr(stored)
+    for fragment in (*leaked_fragments, email_canary):
+        assert fragment not in stored_repr, (
+            f"privacy canary fragment {fragment!r} survived into storage"
         )
-        storage.insert_trace(trace)
-        stored = storage.get_trace(trace.trace_id)
-        storage.close()
 
-        # The address must be replaced whole, not merely reduced.
-        assert stored.prompt_redacted == "Prompt from <IPV6>."
-        assert stored.response_redacted == "Response to <IPV6>."
-        assert stored.error == "Error contacting <IPV6>."
-        assert stored.tags["peer"] == "<IPV6>."
+    bundle = build_bundle(path)
+    serialized = json.dumps(bundle, sort_keys=True, default=str)
+    for fragment in (*leaked_fragments, email_canary):
+        assert fragment not in serialized, (
+            f"privacy canary fragment {fragment!r} reached the dashboard bundle"
+        )
 
-        stored_repr = repr(stored)
-        for fragment in leaked_fragments:
-            assert fragment not in stored_repr, (
-                f"IPv6 canary fragment {fragment!r} survived into storage"
-            )
-
-        bundle = build_bundle(path)
-        serialized = json.dumps(bundle, sort_keys=True, default=str)
-        for fragment in leaked_fragments:
-            assert fragment not in serialized, (
-                f"IPv6 canary fragment {fragment!r} reached the dashboard bundle"
-            )
+    response = TestClient(create_app(storage=str(path))).get("/api/data")
+    assert response.status_code == 200
+    payload = response.text
+    for fragment in (*leaked_fragments, email_canary):
+        assert fragment not in payload, (
+            f"privacy canary fragment {fragment!r} reached the HTTP/UI payload"
+        )
+        assert fragment not in caplog.text
