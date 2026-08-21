@@ -1,6 +1,6 @@
 [project]
 name = "cognifity-verdict"
-version = "0.1.0a6"
+version = "0.1.0a7"
 description = "Verdict — open-source LLM observability & drift detection SDK"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -28,7 +28,7 @@ openai = ["openai>=1.30"]
 google = ["google-genai>=1.0"]
 postgres = ["psycopg[binary,pool]>=3.1"]
 dashboard = [
-    "cognifity-verdict-eval>=0.1.0a6,<0.2",
+    "cognifity-verdict-eval>=0.1.0a7,<0.2",
     "fastapi>=0.116",
     "uvicorn[standard]>=0.35",
 ]

@@ -55,7 +55,7 @@ Unless the customer approves otherwise, propose:
 
 - one non-production environment and one supported provider path;
 - one service/environment scope per store because those init labels are not persisted
-  on trace rows in `0.1.0a6`;
+  on trace rows in `0.1.0a7`;
 - `capture_content=False`;
 - `buffered_writes=False`;
 - a customer-owned absolute SQLite path;

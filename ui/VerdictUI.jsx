@@ -629,7 +629,7 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
         {tab === "drift" && <Drift data={DATA} />}
         {tab === "traces" && <Traces key={evaluation.selectedId || "none"} data={DATA} />}
         {tab === "judge" && <Judge data={DATA} />}
-        {tab === "compare" && <Compare data={DATA} />}
+        {tab === "compare" && <Compare data={DATA} source={source} />}
         {tab === "operations" && operationsUrl && <Operations url={operationsUrl} costBreakdown={DATA.meta.costBreakdown} />}
       </main>
     </div>
@@ -1006,7 +1006,7 @@ function Traces({ data = SEED }) {
                   <span className="text-xs font-mono" style={{ color: C.faint }}>{s.hour}h</span>
                   <span className="flex items-center gap-2 min-w-0 pr-3">
                     <Dot color={provider.color} />
-                    <span className="truncate" style={{ color: C.text }}>{s.prompt_redacted}</span>
+                    <span className="truncate" style={{ color: C.text }}>{s.prompt_redacted || "Content capture off"}</span>
                   </span>
                   <span><Pill color={C.sub}>{s.cluster_id}</Pill></span>
                   <span className="text-xs" style={{ color: C.sub }}>{s.input_tokens}/{s.output_tokens}</span>
@@ -1033,7 +1033,7 @@ function Traces({ data = SEED }) {
         {sel ? <TraceDetail s={sel} onClose={() => setSelectedTraceId(null)} /> : (
           <Panel className="p-8 text-center">
             <Eye size={22} style={{ color: C.faint, margin: "0 auto" }} />
-            <div className="text-sm mt-2" style={{ color: C.sub }}>Select a trace to see the captured prompt, response, and judge verdicts.</div>
+            <div className="text-sm mt-2" style={{ color: C.sub }}>Select a trace to inspect its metadata and any captured content or judge verdicts.</div>
           </Panel>
         )}
       </div>
@@ -1065,12 +1065,12 @@ function TraceDetail({ s, onClose }) {
         </div>
         <div>
           <div className="text-xs mb-1" style={{ color: C.faint }}>PROMPT</div>
-          <div className="text-sm p-2.5" style={{ background: C.panel2, color: C.text, border: `1px solid ${C.border}`, borderRadius: 3 }}>{s.prompt_redacted}</div>
+          <div className="text-sm p-2.5" style={{ background: C.panel2, color: C.text, border: `1px solid ${C.border}`, borderRadius: 3 }}>{s.prompt_redacted || "Content was not captured for this trace."}</div>
         </div>
         <div>
           <div className="text-xs mb-1" style={{ color: C.faint }}>RESPONSE</div>
           <div className="text-sm p-2.5" style={{ background: C.panel2, color: C.sub, border: `1px solid ${C.border}`, borderRadius: 3, lineHeight: 1.5 }}>
-            {s.error ? <span style={{ color: C.red }}>Error: {s.error}</span> : (s.response_redacted || "—")}
+            {s.error ? <span style={{ color: C.red }}>Error: {s.error}</span> : (s.response_redacted || "Content was not captured for this trace.")}
           </div>
         </div>
         {s.judgment && (
@@ -1228,7 +1228,7 @@ function Judge({ data = SEED }) {
 }
 
 /* --------------------------------------------------------------- COMPARE */
-function Compare({ data = SEED }) {
+function Compare({ data = SEED, source = "sample" }) {
   const DATA = data;
   const provs = DATA.providers.map((provider) => ({
     ...provider,
@@ -1241,30 +1241,40 @@ function Compare({ data = SEED }) {
   const costData = provs.map((p) => ({ name: p.presentation.short, v: p.cost, key: p.key, color: p.presentation.color }));
   const latData = provs.map((p) => ({ name: p.presentation.short, v: p.avgLatency, key: p.key, color: p.presentation.color }));
   const tokData = provs.map((p) => ({ name: p.presentation.short, v: p.outTok, key: p.key, color: p.presentation.color }));
+  const regressedProviders = new Set(
+    DATA.driftSignals
+      .filter((signal) => signal.direction === "regression" && signal.provider)
+      .map((signal) => signal.provider),
+  );
   return (
     <div className="space-y-5">
       <div className="text-sm" style={{ color: C.sub }}>
-        Bundled synthetic sample: the same prompt set is shown across three providers to demonstrate comparison views. Connect live data before drawing provider conclusions.
+        {source === "sample"
+          ? "Bundled synthetic sample: the same prompt set is shown across three providers to demonstrate comparison views. Connect live data before drawing provider conclusions."
+          : "Live provider metrics from captured traces. A regression badge appears only when the latest completed drift run attributes a regression to that provider."}
       </div>
 
       <div className="grid md:grid-cols-3 gap-4">
-        {provs.map((p) => (
-          <Panel key={p.key} className="p-5" style={{ borderColor: p.key === "anthropic" ? "rgba(243,154,98,0.45)" : C.border }}>
-            <div className="flex items-center gap-2 mb-3">
-              <Dot color={p.presentation.color} />
-              <span className="font-semibold">{p.label}</span>
-              {p.key === "anthropic" && <Pill color={C.red} bg={C.redBg}>regressed</Pill>}
-            </div>
-            <div className="grid grid-cols-2 gap-y-3 gap-x-2 text-sm">
-              <Metric label="Pass rate" value={pct(p.passRate)} color={p.passRate != null && p.passRate >= 95 ? C.green : C.red} />
-              <Metric label="Avg latency" value={`${p.avgLatency}s`} />
-              <Metric label="Error rate" value={`${p.errorRate}%`} color={p.errorRate > 5 ? C.amber : C.text} />
-              <Metric label="Output tokens" value={k(p.outTok)} />
-              <Metric label={p.costUnknown ? "Total cost (partial)" : "Total cost"} value={usd(p.cost)} color={p.costUnknown ? C.amber : C.green} />
-              <Metric label="Traces" value={p.n.toLocaleString()} />
-            </div>
-          </Panel>
-        ))}
+        {provs.map((p) => {
+          const regressed = regressedProviders.has(p.key);
+          return (
+            <Panel key={p.key} className="p-5" style={{ borderColor: regressed ? "rgba(243,154,98,0.45)" : C.border }}>
+              <div className="flex items-center gap-2 mb-3">
+                <Dot color={p.presentation.color} />
+                <span className="font-semibold">{p.label}</span>
+                {regressed && <Pill color={C.red} bg={C.redBg}>regressed</Pill>}
+              </div>
+              <div className="grid grid-cols-2 gap-y-3 gap-x-2 text-sm">
+                <Metric label="Pass rate" value={pct(p.passRate)} color={p.passRate != null && p.passRate >= 95 ? C.green : C.red} />
+                <Metric label="Avg latency" value={`${p.avgLatency}s`} />
+                <Metric label="Error rate" value={`${p.errorRate}%`} color={p.errorRate > 5 ? C.amber : C.text} />
+                <Metric label="Output tokens" value={k(p.outTok)} />
+                <Metric label={p.costUnknown ? "Total cost (partial)" : "Total cost"} value={usd(p.cost)} color={p.costUnknown ? C.amber : C.green} />
+                <Metric label="Traces" value={p.n.toLocaleString()} />
+              </div>
+            </Panel>
+          );
+        })}
       </div>
 
       <div className="grid md:grid-cols-3 gap-5">
@@ -1279,7 +1289,7 @@ function Compare({ data = SEED }) {
           <li className="flex gap-2"><span style={{ color: C.amber }}>•</span> <span><span style={{ color: C.text }}>Compare cost and latency on identical traffic</span> before changing providers or prompts.</span></li>
           <li className="flex gap-2"><span style={{ color: C.amber }}>•</span> <span><span style={{ color: C.text }}>Check error rate and output tokens</span> alongside quality signals; drift is rarely one-dimensional.</span></li>
           <li className="flex gap-2"><span style={{ color: C.green }}>•</span> <span><span style={{ color: C.text }}>Use per-cluster views</span> to avoid averaging unlike workloads together.</span></li>
-          <li className="flex gap-2"><span style={{ color: C.blue }}>•</span> <span><span style={{ color: C.text }}>Treat bundled numbers as sample data</span>; your own traces are the only meaningful provider comparison.</span></li>
+          <li className="flex gap-2"><span style={{ color: C.blue }}>•</span> <span>{source === "sample" ? <><span style={{ color: C.text }}>Treat bundled numbers as sample data</span>; your own traces are the only meaningful provider comparison.</> : <><span style={{ color: C.text }}>Do not treat unmatched traffic as a head-to-head benchmark</span>; compare matched workloads or controlled replays.</>}</span></li>
         </ul>
       </Panel>
     </div>

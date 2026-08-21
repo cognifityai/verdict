@@ -28,7 +28,7 @@ function componentStub(names) {
 }
 
 async function loadUiModule() {
-  const source = `${await readFile(UI_SOURCE, "utf8")}\nexport { Dashboard, Traces, Drift, Judge, mountedApiUrl };\nexport { useOperations } from "./Operations.jsx";`;
+  const source = `${await readFile(UI_SOURCE, "utf8")}\nexport { Dashboard, Traces, TraceDetail, Drift, Judge, Compare, mountedApiUrl };\nexport { useOperations } from "./Operations.jsx";`;
   const result = await build({
     stdin: {
       contents: source,
@@ -370,4 +370,61 @@ test("dashboard visibly reports every bounded response resource", async () => {
   assert.match(rendered, /Showing a bounded dashboard view/);
   assert.match(rendered, /latency points: 100 of 1,000/);
   assert.match(rendered, /clusters: 20 of 75/);
+});
+
+test("live provider comparison never invents a regression badge", async () => {
+  const ui = await loadUiModule();
+  const data = bundle("evaluator-a");
+  data.providers = [{
+    key: "anthropic", label: "Anthropic Haiku", model: "claude-haiku-4-5",
+    n: 3, errors: 0, errorRate: 0, avgLatency: 1.2, inTok: 10, outTok: 20,
+    cost: 0.01, passRate: null, judged: 0,
+  }];
+
+  const tree = render(ui.Compare, createHooks(), { data, source: "live" });
+  const rendered = textOf(tree).replace(/\s+/g, " ");
+
+  assert.doesNotMatch(rendered, /regressed/);
+  assert.doesNotMatch(rendered, /Bundled synthetic sample/);
+});
+
+test("live provider comparison shows only persisted provider regressions", async () => {
+  const ui = await loadUiModule();
+  const data = bundle("evaluator-a", [], [
+    { id: "signal-a", direction: "regression", provider: "anthropic" },
+    { id: "signal-b", direction: "improvement", provider: "openai" },
+  ]);
+  data.providers = [
+    {
+      key: "anthropic", label: "Anthropic Haiku", model: "claude-haiku-4-5",
+      n: 3, errors: 0, errorRate: 0, avgLatency: 1.2, inTok: 10, outTok: 20,
+      cost: 0.01, passRate: 80, judged: 3,
+    },
+    {
+      key: "openai", label: "OpenAI Nano", model: "gpt-test",
+      n: 3, errors: 0, errorRate: 0, avgLatency: 1.1, inTok: 10, outTok: 20,
+      cost: 0.01, passRate: 90, judged: 3,
+    },
+  ];
+
+  const rendered = textOf(render(ui.Compare, createHooks(), { data, source: "live" }));
+
+  assert.equal((rendered.match(/regressed/g) || []).length, 1);
+});
+
+test("metadata-only traces remain inspectable when content capture is off", async () => {
+  const ui = await loadUiModule();
+  const sample = {
+    trace_id: "metadata-trace", provider: "openai", request_model: "gpt-test",
+    cluster_id: null, input_tokens: 12, output_tokens: 8, latency_ms: 150,
+    cost_usd: null, error: null, hour: 0, prompt_redacted: null,
+    response_redacted: null,
+  };
+  const data = bundle("evaluator-a", [sample]);
+  data.providers = [{ key: "openai", rawProvider: "openai", model: "gpt-test" }];
+  const tree = render(ui.Traces, createHooks(), { data });
+  assert.match(textOf(tree), /Content capture off/);
+
+  const detail = render(ui.TraceDetail, createHooks(), { s: sample, onClose() {} });
+  assert.match(textOf(detail), /Content was not captured for this trace/);
 });

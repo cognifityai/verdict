@@ -190,6 +190,29 @@ def test_installed_dashboard_accepts_a_sqlite_storage_url(tmp_path):
     assert bundle["providers"][0]["rawProvider"] == "custom-provider"
 
 
+def test_trace_explorer_includes_metadata_only_capture(tmp_path):
+    path = tmp_path / "metadata-only.db"
+    storage = SQLiteStorage(str(path))
+    storage.insert_trace(Trace(
+        trace_id="metadata-only-trace",
+        provider="openai",
+        request_model="gpt-test",
+        input_tokens=12,
+        output_tokens=8,
+        prompt_redacted=None,
+        response_redacted=None,
+    ))
+    storage.close()
+
+    bundle = build_bundle(path)
+
+    assert [sample["trace_id"] for sample in bundle["samples"]] == [
+        "metadata-only-trace"
+    ]
+    assert bundle["samples"][0]["prompt_redacted"] is None
+    assert bundle["truncation"]["resources"]["traceSamples"]["available"] == 1
+
+
 def test_dashboard_app_can_be_mounted_below_a_host_application(tmp_path):
     import httpx
     from fastapi import FastAPI
