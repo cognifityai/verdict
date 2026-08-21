@@ -59,9 +59,9 @@ you use:
 
 ```bash
 python -m pip install \
-  "cognifity-verdict[anthropic,openai,google,dashboard]==0.1.0a6" \
-  "cognifity-verdict-eval[semantic]==0.1.0a6" \
-  "cognifity-verdict-inspect==0.1.0a6"
+  "cognifity-verdict[anthropic,openai,google,dashboard]==0.1.0a7" \
+  "cognifity-verdict-eval[semantic]==0.1.0a7" \
+  "cognifity-verdict-inspect==0.1.0a7"
 ```
 
 For a customer proof of concept on `0.1.0a4`, follow the bounded
@@ -81,15 +81,15 @@ PostgreSQL store:
 
 ```bash
 python -m pip install \
-  "cognifity-verdict[dashboard,postgres]==0.1.0a6" \
-  "cognifity-verdict-eval==0.1.0a6" \
-  "cognifity-verdict-inspect==0.1.0a6"
+  "cognifity-verdict[dashboard,postgres]==0.1.0a7" \
+  "cognifity-verdict-eval==0.1.0a7" \
+  "cognifity-verdict-inspect==0.1.0a7"
 ```
 
 The `all` extra preserves its existing provider-and-storage dependency set; it
 does not add the optional dashboard server.
 
-### Upgrade from 0.1.0a5
+### Upgrade from 0.1.0a5 or 0.1.0a6
 
 Upgrade the synchronized distributions in the application's existing virtual
 environment. This also replaces editable installs from an existing Verdict clone;
@@ -97,9 +97,9 @@ do not delete or reclone it:
 
 ```bash
 python -m pip install --upgrade \
-  "cognifity-verdict[anthropic,openai,google,dashboard]==0.1.0a6" \
-  "cognifity-verdict-eval[semantic]==0.1.0a6" \
-  "cognifity-verdict-inspect==0.1.0a6"
+  "cognifity-verdict[anthropic,openai,google,dashboard]==0.1.0a7" \
+  "cognifity-verdict-eval[semantic]==0.1.0a7" \
+  "cognifity-verdict-inspect==0.1.0a7"
 
 python -m pip check
 python -c "import verdict, verdict_eval, verdict_inspect; print(verdict.__version__, verdict_eval.__version__, verdict_inspect.__version__)"
@@ -123,7 +123,7 @@ API remains `import verdict`.
 Minimal install without the local semantic model:
 
 ```bash
-python -m pip install "cognifity-verdict-eval==0.1.0a6"  # lexical hash fallback
+python -m pip install "cognifity-verdict-eval==0.1.0a7"  # lexical hash fallback
 ```
 
 The full test suite also needs pytest and the dashboard's HTTP test dependency:

@@ -1,6 +1,6 @@
 [project]
 name = "verdict-workspace"
-version = "0.1.0a6"
+version = "0.1.0a7"
 description = "Verdict — open-source LLM observability and drift detection (workspace root, not published)"
 readme = "README.md"
 requires-python = ">=3.10"

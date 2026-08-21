@@ -189,11 +189,11 @@ jobs:
           /tmp/verdict-wheel-venv/bin/python -m pip install --disable-pip-version-check dist/eval/*.whl
           /tmp/verdict-wheel-venv/bin/python -m pip install --disable-pip-version-check dist/inspect/*.whl
           /tmp/verdict-wheel-venv/bin/python -m pip install --disable-pip-version-check \
-            "dist/core/cognifity_verdict-0.1.0a6-py3-none-any.whl[dashboard,postgres]"
+            "dist/core/cognifity_verdict-0.1.0a7-py3-none-any.whl[dashboard,postgres]"
           /tmp/verdict-wheel-venv/bin/python -m pip check
           cd /tmp
           /tmp/verdict-wheel-venv/bin/python -c \
-            "import verdict, verdict_eval, verdict_inspect; assert {verdict.__version__, verdict_eval.__version__, verdict_inspect.__version__} == {'0.1.0a6'}"
+            "import verdict, verdict_eval, verdict_inspect; assert {verdict.__version__, verdict_eval.__version__, verdict_inspect.__version__} == {'0.1.0a7'}"
           /tmp/verdict-wheel-venv/bin/verdict-inspect --help
           /tmp/verdict-wheel-venv/bin/verdict-pipeline --help
           /tmp/verdict-wheel-venv/bin/verdict-probes --help
@@ -208,11 +208,11 @@ jobs:
           /tmp/verdict-sdist-venv/bin/python -m pip install --disable-pip-version-check dist/eval/*.tar.gz
           /tmp/verdict-sdist-venv/bin/python -m pip install --disable-pip-version-check dist/inspect/*.tar.gz
           /tmp/verdict-sdist-venv/bin/python -m pip install --disable-pip-version-check \
-            "dist/core/cognifity_verdict-0.1.0a6.tar.gz[dashboard,postgres]"
+            "dist/core/cognifity_verdict-0.1.0a7.tar.gz[dashboard,postgres]"
           /tmp/verdict-sdist-venv/bin/python -m pip check
           cd /tmp
           /tmp/verdict-sdist-venv/bin/python -c \
-            "import verdict, verdict_eval, verdict_inspect; assert {verdict.__version__, verdict_eval.__version__, verdict_inspect.__version__} == {'0.1.0a6'}"
+            "import verdict, verdict_eval, verdict_inspect; assert {verdict.__version__, verdict_eval.__version__, verdict_inspect.__version__} == {'0.1.0a7'}"
           /tmp/verdict-sdist-venv/bin/verdict-inspect --help
           /tmp/verdict-sdist-venv/bin/verdict-pipeline --help
           /tmp/verdict-sdist-venv/bin/verdict-probes --help

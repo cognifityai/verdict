@@ -1122,7 +1122,7 @@ def _build(cur, *, evaluator_id: str | None = None) -> dict:
         f"{cluster_select}, input_tokens, output_tokens, "  # nosec B608
         "latency_ms, cost_usd, finish_reason, error, started_at, "
         "prompt_redacted, response_redacted FROM traces "
-        "WHERE prompt_redacted IS NOT NULL AND prompt_redacted<>'' ORDER BY started_at"
+        "ORDER BY started_at"
     )]
     errs = [r for r in rows if r["error"]]
     late = [

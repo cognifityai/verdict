@@ -24,9 +24,9 @@ uv venv --python 3.12 && source .venv/bin/activate     # or your own 3.10+ venv
 
 # Include the provider extras you want to test live. Google capture needs `google`.
 python -m pip install \
-  "cognifity-verdict[anthropic,openai,google,dashboard]==0.1.0a6" \
-  "cognifity-verdict-eval[semantic]==0.1.0a6" \
-  "cognifity-verdict-inspect==0.1.0a6"
+  "cognifity-verdict[anthropic,openai,google,dashboard]==0.1.0a7" \
+  "cognifity-verdict-eval[semantic]==0.1.0a7" \
+  "cognifity-verdict-inspect==0.1.0a7"
 ```
 
 For a customer POC on the public alpha, use the pinned commands and provider
@@ -38,10 +38,10 @@ lists them as hard dependencies, so the line above brings them in.
 Minimal alternative without the local semantic model:
 
 ```bash
-python -m pip install "cognifity-verdict-eval==0.1.0a6"  # lexical hash fallback
+python -m pip install "cognifity-verdict-eval==0.1.0a7"  # lexical hash fallback
 ```
 
-Already on `0.1.0a5`? Use the synchronized upgrade command in the repository
+Already on `0.1.0a5` or `0.1.0a6`? Use the synchronized upgrade command in the repository
 [README](../README.md#upgrade-from-010a5). It preserves the selected SQLite or
 PostgreSQL store and does not require deleting or recloning an existing checkout.
 
@@ -179,7 +179,7 @@ cost/latency traces written to the same store. Those traces are tagged as the
 `judge` workload and excluded from future drift inputs so the evaluator does not
 become part of the workload it evaluates. The flag is off by default.
 
-For PostgreSQL, install `cognifity-verdict[dashboard,postgres]==0.1.0a6` and pass
+For PostgreSQL, install `cognifity-verdict[dashboard,postgres]==0.1.0a7` and pass
 the same protected storage URL used by the SDK. The dashboard only reads
 existing Verdict tables; it never creates or migrates them.
 `python ui/server.py --db ...` remains a compatible source-checkout wrapper.
@@ -250,6 +250,12 @@ Evaluator requests are sequenced and cancelled so an older response cannot
 replace a newer selection. If a load fails, the dashboard explicitly names the
 last confirmed evaluator that remains on screen, and trace/drift detail is
 derived from IDs in that confirmed snapshot.
+
+Trace Explorer includes sampled metadata-only calls. When capture is off, it
+shows provider, model, timing, token, cost, and error metadata while explicitly
+marking prompt and response content unavailable. Provider comparison badges are
+derived only from persisted signals in the selected completed drift run; provider
+identity alone never implies a regression.
 
 Set both `VERDICT_USER` and `VERDICT_PASS` before starting the server to require
 HTTP Basic authentication for the dashboard shells at `/` and `/dashboard` plus

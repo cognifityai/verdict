@@ -1,4 +1,4 @@
-# Verdict 0.1.0a6 target
+# Verdict 0.1.0a7 target
 
 This release keeps the bounded capture-method evidence in the public
 [`0.1.0a4` POC release profile](https://github.com/cognifityai/verdict/blob/v0.1.0a4/docs/POC_RELEASE_PROFILE.md).
@@ -11,9 +11,9 @@ provider and storage extras it needs:
 
 ```bash
 python -m pip install \
-  "cognifity-verdict[anthropic,dashboard]==0.1.0a6" \
-  "cognifity-verdict-eval[semantic]==0.1.0a6" \
-  "cognifity-verdict-inspect==0.1.0a6"
+  "cognifity-verdict[anthropic,dashboard]==0.1.0a7" \
+  "cognifity-verdict-eval[semantic]==0.1.0a7" \
+  "cognifity-verdict-inspect==0.1.0a7"
 ```
 
 Replace `anthropic` with `openai` or `google` when appropriate. Add `postgres`
@@ -21,11 +21,11 @@ for PostgreSQL. Do not install the unrelated distribution named `verdict`.
 Normal capture, pipeline, probe, Inspect, and dashboard operation does not require
 a Verdict source checkout.
 
-## Upgrade from 0.1.0a5
+## Upgrade from 0.1.0a5 or 0.1.0a6
 
 Back up the selected store and dependency lockfile, stop Verdict writers, and run
 the same synchronized command with `--upgrade`. The command also replaces editable
-`0.1.0a5` installs with published wheels; it does not require deleting or recloning
+older installs with published wheels; it does not require deleting or recloning
 the old checkout.
 
 The package upgrade reuses existing SQLite files and PostgreSQL tables. It does not

@@ -6,6 +6,16 @@ the customer POC profile is refined.
 
 ## [Unreleased]
 
+## [0.1.0a7] - 2026-08-21
+
+### Fixed
+
+- Trace Explorer now includes metadata-only traces and explicitly says when
+  prompt and response content was not captured.
+- The live provider comparison shows a regression badge only when the selected
+  completed drift run attributes a persisted regression to that provider; it no
+  longer labels Anthropic sample data as a live Haiku regression.
+
 ## [0.1.0a6] - 2026-08-20
 
 ### Added
@@ -96,7 +106,8 @@ the customer POC profile is refined.
 - Content capture remains off by default and is documented as best-effort rather
   than a compliance control.
 
-[Unreleased]: https://github.com/cognifityai/verdict/compare/v0.1.0a6...HEAD
+[Unreleased]: https://github.com/cognifityai/verdict/compare/v0.1.0a7...HEAD
+[0.1.0a7]: https://github.com/cognifityai/verdict/compare/v0.1.0a6...v0.1.0a7
 [0.1.0a6]: https://github.com/cognifityai/verdict/compare/v0.1.0a5...v0.1.0a6
 [0.1.0a5]: https://github.com/cognifityai/verdict/compare/v0.1.0a4...v0.1.0a5
 [0.1.0a4]: https://github.com/cognifityai/verdict/compare/v0.1.0a3...v0.1.0a4
