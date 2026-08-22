@@ -25,9 +25,9 @@ verdict.db-wal
 *.db-journal
 
 # Env / secrets — never commit
-.env
-.env.*
-!.env.example
+*.[Ee][Nn][Vv]*
+!/.env.example
+.[Dd][Ii][Rr][Ee][Nn][Vv]/
 
 # IDE
 .vscode/

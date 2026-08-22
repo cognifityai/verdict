@@ -154,8 +154,10 @@ a retained trace.
   guarantee: names, addresses, dates of birth, many international identifiers,
   and arbitrary opaque metadata can remain. Use non-sensitive identifiers and
   keep capture off when this is insufficient.
-- API keys are read from your environment and should not be committed to the
-  repository.
+- API keys are read from the target process environment. Inject them from a
+  managed secret store or OS credential manager; do not keep plaintext `.env*`,
+  `*.env*`, `*.envrc*`, or `.direnv` state under a Verdict working tree, even
+  when ignored by Git.
 - Structural checks and local embedding inference keep trace content local. A
   provider-backed judge sends the sampled prompt/response content to the
   configured provider under that provider's data-handling terms.

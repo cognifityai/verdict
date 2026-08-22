@@ -16,3 +16,8 @@
 ui/__pycache__/
 ui/VerdictUI.html
 ui/VerdictUI.jsx
+
+# Final deny rules: never upload local secret fallbacks or direnv state even if
+# the source allowlist grows.
+*.[Ee][Nn][Vv]*
+.[Dd][Ii][Rr][Ee][Nn][Vv]/

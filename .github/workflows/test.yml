@@ -154,33 +154,7 @@ jobs:
         run: python -m twine check dist/core/* dist/eval/* dist/inspect/*
 
       - name: Reject private or review files in distributions
-        run: |
-          python - <<'PY'
-          from pathlib import Path
-          import tarfile
-          import zipfile
-
-          banned_names = {".env", ".env.local"}
-          banned_prefixes = ("_review", "_sync", "_verdict_src")
-
-          for artifact in Path("dist").glob("*/*"):
-              if artifact.suffix == ".whl":
-                  with zipfile.ZipFile(artifact) as archive:
-                      members = archive.namelist()
-              elif artifact.name.endswith(".tar.gz"):
-                  with tarfile.open(artifact, "r:gz") as archive:
-                      members = archive.getnames()
-              else:
-                  continue
-
-              rejected = []
-              for member in members:
-                  name = Path(member).name
-                  if name in banned_names or name.startswith(banned_prefixes):
-                      rejected.append(member)
-              if rejected:
-                  raise SystemExit(f"{artifact} contains private files: {rejected}")
-          PY
+        run: python scripts/check_release_artifacts.py dist
 
       - name: Cold-install wheels
         run: |

@@ -27,8 +27,11 @@ A few things that are by design rather than vulnerabilities:
 
 - **Content redaction is best-effort** (regex + Luhn), not a compliance
   guarantee. Do not rely on it as your only control for regulated data.
-- **API keys are read from the environment** and are never committed by the
-  SDK. Keep your keys out of source control.
+- **API keys are read from the process environment.** Inject them at process
+  startup from a managed secret store or OS credential manager. Do not keep a
+  plaintext `.env*`, `*.env*`, `*.envrc*`, `.direnv`, or provider-key file
+  anywhere under a Verdict working tree: ignored files still leak into
+  snapshots, support bundles, and misconfigured build contexts.
 - **Local SQLite databases and generated reports may contain sensitive trace
   data.** Treat those files, and any exposed dashboard, as sensitive and keep
   them out of source control and off untrusted networks.

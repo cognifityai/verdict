@@ -213,7 +213,9 @@ What this repo includes:
   against human-labeled public data (`scripts/verify_judge_alignment.py`). Pass
   `--json-output <path>` for its versioned machine-readable result. The
   four-judge `scripts/run_alignment_sweep.sh` writes one JSON and text report
-  per judge, builds `SUMMARY.md` from JSON rather than formatted prose, and
+  per judge. The wrapper never sources repository environment files; inject
+  provider keys into the process from a managed secret store or OS credential
+  manager. It builds `SUMMARY.md` from JSON rather than formatted prose and
   exits non-zero if any run fails, is incomplete, produces an invalid result,
   or does not clear the binarized-AC2 confidence-interval gate. Online runs
   require at least 50 requested pairs, pin the public MT-Bench dataset revision,
