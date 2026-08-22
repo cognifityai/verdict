@@ -16,8 +16,9 @@ SOURCES (via --source):
   sqlite   Read from a Verdict SQLite DB's `traces` table. Uses `prompt_redacted`
            as the query and `response_redacted` as the response. Rows where either
            is NULL/empty are skipped. --sample recent orders by started_at DESC;
-           --sample random orders by RANDOM(). Only plain sqlite3 is used, so the
-           verdict package need not be importable.
+           --sample random orders by RANDOM(). Output is redacted again so rows
+           written before the current storage boundary cannot leak through the
+           labeling export.
 
   jsonl    Pass through / normalize arbitrary JSONL rows that already carry
            query/response-ish fields. Common key names are mapped:
@@ -55,6 +56,8 @@ import json
 import sqlite3
 import sys
 
+from verdict.redaction import redact
+
 # Key aliases for the jsonl source. First hit (in listed order) wins.
 _QUERY_KEYS = ("query", "prompt", "question")
 _RESPONSE_KEYS = ("response", "answer", "completion", "output")
@@ -74,13 +77,13 @@ def _first_str(row: dict, keys: tuple[str, ...]) -> str:
 
 
 def _write_rows(out_path: str, rows: list[dict]) -> int:
-    """Write normalized rows as JSONL. Each row already has query/response/context."""
+    """Write normalized rows through the final redaction boundary as JSONL."""
     with open(out_path, "w") as f:
         for r in rows:
             f.write(json.dumps({
-                "query": r["query"],
-                "response": r["response"],
-                "context": r.get("context", ""),
+                "query": redact(r["query"]),
+                "response": redact(r["response"]),
+                "context": redact(r.get("context", "")),
             }) + "\n")
     return len(rows)
 

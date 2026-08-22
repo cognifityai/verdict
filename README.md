@@ -181,7 +181,8 @@ tool arguments, before `Trace` assignment and again at storage. The detector is
 best-effort pattern matching with Luhn card checks and standard-library IP
 address validation, not a compliance control; names, addresses, many
 international identifiers, and opaque application metadata are not guaranteed
-to be found. Clock values such as `12:34:56` are not treated as IPv6. Use
+to be found. IPv6 validation preserves trailing text that is not part of the
+validated address; clock values such as `12:34:56` are not treated as IPv6. Use
 non-sensitive tenant/session/cluster IDs. `sample_rate`
 controls what fraction of supported calls is retained. The `0.1.0a4` POC
 profile keeps `buffered_writes=False`, so a normal process exit cannot strand
@@ -241,6 +242,10 @@ python scripts/verify_rubric_alignment.py --make-template raw.jsonl labels.jsonl
 python scripts/label_ui.py --file labels.jsonl          # local labeling UI, autosaves
 python scripts/verify_rubric_alignment.py --labeled labels.jsonl --provider anthropic --judge-model <model>
 ```
+
+`sample_to_label.py` reapplies Verdict's best-effort redaction at the JSONL
+output boundary, including for legacy SQLite rows written before the current
+storage sanitizer. Treat the resulting file as sensitive despite that pass.
 
 You hand-label a sample PASS/FAIL (blind, before the judge runs), then the harness reports per-dimension and pooled agreement with 95 % bootstrap CIs. A threshold is "cleared" only when the **CI lower bound** clears it, not the point estimate.
 

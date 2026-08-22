@@ -104,10 +104,11 @@ excessively deep or large values fail closed. Repeated container references fail
 closed at every occurrence so sanitized output cannot alias caller-owned data;
 redacted mapping-key collisions preserve every value under deterministic
 suffixed keys. The pattern detector uses Luhn validation
-for card candidates and standard-library validation for IP candidates, so a
-clock value such as `12:34:56` is not classified as IPv6. Email discovery uses a
-linear `@`-anchored scanner to keep malformed and long inputs bounded. It remains
-best effort, not a compliance control, and opaque metadata such as
+for card candidates and standard-library validation for IP candidates, so
+trailing text that is not part of a validated IPv6 address is preserved while a
+clock value such as `12:34:56` is not classified as IPv6. Email discovery uses
+a linear `@`-anchored scanner to keep malformed and long inputs bounded. It
+remains best effort, not a compliance control, and opaque metadata such as
 tenant/session/cluster IDs must be non-sensitive. Keep content capture off for
 customer POC data. The `0.1.0a4` POC profile also keeps
 `buffered_writes=False`; buffered mode requires an explicit `shutdown()`
@@ -148,6 +149,10 @@ python scripts/verify_rubric_alignment.py --make-template raw.jsonl labels.jsonl
 python scripts/label_ui.py --file labels.jsonl                 # local labeling UI, autosaves
 python scripts/verify_rubric_alignment.py --labeled labels.jsonl --provider anthropic --judge-model <model>
 ```
+
+`sample_to_label.py` reapplies Verdict's best-effort redaction at the JSONL
+output boundary, including for legacy SQLite rows written before the current
+storage sanitizer. Continue to handle the exported file as sensitive.
 
 You hand-label PASS/FAIL **blind** (before the judge runs), then the harness
 reports per-dimension and pooled agreement with 95% bootstrap CIs. A threshold

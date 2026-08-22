@@ -79,7 +79,8 @@ For a visual overview, see `docs/architecture-current.svg`.
   providers from a source checkout.
 - Use `scripts/sample_to_label.py`, `scripts/label_ui.py`, and
   `scripts/verify_rubric_alignment.py` to measure judge agreement on your own
-  labeled examples.
+  labeled examples. The sampler reapplies best-effort redaction when it writes
+  JSONL so legacy database rows do not bypass the current storage sanitizer.
 - Use `verdict-inspect` or the dashboard to inspect stored traces and reports.
 - Run the test suite before changing instrumentation or evaluation behavior.
 

@@ -224,7 +224,13 @@ def redact(
             if ":" not in out:
                 continue
             out = pat.sub(
-                lambda m, lbl=label: _ipv6_repl(m.group(0), lbl, mode, secret),
+                lambda m, lbl=label: _ipv6_repl(
+                    m.group(0),
+                    lbl,
+                    mode,
+                    secret,
+                    following=m.string[m.end() : m.end() + 1],
+                ),
                 out,
             )
         elif mode == "hash":
@@ -276,24 +282,63 @@ def _ipv6_repl(
     label: str,
     mode: RedactionMode,
     secret: str | None,
+    *,
+    following: str = "",
 ) -> str:
-    """Replace validated IPv6 while preserving adjacent ASCII periods.
+    """Replace the longest validated IPv6 prefix and preserve its suffix.
 
     Periods remain in the candidate grammar for mapped tails and scope IDs.
     Treat edge period runs as surrounding prose punctuation so sentence
-    boundaries do not make the whole candidate fail closed into cleartext.
-    Internal periods remain untouched and authoritative validation still comes
-    from ``IPv6Address``.
+    boundaries do not make the whole candidate fail open into cleartext. A
+    trailing colon is also ambiguous: it can delimit an error message or bare
+    port, but the permissive discovery pattern necessarily consumes it. Try
+    only complete delimiter-separated prefixes, longest first, so an invalid
+    suffix such as ``:54321`` is preserved whole rather than partially absorbed
+    into an otherwise valid final hextet. A following ``::`` keeps hex-like
+    C++/Rust namespace chains intact. Authoritative validation remains
+    ``IPv6Address`` and the candidate's address portion is bounded by the regex.
     """
     leading_periods = len(value) - len(value.lstrip("."))
     address_end = len(value.rstrip("."))
-    address = value[leading_periods:address_end]
-    try:
-        ipaddress.IPv6Address(address)
-    except ipaddress.AddressValueError:
+    candidate = value[leading_periods:address_end]
+
+    valid_end: int | None = None
+    # The complete candidate is the common path. On failure, delimiter
+    # positions are the only safe shortening points: trimming individual hex
+    # characters from a five-digit port would leak the last digit while
+    # misclassifying the first four as an IPv6 hextet.
+    prefix_ends = [len(candidate)]
+    bounded_base = candidate.split("%", 1)[0]
+    prefix_ends.extend(
+        index
+        for index, character in enumerate(bounded_base)
+        if index > 0 and character in ".:"
+    )
+    if len(bounded_base) < len(candidate):
+        prefix_ends.append(len(bounded_base))
+
+    for prefix_end in sorted(set(prefix_ends), reverse=True):
+        # A second namespace separator after the proposed prefix is strong
+        # evidence that this is a C++/Rust-style identifier chain rather than
+        # an address followed by prose or a port. Without this guard,
+        # ``dead::beef::codec`` is reduced to ``<IPV6>::codec`` because
+        # ``dead::beef`` is independently valid IPv6 syntax.
+        suffix_context = candidate[prefix_end:] + following
+        if prefix_end < len(candidate) and suffix_context.startswith("::"):
+            continue
+        try:
+            ipaddress.IPv6Address(candidate[:prefix_end])
+        except ipaddress.AddressValueError:
+            continue
+        valid_end = prefix_end
+        break
+
+    if valid_end is None:
         return value
+
+    address = candidate[:valid_end]
     prefix = value[:leading_periods]
-    suffix = value[address_end:]
+    suffix = candidate[valid_end:] + value[address_end:]
     if mode == "hash":
         replacement = _hash_match(address, label, secret)
     else:

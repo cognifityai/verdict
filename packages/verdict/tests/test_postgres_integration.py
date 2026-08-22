@@ -185,21 +185,34 @@ def test_live_postgres_round_trip_and_mutation_contracts():
             provider="custom-provider",
             request_model="custom/model",
             response_model="custom/model-v2",
-            prompt_redacted="Prompt from ::ffff:203.0.113.42.",
-            response_redacted="Response to ::ffff:203.0.113.42.",
+            prompt_redacted="Prompt from 2001:db8:ac1d:5eed::cafe: timeout",
+            response_redacted="Response to 2001:db8:ac1d:5eed::cafe:54321",
+            error="Failure from 2001:db8:ac1d:5eed::cafe: refused",
+            raw_messages=[{
+                "role": "user",
+                "content": "Peer 2001:db8:ac1d:5eed::cafe: unavailable",
+            }],
             tenant_id=f"{prefix}-tenant",
             session_id=f"{prefix}-session",
             cluster_id=f"{prefix}-cluster",
-            tags={"source": "integration"},
+            tags={
+                "source": "integration",
+                "peer": "2001:db8:ac1d:5eed::cafe: unavailable",
+            },
         )
         storage.insert_trace(trace)
         assert storage.trace_exists(trace_id)
         fetched = storage.get_trace(trace_id)
         assert fetched is not None
         assert fetched.parent_span_id == trace.parent_span_id
-        assert fetched.tags == {"source": "integration"}
-        assert fetched.prompt_redacted == "Prompt from <IPV6>."
-        assert fetched.response_redacted == "Response to <IPV6>."
+        assert fetched.tags == {"source": "integration", "peer": "<IPV6>: unavailable"}
+        assert fetched.prompt_redacted == "Prompt from <IPV6>: timeout"
+        assert fetched.response_redacted == "Response to <IPV6>:54321"
+        assert fetched.error == "Failure from <IPV6>: refused"
+        assert fetched.raw_messages == [{
+            "content": "Peer <IPV6>: unavailable",
+            "role": "user",
+        }]
         assert [item.trace_id for item in storage.list_traces(
             tenant_id=trace.tenant_id,
             cluster_id=trace.cluster_id,
