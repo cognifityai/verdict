@@ -6,6 +6,22 @@ the customer POC profile is refined.
 
 ## [Unreleased]
 
+### Fixed
+
+- Anthropic `messages.stream(...)` is captured for synchronous and asynchronous
+  event iteration, `text_stream`, `until_done`, `get_final_message`, and
+  `get_final_text`. Split streaming usage updates are merged field by field;
+  complete, partial, and error boundaries finalize exactly once. Both Anthropic
+  resource layouts in the declared `anthropic>=0.30` range are supported and
+  exercised in CI. Lazy helpers bind routing at each manager entry, preserve
+  one-shot message iterables, do not buffer content when capture is disabled,
+  and preserve captured empty text distinctly from unavailable content.
+- The live capture gate now exercises Anthropic's stream helper, requires
+  exactly one new trace per entry point, names the providers and entry points it
+  verified, and exits nonzero when any requested provider could not run.
+- Trace Explorer distinguishes captured empty prompts and responses from traces
+  whose content capture was disabled.
+
 ### Security
 
 - Repository, container, cloud-upload, and artifact gates now reject plaintext

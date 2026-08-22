@@ -117,7 +117,9 @@ imported from `verdict.client` before process exit.
 Use only the provider methods listed in the
 [`POC release profile`](POC_RELEASE_PROFILE.md). In particular, Anthropic
 `messages.stream(...)` and the OpenAI Responses API are not captured in
-`0.1.0a4`.
+published releases through `0.1.0a7`. Unreleased source captures the Anthropic
+helper, but that path remains unverified for a customer installation until the
+next synchronized alpha is published and cold-installed.
 
 ### Verify capture on your own SDK versions (recommended before you trust it)
 
@@ -130,10 +132,14 @@ python scripts/live_capture_check.py
 python scripts/live_capture_check.py --providers anthropic,openai --no-streaming
 ```
 
-A pass confirms the entry points exercised by the script land traces with
+A pass confirms the entry points exercised by the script land exactly one new
+trace apiece with
 tokens, estimated cost for recognized models, finish reason, and errors on the
 SDK versions you actually have. It does not expand the supported-entry-point
-matrix in the POC release profile.
+matrix in the POC release profile. Every requested provider must complete or the
+command exits nonzero; use `--providers` and `--no-streaming` only to narrow the
+gate explicitly. The final summary names every provider and entry point that
+actually passed, so saved output records the exact live surface exercised.
 
 ## 5. Judge calibration with `verdict_eval` (only if you want quality-drift)
 

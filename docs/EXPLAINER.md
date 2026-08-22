@@ -24,7 +24,9 @@ they go through a supported provider SDK.
   instrumentation.
 - Supports non-streaming and streaming responses for the supported SDK paths.
   The versioned [`0.1.0a4 POC release profile`](POC_RELEASE_PROFILE.md) names
-  those entry points explicitly.
+  the entry points released through `0.1.0a7` explicitly. Unreleased source adds
+  Anthropic `messages.stream(...)`; that is not a public-release claim until the
+  next synchronized alpha passes release verification.
 - Stores traces in SQLite by default, with Postgres support for deployments that
   need a server database.
 - Recursively redacts common sensitive patterns in supported JSON-compatible

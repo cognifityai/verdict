@@ -1,19 +1,18 @@
 """Live capture check — verify the instrumentors capture REAL provider traffic.
 
-Everything in the capture SDK (wrapt monkeypatching, streaming wrappers, token
-extraction, cost, finish_reason normalization, tenant/session/user routing) has
-unit tests — but those run against FAKES. This script is the one thing those
-tests can't be: a real call to a real provider SDK, confirming a trace is
-actually captured and correctly populated.
+Capture has deterministic tests through real provider SDKs and local HTTP
+transports. This script adds the evidence those tests cannot: tiny calls to the
+real provider services, confirming that current wire responses still produce
+complete stored traces.
 
 It is INHERENTLY a thing you run, not something that runs in CI: it needs real
 API keys, network, and the provider SDKs installed. Nothing here is mocked.
 
-Usage (set whichever keys you have; it only tests providers it can reach):
+Usage (set keys for every requested provider; a skip makes the gate nonzero):
     export ANTHROPIC_API_KEY=...      # and/or OPENAI_API_KEY / GOOGLE_API_KEY
     python scripts/live_capture_check.py
     python scripts/live_capture_check.py --providers anthropic,openai
-    python scripts/live_capture_check.py --no-streaming   # skip streaming calls
+    python scripts/live_capture_check.py --no-streaming   # explicitly narrow scope
     python scripts/live_capture_check.py --anthropic-model claude-haiku-4-5
 
 Cost: a handful of tiny (max ~32 token) calls per provider. Cents at most.
@@ -26,6 +25,9 @@ What it asserts for each captured trace:
     - for streaming calls: the same, proving the streaming wrapper captured
     - an intentionally-failing call records a trace WITH an error (not a
       silent success) — the bug we fixed for the Anthropic stream path
+
+The final summary names every provider and entry point that passed, so a saved
+artifact identifies the exact live surface exercised.
 """
 
 from __future__ import annotations
@@ -42,11 +44,25 @@ PASS = "\033[32mPASS\033[0m"
 FAIL = "\033[31mFAIL\033[0m"
 
 
-def _check_trace(t, *, label: str, expect_error: bool, expect_cost: bool) -> list[str]:
+def _check_trace(
+    t,
+    *,
+    label: str,
+    expect_error: bool,
+    expect_cost: bool,
+    expect_stream_completion: str | None = None,
+) -> list[str]:
     """Return a list of failure strings (empty = all good)."""
     fails: list[str] = []
     if t is None:
         return [f"{label}: NO trace was captured (monkeypatch did not fire)"]
+    if expect_stream_completion is not None:
+        completion = (t.tags or {}).get("verdict.stream_completion")
+        if completion != expect_stream_completion:
+            fails.append(
+                f"{label}: stream completion is {completion!r}, "
+                f"expected {expect_stream_completion!r}"
+            )
     if expect_error:
         if not t.error:
             fails.append(f"{label}: expected an error trace, but error is empty "
@@ -65,117 +81,238 @@ def _check_trace(t, *, label: str, expect_error: bool, expect_cost: bool) -> lis
     return fails
 
 
-def _latest_trace(storage):
-    traces = storage.list_traces(limit=1)
-    return traces[0] if traces else None
+def _new_trace(storage, before: int, *, label: str):
+    """Return the one trace added by an entry point, or an exact count failure."""
+    traces = storage.list_traces(limit=1000)
+    added = len(traces) - before
+    if added != 1:
+        return None, [f"{label}: expected exactly one new trace, captured {added}"]
+    return traces[0], []
 
 
-def _trace_for_request_model(storage, model: str):
-    for trace in storage.list_traces(limit=1000):
-        if trace.request_model == model:
-            return trace
-    return None
+def _verify_new_trace(
+    storage,
+    before: int,
+    *,
+    label: str,
+    expect_error: bool,
+    expect_cost: bool,
+    expect_stream_completion: str | None = None,
+) -> list[str]:
+    trace, failures = _new_trace(storage, before, label=label)
+    return failures + _check_trace(
+        trace,
+        label=label,
+        expect_error=expect_error,
+        expect_cost=expect_cost,
+        expect_stream_completion=expect_stream_completion,
+    )
 
 
-def check_anthropic(storage, do_streaming: bool, model: str) -> list[str]:
+def check_anthropic(
+    storage,
+    do_streaming: bool,
+    model: str,
+) -> tuple[list[str], list[str]]:
     import anthropic
     fails: list[str] = []
+    verified: list[str] = []
     client = anthropic.Anthropic()
 
     # 1. non-streaming
+    before = len(storage.list_traces(limit=1000))
     client.messages.create(model=model, max_tokens=16,
                            messages=[{"role": "user", "content": "Say 'ok'."}])
-    fails += _check_trace(_latest_trace(storage), label="anthropic non-stream",
-                          expect_error=False, expect_cost=True)
+    entry_fails = _verify_new_trace(
+        storage,
+        before,
+        label="anthropic messages.create",
+        expect_error=False,
+        expect_cost=True,
+    )
+    fails += entry_fails
+    if not entry_fails:
+        verified.append("messages.create")
 
-    # 2. streaming — use the PATCHED path: create(stream=True). (The instrumentor
-    # wraps Messages.create and handles stream inside it; client.messages.stream()
-    # is a different SDK method and is NOT patched.)
+    # 2. Raw streaming response.
     if do_streaming:
+        before = len(storage.list_traces(limit=1000))
         stream = client.messages.create(
             model=model, max_tokens=16, stream=True,
             messages=[{"role": "user", "content": "Count to 3."}])
         for _ in stream:
             pass
-        fails += _check_trace(_latest_trace(storage), label="anthropic stream",
-                              expect_error=False, expect_cost=True)
+        entry_fails = _verify_new_trace(
+            storage,
+            before,
+            label="anthropic messages.create(stream=True)",
+            expect_error=False,
+            expect_cost=True,
+            expect_stream_completion="complete",
+        )
+        fails += entry_fails
+        if not entry_fails:
+            verified.append("messages.create(stream=True)")
 
-    # 3. intentional error (bad model) must record an error trace, not a success
+        # 3. Anthropic's documented accumulating stream helper. Its text lens
+        # must run through the same telemetry lifecycle as direct event iteration.
+        before = len(storage.list_traces(limit=1000))
+        with client.messages.stream(
+            model=model,
+            max_tokens=16,
+            messages=[{"role": "user", "content": "Say 'stream ok'."}],
+        ) as helper_stream:
+            for _ in helper_stream.text_stream:
+                pass
+        entry_fails = _verify_new_trace(
+            storage,
+            before,
+            label="anthropic messages.stream().text_stream",
+            expect_error=False,
+            expect_cost=True,
+            expect_stream_completion="complete",
+        )
+        fails += entry_fails
+        if not entry_fails:
+            verified.append("messages.stream().text_stream")
+
+    # 4. The selected error surface must record an error, never success.
     bad_model = "claude-does-not-exist-xyz"
+    before = len(storage.list_traces(limit=1000))
     try:
-        client.messages.create(model=bad_model, max_tokens=8,
-                               messages=[{"role": "user", "content": "hi"}])
+        if do_streaming:
+            with client.messages.stream(
+                model=bad_model,
+                max_tokens=8,
+                messages=[{"role": "user", "content": "hi"}],
+            ) as error_stream:
+                error_stream.until_done()
+        else:
+            client.messages.create(
+                model=bad_model,
+                max_tokens=8,
+                messages=[{"role": "user", "content": "hi"}],
+            )
     except Exception:
         pass
-    fails += _check_trace(
-        _trace_for_request_model(storage, bad_model),
-        label="anthropic error-call",
+    error_entry = "messages.stream(error)" if do_streaming else "messages.create(error)"
+    entry_fails = _verify_new_trace(
+        storage,
+        before,
+        label=f"anthropic {error_entry}",
         expect_error=True,
         expect_cost=False,
+        expect_stream_completion="error" if do_streaming else None,
     )
-    return fails
+    fails += entry_fails
+    if not entry_fails:
+        verified.append(error_entry)
+    return fails, verified
 
 
-def check_openai(storage, do_streaming: bool, model: str) -> list[str]:
+def check_openai(
+    storage,
+    do_streaming: bool,
+    model: str,
+) -> tuple[list[str], list[str]]:
     import openai
     fails: list[str] = []
+    verified: list[str] = []
     client = openai.OpenAI()
 
+    before = len(storage.list_traces(limit=1000))
     client.chat.completions.create(model=model, max_tokens=16,
                                    messages=[{"role": "user", "content": "Say 'ok'."}])
-    fails += _check_trace(_latest_trace(storage), label="openai non-stream",
-                          expect_error=False, expect_cost=True)
+    entry_fails = _verify_new_trace(
+        storage,
+        before,
+        label="openai chat.create",
+        expect_error=False,
+        expect_cost=True,
+    )
+    fails += entry_fails
+    if not entry_fails:
+        verified.append("chat.completions.create")
 
     if do_streaming:
+        before = len(storage.list_traces(limit=1000))
         stream = client.chat.completions.create(
             model=model, max_tokens=16, stream=True,
             stream_options={"include_usage": True},
             messages=[{"role": "user", "content": "Count to 3."}])
         for _ in stream:
             pass
-        fails += _check_trace(_latest_trace(storage), label="openai stream",
-                              expect_error=False, expect_cost=True)
-    return fails
+        entry_fails = _verify_new_trace(
+            storage,
+            before,
+            label="openai chat stream",
+            expect_error=False,
+            expect_cost=True,
+        )
+        fails += entry_fails
+        if not entry_fails:
+            verified.append("chat.completions.create(stream=True)")
+    return fails, verified
 
 
-def check_google(storage, do_streaming: bool, model: str) -> list[str]:
+def check_google(
+    storage,
+    do_streaming: bool,
+    model: str,
+) -> tuple[list[str], list[str]]:
     from google import genai
     fails: list[str] = []
+    verified: list[str] = []
     client = genai.Client()
 
+    before = len(storage.list_traces(limit=1000))
     client.models.generate_content(model=model, contents="Say 'ok'.")
-    fails += _check_trace(_latest_trace(storage), label="google non-stream",
-                          expect_error=False, expect_cost=True)
+    entry_fails = _verify_new_trace(
+        storage,
+        before,
+        label="google generate_content",
+        expect_error=False,
+        expect_cost=True,
+    )
+    fails += entry_fails
+    if not entry_fails:
+        verified.append("models.generate_content")
 
     if do_streaming:
         # The instrumentor DOES wrap the modern-SDK streaming method
         # (Models.generate_content_stream). This live check keeps that path
         # honest as provider SDK stream chunk shapes evolve.
-        try:
-            for _ in client.models.generate_content_stream(model=model, contents="Count to 3."):
-                pass
-        except Exception as e:
-            print(f"  - google stream call raised ({type(e).__name__}); skipping")
-            return fails
-        t = _latest_trace(storage)
-        if t is None or t.error or not t.output_tokens:
-            print("  ! google generate_content_stream was NOT captured — the wrapper "
-                  "is registered but its live token/usage extraction needs fixing "
-                  "for the modern google-genai SDK.")
-        else:
-            print("  google streaming captured (parity wrapper confirmed live).")
-    return fails
+        before = len(storage.list_traces(limit=1000))
+        for _ in client.models.generate_content_stream(model=model, contents="Count to 3."):
+            pass
+        entry_fails = _verify_new_trace(
+            storage,
+            before,
+            label="google generate_content_stream",
+            expect_error=False,
+            expect_cost=True,
+        )
+        fails += entry_fails
+        if not entry_fails:
+            verified.append("models.generate_content_stream")
+    return fails, verified
 
 
 CHECKS = {"anthropic": check_anthropic, "openai": check_openai, "google": check_google}
 
 
-def main() -> int:
+def main(argv: list[str] | None = None, *, checks=None) -> int:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--providers", default="anthropic,openai,google",
-                   help="Comma list of providers to test (only those whose SDK + "
-                        "key are available will actually run).")
-    p.add_argument("--no-streaming", action="store_true", help="Skip streaming calls.")
+    p.add_argument(
+        "--providers",
+        default="anthropic,openai,google",
+        help="Comma list of required providers; every named provider must run.",
+    )
+    p.add_argument(
+        "--no-streaming",
+        action="store_true",
+        help="Explicitly narrow the gate to non-streaming calls.",
+    )
     p.add_argument(
         "--anthropic-model",
         default=os.environ.get("VERDICT_LIVE_ANTHROPIC_MODEL", "claude-haiku-4-5-20251001"),
@@ -191,61 +328,80 @@ def main() -> int:
         default=os.environ.get("VERDICT_LIVE_GOOGLE_MODEL", "gemini-2.5-flash"),
         help="Google model for live calls. Env fallback: VERDICT_LIVE_GOOGLE_MODEL.",
     )
-    args = p.parse_args()
+    args = p.parse_args(argv)
+    requested = [x.strip() for x in args.providers.split(",") if x.strip()]
+    if not requested:
+        print("LIVE CAPTURE CHECK INCOMPLETE — request at least one provider.")
+        return 2
 
     import verdict
     from verdict.client import get_client
     from verdict.storage.memory import InMemoryStorage
 
-    # In-memory storage (no leftover DB file); a fresh one per provider so
-    # _latest_trace is unambiguous.
+    # In-memory storage (no leftover DB file); a fresh one per provider.
     verdict.init(capture_content=True, storage=InMemoryStorage())
 
-    requested = [x.strip() for x in args.providers.split(",") if x.strip()]
     models = {
         "anthropic": args.anthropic_model,
         "openai": args.openai_model,
         "google": args.google_model,
     }
+    selected_checks = CHECKS if checks is None else checks
     all_fails: list[str] = []
-    ran_any = False
+    verified: list[str] = []
+    verified_entries: dict[str, list[str]] = {}
+    unverified: dict[str, str] = {}
 
     for name in requested:
-        check = CHECKS.get(name)
+        check = selected_checks.get(name)
         if check is None:
-            print(f"  ? unknown provider {name!r}, skipping")
+            print(f"  ? unknown requested provider {name!r}")
+            unverified[name] = "unknown provider"
             continue
         store = InMemoryStorage()
         get_client().storage = store
         try:
             model = models[name]
             print(f"\n=== {name} ({model}) ===")
-            fails = check(store, do_streaming=not args.no_streaming, model=model)
-            ran_any = True
+            fails, entries = check(
+                store,
+                do_streaming=not args.no_streaming,
+                model=model,
+            )
         except ImportError as e:
-            print(f"  - {name}: SDK not installed ({e}); skipped")
+            print(f"  - {name}: SDK not installed ({type(e).__name__}); unverified")
+            unverified[name] = type(e).__name__
             continue
         except Exception as e:
-            # An auth/network failure is a skip, not a capture failure.
-            print(f"  - {name}: could not run live calls ({type(e).__name__}: {e}); skipped")
+            # Auth/network failures are evidence gaps, never a passing gate.
+            print(f"  - {name}: live calls did not complete ({type(e).__name__}); unverified")
+            unverified[name] = type(e).__name__
             continue
         if fails:
             for f in fails:
                 print(f"  {FAIL} {f}")
             all_fails += fails
         else:
-            print(f"  {PASS} all captured traces correctly populated"
-                  + ("" if args.no_streaming else " (incl. streaming)"))
+            verified.append(name)
+            verified_entries[name] = entries
+            print(f"  {PASS} verified entry points: {', '.join(entries)}")
 
     print("\n" + "=" * 60)
-    if not ran_any:
-        print("No providers ran. Set ANTHROPIC_API_KEY / OPENAI_API_KEY / GOOGLE_API_KEY "
-              "and install the corresponding SDK(s).")
-        return 2
+    print("Verified requested providers: " + (", ".join(verified) or "none"))
+    for name in verified:
+        print(
+            f"Verified entry points ({name}): "
+            + ", ".join(verified_entries[name])
+        )
+    if unverified:
+        print("Unverified requested providers: " + ", ".join(sorted(unverified)))
     if all_fails:
         print(f"LIVE CAPTURE CHECK FAILED ({len(all_fails)} issue(s)).")
         return 1
-    print("LIVE CAPTURE CHECK PASSED — instrumentors capture real traffic correctly.")
+    if unverified:
+        print("LIVE CAPTURE CHECK INCOMPLETE — every requested provider must run.")
+        return 2
+    print("LIVE CAPTURE CHECK PASSED for: " + ", ".join(verified))
     return 0
 
 

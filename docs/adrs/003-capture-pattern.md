@@ -14,8 +14,9 @@ around Verdict-specific clients.
 
 **Primary capture: monkey-patch via `wrapt`.** The user runs `verdict.init()`
 once at app startup; we transparently intercept provider SDK calls (e.g.
-`Anthropic.messages.create`, `OpenAI.chat.completions.create`) by wrapping the
-target functions with `wrapt`. This is a common pattern for Python
+`Anthropic.messages.create`, `Anthropic.messages.stream`, and
+`OpenAI.chat.completions.create`) by wrapping the target functions with `wrapt`.
+This is a common pattern for Python
 auto-instrumentation libraries.
 
 **We do NOT depend on OpenLLMetry / OpenTelemetry instrumentation packages.** Our
@@ -68,7 +69,19 @@ pass-through that yields each chunk immediately and collects a copy for
 telemetry. Full consumption, iteration error, explicit `close()` / `aclose()`,
 context-manager exit, and async cancellation finalize exactly once. A dropped,
 never-iterated, unclosed stream is not a supported garbage-collection
-finalization boundary.
+finalization boundary. Anthropic's lazy `messages.stream(...)` manager begins
+capture and binds routing context on each context entry, so constructing but
+never entering it performs no provider request or trace. Telemetry gives the
+SDK and capture independent views of a one-shot message iterable, so SDK
+request construction cannot be starved by capture. Capture observes messages
+only as the SDK consumes them, so an iterable failure remains at the provider
+call boundary and produces an error trace. Its event, text, and final-message
+accessors all consume through the same accumulator. Anthropic
+stream traces use `verdict.stream_completion` in `Trace.tags` to identify
+`complete`, `partial`, or `error` finalization without changing the storage
+schema. When content capture is disabled the accumulator does not retain text;
+when enabled, an empty string remains distinct from unavailable content through
+storage and dashboard rendering.
 
 Provider request scalars cross one typed boundary before Trace construction and
 are normalized again before persistence because response usage and latency are

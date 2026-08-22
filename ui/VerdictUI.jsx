@@ -1006,7 +1006,9 @@ function Traces({ data = SEED }) {
                   <span className="text-xs font-mono" style={{ color: C.faint }}>{s.hour}h</span>
                   <span className="flex items-center gap-2 min-w-0 pr-3">
                     <Dot color={provider.color} />
-                    <span className="truncate" style={{ color: C.text }}>{s.prompt_redacted || "Content capture off"}</span>
+                    <span className="truncate" style={{ color: C.text }}>
+                      {s.prompt_redacted == null ? "Content capture off" : (s.prompt_redacted || "Captured prompt was empty")}
+                    </span>
                   </span>
                   <span><Pill color={C.sub}>{s.cluster_id}</Pill></span>
                   <span className="text-xs" style={{ color: C.sub }}>{s.input_tokens}/{s.output_tokens}</span>
@@ -1065,12 +1067,16 @@ function TraceDetail({ s, onClose }) {
         </div>
         <div>
           <div className="text-xs mb-1" style={{ color: C.faint }}>PROMPT</div>
-          <div className="text-sm p-2.5" style={{ background: C.panel2, color: C.text, border: `1px solid ${C.border}`, borderRadius: 3 }}>{s.prompt_redacted || "Content was not captured for this trace."}</div>
+          <div className="text-sm p-2.5" style={{ background: C.panel2, color: C.text, border: `1px solid ${C.border}`, borderRadius: 3 }}>
+            {s.prompt_redacted == null ? "Content was not captured for this trace." : (s.prompt_redacted || "Captured prompt was empty.")}
+          </div>
         </div>
         <div>
           <div className="text-xs mb-1" style={{ color: C.faint }}>RESPONSE</div>
           <div className="text-sm p-2.5" style={{ background: C.panel2, color: C.sub, border: `1px solid ${C.border}`, borderRadius: 3, lineHeight: 1.5 }}>
-            {s.error ? <span style={{ color: C.red }}>Error: {s.error}</span> : (s.response_redacted || "Content was not captured for this trace.")}
+            {s.error ? <span style={{ color: C.red }}>Error: {s.error}</span> : (
+              s.response_redacted == null ? "Content was not captured for this trace." : (s.response_redacted || "Captured response was empty.")
+            )}
           </div>
         </div>
         {s.judgment && (
