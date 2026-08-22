@@ -19,6 +19,32 @@ the customer POC profile is refined.
 - The live capture gate now exercises Anthropic's stream helper, requires
   exactly one new trace per entry point, names the providers and entry points it
   verified, and exits nonzero when any requested provider could not run.
+- OpenAI Responses calls are captured for synchronous and asynchronous
+  `create`, `parse`, raw streaming, and new/existing-response stream helpers.
+  Complete, incomplete, failed, cancelled, queued, in-progress, partial-close,
+  application-error, provider-error, and cancellation boundaries retain their
+  status and persist exactly once; an owned post-request-hook native HTTP
+  transport (`httpx` or current `httpx2` SDK layouts)
+  marker prevents local validation, nested same-client requests, request-hook
+  failures, or cancellation-shaped traversal failures from creating false
+  provider traces. Capture reads allowlisted fields from serialized outbound
+  JSON, preserving SDK mapping/list semantics, actual `extra_body` precedence,
+  aliases, and the wire-time mutable snapshot. With content capture disabled,
+  only serialized scalar metadata is retained at that boundary. Nested helper reuse closes both
+  traces, stale helpers stay
+  inactive after shutdown, captured content is recursively redacted, empty
+  captured content remains distinct from unavailable content, and disabled
+  capture retains no response text. The Responses resource is
+  feature-detected so the declared OpenAI minimum continues to capture Chat
+  Completions. The declared minimum is OpenAI 1.56.2, whose ordinary default
+  client is exercised separately without constraining the Google extra's HTTPX.
+  Partial streams retain done-event-only output text and refusal content; an
+  authoritative done value replaces any observed suffix deltas without
+  duplicating normal complete delta sequences.
+  The experimental `client.beta.responses` multi-agent resource remains outside
+  this bounded support surface.
+- The live capture gate now names and verifies the OpenAI Responses entry points
+  it actually exercises, including the helper error boundary.
 - Trace Explorer distinguishes captured empty prompts and responses from traces
   whose content capture was disabled.
 

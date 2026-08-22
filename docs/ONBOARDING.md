@@ -118,8 +118,11 @@ Use only the provider methods listed in the
 [`POC release profile`](POC_RELEASE_PROFILE.md). In particular, Anthropic
 `messages.stream(...)` and the OpenAI Responses API are not captured in
 published releases through `0.1.0a7`. Unreleased source captures the Anthropic
-helper, but that path remains unverified for a customer installation until the
-next synchronized alpha is published and cold-installed.
+helper plus OpenAI `responses.create(...)`, `responses.parse(...)`, raw response
+streams, and `responses.stream(...)` for new or existing responses. Those paths
+remain unverified for a customer installation until the next synchronized alpha
+is published and cold-installed. The separate experimental
+`client.beta.responses` multi-agent resource is not instrumented.
 
 ### Verify capture on your own SDK versions (recommended before you trust it)
 

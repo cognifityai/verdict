@@ -25,7 +25,8 @@ they go through a supported provider SDK.
 - Supports non-streaming and streaming responses for the supported SDK paths.
   The versioned [`0.1.0a4 POC release profile`](POC_RELEASE_PROFILE.md) names
   the entry points released through `0.1.0a7` explicitly. Unreleased source adds
-  Anthropic `messages.stream(...)`; that is not a public-release claim until the
+  Anthropic `messages.stream(...)` and OpenAI Responses create, parse, raw
+  stream, and helper entry points; those are not public-release claims until the
   next synchronized alpha passes release verification.
 - Stores traces in SQLite by default, with Postgres support for deployments that
   need a server database.

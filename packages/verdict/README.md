@@ -131,8 +131,11 @@ points remain Anthropic
 `models.generate_content(...)` / `generate_content_stream(...)`. Anthropic
 `messages.stream(...)` and the OpenAI Responses API are not captured in those
 releases. Unreleased source now captures the Anthropic helper's synchronous and
-asynchronous event, text, and final-message accessors; wait for the next
-synchronized alpha before treating that path as released.
+asynchronous accessors plus OpenAI `responses.create(...)`,
+`responses.parse(...)`, raw response streams, and `responses.stream(...)` for
+new or existing responses. Wait for the next synchronized alpha before treating
+those paths as released. The separate experimental `client.beta.responses`
+multi-agent resource is not instrumented.
 
 See the
 [repository README](https://github.com/cognifityai/verdict#readme) for the full

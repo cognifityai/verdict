@@ -265,16 +265,19 @@ Hexagonal / ports-and-adapters, ≥2 adapters per port (one real + in-memory for
   `models.generate_content(...)` / `generate_content_stream(...)` are the
   supported entry points. Anthropic `messages.stream(...)` and the OpenAI
   Responses API are not captured by those published releases. Unreleased source
-  now instruments the Anthropic helper and its documented sync/async consumption
-  styles; it is not public-release evidence until the next synchronized alpha
-  passes its release gates. See the
+  now instruments the Anthropic helper plus synchronous and asynchronous OpenAI
+  `responses.create(...)`, `responses.parse(...)`, raw response streams, and
+  `responses.stream(...)` for new or existing responses. These paths are not
+  public-release evidence until the next synchronized alpha passes its release
+  gates. The separate experimental `client.beta.responses` multi-agent resource
+  is outside this bounded support surface. See the
   [`POC release profile`](docs/POC_RELEASE_PROFILE.md) before instrumenting an
   existing application.
 - Stream traces finalize deterministically on full iteration, an iteration
   error, explicit `close()` / `aclose()`, or context-manager exit. Async
   cancellation is recorded as an error. Dropping a never-iterated or unclosed
   stream and relying on garbage collection is not a supported persistence
-  guarantee. On the unreleased Anthropic helper path,
+  guarantee. On the unreleased Anthropic helper and OpenAI Responses stream paths,
   `Trace.tags["verdict.stream_completion"]` distinguishes `complete`, `partial`,
   and `error` finalization.
 - **`encrypt` redaction mode** is not implemented (rejected at `init()`);

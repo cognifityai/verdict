@@ -26,16 +26,20 @@ from verdict.instrumentors import openai as openai_instr  # noqa: E402
 def _fresh_module_with_native_wrapped():
     """A stand-in module whose method carries a NATIVE __wrapped__ (like the SDKs)
     but was never wrapped by wrapt."""
+
     def create(self=None):
         return "real"
-    create.__wrapped__ = object()   # what Anthropic/OpenAI SDK methods have natively
+
+    create.__wrapped__ = object()  # what Anthropic/OpenAI SDK methods have natively
 
     class Messages:
         pass
+
     Messages.create = create
 
     class Mod:
         pass
+
     Mod.Messages = Messages
     Mod.Completions = Messages
     return Mod
@@ -68,10 +72,12 @@ def test_wrapt_wrapped_method_IS_detected_anthropic():
 
     class Messages:
         pass
+
     Messages.create = create
 
     class Mod:
         pass
+
     Mod.Messages = Messages
 
     instr = object.__new__(AnthropicInstrumentor)
@@ -94,8 +100,7 @@ def test_real_anthropic_install_wraps_and_restores_complete_supported_surface():
         ("AsyncMessages", "stream"),
     )
     originals = {
-        (cls_name, method): getattr(getattr(mod, cls_name), method)
-        for cls_name, method in surface
+        (cls_name, method): getattr(getattr(mod, cls_name), method) for cls_name, method in surface
     }
     instrumentor = AnthropicInstrumentor(VerdictClient(storage=InMemoryStorage()))
 
@@ -112,3 +117,75 @@ def test_real_anthropic_install_wraps_and_restores_complete_supported_surface():
 
     for cls_name, method in surface:
         assert getattr(getattr(mod, cls_name), method) is originals[(cls_name, method)]
+
+
+def test_real_openai_install_wraps_and_restores_complete_supported_surface():
+    pytest.importorskip("openai")
+    import openai.resources.chat.completions as chat_mod
+    from verdict.client import VerdictClient
+    from verdict.instrumentors.base import is_verdict_wrapt_wrapper
+    from verdict.instrumentors.openai import OpenAIInstrumentor
+    from verdict.storage.memory import InMemoryStorage
+
+    resources = [
+        (chat_mod, cls_name, method)
+        for cls_name, method in (
+            ("Completions", "create"),
+            ("Completions", "stream"),
+            ("AsyncCompletions", "create"),
+            ("AsyncCompletions", "stream"),
+        )
+        if hasattr(getattr(chat_mod, cls_name, None), method)
+    ]
+    responses_resource = openai_instr._responses_resource_module()
+    if responses_resource is not None:
+        import openai._base_client as base_client_mod
+
+        resources.extend(
+            (base_client_mod, cls_name, "request")
+            for cls_name in ("SyncAPIClient", "AsyncAPIClient")
+            if hasattr(getattr(base_client_mod, cls_name, None), "request")
+        )
+        for http_module in openai_instr._response_http_modules(base_client_mod):
+            resources.extend(
+                (http_module, cls_name, "_send_single_request")
+                for cls_name in ("Client", "AsyncClient")
+                if hasattr(
+                    getattr(http_module, cls_name, None),
+                    "_send_single_request",
+                )
+            )
+        responses_mod, _module_path = responses_resource
+        resources.extend(
+            (responses_mod, cls_name, method)
+            for cls_name, method in (
+                ("Responses", "create"),
+                ("Responses", "parse"),
+                ("Responses", "retrieve"),
+                ("Responses", "stream"),
+                ("AsyncResponses", "create"),
+                ("AsyncResponses", "parse"),
+                ("AsyncResponses", "retrieve"),
+                ("AsyncResponses", "stream"),
+            )
+            if hasattr(getattr(responses_mod, cls_name, None), method)
+        )
+    originals = {
+        (id(mod), cls_name, method): getattr(getattr(mod, cls_name), method)
+        for mod, cls_name, method in resources
+    }
+    instrumentor = OpenAIInstrumentor(VerdictClient(storage=InMemoryStorage()))
+
+    instrumentor.install()
+    instrumentor.install()
+    try:
+        for mod, cls_name, method in resources:
+            wrapped = getattr(getattr(mod, cls_name), method)
+            assert is_verdict_wrapt_wrapper(wrapped, owner=instrumentor)
+            assert wrapped.__wrapped__ is originals[(id(mod), cls_name, method)]
+    finally:
+        instrumentor.uninstall()
+        instrumentor.uninstall()
+
+    for mod, cls_name, method in resources:
+        assert getattr(getattr(mod, cls_name), method) is originals[(id(mod), cls_name, method)]

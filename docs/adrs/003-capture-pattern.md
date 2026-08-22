@@ -15,7 +15,8 @@ around Verdict-specific clients.
 **Primary capture: monkey-patch via `wrapt`.** The user runs `verdict.init()`
 once at app startup; we transparently intercept provider SDK calls (e.g.
 `Anthropic.messages.create`, `Anthropic.messages.stream`, and
-`OpenAI.chat.completions.create`) by wrapping the target functions with `wrapt`.
+`OpenAI.chat.completions.create` plus the OpenAI Responses resource) by wrapping
+the target functions with `wrapt`.
 This is a common pattern for Python
 auto-instrumentation libraries.
 
@@ -82,6 +83,41 @@ stream traces use `verdict.stream_completion` in `Trace.tags` to identify
 schema. When content capture is disabled the accumulator does not retain text;
 when enabled, an empty string remains distinct from unavailable content through
 storage and dashboard rendering.
+
+OpenAI Responses capture follows the same one-request/one-trace boundary for
+sync and async `responses.create(...)`, `responses.parse(...)`, raw streams, and
+the lazy `responses.stream(...)` helper. A helper for a new response delegates
+to its nested create call; a helper for an existing response delegates to its
+streaming retrieve call, so the manager itself never creates a duplicate trace.
+Routing binds when that nested request starts. Every valid non-stream Response
+status is retained; cancelled and failed responses are error traces. Terminal
+completed, incomplete, and failed stream events retain their distinct outcome,
+while explicit close, helper exit, application error, transport error, and
+cancellation finalize once with `verdict.stream_completion` set to `complete`,
+`partial`, or `error`. A partial stream also retains content carried only by a
+valid output-text or refusal `done` event; its authoritative full value replaces
+any observed suffix deltas for the same output/content identity. SDK-local
+validation and request-hook failures before transport emit no trace. Each
+Responses resource call owns its exact SDK request-options object, and only the
+matching native HTTP transport invocation establishes the provider boundary, so
+nested same-client requests cannot mark the outer call. Both OpenAI's legacy
+`httpx` layout and its current `httpx2` layout are discovered from the installed
+SDK; an explicitly injected supported legacy client is wrapped as well. Capture reads an
+allowlisted view of the already-serialized outbound JSON. This preserves SDK
+mapping/list semantics, applies actual `extra_body` precedence, and records the
+wire snapshot rather than a later caller mutation without pre-traversing input.
+Content fields are retained from that snapshot only when content capture is
+enabled; disabled capture retains scalar request metadata only.
+The
+declared `openai>=1.56.2` minimum predates the Responses resource,
+so installation feature-detects it and continues to capture Chat Completions on
+older supported SDKs. This floor is the first tested patch after OpenAI's HTTPX
+0.28 default-client incompatibility and avoids constraining HTTPX for the Google
+extra; CI exercises that ordinary constructor as well as injected local
+transports. OpenAI's
+`beta.chat.completions` alias shares the stable Chat resource class and therefore
+the same wrappers. The separate experimental `beta.responses` multi-agent
+resource is outside this bounded support surface.
 
 Provider request scalars cross one typed boundary before Trace construction and
 are normalized again before persistence because response usage and latency are
