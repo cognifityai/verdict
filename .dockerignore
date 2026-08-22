@@ -23,3 +23,8 @@ docker-compose.yml
 *.db-*
 !docker-db/verdict.db
 !docker-db/verdict.db-*
+
+# Final deny rules: never add local secret fallbacks or direnv state to a build
+# context even if the context allowlist grows.
+*.[Ee][Nn][Vv]*
+.[Dd][Ii][Rr][Ee][Nn][Vv]/

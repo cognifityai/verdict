@@ -8,6 +8,11 @@ the customer POC profile is refined.
 
 ### Security
 
+- Repository, container, cloud-upload, and artifact gates now reject plaintext
+  `.env*`, `*.env*`, `*.envrc*`, and `.direnv` fallbacks. The checked-in example
+  is a variable-name reference only; runtime keys should be injected from a
+  managed secret store or OS credential manager. The alignment-sweep wrapper
+  no longer sources a repository-root `.env` fallback.
 - IPv6 redaction now separates validated addresses from trailing non-address
   text in message and host/port shapes, preventing complete or partial address
   fragments from crossing storage, export, dashboard API, and UI payload
