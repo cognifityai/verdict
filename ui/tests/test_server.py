@@ -132,6 +132,41 @@ def test_bundle_marks_unknown_cost_and_exposes_signal_examples(tmp_path):
     assert bundle["driftSignals"][0]["exampleTraceIds"] == [trace.trace_id]
 
 
+def test_dashboard_api_preserves_captured_empty_content(tmp_path):
+    import httpx
+
+    path = tmp_path / "empty-content.db"
+    storage = SQLiteStorage(str(path))
+    storage.insert_trace(Trace(
+        trace_id="captured-empty",
+        provider="anthropic",
+        request_model="claude-test",
+        prompt_redacted="",
+        response_redacted="",
+    ))
+    storage.close()
+
+    [sample] = build_bundle(path)["samples"]
+    assert sample["prompt_redacted"] == ""
+    assert sample["response_redacted"] == ""
+
+    async def request_data():
+        transport = httpx.ASGITransport(
+            app=create_app(storage=f"sqlite:///{path}"),
+        )
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            return await client.get("/api/data")
+
+    response = asyncio.run(request_data())
+    assert response.status_code == 200
+    [api_sample] = response.json()["samples"]
+    assert api_sample["prompt_redacted"] == ""
+    assert api_sample["response_redacted"] == ""
+
+
 def test_bundle_keeps_agent_judge_and_unclassified_cost_provenance_separate(tmp_path):
     path = tmp_path / "cost-provenance.db"
     storage = SQLiteStorage(str(path))

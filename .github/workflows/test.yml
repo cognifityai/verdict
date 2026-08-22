@@ -82,6 +82,34 @@ jobs:
       - name: pytest
         run: python -m pytest -v --tb=short
 
+  anthropic-compat:
+    name: Anthropic declared minimum SDK
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+
+      - name: Install the declared minimum Anthropic SDK
+        run: |
+          python -m pip install --disable-pip-version-check \
+            pytest pytest-asyncio "anthropic==0.30.0"
+          python -m pip install --disable-pip-version-check \
+            -e packages/verdict
+
+      - name: Exercise both resource layouts and stream lifecycles
+        run: >-
+          python -m pytest -v --tb=short
+          packages/verdict/tests/test_provider_scalar_persistence.py
+          packages/verdict/tests/test_instrumentor_wrap_guard.py
+          -k 'messages_stream_helper or raw_stream_surface or complete_supported_surface'
+
   postgres:
     name: PostgreSQL adapter round trip
     runs-on: ubuntu-latest

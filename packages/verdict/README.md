@@ -124,12 +124,15 @@ responsible for cloud credentials, authorization, CSRF protection, collection,
 and job execution. Without `operations_url`, no Operations tab or extra request
 is present.
 
-For `0.1.0a4`, supported POC entry points are Anthropic
+For the published releases through `0.1.0a7`, the bounded `0.1.0a4` POC entry
+points remain Anthropic
 `messages.create(...)` (including `stream=True`), OpenAI
 `chat.completions.create(...)` and its stream helper, and Google
 `models.generate_content(...)` / `generate_content_stream(...)`. Anthropic
-`messages.stream(...)` and the OpenAI Responses API are not captured in this
-release.
+`messages.stream(...)` and the OpenAI Responses API are not captured in those
+releases. Unreleased source now captures the Anthropic helper's synchronous and
+asynchronous event, text, and final-message accessors; wait for the next
+synchronized alpha before treating that path as released.
 
 See the
 [repository README](https://github.com/cognifityai/verdict#readme) for the full

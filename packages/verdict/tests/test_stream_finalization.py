@@ -7,6 +7,10 @@ from types import SimpleNamespace
 
 import pytest
 from verdict.instrumentors.anthropic import (
+    _AsyncMessageStreamManagerWrapper,
+    _MessageStreamManagerWrapper,
+)
+from verdict.instrumentors.anthropic import (
     _AsyncStreamingWrapper as AnthropicAsyncWrapper,
 )
 from verdict.instrumentors.anthropic import _StreamingWrapper as AnthropicWrapper
@@ -34,6 +38,12 @@ class FakeInstrumentor:
 
     def _safe_persist(self, trace: Trace) -> None:
         self.persisted.append(trace)
+
+    def _build_input_trace(self, _kwargs) -> Trace:
+        return Trace(provider="anthropic")
+
+    def _fill_input_trace(self, _trace: Trace, _kwargs) -> None:
+        pass
 
 
 class SyncStream:
@@ -130,6 +140,30 @@ def test_sync_wrapper_close_finalizes_never_iterated_stream(wrapper_type):
     assert len(instrumentor.persisted) == 1
 
 
+def test_sync_helper_close_defers_finalization_until_manager_cleanup_error():
+    class FailingManager:
+        def __init__(self) -> None:
+            self.stream = SyncStream()
+
+        def __enter__(self):
+            return self.stream
+
+        def __exit__(self, exc_type, exc, tb):
+            raise RuntimeError("manager cleanup failed")
+
+    instrumentor = FakeInstrumentor()
+    wrapped = _MessageStreamManagerWrapper(
+        FailingManager(), {}, instrumentor
+    )
+
+    with pytest.raises(RuntimeError, match="manager cleanup failed"):
+        with wrapped as stream:
+            stream.close()
+
+    assert len(instrumentor.persisted) == 1
+    assert instrumentor.persisted[0].error == "RuntimeError: manager cleanup failed"
+
+
 @pytest.mark.parametrize("wrapper_type", SYNC_WRAPPERS)
 def test_sync_context_exit_finalizes(wrapper_type):
     inner = SyncStream()
@@ -197,6 +231,35 @@ def test_async_partial_stream_aclose_finalizes(wrapper_type):
     inner, instrumentor = asyncio.run(run())
     assert inner.closed is True
     assert len(instrumentor.persisted) == 1
+
+
+def test_async_helper_close_defers_finalization_until_manager_cleanup_error():
+    class FailingManager:
+        def __init__(self) -> None:
+            self.stream = AsyncStream()
+
+        async def __aenter__(self):
+            return self.stream
+
+        async def __aexit__(self, exc_type, exc, tb):
+            raise RuntimeError("async manager cleanup failed")
+
+    async def run():
+        instrumentor = FakeInstrumentor()
+        wrapped = _AsyncMessageStreamManagerWrapper(
+            FailingManager(), {}, instrumentor
+        )
+        with pytest.raises(RuntimeError, match="async manager cleanup failed"):
+            async with wrapped as stream:
+                await stream.close()
+        return instrumentor
+
+    instrumentor = asyncio.run(run())
+    assert len(instrumentor.persisted) == 1
+    assert (
+        instrumentor.persisted[0].error
+        == "RuntimeError: async manager cleanup failed"
+    )
 
 
 @pytest.mark.parametrize("wrapper_type", ASYNC_WRAPPERS)

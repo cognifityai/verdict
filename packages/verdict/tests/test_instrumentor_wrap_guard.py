@@ -77,3 +77,38 @@ def test_wrapt_wrapped_method_IS_detected_anthropic():
     instr = object.__new__(AnthropicInstrumentor)
     wrapt.wrap_function_wrapper(Mod.Messages, "create", instr._wrap_create_sync)
     assert anthropic_instr._is_wrapped(Mod, "Messages", "create") is True
+
+
+def test_real_anthropic_install_wraps_and_restores_complete_supported_surface():
+    pytest.importorskip("anthropic")
+    from verdict.client import VerdictClient
+    from verdict.instrumentors.anthropic import AnthropicInstrumentor
+    from verdict.instrumentors.base import is_verdict_wrapt_wrapper
+    from verdict.storage.memory import InMemoryStorage
+
+    mod, _module_path = anthropic_instr._message_resource_module()
+    surface = (
+        ("Messages", "create"),
+        ("Messages", "stream"),
+        ("AsyncMessages", "create"),
+        ("AsyncMessages", "stream"),
+    )
+    originals = {
+        (cls_name, method): getattr(getattr(mod, cls_name), method)
+        for cls_name, method in surface
+    }
+    instrumentor = AnthropicInstrumentor(VerdictClient(storage=InMemoryStorage()))
+
+    instrumentor.install()
+    instrumentor.install()
+    try:
+        for cls_name, method in surface:
+            wrapped = getattr(getattr(mod, cls_name), method)
+            assert is_verdict_wrapt_wrapper(wrapped, owner=instrumentor)
+            assert wrapped.__wrapped__ is originals[(cls_name, method)]
+    finally:
+        instrumentor.uninstall()
+        instrumentor.uninstall()
+
+    for cls_name, method in surface:
+        assert getattr(getattr(mod, cls_name), method) is originals[(cls_name, method)]

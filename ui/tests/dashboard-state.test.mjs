@@ -428,3 +428,25 @@ test("metadata-only traces remain inspectable when content capture is off", asyn
   const detail = render(ui.TraceDetail, createHooks(), { s: sample, onClose() {} });
   assert.match(textOf(detail), /Content was not captured for this trace/);
 });
+
+test("captured empty content remains distinct from capture being off", async () => {
+  const ui = await loadUiModule();
+  const sample = {
+    trace_id: "empty-trace", provider: "anthropic", request_model: "claude-test",
+    cluster_id: null, input_tokens: 12, output_tokens: 0, latency_ms: 150,
+    cost_usd: null, error: null, hour: 0, prompt_redacted: "",
+    response_redacted: "",
+  };
+  const data = bundle("evaluator-a", [sample]);
+  data.providers = [{ key: "anthropic", rawProvider: "anthropic", model: "claude-test" }];
+
+  const traceList = textOf(render(ui.Traces, createHooks(), { data }));
+  assert.match(traceList, /Captured prompt was empty/);
+  assert.doesNotMatch(traceList, /Content capture off/);
+
+  const detail = render(ui.TraceDetail, createHooks(), { s: sample, onClose() {} });
+  const rendered = textOf(detail);
+  assert.match(rendered, /Captured prompt was empty/);
+  assert.match(rendered, /Captured response was empty/);
+  assert.doesNotMatch(rendered, /Content was not captured/);
+});

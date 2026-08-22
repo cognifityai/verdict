@@ -258,19 +258,25 @@ Hexagonal / ports-and-adapters, ≥2 adapters per port (one real + in-memory for
 ## Honest limits / not in v0
 
 - **No OpenTelemetry/OpenInference span emission** yet (vendor-neutral schema today; exporter is planned).
-- **Capture coverage for the `0.1.0a4` POC profile:** Anthropic
+- **Published capture coverage through `0.1.0a7`:** the bounded `0.1.0a4` POC
+  profile remains the release evidence: Anthropic
   `messages.create(...)` (including `stream=True`), OpenAI
   `chat.completions.create(...)` and its stream helper, and Google
   `models.generate_content(...)` / `generate_content_stream(...)` are the
   supported entry points. Anthropic `messages.stream(...)` and the OpenAI
-  Responses API are not captured in this release. See the
+  Responses API are not captured by those published releases. Unreleased source
+  now instruments the Anthropic helper and its documented sync/async consumption
+  styles; it is not public-release evidence until the next synchronized alpha
+  passes its release gates. See the
   [`POC release profile`](docs/POC_RELEASE_PROFILE.md) before instrumenting an
   existing application.
 - Stream traces finalize deterministically on full iteration, an iteration
   error, explicit `close()` / `aclose()`, or context-manager exit. Async
   cancellation is recorded as an error. Dropping a never-iterated or unclosed
   stream and relying on garbage collection is not a supported persistence
-  guarantee.
+  guarantee. On the unreleased Anthropic helper path,
+  `Trace.tags["verdict.stream_completion"]` distinguishes `complete`, `partial`,
+  and `error` finalization.
 - **`encrypt` redaction mode** is not implemented (rejected at `init()`);
   redaction uses a linear email scanner plus regex candidates, Luhn card checks,
   and standard-library IP validation. Presidio is not used.
