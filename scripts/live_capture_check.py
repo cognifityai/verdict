@@ -65,8 +65,10 @@ def _check_trace(
             )
     if expect_error:
         if not t.error:
-            fails.append(f"{label}: expected an error trace, but error is empty "
-                         "(a failed call was recorded as success)")
+            fails.append(
+                f"{label}: expected an error trace, but error is empty "
+                "(a failed call was recorded as success)"
+            )
         return fails  # don't demand tokens/cost on an errored call
     if not t.input_tokens or t.input_tokens <= 0:
         fails.append(f"{label}: input_tokens missing/zero ({t.input_tokens})")
@@ -115,14 +117,16 @@ def check_anthropic(
     model: str,
 ) -> tuple[list[str], list[str]]:
     import anthropic
+
     fails: list[str] = []
     verified: list[str] = []
     client = anthropic.Anthropic()
 
     # 1. non-streaming
     before = len(storage.list_traces(limit=1000))
-    client.messages.create(model=model, max_tokens=16,
-                           messages=[{"role": "user", "content": "Say 'ok'."}])
+    client.messages.create(
+        model=model, max_tokens=16, messages=[{"role": "user", "content": "Say 'ok'."}]
+    )
     entry_fails = _verify_new_trace(
         storage,
         before,
@@ -138,8 +142,11 @@ def check_anthropic(
     if do_streaming:
         before = len(storage.list_traces(limit=1000))
         stream = client.messages.create(
-            model=model, max_tokens=16, stream=True,
-            messages=[{"role": "user", "content": "Count to 3."}])
+            model=model,
+            max_tokens=16,
+            stream=True,
+            messages=[{"role": "user", "content": "Count to 3."}],
+        )
         for _ in stream:
             pass
         entry_fails = _verify_new_trace(
@@ -216,13 +223,15 @@ def check_openai(
     model: str,
 ) -> tuple[list[str], list[str]]:
     import openai
+
     fails: list[str] = []
     verified: list[str] = []
     client = openai.OpenAI()
 
     before = len(storage.list_traces(limit=1000))
-    client.chat.completions.create(model=model, max_tokens=16,
-                                   messages=[{"role": "user", "content": "Say 'ok'."}])
+    client.chat.completions.create(
+        model=model, max_tokens=16, messages=[{"role": "user", "content": "Say 'ok'."}]
+    )
     entry_fails = _verify_new_trace(
         storage,
         before,
@@ -237,9 +246,12 @@ def check_openai(
     if do_streaming:
         before = len(storage.list_traces(limit=1000))
         stream = client.chat.completions.create(
-            model=model, max_tokens=16, stream=True,
+            model=model,
+            max_tokens=16,
+            stream=True,
             stream_options={"include_usage": True},
-            messages=[{"role": "user", "content": "Count to 3."}])
+            messages=[{"role": "user", "content": "Count to 3."}],
+        )
         for _ in stream:
             pass
         entry_fails = _verify_new_trace(
@@ -252,6 +264,134 @@ def check_openai(
         fails += entry_fails
         if not entry_fails:
             verified.append("chat.completions.create(stream=True)")
+
+    if not hasattr(client, "responses"):
+        fails.append(
+            "openai Responses API is unavailable in the installed SDK; "
+            "install a current openai release"
+        )
+        return fails, verified
+
+    before = len(storage.list_traces(limit=1000))
+    response = client.responses.create(
+        model=model,
+        max_output_tokens=16,
+        input="Say 'responses ok'.",
+    )
+    entry_fails = _verify_new_trace(
+        storage,
+        before,
+        label="openai responses.create",
+        expect_error=False,
+        expect_cost=True,
+    )
+    fails += entry_fails
+    if not entry_fails:
+        verified.append("responses.create")
+
+    before = len(storage.list_traces(limit=1000))
+    client.responses.parse(
+        model=model,
+        max_output_tokens=16,
+        input="Say 'parsed ok'.",
+    )
+    entry_fails = _verify_new_trace(
+        storage,
+        before,
+        label="openai responses.parse",
+        expect_error=False,
+        expect_cost=True,
+    )
+    fails += entry_fails
+    if not entry_fails:
+        verified.append("responses.parse")
+
+    if do_streaming:
+        before = len(storage.list_traces(limit=1000))
+        stream = client.responses.create(
+            model=model,
+            max_output_tokens=16,
+            input="Count to 3.",
+            stream=True,
+        )
+        for _ in stream:
+            pass
+        entry_fails = _verify_new_trace(
+            storage,
+            before,
+            label="openai responses.create(stream=True)",
+            expect_error=False,
+            expect_cost=True,
+            expect_stream_completion="complete",
+        )
+        fails += entry_fails
+        if not entry_fails:
+            verified.append("responses.create(stream=True)")
+
+        before = len(storage.list_traces(limit=1000))
+        with client.responses.stream(
+            model=model,
+            max_output_tokens=16,
+            input="Say 'helper ok'.",
+        ) as helper_stream:
+            helper_stream.until_done()
+        entry_fails = _verify_new_trace(
+            storage,
+            before,
+            label="openai responses.stream(new response)",
+            expect_error=False,
+            expect_cost=True,
+            expect_stream_completion="complete",
+        )
+        fails += entry_fails
+        if not entry_fails:
+            verified.append("responses.stream(new response)")
+
+        before = len(storage.list_traces(limit=1000))
+        with client.responses.stream(response_id=response.id) as helper_stream:
+            helper_stream.until_done()
+        entry_fails = _verify_new_trace(
+            storage,
+            before,
+            label="openai responses.stream(existing response)",
+            expect_error=False,
+            expect_cost=True,
+            expect_stream_completion="complete",
+        )
+        fails += entry_fails
+        if not entry_fails:
+            verified.append("responses.stream(existing response)")
+
+    bad_model = "openai-model-does-not-exist-xyz"
+    before = len(storage.list_traces(limit=1000))
+    try:
+        if do_streaming:
+            with client.responses.stream(
+                model=bad_model,
+                max_output_tokens=8,
+                input="hi",
+            ) as error_stream:
+                error_stream.until_done()
+        else:
+            client.responses.create(
+                model=bad_model,
+                max_output_tokens=8,
+                input="hi",
+            )
+    except Exception:
+        pass
+    error_entry = "responses.stream(error)" if do_streaming else "responses.create(error)"
+    entry_fails = _verify_new_trace(
+        storage,
+        before,
+        label=f"openai {error_entry}",
+        expect_error=True,
+        expect_cost=False,
+        expect_stream_completion="error" if do_streaming else None,
+    )
+    fails += entry_fails
+    if not entry_fails:
+        verified.append(error_entry)
     return fails, verified
 
 
@@ -261,6 +401,7 @@ def check_google(
     model: str,
 ) -> tuple[list[str], list[str]]:
     from google import genai
+
     fails: list[str] = []
     verified: list[str] = []
     client = genai.Client()
@@ -389,10 +530,7 @@ def main(argv: list[str] | None = None, *, checks=None) -> int:
     print("\n" + "=" * 60)
     print("Verified requested providers: " + (", ".join(verified) or "none"))
     for name in verified:
-        print(
-            f"Verified entry points ({name}): "
-            + ", ".join(verified_entries[name])
-        )
+        print(f"Verified entry points ({name}): " + ", ".join(verified_entries[name]))
     if unverified:
         print("Unverified requested providers: " + ", ".join(sorted(unverified)))
     if all_fails:
