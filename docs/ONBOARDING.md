@@ -317,6 +317,19 @@ the other captured workloads.
   When upgrading an existing store, run once with `--recluster` so old trace IDs
   are rebuilt under the new registry. Use `--trust-existing-clusters` only when
   every judgeable trace was assigned by your own stable external clusterer.
+  For the versioned registry, `verdict-cluster fit` requires a deliberate
+  strategy: `explicit` is supported, while automatic `semantic` and `hybrid`
+  semantic fallback are experimental opt-in alpha features. Inspect reports the
+  strategy status. The frozen semantic evaluation missed its 30% dominant-
+  cluster limit by one example, so do not present it as generally validated or
+  enable it silently for customers.
+  The supported explicit workflow stamps calls with
+  `verdict.intent_context("billing.v1")`, normalizes upgraded stores in bounded
+  pages, then runs fit, assign, validate, and activate. Active mode follows the
+  tenant pointer. Shadow analysis is disabled pending the tenant-isolation fix
+  tracked in Verdict issue #24. Tenantless Memory/SQLite uses the reserved
+  `__verdict_local__` registry scope. See `packages/verdict_eval/README.md` for
+  exact commands, safe error codes, inspect/rename, and rollback.
 - **Windows use capture time.** The pipeline places judgments into windows using
   the associated trace's `started_at`, not the time the judgment was created.
   Re-running the same hourly analysis bucket replaces that bucket's signals, so
@@ -329,9 +342,10 @@ the other captured workloads.
   expected dimensions, and immutable prompt/rubric fingerprint. A latest judge
   error is coverage failure rather than a PASS/FAIL score and is eligible for a
   future retry. Other evaluator definitions remain stored but are excluded.
-- **The v0 runner is single-tenant per store.** It rejects a database containing
-  multiple tenant scopes instead of pooling them. Use separate stores until
-  tenant-scoped cluster registries and drift signals ship.
+- **Legacy mode is single-tenant per store.** Registry `active` mode requires
+  `--tenant-id` and fetches only that authorized trace scope, so an
+  unrelated tenant in shared PostgreSQL does not block the run. `off` retains
+  the legacy mixed-tenant refusal instead of pooling scopes.
 - **Dashboard cost is an estimate.** Verdict uses a dated static table of public
   base token prices. Unknown models are left unpriced, and caching, special
   tiers, provider tools, residency, and negotiated rates are not modeled.

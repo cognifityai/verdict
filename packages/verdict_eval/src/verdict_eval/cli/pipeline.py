@@ -38,23 +38,41 @@ def build_parser() -> argparse.ArgumentParser:
         default=os.environ.get("VERDICT_STORAGE", "sqlite:///./verdict.db"),
         help="Storage URL. Defaults to VERDICT_STORAGE, then sqlite:///./verdict.db.",
     )
-    p.add_argument("--judge-provider", default="fake",
-                   choices=["fake", "anthropic", "openai", "google"],
-                   help="Provider for the judge LLM.")
-    p.add_argument("--judge-model", default="fake-judge",
-                   help="Judge model name (use 'fake-judge' for offline).")
+    p.add_argument(
+        "--registry-mode",
+        choices=["off", "active"],
+        default="off",
+        help="Use the legacy cluster field or consume a v2 registry's pinned assignments.",
+    )
+    p.add_argument("--tenant-id", default="", help="Authorized tenant for v2 registry modes.")
+    p.add_argument(
+        "--registry-model-path",
+        default="",
+        help="Local MiniLM directory for semantic v2 assignment.",
+    )
+    p.add_argument(
+        "--judge-provider",
+        default="fake",
+        choices=["fake", "anthropic", "openai", "google"],
+        help="Provider for the judge LLM.",
+    )
+    p.add_argument(
+        "--judge-model",
+        default="fake-judge",
+        help="Judge model name (use 'fake-judge' for offline).",
+    )
     p.add_argument(
         "--capture-judge-telemetry",
         action="store_true",
         help="Capture judge LLM cost/latency traces into the configured Verdict "
-             "storage. Off by default; captured judge traces are excluded from "
-             "future target-workload analysis.",
+        "storage. Off by default; captured judge traces are excluded from "
+        "future target-workload analysis.",
     )
     p.add_argument(
         "--judge-sentinel-file",
         default="",
         help="Optional JSONL human-labeled anchor set. Agreement is persisted "
-             "as judge health, separately from production drift.",
+        "as judge health, separately from production drift.",
     )
     p.add_argument(
         "--judge-health-min-examples",
@@ -67,60 +85,103 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.8,
         help="Minimum 95%% Wilson-CI lower bound for healthy sentinel status "
-             "after the independently judged example floor.",
+        "after the independently judged example floor.",
     )
-    p.add_argument("--current-hours", type=int, default=24,
-                   help="Current window size in hours (default 24).")
-    p.add_argument("--baseline-days", type=int, default=7,
-                   help="Baseline window size in days (default 7).")
-    p.add_argument("--baseline-lag-hours", type=int, default=24,
-                   help="Gap between current and baseline windows (default 24).")
-    p.add_argument("--as-of", default="",
-                   help="Analysis time as an ISO-8601 timestamp. Defaults to now. "
-                        "Useful for reproducible reruns and backfills.")
-    p.add_argument("--min-sample-size", type=int, default=30,
-                   help="Min judgments per (cluster, dimension) for stat test.")
-    p.add_argument("--p-threshold", type=float, default=0.01,
-                   help="BH-adjusted p-value threshold for emitting a signal.")
-    p.add_argument("--effect-size-threshold", type=float, default=0.147,
-                   help="Minimum absolute Cliff's delta. On PASS/FAIL data this "
-                        "is the minimum detectable pass-rate change (default 0.147 = 14.7pp).")
-    p.add_argument("--sampling", choices=["stratified", "uniform"], default="stratified",
-                   help="How to choose which traces to judge. 'stratified' "
-                        "allocates per (cluster, window) so each cluster reaches "
-                        "the n>=30 floor without over-spending on big clusters. "
-                        "'uniform' is the legacy flat sample_rate.")
-    p.add_argument("--target-per-cluster", type=int, default=40,
-                   help="Stratified target: judged traces per (cluster, window). "
-                        "Default 40 (margin above min-sample-size=30 for UNCLEARs).")
-    p.add_argument("--sample-rate", type=float, default=1.0,
-                   help="Uniform sampling fraction (0.0-1.0), and the rate used "
-                        "for the uniform-vs-stratified contrast line. Default 1.0.")
-    p.add_argument("--limit", type=int, default=10_000,
-                   help="Max traces to pull from storage.")
-    p.add_argument("--embedder", default="sentence-transformer",
-                   choices=["sentence-transformer", "hashing", "deterministic"],
-                   help="Embedder for clustering. The semantic model is the default "
-                        "and needs cognifity-verdict-eval[semantic]. 'hashing' is an "
-                        "explicit lexical fallback; 'deterministic' is for tests only.")
-    p.add_argument("--clustering-version", default="v2",
-                   help="Registry/version key. Bump when you change embedder or "
-                        "threshold so incompatible cluster definitions aren't mixed.")
-    p.add_argument("--cluster-threshold", type=float, default=0.50,
-                   help="Max cosine distance to join an existing cluster. The "
-                        "MiniLM starting point is 0.50; validate it on your prompts.")
+    p.add_argument(
+        "--current-hours", type=int, default=24, help="Current window size in hours (default 24)."
+    )
+    p.add_argument(
+        "--baseline-days", type=int, default=7, help="Baseline window size in days (default 7)."
+    )
+    p.add_argument(
+        "--baseline-lag-hours",
+        type=int,
+        default=24,
+        help="Gap between current and baseline windows (default 24).",
+    )
+    p.add_argument(
+        "--as-of",
+        default="",
+        help="Analysis time as an ISO-8601 timestamp. Defaults to now. "
+        "Useful for reproducible reruns and backfills.",
+    )
+    p.add_argument(
+        "--min-sample-size",
+        type=int,
+        default=30,
+        help="Min judgments per (cluster, dimension) for stat test.",
+    )
+    p.add_argument(
+        "--p-threshold",
+        type=float,
+        default=0.01,
+        help="BH-adjusted p-value threshold for emitting a signal.",
+    )
+    p.add_argument(
+        "--effect-size-threshold",
+        type=float,
+        default=0.147,
+        help="Minimum absolute Cliff's delta. On PASS/FAIL data this "
+        "is the minimum detectable pass-rate change (default 0.147 = 14.7pp).",
+    )
+    p.add_argument(
+        "--sampling",
+        choices=["stratified", "uniform"],
+        default="stratified",
+        help="How to choose which traces to judge. 'stratified' "
+        "allocates per (cluster, window) so each cluster reaches "
+        "the n>=30 floor without over-spending on big clusters. "
+        "'uniform' is the legacy flat sample_rate.",
+    )
+    p.add_argument(
+        "--target-per-cluster",
+        type=int,
+        default=40,
+        help="Stratified target: judged traces per (cluster, window). "
+        "Default 40 (margin above min-sample-size=30 for UNCLEARs).",
+    )
+    p.add_argument(
+        "--sample-rate",
+        type=float,
+        default=1.0,
+        help="Uniform sampling fraction (0.0-1.0), and the rate used "
+        "for the uniform-vs-stratified contrast line. Default 1.0.",
+    )
+    p.add_argument("--limit", type=int, default=10_000, help="Max traces to pull from storage.")
+    p.add_argument(
+        "--embedder",
+        default="sentence-transformer",
+        choices=["sentence-transformer", "hashing", "deterministic"],
+        help="Embedder for clustering. The semantic model is the default "
+        "and needs cognifity-verdict-eval[semantic]. 'hashing' is an "
+        "explicit lexical fallback; 'deterministic' is for tests only.",
+    )
+    p.add_argument(
+        "--clustering-version",
+        default="v2",
+        help="Registry/version key. Bump when you change embedder or "
+        "threshold so incompatible cluster definitions aren't mixed.",
+    )
+    p.add_argument(
+        "--cluster-threshold",
+        type=float,
+        default=0.50,
+        help="Max cosine distance to join an existing cluster. The "
+        "MiniLM starting point is 0.50; validate it on your prompts.",
+    )
     cluster_mode = p.add_mutually_exclusive_group()
     cluster_mode.add_argument(
-        "--recluster", action="store_true",
+        "--recluster",
+        action="store_true",
         help="Reassign cluster_id even for traces that already have one. Default: "
-             "assign only traces missing a cluster_id during analysis so IDs stay stable.",
+        "assign only traces missing a cluster_id during analysis so IDs stay stable.",
     )
     cluster_mode.add_argument(
         "--trust-existing-clusters",
         action="store_true",
         help="Use preassigned external cluster IDs without a Verdict registry. All "
-             "judgeable traces must already have a cluster_id. Do not use this to "
-             "bypass an embedder/version migration; use --recluster for that.",
+        "judgeable traces must already have a cluster_id. Do not use this to "
+        "bypass an embedder/version migration; use --recluster for that.",
     )
     return p
 
@@ -150,11 +211,7 @@ def _storage_backend(storage: str) -> str:
 
 def _exclude_internal_workloads(traces):
     """Keep evaluator traffic out of the workload it is evaluating."""
-    target = [
-        trace
-        for trace in traces
-        if trace.tags.get("verdict.workload") != "judge"
-    ]
+    target = [trace for trace in traces if trace.tags.get("verdict.workload") != "judge"]
     return target, len(traces) - len(target)
 
 
@@ -166,26 +223,29 @@ def _drift_run_id(
 ) -> str:
     """Return the deterministic identity of one completed hourly snapshot."""
     window_bucket = analysis_time.replace(minute=0, second=0, microsecond=0)
-    identity = "|".join([
-        "verdict-drift-run-v1",
-        tenant_scope,
-        evaluator_fingerprint,
-        args.clustering_version,
-        args.embedder,
-        str(args.cluster_threshold),
-        str(args.recluster),
-        str(args.trust_existing_clusters),
-        args.sampling,
-        str(args.target_per_cluster),
-        str(args.sample_rate),
-        str(args.current_hours),
-        str(args.baseline_days),
-        str(args.baseline_lag_hours),
-        str(args.min_sample_size),
-        str(args.p_threshold),
-        str(args.effect_size_threshold),
-        window_bucket.isoformat(),
-    ])
+    identity = "|".join(
+        [
+            "verdict-drift-run-v1",
+            tenant_scope,
+            evaluator_fingerprint,
+            args.clustering_version,
+            args.registry_mode,
+            args.embedder,
+            str(args.cluster_threshold),
+            str(args.recluster),
+            str(args.trust_existing_clusters),
+            args.sampling,
+            str(args.target_per_cluster),
+            str(args.sample_rate),
+            str(args.current_hours),
+            str(args.baseline_days),
+            str(args.baseline_lag_hours),
+            str(args.min_sample_size),
+            str(args.p_threshold),
+            str(args.effect_size_threshold),
+            window_bucket.isoformat(),
+        ]
+    )
     return uuid5(NAMESPACE_URL, identity).hex
 
 
@@ -195,14 +255,16 @@ def _signal_id_for_run(signal, run_id: str) -> str:
     Run identity includes evaluator, scope, configuration, and analysis bucket,
     so signals from distinct snapshots cannot overwrite one another.
     """
-    identity = "|".join([
-        "verdict-drift-signal-v2",
-        run_id,
-        signal.cluster_id,
-        signal.dimension,
-        signal.direction.value,
-        signal.statistic_name,
-    ])
+    identity = "|".join(
+        [
+            "verdict-drift-signal-v2",
+            run_id,
+            signal.cluster_id,
+            signal.dimension,
+            signal.direction.value,
+            signal.statistic_name,
+        ]
+    )
     return uuid5(NAMESPACE_URL, identity).hex
 
 
@@ -251,35 +313,56 @@ def _run(args) -> int:
         print(f"ERROR: cannot open {_storage_backend(args.storage)} storage")
         return 2
     print(f"Storage backend: {_storage_backend(args.storage)}")
-    traces = storage.list_traces(limit=args.limit)
+    if args.registry_mode != "off" and not args.tenant_id:
+        print("ERROR: --tenant-id is required for registry modes")
+        return 2
+    if args.registry_mode != "off" and args.tenant_id == "__verdict_local__":
+        if storage.list_traces(tenant_id="__verdict_local__", limit=1):
+            print("ERROR: reserved local registry scope is used as a tenant ID")
+            return 2
+    if args.registry_mode == "off" or args.tenant_id == "__verdict_local__":
+        traces = storage.list_traces(limit=args.limit)
+    else:
+        traces = storage.list_traces(tenant_id=args.tenant_id, limit=args.limit)
+    if (
+        args.registry_mode != "off"
+        and args.tenant_id == "__verdict_local__"
+        and any(trace.tenant_id is not None for trace in traces)
+    ):
+        print("ERROR: reserved local registry scope collides with tenant-owned traces")
+        return 2
     print(f"Loaded {len(traces)} traces.")
     traces, excluded_internal = _exclude_internal_workloads(traces)
     if excluded_internal:
         print(f"  Excluded {excluded_internal} judge telemetry trace(s).")
     if not traces:
-        print("No traces in storage. Run an instrumented example first "
-              "(e.g. `python examples/basic_anthropic.py`).")
+        print(
+            "No traces in storage. Run an instrumented example first "
+            "(e.g. `python examples/basic_anthropic.py`)."
+        )
         return 0
 
-    # The v0 runner has one cluster registry and one set of statistical cells
-    # per store. Refuse mixed tenants instead of silently pooling them and
-    # implying isolation that the analysis path does not provide yet.
+    # Legacy/off mode has one cluster registry and one set of statistical cells
+    # per store. Registry modes were already scoped at the storage query above.
     tenant_values = {t.tenant_id for t in traces}
-    if len(tenant_values) > 1:
+    if args.registry_mode == "off" and len(tenant_values) > 1:
         shown = sorted("<unset>" if t is None else t for t in tenant_values)
         print(
             "ERROR: this database contains multiple tenant scopes "
             f"({', '.join(shown)}). The v0 drift runner supports one tenant "
-            "per store; use separate stores until tenant-scoped registries and "
-            "signals are implemented."
+            "per store in registry mode=off; select a tenant-scoped v2 registry "
+            "mode or use separate stores."
         )
         return 2
     only_tenant = next(iter(tenant_values))
-    tenant_scope = only_tenant or "single-store-unset-tenant"
+    tenant_scope = (
+        args.tenant_id if args.registry_mode != "off" else only_tenant or "__verdict_local__"
+    )
 
     completed = [t for t in traces if not t.error]
     judgeable = [
-        t for t in completed
+        t
+        for t in completed
         if (t.prompt_redacted or "").strip() and (t.response_redacted or "").strip()
     ]
     if not judgeable:
@@ -296,6 +379,45 @@ def _run(args) -> int:
             f"  WARN: skipping {missing_content} completed trace(s) without both "
             "captured prompt and response content."
         )
+
+    registry_version: str | None = None
+    if args.registry_mode != "off":
+        if args.tenant_id != tenant_scope:
+            print("ERROR: --tenant-id must exactly authorize the selected trace scope")
+            return 2
+        from verdict_eval.cluster_registry import ClusterRegistryService
+        from verdict_eval.clustering import FrozenMiniLMEmbedder
+
+        factory = None
+        if args.registry_model_path:
+
+            def model_factory():
+                return FrozenMiniLMEmbedder(args.registry_model_path)
+
+            factory = model_factory
+        try:
+            service = ClusterRegistryService(storage, embedder_factory=factory)
+            pointer = storage.get_active_cluster_registry(args.tenant_id)
+            if pointer.version_id is None:
+                raise ValueError("no active cluster registry")
+            registry_version = pointer.version_id
+            service.assign(args.tenant_id, registry_version, through_cutoff=analysis_time)
+        except Exception as exc:
+            from verdict_eval.cli.cluster import _safe_error_code
+
+            print(f"ERROR: versioned registry unavailable: {_safe_error_code(exc)}")
+            return 2
+        assignments = {
+            item.trace_id: item.cluster_id
+            for item in storage.list_trace_cluster_assignments(args.tenant_id, registry_version)
+            if item.status == "assigned"
+        }
+        for trace in traces:
+            trace.cluster_id = assignments.get(trace.trace_id)
+        judgeable = [trace for trace in judgeable if trace.cluster_id is not None]
+        args.trust_existing_clusters = True
+        args.embedder = "deterministic"
+        args.clustering_version = registry_version
 
     # -- Step 2: cluster (stable, persistent, assignment-based) --------------
     # Identity is ASSIGNED against a persisted registry, not recomputed from
@@ -317,7 +439,9 @@ def _run(args) -> int:
     )
 
     print(f"Clustering by intent (stable, version={args.clustering_version})...")
-    if args.embedder == "sentence-transformer":
+    if args.registry_mode == "active":
+        embedder = DeterministicHashEmbedder()  # compatibility branch; no v2 embedding occurs
+    elif args.embedder == "sentence-transformer":
         try:
             embedder = SentenceTransformerEmbedder()
         except Exception as exc:
@@ -341,18 +465,14 @@ def _run(args) -> int:
         embedder = DeterministicHashEmbedder()
 
     # Load the persisted registry for this version (empty on first run).
-    registry = ClusterRegistry.from_json(
-        storage.load_cluster_registry(args.clustering_version)
-    )
+    registry = ClusterRegistry.from_json(storage.load_cluster_registry(args.clustering_version))
     registry.version = args.clustering_version
 
     # Trace rows do not yet carry a separate clustering-version column. Verify
     # every persisted ID belongs to this registry rather than silently mixing
     # old/default or externally assigned IDs with a new embedding definition.
     persisted_ids = {
-        t.cluster_id
-        for t in traces
-        if t.cluster_id and t.cluster_id != UNCLUSTERED_ID
+        t.cluster_id for t in traces if t.cluster_id and t.cluster_id != UNCLUSTERED_ID
     }
     unknown_ids = persisted_ids - set(registry.ids)
     if unknown_ids and not args.recluster and not args.trust_existing_clusters:
@@ -366,7 +486,7 @@ def _run(args) -> int:
             "external clustering system."
         )
         return 2
-    if args.trust_existing_clusters:
+    if args.trust_existing_clusters and args.registry_mode != "active":
         missing_external = [t.trace_id for t in judgeable if not t.cluster_id]
         if missing_external:
             print(
@@ -387,9 +507,11 @@ def _run(args) -> int:
 
     # Assign oldest-first so early traffic seeds the clusters deterministically.
     ordered = sorted(traces, key=lambda t: t.started_at)
-    to_assign = [] if args.trust_existing_clusters else [
-        t for t in ordered if args.recluster or not t.cluster_id
-    ]
+    to_assign = (
+        []
+        if args.trust_existing_clusters
+        else [t for t in ordered if args.recluster or not t.cluster_id]
+    )
     if to_assign:
         # Cluster on the actual prompt text; fall back to an empty string (which
         # routes to UNCLUSTERED_ID) rather than deriving from request_model/trace_id
@@ -399,13 +521,23 @@ def _run(args) -> int:
             t.cluster_id = cid
             storage.insert_trace(t)
     # Persist the (possibly grown) registry so the next run is consistent.
-    storage.save_cluster_registry(args.clustering_version, clusterer.registry.to_json())
+    if args.registry_mode != "active":
+        storage.save_cluster_registry(args.clustering_version, clusterer.registry.to_json())
 
     cluster_ids = [t.cluster_id for t in traces if t.cluster_id]
-    print(f"  Assigned {len(to_assign)} trace(s); "
-          f"registry now holds {len(clusterer.registry.ids)} cluster(s).")
+    if args.registry_mode == "active":
+        print(
+            f"  Using immutable registry {registry_version} with "
+            f"{len(set(cluster_ids))} assigned cluster(s)."
+        )
+    else:
+        print(
+            f"  Assigned {len(to_assign)} trace(s); "
+            f"registry now holds {len(clusterer.registry.ids)} cluster(s)."
+        )
     cluster_health = assess_cluster_health(
-        cluster_ids, min_sample_size=args.min_sample_size,
+        cluster_ids,
+        min_sample_size=args.min_sample_size,
     )
     print(
         f"  Cluster health: {cluster_health.n_clusters} cluster(s), median size "
@@ -424,20 +556,26 @@ def _run(args) -> int:
         # Offline path: synthesize a judge that scores every dimension PASS.
         # Useful for exercising the pipeline before live keys are wired.
         import json
+
         provider = FakeProvider(
-            json.dumps({
-                d.name: {"reasoning": "fake-judge default PASS", "verdict": "PASS"}
-                for d in DEFAULT_RUBRIC.dimensions
-            })
+            json.dumps(
+                {
+                    d.name: {"reasoning": "fake-judge default PASS", "verdict": "PASS"}
+                    for d in DEFAULT_RUBRIC.dimensions
+                }
+            )
         )
     elif args.judge_provider == "anthropic":
         from verdict_eval.providers import AnthropicAdapter
+
         provider = AnthropicAdapter()
     elif args.judge_provider == "openai":
         from verdict_eval.providers import OpenAIAdapter
+
         provider = OpenAIAdapter()
     else:
         from verdict_eval.providers import GoogleAdapter
+
         provider = GoogleAdapter()
 
     judge = Judge(provider=provider, model=args.judge_model, rubric=DEFAULT_RUBRIC)
@@ -490,16 +628,13 @@ def _run(args) -> int:
     def matches_current_evaluator(judgment) -> bool:
         """Keep one statistical run on one judge/rubric definition."""
         return (
-            judgment.evaluator_provider
-            == current_evaluator["evaluator_provider"]
+            judgment.evaluator_provider == current_evaluator["evaluator_provider"]
             and judgment.judge_models == current_evaluator["judge_models"]
             and judgment.rubric_name == current_evaluator["rubric_name"]
             and judgment.rubric_version == current_evaluator["rubric_version"]
             and judgment.evaluator_config == current_evaluator["evaluator_config"]
-            and judgment.expected_dimensions
-            == current_evaluator["expected_dimensions"]
-            and judgment.evaluator_fingerprint
-            == current_evaluator["evaluator_fingerprint"]
+            and judgment.expected_dimensions == current_evaluator["expected_dimensions"]
+            and judgment.evaluator_fingerprint == current_evaluator["evaluator_fingerprint"]
         )
 
     # Re-runs top up only the current evaluator definition. A judgment from a
@@ -507,7 +642,14 @@ def _run(args) -> int:
     # into this run would change the measuring instrument mid-window.
     latest_existing_by_trace = {}
     for cid in set(t.cluster_id for t in judgeable if t.cluster_id):
-        for existing in storage.list_judgments_for_cluster(cid, limit=10**9):
+        existing_rows = (
+            storage.list_judgments_for_registry_cluster(
+                args.tenant_id, registry_version, cid, limit=10**9
+            )
+            if args.registry_mode == "active"
+            else storage.list_judgments_for_cluster(cid, limit=10**9)
+        )
+        for existing in existing_rows:
             if not matches_current_evaluator(existing):
                 continue
             previous = latest_existing_by_trace.get(existing.trace_id)
@@ -531,6 +673,7 @@ def _run(args) -> int:
             WindowSpec,
             uniform_coverage_estimate,
         )
+
         window = WindowSpec(
             now=analysis_time,
             current_hours=args.current_hours,
@@ -542,20 +685,26 @@ def _run(args) -> int:
         print(plan.summary())
         # Contrast with what naive uniform sampling would have achieved.
         est = uniform_coverage_estimate(
-            judgeable, window=window, sample_rate=args.sample_rate,
+            judgeable,
+            window=window,
+            sample_rate=args.sample_rate,
             min_sample_size=args.min_sample_size,
         )
-        print(f"  (uniform @ rate={args.sample_rate} would reach the floor in "
-              f"{est['cells_reaching_floor']}/{est['cells_total']} cells "
-              f"for ~{est['expected_judgments']} judgments)")
+        print(
+            f"  (uniform @ rate={args.sample_rate} would reach the floor in "
+            f"{est['cells_reaching_floor']}/{est['cells_total']} cells "
+            f"for ~{est['expected_judgments']} judgments)"
+        )
         selected = set(plan.selected_trace_ids)
         to_judge = [t for t in judgeable if t.trace_id in selected]
     else:
         # Legacy uniform sampling, kept for comparison.
         import random
+
         rng = random.Random(42)
         to_judge = [
-            t for t in judgeable
+            t
+            for t in judgeable
             if t.trace_id not in already_judged and rng.random() <= args.sample_rate
         ]
 
@@ -564,8 +713,11 @@ def _run(args) -> int:
     judge_errors = 0
     for t in to_judge:
         try:
-            j = judge.judge(query=t.prompt_redacted or "", response=t.response_redacted or "",
-                            trace_id=t.trace_id)
+            j = judge.judge(
+                query=t.prompt_redacted or "",
+                response=t.response_redacted or "",
+                trace_id=t.trace_id,
+            )
             storage.insert_judgment(j)
             judged += 1
         except Exception as e:
@@ -573,18 +725,17 @@ def _run(args) -> int:
             from verdict.schema import Judgment, JudgmentStatus
 
             safe_error = redact(str(e)) or "judge error"
-            storage.insert_judgment(Judgment(
-                trace_id=t.trace_id,
-                status=JudgmentStatus.ERROR,
-                error=safe_error,
-                **current_evaluator,
-            ))
+            storage.insert_judgment(
+                Judgment(
+                    trace_id=t.trace_id,
+                    status=JudgmentStatus.ERROR,
+                    error=safe_error,
+                    **current_evaluator,
+                )
+            )
             judge_errors += 1
             print(f"  WARN: judge failed for {t.trace_id}: {safe_error}")
-    print(
-        f"  Persisted {judged} completed judgment(s) and "
-        f"{judge_errors} error record(s)."
-    )
+    print(f"  Persisted {judged} completed judgment(s) and {judge_errors} error record(s).")
 
     # -- Step 4: compute drift ----------------------------------------------
     from verdict_eval.drift import (
@@ -597,7 +748,13 @@ def _run(args) -> int:
     latest_judgment_for_trace = {}
     cluster_for_trace: dict[str, str] = {}
     for cid in set(cluster_ids):
-        js = storage.list_judgments_for_cluster(cid, limit=100_000)
+        js = (
+            storage.list_judgments_for_registry_cluster(
+                args.tenant_id, registry_version, cid, limit=100_000
+            )
+            if args.registry_mode == "active"
+            else storage.list_judgments_for_cluster(cid, limit=100_000)
+        )
         for j in js:
             if not matches_current_evaluator(j):
                 continue
@@ -623,10 +780,8 @@ def _run(args) -> int:
         baseline_lag_hours=args.baseline_lag_hours,
         now=analysis_time,
     )
-    print(f"  Current windows:  {len(cur_windows)}  "
-          f"(total n = {sum(w.n for w in cur_windows)})")
-    print(f"  Baseline windows: {len(base_windows)}  "
-          f"(total n = {sum(w.n for w in base_windows)})")
+    print(f"  Current windows:  {len(cur_windows)}  (total n = {sum(w.n for w in cur_windows)})")
+    print(f"  Baseline windows: {len(base_windows)}  (total n = {sum(w.n for w in base_windows)})")
 
     detector = DriftDetector(
         min_sample_size=args.min_sample_size,

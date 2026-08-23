@@ -9,6 +9,8 @@ deterministic test adapter.
 from __future__ import annotations
 
 import hashlib
+import json
+from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 import numpy as np
@@ -102,6 +104,73 @@ class SentenceTransformerEmbedder:
             return np.zeros((0, self.dim), dtype=np.float32)
         vecs = self._model.encode(texts, convert_to_numpy=True, show_progress_bar=False)
         return np.asarray(vecs, dtype=np.float32)
+
+
+class FrozenMiniLMEmbedder:
+    """Local-only, singleton-batch MiniLM adapter for registry fit/assign."""
+
+    dim = 384
+    model_name = "sentence-transformers/all-MiniLM-L6-v2"
+    model_revision = "1110a243fdf4706b3f48f1d95db1a4f5529b4d41"
+
+    def __init__(self, model_path: str | Path) -> None:
+        root = Path(model_path).resolve(strict=True)
+        if not root.is_dir():
+            raise ValueError("model path must be a local directory")
+        self._root = root
+        config = json.loads((root / "sentence_bert_config.json").read_text())
+        if config.get("max_seq_length") != 256:
+            raise ValueError("MiniLM max sequence length must be 256")
+        aggregate = hashlib.sha256()
+        for path in sorted(item for item in root.rglob("*") if item.is_file()):
+            relative = path.relative_to(root).as_posix().encode()
+            digest = hashlib.sha256()
+            with path.open("rb") as handle:
+                for block in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(block)
+            aggregate.update(len(relative).to_bytes(4,"big"))
+            aggregate.update(relative)
+            aggregate.update(digest.digest())
+        self.model_file_sha256 = aggregate.hexdigest()
+        self._torch = None
+        self._tokenizer = None
+        self._model = None
+
+    def _load(self) -> None:
+        if self._model is not None:
+            return
+        try:
+            import torch
+            from transformers import AutoModel, AutoTokenizer
+        except ImportError as exc:
+            raise ImportError(
+                "FrozenMiniLMEmbedder requires the semantic extra"
+            ) from exc
+        torch.set_num_threads(1)
+        torch.use_deterministic_algorithms(True)
+        self._torch = torch
+        self._tokenizer = AutoTokenizer.from_pretrained(
+            self._root,local_files_only=True,trust_remote_code=False
+        )
+        self._model = AutoModel.from_pretrained(
+            self._root,local_files_only=True,trust_remote_code=False,use_safetensors=True
+        ).to("cpu").eval()
+
+    def embed(self, texts: list[str]) -> np.ndarray:
+        self._load()
+        rows: list[np.ndarray] = []
+        with self._torch.no_grad():
+            for text in texts:
+                tokens = self._tokenizer(
+                    text,padding="max_length",truncation=True,max_length=256,
+                    return_tensors="pt",
+                )
+                output = self._model(**tokens).last_hidden_state
+                mask = tokens["attention_mask"].unsqueeze(-1).expand(output.size()).float()
+                pooled = (output * mask).sum(1) / mask.sum(1).clamp(min=1e-9)
+                pooled = self._torch.nn.functional.normalize(pooled,p=2,dim=1)
+                rows.append(pooled[0].cpu().numpy().astype(np.float32,copy=False))
+        return np.asarray(rows,dtype=np.float32).reshape((-1,self.dim))
 
 
 class DeterministicHashEmbedder:

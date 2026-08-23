@@ -52,8 +52,10 @@ they go through a supported provider SDK.
    buffered writes move persistence to a background batched writer and require
    explicit client shutdown. The `0.1.0a4` POC profile uses synchronous writes.
 3. **Group**: on a pipeline run, prompt embeddings are assigned against a
-   persisted cluster registry so existing cluster IDs remain stable. Local
-   MiniLM is the semantic default; the explicit hash fallback is lexical.
+   persisted cluster registry so existing cluster IDs remain stable. Registry
+   strategy selection is deliberate: exact-key `explicit` is supported, while
+   automatic MiniLM `semantic` and `hybrid` fallback are experimental opt-in
+   alpha features. The legacy pipeline's hash fallback remains lexical.
 4. **Evaluate**: the separately invoked batch pipeline selects traces per
    cluster and time window, then scores them with a configured judge and rubric.
    Capture itself does not make judge calls. Every stored judgment identifies
