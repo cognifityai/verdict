@@ -96,8 +96,9 @@ Areas under consideration:
   non-local deployment.
 - Quality judging and drift detection are periodic batch operations, not a
   streaming alert service.
-- The v0 drift runner supports one tenant scope per store and refuses to pool a
-  mixed-tenant database.
+- The legacy trace-level runner supports one tenant scope per store and refuses
+  to pool a mixed-tenant database. Conversation-v1 is explicitly
+  tenant/version scoped.
 - Cost values are estimates from a dated static base-price table; caching,
   long-context tiers, batch/priority modes, tools, regional uplifts, and
   negotiated discounts are not modeled.
@@ -127,9 +128,11 @@ and an approved design before implementation.
 2. **Cache-token accounting (medium effort, high value for cache-heavy
    workloads):** add provider-normalized cache fields, migrations, and pricing
    reconciliation.
-3. **Concurrent judging (medium effort, latency value):** bounded concurrency,
-   provider rate-limit handling, cancellation, deterministic output, and load
-   tests. This reduces wall time, not token spend.
+3. **Legacy-runner concurrent judging (medium effort, latency value):** the
+   conversation-v1 path has bounded concurrency, provider deadlines and
+   deterministic terminal snapshots; extending that contract to the legacy
+   trace-level runner still needs its own compatibility/load tests. This
+   reduces wall time, not token spend.
 4. **First-class tool-call/run evaluation (large effort, high agent-workload
    value):** requires a versioned sequence schema, privacy model, storage/UI,
    and task-level evaluation contract.

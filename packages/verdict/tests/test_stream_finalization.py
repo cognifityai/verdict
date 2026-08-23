@@ -33,7 +33,7 @@ class FakeInstrumentor:
             redaction_secret=None,
         )
 
-    def _should_sample(self) -> bool:
+    def _should_sample(self, _trace=None) -> bool:
         return True
 
     def _safe_persist(self, trace: Trace) -> None:

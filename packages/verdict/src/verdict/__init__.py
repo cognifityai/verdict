@@ -11,7 +11,7 @@ Five-line install pattern:
 
 from __future__ import annotations
 
-from verdict.client import VerdictClient, init
+from verdict.client import VerdictClient, init, request_context
 from verdict.schema import DriftRun, DriftSignal, Judgment, Trace
 from verdict.signals import record_user_signal
 from verdict.trace import (
@@ -39,6 +39,7 @@ __all__ = [
     "init",
     "intent_context",
     "record_user_signal",
+    "request_context",
     "set_context",
     "span",
     "trace",

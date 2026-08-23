@@ -21,11 +21,59 @@ def _fake_google_types():
         def __init__(self, **kwargs):
             self.__dict__.update(kwargs)
 
+    class HttpRetryOptions:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    class HttpOptions:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
     return SimpleNamespace(
         Part=Part,
         Content=Content,
         GenerateContentConfig=GenerateContentConfig,
+        HttpOptions=HttpOptions,
+        HttpRetryOptions=HttpRetryOptions,
     )
+
+
+def test_direct_provider_clients_disable_hidden_sdk_retries(monkeypatch) -> None:
+    from verdict_eval.providers import AnthropicAdapter, GoogleAdapter, OpenAIAdapter
+
+    captured = {}
+
+    def anthropic_client(**kwargs):
+        captured["anthropic"] = kwargs
+        return SimpleNamespace()
+
+    def openai_client(**kwargs):
+        captured["openai"] = kwargs
+        return SimpleNamespace()
+
+    google_types = _fake_google_types()
+
+    def google_client(**kwargs):
+        captured["google"] = kwargs
+        return SimpleNamespace()
+
+    monkeypatch.setitem(sys.modules, "anthropic", SimpleNamespace(Anthropic=anthropic_client))
+    monkeypatch.setitem(sys.modules, "openai", SimpleNamespace(OpenAI=openai_client))
+    fake_genai = SimpleNamespace(Client=google_client, types=google_types)
+    monkeypatch.setitem(sys.modules, "google", SimpleNamespace(genai=fake_genai))
+    monkeypatch.setitem(sys.modules, "google.genai", fake_genai)
+
+    AnthropicAdapter(api_key="test", max_retries=1, timeout_seconds=30)
+    OpenAIAdapter(api_key="test", max_retries=1, timeout_seconds=30)
+    GoogleAdapter(api_key="test", max_retries=1, timeout_seconds=30)
+
+    assert captured["anthropic"]["max_retries"] == 0
+    assert captured["anthropic"]["timeout"] == 30
+    assert captured["openai"]["max_retries"] == 0
+    assert captured["openai"]["timeout"] == 30
+    google_http = captured["google"]["http_options"]
+    assert google_http.timeout == 30_000
+    assert google_http.retry_options.attempts == 1
 
 
 def test_google_adapter_translates_messages_config_and_usage(monkeypatch) -> None:

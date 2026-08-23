@@ -6,6 +6,7 @@ provides an ephemeral PostgreSQL service; these are not mocked SQL tests.
 
 from __future__ import annotations
 
+import json
 import os
 import threading
 import time
@@ -21,6 +22,9 @@ from verdict.schema import (
     ClusterRegistryCluster,
     ClusterRegistryEvent,
     ClusterRegistryVersion,
+    ConversationDriftRun,
+    ConversationDriftSample,
+    ConversationDriftSignal,
     DimensionScore,
     DriftDirection,
     DriftRun,
@@ -34,6 +38,7 @@ from verdict.schema import (
     UserSignalRecord,
     Verdict,
     cluster_candidate_digest,
+    conversation_json_fingerprint,
 )
 from verdict.storage import BufferedStorage
 from verdict.storage.postgres import PostgresStorage
@@ -63,9 +68,19 @@ def test_live_postgres_versioned_registry_and_analysis_normalization():
     try:
         storage.insert_trace(
             Trace(
-                trace_id=trace_id, tenant_id=tenant, started_at=now, ended_at=now,
+                trace_id=trace_id,
+                tenant_id=tenant,
+                session_id=f"session-{suffix}",
+                started_at=now,
+                ended_at=now,
+                prompt_redacted="prompt",
+                response_redacted="response",
                 raw_messages=[{"role": "user", "content": "billing"}],
-                tags={"verdict.workload": "agent", "verdict.intent_key": "billing"},
+                tags={
+                    "verdict.workload": "agent",
+                    "verdict.intent_key": "billing",
+                    "verdict.success_sampling": "full-v1",
+                },
             )
         )
         storage._exec(
@@ -77,23 +92,34 @@ def test_live_postgres_versioned_registry_and_analysis_normalization():
         assert storage.count_pending_analysis_rows(tenant) == 0
 
         identity = ClusterIdentity(
-            tenant_id=tenant, cluster_id=cluster_id, kind="explicit",
-            explicit_key="billing", display_name="Billing", created_by="admin",
+            tenant_id=tenant,
+            cluster_id=cluster_id,
+            kind="explicit",
+            explicit_key="billing",
+            display_name="Billing",
+            created_by="admin",
             updated_by="admin",
         )
         version = ClusterRegistryVersion(
-            tenant_id=tenant, version_id=version_id, strategy="explicit", cutoff=now,
+            tenant_id=tenant,
+            version_id=version_id,
+            strategy="explicit",
+            cutoff=now,
             fit_definition_json='{"model_fingerprint":null}',
-            fit_definition_fingerprint="definition", created_by="admin",
+            fit_definition_fingerprint="definition",
+            created_by="admin",
         )
-        cluster = ClusterRegistryCluster(tenant,version_id,cluster_id,"explicit",member_count=1)
+        cluster = ClusterRegistryCluster(tenant, version_id, cluster_id, "explicit", member_count=1)
         assignment = TraceClusterAssignment(
-            tenant,version_id,trace_id,"fit","assigned",cluster_id,"explicit"
+            tenant, version_id, trace_id, "fit", "assigned", cluster_id, "explicit"
         )
-        storage.insert_cluster_preview(version,[identity],[cluster],[assignment])
+        storage.insert_cluster_preview(version, [identity], [cluster], [assignment])
         storage.insert_cluster_registry_event(
             ClusterRegistryEvent(
-                tenant,action="validated",to_version_id=version_id,actor="admin",
+                tenant,
+                action="validated",
+                to_version_id=version_id,
+                actor="admin",
                 details_json='{"schema":"validation-report-v1","passed":true}',
             )
         )
@@ -106,23 +132,42 @@ def test_live_postgres_versioned_registry_and_analysis_normalization():
             expected_candidate_digest=cluster_candidate_digest([]),
         )
         assert pointer.version_id == version_id
-        storage.rename_cluster_identity(tenant,cluster_id,"Billing support",actor="admin")
+        storage.rename_cluster_identity(tenant, cluster_id, "Billing support", actor="admin")
         [loaded] = storage.list_cluster_identities(tenant)
         assert loaded.display_name == "Billing support"
         [candidate] = storage.list_cluster_trace_candidates(
-            tenant, int(now.timestamp() * 1_000_000),
-            int(now.timestamp() * 1_000_000) + 1,
-            target_workload="agent", limit=2,
-        )
-        assert candidate.intent_key == "billing"
-        assert storage.list_cluster_trace_candidates(
             tenant,
             int(now.timestamp() * 1_000_000),
             int(now.timestamp() * 1_000_000) + 1,
             target_workload="agent",
             limit=2,
-            missing_version_id=version_id,
-        ) == []
+        )
+        assert candidate.intent_key == "billing"
+        assert (
+            storage.list_cluster_trace_candidates(
+                tenant,
+                int(now.timestamp() * 1_000_000),
+                int(now.timestamp() * 1_000_000) + 1,
+                target_workload="agent",
+                limit=2,
+                missing_version_id=version_id,
+            )
+            == []
+        )
+        [conversation_candidate] = storage.list_conversation_trace_candidates(
+            tenant,
+            version_id,
+            int(now.timestamp() * 1_000_000),
+            int(now.timestamp() * 1_000_000) + 1,
+            target_workload="agent",
+            limit=50_001,
+        )
+        assert conversation_candidate.session_id == f"session-{suffix}"
+        assert conversation_candidate.assignment_status == "assigned"
+        assert (
+            storage.get_conversation_trace_contents(tenant, [trace_id])[trace_id].response_redacted
+            == "response"
+        )
         storage.insert_trace(
             Trace(
                 trace_id=trace_id,
@@ -138,6 +183,176 @@ def test_live_postgres_versioned_registry_and_analysis_normalization():
         assert preserved.tenant_id == tenant
         assert preserved.tags["verdict.intent_key"] == "billing"
         assert preserved.analysis_started_at_us == int(now.timestamp() * 1_000_000)
+    finally:
+        storage.close()
+
+
+def test_live_postgres_conversation_snapshot_survives_source_deletion_and_is_immutable():
+    suffix = uuid4().hex
+    tenant = f"conversation-{suffix}"
+    version_id = f"version-{suffix}"
+    cluster_id = f"cluster-{suffix}"
+    trace_id = f"trace-{suffix}"
+    baseline_start = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    baseline_end = datetime(2026, 8, 2, tzinfo=timezone.utc)
+    current_start = datetime(2026, 8, 3, tzinfo=timezone.utc)
+    current_end = datetime(2026, 8, 4, tzinfo=timezone.utc)
+    storage = PostgresStorage(DSN, min_pool=1, max_pool=2)
+    try:
+        storage.insert_trace(
+            Trace(
+                trace_id=trace_id,
+                tenant_id=tenant,
+                started_at=baseline_start,
+                ended_at=baseline_start + timedelta(seconds=1),
+            )
+        )
+        identity = ClusterIdentity(
+            tenant_id=tenant,
+            cluster_id=cluster_id,
+            kind="explicit",
+            explicit_key="billing",
+            display_name="Billing",
+            created_by="admin",
+            updated_by="admin",
+        )
+        version = ClusterRegistryVersion(
+            tenant_id=tenant,
+            version_id=version_id,
+            strategy="explicit",
+            cutoff=current_end,
+            fit_definition_json='{"model_fingerprint":null}',
+            fit_definition_fingerprint="definition",
+            created_by="admin",
+        )
+        cluster = ClusterRegistryCluster(tenant, version_id, cluster_id, "explicit", member_count=1)
+        assignment = TraceClusterAssignment(
+            tenant,
+            version_id,
+            trace_id,
+            "fit",
+            "assigned",
+            cluster_id,
+            "explicit",
+        )
+        storage.insert_cluster_preview(version, [identity], [cluster], [assignment])
+        policy_json = (
+            '{"method":"conversation-v1","schema":"analysis-policy-v1","target_per_cell":40}'
+        )
+        evaluator_payload = {
+            "dimensions": ["quality"],
+            "padding": "",
+            "provider": "fake",
+            "schema": "evaluator-definition-v1",
+        }
+        evaluator_base = json.dumps(
+            evaluator_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        )
+        evaluator_payload["padding"] = "x" * (65_536 - len(evaluator_base.encode("utf-8")))
+        evaluator_json = json.dumps(
+            evaluator_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        )
+        assert len(evaluator_json.encode("utf-8")) == 65_536
+        coverage_json = (
+            '{"cells":[],"cluster_ids":["' + cluster_id + '"],'
+            '"dimensions":["quality"],"exclusions":[],"global":{},'
+            '"membership":[],"schema":"coverage-v1"}'
+        )
+        run = ConversationDriftRun(
+            tenant_id=tenant,
+            run_id=f"run-{suffix}",
+            registry_version=version_id,
+            analysis_policy_json=policy_json,
+            analysis_policy_fingerprint=conversation_json_fingerprint(policy_json),
+            evaluator_definition_json=evaluator_json,
+            evaluator_fingerprint=conversation_json_fingerprint(evaluator_json),
+            target_workload="agent",
+            baseline_start=baseline_start,
+            baseline_end=baseline_end,
+            current_start=current_start,
+            current_end=current_end,
+            analysis_cutoff=current_end,
+            status="ready",
+            coverage_json=coverage_json,
+            signal_count=1,
+            sample_count=1,
+            started_at=current_end,
+            completed_at=current_end,
+            actor="admin",
+        )
+        sample = ConversationDriftSample(
+            tenant_id=tenant,
+            run_id=run.run_id,
+            registry_version=version_id,
+            cluster_id=cluster_id,
+            session_ordinal=1,
+            window="baseline",
+            trace_id=trace_id,
+            event_time=baseline_start,
+            attempt_terminal_at=current_end,
+            attempt_status="completed",
+            legacy_write_status="written",
+            outcomes_json='{"quality":"PASS"}',
+        )
+        signal = ConversationDriftSignal(
+            tenant_id=tenant,
+            run_id=run.run_id,
+            signal_id=f"signal-{suffix}",
+            registry_version=version_id,
+            cluster_id=cluster_id,
+            dimension="quality",
+            direction="regression",
+            statistic_name="fisher_exact",
+            statistic_value=1.0,
+            p_value=0.001,
+            p_value_adjusted=0.001,
+            effect_size=0.2,
+            sample_size_current=30,
+            sample_size_baseline=30,
+        )
+        storage.insert_conversation_drift_snapshot(run, [sample], [signal])
+        evaluator_minus_one = evaluator_json.replace('"padding":"x', '"padding":"', 1)
+        minus_run = ConversationDriftRun(
+            **{
+                **run.__dict__,
+                "run_id": f"run-minus-{suffix}",
+                "evaluator_definition_json": evaluator_minus_one,
+                "evaluator_fingerprint": conversation_json_fingerprint(evaluator_minus_one),
+                "signal_count": 0,
+            }
+        )
+        minus_sample = ConversationDriftSample(
+            **{**sample.__dict__, "run_id": minus_run.run_id}
+        )
+        storage.insert_conversation_drift_snapshot(minus_run, [minus_sample], [])
+        with pytest.raises(ValueError, match="JSON exceeds its bound"):
+            ConversationDriftRun(
+                **{
+                    **run.__dict__,
+                    "run_id": f"run-plus-{suffix}",
+                    "evaluator_definition_json": evaluator_json.replace(
+                        '"padding":"', '"padding":"x', 1
+                    ),
+                    "evaluator_fingerprint": "irrelevant",
+                }
+            )
+        storage.delete_trace(trace_id)
+        assert storage.get_conversation_drift_snapshot(tenant, run.run_id) == (
+            run,
+            [sample],
+            [signal],
+        )
+        assert storage.get_conversation_drift_snapshot(tenant, minus_run.run_id) == (
+            minus_run,
+            [minus_sample],
+            [],
+        )
+        with pytest.raises(Exception, match="immutable"):
+            storage._exec(
+                "UPDATE conversation_drift_runs SET status='partial' "
+                "WHERE tenant_id=%s AND run_id=%s",
+                (tenant, run.run_id),
+            )
     finally:
         storage.close()
 
@@ -261,9 +476,7 @@ def test_live_postgres_migrates_legacy_tables_before_creating_indexes():
             storage.close()
     finally:
         with psycopg.connect(DSN, autocommit=True) as admin:
-            admin.execute(
-                sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema))
-            )
+            admin.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
 
 
 def test_live_postgres_round_trip_and_mutation_contracts():
@@ -284,10 +497,12 @@ def test_live_postgres_round_trip_and_mutation_contracts():
             prompt_redacted="Prompt from 2001:db8:ac1d:5eed::cafe: timeout",
             response_redacted="Response to 2001:db8:ac1d:5eed::cafe:54321",
             error="Failure from 2001:db8:ac1d:5eed::cafe: refused",
-            raw_messages=[{
-                "role": "user",
-                "content": "Peer 2001:db8:ac1d:5eed::cafe: unavailable",
-            }],
+            raw_messages=[
+                {
+                    "role": "user",
+                    "content": "Peer 2001:db8:ac1d:5eed::cafe: unavailable",
+                }
+            ],
             tenant_id=f"{prefix}-tenant",
             session_id=f"{prefix}-session",
             cluster_id=f"{prefix}-cluster",
@@ -305,14 +520,19 @@ def test_live_postgres_round_trip_and_mutation_contracts():
         assert fetched.prompt_redacted == "Prompt from <IPV6>: timeout"
         assert fetched.response_redacted == "Response to <IPV6>:54321"
         assert fetched.error == "Failure from <IPV6>: refused"
-        assert fetched.raw_messages == [{
-            "content": "Peer <IPV6>: unavailable",
-            "role": "user",
-        }]
-        assert [item.trace_id for item in storage.list_traces(
-            tenant_id=trace.tenant_id,
-            cluster_id=trace.cluster_id,
-        )] == [trace_id]
+        assert fetched.raw_messages == [
+            {
+                "content": "Peer <IPV6>: unavailable",
+                "role": "user",
+            }
+        ]
+        assert [
+            item.trace_id
+            for item in storage.list_traces(
+                tenant_id=trace.tenant_id,
+                cluster_id=trace.cluster_id,
+            )
+        ] == [trace_id]
 
         span = SpanRecord(
             span_id=f"{prefix}-span",
@@ -363,9 +583,10 @@ def test_live_postgres_round_trip_and_mutation_contracts():
             status=EvaluatorHealthStatus.HEALTHY,
         )
         storage.insert_evaluator_health(health)
-        assert storage.list_evaluator_health(
-            evaluator_fingerprint=fingerprint
-        )[0].status is EvaluatorHealthStatus.HEALTHY
+        assert (
+            storage.list_evaluator_health(evaluator_fingerprint=fingerprint)[0].status
+            is EvaluatorHealthStatus.HEALTHY
+        )
 
         signal = DriftSignal(
             signal_id=f"{prefix}-signal",
@@ -408,9 +629,7 @@ def test_live_postgres_round_trip_and_mutation_contracts():
             now + timedelta(seconds=1),
             evaluator_fingerprint=fingerprint,
         )
-        assert all(
-            item.signal_id != signal.signal_id for item in storage.list_drift_signals()
-        )
+        assert all(item.signal_id != signal.signal_id for item in storage.list_drift_signals())
 
         user_signal = UserSignalRecord(
             signal_id=f"{prefix}-user-signal",
@@ -418,10 +637,7 @@ def test_live_postgres_round_trip_and_mutation_contracts():
             kind="thumbs_down",
         )
         storage.insert_user_signal(user_signal)
-        assert any(
-            item.signal_id == user_signal.signal_id
-            for item in storage.list_user_signals()
-        )
+        assert any(item.signal_id == user_signal.signal_id for item in storage.list_user_signals())
 
         storage.save_cluster_registry(registry_version, '{"clusters": []}')
         assert storage.load_cluster_registry(registry_version) == '{"clusters": []}'
@@ -547,11 +763,13 @@ def test_live_postgres_concurrent_runs_cannot_claim_the_same_signal_id():
                     evaluator_fingerprint=fingerprint,
                     signal_count=1,
                 ),
-                [DriftSignal(
-                    signal_id=signal_id,
-                    evaluator_fingerprint=fingerprint,
-                    run_id=run_id,
-                )],
+                [
+                    DriftSignal(
+                        signal_id=signal_id,
+                        evaluator_fingerprint=fingerprint,
+                        run_id=run_id,
+                    )
+                ],
             )
             completed.append(run_id)
         except BaseException as exc:
@@ -612,9 +830,7 @@ def test_live_postgres_span_upsert_can_clear_an_explicit_trace_link():
         span_id = f"span-{suffix}"
         storage.insert_trace(Trace(trace_id=trace_id, provider="anthropic"))
 
-        storage.insert_span(
-            SpanRecord(span_id=span_id, name="retrieve", trace_id=trace_id)
-        )
+        storage.insert_span(SpanRecord(span_id=span_id, name="retrieve", trace_id=trace_id))
         linked = [s for s in storage.list_spans(limit=500) if s.span_id == span_id]
         assert linked and linked[0].trace_id == trace_id
 
@@ -657,13 +873,9 @@ def test_live_postgres_prune_removes_expired_standalone_and_orphan_spans():
         for record in (old_standalone, old_orphan, recent_standalone):
             storage.insert_span(record)
 
-        assert storage.prune_before(
-            datetime(2021, 1, 1, tzinfo=timezone.utc).isoformat()
-        ) == 0
+        assert storage.prune_before(datetime(2021, 1, 1, tzinfo=timezone.utc).isoformat()) == 0
 
-        persisted = {
-            record.span_id for record in storage.list_spans(limit=500)
-        }
+        persisted = {record.span_id for record in storage.list_spans(limit=500)}
         assert old_standalone.span_id not in persisted
         assert old_orphan.span_id not in persisted
         assert recent_standalone.span_id in persisted
@@ -719,8 +931,7 @@ def test_live_postgres_delete_clears_explicit_link_but_preserves_shared_span():
         storage.delete_trace(explicit_id)
 
         [persisted] = [
-            record for record in storage.list_spans(limit=500)
-            if record.span_id == parent.span_id
+            record for record in storage.list_spans(limit=500) if record.span_id == parent.span_id
         ]
         assert persisted.trace_id is None
         assert storage.get_trace(provider_id).parent_span_id == parent.span_id
@@ -743,19 +954,24 @@ def test_live_postgres_delete_trace_rolls_back_every_cleanup_write_on_failure():
     function_name = f"fail_span_clear_fn_{suffix}"
     try:
         storage.insert_trace(Trace(trace_id=owner_id))
-        storage.insert_span(SpanRecord(
-            span_id=span_id,
-            name="atomic-shared",
-            trace_id=owner_id,
-        ))
-        storage.insert_trace(Trace(
-            trace_id=retained_id,
-            parent_span_id=span_id,
-        ))
+        storage.insert_span(
+            SpanRecord(
+                span_id=span_id,
+                name="atomic-shared",
+                trace_id=owner_id,
+            )
+        )
+        storage.insert_trace(
+            Trace(
+                trace_id=retained_id,
+                parent_span_id=span_id,
+            )
+        )
         with storage._pool.connection() as connection:
             with connection.cursor() as cursor:
-                cursor.execute(sql.SQL(
-                    """CREATE FUNCTION {}() RETURNS trigger LANGUAGE plpgsql AS $$
+                cursor.execute(
+                    sql.SQL(
+                        """CREATE FUNCTION {}() RETURNS trigger LANGUAGE plpgsql AS $$
                        BEGIN
                          IF OLD.trace_id = {} THEN
                            RAISE EXCEPTION 'forced cleanup failure';
@@ -763,33 +979,37 @@ def test_live_postgres_delete_trace_rolls_back_every_cleanup_write_on_failure():
                          RETURN NEW;
                        END
                        $$"""
-                ).format(sql.Identifier(function_name), sql.Literal(owner_id)))
-                cursor.execute(sql.SQL(
-                    """CREATE TRIGGER {} BEFORE UPDATE OF trace_id ON spans
+                    ).format(sql.Identifier(function_name), sql.Literal(owner_id))
+                )
+                cursor.execute(
+                    sql.SQL(
+                        """CREATE TRIGGER {} BEFORE UPDATE OF trace_id ON spans
                        FOR EACH ROW EXECUTE FUNCTION {}()"""
-                ).format(
-                    sql.Identifier(trigger_name),
-                    sql.Identifier(function_name),
-                ))
+                    ).format(
+                        sql.Identifier(trigger_name),
+                        sql.Identifier(function_name),
+                    )
+                )
 
         with pytest.raises(psycopg.DatabaseError, match="forced cleanup failure"):
             storage.delete_trace(owner_id)
 
         assert storage.get_trace(owner_id) is not None
         [persisted] = [
-            record for record in storage.list_spans(limit=500)
-            if record.span_id == span_id
+            record for record in storage.list_spans(limit=500) if record.span_id == span_id
         ]
         assert persisted.trace_id == owner_id
     finally:
         with storage._pool.connection() as connection:
             with connection.cursor() as cursor:
-                cursor.execute(sql.SQL("DROP TRIGGER IF EXISTS {} ON spans").format(
-                    sql.Identifier(trigger_name)
-                ))
-                cursor.execute(sql.SQL("DROP FUNCTION IF EXISTS {}()").format(
-                    sql.Identifier(function_name)
-                ))
+                cursor.execute(
+                    sql.SQL("DROP TRIGGER IF EXISTS {} ON spans").format(
+                        sql.Identifier(trigger_name)
+                    )
+                )
+                cursor.execute(
+                    sql.SQL("DROP FUNCTION IF EXISTS {}()").format(sql.Identifier(function_name))
+                )
         storage._exec("DELETE FROM traces WHERE trace_id = %s", (retained_id,))
         storage._exec("DELETE FROM spans WHERE span_id = %s", (span_id,))
         storage._exec("DELETE FROM traces WHERE trace_id = %s", (owner_id,))
@@ -812,15 +1032,18 @@ def test_live_postgres_delete_trace_serializes_concurrent_trace_insertion():
     delete_error: list[BaseException] = []
     try:
         storage.insert_trace(Trace(trace_id=owner_id))
-        storage.insert_span(SpanRecord(
-            span_id=span_id,
-            name="concurrent-shared",
-            trace_id=owner_id,
-        ))
+        storage.insert_span(
+            SpanRecord(
+                span_id=span_id,
+                name="concurrent-shared",
+                trace_id=owner_id,
+            )
+        )
         with storage._pool.connection() as connection:
             with connection.cursor() as cursor:
-                cursor.execute(sql.SQL(
-                    """CREATE FUNCTION {}() RETURNS trigger LANGUAGE plpgsql AS $$
+                cursor.execute(
+                    sql.SQL(
+                        """CREATE FUNCTION {}() RETURNS trigger LANGUAGE plpgsql AS $$
                        BEGIN
                          IF OLD.trace_id = {} THEN
                            PERFORM pg_sleep(1.5);
@@ -828,14 +1051,17 @@ def test_live_postgres_delete_trace_serializes_concurrent_trace_insertion():
                          RETURN OLD;
                        END
                        $$"""
-                ).format(sql.Identifier(function_name), sql.Literal(owner_id)))
-                cursor.execute(sql.SQL(
-                    """CREATE TRIGGER {} BEFORE DELETE ON spans
+                    ).format(sql.Identifier(function_name), sql.Literal(owner_id))
+                )
+                cursor.execute(
+                    sql.SQL(
+                        """CREATE TRIGGER {} BEFORE DELETE ON spans
                        FOR EACH ROW EXECUTE FUNCTION {}()"""
-                ).format(
-                    sql.Identifier(trigger_name),
-                    sql.Identifier(function_name),
-                ))
+                    ).format(
+                        sql.Identifier(trigger_name),
+                        sql.Identifier(function_name),
+                    )
+                )
 
         def delete_owner() -> None:
             try:
@@ -863,10 +1089,12 @@ def test_live_postgres_delete_trace_serializes_concurrent_trace_insertion():
                 pytest.fail("delete never reached the PostgreSQL cleanup trigger")
 
         def insert_child() -> None:
-            inserting.insert_trace(Trace(
-                trace_id=child_id,
-                parent_span_id=span_id,
-            ))
+            inserting.insert_trace(
+                Trace(
+                    trace_id=child_id,
+                    parent_span_id=span_id,
+                )
+            )
             insert_done.set()
 
         insert_thread = threading.Thread(target=insert_child)
@@ -882,12 +1110,14 @@ def test_live_postgres_delete_trace_serializes_concurrent_trace_insertion():
     finally:
         with storage._pool.connection() as connection:
             with connection.cursor() as cursor:
-                cursor.execute(sql.SQL("DROP TRIGGER IF EXISTS {} ON spans").format(
-                    sql.Identifier(trigger_name)
-                ))
-                cursor.execute(sql.SQL("DROP FUNCTION IF EXISTS {}()").format(
-                    sql.Identifier(function_name)
-                ))
+                cursor.execute(
+                    sql.SQL("DROP TRIGGER IF EXISTS {} ON spans").format(
+                        sql.Identifier(trigger_name)
+                    )
+                )
+                cursor.execute(
+                    sql.SQL("DROP FUNCTION IF EXISTS {}()").format(sql.Identifier(function_name))
+                )
         storage._exec("DELETE FROM traces WHERE trace_id = %s", (child_id,))
         storage._exec("DELETE FROM spans WHERE span_id = %s", (span_id,))
         storage._exec("DELETE FROM traces WHERE trace_id = %s", (owner_id,))
@@ -927,8 +1157,7 @@ def test_live_postgres_provider_span_correlation_succeeds_and_fails_independentl
                 pass
 
         success_records = [
-            record for record in storage.list_spans(limit=500)
-            if record.name in span_names
+            record for record in storage.list_spans(limit=500) if record.name in span_names
         ]
         assert len(success_records) == 2
         assert all(record.trace_id is None for record in success_records)
@@ -946,13 +1175,10 @@ def test_live_postgres_provider_span_correlation_succeeds_and_fails_independentl
                 pass
 
         failed_records = [
-            record for record in storage.list_spans(limit=500)
-            if record.name in span_names
+            record for record in storage.list_spans(limit=500) if record.name in span_names
         ]
         assert len(failed_records) == 4
-        failed_records = [
-            record for record in failed_records if record.name.startswith("failed-")
-        ]
+        failed_records = [record for record in failed_records if record.name.startswith("failed-")]
         assert all(record.trace_id is None for record in failed_records)
     finally:
         client_module._client = None

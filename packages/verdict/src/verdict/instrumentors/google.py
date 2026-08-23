@@ -21,7 +21,6 @@ Mirrors AnthropicInstrumentor in structure for consistency.
 from __future__ import annotations
 
 import asyncio
-import random
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -32,6 +31,7 @@ from verdict.instrumentors.base import (
     decide_persist,
     is_verdict_wrapt_wrapper,
     normalize_finish_reason,
+    should_sample_success,
 )
 from verdict.pricing import compute_cost_usd
 from verdict.redaction import redact, redact_messages
@@ -43,7 +43,6 @@ from verdict.schema import (
 )
 
 # Dedicated RNG so an app calling random.seed() can't perturb our sampling.
-_rng = random.Random()
 
 
 def _is_wrapped(cls: Any, method: str) -> bool:
@@ -193,13 +192,8 @@ class GoogleInstrumentor(BaseInstrumentor):
 
     # -- wrappers ---------------------------------------------------------
 
-    def _should_sample(self) -> bool:
-        rate = self.client.sample_rate
-        if rate >= 1.0:
-            return True
-        if rate <= 0.0:
-            return False
-        return _rng.random() < rate
+    def _should_sample(self, trace: Trace) -> bool:
+        return should_sample_success(self.client, trace)
 
     def _wrap_genai_generate(self, wrapped, instance, args, kwargs):
         trace = self._build_input_trace(args, kwargs, sdk="google-genai")
@@ -223,7 +217,7 @@ class GoogleInstrumentor(BaseInstrumentor):
         except Exception as e:
             self._record_error(trace, t0, e)
             raise
-        should_persist, _is_error = decide_persist(False, self._should_sample())
+        should_persist, _is_error = decide_persist(False, self._should_sample(trace))
         if should_persist:
             self._fill_output(trace, resp)
             trace.latency_ms = (time.perf_counter() - t0) * 1000.0
@@ -247,7 +241,7 @@ class GoogleInstrumentor(BaseInstrumentor):
         except Exception as e:
             self._record_error(trace, t0, e)
             raise
-        should_persist, _is_error = decide_persist(False, self._should_sample())
+        should_persist, _is_error = decide_persist(False, self._should_sample(trace))
         if should_persist:
             self._fill_output(trace, resp)
             trace.latency_ms = (time.perf_counter() - t0) * 1000.0
@@ -311,7 +305,7 @@ class GoogleInstrumentor(BaseInstrumentor):
         except Exception as e:
             self._record_error(trace, t0, e)
             raise
-        should_persist, _is_error = decide_persist(False, self._should_sample())
+        should_persist, _is_error = decide_persist(False, self._should_sample(trace))
         if should_persist:
             self._fill_output(trace, resp)
             trace.latency_ms = (time.perf_counter() - t0) * 1000.0
@@ -506,7 +500,7 @@ class _StreamingWrapper:
         self._finalized = True
 
         raised = self._error is not None
-        should_persist, is_error = decide_persist(raised, self._instr._should_sample())
+        should_persist, is_error = decide_persist(raised, self._instr._should_sample(self._trace))
         if not should_persist:
             return
 

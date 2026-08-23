@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import abc
+import hashlib
 import logging
+import random
 import threading
 import time
+from decimal import Decimal
 from typing import TYPE_CHECKING
 
 from verdict.redaction import sanitize_trace
@@ -14,10 +17,33 @@ from verdict.schema import Trace
 if TYPE_CHECKING:
     from verdict.client import VerdictClient
 
+_SUCCESS_RNG = random.Random()
+
 
 log = logging.getLogger("verdict.instrumentors")
 _persistence_warning_lock = threading.Lock()
 _warned_persistence_failures: set[tuple[str, str, type[BaseException]]] = set()
+_warned_routing_context_skip = False
+
+
+def _session_success_sampled(
+    tenant_id: str,
+    workload: str,
+    session_id: str,
+    sample_rate: float,
+) -> bool:
+    """Return the deterministic conversation-level successful-call decision."""
+    if sample_rate >= 1.0:
+        return True
+    if sample_rate <= 0.0:
+        return False
+    digest = hashlib.sha256()
+    for value in ("conversation-capture-v1", tenant_id, workload, session_id):
+        encoded = value.encode("utf-8")
+        digest.update(len(encoded).to_bytes(4, "big"))
+        digest.update(encoded)
+    threshold = int(Decimal(str(sample_rate)) * (1 << 64))
+    return int.from_bytes(digest.digest()[:8], "big") < threshold
 
 
 def is_verdict_wrapt_wrapper(obj: object, *, owner: object | None = None) -> bool:
@@ -51,14 +77,26 @@ def apply_routing_context(client: VerdictClient, trace: Trace) -> None:
     Best-effort: routing metadata is never worth crashing a request over.
     """
     try:
-        trace.tenant_id = getattr(client, "tenant_id", None)
         # Imported lazily to avoid an import cycle (client imports instrumentors).
         from verdict.client import (
             get_context_intent_key,
+            get_context_sample_rate,
             get_context_session_id,
+            get_context_success_sampling,
+            get_context_tenant_id,
             get_context_user_id_hash,
             get_context_workload,
         )
+
+        request_tenant = get_context_tenant_id()
+        tenant_mode = getattr(client, "_tenant_mode", "fixed")
+        if tenant_mode == "request":
+            if request_tenant is None:
+                trace._verdict_capture_skip = True
+                return
+            trace.tenant_id = request_tenant
+        else:
+            trace.tenant_id = getattr(client, "tenant_id", None)
 
         sid = get_context_session_id()
         if sid is not None:
@@ -72,6 +110,28 @@ def apply_routing_context(client: VerdictClient, trace: Trace) -> None:
         intent_key = get_context_intent_key()
         if intent_key is not None:
             trace.tags = {**trace.tags, "verdict.intent_key": intent_key}
+
+        rate = get_context_sample_rate()
+        if rate is None:
+            rate = client.sample_rate
+        policy = get_context_success_sampling() or "call"
+        trace._verdict_sample_rate = rate
+        if policy == "session":
+            if trace.tenant_id is None or workload is None or sid is None:
+                trace._verdict_capture_skip = True
+                return
+            trace.tags = {
+                **trace.tags,
+                "verdict.success_sampling": "full-v1" if rate >= 1.0 else "session-v1",
+            }
+            trace._verdict_success_sampled = _session_success_sampled(
+                trace.tenant_id,
+                workload,
+                sid,
+                rate,
+            )
+        else:
+            trace.tags = {**trace.tags, "verdict.success_sampling": "call-v1"}
 
         # Automatic provider/manual-span correlation is deliberately one-way.
         # Multiple provider traces can share one manual parent, so choosing one
@@ -122,6 +182,21 @@ def _warn_persistence_failure_once(
 
 def safe_persist_trace(client: VerdictClient, trace: Trace) -> None:
     """Sanitize and persist telemetry without raising into provider calls."""
+    if getattr(trace, "_verdict_capture_skip", False):
+        global _warned_routing_context_skip
+        client.runtime_metrics.record_routing_context_skip()
+        with _persistence_warning_lock:
+            should_warn = not _warned_routing_context_skip
+            _warned_routing_context_skip = True
+        if should_warn:
+            try:
+                log.warning(
+                    "Verdict skipped trace capture because required request routing context "
+                    "was unavailable"
+                )
+            except Exception:
+                pass
+        return
     started = time.perf_counter()
     failed = False
     try:
@@ -187,6 +262,19 @@ def decide_persist(raised: bool, should_sample: bool) -> tuple[bool, bool]:
     if raised:
         return True, True
     return should_sample, False
+
+
+def should_sample_success(client: VerdictClient, trace: Trace) -> bool:
+    """Use the request-start capture decision attached to a provider trace."""
+    session_decision = getattr(trace, "_verdict_success_sampled", None)
+    if session_decision is not None:
+        return bool(session_decision)
+    rate = getattr(trace, "_verdict_sample_rate", client.sample_rate)
+    if rate >= 1.0:
+        return True
+    if rate <= 0.0:
+        return False
+    return _SUCCESS_RNG.random() < rate
 
 
 class BaseInstrumentor(abc.ABC):

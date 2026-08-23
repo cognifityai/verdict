@@ -356,19 +356,39 @@ Hexagonal / ports-and-adapters, ≥2 adapters per port (one real + in-memory for
   prevents a `healthy` status: too few usable examples remain
   `insufficient_data`; otherwise the result is `degraded`.
   Signals retain up to five current-window trace IDs as review evidence.
+- `verdict-pipeline --method conversation-v1` is the tenant-scoped,
+  conversation-independent quality-drift path. It requires an active explicit
+  registry, an exact `--tenant-id` and `--target-workload`, content capture, and
+  capture policy `full-v1` or session-sticky `session-v1`. It selects at most
+  one representative per conversation/cluster/window, removes a conversation
+  appearing on both sides of the same cluster comparison, freezes the exact
+  evaluator/policy/outcomes in an immutable run, and reports every empty,
+  excluded, insufficient, tested, or error cell. Candidate, metadata, content,
+  token, call, concurrency, and attempt-time bounds are checked before paid
+  judging. Reusing the same run ID and exact policy reads the existing snapshot
+  without new calls; a changed policy with that ID fails closed.
+
+  Request-scoped applications initialize with `tenant_mode="request"` and wrap
+  each provider operation in `verdict.request_context(...)`. Pass the durable
+  conversation ID as `session_id`, raw user identity as `user_id` (Verdict
+  hashes it before context mutation), and either `success_sampling="session"`
+  for a conversation-sticky decision or `"call"` for explicitly independent
+  operations. The default fixed-tenant API and positional constructor behavior
+  remain compatible.
 - The `0.1.0a4` POC drift demonstration assumes independently sampled calls.
   Do not treat repeated turns from the same conversation as independent
   evidence or use that profile for a production decision.
-- The v0 drift runner supports one tenant scope per store and rejects mixed-
-  tenant analysis. Use separate stores until tenant-scoped cluster registries
-  and signals are implemented.
+- Legacy `--method legacy-trace --registry-mode off` supports one tenant scope
+  per store and rejects mixed-tenant analysis. Conversation-v1 instead requires
+  an authorized tenant and persists tenant/version-scoped samples and signals.
 - `cost_usd` is a best-effort estimate from a dated static base-price table, not
   a billing source of truth. Unknown models remain unpriced; caching, special
   tiers, tools, residency, and negotiated discounts are not modeled.
-- Judge execution is sequential. Judge token/cost usage, evaluation-budget
-  enforcement, cache-token accounting, human-readable cluster naming, and
-  automatic fragmented-cluster fusion are not implemented. Their scoped
-  follow-ups are listed in [`docs/v1-roadmap.md`](docs/v1-roadmap.md).
+- Legacy judge execution is sequential. Conversation-v1 uses explicitly bounded
+  concurrency and call/content/token budgets. Cache-token accounting,
+  human-readable cluster naming, and automatic fragmented-cluster fusion are
+  not implemented. Their scoped follow-ups are listed in
+  [`docs/v1-roadmap.md`](docs/v1-roadmap.md).
 - This is a **public alpha** release — not a hosted monitoring service and not a substitute for workload-specific calibration.
 - The bundled dashboard server is a read-only view of **SQLite or PostgreSQL**.
   It does not create or migrate schemas. Protect it with the host application's

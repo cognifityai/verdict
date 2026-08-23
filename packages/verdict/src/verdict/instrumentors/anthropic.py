@@ -13,7 +13,6 @@ from __future__ import annotations
 import asyncio
 import importlib
 import inspect
-import random
 import time
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
@@ -24,6 +23,7 @@ from verdict.instrumentors.base import (
     decide_persist,
     is_verdict_wrapt_wrapper,
     normalize_finish_reason,
+    should_sample_success,
 )
 from verdict.pricing import compute_cost_usd
 from verdict.redaction import redact, redact_messages
@@ -38,7 +38,6 @@ if TYPE_CHECKING:
     pass
 
 # Dedicated RNG so an app calling random.seed() can't perturb our sampling.
-_rng = random.Random()
 
 
 def _is_wrapped(mod: Any, cls_name: str, method: str) -> bool:
@@ -75,6 +74,7 @@ def _message_resource_module() -> tuple[Any, str]:
 def _maybe_import_anthropic():
     try:
         import anthropic  # noqa: F401
+
         return True
     except ImportError:
         return False
@@ -153,9 +153,7 @@ class AnthropicInstrumentor(BaseInstrumentor):
         for cls_name, method, wrapper in methods:
             # ``messages.stream`` is feature-detected for the declared
             # anthropic>=0.30 range instead of making installation all-or-none.
-            if _has_method(mod, cls_name, method) and not _is_wrapped(
-                mod, cls_name, method
-            ):
+            if _has_method(mod, cls_name, method) and not _is_wrapped(mod, cls_name, method):
                 wrapt.wrap_function_wrapper(
                     module_path,
                     f"{cls_name}.{method}",
@@ -186,13 +184,8 @@ class AnthropicInstrumentor(BaseInstrumentor):
 
     # -- wrappers ----------------------------------------------------------
 
-    def _should_sample(self) -> bool:
-        rate = self.client.sample_rate
-        if rate >= 1.0:
-            return True
-        if rate <= 0.0:
-            return False
-        return _rng.random() < rate
+    def _should_sample(self, trace: Trace) -> bool:
+        return should_sample_success(self.client, trace)
 
     def _wrap_create_sync(self, wrapped, instance, args, kwargs):
         trace_kwargs, call_kwargs = self._split_capture_kwargs(kwargs)
@@ -219,7 +212,7 @@ class AnthropicInstrumentor(BaseInstrumentor):
             self._fill_input_trace(trace, trace_kwargs)
             self._persist_error(trace, t0, e)
             raise
-        should_persist, _is_error = decide_persist(False, self._should_sample())
+        should_persist, _is_error = decide_persist(False, self._should_sample(trace))
         if should_persist:
             self._fill_input_trace(trace, trace_kwargs)
             self._fill_output(trace, resp)
@@ -256,7 +249,7 @@ class AnthropicInstrumentor(BaseInstrumentor):
             self._fill_input_trace(trace, trace_kwargs)
             self._persist_error(trace, t0, e)
             raise
-        should_persist, _is_error = decide_persist(False, self._should_sample())
+        should_persist, _is_error = decide_persist(False, self._should_sample(trace))
         if should_persist:
             self._fill_input_trace(trace, trace_kwargs)
             self._fill_output(trace, resp)
@@ -382,7 +375,9 @@ class AnthropicInstrumentor(BaseInstrumentor):
         # Anthropic Message has: id, model, role, content (list of blocks),
         # stop_reason, usage.input_tokens, usage.output_tokens
         try:
-            trace.response_model = getattr(resp, "model", trace.request_model) or trace.request_model
+            trace.response_model = (
+                getattr(resp, "model", trace.request_model) or trace.request_model
+            )
             usage = getattr(resp, "usage", None)
             if usage is not None:
                 trace.input_tokens = getattr(usage, "input_tokens", None)
@@ -678,7 +673,7 @@ class _StreamingWrapper:
         self._finalized = True
 
         raised = self._error is not None
-        should_persist, is_error = decide_persist(raised, self._instr._should_sample())
+        should_persist, is_error = decide_persist(raised, self._instr._should_sample(self._trace))
         if not should_persist:
             # Sampled-out success: nothing to record.
             return
@@ -703,9 +698,7 @@ class _StreamingWrapper:
                 self._trace.finish_reason = self._stop_reason
             self._trace.tags = {
                 **self._trace.tags,
-                "verdict.stream_completion": (
-                    "complete" if self._saw_message_stop else "partial"
-                ),
+                "verdict.stream_completion": ("complete" if self._saw_message_stop else "partial"),
             }
             self._trace.cost_usd = compute_cost_usd(
                 self._trace.response_model or self._trace.request_model,

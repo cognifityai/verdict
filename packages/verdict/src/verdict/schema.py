@@ -10,7 +10,7 @@ import json
 import math
 import unicodedata
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any
 from uuid import uuid4
@@ -733,3 +733,309 @@ def cluster_candidate_digest(trace_ids: list[str]) -> str:
         digest.update(len(encoded).to_bytes(4, "big"))
         digest.update(encoded)
     return digest.hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# Conversation-independent drift snapshots
+# ---------------------------------------------------------------------------
+
+
+def _canonical_conversation_json(payload_json: str, *, max_bytes: int) -> object:
+    try:
+        encoded = payload_json.encode("utf-8")
+        payload = json.loads(payload_json)
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError("conversation snapshot JSON is invalid") from exc
+    if len(encoded) > max_bytes:
+        raise ValueError("conversation snapshot JSON exceeds its bound")
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    if canonical != payload_json:
+        raise ValueError("conversation snapshot JSON must be canonical")
+    return payload
+
+
+def conversation_json_fingerprint(payload_json: str) -> str:
+    """Fingerprint one already-canonical bounded conversation definition."""
+    payload = _canonical_conversation_json(payload_json, max_bytes=16 * 1024 * 1024)
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _require_utc_time(name: str, value: datetime) -> datetime:
+    if value.tzinfo is None:
+        raise ValueError(f"{name} must include a timezone")
+    return value.astimezone(timezone.utc)
+
+
+@dataclass(frozen=True)
+class ConversationDriftRun:
+    tenant_id: str
+    run_id: str
+    registry_version: str
+    analysis_policy_json: str
+    analysis_policy_fingerprint: str
+    evaluator_definition_json: str
+    evaluator_fingerprint: str
+    target_workload: str
+    baseline_start: datetime
+    baseline_end: datetime
+    current_start: datetime
+    current_end: datetime
+    analysis_cutoff: datetime
+    status: str
+    coverage_json: str
+    signal_count: int
+    sample_count: int
+    started_at: datetime
+    completed_at: datetime
+    actor: str
+    unavailable_reason: str | None = None
+    method: str = "conversation-v1"
+
+    def __post_init__(self) -> None:
+        if self.method != "conversation-v1":
+            raise ValueError("conversation drift method is invalid")
+        for name, value, maximum in (
+            ("tenant_id", self.tenant_id, 128),
+            ("run_id", self.run_id, 256),
+            ("registry_version", self.registry_version, 256),
+            ("target_workload", self.target_workload, 64),
+            ("actor", self.actor, 256),
+        ):
+            try:
+                size = len(value.encode("utf-8"))
+            except (AttributeError, UnicodeError) as exc:
+                raise ValueError(f"{name} is invalid") from exc
+            if not value or size > maximum or "\x00" in value:
+                raise ValueError(f"{name} is invalid")
+        policy = _canonical_conversation_json(self.analysis_policy_json, max_bytes=32 * 1024)
+        evaluator = _canonical_conversation_json(
+            self.evaluator_definition_json, max_bytes=64 * 1024
+        )
+        coverage = _canonical_conversation_json(self.coverage_json, max_bytes=16 * 1024 * 1024)
+        if not isinstance(policy, dict) or policy.get("schema") != "analysis-policy-v1":
+            raise ValueError("analysis policy is invalid")
+        if not isinstance(evaluator, dict) or evaluator.get("schema") != "evaluator-definition-v1":
+            raise ValueError("evaluator definition is invalid")
+        if not isinstance(coverage, dict) or coverage.get("schema") != "coverage-v1":
+            raise ValueError("coverage is invalid")
+        if (
+            conversation_json_fingerprint(self.analysis_policy_json)
+            != self.analysis_policy_fingerprint
+        ):
+            raise ValueError("analysis policy fingerprint does not match")
+        if (
+            conversation_json_fingerprint(self.evaluator_definition_json)
+            != self.evaluator_fingerprint
+        ):
+            raise ValueError("evaluator fingerprint does not match")
+        dimensions = evaluator.get("dimensions")
+        if not isinstance(dimensions, list) or not 1 <= len(dimensions) <= 64:
+            raise ValueError("evaluator expected dimensions are invalid")
+        normalized_dimensions: list[str] = []
+        for dimension in dimensions:
+            if not isinstance(dimension, str):
+                raise ValueError("evaluator expected dimensions are invalid")
+            normalized = unicodedata.normalize("NFC", dimension)
+            try:
+                size = len(normalized.encode("utf-8"))
+            except UnicodeError as exc:
+                raise ValueError("evaluator expected dimensions are invalid") from exc
+            if (
+                normalized != dimension
+                or not 1 <= size <= 1024
+                or "\x00" in dimension
+                or any(unicodedata.category(char).startswith("C") for char in dimension)
+            ):
+                raise ValueError("evaluator expected dimensions are invalid")
+            normalized_dimensions.append(normalized)
+        if len(set(normalized_dimensions)) != len(normalized_dimensions):
+            raise ValueError("evaluator expected dimensions are not unique")
+        longest_map = json.dumps(
+            {dimension: "UNCLEAR" for dimension in normalized_dimensions},
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        )
+        if len(longest_map.encode("utf-8")) > 32 * 1024:
+            raise ValueError("evaluator expected dimensions exceed the outcome-map bound")
+
+        baseline_start = _require_utc_time("baseline_start", self.baseline_start)
+        baseline_end = _require_utc_time("baseline_end", self.baseline_end)
+        current_start = _require_utc_time("current_start", self.current_start)
+        current_end = _require_utc_time("current_end", self.current_end)
+        cutoff = _require_utc_time("analysis_cutoff", self.analysis_cutoff)
+        started = _require_utc_time("started_at", self.started_at)
+        completed = _require_utc_time("completed_at", self.completed_at)
+        for name, value in (
+            ("baseline_start", baseline_start),
+            ("baseline_end", baseline_end),
+            ("current_start", current_start),
+            ("current_end", current_end),
+            ("analysis_cutoff", cutoff),
+            ("started_at", started),
+            ("completed_at", completed),
+        ):
+            object.__setattr__(self, name, value)
+        if not baseline_start < baseline_end <= current_start < current_end <= cutoff:
+            raise ValueError("conversation drift window ordering is invalid")
+        if baseline_end - baseline_start > timedelta(
+            days=90
+        ) or current_end - current_start > timedelta(days=90):
+            raise ValueError("conversation drift window duration is invalid")
+        if current_end - baseline_start > timedelta(days=180):
+            raise ValueError("conversation drift total window span is invalid")
+        if started > completed:
+            raise ValueError("conversation drift completion precedes its start")
+        if self.status not in {"ineligible", "insufficient", "partial", "ready", "unavailable"}:
+            raise ValueError("conversation drift run status is invalid")
+        if self.status == "unavailable" and not self.unavailable_reason:
+            raise ValueError("unavailable conversation run requires a reason")
+        if self.status != "unavailable" and self.unavailable_reason is not None:
+            raise ValueError("available conversation run cannot contain an unavailable reason")
+        if not 0 <= self.signal_count <= 16_000 or not 0 <= self.sample_count <= 50_000:
+            raise ValueError("conversation snapshot counts are invalid")
+
+
+@dataclass(frozen=True)
+class ConversationDriftSample:
+    tenant_id: str
+    run_id: str
+    registry_version: str
+    cluster_id: str
+    session_ordinal: int
+    window: str
+    trace_id: str
+    event_time: datetime
+    attempt_terminal_at: datetime
+    attempt_status: str
+    legacy_write_status: str
+    outcomes_json: str
+    error_category: str | None = None
+    judgment_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if not 1 <= self.session_ordinal <= 50_000:
+            raise ValueError("conversation session ordinal is invalid")
+        if self.window not in {"baseline", "current"}:
+            raise ValueError("conversation sample window is invalid")
+        object.__setattr__(self, "event_time", _require_utc_time("event_time", self.event_time))
+        object.__setattr__(
+            self,
+            "attempt_terminal_at",
+            _require_utc_time("attempt_terminal_at", self.attempt_terminal_at),
+        )
+        outcomes = _canonical_conversation_json(self.outcomes_json, max_bytes=32 * 1024)
+        if not isinstance(outcomes, dict):
+            raise ValueError("conversation sample outcomes are invalid")
+        if self.attempt_status == "completed":
+            if (
+                self.error_category is not None
+                or not outcomes
+                or any(value not in {"PASS", "FAIL", "UNCLEAR"} for value in outcomes.values())
+            ):
+                raise ValueError("completed conversation sample is invalid")
+        elif self.attempt_status == "error":
+            if outcomes or self.error_category not in {
+                "timeout",
+                "rate_limited",
+                "connection",
+                "provider",
+                "invalid_response",
+                "internal",
+            }:
+                raise ValueError("error conversation sample is invalid")
+        else:
+            raise ValueError("conversation sample attempt status is invalid")
+        if self.legacy_write_status not in {
+            "written",
+            "source_deleted",
+            "storage_error",
+            "not_attempted",
+        }:
+            raise ValueError("conversation sample legacy write status is invalid")
+
+
+@dataclass(frozen=True)
+class ConversationDriftSignal:
+    tenant_id: str
+    run_id: str
+    signal_id: str
+    registry_version: str
+    cluster_id: str
+    dimension: str
+    direction: str
+    statistic_name: str
+    statistic_value: float
+    p_value: float
+    p_value_adjusted: float
+    effect_size: float
+    sample_size_current: int
+    sample_size_baseline: int
+    examples_json: str = "[]"
+    recommended_action: str = ""
+
+    def __post_init__(self) -> None:
+        if self.direction not in {"regression", "improvement", "change"}:
+            raise ValueError("conversation signal direction is invalid")
+        if any(
+            not math.isfinite(value)
+            for value in (
+                self.statistic_value,
+                self.p_value,
+                self.p_value_adjusted,
+                self.effect_size,
+            )
+        ):
+            raise ValueError("conversation signal statistics must be finite")
+        if not 0 <= self.p_value <= 1 or not 0 <= self.p_value_adjusted <= 1:
+            raise ValueError("conversation signal p-value is invalid")
+        if not -1 <= self.effect_size <= 1:
+            raise ValueError("conversation signal effect size is invalid")
+        if (
+            not 0 <= self.sample_size_current <= 50_000
+            or not 0 <= self.sample_size_baseline <= 50_000
+        ):
+            raise ValueError("conversation signal sample count is invalid")
+        examples = _canonical_conversation_json(self.examples_json, max_bytes=16 * 1024)
+        if not isinstance(examples, list):
+            raise ValueError("conversation signal examples are invalid")
+
+
+@dataclass(frozen=True)
+class ConversationTraceCandidate:
+    """Bounded metadata for one Task 6 source trace."""
+
+    trace_id_utf8_bytes: int
+    trace_id: str | None
+    tenant_id: str
+    started_at_us: int
+    workload_json_type: str
+    workload_utf8_bytes: int | None
+    workload: str | None
+    session_state: str
+    session_utf8_bytes: int | None
+    session_id: str | None
+    success_sampling_state: str
+    success_sampling_utf8_bytes: int | None
+    success_sampling: str | None
+    stream_completion_state: str
+    stream_completion_utf8_bytes: int | None
+    stream_completion: str | None
+    assignment_status: str | None
+    assignment_reason: str | None
+    cluster_id: str | None
+    provider_success: bool
+    prompt_present: bool
+    prompt_utf8_valid: bool
+    prompt_utf8_bytes: int | None
+    response_present: bool
+    response_utf8_valid: bool
+    response_utf8_bytes: int | None
+
+
+@dataclass(frozen=True)
+class ConversationTraceContent:
+    trace_id: str
+    prompt_redacted: str
+    response_redacted: str

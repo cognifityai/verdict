@@ -16,6 +16,7 @@ class RuntimeMetrics:
         self._overhead_ms: deque[float] = deque(maxlen=max_samples)
         self._attempts = 0
         self._failures = 0
+        self._routing_context_skips = 0
 
     def record_capture(self, overhead_ms: float, *, failed: bool) -> None:
         value = float(overhead_ms)
@@ -25,17 +26,23 @@ class RuntimeMetrics:
             if math.isfinite(value) and value >= 0:
                 self._overhead_ms.append(value)
 
+    def record_routing_context_skip(self) -> None:
+        with self._lock:
+            self._routing_context_skips += 1
+
     def snapshot(self, storage: Any) -> dict[str, Any]:
         with self._lock:
             values = sorted(self._overhead_ms)
             attempts = self._attempts
             failures = self._failures
+            routing_context_skips = self._routing_context_skips
         buffer_snapshot = getattr(storage, "telemetry_snapshot", None)
         buffer = buffer_snapshot() if callable(buffer_snapshot) else {"enabled": False}
         return {
             "capture": {
                 "attempts": attempts,
                 "failures": failures,
+                "routing_context_skips": routing_context_skips,
                 "overhead_ms": {
                     "samples": len(values),
                     "p50": _percentile(values, 0.50),

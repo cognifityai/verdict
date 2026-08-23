@@ -29,6 +29,11 @@ from verdict.schema import (
     ClusterRegistryEvent,
     ClusterRegistryVersion,
     ClusterTraceCandidate,
+    ConversationDriftRun,
+    ConversationDriftSample,
+    ConversationDriftSignal,
+    ConversationTraceCandidate,
+    ConversationTraceContent,
     DimensionScore,
     DriftDirection,
     DriftRun,
@@ -47,7 +52,22 @@ from verdict.schema import (
     datetime_to_utc_us,
     populate_trace_analysis_fields,
 )
-from verdict.storage.base import _validate_drift_run_snapshot
+from verdict.storage.base import (
+    _validate_conversation_drift_snapshot,
+    _validate_drift_run_snapshot,
+)
+from verdict.storage.conversation import (
+    RUN_COLUMNS,
+    SAMPLE_COLUMNS,
+    SIGNAL_COLUMNS,
+    native_time,
+    run_from_row,
+    run_values,
+    sample_from_row,
+    sample_values,
+    signal_from_row,
+    signal_values,
+)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS traces (
@@ -274,6 +294,123 @@ CREATE TABLE IF NOT EXISTS cluster_registry_events (
 CREATE INDEX IF NOT EXISTS idx_cluster_events_version
     ON cluster_registry_events(tenant_id,to_version_id,created_at,event_id);
 
+CREATE TABLE IF NOT EXISTS conversation_drift_runs (
+    tenant_id TEXT NOT NULL CHECK(octet_length(tenant_id) BETWEEN 1 AND 128),
+    run_id TEXT NOT NULL CHECK(octet_length(run_id) BETWEEN 1 AND 256),
+    registry_version TEXT NOT NULL,
+    method TEXT NOT NULL CHECK(method='conversation-v1'),
+    analysis_policy_json TEXT NOT NULL CHECK(
+        octet_length(analysis_policy_json)<=32768 AND
+        jsonb_typeof(analysis_policy_json::jsonb)='object'),
+    analysis_policy_fingerprint TEXT NOT NULL,
+    evaluator_definition_json TEXT NOT NULL CHECK(
+        octet_length(evaluator_definition_json)<=65536 AND
+        jsonb_typeof(evaluator_definition_json::jsonb)='object'),
+    evaluator_fingerprint TEXT NOT NULL,
+    target_workload TEXT NOT NULL CHECK(octet_length(target_workload) BETWEEN 1 AND 64),
+    baseline_start TIMESTAMPTZ NOT NULL,
+    baseline_end TIMESTAMPTZ NOT NULL,
+    current_start TIMESTAMPTZ NOT NULL,
+    current_end TIMESTAMPTZ NOT NULL,
+    analysis_cutoff TIMESTAMPTZ NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('ineligible','insufficient','partial','ready','unavailable')),
+    unavailable_reason TEXT,
+    coverage_json TEXT NOT NULL CHECK(
+        octet_length(coverage_json)<=16777216 AND
+        jsonb_typeof(coverage_json::jsonb)='object'),
+    signal_count INTEGER NOT NULL CHECK(signal_count BETWEEN 0 AND 16000),
+    sample_count INTEGER NOT NULL CHECK(sample_count BETWEEN 0 AND 50000),
+    started_at TIMESTAMPTZ NOT NULL,
+    completed_at TIMESTAMPTZ NOT NULL,
+    actor TEXT NOT NULL CHECK(octet_length(actor) BETWEEN 1 AND 256),
+    PRIMARY KEY (tenant_id,run_id),
+    UNIQUE (tenant_id,run_id,registry_version),
+    FOREIGN KEY (tenant_id,registry_version)
+        REFERENCES cluster_registry_versions(tenant_id,version_id),
+    CHECK (baseline_start < baseline_end AND baseline_end <= current_start AND
+           current_start < current_end AND current_end <= analysis_cutoff),
+    CHECK (baseline_end-baseline_start <= interval '90 days' AND
+           current_end-current_start <= interval '90 days' AND
+           current_end-baseline_start <= interval '180 days'),
+    CHECK (started_at <= completed_at),
+    CHECK ((status='unavailable' AND unavailable_reason IS NOT NULL) OR
+           (status<>'unavailable' AND unavailable_reason IS NULL))
+);
+CREATE INDEX IF NOT EXISTS idx_conversation_runs_latest
+    ON conversation_drift_runs(tenant_id,completed_at DESC,run_id DESC);
+
+CREATE TABLE IF NOT EXISTS conversation_drift_signals (
+    tenant_id TEXT NOT NULL, run_id TEXT NOT NULL, signal_id TEXT NOT NULL,
+    registry_version TEXT NOT NULL, cluster_id TEXT NOT NULL, dimension TEXT NOT NULL,
+    direction TEXT NOT NULL CHECK(direction IN ('regression','improvement','change')),
+    statistic_name TEXT NOT NULL, statistic_value DOUBLE PRECISION NOT NULL,
+    p_value DOUBLE PRECISION NOT NULL CHECK(p_value BETWEEN 0 AND 1),
+    p_value_adjusted DOUBLE PRECISION NOT NULL CHECK(p_value_adjusted BETWEEN 0 AND 1),
+    effect_size DOUBLE PRECISION NOT NULL CHECK(effect_size BETWEEN -1 AND 1),
+    sample_size_current INTEGER NOT NULL CHECK(sample_size_current BETWEEN 0 AND 50000),
+    sample_size_baseline INTEGER NOT NULL CHECK(sample_size_baseline BETWEEN 0 AND 50000),
+    examples_json TEXT NOT NULL CHECK(
+        octet_length(examples_json)<=16384 AND
+        jsonb_typeof(examples_json::jsonb)='array'),
+    recommended_action TEXT NOT NULL,
+    PRIMARY KEY (tenant_id,run_id,signal_id),
+    UNIQUE (tenant_id,run_id,cluster_id,dimension,statistic_name,direction),
+    FOREIGN KEY (tenant_id,run_id,registry_version)
+        REFERENCES conversation_drift_runs(tenant_id,run_id,registry_version),
+    FOREIGN KEY (tenant_id,registry_version,cluster_id)
+        REFERENCES cluster_registry_clusters(tenant_id,version_id,cluster_id)
+);
+
+CREATE TABLE IF NOT EXISTS conversation_drift_samples (
+    tenant_id TEXT NOT NULL, run_id TEXT NOT NULL, registry_version TEXT NOT NULL,
+    cluster_id TEXT NOT NULL, session_ordinal INTEGER NOT NULL CHECK(session_ordinal BETWEEN 1 AND 50000),
+    "window" TEXT NOT NULL CHECK("window" IN ('baseline','current')), trace_id TEXT NOT NULL,
+    event_time TIMESTAMPTZ NOT NULL, attempt_terminal_at TIMESTAMPTZ NOT NULL,
+    attempt_status TEXT NOT NULL CHECK(attempt_status IN ('completed','error')),
+    error_category TEXT, judgment_id TEXT,
+    legacy_write_status TEXT NOT NULL CHECK(legacy_write_status IN
+        ('written','source_deleted','storage_error','not_attempted')),
+    outcomes_json TEXT NOT NULL CHECK(octet_length(outcomes_json)<=32768),
+    PRIMARY KEY (tenant_id,run_id,cluster_id,session_ordinal),
+    UNIQUE (tenant_id,run_id,trace_id),
+    FOREIGN KEY (tenant_id,run_id,registry_version)
+        REFERENCES conversation_drift_runs(tenant_id,run_id,registry_version),
+    FOREIGN KEY (tenant_id,registry_version,trace_id,cluster_id)
+        REFERENCES trace_cluster_assignments(tenant_id,version_id,trace_id,cluster_id),
+    CHECK ((attempt_status='completed' AND error_category IS NULL AND
+            jsonb_typeof(outcomes_json::jsonb)='object' AND outcomes_json::jsonb<>'{}'::jsonb) OR
+           (attempt_status='error' AND error_category IN
+            ('timeout','rate_limited','connection','provider','invalid_response','internal') AND
+            outcomes_json::jsonb='{}'::jsonb))
+);
+
+CREATE OR REPLACE FUNCTION validate_conversation_sample() RETURNS trigger AS $$
+DECLARE owner conversation_drift_runs%ROWTYPE;
+BEGIN
+  SELECT * INTO owner FROM conversation_drift_runs
+    WHERE tenant_id=NEW.tenant_id AND run_id=NEW.run_id AND registry_version=NEW.registry_version;
+  IF NOT FOUND OR NEW.attempt_terminal_at<owner.started_at OR
+     NEW.attempt_terminal_at>owner.completed_at OR
+     (NEW."window"='baseline' AND NOT (NEW.event_time>=owner.baseline_start AND NEW.event_time<owner.baseline_end)) OR
+     (NEW."window"='current' AND NOT (NEW.event_time>=owner.current_start AND NEW.event_time<owner.current_end)) THEN
+    RAISE EXCEPTION 'conversation sample time contract failed';
+  END IF;
+  IF NEW.attempt_status='completed' AND (
+    EXISTS (SELECT 1 FROM jsonb_each_text(NEW.outcomes_json::jsonb)
+      WHERE value NOT IN ('PASS','FAIL','UNCLEAR')) OR
+    EXISTS (SELECT 1 FROM jsonb_array_elements_text(
+      owner.evaluator_definition_json::jsonb->'dimensions') AS d(value)
+      WHERE NOT (NEW.outcomes_json::jsonb ? d.value)) OR
+    EXISTS (SELECT 1 FROM jsonb_object_keys(NEW.outcomes_json::jsonb) AS k(key)
+      WHERE NOT (owner.evaluator_definition_json::jsonb->'dimensions' ? k.key))
+  ) THEN RAISE EXCEPTION 'conversation sample dimensions failed'; END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS validate_conversation_sample_insert ON conversation_drift_samples;
+CREATE TRIGGER validate_conversation_sample_insert BEFORE INSERT ON conversation_drift_samples
+    FOR EACH ROW EXECUTE FUNCTION validate_conversation_sample();
+
 CREATE OR REPLACE FUNCTION reject_cluster_registry_mutation() RETURNS trigger AS $$
 BEGIN RAISE EXCEPTION '% is immutable', TG_TABLE_NAME; END;
 $$ LANGUAGE plpgsql;
@@ -289,6 +426,15 @@ CREATE TRIGGER immutable_cluster_assignments BEFORE UPDATE OR DELETE
 DROP TRIGGER IF EXISTS immutable_cluster_events ON cluster_registry_events;
 CREATE TRIGGER immutable_cluster_events BEFORE UPDATE OR DELETE
     ON cluster_registry_events FOR EACH ROW EXECUTE FUNCTION reject_cluster_registry_mutation();
+DROP TRIGGER IF EXISTS immutable_conversation_runs ON conversation_drift_runs;
+CREATE TRIGGER immutable_conversation_runs BEFORE UPDATE OR DELETE
+    ON conversation_drift_runs FOR EACH ROW EXECUTE FUNCTION reject_cluster_registry_mutation();
+DROP TRIGGER IF EXISTS immutable_conversation_samples ON conversation_drift_samples;
+CREATE TRIGGER immutable_conversation_samples BEFORE UPDATE OR DELETE
+    ON conversation_drift_samples FOR EACH ROW EXECUTE FUNCTION reject_cluster_registry_mutation();
+DROP TRIGGER IF EXISTS immutable_conversation_signals ON conversation_drift_signals;
+CREATE TRIGGER immutable_conversation_signals BEFORE UPDATE OR DELETE
+    ON conversation_drift_signals FOR EACH ROW EXECUTE FUNCTION reject_cluster_registry_mutation();
 CREATE OR REPLACE FUNCTION guard_cluster_identity_update() RETURNS trigger AS $$
 BEGIN
   IF NEW.tenant_id<>OLD.tenant_id OR NEW.cluster_id<>OLD.cluster_id OR
@@ -1512,6 +1658,205 @@ class PostgresStorage:
             (authorized_tenant, version_id, cluster_id, limit),
         )
         return [self._row_to_judgment(row) for row in rows]
+
+    def insert_conversation_drift_snapshot(
+        self,
+        run: ConversationDriftRun,
+        samples: list[ConversationDriftSample],
+        signals: list[ConversationDriftSignal],
+    ) -> None:
+        _validate_conversation_drift_snapshot(run, samples, signals)
+        with self._pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
+            cur.execute(
+                f"SELECT {RUN_COLUMNS} FROM conversation_drift_runs "
+                "WHERE tenant_id=%s AND run_id=%s",  # nosec B608
+                (run.tenant_id, run.run_id),
+            )
+            existing_row = cur.fetchone()
+            if existing_row is not None:
+                cur.execute(
+                    f"SELECT {SAMPLE_COLUMNS} "
+                    "FROM conversation_drift_samples WHERE tenant_id=%s AND run_id=%s "
+                    "ORDER BY cluster_id,session_ordinal",  # nosec B608
+                    (run.tenant_id, run.run_id),
+                )
+                existing_samples = [
+                    sample_from_row(row, native_time) for row in cur.fetchall()
+                ]
+                cur.execute(
+                    f"SELECT {SIGNAL_COLUMNS} "
+                    "FROM conversation_drift_signals WHERE tenant_id=%s AND run_id=%s "
+                    "ORDER BY signal_id",  # nosec B608
+                    (run.tenant_id, run.run_id),
+                )
+                existing_signals = [
+                    signal_from_row(row) for row in cur.fetchall()
+                ]
+                if (
+                    run_from_row(existing_row, native_time),
+                    existing_samples,
+                    existing_signals,
+                ) != (run, samples, signals):
+                    raise ValueError("immutable conversation snapshot conflict")
+                return
+            cur.execute(
+                """INSERT INTO conversation_drift_runs VALUES (
+                %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
+                %s,%s,%s,%s,%s,%s)""",
+                run_values(run, native_time),
+            )
+            for item in samples:
+                cur.execute(
+                    """INSERT INTO conversation_drift_samples VALUES (
+                    %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                    sample_values(item, native_time),
+                )
+            for item in signals:
+                cur.execute(
+                    """INSERT INTO conversation_drift_signals VALUES (
+                    %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                    signal_values(item),
+                )
+
+    def get_conversation_drift_snapshot(
+        self,
+        authorized_tenant: str,
+        run_id: str,
+    ) -> (
+        tuple[
+            ConversationDriftRun,
+            list[ConversationDriftSample],
+            list[ConversationDriftSignal],
+        ]
+        | None
+    ):
+        run_row = self._fetchone(
+            f"SELECT {RUN_COLUMNS} FROM conversation_drift_runs "
+            "WHERE tenant_id=%s AND run_id=%s",  # nosec B608
+            (authorized_tenant, run_id),
+        )
+        if run_row is None:
+            return None
+        sample_rows = self._fetchall(
+            f"SELECT {SAMPLE_COLUMNS} FROM conversation_drift_samples "
+            "WHERE tenant_id=%s AND run_id=%s ORDER BY cluster_id,session_ordinal",  # nosec B608
+            (authorized_tenant, run_id),
+        )
+        signal_rows = self._fetchall(
+            f"SELECT {SIGNAL_COLUMNS} FROM conversation_drift_signals "
+            "WHERE tenant_id=%s AND run_id=%s ORDER BY signal_id",  # nosec B608
+            (authorized_tenant, run_id),
+        )
+        result = (
+            run_from_row(run_row, native_time),
+            [sample_from_row(row, native_time) for row in sample_rows],
+            [signal_from_row(row) for row in signal_rows],
+        )
+        _validate_conversation_drift_snapshot(*result)
+        return result
+
+    def list_conversation_drift_runs(
+        self,
+        authorized_tenant: str,
+        *,
+        limit: int = 100,
+    ) -> list[ConversationDriftRun]:
+        if type(limit) is not int or not 1 <= limit <= 1_000:
+            raise ValueError("conversation run limit must be in [1,1000]")
+        rows = self._fetchall(
+            f"SELECT {RUN_COLUMNS} FROM conversation_drift_runs "
+            "WHERE tenant_id=%s ORDER BY completed_at DESC,run_id DESC LIMIT %s",  # nosec B608
+            (authorized_tenant, limit),
+        )
+        return [run_from_row(row, native_time) for row in rows]
+
+    def list_conversation_trace_candidates(
+        self,
+        authorized_tenant: str,
+        registry_version: str,
+        baseline_start_us: int,
+        current_end_us: int,
+        *,
+        target_workload: str,
+        limit: int,
+    ) -> list[ConversationTraceCandidate]:
+        if authorized_tenant == "__verdict_local__":
+            raise ValueError("PostgreSQL conversation analysis requires an explicit tenant")
+        if not 1 <= limit <= 50_001:
+            raise ValueError("conversation candidate limit must be in [1,50001]")
+        rows = self._fetchall(
+            """SELECT
+              octet_length(t.trace_id),
+              CASE WHEN octet_length(t.trace_id)<=256 THEN t.trace_id END,
+              t.analysis_started_at_us,
+              COALESCE(jsonb_typeof(t.tags->'verdict.workload'),'missing'),
+              CASE WHEN jsonb_typeof(t.tags->'verdict.workload')='string'
+                THEN octet_length(t.tags->>'verdict.workload') END,
+              CASE WHEN jsonb_typeof(t.tags->'verdict.workload')='string'
+                AND octet_length(t.tags->>'verdict.workload')<=64
+                THEN t.tags->>'verdict.workload' END,
+              CASE WHEN t.session_id IS NULL THEN 'missing' ELSE 'string' END,
+              CASE WHEN t.session_id IS NOT NULL THEN octet_length(t.session_id) END,
+              CASE WHEN octet_length(t.session_id)<=256 THEN t.session_id END,
+              COALESCE(jsonb_typeof(t.tags->'verdict.success_sampling'),'missing'),
+              CASE WHEN jsonb_typeof(t.tags->'verdict.success_sampling')='string'
+                THEN octet_length(t.tags->>'verdict.success_sampling') END,
+              CASE WHEN jsonb_typeof(t.tags->'verdict.success_sampling')='string'
+                AND octet_length(t.tags->>'verdict.success_sampling')<=16
+                THEN t.tags->>'verdict.success_sampling' END,
+              COALESCE(jsonb_typeof(t.tags->'verdict.stream_completion'),'missing'),
+              CASE WHEN jsonb_typeof(t.tags->'verdict.stream_completion')='string'
+                THEN octet_length(t.tags->>'verdict.stream_completion') END,
+              CASE WHEN jsonb_typeof(t.tags->'verdict.stream_completion')='string'
+                AND octet_length(t.tags->>'verdict.stream_completion')<=16
+                THEN t.tags->>'verdict.stream_completion' END,
+              a.status,a.reason,a.cluster_id,t.error IS NULL,
+              t.prompt_redacted IS NOT NULL,TRUE,
+              CASE WHEN t.prompt_redacted IS NOT NULL
+                THEN octet_length(t.prompt_redacted) END,
+              t.response_redacted IS NOT NULL,TRUE,
+              CASE WHEN t.response_redacted IS NOT NULL
+                THEN octet_length(t.response_redacted) END
+            FROM traces t LEFT JOIN trace_cluster_assignments a
+              ON a.tenant_id=%s AND a.version_id=%s AND a.trace_id=t.trace_id
+            WHERE t.tenant_id=%s AND t.ended_at IS NOT NULL
+              AND t.analysis_started_at_state='valid'
+              AND t.analysis_started_at_us>=%s AND t.analysis_started_at_us<%s
+              AND jsonb_typeof(t.tags->'verdict.workload')='string'
+              AND t.tags->>'verdict.workload'=%s
+            ORDER BY t.analysis_started_at_us,t.trace_id LIMIT %s""",
+            (
+                authorized_tenant,
+                registry_version,
+                authorized_tenant,
+                baseline_start_us,
+                current_end_us,
+                target_workload,
+                limit,
+            ),
+        )
+        return [
+            ConversationTraceCandidate(row[0], row[1], authorized_tenant, row[2], *row[3:])
+            for row in rows
+        ]
+
+    def get_conversation_trace_contents(
+        self,
+        authorized_tenant: str,
+        trace_ids: list[str],
+    ) -> dict[str, ConversationTraceContent]:
+        if authorized_tenant == "__verdict_local__":
+            raise ValueError("PostgreSQL conversation analysis requires an explicit tenant")
+        if not trace_ids:
+            return {}
+        rows = self._fetchall(
+            """SELECT trace_id,prompt_redacted,response_redacted FROM traces
+              WHERE tenant_id=%s AND trace_id=ANY(%s)
+                AND prompt_redacted IS NOT NULL AND response_redacted IS NOT NULL
+                AND octet_length(prompt_redacted)+octet_length(response_redacted)<=16384""",
+            (authorized_tenant, trace_ids),
+        )
+        return {row[0]: ConversationTraceContent(*row) for row in rows}
 
     def insert_cluster_registry_event(self, event: ClusterRegistryEvent) -> None:
         self._exec(

@@ -28,6 +28,7 @@ This module is pure stdlib (no scipy/sklearn), so it imports and tests cheaply.
 
 from __future__ import annotations
 
+import hashlib
 import random
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -39,6 +40,151 @@ class _HasClusterAndTime(Protocol):
     trace_id: str
     cluster_id: str | None
     started_at: datetime
+
+
+@dataclass(frozen=True)
+class ConversationCandidate:
+    """One judgeable trace before per-session representative selection."""
+
+    tenant_id: str
+    registry_version: str
+    cluster_id: str
+    window: str
+    session_id: str
+    trace_id: str
+    started_at: datetime
+
+    def __post_init__(self) -> None:
+        if self.window not in {"baseline", "current"}:
+            raise ValueError("conversation candidate window is invalid")
+        if not self.session_id:
+            raise ValueError("conversation candidate session_id must not be empty")
+
+
+@dataclass(frozen=True)
+class ConversationRepresentative:
+    tenant_id: str
+    registry_version: str
+    cluster_id: str
+    window: str
+    session_id: str
+    session_ordinal: int
+    trace_id: str
+    started_at: datetime
+
+
+@dataclass
+class ConversationRepresentativePlan:
+    selected: list[ConversationRepresentative] = field(default_factory=list)
+    pre_counts: dict[tuple[str, str], int] = field(default_factory=dict)
+    post_counts: dict[tuple[str, str], int] = field(default_factory=dict)
+    cross_removed: dict[tuple[str, str], int] = field(default_factory=dict)
+    session_ordinals: dict[str, int] = field(default_factory=dict)
+
+
+def _framed_text(value: str) -> bytes:
+    encoded = value.encode("utf-8", "surrogatepass")
+    return len(encoded).to_bytes(4, "big") + encoded
+
+
+def _representative_rank(candidate: ConversationCandidate) -> tuple[bytes, bytes]:
+    digest = hashlib.sha256()
+    for value in (
+        "conversation-representative-v1",
+        candidate.tenant_id,
+        candidate.registry_version,
+        candidate.cluster_id,
+        candidate.window,
+        candidate.session_id,
+        candidate.trace_id,
+    ):
+        digest.update(_framed_text(value))
+    return digest.digest(), candidate.trace_id.encode("utf-8", "surrogatepass")
+
+
+def select_conversation_representatives(
+    candidates: Iterable[ConversationCandidate],
+    *,
+    target_per_cell: int = 40,
+    seed: int = 0,
+) -> ConversationRepresentativePlan:
+    """Select at most one deterministic trace per session/cluster/window.
+
+    Selection uses identifiers only. Cross-window sessions are removed before
+    seeded cell sampling, so outcomes and turn counts cannot affect admission.
+    """
+    if type(target_per_cell) is not int or target_per_cell <= 0:
+        raise ValueError("target_per_cell must be a positive integer")
+    if type(seed) is not int:
+        raise ValueError("seed must be an integer")
+
+    representatives: dict[tuple[str, str, str], ConversationCandidate] = {}
+    for candidate in candidates:
+        key = (candidate.cluster_id, candidate.window, candidate.session_id)
+        prior = representatives.get(key)
+        if prior is None or _representative_rank(candidate) < _representative_rank(prior):
+            representatives[key] = candidate
+
+    plan = ConversationRepresentativePlan()
+    for cluster_id, window, _session_id in representatives:
+        key = (cluster_id, window)
+        plan.pre_counts[key] = plan.pre_counts.get(key, 0) + 1
+
+    by_cluster_session: dict[tuple[str, str], set[str]] = {}
+    for cluster_id, window, session_id in representatives:
+        by_cluster_session.setdefault((cluster_id, session_id), set()).add(window)
+    overlapping = {key for key, windows in by_cluster_session.items() if len(windows) == 2}
+
+    eligible: list[ConversationCandidate] = []
+    for (cluster_id, window, session_id), candidate in representatives.items():
+        if (cluster_id, session_id) in overlapping:
+            plan.cross_removed[(cluster_id, session_id)] = 2
+            continue
+        eligible.append(candidate)
+        key = (cluster_id, window)
+        plan.post_counts[key] = plan.post_counts.get(key, 0) + 1
+
+    def canonical_key(item: ConversationCandidate) -> tuple[bytes, bytes, bytes, bytes]:
+        return (
+            item.cluster_id.encode("utf-8", "surrogatepass"),
+            item.window.encode("ascii"),
+            item.session_id.encode("utf-8", "surrogatepass"),
+            item.trace_id.encode("utf-8", "surrogatepass"),
+        )
+
+    cells: dict[tuple[str, str], list[ConversationCandidate]] = {}
+    for candidate in sorted(eligible, key=canonical_key):
+        cells.setdefault((candidate.cluster_id, candidate.window), []).append(candidate)
+
+    rng = random.Random(seed)
+    selected: list[ConversationCandidate] = []
+    for key in sorted(cells):
+        pool = cells[key]
+        if len(pool) <= target_per_cell:
+            selected.extend(pool)
+        else:
+            selected.extend(rng.sample(pool, target_per_cell))
+    selected.sort(key=canonical_key)
+
+    sessions = sorted(
+        {item.session_id for item in selected},
+        key=lambda value: value.encode("utf-8", "surrogatepass"),
+    )
+    plan.session_ordinals = {session_id: index + 1 for index, session_id in enumerate(sessions)}
+    plan.selected = [
+        ConversationRepresentative(
+            item.tenant_id,
+            item.registry_version,
+            item.cluster_id,
+            item.window,
+            item.session_id,
+            plan.session_ordinals[item.session_id],
+            item.trace_id,
+            item.started_at,
+        )
+        for item in selected
+    ]
+    return plan
 
 
 @dataclass(frozen=True)
@@ -77,11 +223,12 @@ class WindowSpec:
 @dataclass
 class CellPlan:
     """Sampling plan for one (cluster_id, window) cell."""
+
     cluster_id: str
     window: str
-    existing: int        # judgments already present for this cell
-    available: int       # unjudged, judge-able traces available in this cell
-    to_judge: int        # how many we will judge this run
+    existing: int  # judgments already present for this cell
+    available: int  # unjudged, judge-able traces available in this cell
+    to_judge: int  # how many we will judge this run
     target: int
 
     @property
@@ -187,10 +334,16 @@ class StratifiedJudgeSampler:
                 # input iterable doesn't change which ids are picked).
                 chosen = rng.sample(sorted(pool), take)
                 plan.selected_trace_ids.extend(chosen)
-            plan.cells.append(CellPlan(
-                cluster_id=cid, window=win, existing=have,
-                available=len(pool), to_judge=take, target=self.target_per_cell,
-            ))
+            plan.cells.append(
+                CellPlan(
+                    cluster_id=cid,
+                    window=win,
+                    existing=have,
+                    available=len(pool),
+                    to_judge=take,
+                    target=self.target_per_cell,
+                )
+            )
         return plan
 
 

@@ -13,6 +13,7 @@ import contextvars
 import hashlib
 import hmac
 import logging
+import math
 import re
 import threading
 from collections.abc import Iterator
@@ -43,11 +44,11 @@ class VerdictClient:
 
     # Content capture — OFF by default. PII risk surface.
     capture_content: bool = False
-    redaction_mode: str = "redact"          # "redact" | "hash"  ("encrypt" planned)
-    redaction_secret: str | None = None     # required for hash mode
+    redaction_mode: str = "redact"  # "redact" | "hash"  ("encrypt" planned)
+    redaction_secret: str | None = None  # required for hash mode
 
     # Sampling
-    sample_rate: float = 1.0                # 1.0 = capture everything
+    sample_rate: float = 1.0  # 1.0 = capture everything
 
     # Multi-tenancy — stamped onto every trace from this process if set.
     tenant_id: str | None = None
@@ -86,6 +87,7 @@ def init(
     tenant_id: str | None = None,
     instrumentors: list[str] | None = None,
     buffered_writes: bool = False,
+    tenant_mode: str = "fixed",
 ) -> VerdictClient:
     """Initialize Verdict and install auto-instrumentation.
 
@@ -107,6 +109,9 @@ def init(
                        traces are written on a background thread (batched) instead
                        of synchronously on the request hot path. Recommended for
                        high-volume production; adds a background flush thread.
+        tenant_mode: ``fixed`` preserves tenant_id behavior. ``request`` requires
+                     an authorized tenant in every request_context and forbids a
+                     process-wide tenant_id.
 
     Returns:
         The VerdictClient singleton.
@@ -139,9 +144,12 @@ def init(
         # capture behavior. Reject it loudly.
         if not isinstance(sample_rate, (int, float)) or not (0.0 <= sample_rate <= 1.0):
             raise ValueError(
-                f"sample_rate={sample_rate!r} is out of range. "
-                "It must be a number in [0.0, 1.0]."
+                f"sample_rate={sample_rate!r} is out of range. It must be a number in [0.0, 1.0]."
             )
+        if tenant_mode not in {"fixed", "request"}:
+            raise ValueError("tenant_mode must be 'fixed' or 'request'")
+        if tenant_mode == "request" and tenant_id is not None:
+            raise ValueError("tenant_mode='request' cannot use a fixed tenant_id")
 
         # Resolve storage URL → instance
         if isinstance(storage, str):
@@ -153,6 +161,7 @@ def init(
         # batched writer. Opt-in because it starts a flush thread.
         if buffered_writes:
             from verdict.storage.buffered import BufferedStorage
+
             storage_inst = BufferedStorage(storage_inst)
 
         client = VerdictClient(
@@ -167,6 +176,7 @@ def init(
             tenant_id=tenant_id,
             enabled_instrumentors=instrumentors or [],
         )
+        client._tenant_mode = tenant_mode
 
         # Install instrumentors that are available
         _install_instrumentors(client)
@@ -175,7 +185,10 @@ def init(
         client._initialized = True
         log.info(
             "Verdict initialized: service=%s env=%s instrumentors=%s capture_content=%s",
-            service_name, environment, [i.name for i in client._instrumentors], capture_content,
+            service_name,
+            environment,
+            [i.name for i in client._instrumentors],
+            capture_content,
         )
         return client
 
@@ -187,9 +200,11 @@ def _resolve_storage(url: str) -> Storage:
         return SQLiteStorage(path)
     if url == "memory://" or url.startswith("memory://"):
         from verdict.storage.memory import InMemoryStorage
+
         return InMemoryStorage()
     if url.startswith("postgres://") or url.startswith("postgresql://"):
         from verdict.storage.postgres import PostgresStorage
+
         return PostgresStorage(url)
     raise ValueError(f"Unsupported storage URL: {url!r}")
 
@@ -234,19 +249,35 @@ def get_client() -> VerdictClient | None:
 # ---------------------------------------------------------------------------
 
 _ctx_session_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
-    "verdict_session_id", default=None,
+    "verdict_session_id",
+    default=None,
+)
+_ctx_tenant_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "verdict_tenant_id",
+    default=None,
 )
 _ctx_user_id_hash: contextvars.ContextVar[str | None] = contextvars.ContextVar(
-    "verdict_user_id_hash", default=None,
+    "verdict_user_id_hash",
+    default=None,
 )
 _ctx_trace_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
-    "verdict_trace_id", default=None,
+    "verdict_trace_id",
+    default=None,
 )
 _ctx_workload: contextvars.ContextVar[str | None] = contextvars.ContextVar(
-    "verdict_workload", default=None,
+    "verdict_workload",
+    default=None,
 )
 _ctx_intent_key: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "verdict_intent_key",
+    default=None,
+)
+_ctx_sample_rate: contextvars.ContextVar[float | None] = contextvars.ContextVar(
+    "verdict_sample_rate",
+    default=None,
+)
+_ctx_success_sampling: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "verdict_success_sampling",
     default=None,
 )
 _WORKLOAD = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,63}")
@@ -258,6 +289,11 @@ def _validate_workload(workload: str) -> None:
             "workload must be a 1-64 character identifier containing only "
             "letters, numbers, '.', '_', ':', or '-'"
         )
+    if workload:
+        from verdict.redaction import redact
+
+        if redact(workload, mode="redact") != workload:
+            raise ValueError("workload must be a redaction-safe routing identifier")
 
 
 def _validate_intent_key(intent_key: str) -> None:
@@ -316,6 +352,11 @@ def get_context_session_id() -> str | None:
     return _ctx_session_id.get()
 
 
+def get_context_tenant_id() -> str | None:
+    """Return the request-scoped authorized tenant, if any."""
+    return _ctx_tenant_id.get()
+
+
 def get_context_user_id_hash() -> str | None:
     """Return the hashed user id bound to the current context, if any."""
     return _ctx_user_id_hash.get()
@@ -334,6 +375,83 @@ def get_context_workload() -> str | None:
 def get_context_intent_key() -> str | None:
     """Return the explicit intent key bound to the current request."""
     return _ctx_intent_key.get()
+
+
+def get_context_sample_rate() -> float | None:
+    """Return the request-start success sample rate override, if any."""
+    return _ctx_sample_rate.get()
+
+
+def get_context_success_sampling() -> str | None:
+    """Return ``call`` or ``session`` for the current request."""
+    return _ctx_success_sampling.get()
+
+
+def _validate_context_text(name: str, value: str, *, max_bytes: int) -> None:
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{name} must be a non-empty string")
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeError as exc:
+        raise ValueError(f"{name} must be valid UTF-8") from exc
+    if len(encoded) > max_bytes or "\x00" in value:
+        raise ValueError(f"{name} exceeds its safe bound")
+
+
+@contextmanager
+def request_context(
+    *,
+    tenant_id: str,
+    session_id: str,
+    workload: str,
+    sample_rate: float,
+    success_sampling: str,
+    user_id: str | None = None,
+    intent_key: str | None = None,
+) -> Iterator[None]:
+    """Bind one validated request snapshot and restore every prior token.
+
+    Validation and user-ID hashing finish before any ContextVar is mutated.
+    """
+    _validate_context_text("tenant_id", tenant_id, max_bytes=128)
+    _validate_context_text("session_id", session_id, max_bytes=256)
+    _validate_workload(workload)
+    if not isinstance(sample_rate, (int, float)) or isinstance(sample_rate, bool):
+        raise ValueError("sample_rate must be a finite number in [0,1]")
+    normalized_rate = float(sample_rate)
+    if not math.isfinite(normalized_rate) or not 0.0 <= normalized_rate <= 1.0:
+        raise ValueError("sample_rate must be a finite number in [0,1]")
+    if success_sampling not in {"call", "session"}:
+        raise ValueError("success_sampling must be 'call' or 'session'")
+    if intent_key is not None:
+        _validate_intent_key(intent_key)
+    user_hash = None
+    if user_id is not None:
+        _validate_context_text("user_id", user_id, max_bytes=1024)
+        user_hash = _hash_user_id(user_id)
+
+    client = _client
+    tenant_mode = getattr(client, "_tenant_mode", "fixed") if client is not None else "fixed"
+    fixed_tenant = client.tenant_id if client is not None else None
+    if tenant_mode == "fixed" and tenant_id != fixed_tenant:
+        raise ValueError("request tenant does not match the fixed Verdict tenant")
+    if tenant_mode == "request" and fixed_tenant is not None:
+        raise ValueError("request tenant mode cannot use a fixed Verdict tenant")
+
+    tokens = (
+        (_ctx_tenant_id, _ctx_tenant_id.set(tenant_id)),
+        (_ctx_session_id, _ctx_session_id.set(session_id)),
+        (_ctx_user_id_hash, _ctx_user_id_hash.set(user_hash)),
+        (_ctx_workload, _ctx_workload.set(workload)),
+        (_ctx_sample_rate, _ctx_sample_rate.set(normalized_rate)),
+        (_ctx_success_sampling, _ctx_success_sampling.set(success_sampling)),
+        (_ctx_intent_key, _ctx_intent_key.set(intent_key)),
+    )
+    try:
+        yield
+    finally:
+        for variable, token in reversed(tokens):
+            variable.reset(token)
 
 
 @contextmanager
@@ -371,10 +489,13 @@ def intent_context(intent_key: str) -> Iterator[None]:
 def clear_context() -> None:
     """Clear any per-request context (useful between requests / in tests)."""
     _ctx_session_id.set(None)
+    _ctx_tenant_id.set(None)
     _ctx_user_id_hash.set(None)
     _ctx_trace_id.set(None)
     _ctx_workload.set(None)
     _ctx_intent_key.set(None)
+    _ctx_sample_rate.set(None)
+    _ctx_success_sampling.set(None)
 
 
 def shutdown() -> None:

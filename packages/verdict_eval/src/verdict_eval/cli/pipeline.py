@@ -27,12 +27,18 @@ from __future__ import annotations
 
 import argparse
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import NAMESPACE_URL, uuid5
 
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser()
+    p.add_argument(
+        "--method",
+        choices=["legacy-trace", "conversation-v1"],
+        default="legacy-trace",
+        help="Observation method. Existing trace-level behavior remains the default.",
+    )
     p.add_argument(
         "--storage",
         default=os.environ.get("VERDICT_STORAGE", "sqlite:///./verdict.db"),
@@ -45,6 +51,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="Use the legacy cluster field or consume a v2 registry's pinned assignments.",
     )
     p.add_argument("--tenant-id", default="", help="Authorized tenant for v2 registry modes.")
+    p.add_argument(
+        "--target-workload",
+        default="agent",
+        help="Exact workload for conversation-v1 (default agent).",
+    )
+    p.add_argument(
+        "--run-id",
+        default="",
+        help="Optional caller-owned idempotency ID for conversation-v1.",
+    )
+    p.add_argument("--max-candidate-rows", type=int, default=50_000)
+    p.add_argument("--max-candidate-metadata-bytes", type=int, default=33_554_432)
+    p.add_argument("--max-judge-calls", type=int, default=20_000)
+    p.add_argument("--max-selected-content-bytes", type=int, default=67_108_864)
+    p.add_argument("--max-estimated-input-tokens", type=int, default=16_000_000)
+    p.add_argument("--judge-concurrency", type=int, default=1)
+    p.add_argument("--judge-attempt-timeout", type=int, default=30)
     p.add_argument(
         "--registry-model-path",
         default="",
@@ -268,6 +291,68 @@ def _signal_id_for_run(signal, run_id: str) -> str:
     return uuid5(NAMESPACE_URL, identity).hex
 
 
+def _build_judge(args):
+    from verdict_eval.judge import DEFAULT_RUBRIC, Judge
+    from verdict_eval.providers import FakeProvider
+
+    if args.judge_provider == "fake":
+        import json
+
+        provider = FakeProvider(
+            json.dumps(
+                {
+                    dimension.name: {
+                        "reasoning": "fake-judge default PASS",
+                        "verdict": "PASS",
+                    }
+                    for dimension in DEFAULT_RUBRIC.dimensions
+                }
+            )
+        )
+    elif args.judge_provider == "anthropic":
+        from verdict_eval.providers import AnthropicAdapter
+
+        provider = AnthropicAdapter(
+            max_retries=1,
+            timeout_seconds=args.judge_attempt_timeout,
+        )
+    elif args.judge_provider == "openai":
+        from verdict_eval.providers import OpenAIAdapter
+
+        provider = OpenAIAdapter(
+            max_retries=1,
+            timeout_seconds=args.judge_attempt_timeout,
+        )
+    else:
+        from verdict_eval.providers import GoogleAdapter
+
+        provider = GoogleAdapter(
+            max_retries=1,
+            timeout_seconds=args.judge_attempt_timeout,
+        )
+    return Judge(provider=provider, model=args.judge_model, rubric=DEFAULT_RUBRIC)
+
+
+class _JudgeProviderDefinition:
+    """Provider-name carrier used before any SDK/client construction."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+    def complete(self, _request):
+        raise RuntimeError("judge provider was used before construction")
+
+
+def _build_judge_definition(args):
+    from verdict_eval.judge import DEFAULT_RUBRIC, Judge
+
+    return Judge(
+        provider=_JudgeProviderDefinition(args.judge_provider),
+        model=args.judge_model,
+        rubric=DEFAULT_RUBRIC,
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if not args.capture_judge_telemetry:
@@ -282,16 +367,26 @@ def main(argv: list[str] | None = None) -> int:
             storage=args.storage,
             capture_content=False,
             instrumentors=[] if args.judge_provider == "fake" else [args.judge_provider],
-        )
-        verdict.set_context(
-            session_id=os.environ.get("VERDICT_JOB_ID") or None,
-            workload="judge",
+            tenant_mode="request" if args.method == "conversation-v1" else "fixed",
         )
     except Exception:
         print("ERROR: cannot initialize judge telemetry")
         verdict.shutdown()
         return 2
     try:
+        if args.method == "conversation-v1":
+            with verdict.request_context(
+                tenant_id=args.tenant_id,
+                session_id=args.run_id or os.environ.get("VERDICT_JOB_ID") or "conversation-run",
+                workload="judge",
+                sample_rate=1.0,
+                success_sampling="call",
+            ):
+                return _run(args)
+        verdict.set_context(
+            session_id=os.environ.get("VERDICT_JOB_ID") or None,
+            workload="judge",
+        )
         return _run(args)
     finally:
         verdict.shutdown()
@@ -313,6 +408,79 @@ def _run(args) -> int:
         print(f"ERROR: cannot open {_storage_backend(args.storage)} storage")
         return 2
     print(f"Storage backend: {_storage_backend(args.storage)}")
+    if args.method == "conversation-v1":
+        if args.registry_mode != "active" or not args.tenant_id:
+            print("ERROR: conversation-v1 requires --registry-mode active and --tenant-id")
+            storage.close()
+            return 2
+        from verdict_eval.conversation_analysis import (
+            ConversationAnalysisConfig,
+            run_conversation_analysis,
+        )
+
+        run_id = (
+            args.run_id
+            or uuid5(
+                NAMESPACE_URL,
+                "|".join(
+                    (
+                        "conversation-run-v1",
+                        args.tenant_id,
+                        args.target_workload,
+                        analysis_time.isoformat(),
+                    )
+                ),
+            ).hex
+        )
+        try:
+            config = ConversationAnalysisConfig(
+                tenant_id=args.tenant_id,
+                run_id=run_id,
+                target_workload=args.target_workload,
+                baseline_start=(
+                    analysis_time
+                    - timedelta(hours=args.baseline_lag_hours)
+                    - timedelta(days=args.baseline_days)
+                ),
+                baseline_end=analysis_time - timedelta(hours=args.baseline_lag_hours),
+                current_start=analysis_time - timedelta(hours=args.current_hours),
+                current_end=analysis_time,
+                analysis_cutoff=analysis_time,
+                actor=os.environ.get("VERDICT_ACTOR", "verdict-pipeline"),
+                target_per_cell=args.target_per_cluster,
+                min_sample_size=args.min_sample_size,
+                p_threshold=args.p_threshold,
+                effect_size_threshold=args.effect_size_threshold,
+                max_candidate_rows=args.max_candidate_rows,
+                max_candidate_metadata_bytes=args.max_candidate_metadata_bytes,
+                max_judge_calls=args.max_judge_calls,
+                max_selected_content_bytes=args.max_selected_content_bytes,
+                max_estimated_input_tokens=args.max_estimated_input_tokens,
+                judge_concurrency=args.judge_concurrency,
+                judge_attempt_timeout=args.judge_attempt_timeout,
+            )
+            result = run_conversation_analysis(
+                storage,
+                _build_judge_definition(args),
+                config,
+                judge_factory=lambda: _build_judge(args),
+            )
+        except ValueError as exc:
+            from verdict_eval.cli.cluster import _safe_error_code
+
+            print(f"ERROR: conversation-v1 unavailable: {_safe_error_code(exc)}")
+            return 2
+        except Exception:
+            print("ERROR: conversation-v1 unavailable: internal_error")
+            return 2
+        finally:
+            storage.close()
+        suffix = f":{result.reason}" if result.reason else ""
+        print(
+            f"Conversation run {result.run_id}: {result.status}{suffix}; "
+            f"provider_calls={result.provider_calls}; signals={result.signal_count}"
+        )
+        return 0 if result.reason != "registry" else 2
     if args.registry_mode != "off" and not args.tenant_id:
         print("ERROR: --tenant-id is required for registry modes")
         return 2
@@ -549,36 +717,7 @@ def _run(args) -> int:
         print(f"  WARN: {message}")
 
     # -- Step 3: judge -------------------------------------------------------
-    from verdict_eval.judge import DEFAULT_RUBRIC, Judge
-    from verdict_eval.providers import FakeProvider
-
-    if args.judge_provider == "fake":
-        # Offline path: synthesize a judge that scores every dimension PASS.
-        # Useful for exercising the pipeline before live keys are wired.
-        import json
-
-        provider = FakeProvider(
-            json.dumps(
-                {
-                    d.name: {"reasoning": "fake-judge default PASS", "verdict": "PASS"}
-                    for d in DEFAULT_RUBRIC.dimensions
-                }
-            )
-        )
-    elif args.judge_provider == "anthropic":
-        from verdict_eval.providers import AnthropicAdapter
-
-        provider = AnthropicAdapter()
-    elif args.judge_provider == "openai":
-        from verdict_eval.providers import OpenAIAdapter
-
-        provider = OpenAIAdapter()
-    else:
-        from verdict_eval.providers import GoogleAdapter
-
-        provider = GoogleAdapter()
-
-    judge = Judge(provider=provider, model=args.judge_model, rubric=DEFAULT_RUBRIC)
+    judge = _build_judge(args)
     current_evaluator = judge.evaluator_identity(context=None)
 
     # A fixed human-labeled sentinel set is the independent anchor for judge

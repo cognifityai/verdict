@@ -184,6 +184,16 @@ verdict-pipeline \
     --storage sqlite:///./verdict.db \
     --judge-provider anthropic --judge-model claude-haiku-4-5
 
+# Conversation-independent production path. First create/validate/activate the
+# explicit registry described in the clustering section, and capture agent
+# calls with request_context(..., session_id=<conversation id>,
+# success_sampling="session").
+verdict-pipeline \
+    --storage sqlite:///./verdict.db \
+    --method conversation-v1 --registry-mode active \
+    --tenant-id workspace-a --target-workload agent \
+    --judge-provider anthropic --judge-model claude-haiku-4-5
+
 # 2. Launch the read-only dashboard and open http://127.0.0.1:8000/dashboard.
 verdict-dashboard --storage sqlite:///./verdict.db
 ```
@@ -192,6 +202,15 @@ Add `--capture-judge-telemetry` only when you intentionally want judge model
 cost/latency traces written to the same store. Those traces are tagged as the
 `judge` workload and excluded from future drift inputs so the evaluator does not
 become part of the workload it evaluates. The flag is off by default.
+
+Conversation-v1 treats one durable session ID as one statistical observation
+per cluster/window, excludes sessions reused across both windows, and stores a
+separate immutable run/sample/signal snapshot. Its coverage is measured in
+conversations, not turns or traces. The command refuses missing assignment
+coverage and over-budget plans before provider calls. Captured content is sent
+to the configured judge as the same redacted prompt/response pair used by the
+legacy path; do not enable it without the application's reviewed content and
+provider-data policy.
 
 For PostgreSQL, install `cognifity-verdict[dashboard,postgres]==0.1.0a7` and pass
 the same protected storage URL used by the SDK. The dashboard only reads

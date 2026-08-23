@@ -21,6 +21,11 @@ from verdict.schema import (
     ClusterRegistryEvent,
     ClusterRegistryVersion,
     ClusterTraceCandidate,
+    ConversationDriftRun,
+    ConversationDriftSample,
+    ConversationDriftSignal,
+    ConversationTraceCandidate,
+    ConversationTraceContent,
     DriftRun,
     DriftSignal,
     EvaluatorHealthRecord,
@@ -33,7 +38,10 @@ from verdict.schema import (
     datetime_to_utc_us,
     populate_trace_analysis_fields,
 )
-from verdict.storage.base import _validate_drift_run_snapshot
+from verdict.storage.base import (
+    _validate_conversation_drift_snapshot,
+    _validate_drift_run_snapshot,
+)
 
 
 class InMemoryStorage:
@@ -55,6 +63,11 @@ class InMemoryStorage:
         self._cluster_registry_events: dict[tuple[str, str], ClusterRegistryEvent] = {}
         self._cluster_v2_lock = threading.RLock()
         self._cluster_snapshot = threading.local()
+        self._conversation_snapshots: dict[
+            tuple[str, str],
+            tuple[ConversationDriftRun, list[ConversationDriftSample], list[ConversationDriftSignal]],
+        ] = {}
+        self._conversation_lock = threading.RLock()
         self._spans: dict[str, SpanRecord] = {}
         self._user_signals: dict[str, UserSignalRecord] = {}
 
@@ -524,6 +537,237 @@ class InMemoryStorage:
         )
         return copy.deepcopy(rows[:limit])
 
+    def insert_conversation_drift_snapshot(
+        self,
+        run: ConversationDriftRun,
+        samples: list[ConversationDriftSample],
+        signals: list[ConversationDriftSignal],
+    ) -> None:
+        _validate_conversation_drift_snapshot(run, samples, signals)
+        with self._conversation_lock:
+            key = (run.tenant_id, run.run_id)
+            candidate = (run, samples, signals)
+            existing = self._conversation_snapshots.get(key)
+            if existing is not None:
+                if existing != candidate:
+                    raise ValueError("immutable conversation snapshot conflict")
+                return
+            if (run.tenant_id, run.registry_version) not in self._cluster_versions:
+                raise ValueError("unknown conversation registry version")
+            for sample in samples:
+                assignment = self._trace_cluster_assignments.get(
+                    (run.tenant_id, run.registry_version, sample.trace_id)
+                )
+                if (
+                    assignment is None
+                    or assignment.status != "assigned"
+                    or assignment.cluster_id != sample.cluster_id
+                ):
+                    raise ValueError("conversation sample assignment mismatch")
+            for signal in signals:
+                if (
+                    run.tenant_id,
+                    run.registry_version,
+                    signal.cluster_id,
+                ) not in self._cluster_version_clusters:
+                    raise ValueError("conversation signal cluster mismatch")
+            self._conversation_snapshots[key] = copy.deepcopy(candidate)
+
+    def get_conversation_drift_snapshot(
+        self,
+        authorized_tenant: str,
+        run_id: str,
+    ) -> (
+        tuple[
+            ConversationDriftRun,
+            list[ConversationDriftSample],
+            list[ConversationDriftSignal],
+        ]
+        | None
+    ):
+        with self._conversation_lock:
+            snapshot = self._conversation_snapshots.get((authorized_tenant, run_id))
+            if snapshot is None:
+                return None
+            result = copy.deepcopy(snapshot)
+            _validate_conversation_drift_snapshot(*result)
+            return result
+
+    def list_conversation_drift_runs(
+        self,
+        authorized_tenant: str,
+        *,
+        limit: int = 100,
+    ) -> list[ConversationDriftRun]:
+        if type(limit) is not int or not 1 <= limit <= 1_000:
+            raise ValueError("conversation run limit must be in [1,1000]")
+        with self._conversation_lock:
+            rows = sorted(
+                (
+                    snapshot[0]
+                    for (tenant, _run_id), snapshot in self._conversation_snapshots.items()
+                    if tenant == authorized_tenant
+                ),
+                key=lambda run: (run.completed_at, run.run_id),
+                reverse=True,
+            )
+            return copy.deepcopy(rows[:limit])
+
+    @staticmethod
+    def _conversation_scalar(
+        value: object, *, present: bool, max_bytes: int,
+    ) -> tuple[str, int | None, str | None, bool]:
+        if not present:
+            return "missing", None, None, True
+        if value is None:
+            return "null", None, None, True
+        if not isinstance(value, str):
+            state = (
+                "boolean"
+                if isinstance(value, bool)
+                else "number"
+                if isinstance(value, (int, float))
+                else "array"
+                if isinstance(value, list)
+                else "object"
+                if isinstance(value, dict)
+                else "invalid"
+            )
+            return state, None, None, False
+        size = 0
+        valid = True
+        for start in range(0, len(value), 4096):
+            chunk = value[start : start + 4096]
+            try:
+                encoded = chunk.encode("utf-8")
+            except UnicodeError:
+                valid = False
+                encoded = chunk.encode("utf-8", "surrogatepass")
+            size += len(encoded)
+        return "string", size, value if valid and size <= max_bytes else None, valid
+
+    def list_conversation_trace_candidates(
+        self,
+        authorized_tenant: str,
+        registry_version: str,
+        baseline_start_us: int,
+        current_end_us: int,
+        *,
+        target_workload: str,
+        limit: int,
+    ) -> list[ConversationTraceCandidate]:
+        if not 1 <= limit <= 50_001:
+            raise ValueError("conversation candidate limit must be in [1,50001]")
+        traces = getattr(self._cluster_snapshot, "traces", self._traces)
+        rows: list[ConversationTraceCandidate] = []
+        for trace in traces.values():
+            if (
+                not (
+                    trace.tenant_id == authorized_tenant
+                    or (authorized_tenant == "__verdict_local__" and trace.tenant_id is None)
+                )
+                or trace.ended_at is None
+                or trace.analysis_started_at_state != "valid"
+                or trace.analysis_started_at_us is None
+                or not baseline_start_us <= trace.analysis_started_at_us < current_end_us
+            ):
+                continue
+            workload = self._conversation_scalar(
+                trace.tags.get("verdict.workload"),
+                present="verdict.workload" in trace.tags,
+                max_bytes=64,
+            )
+            if workload[2] != target_workload:
+                continue
+            trace_id = self._conversation_scalar(trace.trace_id, present=True, max_bytes=256)
+            session = self._conversation_scalar(
+                trace.session_id, present=trace.session_id is not None, max_bytes=256
+            )
+            sampling = self._conversation_scalar(
+                trace.tags.get("verdict.success_sampling"),
+                present="verdict.success_sampling" in trace.tags,
+                max_bytes=16,
+            )
+            stream = self._conversation_scalar(
+                trace.tags.get("verdict.stream_completion"),
+                present="verdict.stream_completion" in trace.tags,
+                max_bytes=16,
+            )
+            prompt = self._conversation_scalar(
+                trace.prompt_redacted,
+                present=trace.prompt_redacted is not None,
+                max_bytes=16 * 1024,
+            )
+            response = self._conversation_scalar(
+                trace.response_redacted,
+                present=trace.response_redacted is not None,
+                max_bytes=16 * 1024,
+            )
+            assignment = self._trace_cluster_assignments.get(
+                (authorized_tenant, registry_version, trace.trace_id)
+            )
+            rows.append(
+                ConversationTraceCandidate(
+                    trace_id[1] or 0,
+                    trace_id[2],
+                    authorized_tenant,
+                    trace.analysis_started_at_us,
+                    workload[0],
+                    workload[1],
+                    workload[2],
+                    session[0],
+                    session[1],
+                    session[2],
+                    sampling[0],
+                    sampling[1],
+                    sampling[2],
+                    stream[0],
+                    stream[1],
+                    stream[2],
+                    assignment.status if assignment else None,
+                    assignment.reason if assignment else None,
+                    assignment.cluster_id if assignment else None,
+                    trace.error is None,
+                    trace.prompt_redacted is not None,
+                    prompt[3],
+                    prompt[1],
+                    trace.response_redacted is not None,
+                    response[3],
+                    response[1],
+                )
+            )
+        rows.sort(key=lambda row: (row.started_at_us, row.trace_id or ""))
+        return rows[:limit]
+
+    def get_conversation_trace_contents(
+        self,
+        authorized_tenant: str,
+        trace_ids: list[str],
+    ) -> dict[str, ConversationTraceContent]:
+        traces = getattr(self._cluster_snapshot, "traces", self._traces)
+        result: dict[str, ConversationTraceContent] = {}
+        for trace_id in trace_ids:
+            trace = traces.get(trace_id)
+            if trace is None or not (
+                trace.tenant_id == authorized_tenant
+                or (authorized_tenant == "__verdict_local__" and trace.tenant_id is None)
+            ):
+                continue
+            if not isinstance(trace.prompt_redacted, str) or not isinstance(
+                trace.response_redacted, str
+            ):
+                continue
+            try:
+                prompt_size = len(trace.prompt_redacted.encode("utf-8"))
+                response_size = len(trace.response_redacted.encode("utf-8"))
+            except UnicodeError:
+                continue
+            if prompt_size + response_size <= 16 * 1024:
+                result[trace_id] = ConversationTraceContent(
+                    trace_id, trace.prompt_redacted, trace.response_redacted
+                )
+        return copy.deepcopy(result)
+
     def insert_cluster_registry_event(self, event: ClusterRegistryEvent) -> None:
         with self._cluster_v2_lock:
             key = (event.tenant_id, event.event_id)
@@ -890,5 +1134,6 @@ class InMemoryStorage:
         self._trace_cluster_assignments.clear()
         self._active_cluster_registries.clear()
         self._cluster_registry_events.clear()
+        self._conversation_snapshots.clear()
         self._spans.clear()
         self._user_signals.clear()

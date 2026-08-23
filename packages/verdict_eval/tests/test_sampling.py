@@ -7,8 +7,10 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 from verdict_eval.sampling import (
+    ConversationCandidate,
     StratifiedJudgeSampler,
     WindowSpec,
+    select_conversation_representatives,
     uniform_coverage_estimate,
 )
 
@@ -27,11 +29,11 @@ WINDOW = WindowSpec(now=NOW, current_hours=24, baseline_days=7, baseline_lag_hou
 
 
 def _current_ts(h: float = 1) -> datetime:
-    return NOW - timedelta(hours=h)        # inside current window (< 24h old)
+    return NOW - timedelta(hours=h)  # inside current window (< 24h old)
 
 
 def _baseline_ts(d: float = 3) -> datetime:
-    return NOW - timedelta(hours=48) - timedelta(days=d)   # inside baseline (> 48h old)
+    return NOW - timedelta(hours=48) - timedelta(days=d)  # inside baseline (> 48h old)
 
 
 def _make(cluster: str, n: int, ts: datetime, prefix: str) -> list[FakeTrace]:
@@ -74,8 +76,10 @@ def test_low_volume_cluster_is_undercovered_not_silent():
 def test_each_cluster_reaches_target_where_traffic_allows():
     # Two clusters, both with plenty of traffic in both windows.
     traces = (
-        _make("a", 100, _current_ts(), "cur") + _make("a", 100, _baseline_ts(), "base")
-        + _make("b", 100, _current_ts(), "cur") + _make("b", 100, _baseline_ts(), "base")
+        _make("a", 100, _current_ts(), "cur")
+        + _make("a", 100, _baseline_ts(), "base")
+        + _make("b", 100, _current_ts(), "cur")
+        + _make("b", 100, _baseline_ts(), "base")
     )
     plan = StratifiedJudgeSampler(target_per_cell=30).plan(traces, window=WINDOW)
     # 2 clusters x 2 windows = 4 cells, each judged to 30.
@@ -90,7 +94,8 @@ def test_topup_does_not_rejudge_existing():
     # 25 already judged → should top up by 15 to reach 40, not judge 40 more.
     already = {f"cur-c-{i}" for i in range(25)}
     plan = StratifiedJudgeSampler(target_per_cell=40).plan(
-        traces, window=WINDOW, already_judged_trace_ids=already)
+        traces, window=WINDOW, already_judged_trace_ids=already
+    )
     cell = plan.cells[0]
     assert cell.existing == 25
     assert cell.to_judge == 15
@@ -103,7 +108,8 @@ def test_already_covered_cell_judges_nothing():
     traces = _make("c", 100, _current_ts(), "cur")
     already = {f"cur-c-{i}" for i in range(40)}
     plan = StratifiedJudgeSampler(target_per_cell=40).plan(
-        traces, window=WINDOW, already_judged_trace_ids=already)
+        traces, window=WINDOW, already_judged_trace_ids=already
+    )
     assert plan.total_to_judge == 0
 
 
@@ -133,9 +139,76 @@ def test_uniform_contrast_shows_starvation():
     traces = _make("big", 1000, _current_ts(), "cur") + _make("small", 20, _current_ts(), "cur")
     est = uniform_coverage_estimate(traces, window=WINDOW, sample_rate=0.1, min_sample_size=30)
     assert est["cells_total"] == 2
-    assert est["cells_reaching_floor"] == 1   # only the big cluster
+    assert est["cells_reaching_floor"] == 1  # only the big cluster
     strat = StratifiedJudgeSampler(target_per_cell=30).plan(traces, window=WINDOW)
     # Stratified reaches the floor for big and judges all 20 of small (capped by
     # availability), spending far less than uniform on the big cluster.
     big_cell = next(c for c in strat.cells if c.cluster_id == "big")
-    assert big_cell.to_judge == 30   # not 100
+    assert big_cell.to_judge == 30  # not 100
+
+
+def _conversation_candidate(
+    trace_id: str,
+    session_id: str,
+    window: str,
+    *,
+    cluster_id: str = "cluster-a",
+) -> ConversationCandidate:
+    return ConversationCandidate(
+        tenant_id="tenant-a",
+        registry_version="version-a",
+        cluster_id=cluster_id,
+        window=window,
+        session_id=session_id,
+        trace_id=trace_id,
+        started_at=_current_ts() if window == "current" else _baseline_ts(),
+    )
+
+
+def test_conversation_representatives_count_each_session_once_before_sampling() -> None:
+    candidates = [
+        _conversation_candidate(f"busy-{turn:02d}", "busy", "current") for turn in range(30)
+    ] + [_conversation_candidate("single", "single", "current")]
+
+    plan = select_conversation_representatives(candidates, target_per_cell=40, seed=9)
+
+    assert len(plan.selected) == 2
+    assert {item.session_id for item in plan.selected} == {"busy", "single"}
+    assert plan.pre_counts[("cluster-a", "current")] == 2
+
+
+def test_conversation_representatives_exclude_cross_window_session_per_cluster() -> None:
+    candidates = [
+        _conversation_candidate("shared-b", "shared", "baseline"),
+        _conversation_candidate("shared-c", "shared", "current"),
+        _conversation_candidate("other-cluster", "shared", "current", cluster_id="cluster-b"),
+        _conversation_candidate("kept-b", "baseline-only", "baseline"),
+        _conversation_candidate("kept-c", "current-only", "current"),
+    ]
+
+    plan = select_conversation_representatives(candidates, target_per_cell=40, seed=0)
+
+    assert {item.trace_id for item in plan.selected} == {
+        "other-cluster",
+        "kept-b",
+        "kept-c",
+    }
+    assert plan.cross_removed[("cluster-a", "shared")] == 2
+    shared = next(item for item in plan.selected if item.session_id == "shared")
+    assert plan.session_ordinals["shared"] == shared.session_ordinal
+
+
+def test_conversation_representative_selection_is_page_order_independent() -> None:
+    candidates = [
+        _conversation_candidate(f"trace-{index:03d}", f"session-{index // 4:03d}", "current")
+        for index in range(200)
+    ]
+
+    forward = select_conversation_representatives(candidates, target_per_cell=20, seed=7)
+    reverse = select_conversation_representatives(
+        list(reversed(candidates)), target_per_cell=20, seed=7
+    )
+
+    assert [item.trace_id for item in forward.selected] == [
+        item.trace_id for item in reverse.selected
+    ]

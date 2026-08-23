@@ -6,6 +6,18 @@ the customer POC profile is refined.
 
 ## [Unreleased]
 
+### Added
+
+- Request-scoped tenant/session/user/workload capture via
+  `verdict.request_context(...)`, including conversation-sticky successful-call
+  sampling. Raw user identity is hashed before context mutation; fixed-tenant
+  initialization remains compatible.
+- Opt-in `verdict-pipeline --method conversation-v1` for one representative per
+  conversation/cluster/window. It pins the active tenant registry, excludes
+  cross-window session reuse, applies bounded concurrent judging, and stores an
+  immutable policy/evaluator/coverage/sample/signal snapshot across Memory,
+  SQLite, and PostgreSQL. Legacy trace-level analysis remains the default.
+
 ### Fixed
 
 - Anthropic `messages.stream(...)` is captured for synchronous and asynchronous

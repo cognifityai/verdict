@@ -583,3 +583,120 @@ def test_apply_routing_context_no_context_is_clean():
         assert trace.user_id_hash is None
     finally:
         client_mod.shutdown()
+
+def test_request_context_restores_nested_values_and_never_retains_raw_user_id():
+    import verdict.client as client_mod
+
+    client_mod.shutdown()
+    client_mod.init(storage="memory://", tenant_mode="request")
+    try:
+        with client_mod.request_context(
+            tenant_id="workspace-a",
+            session_id="conversation-a",
+            user_id="raw-user@example.com",
+            workload="agent",
+            sample_rate=0.5,
+            success_sampling="session",
+            intent_key="billing.v1",
+        ):
+            assert client_mod.get_context_tenant_id() == "workspace-a"
+            assert client_mod.get_context_session_id() == "conversation-a"
+            assert client_mod.get_context_user_id_hash() != "raw-user@example.com"
+            with client_mod.request_context(
+                tenant_id="workspace-a",
+                session_id="conversation-b",
+                workload="agent",
+                sample_rate=1.0,
+                success_sampling="session",
+            ):
+                assert client_mod.get_context_session_id() == "conversation-b"
+            assert client_mod.get_context_session_id() == "conversation-a"
+        assert client_mod.get_context_tenant_id() is None
+        assert client_mod.get_context_session_id() is None
+        assert client_mod.get_context_user_id_hash() is None
+    finally:
+        client_mod.shutdown()
+
+
+def test_request_context_validates_every_value_before_mutating_context():
+    import verdict.client as client_mod
+
+    client_mod.clear_context()
+    with pytest.raises(ValueError):
+        with client_mod.request_context(
+            tenant_id="workspace-a",
+            session_id="conversation-a",
+            workload="192.168.1.1",
+            sample_rate=0.5,
+            success_sampling="session",
+        ):
+            pass
+    assert client_mod.get_context_tenant_id() is None
+    assert client_mod.get_context_session_id() is None
+
+
+def test_request_tenant_mode_skips_missing_or_mismatched_routing_without_persisting(
+    caplog, monkeypatch
+):
+    import verdict.client as client_mod
+    import verdict.instrumentors.base as instrumentor_base
+    from verdict.instrumentors.base import apply_routing_context, safe_persist_trace
+    from verdict.schema import Trace
+
+    monkeypatch.setattr(instrumentor_base, "_warned_routing_context_skip", False)
+    client_mod.shutdown()
+    request_client = client_mod.init(storage="memory://", tenant_mode="request")
+    try:
+        missing = Trace(trace_id="missing")
+        apply_routing_context(request_client, missing)
+        safe_persist_trace(request_client, missing)
+        assert request_client.storage.get_trace("missing") is None
+        snapshot = request_client.runtime_metrics.snapshot(request_client.storage)
+        assert snapshot["capture"]["routing_context_skips"] == 1
+        assert "required request routing context was unavailable" in caplog.text
+    finally:
+        client_mod.shutdown()
+
+    fixed_client = client_mod.init(
+        storage="memory://", tenant_id="workspace-a", tenant_mode="fixed"
+    )
+    try:
+        with pytest.raises(ValueError):
+            with client_mod.request_context(
+                tenant_id="workspace-b",
+                session_id="conversation-a",
+                workload="agent",
+                sample_rate=1.0,
+                success_sampling="session",
+            ):
+                pass
+        assert fixed_client.storage.list_traces() == []
+    finally:
+        client_mod.shutdown()
+
+
+def test_session_success_sampling_reuses_one_decision_for_every_turn():
+    import verdict.client as client_mod
+    from verdict.instrumentors.base import apply_routing_context, should_sample_success
+    from verdict.schema import Trace
+
+    client_mod.shutdown()
+    client = client_mod.init(storage="memory://", tenant_mode="request")
+    try:
+        with client_mod.request_context(
+            tenant_id="workspace-a",
+            session_id="conversation-a",
+            workload="agent",
+            sample_rate=0.5,
+            success_sampling="session",
+        ):
+            traces = [Trace(trace_id=f"turn-{index}") for index in range(30)]
+            for trace in traces:
+                apply_routing_context(client, trace)
+
+        decisions = {should_sample_success(client, trace) for trace in traces}
+        assert len(decisions) == 1
+        assert {trace.session_id for trace in traces} == {"conversation-a"}
+        assert {trace.tags["verdict.success_sampling"] for trace in traces} == {"session-v1"}
+    finally:
+        client_mod.shutdown()

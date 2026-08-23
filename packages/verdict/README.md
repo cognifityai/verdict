@@ -66,6 +66,12 @@ they decide which shared parent spans must survive.
 Stored costs are best-effort estimates from Verdict's dated static base-price table;
 unknown models remain unpriced, and the values are not billing truth.
 
+Built-in adapters also expose the optional conversation-drift capability used
+by `verdict-pipeline --method conversation-v1`. Those snapshots preserve the
+exact evaluator definition, policy, per-sample terminal outcomes, and compact
+coverage after source trace/judgment pruning; custom adapters implementing the
+legacy `Storage` protocol are unchanged.
+
 Hosts that need agent-versus-evaluator cost provenance can bind a bounded,
 task-local workload label:
 
@@ -74,11 +80,32 @@ with verdict.workload_context("agent"):
     response = client.messages.create(...)
 ```
 
+For request-scoped multi-tenant runtimes, initialize with
+`tenant_mode="request"` and bind all routing and sampling values atomically:
+
+```python
+with verdict.request_context(
+    tenant_id="workspace-a",
+    session_id=conversation.id,
+    user_id=current_user.email,  # hashed before it reaches ContextVars
+    workload="agent",
+    sample_rate=0.25,
+    success_sampling="session",
+):
+    response = client.messages.create(...)
+```
+
+Session sampling makes every successful turn in that tenant/workload/session
+share one capture decision. Fixed-tenant initialization and
+`workload_context()` remain supported for simpler services.
+
 The packaged dashboard recognizes `agent` and `judge`; missing and custom labels
 remain visible as unclassified rather than being guessed. The SDK also exposes
 aggregate process-local capture/queue telemetry through
 `VerdictClient.runtime_metrics.snapshot(client.storage)`. It contains counts and
-latency summaries only, never prompts, responses, or exception text.
+latency summaries only, including a `routing_context_skips` count when required
+request-scoped routing is absent; it never contains prompts, responses, or
+exception text.
 
 ```python
 import verdict

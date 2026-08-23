@@ -22,6 +22,11 @@ from verdict.schema import (
     ClusterRegistryEvent,
     ClusterRegistryVersion,
     ClusterTraceCandidate,
+    ConversationDriftRun,
+    ConversationDriftSample,
+    ConversationDriftSignal,
+    ConversationTraceCandidate,
+    ConversationTraceContent,
     DimensionScore,
     DriftDirection,
     DriftRun,
@@ -40,7 +45,21 @@ from verdict.schema import (
     datetime_to_utc_us,
     populate_trace_analysis_fields,
 )
-from verdict.storage.base import _validate_drift_run_snapshot
+from verdict.storage.base import (
+    _validate_conversation_drift_snapshot,
+    _validate_drift_run_snapshot,
+)
+from verdict.storage.conversation import (
+    RUN_COLUMNS,
+    SAMPLE_COLUMNS,
+    SIGNAL_COLUMNS,
+    run_from_row,
+    run_values,
+    sample_from_row,
+    sample_values,
+    signal_from_row,
+    signal_values,
+)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS traces (
@@ -303,6 +322,153 @@ CREATE TABLE IF NOT EXISTS cluster_registry_events (
 CREATE INDEX IF NOT EXISTS idx_cluster_events_version
     ON cluster_registry_events(tenant_id, to_version_id, created_at, event_id);
 
+CREATE TABLE IF NOT EXISTS conversation_drift_runs (
+    tenant_id TEXT NOT NULL CHECK(length(CAST(tenant_id AS BLOB)) BETWEEN 1 AND 128),
+    run_id TEXT NOT NULL CHECK(length(CAST(run_id AS BLOB)) BETWEEN 1 AND 256),
+    registry_version TEXT NOT NULL,
+    method TEXT NOT NULL CHECK(method='conversation-v1'),
+    analysis_policy_json TEXT NOT NULL CHECK(length(CAST(analysis_policy_json AS BLOB)) <= 32768),
+    analysis_policy_fingerprint TEXT NOT NULL,
+    evaluator_definition_json TEXT NOT NULL CHECK(length(CAST(evaluator_definition_json AS BLOB)) <= 65536),
+    evaluator_fingerprint TEXT NOT NULL,
+    target_workload TEXT NOT NULL CHECK(length(CAST(target_workload AS BLOB)) BETWEEN 1 AND 64),
+    baseline_start INTEGER NOT NULL CHECK(typeof(baseline_start)='integer'),
+    baseline_end INTEGER NOT NULL CHECK(typeof(baseline_end)='integer'),
+    current_start INTEGER NOT NULL CHECK(typeof(current_start)='integer'),
+    current_end INTEGER NOT NULL CHECK(typeof(current_end)='integer'),
+    analysis_cutoff INTEGER NOT NULL CHECK(typeof(analysis_cutoff)='integer'),
+    status TEXT NOT NULL CHECK(status IN ('ineligible','insufficient','partial','ready','unavailable')),
+    unavailable_reason TEXT,
+    coverage_json TEXT NOT NULL CHECK(length(CAST(coverage_json AS BLOB)) <= 16777216),
+    signal_count INTEGER NOT NULL CHECK(signal_count BETWEEN 0 AND 16000),
+    sample_count INTEGER NOT NULL CHECK(sample_count BETWEEN 0 AND 50000),
+    started_at INTEGER NOT NULL CHECK(typeof(started_at)='integer'),
+    completed_at INTEGER NOT NULL CHECK(typeof(completed_at)='integer'),
+    actor TEXT NOT NULL CHECK(length(CAST(actor AS BLOB)) BETWEEN 1 AND 256),
+    PRIMARY KEY (tenant_id, run_id),
+    UNIQUE (tenant_id, run_id, registry_version),
+    FOREIGN KEY (tenant_id, registry_version)
+        REFERENCES cluster_registry_versions(tenant_id, version_id),
+    CHECK (baseline_start < baseline_end AND baseline_end <= current_start AND
+           current_start < current_end AND current_end <= analysis_cutoff),
+    CHECK (baseline_end-baseline_start <= 7776000000000 AND
+           current_end-current_start <= 7776000000000 AND
+           current_end-baseline_start <= 15552000000000),
+    CHECK (started_at <= completed_at),
+    CHECK ((status='unavailable' AND unavailable_reason IS NOT NULL) OR
+           (status<>'unavailable' AND unavailable_reason IS NULL))
+);
+CREATE INDEX IF NOT EXISTS idx_conversation_runs_latest
+    ON conversation_drift_runs(tenant_id, completed_at, run_id);
+
+CREATE TABLE IF NOT EXISTS conversation_drift_signals (
+    tenant_id TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    signal_id TEXT NOT NULL,
+    registry_version TEXT NOT NULL,
+    cluster_id TEXT NOT NULL,
+    dimension TEXT NOT NULL,
+    direction TEXT NOT NULL CHECK(direction IN ('regression','improvement','change')),
+    statistic_name TEXT NOT NULL,
+    statistic_value REAL NOT NULL,
+    p_value REAL NOT NULL CHECK(p_value BETWEEN 0 AND 1),
+    p_value_adjusted REAL NOT NULL CHECK(p_value_adjusted BETWEEN 0 AND 1),
+    effect_size REAL NOT NULL CHECK(effect_size BETWEEN -1 AND 1),
+    sample_size_current INTEGER NOT NULL CHECK(sample_size_current BETWEEN 0 AND 50000),
+    sample_size_baseline INTEGER NOT NULL CHECK(sample_size_baseline BETWEEN 0 AND 50000),
+    examples_json TEXT NOT NULL CHECK(length(CAST(examples_json AS BLOB)) <= 16384),
+    recommended_action TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, run_id, signal_id),
+    UNIQUE (tenant_id,run_id,cluster_id,dimension,statistic_name,direction),
+    FOREIGN KEY (tenant_id,run_id,registry_version)
+        REFERENCES conversation_drift_runs(tenant_id,run_id,registry_version),
+    FOREIGN KEY (tenant_id,registry_version,cluster_id)
+        REFERENCES cluster_registry_clusters(tenant_id,version_id,cluster_id)
+);
+
+CREATE TABLE IF NOT EXISTS conversation_drift_samples (
+    tenant_id TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    registry_version TEXT NOT NULL,
+    cluster_id TEXT NOT NULL,
+    session_ordinal INTEGER NOT NULL CHECK(session_ordinal BETWEEN 1 AND 50000),
+    window TEXT NOT NULL CHECK(window IN ('baseline','current')),
+    trace_id TEXT NOT NULL,
+    event_time INTEGER NOT NULL CHECK(typeof(event_time)='integer'),
+    attempt_terminal_at INTEGER NOT NULL CHECK(typeof(attempt_terminal_at)='integer'),
+    attempt_status TEXT NOT NULL CHECK(attempt_status IN ('completed','error')),
+    error_category TEXT,
+    judgment_id TEXT,
+    legacy_write_status TEXT NOT NULL CHECK(legacy_write_status IN
+        ('written','source_deleted','storage_error','not_attempted')),
+    outcomes_json TEXT NOT NULL CHECK(length(CAST(outcomes_json AS BLOB)) <= 32768),
+    PRIMARY KEY (tenant_id,run_id,cluster_id,session_ordinal),
+    UNIQUE (tenant_id,run_id,trace_id),
+    FOREIGN KEY (tenant_id,run_id,registry_version)
+        REFERENCES conversation_drift_runs(tenant_id,run_id,registry_version),
+    FOREIGN KEY (tenant_id,registry_version,trace_id,cluster_id)
+        REFERENCES trace_cluster_assignments(tenant_id,version_id,trace_id,cluster_id),
+    CHECK ((attempt_status='completed' AND error_category IS NULL AND
+            json_valid(outcomes_json) AND json_type(outcomes_json)='object' AND
+            json(outcomes_json)<>'{}') OR
+           (attempt_status='error' AND error_category IN
+            ('timeout','rate_limited','connection','provider','invalid_response','internal') AND
+            json(outcomes_json)='{}'))
+);
+
+CREATE TRIGGER IF NOT EXISTS validate_conversation_sample_insert
+BEFORE INSERT ON conversation_drift_samples BEGIN
+    SELECT CASE WHEN NOT EXISTS (
+      SELECT 1 FROM conversation_drift_runs r
+      WHERE r.tenant_id=NEW.tenant_id AND r.run_id=NEW.run_id
+        AND r.registry_version=NEW.registry_version
+        AND NEW.attempt_terminal_at BETWEEN r.started_at AND r.completed_at
+        AND ((NEW.window='baseline' AND NEW.event_time>=r.baseline_start
+              AND NEW.event_time<r.baseline_end)
+          OR (NEW.window='current' AND NEW.event_time>=r.current_start
+              AND NEW.event_time<r.current_end))
+    ) THEN RAISE(ABORT,'conversation sample time contract failed') END;
+    SELECT CASE WHEN NEW.attempt_status='completed' AND (
+      EXISTS (SELECT 1 FROM json_each(NEW.outcomes_json) WHERE value NOT IN ('PASS','FAIL','UNCLEAR')) OR
+      EXISTS (
+        SELECT 1 FROM json_each((SELECT evaluator_definition_json
+          FROM conversation_drift_runs WHERE tenant_id=NEW.tenant_id AND run_id=NEW.run_id),'$.dimensions') expected
+        WHERE NOT EXISTS (SELECT 1 FROM json_each(NEW.outcomes_json) actual WHERE actual.key=expected.value)
+      ) OR
+      EXISTS (
+        SELECT 1 FROM json_each(NEW.outcomes_json) actual
+        WHERE NOT EXISTS (SELECT 1 FROM json_each((SELECT evaluator_definition_json
+          FROM conversation_drift_runs WHERE tenant_id=NEW.tenant_id AND run_id=NEW.run_id),'$.dimensions') expected
+          WHERE expected.value=actual.key)
+      )
+    ) THEN RAISE(ABORT,'conversation sample dimensions failed') END;
+END;
+
+CREATE TRIGGER IF NOT EXISTS immutable_conversation_runs_update
+BEFORE UPDATE ON conversation_drift_runs BEGIN
+    SELECT RAISE(ABORT, 'conversation drift run is immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS immutable_conversation_runs_delete
+BEFORE DELETE ON conversation_drift_runs BEGIN
+    SELECT RAISE(ABORT, 'conversation drift run is immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS immutable_conversation_samples_update
+BEFORE UPDATE ON conversation_drift_samples BEGIN
+    SELECT RAISE(ABORT, 'conversation drift sample is immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS immutable_conversation_samples_delete
+BEFORE DELETE ON conversation_drift_samples BEGIN
+    SELECT RAISE(ABORT, 'conversation drift sample is immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS immutable_conversation_signals_update
+BEFORE UPDATE ON conversation_drift_signals BEGIN
+    SELECT RAISE(ABORT, 'conversation drift signal is immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS immutable_conversation_signals_delete
+BEFORE DELETE ON conversation_drift_signals BEGIN
+    SELECT RAISE(ABORT, 'conversation drift signal is immutable');
+END;
+
 CREATE TRIGGER IF NOT EXISTS immutable_cluster_versions_update
 BEFORE UPDATE ON cluster_registry_versions BEGIN
     SELECT RAISE(ABORT, 'cluster registry version is immutable');
@@ -385,6 +551,12 @@ def _iso(dt: datetime | None) -> str | None:
 
 def _parse_iso(s: str | None) -> datetime | None:
     return datetime.fromisoformat(s) if s else None
+
+
+def _parse_utc_us(value: object) -> datetime:
+    if type(value) is not int:
+        raise ValueError("conversation timestamp is invalid")
+    return datetime(1970, 1, 1, tzinfo=timezone.utc) + timedelta(microseconds=value)
 
 
 def _normalize_sqlite_path(path: str) -> str:
@@ -1550,6 +1722,248 @@ class SQLiteStorage:
                 (authorized_tenant, version_id, cluster_id, limit),
             ).fetchall()
         return [self._row_to_judgment(row) for row in rows]
+
+    def insert_conversation_drift_snapshot(
+        self,
+        run: ConversationDriftRun,
+        samples: list[ConversationDriftSample],
+        signals: list[ConversationDriftSignal],
+    ) -> None:
+        _validate_conversation_drift_snapshot(run, samples, signals)
+        with self._lock:
+            existing = self.get_conversation_drift_snapshot(run.tenant_id, run.run_id)
+            if existing is not None:
+                if existing != (run, samples, signals):
+                    raise ValueError("immutable conversation snapshot conflict")
+                return
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                self._conn.execute(
+                    """INSERT INTO conversation_drift_runs VALUES (
+                    ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    run_values(run, datetime_to_utc_us),
+                )
+                self._conn.executemany(
+                    """INSERT INTO conversation_drift_samples VALUES (
+                    ?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    [sample_values(item, datetime_to_utc_us) for item in samples],
+                )
+                self._conn.executemany(
+                    """INSERT INTO conversation_drift_signals VALUES (
+                    ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    [signal_values(item) for item in signals],
+                )
+                self._conn.execute("COMMIT")
+            except BaseException:
+                self._conn.execute("ROLLBACK")
+                raise
+
+    def get_conversation_drift_snapshot(
+        self,
+        authorized_tenant: str,
+        run_id: str,
+    ) -> (
+        tuple[
+            ConversationDriftRun,
+            list[ConversationDriftSample],
+            list[ConversationDriftSignal],
+        ]
+        | None
+    ):
+        with self._lock:
+            run_row = self._conn.execute(
+                f"SELECT {RUN_COLUMNS} FROM conversation_drift_runs "
+                "WHERE tenant_id=? AND run_id=?",  # nosec B608
+                (authorized_tenant, run_id),
+            ).fetchone()
+            if run_row is None:
+                return None
+            sample_rows = self._conn.execute(
+                f"SELECT {SAMPLE_COLUMNS} FROM conversation_drift_samples "
+                "WHERE tenant_id=? AND run_id=? "
+                "ORDER BY cluster_id,session_ordinal",
+                (authorized_tenant, run_id),
+            ).fetchall()
+            signal_rows = self._conn.execute(
+                f"SELECT {SIGNAL_COLUMNS} FROM conversation_drift_signals "
+                "WHERE tenant_id=? AND run_id=? "
+                "ORDER BY signal_id",
+                (authorized_tenant, run_id),
+            ).fetchall()
+        result = (
+            run_from_row(run_row, _parse_utc_us),
+            [sample_from_row(row, _parse_utc_us) for row in sample_rows],
+            [signal_from_row(row) for row in signal_rows],
+        )
+        _validate_conversation_drift_snapshot(*result)
+        return result
+
+    def list_conversation_drift_runs(
+        self,
+        authorized_tenant: str,
+        *,
+        limit: int = 100,
+    ) -> list[ConversationDriftRun]:
+        if type(limit) is not int or not 1 <= limit <= 1_000:
+            raise ValueError("conversation run limit must be in [1,1000]")
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT {RUN_COLUMNS} FROM conversation_drift_runs WHERE tenant_id=? "
+                "ORDER BY completed_at DESC,run_id DESC LIMIT ?",
+                (authorized_tenant, limit),
+            ).fetchall()
+        return [run_from_row(row, _parse_utc_us) for row in rows]
+
+    @staticmethod
+    def _decode_bounded_text(value: object) -> str | None:
+        if value is None:
+            return None
+        try:
+            return bytes(value).decode("utf-8")
+        except (TypeError, UnicodeError):
+            return None
+
+    def list_conversation_trace_candidates(
+        self,
+        authorized_tenant: str,
+        registry_version: str,
+        baseline_start_us: int,
+        current_end_us: int,
+        *,
+        target_workload: str,
+        limit: int,
+    ) -> list[ConversationTraceCandidate]:
+        if not 1 <= limit <= 50_001:
+            raise ValueError("conversation candidate limit must be in [1,50001]")
+        workload_path = '$."verdict.workload"'
+        sampling_path = '$."verdict.success_sampling"'
+        stream_path = '$."verdict.stream_completion"'
+
+        def json_state(path: str) -> str:
+            expression = f"json_type(t.tags_json,'{path}')"
+            return (
+                f"CASE {expression} WHEN 'text' THEN 'string' "
+                "WHEN 'integer' THEN 'number' WHEN 'real' THEN 'number' "
+                "WHEN 'true' THEN 'boolean' WHEN 'false' THEN 'boolean' "
+                f"ELSE COALESCE({expression},'missing') END"
+            )
+
+        with self._lock:
+            rows = self._conn.execute(
+                f"""SELECT
+                  length(CAST(t.trace_id AS BLOB)),
+                  CASE WHEN length(CAST(t.trace_id AS BLOB))<=256 THEN CAST(t.trace_id AS BLOB) END,
+                  t.analysis_started_at_us,
+                  {json_state(workload_path)},
+                  CASE WHEN json_type(t.tags_json,'{workload_path}')='text'
+                    THEN length(CAST(json_extract(t.tags_json,'{workload_path}') AS BLOB)) END,
+                  CASE WHEN json_type(t.tags_json,'{workload_path}')='text' AND
+                    length(CAST(json_extract(t.tags_json,'{workload_path}') AS BLOB))<=64
+                    THEN CAST(json_extract(t.tags_json,'{workload_path}') AS BLOB) END,
+                  CASE WHEN t.session_id IS NULL THEN 'missing'
+                    WHEN typeof(t.session_id)='text' THEN 'string'
+                    ELSE typeof(t.session_id) END,
+                  CASE WHEN typeof(t.session_id)='text' THEN length(CAST(t.session_id AS BLOB)) END,
+                  CASE WHEN typeof(t.session_id)='text' AND length(CAST(t.session_id AS BLOB))<=256
+                    THEN CAST(t.session_id AS BLOB) END,
+                  {json_state(sampling_path)},
+                  CASE WHEN json_type(t.tags_json,'{sampling_path}')='text'
+                    THEN length(CAST(json_extract(t.tags_json,'{sampling_path}') AS BLOB)) END,
+                  CASE WHEN json_type(t.tags_json,'{sampling_path}')='text' AND
+                    length(CAST(json_extract(t.tags_json,'{sampling_path}') AS BLOB))<=16
+                    THEN CAST(json_extract(t.tags_json,'{sampling_path}') AS BLOB) END,
+                  {json_state(stream_path)},
+                  CASE WHEN json_type(t.tags_json,'{stream_path}')='text'
+                    THEN length(CAST(json_extract(t.tags_json,'{stream_path}') AS BLOB)) END,
+                  CASE WHEN json_type(t.tags_json,'{stream_path}')='text' AND
+                    length(CAST(json_extract(t.tags_json,'{stream_path}') AS BLOB))<=16
+                    THEN CAST(json_extract(t.tags_json,'{stream_path}') AS BLOB) END,
+                  a.status,a.reason,a.cluster_id,t.error IS NULL,
+                  t.prompt_redacted IS NOT NULL,typeof(t.prompt_redacted)='text',
+                  CASE WHEN t.prompt_redacted IS NOT NULL
+                    THEN length(CAST(t.prompt_redacted AS BLOB)) END,
+                  t.response_redacted IS NOT NULL,typeof(t.response_redacted)='text',
+                  CASE WHEN t.response_redacted IS NOT NULL
+                    THEN length(CAST(t.response_redacted AS BLOB)) END
+                FROM traces t LEFT JOIN trace_cluster_assignments a
+                  ON a.tenant_id=? AND a.version_id=? AND a.trace_id=t.trace_id
+                WHERE (t.tenant_id=? OR (?='__verdict_local__' AND t.tenant_id IS NULL))
+                  AND t.ended_at IS NOT NULL AND t.analysis_started_at_state='valid'
+                  AND t.analysis_started_at_us>=? AND t.analysis_started_at_us<?
+                  AND json_type(t.tags_json,'{workload_path}')='text'
+                  AND json_extract(t.tags_json,'{workload_path}')=?
+                ORDER BY t.analysis_started_at_us,t.trace_id LIMIT ?""",  # nosec B608
+                (
+                    authorized_tenant,
+                    registry_version,
+                    authorized_tenant,
+                    authorized_tenant,
+                    baseline_start_us,
+                    current_end_us,
+                    target_workload,
+                    limit,
+                ),
+            ).fetchall()
+        return [
+            ConversationTraceCandidate(
+                row[0],
+                self._decode_bounded_text(row[1]),
+                authorized_tenant,
+                row[2],
+                row[3],
+                row[4],
+                self._decode_bounded_text(row[5]),
+                row[6],
+                row[7],
+                self._decode_bounded_text(row[8]),
+                row[9],
+                row[10],
+                self._decode_bounded_text(row[11]),
+                row[12],
+                row[13],
+                self._decode_bounded_text(row[14]),
+                row[15],
+                row[16],
+                row[17],
+                bool(row[18]),
+                bool(row[19]),
+                bool(row[20]),
+                row[21],
+                bool(row[22]),
+                bool(row[23]),
+                row[24],
+            )
+            for row in rows
+        ]
+
+    def get_conversation_trace_contents(
+        self,
+        authorized_tenant: str,
+        trace_ids: list[str],
+    ) -> dict[str, ConversationTraceContent]:
+        result: dict[str, ConversationTraceContent] = {}
+        with self._lock:
+            for start in range(0, len(trace_ids), 500):
+                batch = trace_ids[start : start + 500]
+                if not batch:
+                    continue
+                placeholders = ",".join("?" for _ in batch)
+                rows = self._conn.execute(
+                    f"""SELECT trace_id,CAST(prompt_redacted AS BLOB),
+                      CAST(response_redacted AS BLOB) FROM traces
+                      WHERE (tenant_id=? OR (?='__verdict_local__' AND tenant_id IS NULL))
+                        AND trace_id IN ({placeholders})
+                        AND typeof(prompt_redacted)='text' AND typeof(response_redacted)='text'
+                        AND length(CAST(prompt_redacted AS BLOB))+
+                            length(CAST(response_redacted AS BLOB))<=16384""",  # nosec B608
+                    (authorized_tenant, authorized_tenant, *batch),
+                ).fetchall()
+                for row in rows:
+                    prompt = self._decode_bounded_text(row[1])
+                    response = self._decode_bounded_text(row[2])
+                    if prompt is not None and response is not None:
+                        result[row[0]] = ConversationTraceContent(row[0], prompt, response)
+        return result
 
     def insert_cluster_registry_event(self, event: ClusterRegistryEvent) -> None:
         with self._lock:

@@ -47,6 +47,8 @@ class FakeProvider:
     """Deterministic adapter for tests. Returns a fixed string (or callable)."""
 
     name = "fake"
+    request_timeout_seconds = None
+    request_max_attempts = 1
 
     def __init__(self, response: str | callable = "OK") -> None:  # type: ignore[type-arg]
         self._response = response
@@ -64,15 +66,26 @@ class AnthropicAdapter:
 
     name = "anthropic"
 
-    def __init__(self, api_key: str | None = None, *, max_retries: int = 4) -> None:
+    def __init__(
+        self,
+        api_key: str | None = None,
+        *,
+        max_retries: int = 4,
+        timeout_seconds: int | None = None,
+    ) -> None:
         try:
             from anthropic import Anthropic
         except ImportError as e:
             raise ImportError(
                 "AnthropicAdapter requires `pip install anthropic`"
             ) from e
-        self._client = Anthropic(api_key=api_key) if api_key else Anthropic()
+        options = {"max_retries": 0}
+        if timeout_seconds is not None:
+            options["timeout"] = timeout_seconds
+        self._client = Anthropic(api_key=api_key, **options) if api_key else Anthropic(**options)
         self._max_retries = max_retries
+        self.request_timeout_seconds = timeout_seconds
+        self.request_max_attempts = max_retries
 
     def complete(self, req: CompletionRequest) -> CompletionResponse:
         return _with_retry(self._complete_once, req, max_attempts=self._max_retries)
@@ -112,13 +125,24 @@ class OpenAIAdapter:
 
     name = "openai"
 
-    def __init__(self, api_key: str | None = None, *, max_retries: int = 4) -> None:
+    def __init__(
+        self,
+        api_key: str | None = None,
+        *,
+        max_retries: int = 4,
+        timeout_seconds: int | None = None,
+    ) -> None:
         try:
             from openai import OpenAI
         except ImportError as e:
             raise ImportError("OpenAIAdapter requires `pip install openai`") from e
-        self._client = OpenAI(api_key=api_key) if api_key else OpenAI()
+        options = {"max_retries": 0}
+        if timeout_seconds is not None:
+            options["timeout"] = timeout_seconds
+        self._client = OpenAI(api_key=api_key, **options) if api_key else OpenAI(**options)
         self._max_retries = max_retries
+        self.request_timeout_seconds = timeout_seconds
+        self.request_max_attempts = max_retries
 
     def complete(self, req: CompletionRequest) -> CompletionResponse:
         return _with_retry(self._complete_once, req, max_attempts=self._max_retries)
@@ -168,6 +192,8 @@ class LiteLLMAdapter:
                 "LiteLLMAdapter requires `pip install litellm`"
             ) from e
         self._max_retries = max_retries
+        self.request_timeout_seconds = None
+        self.request_max_attempts = max_retries
 
     def complete(self, req: CompletionRequest) -> CompletionResponse:
         return _with_retry(self._complete_once, req, max_attempts=self._max_retries)
@@ -265,7 +291,13 @@ class GoogleAdapter:
 
     name = "google"
 
-    def __init__(self, api_key: str | None = None, *, max_retries: int = 4) -> None:
+    def __init__(
+        self,
+        api_key: str | None = None,
+        *,
+        max_retries: int = 4,
+        timeout_seconds: int | None = None,
+    ) -> None:
         try:
             from google import genai
         except ImportError as e:
@@ -279,8 +311,16 @@ class GoogleAdapter:
                 "GoogleAdapter requires an API key via constructor arg or "
                 "GOOGLE_API_KEY / GEMINI_API_KEY env var."
             )
-        self._client = genai.Client(api_key=key)
+        from google.genai import types
+
+        http_options = types.HttpOptions(
+            timeout=timeout_seconds * 1000 if timeout_seconds is not None else None,
+            retry_options=types.HttpRetryOptions(attempts=1),
+        )
+        self._client = genai.Client(api_key=key, http_options=http_options)
         self._max_retries = max_retries
+        self.request_timeout_seconds = timeout_seconds
+        self.request_max_attempts = max_retries
 
     def complete(self, req: CompletionRequest) -> CompletionResponse:
         return _with_retry(self._complete_once, req, max_attempts=self._max_retries)

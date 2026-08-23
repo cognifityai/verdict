@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import sqlite3
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from verdict.schema import (
@@ -9,11 +10,17 @@ from verdict.schema import (
     ClusterRegistryCluster,
     ClusterRegistryEvent,
     ClusterRegistryVersion,
+    ConversationDriftRun,
+    ConversationDriftSample,
+    ConversationDriftSignal,
     Judgment,
     Trace,
     TraceClusterAssignment,
     cluster_candidate_digest,
+    conversation_json_fingerprint,
+    datetime_to_utc_us,
 )
+from verdict.storage.conversation import sample_values
 from verdict.storage.memory import InMemoryStorage
 from verdict.storage.sqlite import SQLiteStorage
 
@@ -111,6 +118,214 @@ def test_preview_assignments_are_tenant_scoped_immutable_and_idempotent(
     registry_storage.insert_cluster_preview(*other)
     assert registry_storage.get_cluster_registry_version("tenant-b", "version-1")
     assert registry_storage.get_cluster_registry_version("tenant-a", "version-1")
+
+
+def _conversation_snapshot():
+    baseline_start = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    baseline_end = datetime(2026, 8, 2, tzinfo=timezone.utc)
+    current_start = datetime(2026, 8, 3, tzinfo=timezone.utc)
+    current_end = datetime(2026, 8, 4, tzinfo=timezone.utc)
+    policy_json = (
+        '{"max_candidate_rows":50000,"method":"conversation-v1",'
+        '"schema":"analysis-policy-v1","target_per_cell":40}'
+    )
+    evaluator_json = (
+        '{"dimensions":["quality"],"models":["fake-judge"],'
+        '"provider":"fake","rubric_name":"default","rubric_version":"1",'
+        '"schema":"evaluator-definition-v1"}'
+    )
+    coverage_json = (
+        '{"cells":[[0,0,1,1,0,1,1,1,1,1,1,1,1,0,0,0,0,3]],'
+        '"cluster_ids":["cluster-billing"],"dimensions":["quality"],'
+        '"exclusions":[],"global":{},"membership":[],"schema":"coverage-v1"}'
+    )
+    run = ConversationDriftRun(
+        tenant_id="tenant-a",
+        run_id="conversation-run-1",
+        registry_version="version-1",
+        analysis_policy_json=policy_json,
+        analysis_policy_fingerprint=conversation_json_fingerprint(policy_json),
+        evaluator_definition_json=evaluator_json,
+        evaluator_fingerprint=conversation_json_fingerprint(evaluator_json),
+        target_workload="agent",
+        baseline_start=baseline_start,
+        baseline_end=baseline_end,
+        current_start=current_start,
+        current_end=current_end,
+        analysis_cutoff=current_end,
+        status="ready",
+        coverage_json=coverage_json,
+        signal_count=1,
+        sample_count=1,
+        started_at=current_end,
+        completed_at=current_end,
+        actor="admin@example.test",
+    )
+    sample = ConversationDriftSample(
+        tenant_id="tenant-a",
+        run_id=run.run_id,
+        registry_version="version-1",
+        cluster_id="cluster-billing",
+        session_ordinal=1,
+        window="baseline",
+        trace_id="trace-1",
+        event_time=baseline_start,
+        attempt_terminal_at=current_end,
+        attempt_status="completed",
+        legacy_write_status="written",
+        outcomes_json='{"quality":"PASS"}',
+    )
+    signal = ConversationDriftSignal(
+        tenant_id="tenant-a",
+        run_id=run.run_id,
+        signal_id="conversation-signal-1",
+        registry_version="version-1",
+        cluster_id="cluster-billing",
+        dimension="quality",
+        direction="regression",
+        statistic_name="fisher_exact",
+        statistic_value=4.0,
+        p_value=0.001,
+        p_value_adjusted=0.001,
+        effect_size=0.2,
+        sample_size_current=30,
+        sample_size_baseline=30,
+    )
+    return run, [sample], [signal]
+
+
+def test_conversation_snapshot_is_atomic_tenant_scoped_immutable_and_idempotent(
+    registry_storage,
+) -> None:
+    registry_storage.insert_cluster_preview(*_preview())
+    run, samples, signals = _conversation_snapshot()
+
+    registry_storage.insert_conversation_drift_snapshot(run, samples, signals)
+    registry_storage.insert_conversation_drift_snapshot(run, samples, signals)
+
+    assert registry_storage.get_conversation_drift_snapshot("tenant-a", run.run_id) == (
+        run,
+        samples,
+        signals,
+    )
+    assert registry_storage.get_conversation_drift_snapshot("tenant-b", run.run_id) is None
+    assert registry_storage.list_conversation_drift_runs("tenant-a") == [run]
+    with pytest.raises(ValueError, match="immutable conversation snapshot conflict"):
+        registry_storage.insert_conversation_drift_snapshot(
+            replace(run, status="partial"), samples, signals
+        )
+
+
+def test_conversation_snapshot_rejects_bad_time_and_dimension_contracts(
+    registry_storage,
+) -> None:
+    registry_storage.insert_cluster_preview(*_preview())
+    run, samples, signals = _conversation_snapshot()
+    with pytest.raises(ValueError, match="attempt terminal time"):
+        registry_storage.insert_conversation_drift_snapshot(
+            run,
+            [replace(samples[0], attempt_terminal_at=run.completed_at.replace(year=2027))],
+            signals,
+        )
+    with pytest.raises(ValueError, match="expected dimensions"):
+        registry_storage.insert_conversation_drift_snapshot(
+            run,
+            [replace(samples[0], outcomes_json='{"other":"PASS"}')],
+            signals,
+        )
+
+
+def test_sqlite_conversation_times_are_exact_at_microsecond_boundaries(tmp_path) -> None:
+    storage = SQLiteStorage(str(tmp_path / "exact-conversation-times.db"))
+    version, identities, clusters, assignments = _preview()
+    assignments.extend(
+        replace(assignment, trace_id=f"trace-{index}", origin="incremental")
+        for index in (2, 3)
+        for assignment in assignments[:1]
+    )
+    storage.insert_cluster_preview(version, identities, clusters, assignments)
+    run, samples, _signals = _conversation_snapshot()
+    baseline_start = datetime(2026, 8, 1, 11, 0, 0, 1, tzinfo=timezone.utc)
+    baseline_end = datetime(2026, 8, 1, 12, 0, 0, 1, tzinfo=timezone.utc)
+    current_start = datetime(2026, 8, 2, 11, 0, 0, 1, tzinfo=timezone.utc)
+    current_end = datetime(2026, 8, 2, 12, 0, 0, 1, tzinfo=timezone.utc)
+    run = replace(
+        run,
+        baseline_start=baseline_start,
+        baseline_end=baseline_end,
+        current_start=current_start,
+        current_end=current_end,
+        analysis_cutoff=current_end,
+        started_at=current_end,
+        completed_at=current_end,
+        signal_count=0,
+    )
+    valid = replace(
+        samples[0],
+        event_time=baseline_end - timedelta(microseconds=1),
+        attempt_terminal_at=current_end,
+    )
+    storage.insert_conversation_drift_snapshot(run, [valid], [])
+    assert storage.get_conversation_drift_snapshot(run.tenant_id, run.run_id) == (
+        run,
+        [valid],
+        [],
+    )
+
+    for trace_id, event_time in (
+        ("trace-2", baseline_start - timedelta(microseconds=1)),
+        ("trace-3", baseline_end),
+    ):
+        invalid = replace(
+            valid,
+            trace_id=trace_id,
+            session_ordinal=int(trace_id[-1]),
+            event_time=event_time,
+        )
+        with pytest.raises(sqlite3.IntegrityError, match="sample time contract"):
+            storage._conn.execute(
+                """INSERT INTO conversation_drift_samples VALUES (
+                ?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                sample_values(invalid, datetime_to_utc_us),
+            )
+    storage.close()
+
+
+def test_sqlite_conversation_run_duration_checks_are_database_enforced(tmp_path) -> None:
+    storage = SQLiteStorage(str(tmp_path / "conversation-duration.db"))
+    storage.insert_cluster_preview(*_preview())
+    run, _samples, _signals = _conversation_snapshot()
+    values = [
+        run.tenant_id,
+        "overlong-run",
+        run.registry_version,
+        run.method,
+        run.analysis_policy_json,
+        run.analysis_policy_fingerprint,
+        run.evaluator_definition_json,
+        run.evaluator_fingerprint,
+        run.target_workload,
+        0,
+        7_776_000_000_001,
+        7_776_000_000_001,
+        7_776_000_000_002,
+        7_776_000_000_002,
+        run.status,
+        run.unavailable_reason,
+        run.coverage_json,
+        0,
+        0,
+        0,
+        0,
+        run.actor,
+    ]
+    with pytest.raises(sqlite3.IntegrityError):
+        storage._conn.execute(
+            """INSERT INTO conversation_drift_runs VALUES (
+            ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            values,
+        )
+    storage.close()
 
 
 def test_python_geometry_bounds_match_database_checks() -> None:
@@ -475,6 +690,114 @@ def test_candidate_projection_can_page_only_missing_version_assignments(
     )
 
     assert [row.trace_id for row in rows] == ["trace-2"]
+
+
+def test_conversation_candidate_projection_is_bounded_and_keeps_missing_assignments(
+    registry_storage,
+) -> None:
+    started = datetime(2026, 8, 22, tzinfo=timezone.utc)
+    registry_storage.insert_trace(
+        Trace(
+            trace_id="trace-1",
+            tenant_id="tenant-a",
+            session_id="session-1",
+            started_at=started,
+            ended_at=started,
+            prompt_redacted="prompt",
+            response_redacted="response",
+            tags={
+                "verdict.workload": "agent",
+                "verdict.intent_key": "billing",
+                "verdict.success_sampling": "full-v1",
+            },
+        )
+    )
+    registry_storage.insert_trace(
+        Trace(
+            trace_id="trace-2",
+            tenant_id="tenant-a",
+            session_id="s" * 1_000,
+            started_at=started,
+            ended_at=started,
+            prompt_redacted="p" * 9_000,
+            response_redacted="r" * 9_000,
+            tags={
+                "verdict.workload": "agent",
+                "verdict.intent_key": "billing",
+                "verdict.success_sampling": "full-v1",
+            },
+        )
+    )
+    registry_storage.insert_cluster_preview(*_preview())
+    start_us = 1_787_356_800_000_000
+
+    rows = registry_storage.list_conversation_trace_candidates(
+        "tenant-a",
+        "version-1",
+        start_us,
+        start_us + 1,
+        target_workload="agent",
+        limit=50_001,
+    )
+
+    assert [row.trace_id for row in rows] == ["trace-1", "trace-2"]
+    assert rows[0].assignment_status == "assigned"
+    assert rows[0].cluster_id == "cluster-billing"
+    assert rows[1].assignment_status is None
+    assert rows[1].session_utf8_bytes == 1_000
+    assert rows[1].session_id is None
+    assert rows[1].prompt_utf8_bytes == 9_000
+    assert rows[1].response_utf8_bytes == 9_000
+
+    content = registry_storage.get_conversation_trace_contents(
+        "tenant-a", ["trace-1", "trace-2"]
+    )
+    assert content == {
+        "trace-1": type(content["trace-1"])("trace-1", "prompt", "response")
+    }
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (None, "null"),
+        (7, "number"),
+        (True, "boolean"),
+        ([], "array"),
+        ({}, "object"),
+        ("full-v1", "string"),
+    ],
+)
+def test_conversation_candidate_json_states_are_adapter_neutral(
+    registry_storage,
+    value: object,
+    expected: str,
+) -> None:
+    started = datetime(2026, 8, 22, tzinfo=timezone.utc)
+    registry_storage.insert_trace(
+        Trace(
+            trace_id="trace-state",
+            tenant_id="tenant-a",
+            session_id="session-state",
+            started_at=started,
+            ended_at=started,
+            tags={
+                "verdict.workload": "agent",
+                "verdict.success_sampling": value,
+            },
+        )
+    )
+
+    [row] = registry_storage.list_conversation_trace_candidates(
+        "tenant-a",
+        "version-missing",
+        1_787_356_800_000_000,
+        1_787_356_800_000_001,
+        target_workload="agent",
+        limit=50_001,
+    )
+
+    assert row.success_sampling_state == expected
 
 
 def test_explicit_key_cannot_be_remapped_to_another_identity(registry_storage) -> None:

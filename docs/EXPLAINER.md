@@ -111,8 +111,9 @@ themselves. Production deployments should validate provider coverage,
 storage settings, redaction behavior, retention policy, and judge calibration for
 their own traffic before depending on alerts.
 
-The v0 drift runner supports one tenant scope per store and rejects mixed-tenant
-analysis. Cost figures are best-effort estimates from a dated static table of
+The legacy trace-level runner supports one tenant scope per store and rejects
+mixed-tenant analysis. Conversation-v1 requires an authorized tenant and active
+registry. Cost figures are best-effort estimates from a dated static table of
 public base token prices, not provider billing data.
 
 PASS rate is `PASS / (PASS + FAIL)`. `UNCLEAR`, missing dimensions, and judge
