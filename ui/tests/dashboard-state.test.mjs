@@ -28,7 +28,7 @@ function componentStub(names) {
 }
 
 async function loadUiModule() {
-  const source = `${await readFile(UI_SOURCE, "utf8")}\nexport { Dashboard, Traces, TraceDetail, Drift, Judge, Compare, mountedApiUrl };\nexport { useOperations } from "./Operations.jsx";`;
+  const source = `${await readFile(UI_SOURCE, "utf8")}\nexport { Dashboard, Traces, TraceDetail, Drift, Judge, Compare, mountedApiUrl };\nexport { useOperations } from "./Operations.jsx";\nexport { RegistryView } from "./Registry.jsx";`;
   const result = await build({
     stdin: {
       contents: source,
@@ -185,6 +185,73 @@ test("operations navigation is present only when the host configures an adapter"
     operationsUrl: "/api/admin/operations",
   });
   assert.equal(textOf(withAdapter).includes("Operations"), true);
+});
+
+test("registry view discloses experimental status, readiness, explanations, and actions", async () => {
+  const ui = await loadUiModule();
+  const actions = [];
+  const tree = render(ui.RegistryView, createHooks(), {
+    data: {
+      tenant: "tenant-a",
+      status: "ready",
+      active: { versionId: "crv-old", generation: 3 },
+      versions: [
+        { versionId: "crv-old", strategy: "explicit", active: true },
+        { versionId: "crv-preview", strategy: "hybrid", active: false },
+      ],
+      selectedVersion: {
+        versionId: "crv-preview",
+        strategy: "hybrid",
+        active: false,
+        strategyStatus: { experimental: true, semanticComponent: "fallback" },
+        preview: { warnings: ["fit warning"] },
+        configuration: {},
+        algorithm: "ward-best-k-v2",
+        selector: "latest-user-v1",
+        model: { name: "MiniLM", revision: "frozen" },
+      },
+      readiness: { status: "validated", passed: true, coverage: true, structural: true, definition: true, model: true },
+      activationHistory: true,
+      counts: { assigned: 8, outlier: 1, ineligible: 1, total: 10 },
+      modelDistribution: [{ provider: "anthropic", model: "claude", count: 8 }],
+      trafficWindow: { conversationFloor: 30 },
+      healthWarnings: ["fragmented_semantic_space"],
+      clusters: [{ clusterId: "clu-a", displayName: "Billing", kind: "explicit", lifecycle: "provisional", explicitKey: "billing", assignedCount: 8, memberCount: 8, outlierCount: 1, radius: null, detailsAvailable: true, representatives: [{ traceId: "trace-a", prompt: "Redacted billing prompt", provider: "anthropic", model: "claude" }], modelDistribution: [{ provider: "anthropic", model: "claude", count: 8 }], conversationReadiness: { status: "collecting", floor: 30, baseline: 20, current: 8, remainingBaseline: 10, remainingCurrent: 22, estimatedDaysToReady: 3 }, warnings: [] }],
+      assignments: [{ traceId: "trace-a", origin: "incremental", status: "ineligible", reason: "missing_intent_key" }],
+      reasons: [{ status: "ineligible", reason: "missing_intent_key", count: 1 }],
+      events: [{ action: "activated" }],
+      page: { offset: 0, available: 1, shown: 1, truncated: false },
+    },
+    operations: { available: true, running: null, jobs: [] },
+    onRun: (kind, parameters) => actions.push([kind, parameters]),
+    onVersion: () => {},
+    onPage: () => {},
+  });
+  const rendered = textOf(tree);
+
+  assert.match(rendered, /Experimental opt-in/);
+  assert.match(rendered, /30\.1047%/);
+  assert.match(rendered, /Validated/);
+  assert.match(rendered, /Redacted billing prompt/);
+  assert.match(rendered, /Baseline\s+20\s+\/\s+30/);
+  assert.match(rendered, /split across many small clusters/);
+  assert.match(rendered, /ward-best-k-v2/);
+  assert.match(rendered, /No explicit intent key was captured/);
+  assert.match(rendered, /Activate version/);
+  assert.match(rendered, /Refit active/);
+  assert.match(rendered, /Rollback to version/);
+
+  for (const label of ["Refit active", "Activate version", "Rollback to version"]) {
+    findAll(
+      tree,
+      (node) => node.type?.name === "ActionButton" && textOf(node) === label,
+    )[0].props.onClick();
+  }
+  assert.deepEqual(actions, [
+    ["cluster_refit", {}],
+    ["cluster_activate", { version: "crv-preview", expected_generation: 3 }],
+    ["cluster_rollback", { version: "crv-preview", expected_generation: 3 }],
+  ]);
 });
 
 test("the live dashboard does not display synthetic metrics before confirmation", async () => {

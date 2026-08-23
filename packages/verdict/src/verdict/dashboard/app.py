@@ -25,6 +25,13 @@ from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import urlsplit
 
+from verdict.dashboard.registry import (
+    RegistryNotFoundError,
+    RegistryStateError,
+)
+from verdict.dashboard.registry import (
+    build_registry_bundle as _build_registry_bundle,
+)
 from verdict.metrics import ScoreCounts, verdict_label
 from verdict.redaction import redact, redact_structure
 
@@ -208,7 +215,13 @@ class _Result:
             return None
         values = dict(row)
         return {
-            key: value.isoformat() if isinstance(value, datetime) else value
+            key: (
+                (value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc))
+                .astimezone(timezone.utc)
+                .isoformat()
+                if isinstance(value, datetime)
+                else value
+            )
             for key, value in values.items()
         }
 
@@ -229,10 +242,28 @@ class _QuerySession(Protocol):
 
     def columns(self, table: str) -> set[str]: ...
 
+    def valid_session_predicate(self, trace_alias: str) -> str: ...
+
+
+def _valid_utf8(value: object) -> int:
+    if not isinstance(value, bytes):
+        return 0
+    try:
+        value.decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        return 0
+    return 1
+
 
 class _SQLiteSession:
     def __init__(self, connection: sqlite3.Connection) -> None:
         self._connection = connection
+        connection.create_function(
+            "verdict_valid_utf8",
+            1,
+            _valid_utf8,
+            deterministic=True,
+        )
 
     def execute(self, query: str, params: tuple[Any, ...] = ()) -> _Result:
         return _Result(self._connection.execute(query, params))
@@ -245,6 +276,15 @@ class _SQLiteSession:
 
     def columns(self, table: str) -> set[str]:
         return {row["name"] for row in self.execute(f"PRAGMA table_info({table})")}
+
+    def valid_session_predicate(self, trace_alias: str) -> str:
+        value = f"{trace_alias}.session_id"
+        return (
+            f"typeof({value})='text' AND CASE WHEN "
+            f"length(CAST({value} AS BLOB)) BETWEEN 1 AND 256 "
+            f"AND instr({value},char(0))=0 THEN "
+            f"verdict_valid_utf8(CAST({value} AS BLOB)) ELSE 0 END=1"
+        )
 
 
 class _PostgresSession:
@@ -270,6 +310,13 @@ class _PostgresSession:
                 (table,),
             )
         }
+
+    def valid_session_predicate(self, trace_alias: str) -> str:
+        value = f"{trace_alias}.session_id"
+        return (
+            f"{value} IS NOT NULL AND {value}<>'' "
+            f"AND octet_length({value})<=256"
+        )
 
 
 def _table_exists(cur: _QuerySession, table: str) -> bool:
@@ -395,6 +442,60 @@ def build_bundle(
         con = sqlite3.connect(path)
         con.execute("PRAGMA query_only = ON")
         return _build_from_connection(con, evaluator_id=evaluator_id)
+
+
+def build_registry_bundle(
+    storage: str | os.PathLike[str],
+    *,
+    tenant: str,
+    version_id: str | None = None,
+    assignment_limit: int = 50,
+    assignment_offset: int = 0,
+) -> dict:
+    """Read one bounded tenant registry snapshot without migrating the store."""
+    configured = str(storage)
+
+    def builder(session: _QuerySession) -> dict:
+        return _build_registry_bundle(
+            session,
+            tenant=tenant,
+            version_id=version_id,
+            assignment_limit=assignment_limit,
+            assignment_offset=assignment_offset,
+        )
+
+    if _is_postgres(configured):
+        try:
+            import psycopg
+            from psycopg.rows import dict_row
+        except ImportError as exc:
+            raise ImportError(
+                "PostgreSQL dashboard support requires "
+                '`pip install "cognifity-verdict[postgres,dashboard]"`'
+            ) from exc
+        with psycopg.connect(configured, autocommit=False, row_factory=dict_row) as connection:
+            with connection.transaction():
+                connection.execute("SET TRANSACTION READ ONLY")
+                result = builder(_PostgresSession(connection))
+    else:
+        path = _sqlite_path(configured)
+        connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        connection.row_factory = sqlite3.Row
+        try:
+            connection.execute("BEGIN")
+            result = builder(_SQLiteSession(connection))
+            connection.commit()
+        except BaseException:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+    redacted = redact_structure(result)
+    if not isinstance(redacted, dict):
+        raise DashboardBundleLimitError(
+            "bounded registry dashboard bundle exceeded the redaction budget"
+        )
+    return redacted
 
 
 def _build_from_connection(
@@ -1266,7 +1367,7 @@ def create_app(
     import base64
     import secrets
 
-    from fastapi import FastAPI
+    from fastapi import FastAPI, Request
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import HTMLResponse, JSONResponse, Response
     from fastapi.staticfiles import StaticFiles
@@ -1301,7 +1402,9 @@ def create_app(
     # The dashboard shell and live data require the password. Health and static
     # assets contain no stored telemetry and remain public.
     def _is_gated(path: str) -> bool:
-        return path in {"/", "/dashboard", "/api/config"} or path.startswith("/api/data")
+        return path in {"/", "/dashboard", "/api/config"} or path.startswith(
+            ("/api/data", "/api/registry")
+        )
 
     @app.middleware("http")
     async def basic_auth(request, call_next):
@@ -1382,6 +1485,46 @@ def create_app(
         except Exception:  # pragma: no cover - defensive: corrupt/locked DB
             _log.exception("failed to build %s dashboard data bundle", backend)
             return JSONResponse({"error": "data unavailable"}, status_code=503)
+
+    def registry(
+        request,
+        tenant: str | None = None,
+        version: str | None = None,
+        assignment_limit: int = 50,
+        assignment_offset: int = 0,
+    ):
+        authorized_tenant = getattr(
+            request.state,
+            "verdict_registry_tenant",
+            None,
+        ) or tenant or "__verdict_local__"
+        try:
+            tenant_bytes = authorized_tenant.encode("utf-8")
+        except (AttributeError, UnicodeError):
+            return JSONResponse({"error": "invalid tenant"}, status_code=400)
+        if not tenant_bytes or len(tenant_bytes) > 128:
+            return JSONResponse({"error": "invalid tenant"}, status_code=400)
+        try:
+            return build_registry_bundle(
+                configured_storage,
+                tenant=authorized_tenant,
+                version_id=version,
+                assignment_limit=assignment_limit,
+                assignment_offset=assignment_offset,
+            )
+        except RegistryNotFoundError:
+            return JSONResponse({"error": "registry version not found"}, status_code=404)
+        except ValueError:
+            return JSONResponse({"error": "invalid registry request"}, status_code=400)
+        except (RegistryStateError, DashboardBundleLimitError):
+            _log.exception("registry dashboard state is invalid")
+            return JSONResponse({"error": "registry data unavailable"}, status_code=503)
+        except Exception:  # pragma: no cover - defensive: corrupt/locked DB
+            _log.exception("failed to build %s registry dashboard data", backend)
+            return JSONResponse({"error": "registry data unavailable"}, status_code=503)
+
+    registry.__annotations__["request"] = Request
+    app.get("/api/registry")(registry)
 
     @app.get("/", response_class=HTMLResponse)
     def index():

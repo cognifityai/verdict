@@ -10,7 +10,21 @@ from uuid import uuid4
 
 import pytest
 from verdict.dashboard import build_bundle
-from verdict.schema import DimensionScore, DriftRun, DriftSignal, Judgment, Trace, Verdict
+from verdict.dashboard.app import build_registry_bundle
+from verdict.schema import (
+    ClusterIdentity,
+    ClusterRegistryCluster,
+    ClusterRegistryEvent,
+    ClusterRegistryVersion,
+    DimensionScore,
+    DriftRun,
+    DriftSignal,
+    Judgment,
+    Trace,
+    TraceClusterAssignment,
+    Verdict,
+    cluster_candidate_digest,
+)
 from verdict.storage import SQLiteStorage
 from verdict.storage.postgres import PostgresStorage
 
@@ -59,9 +73,7 @@ def test_live_postgres_and_sqlite_produce_the_same_dashboard_bundle(tmp_path) ->
             evaluator_fingerprint="dashboard-parity-evaluator",
             expected_dimensions=["custom-dimension"],
             judge_models=["custom-judge-model"],
-            dimensions=[
-                DimensionScore(name="custom-dimension", verdict=Verdict.FAIL)
-            ],
+            dimensions=[DimensionScore(name="custom-dimension", verdict=Verdict.FAIL)],
         )
         run = DriftRun(
             run_id="dashboard-parity-run",
@@ -105,6 +117,220 @@ def test_live_postgres_and_sqlite_produce_the_same_dashboard_bundle(tmp_path) ->
         assert postgres_bundle["meta"]["totalTraces"] == 1
         assert postgres_bundle["providers"][0]["rawProvider"] == "custom-provider"
         assert postgres_bundle["driftSignals"][0]["id"] == signal.signal_id
+    finally:
+        if sqlite is not None:
+            sqlite.close()
+        if postgres is not None:
+            postgres.close()
+        with psycopg.connect(DSN, autocommit=True) as admin:
+            admin.execute(
+                sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(schema))
+            )
+
+
+def test_live_postgres_and_sqlite_registry_dashboard_shapes_match(tmp_path) -> None:
+    import psycopg
+    from psycopg import sql
+    from psycopg.conninfo import make_conninfo
+
+    schema = f"verdict_registry_dashboard_{uuid4().hex}"
+    with psycopg.connect(DSN, autocommit=True) as admin:
+        admin.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+
+    postgres = None
+    sqlite = None
+    try:
+        scoped_dsn = make_conninfo(DSN, options=f"-csearch_path={schema}")
+        postgres = PostgresStorage(scoped_dsn, min_pool=1, max_pool=1)
+        sqlite_path = tmp_path / "registry-dashboard-parity.db"
+        sqlite = SQLiteStorage(str(sqlite_path))
+        now = datetime(2026, 8, 23, 12, tzinfo=timezone.utc)
+        tenant = "registry-dashboard-tenant"
+        trace = Trace(
+            trace_id="registry-dashboard-trace",
+            tenant_id=tenant,
+            session_id="registry-dashboard-session",
+            started_at=now,
+            ended_at=now,
+            provider="anthropic",
+            request_model="claude-haiku-4-5",
+            response_model="claude-haiku-4-5",
+            prompt_redacted="Safe representative billing prompt",
+            tags={"verdict.workload": "agent", "verdict.intent_key": "billing"},
+        )
+        identity = ClusterIdentity(
+            tenant_id=tenant,
+            cluster_id="clu-registry-dashboard",
+            kind="explicit",
+            explicit_key="billing",
+            display_name="Billing requests",
+            created_by="admin@example.test",
+            updated_by="admin@example.test",
+        )
+        version = ClusterRegistryVersion(
+            tenant_id=tenant,
+            version_id="crv-registry-dashboard",
+            strategy="explicit",
+            cutoff=now + timedelta(minutes=1),
+            fit_definition_json=json.dumps(
+                {
+                    "algorithm": "ward-best-k-v2",
+                    "selector": "latest-user-v1",
+                    "model": {},
+                    "config": {"target_workload": "agent"},
+                }
+            ),
+            fit_definition_fingerprint="registry-dashboard-definition",
+            preview_report_json=json.dumps(
+                {
+                    "candidate_count": 1,
+                    "fit_assignment_count": 1,
+                    "cluster_count": 1,
+                    "explicit_cluster_count": 1,
+                    "semantic_cluster_count": 0,
+                    "chosen_k": None,
+                    "statuses": {"assigned": 1, "outlier": 0, "ineligible": 0},
+                    "metrics": {},
+                    "warnings": [],
+                    "candidate_summary": {},
+                }
+            ),
+            created_by="admin@example.test",
+        )
+        cluster = ClusterRegistryCluster(
+            tenant,
+            version.version_id,
+            identity.cluster_id,
+            "explicit",
+            member_count=1,
+        )
+        assignment = TraceClusterAssignment(
+            tenant,
+            version.version_id,
+            trace.trace_id,
+            "fit",
+            "assigned",
+            identity.cluster_id,
+            "explicit",
+        )
+        validation = ClusterRegistryEvent(
+            tenant_id=tenant,
+            event_id="cre-registry-dashboard-validation",
+            action="validated",
+            to_version_id=version.version_id,
+            actor="admin@example.test",
+            details_json=json.dumps(
+                {
+                    "coverage": True,
+                    "structural": True,
+                    "definition": True,
+                    "model": True,
+                }
+            ),
+        )
+        tenantless_trace = deepcopy(trace)
+        tenantless_trace.trace_id = "registry-dashboard-tenantless-private"
+        tenantless_trace.tenant_id = None
+        tenantless_trace.session_id = "tenantless-private-session"
+        tenantless_trace.prompt_redacted = "TENANTLESS PRIVATE PROMPT"
+        boundary_traces: list[Trace] = []
+        for window, started_at, valid_count in (
+            ("baseline", now - timedelta(days=2), 29),
+            ("current", now, 28),
+        ):
+            for index in range(valid_count):
+                item = deepcopy(trace)
+                item.trace_id = f"registry-dashboard-{window}-valid-{index}"
+                item.session_id = f"{window}-session-{index}"
+                item.started_at = started_at
+                item.ended_at = started_at
+                boundary_traces.append(item)
+            for index, session_id in enumerate(("", "a" * 257, "é" * 129)):
+                item = deepcopy(trace)
+                item.trace_id = f"registry-dashboard-{window}-invalid-{index}"
+                item.session_id = session_id
+                item.started_at = started_at
+                item.ended_at = started_at
+                boundary_traces.append(item)
+        boundary_assignments = [
+            TraceClusterAssignment(
+                tenant,
+                version.version_id,
+                item.trace_id,
+                "incremental",
+                "assigned",
+                identity.cluster_id,
+                "explicit",
+            )
+            for item in (tenantless_trace, *boundary_traces)
+        ]
+        for storage in (sqlite, postgres):
+            storage.insert_trace(deepcopy(trace))
+            storage.insert_cluster_preview(
+                deepcopy(version),
+                [deepcopy(identity)],
+                [deepcopy(cluster)],
+                [deepcopy(assignment)],
+            )
+            storage.insert_cluster_registry_event(deepcopy(validation))
+            storage.activate_cluster_registry(
+                tenant,
+                version.version_id,
+                expected_generation=0,
+                actor="admin@example.test",
+                action="activated",
+                expected_candidate_digest=cluster_candidate_digest([trace.trace_id]),
+            )
+            storage.insert_trace(deepcopy(tenantless_trace))
+            for boundary_trace in boundary_traces:
+                storage.insert_trace(deepcopy(boundary_trace))
+            storage.insert_trace_cluster_assignments(
+                tenant,
+                deepcopy(boundary_assignments),
+            )
+
+        sqlite.close()
+        sqlite = None
+        postgres.close()
+        postgres = None
+        sqlite_bundle = build_registry_bundle(f"sqlite:///{sqlite_path}", tenant=tenant)
+        postgres_bundle = build_registry_bundle(scoped_dsn, tenant=tenant)
+
+        json.dumps(postgres_bundle)
+        for bundle in (sqlite_bundle, postgres_bundle):
+            assert bundle["status"] == "ready"
+            assert bundle["tenant"] == tenant
+            assert bundle["active"]["versionId"] == version.version_id
+            assert bundle["selectedVersion"]["algorithm"] == "ward-best-k-v2"
+            assert bundle["selectedVersion"]["selector"] == "latest-user-v1"
+            assert bundle["counts"] == {
+                "assigned": 65,
+                "outlier": 0,
+                "ineligible": 0,
+                "total": 65,
+            }
+            assert bundle["readiness"]["passed"] is True
+            assert bundle["clusters"][0]["displayName"] == "Billing requests"
+            assert bundle["clusters"][0]["representatives"][0]["prompt"] == (
+                "Safe representative billing prompt"
+            )
+            assert bundle["clusters"][0]["conversationReadiness"] == {
+                "status": "collecting",
+                "floor": 30,
+                "baseline": 29,
+                "current": 29,
+                "remainingBaseline": 1,
+                "remainingCurrent": 1,
+                "estimatedDaysToReady": 1,
+            }
+            assert bundle["modelDistribution"] == [
+                {"provider": "anthropic", "model": "claude-haiku-4-5", "count": 64}
+            ]
+            assert "TENANTLESS PRIVATE PROMPT" not in str(bundle)
+            assert "tenantless-private-session" not in str(bundle)
+        assert postgres_bundle["selectedVersion"] == sqlite_bundle["selectedVersion"]
+        assert postgres_bundle["clusters"] == sqlite_bundle["clusters"]
+        assert postgres_bundle["assignments"] == sqlite_bundle["assignments"]
     finally:
         if sqlite is not None:
             sqlite.close()

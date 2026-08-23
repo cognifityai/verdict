@@ -21,6 +21,7 @@ export function useOperations(url) {
   const requestId = React.useRef(0);
 
   const load = React.useCallback(async () => {
+    if (!url) return false;
     const activeRequest = ++requestId.current;
     setState((current) => ({ ...current, loading: true, error: null }));
     try {
@@ -33,13 +34,19 @@ export function useOperations(url) {
       const data = normalizeOperationsPayload(await response.json());
       if (activeRequest !== requestId.current) return;
       setState((current) => ({ ...current, data, loading: false, error: null }));
+      return true;
     } catch (_error) {
       if (activeRequest !== requestId.current) return;
       setState((current) => ({ ...current, loading: false, error: "Operations data is temporarily unavailable." }));
+      return false;
     }
   }, [url]);
 
   useEffect(() => {
+    if (!url) {
+      setState({ data: null, loading: false, error: null, running: null });
+      return undefined;
+    }
     load();
     const timer = setInterval(load, 60_000);
     return () => {
@@ -48,8 +55,8 @@ export function useOperations(url) {
     };
   }, [load]);
 
-  const run = React.useCallback(async (actionId) => {
-    if (!state.data?.csrfToken || state.running) return;
+  const run = React.useCallback(async (actionId, parameters = {}) => {
+    if (!url || !state.data?.csrfToken || state.running) return false;
     setState((current) => ({ ...current, running: actionId, error: null }));
     try {
       const response = await fetch(`${url}/jobs`, {
@@ -60,14 +67,16 @@ export function useOperations(url) {
           "Content-Type": "application/json",
           "X-CSRF-Token": state.data.csrfToken,
         },
-        body: JSON.stringify({ kind: actionId }),
+        body: JSON.stringify({ kind: actionId, ...parameters }),
       });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      await response.json();
+      const result = await response.json();
       setState((current) => ({ ...current, running: null }));
       await load();
+      return result;
     } catch (_error) {
       setState((current) => ({ ...current, running: null, error: "The backend job did not complete successfully." }));
+      return null;
     }
   }, [load, state.data, state.running, url]);
 
