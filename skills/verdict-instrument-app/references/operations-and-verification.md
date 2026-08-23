@@ -7,7 +7,7 @@ test is insufficient evidence of trace collection or a rendered regression.
 
 Record the interpreter and installed distributions. Confirm the imported `verdict`
 module belongs to `cognifity-verdict`, not the unrelated package named `verdict`.
-Pin the synchronized `0.1.0a7` distributions and verify the installed pipeline,
+Pin the synchronized `0.1.0a8` distributions and verify the installed pipeline,
 probe, and dashboard commands.
 
 ## Trace capture gate
@@ -22,7 +22,7 @@ Verify:
 - persisted provider, model, timing, status, finish reason, and token fields expected
   for the exercised path;
 - active service/environment configuration separately, while stating that release
-  `0.1.0a7` does not persist those two labels on `Trace` rows;
+  `0.1.0a8` does not persist those two labels on `Trace` rows;
 - request and response behavior is unchanged;
 - supported sync, async, and streaming variants used by the customer;
 - provider exception/cancellation semantics;
@@ -84,6 +84,22 @@ through the customer's protected `VERDICT_STORAGE` environment. The installed
 commands log only the selected backend name.
 
 ## Drift pipeline gate
+
+### Versioned registry gate
+
+For the supported exact-key path, first prove that every intended call stamps a
+validated `verdict.intent_context(...)` value and that routing metadata remains
+non-sensitive. On an upgraded store, run the tenant-scoped, resumable
+`verdict-cluster normalize` command until no pending rows remain. Then execute
+`fit --strategy explicit`, `assign`, `validate`, inspect the immutable preview,
+and `activate` only after the operator accepts its coverage and labels. Record
+the preview and active version IDs. Test rollback after incremental assignments.
+
+Automatic `semantic` and `hybrid` strategies are experimental opt-in paths; the
+frozen release evaluation missed its fragmentation maximum. Do not enable them
+for a customer path without a separate workload-specific evaluation. Shadow
+analysis is disabled; `active` mode must resolve the authorized tenant's active
+pointer and must never accept a browser-supplied tenant as authorization.
 
 Before a live run prove:
 
@@ -149,7 +165,7 @@ user turns, tool-only calls, multimodal blocks, or another provider's message sc
 
 Use `--storage` or `VERDICT_STORAGE` with `verdict-pipeline` and
 `verdict-dashboard`. Reject generated schedules that mix these contracts.
-Release `0.1.0a7` still constructs the selected embedder when
+Release `0.1.0a8` still constructs the selected embedder when
 `--trust-existing-clusters` is used. For that external-taxonomy path, deliberately
 select an installed local embedder such as `--embedder hashing` to avoid an
 unnecessary MiniLM download, then run the exact command manually. This is an

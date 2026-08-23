@@ -23,11 +23,9 @@ they go through a supported provider SDK.
 - Captures Anthropic, OpenAI, and Google GenAI calls through lightweight Python
   instrumentation.
 - Supports non-streaming and streaming responses for the supported SDK paths.
-  The versioned [`0.1.0a4 POC release profile`](POC_RELEASE_PROFILE.md) names
-  the entry points released through `0.1.0a7` explicitly. Unreleased source adds
-  Anthropic `messages.stream(...)` and OpenAI Responses create, parse, raw
-  stream, and helper entry points; those are not public-release claims until the
-  next synchronized alpha passes release verification.
+  The versioned [`0.1.0a8 POC release profile`](POC_RELEASE_PROFILE.md) names
+  the released entry points explicitly, including Anthropic
+  `messages.stream(...)` and OpenAI Responses create, parse, and helper paths.
 - Stores traces in SQLite by default, with Postgres support for deployments that
   need a server database.
 - Recursively redacts common sensitive patterns in supported JSON-compatible
@@ -50,7 +48,7 @@ they go through a supported provider SDK.
 2. **Store**: traces are written through a storage interface. SQLite is the
    default local store; Postgres is available for shared environments. Optional
    buffered writes move persistence to a background batched writer and require
-   explicit client shutdown. The `0.1.0a4` POC profile uses synchronous writes.
+   explicit client shutdown. The `0.1.0a8` POC profile uses synchronous writes.
 3. **Group**: on a pipeline run, prompt embeddings are assigned against a
    persisted cluster registry so existing cluster IDs remain stable. Registry
    strategy selection is deliberate: exact-key `explicit` is supported, while

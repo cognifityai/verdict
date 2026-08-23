@@ -6,6 +6,25 @@ the customer POC profile is refined.
 
 ## [Unreleased]
 
+## [0.1.0a8] - 2026-08-23
+
+### Added
+
+- A bounded tenant/version cluster registry with supported exact-key `explicit`
+  clustering, stable cluster identities and labels, immutable previews,
+  assignment/validation/activation/rollback commands, additive SQLite and
+  PostgreSQL migrations, and an upgrade normalization workflow. Automatic
+  `semantic` and `hybrid` clustering remain explicitly experimental after the
+  frozen evaluation missed its preregistered fragmentation gate.
+- A bounded Registry dashboard view for active and preview versions, stable
+  labels, frozen algorithm/selector/model definitions, representative redacted
+  prompts, provider/model mix, membership explanations, terminal reasons,
+  coverage, readiness estimates, and fragmentation warnings. Mounted hosts own
+  tenant authorization and mutations through the existing Operations adapter.
+- The version-matched `verdict-instrument-app` skill now discovers the complete
+  released provider surface and guides operators through registry normalization,
+  supported explicit clustering, activation, inspection, and rollback.
+
 ### Fixed
 
 - Anthropic `messages.stream(...)` is captured for synchronous and asynchronous
@@ -20,7 +39,7 @@ the customer POC profile is refined.
   exactly one new trace per entry point, names the providers and entry points it
   verified, and exits nonzero when any requested provider could not run.
 - OpenAI Responses calls are captured for synchronous and asynchronous
-  `create`, `parse`, raw streaming, and new/existing-response stream helpers.
+  `create`, `parse`, and new/existing-response stream helpers.
   Complete, incomplete, failed, cancelled, queued, in-progress, partial-close,
   application-error, provider-error, and cancellation boundaries retain their
   status and persist exactly once; an owned post-request-hook native HTTP
@@ -41,8 +60,9 @@ the customer POC profile is refined.
   Partial streams retain done-event-only output text and refusal content; an
   authoritative done value replaces any observed suffix deltas without
   duplicating normal complete delta sequences.
-  The experimental `client.beta.responses` multi-agent resource remains outside
-  this bounded support surface.
+  The `responses.with_streaming_response` raw-response manager and experimental
+  `client.beta.responses` multi-agent resource remain outside this bounded
+  support surface.
 - The live capture gate now names and verifies the OpenAI Responses entry points
   it actually exercises, including the helper error boundary.
 - Trace Explorer distinguishes captured empty prompts and responses from traces
@@ -160,7 +180,8 @@ the customer POC profile is refined.
 - Content capture remains off by default and is documented as best-effort rather
   than a compliance control.
 
-[Unreleased]: https://github.com/cognifityai/verdict/compare/v0.1.0a7...HEAD
+[Unreleased]: https://github.com/cognifityai/verdict/compare/v0.1.0a8...HEAD
+[0.1.0a8]: https://github.com/cognifityai/verdict/compare/v0.1.0a7...v0.1.0a8
 [0.1.0a7]: https://github.com/cognifityai/verdict/compare/v0.1.0a6...v0.1.0a7
 [0.1.0a6]: https://github.com/cognifityai/verdict/compare/v0.1.0a5...v0.1.0a6
 [0.1.0a5]: https://github.com/cognifityai/verdict/compare/v0.1.0a4...v0.1.0a5

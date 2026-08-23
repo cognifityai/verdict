@@ -23,7 +23,7 @@ This is best-effort matching, not a compliance guarantee; keep content capture
 off when its documented coverage is insufficient.
 
 For a customer proof of concept, follow the versioned
-[`0.1.0a4 POC release profile`](https://github.com/cognifityai/verdict/blob/v0.1.0a4/docs/POC_RELEASE_PROFILE.md).
+[`0.1.0a8 POC release profile`](https://github.com/cognifityai/verdict/blob/v0.1.0a8/docs/POC_RELEASE_PROFILE.md).
 It pins the package set, provider entry points, persistence mode, and privacy
 boundary used for release verification.
 
@@ -53,7 +53,7 @@ each ended span is persisted once independently of provider success. `flush()` i
 a FIFO point-in-time barrier and accepts an optional timeout. `close()` rejects
 new reads/writes, drains every accepted FIFO write, stops and joins the worker,
 then closes the inner adapter; post-close `flush()` is an idempotent no-op.
-The `0.1.0a4` POC profile uses `buffered_writes=False`. Buffered mode requires
+The `0.1.0a8` POC profile uses `buffered_writes=False`. Buffered mode requires
 an explicit `shutdown()` imported from `verdict.client` before process exit.
 Completed drift analyses use atomic `DriftRun` snapshots, including explicit
 zero-signal runs. Storage readers select a run marker and its exact signals from
@@ -92,7 +92,7 @@ client = Anthropic()
 Install and run the version-matched dashboard without a source checkout:
 
 ```bash
-python -m pip install "cognifity-verdict[dashboard]==0.1.0a7"
+python -m pip install "cognifity-verdict[dashboard]==0.1.0a8"
 verdict-dashboard --storage sqlite:///./verdict.db
 ```
 
@@ -101,12 +101,12 @@ can also be mounted with `verdict.dashboard.create_app()` behind an existing
 FastAPI application's authentication. Trace Explorer includes sampled metadata-
 only traces and marks prompt and response content unavailable when capture is off.
 
-Upgrade an existing `0.1.0a5` or `0.1.0a6` environment with
+Upgrade an existing synchronized `0.1.0a5` through `0.1.0a7` environment with
 `python -m pip install --upgrade`
 and the same provider, dashboard, semantic, and storage extras already in use.
 The published wheels replace editable installs without a new clone and reuse the
 selected SQLite file or PostgreSQL tables in place. See the repository
-[upgrade instructions](https://github.com/cognifityai/verdict#upgrade-from-010a5-or-010a6)
+[upgrade instructions](https://github.com/cognifityai/verdict#upgrade-from-an-earlier-synchronized-alpha)
 for the synchronized three-package command and verification steps.
 
 An authenticated host may add the dashboard's Operations tab by passing a
@@ -141,18 +141,15 @@ value wins over query input. Mutation buttons appear only with the same-origin
 Operations adapter. Semantic and hybrid fallback retain their experimental
 disclosure.
 
-For the published releases through `0.1.0a7`, the bounded `0.1.0a4` POC entry
-points remain Anthropic
+For published release `0.1.0a8`, the bounded POC entry points include Anthropic
 `messages.create(...)` (including `stream=True`), OpenAI
 `chat.completions.create(...)` and its stream helper, and Google
-`models.generate_content(...)` / `generate_content_stream(...)`. Anthropic
-`messages.stream(...)` and the OpenAI Responses API are not captured in those
-releases. Unreleased source now captures the Anthropic helper's synchronous and
-asynchronous accessors plus OpenAI `responses.create(...)`,
-`responses.parse(...)`, raw response streams, and `responses.stream(...)` for
-new or existing responses. Wait for the next synchronized alpha before treating
-those paths as released. The separate experimental `client.beta.responses`
-multi-agent resource is not instrumented.
+`models.generate_content(...)` / `generate_content_stream(...)`, plus the
+Anthropic `messages.stream(...)` helper's synchronous and asynchronous accessors
+and OpenAI `responses.create(...)`, `responses.parse(...)`, and
+`responses.stream(...)` for new or existing responses. OpenAI's
+`responses.with_streaming_response` raw-response manager and the separate
+experimental `client.beta.responses` multi-agent resource are not instrumented.
 
 See the
 [repository README](https://github.com/cognifityai/verdict#readme) for the full
