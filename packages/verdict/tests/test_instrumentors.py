@@ -18,6 +18,7 @@ from verdict.instrumentors.base import decide_persist, normalize_finish_reason
 # normalize_finish_reason
 # ---------------------------------------------------------------------------
 
+
 class _FakeFinishReason:
     """Stand-in for an enum value whose str() is 'FinishReason.STOP'."""
 
@@ -55,6 +56,7 @@ def test_normalize_finish_reason_strips_only_class_prefix():
 # decide_persist truth table (error-vs-sampling control flow)
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.parametrize(
     "raised, should_sample, expected",
     [
@@ -80,6 +82,7 @@ def test_errors_are_never_dropped_by_sampling():
 # ---------------------------------------------------------------------------
 # Dedicated-RNG determinism (fix #2)
 # ---------------------------------------------------------------------------
+
 
 def _sample_decisions(rng: random.Random, rate: float, n: int) -> list[bool]:
     return [rng.random() < rate for _ in range(n)]
@@ -119,6 +122,7 @@ def test_module_rngs_match_when_seeded_identically():
 # OpenAI / Anthropic flatten helpers handle multimodal list content (fix #5)
 # ---------------------------------------------------------------------------
 
+
 def test_openai_flatten_handles_list_content():
     from verdict.instrumentors.openai import _flatten_content
 
@@ -141,21 +145,27 @@ def test_openai_input_trace_recursively_redacts_tool_arguments_before_persistenc
     client = VerdictClient(storage=InMemoryStorage(), capture_content=True)
     instrumentor = OpenAIInstrumentor(client)
 
-    trace = instrumentor._build_input_trace({
-        "model": "custom-model",
-        "messages": [{
-            "role": "assistant",
-            "content": "safe",
-            "tool_calls": [{
-                "type": "function",
-                "function": {
-                    "name": "lookup",
-                    "arguments": f'{{"email": "{canary}"}}',
-                },
-            }],
-            "metadata": {"contact": canary},
-        }],
-    })
+    trace = instrumentor._build_input_trace(
+        {
+            "model": "custom-model",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "safe",
+                    "tool_calls": [
+                        {
+                            "type": "function",
+                            "function": {
+                                "name": "lookup",
+                                "arguments": f'{{"email": "{canary}"}}',
+                            },
+                        }
+                    ],
+                    "metadata": {"contact": canary},
+                }
+            ],
+        }
+    )
 
     assert canary not in repr(trace.raw_messages)
     assert trace.raw_messages[0]["tool_calls"][0]["function"]["name"] == "lookup"
@@ -203,14 +213,98 @@ def test_google_contents_to_messages_wraps_user_message():
     msgs = _genai_contents_to_messages("hi there")
     assert msgs == [{"role": "user", "content": "hi there"}]
     assert _genai_contents_to_messages(None) == []
-    assert _genai_contents_to_messages(["one", "two"]) == [
-        {"role": "user", "content": "one\ntwo"}
+    assert _genai_contents_to_messages(["one", "two"]) == [{"role": "user", "content": "one\ntwo"}]
+
+
+def test_google_contents_to_messages_preserves_roles_and_ordered_text_parts():
+    from verdict.instrumentors.google import _genai_contents_to_messages
+
+    class Part:
+        def __init__(self, text=None, *, inline_data=None):
+            self.text = text
+            self.inline_data = inline_data
+
+    class Content:
+        def __init__(self, role, parts):
+            self.role = role
+            self.parts = parts
+
+    messages = _genai_contents_to_messages(
+        [
+            Content("user", [Part("old"), Part(inline_data=b"ignored")]),
+            {"role": "model", "parts": [{"text": "answer"}]},
+            Content("user", [Part("new"), Part("question")]),
+        ],
+        system_instruction={"parts": [{"text": "system policy"}]},
+    )
+
+    assert messages == [
+        {"role": "system", "content": [{"type": "text", "text": "system policy"}]},
+        {"role": "user", "content": [{"type": "text", "text": "old"}]},
+        {"role": "assistant", "content": [{"type": "text", "text": "answer"}]},
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "new"},
+                {"type": "text", "text": "question"},
+            ],
+        },
     ]
+
+
+def test_google_contents_to_messages_matches_sdk_part_grouping():
+    from google.genai import types
+    from verdict.instrumentors.google import _genai_contents_to_messages
+
+    assert _genai_contents_to_messages([types.Part.from_text(text="hello")]) == [
+        {"role": "user", "content": [{"type": "text", "text": "hello"}]}
+    ]
+
+    messages = _genai_contents_to_messages(
+        [
+            "first",
+            types.Part.from_text(text="question"),
+            types.Content(
+                role="model",
+                parts=[types.Part.from_text(text="answer")],
+            ),
+            "follow up",
+        ]
+    )
+    assert messages == [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "first"},
+                {"type": "text", "text": "question"},
+            ],
+        },
+        {"role": "assistant", "content": [{"type": "text", "text": "answer"}]},
+        {"role": "user", "content": [{"type": "text", "text": "follow up"}]},
+    ]
+
+
+def test_intent_context_is_token_restoring_and_rejects_redaction_changing_keys():
+    from verdict import intent_context
+    from verdict.client import get_context_intent_key
+
+    assert get_context_intent_key() is None
+    with intent_context("billing.v1"):
+        assert get_context_intent_key() == "billing.v1"
+        with intent_context("shipping"):
+            assert get_context_intent_key() == "shipping"
+        assert get_context_intent_key() == "billing.v1"
+    assert get_context_intent_key() is None
+
+    with pytest.raises(ValueError, match="redaction-safe"):
+        with intent_context("192.168.1.1"):
+            pass
 
 
 # ---------------------------------------------------------------------------
 # Wrapper guard regression: SDK-native __wrapped__ is NOT Verdict instrumentation
 # ---------------------------------------------------------------------------
+
 
 def _sdk_native_wrapped(fn):
     def sdk_wrapper(*args, **kwargs):
@@ -375,6 +469,7 @@ def test_anthropic_known_opus_41_response_persists_verified_cost():
 # the same decide_persist rule.
 # ---------------------------------------------------------------------------
 
+
 def test_control_flow_with_inmemory_storage():
     from verdict.schema import Operation, Trace
     from verdict.storage.memory import InMemoryStorage
@@ -414,6 +509,7 @@ def test_control_flow_with_inmemory_storage():
 # sample_rate validation in init() (fix #1)
 # ---------------------------------------------------------------------------
 
+
 def test_init_rejects_out_of_range_sample_rate():
     import verdict.client as client_mod
 
@@ -439,6 +535,7 @@ def test_init_accepts_boundary_sample_rates():
 # don't need a provider SDK.
 # ---------------------------------------------------------------------------
 
+
 def test_apply_routing_context_populates_fields():
     import hashlib
     import hmac
@@ -462,9 +559,7 @@ def test_apply_routing_context_populates_fields():
         assert trace.tenant_id == "tenant-42"
         assert trace.session_id == "sess-1"
         # user id must be HMAC-hashed with the redaction secret, never raw.
-        expected = hmac.new(
-            b"s3cret", b"user-99", hashlib.sha256
-        ).hexdigest()
+        expected = hmac.new(b"s3cret", b"user-99", hashlib.sha256).hexdigest()
         assert trace.user_id_hash == expected
         assert trace.user_id_hash != "user-99"
     finally:

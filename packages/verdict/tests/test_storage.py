@@ -661,6 +661,54 @@ def test_reinsert_with_null_cluster_id_preserves_existing(storage):
     assert fetched.response_model == "claude-opus"
 
 
+def test_reinsert_preserves_capture_inputs_and_their_analysis_projection(storage):
+    started = datetime(2026, 8, 22, tzinfo=timezone.utc)
+    original = _trace(
+        trace_id="immutable-capture-input",
+        started_at=started,
+        ended_at=started,
+        raw_messages=[{"role": "user", "content": "billing"}],
+        tags={"verdict.workload": "agent", "verdict.intent_key": "billing"},
+        tenant_id="tenant-a",
+    )
+    storage.insert_trace(original)
+    expected_analysis = (
+        original.analysis_started_at_us,
+        original.analysis_started_at_state,
+        original.analysis_raw_messages_utf8_bytes,
+        original.analysis_raw_messages_state,
+    )
+
+    storage.insert_trace(
+        _trace(
+            trace_id=original.trace_id,
+            started_at=started + timedelta(days=1),
+            ended_at=started + timedelta(days=1),
+            raw_messages=[{"role": "user", "content": "shipping"}],
+            tags={"verdict.workload": "judge", "verdict.intent_key": "shipping"},
+            tenant_id="tenant-b",
+            output_tokens=999,
+        )
+    )
+
+    fetched = storage.get_trace(original.trace_id)
+    assert fetched is not None
+    assert fetched.started_at == started
+    assert fetched.tenant_id == "tenant-a"
+    assert fetched.raw_messages == [{"role": "user", "content": "billing"}]
+    assert fetched.tags == {
+        "verdict.workload": "agent",
+        "verdict.intent_key": "billing",
+    }
+    assert (
+        fetched.analysis_started_at_us,
+        fetched.analysis_started_at_state,
+        fetched.analysis_raw_messages_utf8_bytes,
+        fetched.analysis_raw_messages_state,
+    ) == expected_analysis
+    assert fetched.output_tokens == 999
+
+
 def test_reinsert_with_null_parent_span_id_preserves_existing(storage):
     linked = _trace(parent_span_id="span-parent")
     storage.insert_trace(linked)
@@ -1146,7 +1194,7 @@ def test_postgres_trace_columns_include_stable_parent_span_link():
 
     assert "parent_span_id" in pg._SCHEMA
     assert "parent_span_id" in pg.PostgresStorage._TRACE_COLUMNS
-    assert len(pg.PostgresStorage._TRACE_COLUMNS.split(",")) == 24
+    assert len(pg.PostgresStorage._TRACE_COLUMNS.split(",")) == 28
     insert_source = inspect.getsource(pg.PostgresStorage.insert_trace)
     assert "INSERT INTO traces (" in insert_source
     assert "COALESCE(" in insert_source

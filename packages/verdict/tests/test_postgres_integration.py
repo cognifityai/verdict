@@ -17,6 +17,10 @@ import verdict
 import verdict.client as client_module
 from verdict.instrumentors.base import apply_routing_context, persist_trace
 from verdict.schema import (
+    ClusterIdentity,
+    ClusterRegistryCluster,
+    ClusterRegistryEvent,
+    ClusterRegistryVersion,
     DimensionScore,
     DriftDirection,
     DriftRun,
@@ -26,8 +30,10 @@ from verdict.schema import (
     Judgment,
     SpanRecord,
     Trace,
+    TraceClusterAssignment,
     UserSignalRecord,
     Verdict,
+    cluster_candidate_digest,
 )
 from verdict.storage import BufferedStorage
 from verdict.storage.postgres import PostgresStorage
@@ -44,6 +50,96 @@ pytestmark = [
     pytest.mark.skipif(not DSN, reason="no disposable live Postgres DSN"),
     pytest.mark.filterwarnings("error::DeprecationWarning:psycopg_pool.*"),
 ]
+
+
+def test_live_postgres_versioned_registry_and_analysis_normalization():
+    suffix = uuid4().hex
+    tenant = f"registry-{suffix}"
+    version_id = f"version-{suffix}"
+    cluster_id = f"cluster-{suffix}"
+    trace_id = f"trace-{suffix}"
+    now = datetime.now(timezone.utc)
+    storage = PostgresStorage(DSN, min_pool=1, max_pool=2)
+    try:
+        storage.insert_trace(
+            Trace(
+                trace_id=trace_id, tenant_id=tenant, started_at=now, ended_at=now,
+                raw_messages=[{"role": "user", "content": "billing"}],
+                tags={"verdict.workload": "agent", "verdict.intent_key": "billing"},
+            )
+        )
+        storage._exec(
+            "UPDATE traces SET analysis_started_at_state='pending', "
+            "analysis_raw_messages_state='pending' WHERE trace_id=%s",
+            (trace_id,),
+        )
+        assert storage.normalize_cluster_trace_analysis(tenant, limit=1) == 1
+        assert storage.count_pending_analysis_rows(tenant) == 0
+
+        identity = ClusterIdentity(
+            tenant_id=tenant, cluster_id=cluster_id, kind="explicit",
+            explicit_key="billing", display_name="Billing", created_by="admin",
+            updated_by="admin",
+        )
+        version = ClusterRegistryVersion(
+            tenant_id=tenant, version_id=version_id, strategy="explicit", cutoff=now,
+            fit_definition_json='{"model_fingerprint":null}',
+            fit_definition_fingerprint="definition", created_by="admin",
+        )
+        cluster = ClusterRegistryCluster(tenant,version_id,cluster_id,"explicit",member_count=1)
+        assignment = TraceClusterAssignment(
+            tenant,version_id,trace_id,"fit","assigned",cluster_id,"explicit"
+        )
+        storage.insert_cluster_preview(version,[identity],[cluster],[assignment])
+        storage.insert_cluster_registry_event(
+            ClusterRegistryEvent(
+                tenant,action="validated",to_version_id=version_id,actor="admin",
+                details_json='{"schema":"validation-report-v1","passed":true}',
+            )
+        )
+        pointer = storage.activate_cluster_registry(
+            tenant,
+            version_id,
+            expected_generation=0,
+            actor="admin",
+            action="activated",
+            expected_candidate_digest=cluster_candidate_digest([]),
+        )
+        assert pointer.version_id == version_id
+        storage.rename_cluster_identity(tenant,cluster_id,"Billing support",actor="admin")
+        [loaded] = storage.list_cluster_identities(tenant)
+        assert loaded.display_name == "Billing support"
+        [candidate] = storage.list_cluster_trace_candidates(
+            tenant, int(now.timestamp() * 1_000_000),
+            int(now.timestamp() * 1_000_000) + 1,
+            target_workload="agent", limit=2,
+        )
+        assert candidate.intent_key == "billing"
+        assert storage.list_cluster_trace_candidates(
+            tenant,
+            int(now.timestamp() * 1_000_000),
+            int(now.timestamp() * 1_000_000) + 1,
+            target_workload="agent",
+            limit=2,
+            missing_version_id=version_id,
+        ) == []
+        storage.insert_trace(
+            Trace(
+                trace_id=trace_id,
+                tenant_id=f"other-{tenant}",
+                started_at=now + timedelta(days=1),
+                ended_at=now + timedelta(days=1),
+                raw_messages=[{"role": "user", "content": "shipping"}],
+                tags={"verdict.workload": "judge", "verdict.intent_key": "shipping"},
+            )
+        )
+        preserved = storage.get_trace(trace_id)
+        assert preserved is not None
+        assert preserved.tenant_id == tenant
+        assert preserved.tags["verdict.intent_key"] == "billing"
+        assert preserved.analysis_started_at_us == int(now.timestamp() * 1_000_000)
+    finally:
+        storage.close()
 
 
 def test_live_postgres_migrates_legacy_tables_before_creating_indexes():

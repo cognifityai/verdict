@@ -17,6 +17,7 @@ from verdict.signals import record_user_signal
 from verdict.trace import (
     clear_context,
     current_span,
+    intent_context,
     set_context,
     span,
     trace,
@@ -36,6 +37,7 @@ __all__ = [
     "clear_context",
     "current_span",
     "init",
+    "intent_context",
     "record_user_signal",
     "set_context",
     "span",

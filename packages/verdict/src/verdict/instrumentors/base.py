@@ -54,6 +54,7 @@ def apply_routing_context(client: VerdictClient, trace: Trace) -> None:
         trace.tenant_id = getattr(client, "tenant_id", None)
         # Imported lazily to avoid an import cycle (client imports instrumentors).
         from verdict.client import (
+            get_context_intent_key,
             get_context_session_id,
             get_context_user_id_hash,
             get_context_workload,
@@ -68,6 +69,9 @@ def apply_routing_context(client: VerdictClient, trace: Trace) -> None:
         workload = get_context_workload()
         if workload is not None:
             trace.tags = {**trace.tags, "verdict.workload": workload}
+        intent_key = get_context_intent_key()
+        if intent_key is not None:
+            trace.tags = {**trace.tags, "verdict.intent_key": intent_key}
 
         # Automatic provider/manual-span correlation is deliberately one-way.
         # Multiple provider traces can share one manual parent, so choosing one

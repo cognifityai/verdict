@@ -312,6 +312,21 @@ Hexagonal / ports-and-adapters, ≥2 adapters per port (one real + in-memory for
   Existing traces whose IDs are absent from the selected registry also fail
   closed: use a one-time `--recluster` after a Verdict clustering migration, or
   `--trust-existing-clusters` only for stable clusters assigned outside Verdict.
+- Versioned-registry `explicit` clustering is supported. Automatic `semantic`
+  clustering and `hybrid` semantic fallback are experimental, opt-in alpha
+  features: `verdict-cluster fit` requires an explicit strategy, and
+  `verdict-cluster inspect` reports its experimental status. The frozen
+  semantic evaluation failed one preregistered fragmentation gate (largest
+  nonoutlier cluster `30.1047%` versus the `30%` maximum), although its other
+  quality and stability gates passed. Do not claim general validated semantic
+  quality or silently enable it in customer deployments.
+  The supported exact-key path uses `verdict.intent_context("billing.v1")`,
+  followed by the bounded `normalize` (for upgraded stores), `fit --strategy
+  explicit`, `assign`, `validate`, and `activate` workflow documented in
+  `packages/verdict_eval/README.md`. Active analysis follows the tenant pointer;
+  tenantless Memory/SQLite uses the reserved `__verdict_local__` scope. Shadow
+  analysis is disabled pending the tenant-isolation correction tracked in issue
+  #24.
 - The batch drift runner uses each captured trace's `started_at` timestamp for
   its current and baseline windows. Every successful analysis atomically stores
   one `DriftRun` marker plus its exact signal set, including an explicit

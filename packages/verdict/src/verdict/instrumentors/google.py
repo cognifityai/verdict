@@ -57,6 +57,7 @@ def _is_wrapped(cls: Any, method: str) -> bool:
 def _has_google_genai() -> bool:
     try:
         import google.genai  # noqa: F401
+
         return True
     except ImportError:
         return False
@@ -65,6 +66,7 @@ def _has_google_genai() -> bool:
 def _has_google_generativeai() -> bool:
     try:
         import google.generativeai  # noqa: F401
+
         return True
     except ImportError:
         return False
@@ -92,6 +94,7 @@ class GoogleInstrumentor(BaseInstrumentor):
         if _has_google_genai():
             try:
                 import google.genai.models as gmod
+
                 if not _is_wrapped(getattr(gmod, "Models", None), "generate_content"):
                     wrapt.wrap_function_wrapper(
                         "google.genai.models",
@@ -102,6 +105,7 @@ class GoogleInstrumentor(BaseInstrumentor):
                 pass  # Defensive: SDK internals can change
             try:
                 import google.genai.models as gmod
+
                 if not _is_wrapped(getattr(gmod, "AsyncModels", None), "generate_content"):
                     wrapt.wrap_function_wrapper(
                         "google.genai.models",
@@ -121,6 +125,7 @@ class GoogleInstrumentor(BaseInstrumentor):
             # stream chunk shapes can drift across SDK releases.
             try:
                 import google.genai.models as gmod
+
                 if not _is_wrapped(getattr(gmod, "Models", None), "generate_content_stream"):
                     wrapt.wrap_function_wrapper(
                         "google.genai.models",
@@ -131,6 +136,7 @@ class GoogleInstrumentor(BaseInstrumentor):
                 pass  # Defensive: SDK internals can change
             try:
                 import google.genai.models as gmod
+
                 if not _is_wrapped(getattr(gmod, "AsyncModels", None), "generate_content_stream"):
                     wrapt.wrap_function_wrapper(
                         "google.genai.models",
@@ -144,6 +150,7 @@ class GoogleInstrumentor(BaseInstrumentor):
         if _has_google_generativeai():
             try:
                 import google.generativeai.generative_models as lmod
+
                 if not _is_wrapped(getattr(lmod, "GenerativeModel", None), "generate_content"):
                     wrapt.wrap_function_wrapper(
                         "google.generativeai.generative_models",
@@ -161,6 +168,7 @@ class GoogleInstrumentor(BaseInstrumentor):
         # Best-effort unwrap; if the SDK isn't importable we silently skip.
         try:
             import google.genai.models as mod
+
             for cls_name in ["Models", "AsyncModels"]:
                 cls = getattr(mod, cls_name, None)
                 if cls is not None:
@@ -173,6 +181,7 @@ class GoogleInstrumentor(BaseInstrumentor):
             pass
         try:
             import google.generativeai.generative_models as mod
+
             cls = getattr(mod, "GenerativeModel", None)
             if cls is not None:
                 bound = getattr(cls, "generate_content", None)
@@ -283,8 +292,9 @@ class GoogleInstrumentor(BaseInstrumentor):
     def _wrap_legacy_generate(self, wrapped, instance, args, kwargs):
         # Legacy SDK: model name is on the GenerativeModel instance
         model_name = getattr(instance, "model_name", "") or ""
-        trace = self._build_input_trace(args, kwargs, sdk="google-generativeai",
-                                        model_override=model_name)
+        trace = self._build_input_trace(
+            args, kwargs, sdk="google-generativeai", model_override=model_name
+        )
         t0 = time.perf_counter()
 
         # Legacy SDK streams when stream=True (returns an iterable of chunks).
@@ -327,9 +337,7 @@ class GoogleInstrumentor(BaseInstrumentor):
         max_tokens = None
         if config is not None:
             temperature = normalize_optional_float(getattr(config, "temperature", None))
-            max_tokens = normalize_optional_integer(
-                getattr(config, "max_output_tokens", None)
-            )
+            max_tokens = normalize_optional_integer(getattr(config, "max_output_tokens", None))
 
         trace = Trace(
             provider="google",
@@ -351,7 +359,10 @@ class GoogleInstrumentor(BaseInstrumentor):
             # messages. google-genai's `contents` isn't a list of role/content
             # dicts, so normalize it into one user message before redacting via
             # the same redact_messages path the other instrumentors use.
-            messages = _genai_contents_to_messages(contents)
+            messages = _genai_contents_to_messages(
+                contents,
+                system_instruction=_google_field(config, "system_instruction"),
+            )
             trace.raw_messages = redact_messages(
                 messages,
                 mode=self.client.redaction_mode,
@@ -395,6 +406,7 @@ class GoogleInstrumentor(BaseInstrumentor):
         trace.latency_ms = (time.perf_counter() - t0) * 1000.0
         trace.error = f"{type(e).__name__}: {e}"
         self._safe_persist(trace)
+
 
 class _StreamingWrapper:
     """Pass-through iterator around a Google Gemini streaming response.
@@ -599,18 +611,105 @@ class _AsyncStreamingWrapper(_StreamingWrapper):
             self._finalize()
 
 
-def _genai_contents_to_messages(contents: Any) -> list[dict[str, Any]]:
+def _google_field(value: Any, name: str) -> Any:
+    if isinstance(value, dict):
+        return value.get(name)
+    return getattr(value, name, None)
+
+
+def _google_text_blocks(value: Any) -> list[dict[str, str]] | None:
+    if isinstance(value, str):
+        return [{"type": "text", "text": value}]
+    if isinstance(value, (list, tuple)):
+        blocks: list[dict[str, str]] = []
+        for item in value:
+            item_blocks = _google_text_blocks(item)
+            if item_blocks is None:
+                return None
+            blocks.extend(item_blocks)
+        return blocks
+    parts = _google_field(value, "parts")
+    if not isinstance(parts, (list, tuple)):
+        text = _google_field(value, "text")
+        return [{"type": "text", "text": text}] if isinstance(text, str) else None
+    blocks: list[dict[str, str]] = []
+    for part in parts:
+        text = part.get("text") if isinstance(part, dict) else getattr(part, "text", None)
+        if text is None:
+            continue
+        if not isinstance(text, str):
+            return None
+        blocks.append({"type": "text", "text": text})
+    return blocks
+
+
+def _google_content_message(value: Any, *, default_role: str | None = None) -> dict[str, Any]:
+    raw_role = _google_field(value, "role") or default_role
+    roles = {"user": "user", "model": "assistant", "system": "system"}
+    role = roles.get(raw_role, "unknown")
+    blocks = _google_text_blocks(value)
+    if blocks is None:
+        return {"role": role, "content": [{"type": "text", "text": None}]}
+    return {"role": role, "content": blocks}
+
+
+def _genai_contents_to_messages(
+    contents: Any,
+    *,
+    system_instruction: Any = None,
+) -> list[dict[str, Any]]:
     """Normalize google-genai's `contents` into chat-message dicts.
 
-    google-genai accepts a str, a list of strings/Parts/Content objects, or a
-    single Content/Part. We flatten the whole thing to text and wrap it in a
-    single user message so it can flow through the shared redact_messages path
-    that anthropic/openai use for `raw_messages`.
+    Preserve supported Content roles and text parts for role-aware clustering.
+    Plain strings and lists of strings keep their published flattened user
+    shape. Unsupported non-text parts are ignored; malformed supported text is
+    retained as an invalid shape so the selector fails closed.
     """
-    text = _flatten_genai_contents(contents)
-    if not text:
-        return []
-    return [{"role": "user", "content": text}]
+    messages: list[dict[str, Any]] = []
+    if system_instruction is not None:
+        messages.append(_google_content_message(system_instruction, default_role="system"))
+    if contents is None:
+        return messages
+    if isinstance(contents, str):
+        messages.append({"role": "user", "content": contents})
+        return messages
+    if isinstance(contents, (list, tuple)):
+        if all(isinstance(item, str) for item in contents):
+            text = "\n".join(item for item in contents if item)
+            if text:
+                messages.append({"role": "user", "content": text})
+            return messages
+        pending_role: str | None = None
+        pending_blocks: list[dict[str, str]] = []
+
+        def flush_parts() -> None:
+            nonlocal pending_role, pending_blocks
+            if pending_role is not None and pending_blocks:
+                messages.append({"role": pending_role, "content": pending_blocks})
+            pending_role = None
+            pending_blocks = []
+
+        for item in contents:
+            raw_role = _google_field(item, "role")
+            parts = _google_field(item, "parts")
+            if raw_role is not None or parts is not None or isinstance(item, (list, tuple)):
+                flush_parts()
+                messages.append(_google_content_message(item, default_role="user"))
+                continue
+            role = "assistant" if _google_field(item, "function_call") is not None else "user"
+            blocks = _google_text_blocks(item)
+            if blocks is None:
+                flush_parts()
+                messages.append(_google_content_message(item, default_role=role))
+                continue
+            if role != pending_role:
+                flush_parts()
+                pending_role = role
+            pending_blocks.extend(blocks)
+        flush_parts()
+        return messages
+    messages.append(_google_content_message(contents, default_role="user"))
+    return messages
 
 
 def _flatten_genai_contents(contents: Any) -> str:

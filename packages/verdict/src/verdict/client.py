@@ -245,6 +245,10 @@ _ctx_trace_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 _ctx_workload: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "verdict_workload", default=None,
 )
+_ctx_intent_key: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "verdict_intent_key",
+    default=None,
+)
 _WORKLOAD = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,63}")
 
 
@@ -254,6 +258,14 @@ def _validate_workload(workload: str) -> None:
             "workload must be a 1-64 character identifier containing only "
             "letters, numbers, '.', '_', ':', or '-'"
         )
+
+
+def _validate_intent_key(intent_key: str) -> None:
+    _validate_workload(intent_key)
+    from verdict.redaction import redact
+
+    if redact(intent_key, mode="redact") != intent_key:
+        raise ValueError("intent_key must be a redaction-safe routing identifier")
 
 
 def _hash_user_id(user_id: str) -> str:
@@ -319,6 +331,11 @@ def get_context_workload() -> str | None:
     return _ctx_workload.get()
 
 
+def get_context_intent_key() -> str | None:
+    """Return the explicit intent key bound to the current request."""
+    return _ctx_intent_key.get()
+
+
 @contextmanager
 def trace_context(trace_id: str | None) -> Iterator[None]:
     """Temporarily bind a trace ID and restore the prior value on every exit."""
@@ -340,12 +357,24 @@ def workload_context(workload: str) -> Iterator[None]:
         _ctx_workload.reset(token)
 
 
+@contextmanager
+def intent_context(intent_key: str) -> Iterator[None]:
+    """Temporarily bind a validated explicit clustering key."""
+    _validate_intent_key(intent_key)
+    token = _ctx_intent_key.set(intent_key)
+    try:
+        yield
+    finally:
+        _ctx_intent_key.reset(token)
+
+
 def clear_context() -> None:
     """Clear any per-request context (useful between requests / in tests)."""
     _ctx_session_id.set(None)
     _ctx_user_id_hash.set(None)
     _ctx_trace_id.set(None)
     _ctx_workload.set(None)
+    _ctx_intent_key.set(None)
 
 
 def shutdown() -> None:

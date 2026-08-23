@@ -43,14 +43,72 @@ if judgment.status is not PairwiseStatus.VALID:
 winner = judgment.verdict
 ```
 
-The repository pipeline uses a persisted cluster registry rather than
-re-clustering the full dataset on every run. Local
-`sentence-transformers/all-MiniLM-L6-v2` embeddings are the semantic default;
-`0.50` cosine distance is the shipped starting threshold, not a universal
-cutoff. The built-in hash embedder is an explicit lexical fallback. Change the
-embedding model or threshold only with a new clustering version and a one-time
-`--recluster` for existing traces. `--trust-existing-clusters` is reserved for
-stable cluster IDs assigned outside Verdict.
+The versioned registry requires a deliberate `verdict-cluster fit --strategy`
+choice; no registry strategy is silently selected. Exact-key `explicit`
+clustering is supported. Automatic `semantic` clustering and the semantic
+fallback inside `hybrid` are experimental opt-in alpha features. Their frozen
+quality evaluation missed one preregistered fragmentation gate (largest
+nonoutlier cluster `30.1047%`, maximum `30%`) and must not be described as
+generally validated. `verdict-cluster inspect` reports the strategy and this
+experimental status. Local semantic work uses the frozen
+`sentence-transformers/all-MiniLM-L6-v2` model; runtime download is forbidden.
+The legacy trace clustering pipeline remains a separate methodology.
+
+### Supported explicit registry workflow
+
+Stamp a bounded, redaction-safe routing key around the provider request that
+owns the intent. The context is token-restoring and the raw key is stored only
+as the existing trace routing tag:
+
+```python
+import verdict
+
+with verdict.intent_context("billing.v1"):
+    response = provider.messages.create(...)
+```
+
+Use the real tenant ID for tenant-owned traces. For tenantless Memory/SQLite
+stores only, use the reserved local scope `__verdict_local__`; that literal is
+not a customer tenant ID. Existing a7 databases start with pending derived
+analysis fields, so normalize bounded pages until the JSON result says
+`"complete": true`:
+
+```bash
+verdict-cluster --storage sqlite:///verdict.db --tenant tenant-a --actor ops \
+  normalize --limit 1000
+verdict-cluster --storage sqlite:///verdict.db --tenant tenant-a --actor ops \
+  fit --strategy explicit --target-workload agent \
+  --cutoff 2026-08-22T00:00:00Z
+```
+
+Take `version_id` from the fit result, then assign and validate the immutable
+preview before activation:
+
+```bash
+verdict-cluster --storage sqlite:///verdict.db --tenant tenant-a --actor ops \
+  assign --version "$VERSION" --through-cutoff 2026-08-22T00:00:00Z
+verdict-cluster --storage sqlite:///verdict.db --tenant tenant-a --actor ops \
+  validate --version "$VERSION"
+verdict-cluster --storage sqlite:///verdict.db --tenant tenant-a --actor ops \
+  activate --version "$VERSION" --expected-generation 0
+verdict-pipeline --storage sqlite:///verdict.db --registry-mode active \
+  --tenant-id tenant-a
+```
+
+Active mode is always pinned to the tenant's active pointer. `inspect` returns
+bounded version, cluster, stable display-name, assignment, and event data plus
+truncation flags; its `--*-limit` and `--*-offset` options page immutable detail
+within hard output ceilings. `rename` changes only a stable display name; `rollback`
+requires a previously activated version and the current expected generation.
+CLI failures use a closed safe code such as `analysis_index_pending`,
+`model_unavailable`, `validation_failed`, or `generation_conflict`; raw storage
+and provider exception text is not printed. Semantic and hybrid commands also
+require a reviewed local `--model-path` and remain experimental.
+
+Registry shadow analysis is disabled pending the tenant-isolation correction in
+[issue #24](https://github.com/cognifityai/verdict/issues/24). Validate an
+inactive preview with `verdict-cluster validate`; do not analyze it through the
+drift pipeline before activation.
 
 Drift is a batch comparison over each captured trace's `started_at` time. The
 runner defaults to a 24-hour current window and a 7-day baseline separated by a

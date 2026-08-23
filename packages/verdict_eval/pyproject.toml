@@ -41,6 +41,7 @@ dev = [
 [project.scripts]
 verdict-pipeline = "verdict_eval.cli.pipeline:main"
 verdict-probes = "verdict_eval.cli.probes:main"
+verdict-cluster = "verdict_eval.cli.cluster:main"
 
 [project.urls]
 Homepage = "https://cognifity.ai/verdict"

@@ -16,11 +16,19 @@ from __future__ import annotations
 
 import json
 import threading
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import asdict
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from verdict.redaction import sanitize_judgment, sanitize_span, sanitize_trace
 from verdict.schema import (
+    ActiveClusterRegistry,
+    ClusterIdentity,
+    ClusterRegistryCluster,
+    ClusterRegistryEvent,
+    ClusterRegistryVersion,
+    ClusterTraceCandidate,
     DimensionScore,
     DriftDirection,
     DriftRun,
@@ -32,8 +40,12 @@ from verdict.schema import (
     Operation,
     SpanRecord,
     Trace,
+    TraceClusterAssignment,
     UserSignalRecord,
     Verdict,
+    cluster_candidate_digest,
+    datetime_to_utc_us,
+    populate_trace_analysis_fields,
 )
 from verdict.storage.base import _validate_drift_run_snapshot
 
@@ -62,7 +74,11 @@ CREATE TABLE IF NOT EXISTS traces (
     user_id_hash      TEXT,
     cluster_id        TEXT,
     tags              JSONB DEFAULT '{}'::jsonb,
-    cost_usd          DOUBLE PRECISION
+    cost_usd          DOUBLE PRECISION,
+    analysis_started_at_us BIGINT,
+    analysis_started_at_state TEXT NOT NULL DEFAULT 'pending',
+    analysis_raw_messages_utf8_bytes BIGINT,
+    analysis_raw_messages_state TEXT NOT NULL DEFAULT 'pending'
 );
 ALTER TABLE traces ADD COLUMN IF NOT EXISTS cluster_id TEXT;
 ALTER TABLE traces ADD COLUMN IF NOT EXISTS parent_span_id TEXT;
@@ -153,6 +169,141 @@ CREATE TABLE IF NOT EXISTS cluster_registries (
     updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS cluster_identities (
+    tenant_id TEXT NOT NULL CHECK(octet_length(tenant_id) BETWEEN 1 AND 128),
+    cluster_id TEXT NOT NULL CHECK(octet_length(cluster_id) BETWEEN 1 AND 64),
+    kind TEXT NOT NULL CHECK(kind IN ('explicit','semantic')),
+    lifecycle TEXT NOT NULL CHECK(lifecycle IN ('provisional','active')),
+    explicit_key TEXT CHECK(explicit_key IS NULL OR octet_length(explicit_key) BETWEEN 1 AND 64),
+    display_name TEXT NOT NULL CHECK(octet_length(display_name) BETWEEN 1 AND 256),
+    last_model_fingerprint TEXT,
+    last_centroid JSONB CHECK(last_centroid IS NULL OR octet_length(last_centroid::text)<=65536),
+    last_version_id TEXT,
+    created_at TIMESTAMPTZ NOT NULL, created_by TEXT NOT NULL
+        CHECK(octet_length(created_by)<=256),
+    updated_at TIMESTAMPTZ NOT NULL, updated_by TEXT NOT NULL
+        CHECK(octet_length(updated_by)<=256),
+    PRIMARY KEY (tenant_id,cluster_id), UNIQUE (tenant_id,cluster_id,kind),
+    UNIQUE (tenant_id,explicit_key),
+    CHECK ((kind='explicit') = (explicit_key IS NOT NULL))
+);
+CREATE TABLE IF NOT EXISTS cluster_registry_versions (
+    tenant_id TEXT NOT NULL CHECK(octet_length(tenant_id) BETWEEN 1 AND 128),
+    version_id TEXT NOT NULL CHECK(octet_length(version_id) BETWEEN 1 AND 64),
+    parent_version_id TEXT, strategy TEXT NOT NULL
+        CHECK(strategy IN ('explicit','semantic','hybrid')),
+    cutoff TIMESTAMPTZ NOT NULL, lookback_days INTEGER NOT NULL CHECK(lookback_days>0),
+    fit_definition_json JSONB NOT NULL
+        CHECK(octet_length(fit_definition_json::text)<=65536),
+    fit_definition_fingerprint TEXT NOT NULL,
+    preview_report_json JSONB NOT NULL
+        CHECK(octet_length(preview_report_json::text)<=1048576),
+    created_at TIMESTAMPTZ NOT NULL, created_by TEXT NOT NULL
+        CHECK(octet_length(created_by)<=256),
+    PRIMARY KEY (tenant_id,version_id),
+    FOREIGN KEY (tenant_id,parent_version_id)
+        REFERENCES cluster_registry_versions(tenant_id,version_id)
+);
+CREATE TABLE IF NOT EXISTS cluster_registry_clusters (
+    tenant_id TEXT NOT NULL, version_id TEXT NOT NULL, cluster_id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK(kind IN ('explicit','semantic')),
+    centroid JSONB CHECK(centroid IS NULL OR octet_length(centroid::text)<=65536),
+    radius DOUBLE PRECISION,
+    member_count INTEGER NOT NULL CHECK(member_count>=0),
+    outlier_count INTEGER NOT NULL CHECK(outlier_count>=0),
+    PRIMARY KEY (tenant_id,version_id,cluster_id),
+    UNIQUE (tenant_id,version_id,cluster_id,kind),
+    FOREIGN KEY (tenant_id,version_id)
+        REFERENCES cluster_registry_versions(tenant_id,version_id),
+    FOREIGN KEY (tenant_id,cluster_id,kind)
+        REFERENCES cluster_identities(tenant_id,cluster_id,kind),
+    CHECK ((kind='explicit' AND centroid IS NULL AND radius IS NULL) OR
+           (kind='semantic' AND centroid IS NOT NULL AND radius BETWEEN 0 AND 2))
+);
+CREATE TABLE IF NOT EXISTS trace_cluster_assignments (
+    tenant_id TEXT NOT NULL, version_id TEXT NOT NULL,
+    trace_id TEXT NOT NULL CHECK(octet_length(trace_id) BETWEEN 1 AND 256),
+    origin TEXT NOT NULL CHECK(origin IN ('fit','incremental')),
+    status TEXT NOT NULL CHECK(status IN ('assigned','outlier','ineligible')),
+    cluster_id TEXT, cluster_kind TEXT, reason TEXT,
+    distance DOUBLE PRECISION, assigned_at TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (tenant_id,version_id,trace_id),
+    UNIQUE (tenant_id,version_id,trace_id,cluster_id),
+    FOREIGN KEY (tenant_id,version_id)
+        REFERENCES cluster_registry_versions(tenant_id,version_id),
+    FOREIGN KEY (tenant_id,version_id,cluster_id,cluster_kind)
+        REFERENCES cluster_registry_clusters(tenant_id,version_id,cluster_id,kind),
+    CHECK (
+      (status='assigned' AND cluster_id IS NOT NULL AND
+       cluster_kind IN ('explicit','semantic') AND reason IS NULL AND
+       ((cluster_kind='explicit' AND distance IS NULL) OR
+        (cluster_kind='semantic' AND distance IS NOT NULL AND distance BETWEEN 0 AND 2))) OR
+      (status='outlier' AND cluster_id IS NULL AND cluster_kind IS NULL AND
+       reason IN ('distance','explicit_key_not_in_version','semantic_fit_too_small') AND
+       ((reason='distance' AND distance IS NOT NULL AND distance BETWEEN 0 AND 2) OR
+        (reason<>'distance' AND distance IS NULL))) OR
+      (status='ineligible' AND cluster_id IS NULL AND cluster_kind IS NULL AND
+       distance IS NULL AND reason IN (
+        'invalid_workload','unsafe_workload','missing_intent_key','invalid_intent_key',
+        'unsafe_intent_key','content_not_captured','raw_messages_oversize',
+        'malformed_messages','no_supported_user_text','text_too_short',
+        'text_too_long','redaction_error')))
+);
+CREATE TABLE IF NOT EXISTS active_cluster_registry (
+    tenant_id TEXT PRIMARY KEY CHECK(octet_length(tenant_id) BETWEEN 1 AND 128),
+    version_id TEXT, generation INTEGER NOT NULL DEFAULT 0 CHECK(generation>=0),
+    activated_at TIMESTAMPTZ, activated_by TEXT,
+    FOREIGN KEY (tenant_id,version_id)
+        REFERENCES cluster_registry_versions(tenant_id,version_id)
+);
+CREATE TABLE IF NOT EXISTS cluster_registry_events (
+    tenant_id TEXT NOT NULL CHECK(octet_length(tenant_id) BETWEEN 1 AND 128),
+    event_id TEXT NOT NULL CHECK(octet_length(event_id) BETWEEN 1 AND 64),
+    action TEXT NOT NULL CHECK(action IN (
+      'validated','validation_failed','activated','rolled_back','renamed')),
+    from_version_id TEXT, to_version_id TEXT,
+    pointer_generation INTEGER CHECK(pointer_generation IS NULL OR pointer_generation>=0),
+    created_at TIMESTAMPTZ NOT NULL, actor TEXT NOT NULL CHECK(octet_length(actor)<=256),
+    details_json JSONB NOT NULL CHECK(octet_length(details_json::text)<=1048576),
+    PRIMARY KEY (tenant_id,event_id),
+    FOREIGN KEY (tenant_id,from_version_id)
+        REFERENCES cluster_registry_versions(tenant_id,version_id),
+    FOREIGN KEY (tenant_id,to_version_id)
+        REFERENCES cluster_registry_versions(tenant_id,version_id)
+);
+CREATE INDEX IF NOT EXISTS idx_cluster_events_version
+    ON cluster_registry_events(tenant_id,to_version_id,created_at,event_id);
+
+CREATE OR REPLACE FUNCTION reject_cluster_registry_mutation() RETURNS trigger AS $$
+BEGIN RAISE EXCEPTION '% is immutable', TG_TABLE_NAME; END;
+$$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS immutable_cluster_versions ON cluster_registry_versions;
+CREATE TRIGGER immutable_cluster_versions BEFORE UPDATE OR DELETE
+    ON cluster_registry_versions FOR EACH ROW EXECUTE FUNCTION reject_cluster_registry_mutation();
+DROP TRIGGER IF EXISTS immutable_registry_clusters ON cluster_registry_clusters;
+CREATE TRIGGER immutable_registry_clusters BEFORE UPDATE OR DELETE
+    ON cluster_registry_clusters FOR EACH ROW EXECUTE FUNCTION reject_cluster_registry_mutation();
+DROP TRIGGER IF EXISTS immutable_cluster_assignments ON trace_cluster_assignments;
+CREATE TRIGGER immutable_cluster_assignments BEFORE UPDATE OR DELETE
+    ON trace_cluster_assignments FOR EACH ROW EXECUTE FUNCTION reject_cluster_registry_mutation();
+DROP TRIGGER IF EXISTS immutable_cluster_events ON cluster_registry_events;
+CREATE TRIGGER immutable_cluster_events BEFORE UPDATE OR DELETE
+    ON cluster_registry_events FOR EACH ROW EXECUTE FUNCTION reject_cluster_registry_mutation();
+CREATE OR REPLACE FUNCTION guard_cluster_identity_update() RETURNS trigger AS $$
+BEGIN
+  IF NEW.tenant_id<>OLD.tenant_id OR NEW.cluster_id<>OLD.cluster_id OR
+     NEW.kind<>OLD.kind OR NEW.explicit_key IS DISTINCT FROM OLD.explicit_key OR
+     NEW.created_at<>OLD.created_at OR NEW.created_by<>OLD.created_by OR
+     (OLD.lifecycle='active' AND NEW.lifecycle<>'active') THEN
+    RAISE EXCEPTION 'cluster identity immutable field changed';
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS guarded_cluster_identity_update ON cluster_identities;
+CREATE TRIGGER guarded_cluster_identity_update BEFORE UPDATE ON cluster_identities
+    FOR EACH ROW EXECUTE FUNCTION guard_cluster_identity_update();
+
 CREATE TABLE IF NOT EXISTS spans (
     span_id      TEXT PRIMARY KEY,
     name         TEXT,
@@ -192,7 +343,7 @@ class PostgresStorage:
             from psycopg_pool import ConnectionPool
         except ImportError as e:
             raise ImportError(
-                "PostgresStorage requires `pip install \"psycopg[binary,pool]\"`"
+                'PostgresStorage requires `pip install "psycopg[binary,pool]"`'
             ) from e
         self._pool = ConnectionPool(
             conninfo=dsn,
@@ -202,6 +353,9 @@ class PostgresStorage:
             open=True,
         )
         self._lock = threading.Lock()
+        self._cluster_snapshot_connection: ContextVar[object | None] = ContextVar(
+            "verdict_cluster_snapshot_connection", default=None
+        )
         # Initialize schema
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
@@ -216,9 +370,7 @@ class PostgresStorage:
                     ("evaluator_fingerprint", "TEXT"),
                     ("run_id", "TEXT"),
                 ]:
-                    cur.execute(
-                        f"ALTER TABLE drift_signals ADD COLUMN IF NOT EXISTS {col} {ddl}"
-                    )
+                    cur.execute(f"ALTER TABLE drift_signals ADD COLUMN IF NOT EXISTS {col} {ddl}")
                 for col, ddl in [
                     ("evaluator_provider", "TEXT"),
                     ("evaluator_config", "JSONB"),
@@ -227,9 +379,7 @@ class PostgresStorage:
                     ("status", "TEXT DEFAULT 'completed'"),
                     ("error", "TEXT"),
                 ]:
-                    cur.execute(
-                        f"ALTER TABLE judgments ADD COLUMN IF NOT EXISTS {col} {ddl}"
-                    )
+                    cur.execute(f"ALTER TABLE judgments ADD COLUMN IF NOT EXISTS {col} {ddl}")
                 for col, ddl in [
                     ("correct_examples", "INTEGER NOT NULL DEFAULT 0"),
                     ("total_examples", "INTEGER NOT NULL DEFAULT 0"),
@@ -240,15 +390,30 @@ class PostgresStorage:
                     ("method_version", "TEXT NOT NULL DEFAULT '1'"),
                 ]:
                     cur.execute(
-                        "ALTER TABLE evaluator_health ADD COLUMN IF NOT EXISTS "
-                        f"{col} {ddl}"
+                        f"ALTER TABLE evaluator_health ADD COLUMN IF NOT EXISTS {col} {ddl}"
                     )
+                cur.execute("ALTER TABLE traces ADD COLUMN IF NOT EXISTS parent_span_id TEXT")
+                for col, ddl in [
+                    ("analysis_started_at_us", "BIGINT"),
+                    ("analysis_started_at_state", "TEXT NOT NULL DEFAULT 'pending'"),
+                    ("analysis_raw_messages_utf8_bytes", "BIGINT"),
+                    ("analysis_raw_messages_state", "TEXT NOT NULL DEFAULT 'pending'"),
+                ]:
+                    cur.execute(f"ALTER TABLE traces ADD COLUMN IF NOT EXISTS {col} {ddl}")
+                cur.execute("""CREATE INDEX IF NOT EXISTS idx_traces_tenant_started_completed_v2
+                    ON traces(tenant_id,analysis_started_at_us,trace_id)
+                    WHERE ended_at IS NOT NULL AND analysis_started_at_state='valid'""")
+                cur.execute("""CREATE INDEX IF NOT EXISTS
+                    idx_traces_tenant_workload_started_completed_v2 ON traces(
+                    tenant_id,(CASE WHEN jsonb_typeof(tags->'verdict.workload')='string'
+                    AND octet_length(tags->>'verdict.workload') BETWEEN 1 AND 64
+                    THEN tags->>'verdict.workload' END),analysis_started_at_us,trace_id)
+                    WHERE ended_at IS NOT NULL AND analysis_started_at_state='valid'""")
+                cur.execute("""CREATE INDEX IF NOT EXISTS idx_traces_tenant_analysis_pending_v2
+                    ON traces(tenant_id,trace_id) WHERE analysis_started_at_state='pending'
+                    OR analysis_raw_messages_state='pending'""")
                 cur.execute(
-                    "ALTER TABLE traces ADD COLUMN IF NOT EXISTS parent_span_id TEXT"
-                )
-                cur.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_traces_parent_span "
-                    "ON traces(parent_span_id)"
+                    "CREATE INDEX IF NOT EXISTS idx_traces_parent_span ON traces(parent_span_id)"
                 )
 
     # -- helpers ----------------------------------------------------------
@@ -263,12 +428,20 @@ class PostgresStorage:
                 cur.execute(sql, params)
 
     def _fetchone(self, sql: str, params: tuple):
+        if (conn := self._cluster_snapshot_connection.get()) is not None:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                return cur.fetchone()
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(sql, params)
                 return cur.fetchone()
 
     def _fetchall(self, sql: str, params: tuple):
+        if (conn := self._cluster_snapshot_connection.get()) is not None:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                return cur.fetchall()
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(sql, params)
@@ -280,16 +453,19 @@ class PostgresStorage:
         provider, operation, request_model, response_model, input_tokens,
         output_tokens, temperature, max_tokens, finish_reason, error,
         latency_ms, prompt_redacted, response_redacted, raw_messages,
-        tenant_id, session_id, user_id_hash, cluster_id, tags, cost_usd"""
+        tenant_id, session_id, user_id_hash, cluster_id, tags, cost_usd,
+        analysis_started_at_us, analysis_started_at_state,
+        analysis_raw_messages_utf8_bytes, analysis_raw_messages_state"""
 
     def insert_trace(self, trace: Trace) -> None:
         sanitize_trace(trace)
+        populate_trace_analysis_fields(trace)
         # Only the fixed, class-owned column list is interpolated; every trace
         # value remains a driver-bound parameter.
         sql = (
             f"INSERT INTO traces ({self._TRACE_COLUMNS}) VALUES ("  # nosec B608
             "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,"
-            "%s,%s,%s,%s,%s::jsonb,%s) "
+            "%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s,%s) "
             "ON CONFLICT (trace_id) DO UPDATE SET "
             "ended_at = EXCLUDED.ended_at, "
             "response_model = EXCLUDED.response_model, "
@@ -331,6 +507,10 @@ class PostgresStorage:
                 trace.cluster_id,
                 json.dumps(trace.tags),
                 trace.cost_usd,
+                trace.analysis_started_at_us,
+                trace.analysis_started_at_state,
+                trace.analysis_raw_messages_utf8_bytes,
+                trace.analysis_raw_messages_state,
             ),
         )
 
@@ -354,20 +534,18 @@ class PostgresStorage:
             prompt_redacted=row[15],
             response_redacted=row[16],
             raw_messages=(
-                row[17]
-                if isinstance(row[17], list)
-                else json.loads(row[17]) if row[17] else None
+                row[17] if isinstance(row[17], list) else json.loads(row[17]) if row[17] else None
             ),
             tenant_id=row[18],
             session_id=row[19],
             user_id_hash=row[20],
             cluster_id=row[21],
-            tags=(
-                row[22]
-                if isinstance(row[22], dict)
-                else json.loads(row[22]) if row[22] else {}
-            ),
+            tags=(row[22] if isinstance(row[22], dict) else json.loads(row[22]) if row[22] else {}),
             cost_usd=row[23],
+            analysis_started_at_us=row[24],
+            analysis_started_at_state=row[25],
+            analysis_raw_messages_utf8_bytes=row[26],
+            analysis_raw_messages_state=row[27],
         )
 
     def get_trace(self, trace_id: str) -> Trace | None:
@@ -379,10 +557,13 @@ class PostgresStorage:
         return self._row_to_trace(row) if row else None
 
     def trace_exists(self, trace_id: str) -> bool:
-        return self._fetchone(
-            "SELECT 1 FROM traces WHERE trace_id = %s LIMIT 1",
-            (trace_id,),
-        ) is not None
+        return (
+            self._fetchone(
+                "SELECT 1 FROM traces WHERE trace_id = %s LIMIT 1",
+                (trace_id,),
+            )
+            is not None
+        )
 
     def list_traces(
         self,
@@ -401,8 +582,7 @@ class PostgresStorage:
         where = "WHERE " + " AND ".join(clauses) if clauses else ""
         params.append(limit)
         rows = self._fetchall(
-            f"SELECT {self._TRACE_COLUMNS} FROM traces "
-            f"{where} ORDER BY started_at DESC LIMIT %s",
+            f"SELECT {self._TRACE_COLUMNS} FROM traces {where} ORDER BY started_at DESC LIMIT %s",
             tuple(params),
         )
         return [self._row_to_trace(r) for r in rows]
@@ -450,12 +630,8 @@ class PostgresStorage:
                 )
                 ids = [row[0] for row in cur.fetchall()]
                 if ids:
-                    cur.execute(
-                        "DELETE FROM user_signals WHERE trace_id = ANY(%s)", (ids,)
-                    )
-                    cur.execute(
-                        "DELETE FROM judgments WHERE trace_id = ANY(%s)", (ids,)
-                    )
+                    cur.execute("DELETE FROM user_signals WHERE trace_id = ANY(%s)", (ids,))
+                    cur.execute("DELETE FROM judgments WHERE trace_id = ANY(%s)", (ids,))
                     cur.execute("DELETE FROM traces WHERE trace_id = ANY(%s)", (ids,))
                     cur.execute(
                         """DELETE FROM spans AS candidate
@@ -562,17 +738,17 @@ class PostgresStorage:
             rubric_name=row[2] or "default",
             rubric_version=row[3] or "1",
             created_at=row[4],
-            judge_models=row[5] if isinstance(row[5], list) else (json.loads(row[5]) if row[5] else []),
+            judge_models=row[5]
+            if isinstance(row[5], list)
+            else (json.loads(row[5]) if row[5] else []),
             dimensions=dims,
             evaluator_provider=row[8] or "",
             evaluator_config=(
-                row[9] if isinstance(row[9], dict)
-                else (json.loads(row[9]) if row[9] else {})
+                row[9] if isinstance(row[9], dict) else (json.loads(row[9]) if row[9] else {})
             ),
             evaluator_fingerprint=row[10] or "",
             expected_dimensions=(
-                row[11] if isinstance(row[11], list)
-                else (json.loads(row[11]) if row[11] else [])
+                row[11] if isinstance(row[11], list) else (json.loads(row[11]) if row[11] else [])
             ),
             status=JudgmentStatus(row[12] or "completed"),
             error=row[13],
@@ -678,27 +854,30 @@ class PostgresStorage:
         records = []
         for row in rows:
             legacy = (row[15] or "1") == "1"
-            records.append(EvaluatorHealthRecord(
-                health_id=row[0],
-                evaluated_at=row[1],
-                evaluator_fingerprint=row[2],
-                sentinel_set_name=row[3] or "",
-                sentinel_set_fingerprint=row[4],
-                correct_examples=0 if legacy else row[5],
-                total_examples=0 if legacy else row[6],
-                example_agreement=None if legacy else row[7],
-                example_confidence_low=None if legacy else row[8],
-                example_confidence_high=None if legacy else row[9],
-                correct_labels=row[10],
-                total_labels=row[11],
-                label_agreement=None if legacy else row[12],
-                status=(
-                    EvaluatorHealthStatus.INSUFFICIENT_DATA
-                    if legacy else EvaluatorHealthStatus(row[13])
-                ),
-                error_count=row[14],
-                method_version=row[15] or "1",
-            ))
+            records.append(
+                EvaluatorHealthRecord(
+                    health_id=row[0],
+                    evaluated_at=row[1],
+                    evaluator_fingerprint=row[2],
+                    sentinel_set_name=row[3] or "",
+                    sentinel_set_fingerprint=row[4],
+                    correct_examples=0 if legacy else row[5],
+                    total_examples=0 if legacy else row[6],
+                    example_agreement=None if legacy else row[7],
+                    example_confidence_low=None if legacy else row[8],
+                    example_confidence_high=None if legacy else row[9],
+                    correct_labels=row[10],
+                    total_labels=row[11],
+                    label_agreement=None if legacy else row[12],
+                    status=(
+                        EvaluatorHealthStatus.INSUFFICIENT_DATA
+                        if legacy
+                        else EvaluatorHealthStatus(row[13])
+                    ),
+                    error_count=row[14],
+                    method_version=row[15] or "1",
+                )
+            )
         return records
 
     # -- Drift signals ----------------------------------------------------
@@ -793,8 +972,7 @@ class PostgresStorage:
                             (lock_name,),
                         )
                     cur.execute(
-                        "SELECT evaluator_fingerprint FROM drift_runs "
-                        "WHERE run_id = %s",
+                        "SELECT evaluator_fingerprint FROM drift_runs WHERE run_id = %s",
                         (run.run_id,),
                     )
                     existing = cur.fetchone()
@@ -807,9 +985,7 @@ class PostgresStorage:
                         )
                         owner = cur.fetchone()
                         if owner and owner[0] and owner[0] != run.run_id:
-                            raise ValueError(
-                                "signal_id already belongs to another drift run"
-                            )
+                            raise ValueError("signal_id already belongs to another drift run")
                     cur.execute(
                         """INSERT INTO drift_runs (
                             run_id, analysis_time, completed_at,
@@ -917,8 +1093,7 @@ class PostgresStorage:
 
     def list_drift_signals(self, *, limit: int = 100) -> list[DriftSignal]:
         rows = self._fetchall(
-            f"SELECT {self._SIGNAL_COLUMNS} FROM drift_signals "
-            "ORDER BY detected_at DESC LIMIT %s",
+            f"SELECT {self._SIGNAL_COLUMNS} FROM drift_signals ORDER BY detected_at DESC LIMIT %s",
             (limit,),
         )
         return [self._row_to_drift_signal(r) for r in rows]
@@ -926,33 +1101,31 @@ class PostgresStorage:
     @staticmethod
     def _row_to_drift_signal(r) -> DriftSignal:
         return DriftSignal(
-                signal_id=r[0],
-                detected_at=r[1],
-                cluster_id=r[2] or "",
-                dimension=r[3] or "",
-                direction=DriftDirection(r[4] or "change"),
-                evaluator_fingerprint=r[5] or "",
-                run_id=r[6] or "",
-                statistic_name=r[7] or "",
-                statistic_value=r[8] or 0.0,
-                p_value=r[9] or 1.0,
-                p_value_adjusted=r[10] or 1.0,
-                effect_size_cohens_d=r[11] or 0.0,
-                effect_size_cliffs_delta=r[12] or 0.0,
-                wasserstein_distance=r[13] or 0.0,
-                psi=r[14] or 0.0,
-                sample_size_current=r[15] or 0,
-                sample_size_baseline=r[16] or 0,
-                contributing_layers=(
-                    r[17] if isinstance(r[17], list)
-                    else (json.loads(r[17]) if r[17] else [])
-                ),
-                example_trace_ids=(
-                    r[18] if isinstance(r[18], list)
-                    else (json.loads(r[18]) if r[18] else [])
-                ),
-                recommended_action=r[19] or "",
-            )
+            signal_id=r[0],
+            detected_at=r[1],
+            cluster_id=r[2] or "",
+            dimension=r[3] or "",
+            direction=DriftDirection(r[4] or "change"),
+            evaluator_fingerprint=r[5] or "",
+            run_id=r[6] or "",
+            statistic_name=r[7] or "",
+            statistic_value=r[8] or 0.0,
+            p_value=r[9] or 1.0,
+            p_value_adjusted=r[10] or 1.0,
+            effect_size_cohens_d=r[11] or 0.0,
+            effect_size_cliffs_delta=r[12] or 0.0,
+            wasserstein_distance=r[13] or 0.0,
+            psi=r[14] or 0.0,
+            sample_size_current=r[15] or 0,
+            sample_size_baseline=r[16] or 0,
+            contributing_layers=(
+                r[17] if isinstance(r[17], list) else (json.loads(r[17]) if r[17] else [])
+            ),
+            example_trace_ids=(
+                r[18] if isinstance(r[18], list) else (json.loads(r[18]) if r[18] else [])
+            ),
+            recommended_action=r[19] or "",
+        )
 
     # -- Spans ------------------------------------------------------------
 
@@ -995,7 +1168,9 @@ class PostgresStorage:
             started_at=row[4],
             ended_at=row[5],
             duration_ms=row[6],
-            attributes=row[7] if isinstance(row[7], dict) else (json.loads(row[7]) if row[7] else {}),
+            attributes=row[7]
+            if isinstance(row[7], dict)
+            else (json.loads(row[7]) if row[7] else {}),
             error=row[8],
         )
 
@@ -1054,9 +1229,694 @@ class PostgresStorage:
 
     def load_cluster_registry(self, version: str) -> str | None:
         row = self._fetchone(
-            "SELECT payload_json FROM cluster_registries WHERE version = %s", (version,),
+            "SELECT payload_json FROM cluster_registries WHERE version = %s",
+            (version,),
         )
         return row[0] if row else None
+
+    # -- Versioned cluster registry --------------------------------------
+
+    @staticmethod
+    def _json_text(value) -> str:
+        if isinstance(value, str):
+            value = json.loads(value)
+        return json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+    @classmethod
+    def _cluster_version_from_row(cls, row) -> ClusterRegistryVersion:
+        return ClusterRegistryVersion(
+            tenant_id=row[0],
+            version_id=row[1],
+            parent_version_id=row[2],
+            strategy=row[3],
+            cutoff=row[4],
+            lookback_days=row[5],
+            fit_definition_json=cls._json_text(row[6]),
+            fit_definition_fingerprint=row[7],
+            preview_report_json=cls._json_text(row[8]),
+            created_at=row[9],
+            created_by=row[10],
+        )
+
+    @staticmethod
+    def _registry_cluster_from_row(row) -> ClusterRegistryCluster:
+        return ClusterRegistryCluster(
+            row[0], row[1], row[2], row[3], row[4], row[5], row[6], row[7]
+        )
+
+    @staticmethod
+    def _cluster_assignment_from_row(row) -> TraceClusterAssignment:
+        return TraceClusterAssignment(
+            tenant_id=row[0],
+            version_id=row[1],
+            trace_id=row[2],
+            origin=row[3],
+            status=row[4],
+            cluster_id=row[5],
+            cluster_kind=row[6],
+            reason=row[7],
+            distance=row[8],
+            assigned_at=row[9],
+        )
+
+    @classmethod
+    def _cluster_event_from_row(cls, row) -> ClusterRegistryEvent:
+        return ClusterRegistryEvent(
+            tenant_id=row[0],
+            event_id=row[1],
+            action=row[2],
+            from_version_id=row[3],
+            to_version_id=row[4],
+            pointer_generation=row[5],
+            created_at=row[6],
+            actor=row[7],
+            details_json=cls._json_text(row[8]),
+        )
+
+    def insert_cluster_preview(
+        self,
+        version: ClusterRegistryVersion,
+        identities: list[ClusterIdentity],
+        clusters: list[ClusterRegistryCluster],
+        assignments: list[TraceClusterAssignment],
+    ) -> None:
+        with self._pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO active_cluster_registry (tenant_id,version_id,generation) "
+                "VALUES (%s,NULL,0) ON CONFLICT (tenant_id) DO NOTHING",
+                (version.tenant_id,),
+            )
+            for identity in identities:
+                if identity.tenant_id != version.tenant_id or identity.lifecycle != "provisional":
+                    raise ValueError("cluster preview tenant mismatch")
+                cur.execute(
+                    """INSERT INTO cluster_identities (
+                      tenant_id,cluster_id,kind,lifecycle,explicit_key,display_name,
+                      last_model_fingerprint,last_centroid,last_version_id,
+                      created_at,created_by,updated_at,updated_by
+                    ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s,%s)
+                    ON CONFLICT (tenant_id,cluster_id) DO NOTHING""",
+                    (
+                        identity.tenant_id,
+                        identity.cluster_id,
+                        identity.kind,
+                        identity.lifecycle,
+                        identity.explicit_key,
+                        identity.display_name,
+                        identity.last_model_fingerprint,
+                        json.dumps(identity.last_centroid) if identity.last_centroid else None,
+                        identity.last_version_id,
+                        identity.created_at,
+                        identity.created_by,
+                        identity.updated_at,
+                        identity.updated_by,
+                    ),
+                )
+                cur.execute(
+                    "SELECT kind,explicit_key FROM cluster_identities "
+                    "WHERE tenant_id=%s AND cluster_id=%s",
+                    (identity.tenant_id, identity.cluster_id),
+                )
+                if cur.fetchone() != (identity.kind, identity.explicit_key):
+                    raise ValueError("cluster identity conflict")
+            cur.execute(
+                """INSERT INTO cluster_registry_versions (
+                  tenant_id,version_id,parent_version_id,strategy,cutoff,lookback_days,
+                  fit_definition_json,fit_definition_fingerprint,preview_report_json,
+                  created_at,created_by
+                ) VALUES (%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s::jsonb,%s,%s)""",
+                (
+                    version.tenant_id,
+                    version.version_id,
+                    version.parent_version_id,
+                    version.strategy,
+                    version.cutoff,
+                    version.lookback_days,
+                    version.fit_definition_json,
+                    version.fit_definition_fingerprint,
+                    version.preview_report_json,
+                    version.created_at,
+                    version.created_by,
+                ),
+            )
+            for cluster in clusters:
+                if (
+                    cluster.tenant_id != version.tenant_id
+                    or cluster.version_id != version.version_id
+                ):
+                    raise ValueError("cluster preview version mismatch")
+                cur.execute(
+                    """INSERT INTO cluster_registry_clusters (
+                      tenant_id,version_id,cluster_id,kind,centroid,radius,
+                      member_count,outlier_count
+                    ) VALUES (%s,%s,%s,%s,%s::jsonb,%s,%s,%s)""",
+                    (
+                        cluster.tenant_id,
+                        cluster.version_id,
+                        cluster.cluster_id,
+                        cluster.kind,
+                        json.dumps(cluster.centroid) if cluster.centroid is not None else None,
+                        cluster.radius,
+                        cluster.member_count,
+                        cluster.outlier_count,
+                    ),
+                )
+            self._insert_cluster_assignments_cursor(
+                cur,
+                version.tenant_id,
+                assignments,
+                expected_version_id=version.version_id,
+            )
+
+    def get_cluster_registry_version(
+        self,
+        authorized_tenant: str,
+        version_id: str,
+    ) -> ClusterRegistryVersion | None:
+        row = self._fetchone(
+            "SELECT tenant_id,version_id,parent_version_id,strategy,cutoff,lookback_days,"
+            "fit_definition_json,fit_definition_fingerprint,preview_report_json,"
+            "created_at,created_by FROM cluster_registry_versions "
+            "WHERE tenant_id=%s AND version_id=%s",
+            (authorized_tenant, version_id),
+        )
+        return self._cluster_version_from_row(row) if row else None
+
+    def list_cluster_registry_clusters(
+        self,
+        authorized_tenant: str,
+        version_id: str,
+    ) -> list[ClusterRegistryCluster]:
+        rows = self._fetchall(
+            "SELECT tenant_id,version_id,cluster_id,kind,centroid,radius,"
+            "member_count,outlier_count FROM cluster_registry_clusters "
+            "WHERE tenant_id=%s AND version_id=%s ORDER BY cluster_id",
+            (authorized_tenant, version_id),
+        )
+        return [self._registry_cluster_from_row(row) for row in rows]
+
+    def _insert_cluster_assignments_cursor(
+        self,
+        cur,
+        authorized_tenant: str,
+        assignments: list[TraceClusterAssignment],
+        *,
+        expected_version_id: str | None = None,
+    ) -> None:
+        for assignment in assignments:
+            if assignment.tenant_id != authorized_tenant or (
+                expected_version_id is not None and assignment.version_id != expected_version_id
+            ):
+                raise ValueError("cluster assignment tenant mismatch")
+            cur.execute(
+                """INSERT INTO trace_cluster_assignments (
+                  tenant_id,version_id,trace_id,origin,status,cluster_id,cluster_kind,
+                  reason,distance,assigned_at
+                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                ON CONFLICT (tenant_id,version_id,trace_id) DO NOTHING""",
+                (
+                    assignment.tenant_id,
+                    assignment.version_id,
+                    assignment.trace_id,
+                    assignment.origin,
+                    assignment.status,
+                    assignment.cluster_id,
+                    assignment.cluster_kind,
+                    assignment.reason,
+                    assignment.distance,
+                    assignment.assigned_at,
+                ),
+            )
+            cur.execute(
+                "SELECT tenant_id,version_id,trace_id,origin,status,cluster_id,"
+                "cluster_kind,reason,distance,assigned_at FROM trace_cluster_assignments "
+                "WHERE tenant_id=%s AND version_id=%s AND trace_id=%s",
+                (assignment.tenant_id, assignment.version_id, assignment.trace_id),
+            )
+            if self._cluster_assignment_from_row(cur.fetchone()) != assignment:
+                raise ValueError("immutable assignment conflict")
+
+    def insert_trace_cluster_assignments(
+        self,
+        authorized_tenant: str,
+        assignments: list[TraceClusterAssignment],
+    ) -> None:
+        with self._pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
+            self._insert_cluster_assignments_cursor(cur, authorized_tenant, assignments)
+
+    def list_trace_cluster_assignments(
+        self,
+        authorized_tenant: str,
+        version_id: str,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[TraceClusterAssignment]:
+        if limit is not None and (type(limit) is not int or limit <= 0):
+            raise ValueError("assignment limit must be a positive integer")
+        if type(offset) is not int or offset < 0 or (offset and limit is None):
+            raise ValueError("assignment offset requires a limit")
+        sql = (
+            "SELECT tenant_id,version_id,trace_id,origin,status,cluster_id,cluster_kind,"
+            "reason,distance,assigned_at FROM trace_cluster_assignments "
+            "WHERE tenant_id=%s AND version_id=%s ORDER BY trace_id"
+        )
+        params: tuple = (authorized_tenant, version_id)
+        if limit is not None:
+            sql += " LIMIT %s OFFSET %s"
+            params += (limit, offset)
+        rows = self._fetchall(
+            sql,
+            params,
+        )
+        return [self._cluster_assignment_from_row(row) for row in rows]
+
+    def list_judgments_for_registry_cluster(
+        self,
+        authorized_tenant: str,
+        version_id: str,
+        cluster_id: str,
+        *,
+        limit: int = 1_000,
+    ) -> list[Judgment]:
+        rows = self._fetchall(
+            f"""SELECT {self._JUDGMENT_COLUMNS} FROM judgments j
+              JOIN trace_cluster_assignments a ON a.trace_id=j.trace_id
+              WHERE a.tenant_id=%s AND a.version_id=%s AND a.status='assigned'
+                AND a.cluster_id=%s ORDER BY j.created_at DESC LIMIT %s""",  # nosec B608
+            (authorized_tenant, version_id, cluster_id, limit),
+        )
+        return [self._row_to_judgment(row) for row in rows]
+
+    def insert_cluster_registry_event(self, event: ClusterRegistryEvent) -> None:
+        self._exec(
+            """INSERT INTO cluster_registry_events (
+              tenant_id,event_id,action,from_version_id,to_version_id,
+              pointer_generation,created_at,actor,details_json
+            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb)""",
+            (
+                event.tenant_id,
+                event.event_id,
+                event.action,
+                event.from_version_id,
+                event.to_version_id,
+                event.pointer_generation,
+                event.created_at,
+                event.actor,
+                event.details_json,
+            ),
+        )
+
+    def list_cluster_registry_events(
+        self,
+        authorized_tenant: str,
+        version_id: str | None = None,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[ClusterRegistryEvent]:
+        if limit is not None and (type(limit) is not int or limit <= 0):
+            raise ValueError("event limit must be a positive integer")
+        if type(offset) is not int or offset < 0 or (offset and limit is None):
+            raise ValueError("event offset requires a limit")
+        sql = (
+            "SELECT tenant_id,event_id,action,from_version_id,to_version_id,"
+            "pointer_generation,created_at,actor,details_json "
+            "FROM cluster_registry_events WHERE tenant_id=%s"
+        )
+        params: tuple = (authorized_tenant,)
+        if version_id is not None:
+            sql += " AND (from_version_id=%s OR to_version_id=%s)"
+            params += (version_id, version_id)
+        sql += " ORDER BY created_at,event_id"
+        if limit is not None:
+            sql += " LIMIT %s OFFSET %s"
+            params += (limit, offset)
+        rows = self._fetchall(sql, params)
+        return [self._cluster_event_from_row(row) for row in rows]
+
+    def get_active_cluster_registry(
+        self,
+        authorized_tenant: str,
+    ) -> ActiveClusterRegistry:
+        self._exec(
+            "INSERT INTO active_cluster_registry (tenant_id,version_id,generation) "
+            "VALUES (%s,NULL,0) ON CONFLICT (tenant_id) DO NOTHING",
+            (authorized_tenant,),
+        )
+        row = self._fetchone(
+            "SELECT tenant_id,version_id,generation,activated_at,activated_by "
+            "FROM active_cluster_registry WHERE tenant_id=%s",
+            (authorized_tenant,),
+        )
+        return ActiveClusterRegistry(*row)
+
+    def activate_cluster_registry(
+        self,
+        authorized_tenant: str,
+        version_id: str,
+        *,
+        expected_generation: int,
+        actor: str,
+        action: str,
+        expected_candidate_digest: str,
+    ) -> ActiveClusterRegistry:
+        if action not in {"activated", "rolled_back"}:
+            raise ValueError("activation action is invalid")
+        now = datetime.now().astimezone()
+        with self._pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO active_cluster_registry (tenant_id,version_id,generation) "
+                "VALUES (%s,NULL,0) ON CONFLICT (tenant_id) DO NOTHING",
+                (authorized_tenant,),
+            )
+            cur.execute(
+                "SELECT version_id,generation FROM active_cluster_registry "
+                "WHERE tenant_id=%s FOR UPDATE",
+                (authorized_tenant,),
+            )
+            previous, generation = cur.fetchone()
+            if generation != expected_generation:
+                raise ValueError("cluster registry generation conflict")
+            cur.execute(
+                "SELECT fit_definition_json->>'model_fingerprint',parent_version_id,"
+                "fit_definition_json->'config',cutoff,lookback_days "
+                "FROM cluster_registry_versions "
+                "WHERE tenant_id=%s AND version_id=%s",
+                (authorized_tenant, version_id),
+            )
+            version = cur.fetchone()
+            if version is None:
+                raise ValueError("unknown cluster registry version")
+            if action == "activated" and version[1] != previous:
+                raise ValueError("cluster registry parent conflict")
+            cur.execute(
+                "SELECT action FROM cluster_registry_events WHERE tenant_id=%s "
+                "AND to_version_id=%s AND action IN ('validated','validation_failed') "
+                "ORDER BY created_at DESC,event_id DESC LIMIT 1",
+                (authorized_tenant, version_id),
+            )
+            validation = cur.fetchone()
+            if validation is None or validation[0] != "validated":
+                raise ValueError("cluster registry version is not validated")
+            config = version[2] or {}
+            cur.execute("LOCK TABLE traces IN SHARE MODE")
+            token = self._cluster_snapshot_connection.set(conn)
+            try:
+                rows = self.list_cluster_trace_candidates(
+                    authorized_tenant,
+                    datetime_to_utc_us(version[3] - timedelta(days=version[4])),
+                    datetime_to_utc_us(version[3]),
+                    target_workload=config.get("target_workload"),
+                    limit=config.get("max_fit_candidates", 50_000) + 1,
+                )
+                candidate_ids = [row.trace_id for row in rows if row.trace_id is not None]
+                assigned_ids = {
+                    item.trace_id
+                    for item in self.list_trace_cluster_assignments(authorized_tenant, version_id)
+                }
+                pending = self.count_pending_analysis_rows(authorized_tenant)
+            finally:
+                self._cluster_snapshot_connection.reset(token)
+            if (
+                pending
+                or len(rows) > config.get("max_fit_candidates", 50_000)
+                or len(candidate_ids) != len(rows)
+                or cluster_candidate_digest(candidate_ids) != expected_candidate_digest
+                or not set(candidate_ids) <= assigned_ids
+            ):
+                raise ValueError("cluster registry coverage changed")
+            cur.execute(
+                """SELECT kind,COUNT(*) FROM cluster_identities i
+                  WHERE tenant_id=%s AND (lifecycle='active' OR EXISTS (
+                    SELECT 1 FROM cluster_registry_clusters c
+                    WHERE c.tenant_id=i.tenant_id AND c.cluster_id=i.cluster_id
+                      AND c.version_id=%s)) GROUP BY kind""",
+                (authorized_tenant, version_id),
+            )
+            identity_counts = dict(cur.fetchall())
+            if identity_counts.get("explicit", 0) > config.get(
+                "max_explicit_identities_per_tenant", 10_000
+            ) or identity_counts.get("semantic", 0) > config.get(
+                "max_semantic_identities_per_tenant", 5_000
+            ):
+                raise ValueError("identity_limit")
+            next_generation = generation + 1
+            event = ClusterRegistryEvent(
+                authorized_tenant,
+                action=action,
+                from_version_id=previous,
+                to_version_id=version_id,
+                pointer_generation=next_generation,
+                created_at=now,
+                actor=actor,
+            )
+            cur.execute(
+                "INSERT INTO cluster_registry_events VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb)",
+                (
+                    event.tenant_id,
+                    event.event_id,
+                    event.action,
+                    event.from_version_id,
+                    event.to_version_id,
+                    event.pointer_generation,
+                    event.created_at,
+                    event.actor,
+                    event.details_json,
+                ),
+            )
+            cur.execute(
+                "UPDATE active_cluster_registry SET version_id=%s,generation=%s,"
+                "activated_at=%s,activated_by=%s WHERE tenant_id=%s",
+                (version_id, next_generation, now, actor, authorized_tenant),
+            )
+            cur.execute(
+                """UPDATE cluster_identities i SET lifecycle='active',
+                  last_model_fingerprint=%s,last_centroid=c.centroid,
+                  last_version_id=%s,updated_at=%s,updated_by=%s
+                  FROM cluster_registry_clusters c
+                  WHERE c.tenant_id=%s AND c.version_id=%s
+                    AND i.tenant_id=c.tenant_id AND i.cluster_id=c.cluster_id
+                    AND i.kind=c.kind""",
+                (version[0], version_id, now, actor, authorized_tenant, version_id),
+            )
+            cur.execute(
+                """SELECT COUNT(*) FROM cluster_registry_clusters c
+                  JOIN cluster_identities i USING (tenant_id,cluster_id,kind)
+                  WHERE c.tenant_id=%s AND c.version_id=%s
+                    AND i.lifecycle='active' AND i.last_version_id=%s
+                    AND i.last_model_fingerprint IS NOT DISTINCT FROM %s
+                    AND i.last_centroid IS NOT DISTINCT FROM c.centroid""",
+                (authorized_tenant, version_id, version_id, version[0]),
+            )
+            valid = cur.fetchone()[0]
+            cur.execute(
+                "SELECT COUNT(*) FROM cluster_registry_clusters "
+                "WHERE tenant_id=%s AND version_id=%s",
+                (authorized_tenant, version_id),
+            )
+            if valid != cur.fetchone()[0]:
+                raise ValueError("cluster activation identity invariant failed")
+        return ActiveClusterRegistry(authorized_tenant, version_id, next_generation, now, actor)
+
+    def rename_cluster_identity(
+        self, authorized_tenant: str, cluster_id: str, display_name: str, *, actor: str
+    ) -> None:
+        event = ClusterRegistryEvent(
+            authorized_tenant,
+            action="renamed",
+            actor=actor,
+            details_json=json.dumps({"cluster_id": cluster_id}, sort_keys=True),
+        )
+        with self._pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO cluster_registry_events VALUES (%s,%s,%s,NULL,NULL,NULL,%s,%s,%s::jsonb)",
+                (
+                    event.tenant_id,
+                    event.event_id,
+                    event.action,
+                    event.created_at,
+                    event.actor,
+                    event.details_json,
+                ),
+            )
+            cur.execute(
+                "UPDATE cluster_identities SET display_name=%s,updated_at=%s,updated_by=%s "
+                "WHERE tenant_id=%s AND cluster_id=%s RETURNING display_name",
+                (display_name, event.created_at, actor, authorized_tenant, cluster_id),
+            )
+            row = cur.fetchone()
+            if row is None:
+                raise ValueError("unknown cluster identity")
+            if row[0] != display_name:
+                raise ValueError("cluster rename invariant failed")
+
+    def list_cluster_identities(
+        self,
+        authorized_tenant: str,
+        *,
+        cluster_ids: list[str] | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[ClusterIdentity]:
+        if limit is not None and (type(limit) is not int or limit <= 0):
+            raise ValueError("identity limit must be a positive integer")
+        if type(offset) is not int or offset < 0 or (offset and limit is None):
+            raise ValueError("identity offset requires a limit")
+        if cluster_ids == []:
+            return []
+        sql = (
+            "SELECT tenant_id,cluster_id,kind,lifecycle,explicit_key,display_name,"
+            "last_model_fingerprint,last_centroid,last_version_id,created_at,created_by,"
+            "updated_at,updated_by FROM cluster_identities WHERE tenant_id=%s "
+        )
+        params: tuple = (authorized_tenant,)
+        if cluster_ids is not None:
+            sql += "AND cluster_id=ANY(%s) "
+            params += (cluster_ids,)
+        sql += "ORDER BY cluster_id"
+        if limit is not None:
+            sql += " LIMIT %s OFFSET %s"
+            params += (limit, offset)
+        rows = self._fetchall(sql, params)
+        return [ClusterIdentity(*row) for row in rows]
+
+    _WORKLOAD_VALUE_SQL = """CASE
+      WHEN jsonb_typeof(tags->'verdict.workload')='string'
+       AND octet_length(tags->>'verdict.workload') BETWEEN 1 AND 64
+      THEN tags->>'verdict.workload' END"""
+
+    def list_cluster_trace_candidates(
+        self,
+        authorized_tenant: str,
+        start_us: int,
+        cutoff_us: int,
+        *,
+        target_workload: str | None,
+        limit: int,
+        missing_version_id: str | None = None,
+    ) -> list[ClusterTraceCandidate]:
+        if authorized_tenant == "__verdict_local__":
+            raise ValueError("PostgreSQL clustering requires an explicit tenant")
+        where = """tenant_id=%s AND ended_at IS NOT NULL
+          AND analysis_started_at_state='valid'
+          AND analysis_started_at_us>=%s AND analysis_started_at_us<%s"""
+        params: tuple = (authorized_tenant, start_us, cutoff_us)
+        if missing_version_id is not None:
+            where += """ AND NOT EXISTS (
+              SELECT 1 FROM trace_cluster_assignments a
+              WHERE a.tenant_id=%s AND a.version_id=%s AND a.trace_id=traces.trace_id)"""
+            params += (authorized_tenant, missing_version_id)
+        if target_workload is None:
+            where += f" AND COALESCE(({self._WORKLOAD_VALUE_SQL}),'') NOT IN (%s,%s)"
+            params += ("judge", "paired_replay")
+        else:
+            where += f" AND ({self._WORKLOAD_VALUE_SQL})=%s"
+            params += (target_workload,)
+        rows = self._fetchall(
+            f"""SELECT octet_length(trace_id),
+              CASE WHEN octet_length(trace_id)<=256 THEN trace_id END,
+              tenant_id,analysis_started_at_us,
+              COALESCE(jsonb_typeof(tags->'verdict.workload'),'missing'),
+              CASE WHEN jsonb_typeof(tags->'verdict.workload')='string'
+                THEN octet_length(tags->>'verdict.workload') END,
+              {self._WORKLOAD_VALUE_SQL},
+              COALESCE(jsonb_typeof(tags->'verdict.intent_key'),'missing'),
+              CASE WHEN jsonb_typeof(tags->'verdict.intent_key')='string'
+                THEN octet_length(tags->>'verdict.intent_key') END,
+              CASE WHEN jsonb_typeof(tags->'verdict.intent_key')='string'
+                AND octet_length(tags->>'verdict.intent_key') BETWEEN 1 AND 64
+                THEN tags->>'verdict.intent_key' END,
+              analysis_raw_messages_state,analysis_raw_messages_utf8_bytes
+              FROM traces WHERE {where}
+              ORDER BY analysis_started_at_us,trace_id LIMIT %s""",  # nosec B608
+            (*params, limit),
+        )
+        return [ClusterTraceCandidate(*row) for row in rows]
+
+    def get_cluster_trace_messages(
+        self,
+        authorized_tenant: str,
+        trace_ids: list[str],
+    ) -> dict[str, list[dict] | None]:
+        if authorized_tenant == "__verdict_local__":
+            raise ValueError("PostgreSQL clustering requires an explicit tenant")
+        if not trace_ids:
+            return {}
+        rows = self._fetchall(
+            """SELECT trace_id,CASE WHEN analysis_raw_messages_state='valid'
+              AND analysis_raw_messages_utf8_bytes<=67108864 THEN raw_messages END
+              FROM traces WHERE tenant_id=%s AND trace_id=ANY(%s)""",
+            (authorized_tenant, trace_ids),
+        )
+        return {row[0]: row[1] for row in rows}
+
+    def count_pending_analysis_rows(self, authorized_tenant: str) -> int:
+        if authorized_tenant == "__verdict_local__":
+            raise ValueError("PostgreSQL clustering requires an explicit tenant")
+        return self._fetchone(
+            """SELECT COUNT(*) FROM traces WHERE tenant_id=%s AND
+              (analysis_started_at_state='pending' OR
+               analysis_raw_messages_state='pending')""",
+            (authorized_tenant,),
+        )[0]
+
+    @contextmanager
+    def cluster_analysis_snapshot(self):
+        with self._pool.connection() as conn, conn.transaction():
+            conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            token = self._cluster_snapshot_connection.set(conn)
+            try:
+                yield self
+            finally:
+                self._cluster_snapshot_connection.reset(token)
+
+    def normalize_cluster_trace_analysis(
+        self, authorized_tenant: str, *, limit: int = 10_000
+    ) -> int:
+        if authorized_tenant == "__verdict_local__":
+            raise ValueError("PostgreSQL clustering requires an explicit tenant")
+        if not 1 <= limit <= 10_000:
+            raise ValueError("normalization limit must be in [1,10000]")
+        with self._pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
+            cur.execute(
+                """SELECT trace_id,started_at,octet_length(raw_messages::text),
+                  CASE WHEN octet_length(raw_messages::text)<=67108864
+                       THEN raw_messages END
+                  FROM traces WHERE tenant_id=%s AND
+                   (analysis_started_at_state='pending' OR
+                    analysis_raw_messages_state='pending')
+                  ORDER BY trace_id LIMIT %s FOR UPDATE""",
+                (authorized_tenant, limit),
+            )
+            rows = cur.fetchall()
+            for trace_id, started_at, stored_bytes, raw_messages in rows:
+                trace = Trace(trace_id=trace_id, started_at=started_at, raw_messages=None)
+                populate_trace_analysis_fields(trace)
+                if stored_bytes is not None and stored_bytes > 67_108_864:
+                    trace.analysis_raw_messages_utf8_bytes = stored_bytes
+                    trace.analysis_raw_messages_state = "oversize"
+                elif raw_messages is not None:
+                    trace.raw_messages = raw_messages
+                    populate_trace_analysis_fields(trace)
+                cur.execute(
+                    """UPDATE traces SET analysis_started_at_us=%s,
+                       analysis_started_at_state=%s,analysis_raw_messages_utf8_bytes=%s,
+                       analysis_raw_messages_state=%s WHERE trace_id=%s""",
+                    (
+                        trace.analysis_started_at_us,
+                        trace.analysis_started_at_state,
+                        trace.analysis_raw_messages_utf8_bytes,
+                        trace.analysis_raw_messages_state,
+                        trace.trace_id,
+                    ),
+                )
+        return len(rows)
 
     def close(self) -> None:
         try:
