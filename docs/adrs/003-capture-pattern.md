@@ -85,8 +85,8 @@ when enabled, an empty string remains distinct from unavailable content through
 storage and dashboard rendering.
 
 OpenAI Responses capture follows the same one-request/one-trace boundary for
-sync and async `responses.create(...)`, `responses.parse(...)`, raw streams, and
-the lazy `responses.stream(...)` helper. A helper for a new response delegates
+sync and async `responses.create(...)`, `responses.parse(...)`, and the lazy
+`responses.stream(...)` helper. A helper for a new response delegates
 to its nested create call; a helper for an existing response delegates to its
 streaming retrieve call, so the manager itself never creates a duplicate trace.
 Routing binds when that nested request starts. Every valid non-stream Response
@@ -116,8 +116,9 @@ older supported SDKs. This floor is the first tested patch after OpenAI's HTTPX
 extra; CI exercises that ordinary constructor as well as injected local
 transports. OpenAI's
 `beta.chat.completions` alias shares the stable Chat resource class and therefore
-the same wrappers. The separate experimental `beta.responses` multi-agent
-resource is outside this bounded support surface.
+the same wrappers. OpenAI's `responses.with_streaming_response` raw-response
+manager and the separate experimental `beta.responses` multi-agent resource are
+outside this bounded support surface.
 
 Provider request scalars cross one typed boundary before Trace construction and
 are normalized again before persistence because response usage and latency are

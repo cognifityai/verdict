@@ -5,6 +5,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 REPO_ROOT = SKILL_ROOT.parents[1]
 
@@ -37,7 +39,7 @@ def test_every_relative_markdown_link_resolves_inside_skill() -> None:
 def test_skill_uses_resolved_skill_path_and_installed_runtime_commands() -> None:
     skill = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
 
-    assert "Verdict `0.1.0a7`" in skill
+    assert "Verdict `0.1.0a8`" in skill
     assert "<python> <skill-root>/scripts/inspect_environment.py" in skill
     assert "python3 <skill-root>/scripts/scan_repository.py" in skill
     assert "verdict-pipeline --help" in skill
@@ -58,6 +60,8 @@ def test_skill_distinguishes_install_upgrade_current_and_repair_states() -> None
 
 
 def test_documented_pipeline_flags_match_the_released_parser() -> None:
+    if not (REPO_ROOT / "scripts" / "run_drift_pipeline.py").is_file():
+        pytest.skip("repository-only parser integration")
     result = subprocess.run(
         [sys.executable, str(REPO_ROOT / "scripts" / "run_drift_pipeline.py"), "--help"],
         check=False,
@@ -73,6 +77,8 @@ def test_documented_pipeline_flags_match_the_released_parser() -> None:
 
 
 def test_customer_entry_document_points_to_the_committed_skill() -> None:
+    if not (REPO_ROOT / "docs" / "AGENT_POC_SKILL.md").is_file():
+        pytest.skip("repository-only documentation integration")
     guide = (REPO_ROOT / "docs" / "AGENT_POC_SKILL.md").read_text(encoding="utf-8")
     readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
 

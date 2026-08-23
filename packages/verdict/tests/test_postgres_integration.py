@@ -212,6 +212,14 @@ def test_live_postgres_migrates_legacy_tables_before_creating_indexes():
                     started_at TIMESTAMPTZ NOT NULL, ended_at TIMESTAMPTZ,
                     duration_ms DOUBLE PRECISION, attributes JSONB, error TEXT
                 );
+                INSERT INTO traces (
+                    trace_id, started_at, ended_at, provider, operation,
+                    tenant_id, tags
+                ) VALUES (
+                    'legacy-task5-trace', '2026-08-16T12:00:00Z',
+                    '2026-08-16T12:00:01Z', 'anthropic', 'chat',
+                    'tenant-upgrade', '{"verdict.intent_key":"billing.v1"}'::jsonb
+                );
             """)
 
         storage = PostgresStorage(scoped_dsn, min_pool=1, max_pool=2)
@@ -227,6 +235,10 @@ def test_live_postgres_migrates_legacy_tables_before_creating_indexes():
             assert {
                 ("traces", "cluster_id"),
                 ("traces", "parent_span_id"),
+                ("traces", "analysis_started_at_us"),
+                ("traces", "analysis_started_at_state"),
+                ("traces", "analysis_raw_messages_utf8_bytes"),
+                ("traces", "analysis_raw_messages_state"),
                 ("spans", "parent_name"),
                 ("judgments", "evaluator_fingerprint"),
                 ("judgments", "status"),
@@ -240,6 +252,35 @@ def test_live_postgres_migrates_legacy_tables_before_creating_indexes():
                 ("evaluator_health", "example_agreement"),
                 ("evaluator_health", "method_version"),
             } <= columns
+
+            tables = {
+                row[0]
+                for row in storage._fetchall(
+                    "SELECT table_name FROM information_schema.tables "
+                    "WHERE table_schema = current_schema()",
+                    (),
+                )
+            }
+            assert {
+                "cluster_registries",
+                "cluster_identities",
+                "cluster_registry_versions",
+                "cluster_registry_clusters",
+                "trace_cluster_assignments",
+                "active_cluster_registry",
+                "cluster_registry_events",
+            } <= tables
+
+            assert storage.count_pending_analysis_rows("tenant-upgrade") == 1
+            assert (
+                storage.normalize_cluster_trace_analysis("tenant-upgrade", limit=100)
+                == 1
+            )
+            assert storage.count_pending_analysis_rows("tenant-upgrade") == 0
+            legacy_trace = storage.get_trace("legacy-task5-trace")
+            assert legacy_trace is not None
+            assert legacy_trace.tags["verdict.intent_key"] == "billing.v1"
+            assert legacy_trace.analysis_started_at_state == "valid"
 
             [legacy_health] = storage.list_evaluator_health(
                 evaluator_fingerprint="legacy-evaluator"

@@ -59,12 +59,12 @@ you use:
 
 ```bash
 python -m pip install \
-  "cognifity-verdict[anthropic,openai,google,dashboard]==0.1.0a7" \
-  "cognifity-verdict-eval[semantic]==0.1.0a7" \
-  "cognifity-verdict-inspect==0.1.0a7"
+  "cognifity-verdict[anthropic,openai,google,dashboard]==0.1.0a8" \
+  "cognifity-verdict-eval[semantic]==0.1.0a8" \
+  "cognifity-verdict-inspect==0.1.0a8"
 ```
 
-For a customer proof of concept on `0.1.0a4`, follow the bounded
+For a customer proof of concept on `0.1.0a8`, follow the bounded
 [`POC release profile`](docs/POC_RELEASE_PROFILE.md). It names the provider
 entry points exercised for this release, keeps persistence synchronous, and
 separates a workflow demonstration from a production-readiness claim.
@@ -81,15 +81,15 @@ PostgreSQL store:
 
 ```bash
 python -m pip install \
-  "cognifity-verdict[dashboard,postgres]==0.1.0a7" \
-  "cognifity-verdict-eval==0.1.0a7" \
-  "cognifity-verdict-inspect==0.1.0a7"
+  "cognifity-verdict[dashboard,postgres]==0.1.0a8" \
+  "cognifity-verdict-eval==0.1.0a8" \
+  "cognifity-verdict-inspect==0.1.0a8"
 ```
 
 The `all` extra preserves its existing provider-and-storage dependency set; it
 does not add the optional dashboard server.
 
-### Upgrade from 0.1.0a5 or 0.1.0a6
+### Upgrade from an earlier synchronized alpha
 
 Upgrade the synchronized distributions in the application's existing virtual
 environment. This also replaces editable installs from an existing Verdict clone;
@@ -97,9 +97,9 @@ do not delete or reclone it:
 
 ```bash
 python -m pip install --upgrade \
-  "cognifity-verdict[anthropic,openai,google,dashboard]==0.1.0a7" \
-  "cognifity-verdict-eval[semantic]==0.1.0a7" \
-  "cognifity-verdict-inspect==0.1.0a7"
+  "cognifity-verdict[anthropic,openai,google,dashboard]==0.1.0a8" \
+  "cognifity-verdict-eval[semantic]==0.1.0a8" \
+  "cognifity-verdict-inspect==0.1.0a8"
 
 python -m pip check
 python -c "import verdict, verdict_eval, verdict_inspect; print(verdict.__version__, verdict_eval.__version__, verdict_inspect.__version__)"
@@ -123,7 +123,7 @@ API remains `import verdict`.
 Minimal install without the local semantic model:
 
 ```bash
-python -m pip install "cognifity-verdict-eval==0.1.0a7"  # lexical hash fallback
+python -m pip install "cognifity-verdict-eval==0.1.0a8"  # lexical hash fallback
 ```
 
 The full test suite also needs pytest and the dashboard's HTTP test dependency:
@@ -184,7 +184,7 @@ international identifiers, and opaque application metadata are not guaranteed
 to be found. IPv6 validation preserves trailing text that is not part of the
 validated address; clock values such as `12:34:56` are not treated as IPv6. Use
 non-sensitive tenant/session/cluster IDs. `sample_rate`
-controls what fraction of supported calls is retained. The `0.1.0a4` POC
+controls what fraction of supported calls is retained. The `0.1.0a8` POC
 profile keeps `buffered_writes=False`, so a normal process exit cannot strand
 queued telemetry. `buffered_writes=True` moves writes to a background batched
 writer but requires an explicit `shutdown()` imported from `verdict.client`
@@ -258,26 +258,24 @@ Hexagonal / ports-and-adapters, ≥2 adapters per port (one real + in-memory for
 ## Honest limits / not in v0
 
 - **No OpenTelemetry/OpenInference span emission** yet (vendor-neutral schema today; exporter is planned).
-- **Published capture coverage through `0.1.0a7`:** the bounded `0.1.0a4` POC
-  profile remains the release evidence: Anthropic
+- **Published capture coverage in `0.1.0a8`:** the bounded POC profile names
+  Anthropic
   `messages.create(...)` (including `stream=True`), OpenAI
   `chat.completions.create(...)` and its stream helper, and Google
-  `models.generate_content(...)` / `generate_content_stream(...)` are the
-  supported entry points. Anthropic `messages.stream(...)` and the OpenAI
-  Responses API are not captured by those published releases. Unreleased source
-  now instruments the Anthropic helper plus synchronous and asynchronous OpenAI
-  `responses.create(...)`, `responses.parse(...)`, raw response streams, and
-  `responses.stream(...)` for new or existing responses. These paths are not
-  public-release evidence until the next synchronized alpha passes its release
-  gates. The separate experimental `client.beta.responses` multi-agent resource
-  is outside this bounded support surface. See the
+  `models.generate_content(...)` / `generate_content_stream(...)`, plus the
+  Anthropic `messages.stream(...)` helper and synchronous and asynchronous OpenAI
+  `responses.create(...)`, `responses.parse(...)`, and
+  `responses.stream(...)` for new or existing responses as supported entry
+  points. OpenAI's `responses.with_streaming_response` raw-response manager and
+  the separate experimental `client.beta.responses` multi-agent resource remain
+  outside this bounded support surface. See the
   [`POC release profile`](docs/POC_RELEASE_PROFILE.md) before instrumenting an
   existing application.
 - Stream traces finalize deterministically on full iteration, an iteration
   error, explicit `close()` / `aclose()`, or context-manager exit. Async
   cancellation is recorded as an error. Dropping a never-iterated or unclosed
   stream and relying on garbage collection is not a supported persistence
-  guarantee. On the unreleased Anthropic helper and OpenAI Responses stream paths,
+  guarantee. On Anthropic helper and OpenAI Responses stream paths,
   `Trace.tags["verdict.stream_completion"]` distinguishes `complete`, `partial`,
   and `error` finalization.
 - **`encrypt` redaction mode** is not implemented (rejected at `init()`);
@@ -371,7 +369,7 @@ Hexagonal / ports-and-adapters, ≥2 adapters per port (one real + in-memory for
   prevents a `healthy` status: too few usable examples remain
   `insufficient_data`; otherwise the result is `degraded`.
   Signals retain up to five current-window trace IDs as review evidence.
-- The `0.1.0a4` POC drift demonstration assumes independently sampled calls.
+- The `0.1.0a8` POC drift demonstration assumes independently sampled calls.
   Do not treat repeated turns from the same conversation as independent
   evidence or use that profile for a production decision.
 - The v0 drift runner supports one tenant scope per store and rejects mixed-
@@ -405,6 +403,8 @@ Apache 2.0 — see [LICENSE](LICENSE).
 ## Docs
 
 - [`CHANGELOG.md`](CHANGELOG.md) — curated release changes and version history.
+- [`docs/RELEASING.md`](docs/RELEASING.md) — synchronized publication,
+  partial-release recovery, and the immutable rollback boundary.
 - [`docs/POC_RELEASE_PROFILE.md`](docs/POC_RELEASE_PROFILE.md) — the exact
   provider, persistence, privacy, and evidence boundaries for customer POCs.
 - [`docs/STATS_PRIMER.md`](docs/STATS_PRIMER.md) — plain-language explanation of every statistical method Verdict uses (Fisher's exact, Cliff's δ, Wasserstein, PSI, Benjamini-Hochberg, Cohen's κ / Gwet's AC2, Bradley-Terry) and *why* each was chosen.

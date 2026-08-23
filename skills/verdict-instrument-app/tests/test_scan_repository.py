@@ -37,7 +37,9 @@ class ScannerTests(unittest.TestCase):
             "client.chat.completions.create(model='mock')\n"
             "client.chat.completions.stream(model='mock')\n"
             "client.responses.create(model='mock')\n"
+            "client.responses.parse(model='mock')\n"
             "client.responses.stream(model='mock')\n"
+            "client.responses.with_streaming_response.create(model='mock')\n"
             "anthropic.messages.stream(model='mock')\n"
             "google.models.generate_content(model='mock', contents='x')\n"
             "legacy_model.generate_content('x')\n"
@@ -47,7 +49,9 @@ class ScannerTests(unittest.TestCase):
             encoding="utf-8",
         )
         (root / "web.ts").write_text(
-            "await client.chat.completions.create({ model: 'mock' });",
+            "await client.chat.completions.create({ model: 'mock' });\n"
+            "await client.responses.create({ model: 'mock' });\n"
+            "await anthropic.messages.stream({ model: 'mock' });",
             encoding="utf-8",
         )
 
@@ -71,16 +75,32 @@ class ScannerTests(unittest.TestCase):
             "unsupported",
         )
         self.assertEqual(
-            by_rule_and_path[("openai-responses-create", "app.py")]["support"],
+            by_rule_and_path[("openai-responses-create", "web.ts")]["support"],
             "unsupported",
+        )
+        self.assertEqual(
+            by_rule_and_path[("anthropic-messages-stream", "web.ts")]["support"],
+            "unsupported",
+        )
+        self.assertEqual(
+            by_rule_and_path[("openai-responses-create", "app.py")]["support"],
+            "supported",
+        )
+        self.assertEqual(
+            by_rule_and_path[("openai-responses-parse", "app.py")]["support"],
+            "supported",
         )
         self.assertEqual(
             by_rule_and_path[("openai-responses-stream", "app.py")]["support"],
-            "unsupported",
+            "supported-with-constraints",
+        )
+        self.assertEqual(
+            by_rule_and_path[("openai-responses-raw-manager", "app.py")]["support"],
+            "conflict",
         )
         self.assertEqual(
             by_rule_and_path[("anthropic-messages-stream", "app.py")]["support"],
-            "unsupported",
+            "supported-with-constraints",
         )
         self.assertEqual(
             by_rule_and_path[("google-generate-content", "app.py")]["support"],
