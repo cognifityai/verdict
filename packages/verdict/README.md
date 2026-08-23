@@ -124,6 +124,23 @@ responsible for cloud credentials, authorization, CSRF protection, collection,
 and job execution. Without `operations_url`, no Operations tab or extra request
 is present.
 
+The dashboard's Registry tab is a bounded, read-only view of the Task 5
+tenant/version registry. It shows active and preview versions, stable display
+names, frozen algorithm/selector/model configuration, representative redacted
+prompts, bounded provider/model distributions, membership explanations,
+terminal outlier/ineligible reasons, coverage, and validation readiness. Its
+per-cluster independent-conversation counts accept only strict-UTF-8, nonempty,
+NUL-free session IDs of at most 256 bytes. Their time-to-readiness value is a
+diagnostic estimate at the documented default windows/floor, not activation
+or drift decisions; fragmentation/dominant-cluster warnings likewise require
+operator inspection. The full 250-cluster list remains visible while nested
+evidence is limited to the 20 highest-volume clusters. Standalone use selects the reserved local scope by
+default and may select an explicit tenant with `?tenant=`. A mounted host can
+instead set `request.state.verdict_registry_tenant`; that authorization-owned
+value wins over query input. Mutation buttons appear only with the same-origin
+Operations adapter. Semantic and hybrid fallback retain their experimental
+disclosure.
+
 For the published releases through `0.1.0a7`, the bounded `0.1.0a4` POC entry
 points remain Anthropic
 `messages.create(...)` (including `stream=True`), OpenAI

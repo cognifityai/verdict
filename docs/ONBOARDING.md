@@ -330,6 +330,22 @@ the other captured workloads.
   tracked in Verdict issue #24. Tenantless Memory/SQLite uses the reserved
   `__verdict_local__` registry scope. See `packages/verdict_eval/README.md` for
   exact commands, safe error codes, inspect/rename, and rollback.
+  The dashboard Registry tab is the bounded product view over those same
+  tenant/version rows. It explains exact-key matches, semantic
+  distance-versus-radius matches, outliers, ineligible traces, validation
+  coverage, active/preview state, the frozen definition/model, representative
+  redacted prompts, and provider/model mix. Per-cluster planning readiness uses
+  distinct strict-UTF-8, nonempty, NUL-free session IDs of at most 256 bytes as
+  of the version cutoff with the default 7-day baseline, 1-day gap, 1-day
+  current window, and n=30 floor. The displayed
+  remaining-traffic/time estimate is directional only—not an activation gate or
+  a persisted drift result. Fragmentation and dominant semantic-cluster warnings
+  require inspection/refit rather than automatic membership changes. The full
+  250-cluster identity list remains visible while nested evidence is limited to
+  the 20 highest-volume clusters. Standalone dashboards are read-only by
+  default; mounted deployments may expose mutations only through their
+  authenticated, CSRF-protected Operations adapter. The host must inject the
+  authorized registry tenant rather than trusting a browser query parameter.
 - **Windows use capture time.** The pipeline places judgments into windows using
   the associated trace's `started_at`, not the time the judgment was created.
   Re-running the same hourly analysis bucket replaces that bucket's signals, so

@@ -327,6 +327,21 @@ Hexagonal / ports-and-adapters, ≥2 adapters per port (one real + in-memory for
   tenantless Memory/SQLite uses the reserved `__verdict_local__` scope. Shadow
   analysis is disabled pending the tenant-isolation correction tracked in issue
   #24.
+  The packaged dashboard's Registry tab reads these immutable versions and
+  shows stable labels, the frozen selector/algorithm/model definition,
+  representative redacted prompts, provider/model mix, membership explanations,
+  terminal reasons, coverage, and activation readiness. Per-cluster planning
+  estimates count distinct strict-UTF-8, nonempty, NUL-free session IDs of at
+  most 256 bytes in the default 7-day baseline / 1-day gap / 1-day current
+  windows at n=30; they are diagnostic traffic estimates,
+  not activation or drift results. Fragmentation and dominant semantic-cluster
+  warnings prompt inspection/refit without changing immutable membership. All
+  250 allowed clusters remain visible; nested evidence is limited to the 20
+  highest-volume clusters so the final redaction sink stays bounded. It is
+  read-only unless an authenticated host
+  supplies the existing same-origin Operations adapter; the host owns tenant
+  authorization and every mutation. Semantic/hybrid rows keep the experimental
+  disclosure above.
 - The batch drift runner uses each captured trace's `started_at` timestamp for
   its current and baseline windows. Every successful analysis atomically stores
   one `DriftRun` marker plus its exact signal set, including an explicit

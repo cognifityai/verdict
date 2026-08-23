@@ -12,6 +12,7 @@ import {
 import { dimensionAxisLabel, dimensionLabel } from "./dimension-labels.js";
 import { providerPresentation } from "./provider-presentation.js";
 import { Operations } from "./Operations.jsx";
+import { Registry } from "./Registry.jsx";
 
 // Embedded synthetic sample data. This keeps the static dashboard renderable when
 // no live API is reachable. It is not a benchmark, experiment result, or claim
@@ -141,6 +142,10 @@ function mountedApiUrl() {
 
 function mountedConfigUrl() {
   return mountedApiUrl().replace(/\/api\/data(?:\?.*)?$/, "/api/config");
+}
+
+function mountedRegistryUrl() {
+  return mountedApiUrl().replace(/\/api\/data(?:\?.*)?$/, "/api/registry");
 }
 
 function useOperationsConfig() {
@@ -515,6 +520,7 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
     { id: "overview", label: "Overview", icon: Gauge },
     { id: "drift", label: "Drift signals", icon: Signal, badge: DATA.driftSignals.length },
     { id: "traces", label: "Trace explorer", icon: Activity },
+    { id: "registry", label: "Registry", icon: Layers },
     { id: "judge", label: "Judge scores", icon: Scale },
     { id: "compare", label: "Compare LLMs", icon: GitBranch },
     ...(operationsUrl ? [{ id: "operations", label: "Operations", icon: Cpu }] : []),
@@ -628,6 +634,7 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
         {tab === "overview" && <Overview data={DATA} />}
         {tab === "drift" && <Drift data={DATA} />}
         {tab === "traces" && <Traces key={evaluation.selectedId || "none"} data={DATA} />}
+        {tab === "registry" && <Registry url={mountedRegistryUrl()} operationsUrl={operationsUrl} />}
         {tab === "judge" && <Judge data={DATA} />}
         {tab === "compare" && <Compare data={DATA} source={source} />}
         {tab === "operations" && operationsUrl && <Operations url={operationsUrl} costBreakdown={DATA.meta.costBreakdown} />}
