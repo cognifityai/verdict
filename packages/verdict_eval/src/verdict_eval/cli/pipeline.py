@@ -274,6 +274,7 @@ def main(argv: list[str] | None = None) -> int:
         return _run(args)
 
     import verdict
+    from verdict import client as verdict_client
 
     try:
         verdict.init(
@@ -289,12 +290,12 @@ def main(argv: list[str] | None = None) -> int:
         )
     except Exception:
         print("ERROR: cannot initialize judge telemetry")
-        verdict.shutdown()
+        verdict_client.shutdown()
         return 2
     try:
         return _run(args)
     finally:
-        verdict.shutdown()
+        verdict_client.shutdown()
 
 
 def _run(args) -> int:

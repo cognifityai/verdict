@@ -6,6 +6,12 @@ the customer POC profile is refined.
 
 ## [Unreleased]
 
+### Fixed
+
+- `verdict-pipeline --capture-judge-telemetry` now shuts down through the core
+  client API, so successful jobs return their real exit status instead of
+  failing after results have been persisted.
+
 ## [0.1.0a10] - 2026-08-24
 
 ### Fixed

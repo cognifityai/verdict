@@ -12,6 +12,7 @@ from verdict.schema import (
     Verdict,
 )
 from verdict.storage.sqlite import SQLiteStorage
+from verdict_eval.cli import pipeline as pipeline_module
 from verdict_eval.cli.pipeline import (
     _exclude_internal_workloads,
     _storage_backend,
@@ -32,6 +33,27 @@ def test_pipeline_defaults_to_semantic_clustering_and_discloses_effect_floor():
     assert args.cluster_threshold == 0.50
     assert args.effect_size_threshold == 0.147
     assert args.capture_judge_telemetry is False
+
+
+@pytest.mark.parametrize("init_fails", [False, True])
+def test_pipeline_telemetry_shutdown_uses_client_api(monkeypatch, init_fails) -> None:
+    import verdict
+    from verdict import client
+
+    shutdowns: list[bool] = []
+
+    def initialize(**_kwargs):
+        if init_fails:
+            raise RuntimeError("synthetic initialization failure")
+
+    monkeypatch.setattr(verdict, "init", initialize)
+    monkeypatch.setattr(verdict, "set_context", lambda **_kwargs: None)
+    monkeypatch.setattr(client, "shutdown", lambda: shutdowns.append(True))
+    monkeypatch.setattr(pipeline_module, "_run", lambda _args: 0)
+
+    expected = 2 if init_fails else 0
+    assert main(["--capture-judge-telemetry"]) == expected
+    assert shutdowns == [True]
 
 
 def test_pipeline_rejects_disabled_shadow_registry_mode() -> None:
