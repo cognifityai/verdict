@@ -878,6 +878,7 @@ def test_bundle_filters_drift_by_selected_evaluator_and_excludes_historical_rows
     ):
         trace = Trace(
             trace_id=f"trace-{suffix}",
+            started_at=datetime(2026, 8, 15, 10, tzinfo=timezone.utc),
             provider="openai",
             cluster_id="support",
             prompt_redacted="Prompt",
@@ -904,6 +905,13 @@ def test_bundle_filters_drift_by_selected_evaluator_and_excludes_historical_rows
         cluster_id="support",
         dimension="historical",
     ))
+    assert storage.prune_before("2026-08-16T00:00:00+00:00") == 2
+    storage.insert_trace(Trace(
+        trace_id="trace-after-multi-retention",
+        started_at=datetime(2026, 8, 16, 13, tzinfo=timezone.utc),
+        prompt_redacted="New prompt",
+        response_redacted="New response",
+    ))
     storage.close()
 
     ambiguous = build_bundle(path)
@@ -911,6 +919,10 @@ def test_bundle_filters_drift_by_selected_evaluator_and_excludes_historical_rows
     assert ambiguous["evaluation"]["driftStatus"] == "selection_required"
     assert ambiguous["driftAnalysis"]["runStatus"] == "selection_required"
     assert ambiguous["driftSignals"] == []
+    assert all(
+        identity["complete"] is False
+        for identity in ambiguous["evaluation"]["availableIdentities"]
+    )
 
     evaluator_a = next(
         identity for identity in ambiguous["evaluation"]["availableIdentities"]
@@ -927,6 +939,7 @@ def test_bundle_uses_latest_completed_drift_run_even_when_it_has_zero_signals(tm
     storage = SQLiteStorage(str(path))
     trace = Trace(
         trace_id="trace-latest-run",
+        started_at=datetime(2026, 8, 15, 10, tzinfo=timezone.utc),
         provider="openai",
         cluster_id="support",
         prompt_redacted="Prompt",
@@ -966,6 +979,13 @@ def test_bundle_uses_latest_completed_drift_run_even_when_it_has_zero_signals(tm
         ),
         [],
     )
+    assert storage.prune_before("2026-08-16T00:00:00+00:00") == 1
+    storage.insert_trace(Trace(
+        trace_id="trace-after-retention",
+        started_at=datetime(2026, 8, 16, 13, tzinfo=timezone.utc),
+        prompt_redacted="New prompt",
+        response_redacted="New response",
+    ))
     storage.close()
 
     bundle = build_bundle(path)
@@ -974,6 +994,10 @@ def test_bundle_uses_latest_completed_drift_run_even_when_it_has_zero_signals(tm
     assert bundle["driftRun"]["id"] == "latest-zero-run"
     assert bundle["driftRun"]["signalCount"] == 0
     assert bundle["evaluation"]["driftStatus"] == "selected"
+    assert bundle["evaluation"]["selectedIdentity"]["complete"] is False
+    assert bundle["evaluation"]["selectedIdentity"]["fingerprint"] == (
+        "latest-run-evaluator"
+    )
 
 
 def test_bundle_builds_independent_cluster_pass_rate_series(tmp_path):

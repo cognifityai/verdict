@@ -828,8 +828,14 @@ def _build(cur, *, evaluator_id: str | None = None) -> dict:
             else ""
         )
 
+    has_drift_table = _table_exists(cur, "drift_signals")
+    has_drift_run_table = _table_exists(cur, "drift_runs")
+    drift_columns = cur.columns("drift_signals") if has_drift_table else set()
+
     # Group persisted judgments by evaluator identity before calculating any
-    # score. Multiple identities require an explicit API/UI selection.
+    # score. Multiple identities require an explicit API/UI selection. Retention
+    # may remove the last judgment while intentionally preserving its completed
+    # run; keep that fingerprint selectable as an explicitly incomplete identity.
     identity_rows: list[tuple[dict, Mapping[str, Any]]] = []
     identity_by_id: dict[str, dict] = {}
     judgment_rows = (
@@ -841,6 +847,33 @@ def _build(cur, *, evaluator_id: str | None = None) -> dict:
         identity = _evaluator_identity(row)
         identity_by_id.setdefault(identity["id"], identity)
         identity_rows.append((identity, row))
+    known_fingerprints = {
+        identity["fingerprint"]
+        for identity in identity_by_id.values()
+        if identity["fingerprint"]
+    }
+    retained_fingerprints = set()
+    if has_drift_run_table:
+        retained_fingerprints.update(
+            row["evaluator_fingerprint"]
+            for row in cur.execute(
+                """SELECT DISTINCT evaluator_fingerprint FROM drift_runs
+                     WHERE evaluator_fingerprint IS NOT NULL
+                       AND evaluator_fingerprint != ''"""
+            )
+        )
+    if has_drift_table and "evaluator_fingerprint" in drift_columns:
+        retained_fingerprints.update(
+            row["evaluator_fingerprint"]
+            for row in cur.execute(
+                """SELECT DISTINCT evaluator_fingerprint FROM drift_signals
+                     WHERE evaluator_fingerprint IS NOT NULL
+                       AND evaluator_fingerprint != ''"""
+            )
+        )
+    for fingerprint in sorted(retained_fingerprints - known_fingerprints):
+        identity = _evaluator_identity({"evaluator_fingerprint": fingerprint})
+        identity_by_id[identity["id"]] = identity
     all_available_identities = sorted(
         identity_by_id.values(), key=lambda identity: (identity["label"], identity["id"])
     )
@@ -887,9 +920,6 @@ def _build(cur, *, evaluator_id: str | None = None) -> dict:
     selected_fingerprint = (
         selected_identity.get("fingerprint") if selected_identity else None
     )
-    has_drift_table = _table_exists(cur, "drift_signals")
-    has_drift_run_table = _table_exists(cur, "drift_runs")
-    drift_columns = cur.columns("drift_signals") if has_drift_table else set()
     drift_signal_count = (
         cur.execute("SELECT COUNT(*) AS n FROM drift_signals").fetchone()["n"]
         if has_drift_table

@@ -258,6 +258,9 @@ unavailable rather than counted as zero drift. Completed analyses are persisted
 as atomic run snapshots, including explicit zero-signal runs. The dashboard
 shows only the latest completed snapshot for the selected evaluator; legacy
 signals without a run identity are excluded rather than presented as current.
+If retention removes the last defining judgment, a retained run remains
+selectable by its fingerprint as a historical incomplete identity; unavailable
+provider, model, and rubric details are not reconstructed.
 Evaluator requests are sequenced and cancelled so an older response cannot
 replace a newer selection. If a load fails, the dashboard explicitly names the
 last confirmed evaluator that remains on screen, and trace/drift detail is
