@@ -794,6 +794,7 @@ def _build(
     baseline_content_traces = 0
     display_workloads: set[str] = set()
     has_undisplayable_workload = False
+    explorer_trace_ids: list[str] = []
 
     # trace_id -> (provider, started_at) and provider model
     tp, ttime, tcluster, model_of, models_of, raw_provider_of = (
@@ -822,6 +823,8 @@ def _build(
         )
         workload = tags.get("verdict.workload") if isinstance(tags, dict) else None
         group = workload if workload in {"agent", "judge"} else "unclassified"
+        if workload != "judge":
+            explorer_trace_ids.append(r["trace_id"])
         displayable_workload = (
             isinstance(workload, str)
             and workload != "judge"
@@ -1398,14 +1401,14 @@ def _build(
 
     # ---- sample traces for the explorer ----
     sample_trace_ids = sorted(
-        ttime,
+        explorer_trace_ids,
         key=lambda trace_id: (_dt(ttime[trace_id]), trace_id),
         reverse=True,
     )[:MAX_TRACE_SAMPLES]
-    placeholders = ",".join("?" for _ in sample_trace_ids)
+    placeholders = ",".join("?" for _ in sample_trace_ids) or "NULL"
     sample_rows = [dict(r) for r in cur.execute(
         # ``cluster_select`` is the same closed-set schema compatibility
-        # expression used above, and placeholders bound the selected IDs.
+        # expression used above. Placeholders bind IDs; fixed NULL handles none.
         "SELECT trace_id, provider, request_model, "
         f"{cluster_select}, input_tokens, output_tokens, "  # nosec B608
         "latency_ms, cost_usd, finish_reason, error, started_at, "
@@ -1487,7 +1490,7 @@ def _build(
             MAX_SERIES_POINTS,
         ),
         "traceSamples": _resource_limit(
-            total_traces,
+            len(explorer_trace_ids),
             len(samples),
             MAX_TRACE_SAMPLES,
         ),

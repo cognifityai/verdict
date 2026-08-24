@@ -267,8 +267,10 @@ last confirmed evaluator that remains on screen, and trace/drift detail is
 derived from IDs in that confirmed snapshot.
 
 Trace Explorer is a bounded newest-first view with complete store totals. It
-shows up to 30 newest traces, breaks equal timestamps by trace ID, and lets you
-filter the bounded view by provider and by `Content captured` or `Metadata only`.
+shows up to 30 newest non-judge application traces, breaks equal timestamps by
+trace ID, and lets you filter the bounded view by provider and by `Content
+captured` or `Metadata only`. Judge telemetry remains in aggregate cost and
+store totals but does not displace application traces from this view.
 Each row uses its recorded UTC time plus relative age. A metadata-only row is
 described as a **historical metadata-only trace**: this means prompt and response
 were not captured when that trace was recorded, not that capture is currently
@@ -300,9 +302,9 @@ trusted reverse proxy. Dashboard time series include only observed hourly bins
 and half-hour latency bins. Presentation data is capped at the latest 100
 observed chart points, 8 providers, 20 usable intent clusters, 12 dimensions,
 20 evaluator identities, 20 models per displayed provider, 40 drift signals,
-and 30 trace samples. The non-intent `unclustered` bucket is excluded from the
-cluster chart and its cap counts, and capped drift signals are ordered by
-absolute effect size. Full-store totals remain in the summary, while a visible
+and 30 non-judge application trace samples. The non-intent `unclustered` bucket
+is excluded from the cluster chart and its cap counts, and capped drift signals
+are ordered by absolute effect size. Full-store totals remain in the summary, while a visible
 banner reports every shown-versus-available capped count. A bundle that still
 exceeds the redaction safety budget returns an explicit service error instead
 of an empty successful dashboard.

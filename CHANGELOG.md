@@ -6,6 +6,12 @@ the customer POC profile is refined.
 
 ## [Unreleased]
 
+### Fixed
+
+- Trace Explorer now reserves its bounded newest-first sample for application
+  traces, so newer judge telemetry cannot hide captured prompts and responses.
+  Judge-call telemetry remains included in aggregate cost and store totals.
+
 ## [0.1.0a11] - 2026-08-24
 
 ### Fixed

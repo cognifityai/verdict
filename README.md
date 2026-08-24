@@ -396,7 +396,8 @@ Hexagonal / ports-and-adapters, ≥2 adapters per port (one real + in-memory for
 - Dashboard responses keep full-store totals but bound presentation data to the
   latest 100 observed chart points, 8 providers, 20 usable intent clusters,
   12 dimensions, 20 models per displayed provider, 20 evaluator identities,
-  40 drift signals, and 30 trace samples. The non-intent `unclustered` bucket
+  40 drift signals, and 30 non-judge application trace samples. The non-intent
+  `unclustered` bucket
   is outside the cluster chart and its cap counts. Drift-signal truncation keeps
   the largest absolute effect sizes. A visible banner reports every capped
   count; a bundle that still exceeds the redaction safety budget returns an

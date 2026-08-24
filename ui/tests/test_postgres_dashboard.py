@@ -101,6 +101,13 @@ def test_live_postgres_and_sqlite_produce_the_same_dashboard_bundle(
             response_redacted="captured response",
             tags={"verdict.workload": "agent"},
         )
+        judge_trace = Trace(
+            trace_id="dashboard-parity-judge-trace",
+            started_at=started_at + timedelta(minutes=5),
+            provider="custom-judge-provider",
+            request_model="custom-judge-model",
+            tags={"verdict.workload": "judge"},
+        )
         judgment = Judgment(
             judgment_id="dashboard-parity-judgment",
             trace_id=trace.trace_id,
@@ -135,6 +142,7 @@ def test_live_postgres_and_sqlite_produce_the_same_dashboard_bundle(
             storage.insert_trace(deepcopy(failed_trace))
             storage.insert_trace(deepcopy(empty_error_trace))
             storage.insert_trace(deepcopy(whitespace_trace))
+            storage.insert_trace(deepcopy(judge_trace))
             storage.insert_judgment(deepcopy(judgment))
             storage.replace_drift_run(deepcopy(run), [deepcopy(signal)])
 
@@ -154,8 +162,17 @@ def test_live_postgres_and_sqlite_produce_the_same_dashboard_bundle(
         assert type(postgres_bundle["providers"][0]["inTok"]) is type(
             sqlite_bundle["providers"][0]["inTok"]
         )
-        assert postgres_bundle["meta"]["totalTraces"] == 4
+        assert postgres_bundle["meta"]["totalTraces"] == 5
         assert postgres_bundle["meta"]["workload"] == "agent"
+        assert postgres_bundle["meta"]["costBreakdown"]["judge"]["traces"] == 1
+        assert postgres_bundle["truncation"]["resources"]["traceSamples"] == {
+            "available": 4,
+            "shown": 4,
+            "limit": 30,
+        }
+        assert judge_trace.trace_id not in {
+            sample["trace_id"] for sample in postgres_bundle["samples"]
+        }
         assert postgres_bundle["driftAnalysis"] == {
             "runStatus": "completed_with_signals",
             "readinessStatus": "not_enough_current",

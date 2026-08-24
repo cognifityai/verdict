@@ -248,6 +248,27 @@ def test_trace_explorer_includes_metadata_only_capture(tmp_path):
     assert bundle["truncation"]["resources"]["traceSamples"]["available"] == 1
 
 
+def test_trace_explorer_excludes_judge_only_store_without_hiding_totals(tmp_path):
+    path = tmp_path / "judge-only.db"
+    storage = SQLiteStorage(str(path))
+    storage.insert_trace(Trace(
+        trace_id="judge-trace",
+        tags={"verdict.workload": "judge"},
+    ))
+    storage.close()
+
+    bundle = build_bundle(path)
+
+    assert bundle["samples"] == []
+    assert bundle["meta"]["totalTraces"] == 1
+    assert bundle["meta"]["costBreakdown"]["judge"]["traces"] == 1
+    assert bundle["truncation"]["resources"]["traceSamples"] == {
+        "available": 0,
+        "shown": 0,
+        "limit": 30,
+    }
+
+
 def test_trace_explorer_prioritizes_newest_traces_with_deterministic_ties(tmp_path):
     path = tmp_path / "newest-traces.db"
     storage = SQLiteStorage(str(path))
@@ -260,12 +281,22 @@ def test_trace_explorer_prioritizes_newest_traces_with_deterministic_ties(tmp_pa
             response_redacted=None if index < 15 else f"captured response {index}",
             error="historical failure" if index == 0 else None,
         ))
-    for trace_id in ("tie-a", "tie-z"):
+    for trace_id, workload in (
+        ("tie-a", "agent"),
+        ("tie-z", "customer-specialist"),
+    ):
         storage.insert_trace(Trace(
             trace_id=trace_id,
             started_at=started_at + timedelta(hours=31),
             prompt_redacted="newest captured prompt",
             response_redacted="newest captured response",
+            tags={"verdict.workload": workload},
+        ))
+    for index in range(30):
+        storage.insert_trace(Trace(
+            trace_id=f"judge-{index:02d}",
+            started_at=started_at + timedelta(hours=100 + index),
+            tags={"verdict.workload": "judge"},
         ))
     storage.close()
 
@@ -277,7 +308,8 @@ def test_trace_explorer_prioritizes_newest_traces_with_deterministic_ties(tmp_pa
     assert "trace-00" not in sample_ids
     assert bundle["samples"][0]["contentCaptured"] is True
     assert bundle["samples"][-1]["contentCaptured"] is False
-    assert bundle["meta"]["totalTraces"] == 33
+    assert bundle["meta"]["totalTraces"] == 63
+    assert bundle["meta"]["costBreakdown"]["judge"]["traces"] == 30
     assert bundle["truncation"]["resources"]["traceSamples"] == {
         "available": 33,
         "shown": 30,

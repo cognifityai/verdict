@@ -584,7 +584,8 @@ test("trace explorer filters the newest bounded view by capture state", async ()
   assert.match(rendered, /CAPTURED_PROMPT/);
   assert.match(rendered, /Captured prompt was empty/);
   assert.doesNotMatch(rendered, /Historical metadata-only trace/);
-  assert.match(rendered, /Showing newest 3 of 37 total traces/);
+  assert.match(rendered, /Showing newest 3 of 37 application traces/);
+  assert.match(rendered, /Judge telemetry remains in store totals and is excluded here/);
   assert.match(rendered, /Filters apply to this bounded view/);
   assert.match(rendered, /UTC/);
   assert.match(rendered, /minutes ago/);

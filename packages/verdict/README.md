@@ -100,8 +100,10 @@ Add the `postgres` extra for a PostgreSQL store. Verdict requires PostgreSQL
 databases to use UTF-8 encoding. Legacy SQL_ASCII databases are not supported.
 The dashboard is read-only and can also be mounted with
 `verdict.dashboard.create_app()` behind an existing
-FastAPI application's authentication. Trace Explorer shows the 30 newest traces
-with complete store totals and provider/content-state filters. A `Historical
+FastAPI application's authentication. Trace Explorer shows the 30 newest
+non-judge application traces with complete store totals and provider/content-
+state filters. Judge telemetry remains in aggregate cost and store totals but
+does not displace application traces from this bounded view. A `Historical
 metadata-only trace` means content was not captured when that specific trace was
 recorded; it does not report the application's current capture setting. Drift
 and Judge empty states show global content-bearing trace availability over the
