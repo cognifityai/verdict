@@ -33,7 +33,10 @@ DSN = os.environ.get("VERDICT_TEST_POSTGRES_DSN")
 pytestmark = pytest.mark.skipif(not DSN, reason="no disposable live Postgres DSN")
 
 
-def test_live_postgres_and_sqlite_produce_the_same_dashboard_bundle(tmp_path) -> None:
+def test_live_postgres_and_sqlite_produce_the_same_dashboard_bundle(
+    monkeypatch,
+    tmp_path,
+) -> None:
     import psycopg
     from psycopg import sql
     from psycopg.conninfo import make_conninfo
@@ -51,6 +54,10 @@ def test_live_postgres_and_sqlite_produce_the_same_dashboard_bundle(tmp_path) ->
         sqlite = SQLiteStorage(str(sqlite_path))
 
         started_at = datetime(2026, 8, 20, 12, tzinfo=timezone.utc)
+        monkeypatch.setattr(
+            "verdict.dashboard.app._now_utc",
+            lambda: started_at + timedelta(hours=1),
+        )
         trace = Trace(
             trace_id="dashboard-parity-trace",
             started_at=started_at,
@@ -63,6 +70,36 @@ def test_live_postgres_and_sqlite_produce_the_same_dashboard_bundle(tmp_path) ->
             output_tokens=34,
             latency_ms=123.0,
             cost_usd=0.001,
+            tags={"verdict.workload": "agent"},
+        )
+        failed_trace = Trace(
+            trace_id="dashboard-parity-failed-trace",
+            started_at=started_at,
+            provider="custom-provider",
+            request_model="custom-model",
+            prompt_redacted="captured prompt",
+            response_redacted="partial response",
+            error="provider failed",
+            tags={"verdict.workload": "agent"},
+        )
+        empty_error_trace = Trace(
+            trace_id="dashboard-parity-empty-error-trace",
+            started_at=started_at,
+            provider="custom-provider",
+            request_model="custom-model",
+            prompt_redacted="captured prompt",
+            response_redacted="captured response",
+            error="",
+            tags={"verdict.workload": "agent"},
+        )
+        whitespace_trace = Trace(
+            trace_id="dashboard-parity-whitespace-trace",
+            started_at=started_at,
+            provider="custom-provider",
+            request_model="custom-model",
+            prompt_redacted="\t\n\N{NO-BREAK SPACE}",
+            response_redacted="captured response",
+            tags={"verdict.workload": "agent"},
         )
         judgment = Judgment(
             judgment_id="dashboard-parity-judgment",
@@ -95,6 +132,9 @@ def test_live_postgres_and_sqlite_produce_the_same_dashboard_bundle(tmp_path) ->
 
         for storage in (sqlite, postgres):
             storage.insert_trace(deepcopy(trace))
+            storage.insert_trace(deepcopy(failed_trace))
+            storage.insert_trace(deepcopy(empty_error_trace))
+            storage.insert_trace(deepcopy(whitespace_trace))
             storage.insert_judgment(deepcopy(judgment))
             storage.replace_drift_run(deepcopy(run), [deepcopy(signal)])
 
@@ -114,7 +154,18 @@ def test_live_postgres_and_sqlite_produce_the_same_dashboard_bundle(tmp_path) ->
         assert type(postgres_bundle["providers"][0]["inTok"]) is type(
             sqlite_bundle["providers"][0]["inTok"]
         )
-        assert postgres_bundle["meta"]["totalTraces"] == 1
+        assert postgres_bundle["meta"]["totalTraces"] == 4
+        assert postgres_bundle["meta"]["workload"] == "agent"
+        assert postgres_bundle["driftAnalysis"] == {
+            "runStatus": "completed_with_signals",
+            "readinessStatus": "not_enough_current",
+            "current": 2,
+            "baseline": 0,
+            "minimum": 30,
+            "currentHours": 24,
+            "baselineLagHours": 24,
+            "baselineDays": 7,
+        }
         assert postgres_bundle["providers"][0]["rawProvider"] == "custom-provider"
         assert postgres_bundle["driftSignals"][0]["id"] == signal.signal_id
     finally:

@@ -96,10 +96,17 @@ python -m pip install "cognifity-verdict[dashboard]==0.1.0a8"
 verdict-dashboard --storage sqlite:///./verdict.db
 ```
 
-Add the `postgres` extra for a PostgreSQL store. The dashboard is read-only and
-can also be mounted with `verdict.dashboard.create_app()` behind an existing
-FastAPI application's authentication. Trace Explorer includes sampled metadata-
-only traces and marks prompt and response content unavailable when capture is off.
+Add the `postgres` extra for a PostgreSQL store. Verdict requires PostgreSQL
+databases to use UTF-8 encoding. Legacy SQL_ASCII databases are not supported.
+The dashboard is read-only and can also be mounted with
+`verdict.dashboard.create_app()` behind an existing
+FastAPI application's authentication. Trace Explorer shows the 30 newest traces
+with complete store totals and provider/content-state filters. A `Historical
+metadata-only trace` means content was not captured when that specific trace was
+recorded; it does not report the application's current capture setting. Drift
+and Judge empty states show the shared 24-hour current and 7-day baseline
+readiness counts, and distinguish a run that has not completed from a completed
+run with zero signals.
 
 Upgrade an existing synchronized `0.1.0a5` through `0.1.0a7` environment with
 `python -m pip install --upgrade`

@@ -28,7 +28,7 @@ function componentStub(names) {
 }
 
 async function loadUiModule() {
-  const source = `${await readFile(UI_SOURCE, "utf8")}\nexport { Dashboard, Traces, TraceDetail, Drift, Judge, Compare, mountedApiUrl };\nexport { useOperations } from "./Operations.jsx";\nexport { RegistryView } from "./Registry.jsx";`;
+  const source = `${await readFile(UI_SOURCE, "utf8")}\nexport { Dashboard, Overview, Traces, TraceDetail, Drift, Judge, Compare, mountedApiUrl };\nexport { useOperations } from "./Operations.jsx";\nexport { RegistryView } from "./Registry.jsx";`;
   const result = await build({
     stdin: {
       contents: source,
@@ -144,11 +144,22 @@ function dashboardElement(tree) {
 
 function bundle(evaluator, samples = [], driftSignals = []) {
   return {
-    meta: { totalTraces: samples.length, totalJudged: 0 },
+    meta: { totalTraces: samples.length, totalJudged: 0, workload: null },
     evaluation: { selectedId: evaluator, availableIdentities: [] },
+    driftAnalysis: {
+      runStatus: "no_completed_run", readinessStatus: "not_enough_current",
+      current: 0, baseline: 0, minimum: 30,
+      currentHours: 24, baselineLagHours: 24, baselineDays: 7,
+    },
+    driftRun: null,
+    clusterHealth: { status: "empty", messages: [], minSampleSize: 30, clustersMeetingSampleFloor: 0, nClusters: 0 },
     providers: [], clusters: [], driftSignals, dimensionOverall: [], tsRows: [],
     passrate: [], clusterPassrate: [], haikuDim: [], samples,
     providerDimension: [], evaluatorHealth: [], scoreCoverage: {},
+    truncation: {
+      applied: samples.length > 30,
+      resources: { traceSamples: { available: samples.length, shown: Math.min(samples.length, 30), limit: 30 } },
+    },
   };
 }
 
@@ -387,6 +398,7 @@ test("drift chart renders custom dimensions and the runtime regression marker", 
   const data = bundle("evaluator-a");
   data.dimensionOverall = [{ dim: "action_correctness", passRate: 80 }];
   data.meta.regressionHour = 17;
+  data.driftAnalysis.runStatus = "completed_no_signals";
 
   const tree = render(ui.Drift, hooks, { data });
   const lines = findAll(tree, (node) => node.type?.name === "Line");
@@ -439,6 +451,24 @@ test("dashboard visibly reports every bounded response resource", async () => {
   assert.match(rendered, /clusters: 20 of 75/);
 });
 
+test("live dashboard identity never falls back to the bundled sample service", async () => {
+  const ui = await loadUiModule();
+  const data = bundle("evaluator-a");
+  data.meta.workload = "agent";
+
+  const rendered = textOf(render(ui.Dashboard, createHooks(), {
+    data,
+    source: "live",
+    onReload() {},
+    onEvaluatorChange() {},
+  }));
+
+  assert.match(rendered, /Live Verdict store/);
+  assert.match(rendered, /Workload: agent/);
+  assert.doesNotMatch(rendered, /sample-service \/ local/i);
+  assert.doesNotMatch(rendered, /WORKLOAD \/ SAMPLE-SERVICE/i);
+});
+
 test("live provider comparison never invents a regression badge", async () => {
   const ui = await loadUiModule();
   const data = bundle("evaluator-a");
@@ -479,7 +509,7 @@ test("live provider comparison shows only persisted provider regressions", async
   assert.equal((rendered.match(/regressed/g) || []).length, 1);
 });
 
-test("metadata-only traces remain inspectable when content capture is off", async () => {
+test("metadata-only traces describe historical capture without claiming capture is off", async () => {
   const ui = await loadUiModule();
   const sample = {
     trace_id: "metadata-trace", provider: "openai", request_model: "gpt-test",
@@ -490,10 +520,13 @@ test("metadata-only traces remain inspectable when content capture is off", asyn
   const data = bundle("evaluator-a", [sample]);
   data.providers = [{ key: "openai", rawProvider: "openai", model: "gpt-test" }];
   const tree = render(ui.Traces, createHooks(), { data });
-  assert.match(textOf(tree), /Content capture off/);
+  assert.match(textOf(tree), /Historical metadata-only trace/);
+  assert.doesNotMatch(textOf(tree), /Content capture off/);
 
   const detail = render(ui.TraceDetail, createHooks(), { s: sample, onClose() {} });
-  assert.match(textOf(detail), /Content was not captured for this trace/);
+  assert.match(textOf(detail), /Historical metadata-only trace/);
+  assert.match(textOf(detail), /Prompt and response content were not captured when this trace was recorded/);
+  assert.match(textOf(detail), /No judge results/);
 });
 
 test("captured empty content remains distinct from capture being off", async () => {
@@ -516,4 +549,142 @@ test("captured empty content remains distinct from capture being off", async () 
   assert.match(rendered, /Captured prompt was empty/);
   assert.match(rendered, /Captured response was empty/);
   assert.doesNotMatch(rendered, /Content was not captured/);
+});
+
+test("trace explorer filters the newest bounded view by capture state", async () => {
+  const ui = await loadUiModule();
+  const hooks = createHooks();
+  const data = bundle("evaluator-a", [
+    {
+      trace_id: "captured-trace", provider: "openai", request_model: "gpt-test",
+      prompt_redacted: "CAPTURED_PROMPT", response_redacted: "CAPTURED_RESPONSE",
+      started_at: new Date(Date.now() - 10 * 60 * 1000).toISOString(),
+    },
+    {
+      trace_id: "captured-empty", provider: "openai", request_model: "gpt-test",
+      prompt_redacted: "", response_redacted: "", started_at: new Date().toISOString(),
+    },
+    {
+      trace_id: "metadata-trace", provider: "openai", request_model: "gpt-test",
+      prompt_redacted: null, response_redacted: null, started_at: "2026-08-20T12:00:00Z",
+    },
+  ]);
+  data.truncation.resources.traceSamples = { available: 37, shown: 3, limit: 30 };
+
+  let tree = render(ui.Traces, hooks, { data });
+  const contentButton = findAll(
+    tree,
+    (node) => node.type === "button" && textOf(node) === "Content captured",
+  )[0];
+  contentButton.props.onClick();
+  tree = render(ui.Traces, hooks, { data });
+  const rendered = textOf(tree);
+
+  assert.match(rendered, /CAPTURED_PROMPT/);
+  assert.match(rendered, /Captured prompt was empty/);
+  assert.doesNotMatch(rendered, /Historical metadata-only trace/);
+  assert.match(rendered, /Showing newest 3 of 37 total traces/);
+  assert.match(rendered, /Filters apply to this bounded view/);
+  assert.match(rendered, /UTC/);
+  assert.match(rendered, /minutes ago/);
+  assert.doesNotMatch(rendered, /\bHour\b/);
+});
+
+test("trace detail distinguishes content, provider failure, and judge availability", async () => {
+  const ui = await loadUiModule();
+  const sample = {
+    trace_id: "failed-trace", provider: "custom-provider", request_model: "custom-model",
+    prompt_redacted: "captured prompt", response_redacted: null,
+    error: "provider failed", started_at: "2026-08-23T22:20:00Z",
+  };
+
+  const rendered = textOf(render(ui.TraceDetail, createHooks(), { s: sample, onClose() {} }));
+
+  assert.match(rendered, /Content partially captured/);
+  assert.match(rendered, /Failed trace/);
+  assert.match(rendered, /No judge results/);
+  assert.match(rendered, /Aug 23, 22:20 UTC/);
+  assert.match(rendered, /Response was not captured for this trace/);
+  assert.doesNotMatch(rendered, /response.*historical metadata-only trace/i);
+});
+
+test("drift empty state shows live readiness and opens Operations", async () => {
+  const ui = await loadUiModule();
+  const data = bundle("evaluator-a");
+  data.driftAnalysis.current = 16;
+  data.driftAnalysis.baseline = 0;
+  let opened = 0;
+
+  const tree = render(ui.Drift, createHooks(), {
+    data,
+    onOpenOperations: () => { opened += 1; },
+  });
+  const rendered = textOf(tree).replace(/\s+/g, " ");
+
+  assert.match(rendered, /No drift analysis has completed yet/);
+  assert.match(rendered, /Current content-bearing traces 16 \/ 30/);
+  assert.match(rendered, /Baseline content-bearing traces 0 \/ 30/);
+  assert.match(rendered, /Current window Latest 24 hours/);
+  assert.match(rendered, /Baseline lag 24 hours/);
+  assert.match(rendered, /Baseline window Previous 7 days/);
+  assert.match(rendered, /New traces cannot simultaneously be recent current data and historical baseline data/);
+  const operationsButton = findAll(
+    tree,
+    (node) => node.type === "button" && textOf(node) === "Open Operations",
+  )[0];
+  operationsButton.props.onClick();
+  assert.equal(opened, 1);
+});
+
+test("completed zero-signal drift is distinct from an analysis that never ran", async () => {
+  const ui = await loadUiModule();
+  const data = bundle("evaluator-a");
+  data.driftAnalysis.runStatus = "completed_no_signals";
+
+  const rendered = textOf(render(ui.Drift, createHooks(), { data }));
+
+  assert.match(rendered, /Completed with no signals/);
+  assert.doesNotMatch(rendered, /No drift analysis has completed yet/);
+});
+
+test("overview reports insufficient readiness without calling it zero drift", async () => {
+  const ui = await loadUiModule();
+  const data = bundle("evaluator-a");
+  data.driftAnalysis.current = 16;
+  data.driftAnalysis.baseline = 0;
+
+  const rendered = textOf(render(ui.Overview, createHooks(), { data }));
+
+  assert.match(rendered, /Not enough current data/);
+  assert.match(rendered, /No completed run/);
+  assert.doesNotMatch(rendered, /No dimensions currently clear/);
+});
+
+test("judge scores explains the empty state using shared readiness", async () => {
+  const ui = await loadUiModule();
+  const data = bundle("evaluator-a");
+  data.driftAnalysis.current = 16;
+  data.driftAnalysis.baseline = 0;
+
+  const rendered = textOf(render(ui.Judge, createHooks(), { data })).replace(/\s+/g, " ");
+
+  assert.match(rendered, /No eligible evaluation pipeline run has completed yet/);
+  assert.match(rendered, /Current content-bearing traces 16 \/ 30/);
+  assert.match(rendered, /Baseline content-bearing traces 0 \/ 30/);
+});
+
+test("unresolved evaluator selection is not described as a missing run", async () => {
+  const ui = await loadUiModule();
+  const data = bundle(null);
+  data.evaluation.status = "selection_required";
+  data.driftAnalysis.runStatus = "selection_required";
+
+  const overview = textOf(render(ui.Overview, createHooks(), { data }));
+  const drift = textOf(render(ui.Drift, createHooks(), { data }));
+  const judge = textOf(render(ui.Judge, createHooks(), { data }));
+
+  assert.match(overview, /Select an evaluator/);
+  assert.match(drift, /Select an evaluator to view drift analysis/);
+  assert.match(judge, /Select an evaluator to view judge results/);
+  assert.doesNotMatch(`${overview} ${drift} ${judge}`, /No drift analysis has completed yet|No eligible evaluation pipeline run has completed yet/);
 });

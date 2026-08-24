@@ -263,11 +263,23 @@ replace a newer selection. If a load fails, the dashboard explicitly names the
 last confirmed evaluator that remains on screen, and trace/drift detail is
 derived from IDs in that confirmed snapshot.
 
-Trace Explorer includes sampled metadata-only calls. When capture is off, it
-shows provider, model, timing, token, cost, and error metadata while explicitly
-marking prompt and response content unavailable. Provider comparison badges are
-derived only from persisted signals in the selected completed drift run; provider
-identity alone never implies a regression.
+Trace Explorer is a bounded newest-first view with complete store totals. It
+shows up to 30 newest traces, breaks equal timestamps by trace ID, and lets you
+filter the bounded view by provider and by `Content captured` or `Metadata only`.
+Each row uses its recorded UTC time plus relative age. A metadata-only row is
+described as a **historical metadata-only trace**: this means prompt and response
+were not captured when that trace was recorded, not that capture is currently
+disabled. Captured empty strings remain distinct from metadata-only history.
+Provider comparison badges are derived only from persisted signals in the
+selected completed drift run; provider identity alone never implies a regression.
+
+Before a drift or judge run exists, Overview, Drift, and Judge show the same live
+content-bearing readiness counts instead of rendering an empty chart as zero
+drift. The current window is the latest 24 hours; the baseline is the preceding
+7 days after its 24-hour lag, with a minimum of 30 eligible traces in each.
+`No drift analysis has completed yet`, `Completed with no signals`, and
+`Completed with signals` are separate states. A mounted host that supplies the
+same-origin Operations adapter also exposes the action from the empty state.
 
 Set both `VERDICT_USER` and `VERDICT_PASS` before starting the server to require
 HTTP Basic authentication for the dashboard shells at `/` and `/dashboard` plus
