@@ -274,9 +274,13 @@ Provider comparison badges are derived only from persisted signals in the
 selected completed drift run; provider identity alone never implies a regression.
 
 Before a drift or judge run exists, Overview, Drift, and Judge show the same live
-content-bearing readiness counts instead of rendering an empty chart as zero
-drift. The current window is the latest 24 hours; the baseline is the preceding
-7 days after its 24-hour lag, with a minimum of 30 eligible traces in each.
+global content-bearing trace counts instead of rendering an empty chart as zero
+drift. The displayed default current window is the latest 24 hours; the default
+baseline is the preceding 7 days after its 24-hour lag, with a global minimum of
+30 traces in each. Meeting those totals means only that the global trace minimum
+is met. The pipeline still checks judged-sample sufficiency for every eligible
+cluster and rubric dimension, and actual job flags may use different windows or
+sample floors.
 `No drift analysis has completed yet`, `Completed with no signals`, and
 `Completed with signals` are separate states. A mounted host that supplies the
 same-origin Operations adapter also exposes the action from the empty state.

@@ -608,11 +608,12 @@ test("trace detail distinguishes content, provider failure, and judge availabili
   assert.doesNotMatch(rendered, /response.*historical metadata-only trace/i);
 });
 
-test("drift empty state shows live readiness and opens Operations", async () => {
+test("drift empty state treats global trace totals as availability and opens Operations", async () => {
   const ui = await loadUiModule();
   const data = bundle("evaluator-a");
-  data.driftAnalysis.current = 16;
-  data.driftAnalysis.baseline = 0;
+  data.driftAnalysis.current = 30;
+  data.driftAnalysis.baseline = 30;
+  data.driftAnalysis.readinessStatus = "global_minimum_met";
   let opened = 0;
 
   const tree = render(ui.Drift, createHooks(), {
@@ -622,12 +623,16 @@ test("drift empty state shows live readiness and opens Operations", async () => 
   const rendered = textOf(tree).replace(/\s+/g, " ");
 
   assert.match(rendered, /No drift analysis has completed yet/);
-  assert.match(rendered, /Current content-bearing traces 16 \/ 30/);
-  assert.match(rendered, /Baseline content-bearing traces 0 \/ 30/);
-  assert.match(rendered, /Current window Latest 24 hours/);
-  assert.match(rendered, /Baseline lag 24 hours/);
-  assert.match(rendered, /Baseline window Previous 7 days/);
+  assert.match(rendered, /Global trace minimum met/);
+  assert.match(rendered, /Current global content-bearing traces 30 \/ 30/);
+  assert.match(rendered, /Baseline global content-bearing traces 30 \/ 30/);
+  assert.match(rendered, /Default current window Latest 24 hours/);
+  assert.match(rendered, /Default baseline lag 24 hours/);
+  assert.match(rendered, /Default baseline window Previous 7 days/);
+  assert.match(rendered, /each cluster and rubric dimension has enough judged traces/);
+  assert.match(rendered, /Actual job flags may use different windows or sample floors/);
   assert.match(rendered, /New traces cannot simultaneously be recent current data and historical baseline data/);
+  assert.doesNotMatch(rendered, /Ready to run/);
   const operationsButton = findAll(
     tree,
     (node) => node.type === "button" && textOf(node) === "Open Operations",
@@ -655,7 +660,7 @@ test("overview reports insufficient readiness without calling it zero drift", as
 
   const rendered = textOf(render(ui.Overview, createHooks(), { data }));
 
-  assert.match(rendered, /Not enough current data/);
+  assert.match(rendered, /Collecting current traces/);
   assert.match(rendered, /No completed run/);
   assert.doesNotMatch(rendered, /No dimensions currently clear/);
 });
@@ -669,8 +674,8 @@ test("judge scores explains the empty state using shared readiness", async () =>
   const rendered = textOf(render(ui.Judge, createHooks(), { data })).replace(/\s+/g, " ");
 
   assert.match(rendered, /No eligible evaluation pipeline run has completed yet/);
-  assert.match(rendered, /Current content-bearing traces 16 \/ 30/);
-  assert.match(rendered, /Baseline content-bearing traces 0 \/ 30/);
+  assert.match(rendered, /Current global content-bearing traces 16 \/ 30/);
+  assert.match(rendered, /Baseline global content-bearing traces 0 \/ 30/);
 });
 
 test("unresolved evaluator selection is not described as a missing run", async () => {

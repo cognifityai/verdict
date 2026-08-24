@@ -104,9 +104,12 @@ FastAPI application's authentication. Trace Explorer shows the 30 newest traces
 with complete store totals and provider/content-state filters. A `Historical
 metadata-only trace` means content was not captured when that specific trace was
 recorded; it does not report the application's current capture setting. Drift
-and Judge empty states show the shared 24-hour current and 7-day baseline
-readiness counts, and distinguish a run that has not completed from a completed
-run with zero signals.
+and Judge empty states show global content-bearing trace availability over the
+default 24-hour current and 7-day baseline windows. Meeting both displayed
+totals does not establish statistical readiness: the pipeline still checks each
+eligible cluster and rubric dimension for enough judged traces, and job flags
+may use different windows or sample floors. The dashboard distinguishes a run
+that has not completed from a completed run with zero signals.
 
 Upgrade an existing synchronized `0.1.0a5` through `0.1.0a7` environment with
 `python -m pip install --upgrade`

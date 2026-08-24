@@ -35,7 +35,7 @@ const SEED = (() => {
       providers: 3, clusters: 4, workload: 'sample-service',
     },
     driftAnalysis: {
-      runStatus: 'completed_with_signals', readinessStatus: 'ready_to_run',
+      runStatus: 'completed_with_signals', readinessStatus: 'global_minimum_met',
       current: 48, baseline: 48, minimum: 30,
       currentHours: 24, baselineLagHours: 24, baselineDays: 7,
     },
@@ -310,29 +310,30 @@ function analysisHeadline(analysis) {
   if (analysis.runStatus === "invalid_selection") return "Selected evaluator is unavailable";
   if (analysis.runStatus === "completed_with_signals") return "Completed with signals";
   if (analysis.runStatus === "completed_no_signals") return "Completed with no signals";
-  if (analysis.readinessStatus === "not_enough_baseline") return "Not enough baseline data";
-  if (analysis.readinessStatus === "ready_to_run") return "Ready to run";
-  return "Not enough current data";
+  if (analysis.readinessStatus === "not_enough_baseline") return "Collecting baseline traces";
+  if (analysis.readinessStatus === "global_minimum_met") return "Global trace minimum met";
+  return "Collecting current traces";
 }
 
 function ReadinessSummary({ analysis }) {
+  const globalMinimumMet = analysis.readinessStatus === "global_minimum_met";
   return (
     <div className="mt-4">
       <div className="grid sm:grid-cols-2 gap-3">
         <div className="rounded-md p-3" style={{ background: C.panel2, border: `1px solid ${C.border}` }}>
-          <div className="text-xs" style={{ color: C.sub }}>Current content-bearing traces</div>
+          <div className="text-xs" style={{ color: C.sub }}>Current global content-bearing traces</div>
           <div className="font-semibold mt-0.5" style={{ fontSize: 17 }}>{`${analysis.current} / ${analysis.minimum}`}</div>
         </div>
         <div className="rounded-md p-3" style={{ background: C.panel2, border: `1px solid ${C.border}` }}>
-          <div className="text-xs" style={{ color: C.sub }}>Baseline content-bearing traces</div>
+          <div className="text-xs" style={{ color: C.sub }}>Baseline global content-bearing traces</div>
           <div className="font-semibold mt-0.5" style={{ fontSize: 17 }}>{`${analysis.baseline} / ${analysis.minimum}`}</div>
         </div>
       </div>
       <div className="grid sm:grid-cols-3 gap-3 mt-3">
         {[
-          ["Current window", `Latest ${analysis.currentHours} hours`],
-          ["Baseline lag", `${analysis.baselineLagHours} hours`],
-          ["Baseline window", `Previous ${analysis.baselineDays} days`],
+          ["Default current window", `Latest ${analysis.currentHours} hours`],
+          ["Default baseline lag", `${analysis.baselineLagHours} hours`],
+          ["Default baseline window", `Previous ${analysis.baselineDays} days`],
         ].map(([label, value]) => (
           <div key={label} className="rounded-md p-3" style={{ background: C.panel2, border: `1px solid ${C.border}` }}>
             <div className="text-xs" style={{ color: C.sub }}>{label}</div>
@@ -341,6 +342,12 @@ function ReadinessSummary({ analysis }) {
         ))}
       </div>
       <div className="text-xs mt-3" style={{ color: C.faint }}>
+        {globalMinimumMet
+          ? "Enough content-bearing traces exist across the overall default windows. The pipeline will still check whether each cluster and rubric dimension has enough judged traces."
+          : "These global counts show content availability only. They do not establish whether each cluster and rubric dimension has enough judged traces."}
+        {" "}Actual job flags may use different windows or sample floors.
+      </div>
+      <div className="text-xs mt-2" style={{ color: C.faint }}>
         New traces cannot simultaneously be recent current data and historical baseline data. The baseline matures only after its {analysis.baselineLagHours}-hour lag.
       </div>
     </div>
@@ -1338,7 +1345,7 @@ function Judge({ data = SEED, onOpenOperations = null }) {
               <div className="text-sm mt-1" style={{ color: C.sub }}>
                 {evaluatorSelectionNeeded
                   ? "Choose an evaluator identity above to load its persisted judgments and completed runs."
-                  : "Judge charts appear only after an eligible run stores evaluator results. Readiness uses the same content-bearing trace windows as drift analysis."}
+                  : "Judge charts appear only after an eligible run stores evaluator results. The availability summary uses the same default content-bearing trace windows as drift analysis."}
               </div>
               {ReadinessSummary({ analysis })}
               {onOpenOperations && (

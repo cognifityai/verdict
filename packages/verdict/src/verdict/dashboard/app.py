@@ -430,7 +430,7 @@ def _drift_analysis(
     elif baseline < DRIFT_MIN_SAMPLE_SIZE:
         readiness_status = "not_enough_baseline"
     else:
-        readiness_status = "ready_to_run"
+        readiness_status = "global_minimum_met"
     return {
         "runStatus": run_status,
         "readinessStatus": readiness_status,

@@ -285,7 +285,7 @@ def test_trace_explorer_prioritizes_newest_traces_with_deterministic_ties(tmp_pa
     }
 
 
-def test_dashboard_reports_live_content_readiness_without_counting_gap_or_judge_rows(
+def test_dashboard_reports_global_content_availability_without_claiming_readiness(
     monkeypatch,
     tmp_path,
 ):
@@ -298,7 +298,7 @@ def test_dashboard_reports_live_content_readiness_without_counting_gap_or_judge_
         lambda: analysis_time,
         raising=False,
     )
-    for index in range(28):
+    for index in range(29):
         storage.insert_trace(Trace(
             trace_id=f"current-{index:02d}",
             started_at=analysis_time - timedelta(hours=1),
@@ -371,8 +371,8 @@ def test_dashboard_reports_live_content_readiness_without_counting_gap_or_judge_
     assert bundle["meta"]["workload"] == "agent"
     assert bundle["driftAnalysis"] == {
         "runStatus": "no_completed_run",
-        "readinessStatus": "not_enough_current",
-        "current": 29,
+        "readinessStatus": "global_minimum_met",
+        "current": 30,
         "baseline": 30,
         "minimum": 30,
         "currentHours": 24,
