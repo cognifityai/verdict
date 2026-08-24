@@ -264,6 +264,32 @@ def test_live_postgres_and_sqlite_registry_dashboard_shapes_match(tmp_path) -> N
             identity.cluster_id,
             "explicit",
         )
+        judgment = Judgment(
+            judgment_id="registry-dashboard-judgment",
+            trace_id=trace.trace_id,
+            created_at=now,
+            evaluator_provider="anthropic",
+            evaluator_config={"temperature": 0},
+            evaluator_fingerprint="registry-dashboard-evaluator",
+            expected_dimensions=["quality"],
+            judge_models=["claude-haiku-4-5"],
+            dimensions=[DimensionScore(name="quality", verdict=Verdict.FAIL)],
+        )
+        drift_run = DriftRun(
+            run_id="registry-dashboard-drift-run",
+            analysis_time=now + timedelta(hours=1),
+            completed_at=now + timedelta(hours=1, seconds=1),
+            evaluator_fingerprint=judgment.evaluator_fingerprint,
+            signal_count=1,
+        )
+        drift_signal = DriftSignal(
+            signal_id="registry-dashboard-drift-signal",
+            run_id=drift_run.run_id,
+            detected_at=drift_run.analysis_time,
+            cluster_id=identity.cluster_id,
+            dimension="quality",
+            evaluator_fingerprint=judgment.evaluator_fingerprint,
+        )
         validation = ClusterRegistryEvent(
             tenant_id=tenant,
             event_id="cre-registry-dashboard-validation",
@@ -339,6 +365,11 @@ def test_live_postgres_and_sqlite_registry_dashboard_shapes_match(tmp_path) -> N
                 tenant,
                 deepcopy(boundary_assignments),
             )
+            storage.insert_judgment(deepcopy(judgment))
+            storage.replace_drift_run(
+                deepcopy(drift_run),
+                [deepcopy(drift_signal)],
+            )
 
         sqlite.close()
         sqlite = None
@@ -346,6 +377,11 @@ def test_live_postgres_and_sqlite_registry_dashboard_shapes_match(tmp_path) -> N
         postgres = None
         sqlite_bundle = build_registry_bundle(f"sqlite:///{sqlite_path}", tenant=tenant)
         postgres_bundle = build_registry_bundle(scoped_dsn, tenant=tenant)
+        sqlite_data = build_bundle(
+            f"sqlite:///{sqlite_path}",
+            registry_tenant=tenant,
+        )
+        postgres_data = build_bundle(scoped_dsn, registry_tenant=tenant)
 
         json.dumps(postgres_bundle)
         for bundle in (sqlite_bundle, postgres_bundle):
@@ -382,6 +418,15 @@ def test_live_postgres_and_sqlite_registry_dashboard_shapes_match(tmp_path) -> N
         assert postgres_bundle["selectedVersion"] == sqlite_bundle["selectedVersion"]
         assert postgres_bundle["clusters"] == sqlite_bundle["clusters"]
         assert postgres_bundle["assignments"] == sqlite_bundle["assignments"]
+        assert postgres_data == sqlite_data
+        assert postgres_data["clusters"] == [
+            {
+                "cluster_id": identity.cluster_id,
+                "display_name": identity.display_name,
+                "n": 64,
+            }
+        ]
+        assert postgres_data["driftSignals"][0]["clusterLabel"] == identity.display_name
     finally:
         if sqlite is not None:
             sqlite.close()

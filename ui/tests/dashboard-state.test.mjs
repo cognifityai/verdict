@@ -380,8 +380,8 @@ test("only one same-dimension drift card opens because state is keyed by signal 
   const driftHooks = createHooks();
   const requests = deferredFetches();
   const data = bundle("evaluator-a", [], [
-    { id: "signal-a", dimension: "quality", direction: "regression", layers: [], providerLabel: "A" },
-    { id: "signal-b", dimension: "quality", direction: "regression", layers: [], providerLabel: "A" },
+    { id: "signal-a", clusterId: "clu-a", clusterLabel: "Billing support", dimension: "quality", direction: "regression", layers: [], providerLabel: "A" },
+    { id: "signal-b", clusterId: "clu-a", clusterLabel: "Billing support", dimension: "quality", direction: "regression", layers: [], providerLabel: "A" },
   ]);
   const dashboard = dashboardElement(render(ui.DashboardRoot, rootHooks));
   dashboard.props.onEvaluatorChange("evaluator-a");
@@ -390,6 +390,7 @@ test("only one same-dimension drift card opens because state is keyed by signal 
   const tree = render(ui.Drift, driftHooks, { data });
 
   assert.equal((textOf(tree).match(/Recommended action/g) || []).length, 1);
+  assert.match(textOf(tree), /Billing support/);
 });
 
 test("drift chart renders custom dimensions and the runtime regression marker", async () => {

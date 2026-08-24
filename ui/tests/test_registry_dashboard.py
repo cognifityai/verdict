@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 from datetime import datetime, timedelta, timezone
 
 import httpx
 from fastapi import FastAPI, Request
-from verdict.dashboard.app import build_registry_bundle, create_app
+from verdict.dashboard.app import build_bundle, build_registry_bundle, create_app
 from verdict.schema import (
     ClusterIdentity,
     ClusterRegistryCluster,
@@ -136,10 +137,12 @@ def test_registry_api_uses_host_authorized_tenant_and_explains_terminal_membersh
                     "/admin/verdict/api/registry",
                     params={"tenant": "tenant-b", "version": version_b},
                 ),
+                await client.get("/admin/verdict/api/data"),
             )
 
-    response, rejected_version = asyncio.run(request_registry())
+    response, rejected_version, data_response = asyncio.run(request_registry())
     payload = response.json()
+    data_payload = data_response.json()
 
     assert response.status_code == 200
     assert payload["schema"] == "cluster-registry-dashboard-v1"
@@ -209,6 +212,31 @@ def test_registry_api_uses_host_authorized_tenant_and_explains_terminal_membersh
     assert "TENANTLESS PRIVATE PROMPT" not in str(payload)
     assert "tenantless-private-session" not in str(payload)
     assert rejected_version.status_code == 404
+    assert data_response.status_code == 200
+    assert data_payload["meta"]["clusters"] == 1
+    assert data_payload["clusters"] == [
+        {
+            "cluster_id": cluster_id,
+            "display_name": "Billing requests 100",
+            "n": 1,
+        }
+    ]
+    tenant_a_sample = next(
+        item for item in data_payload["samples"] if item["trace_id"] == "tenant-a-trace"
+    )
+    assert tenant_a_sample["cluster_id"] == cluster_id
+    assert tenant_a_sample["cluster_label"] == "Billing requests 100"
+    tenantless_sample = next(
+        item for item in data_payload["samples"] if item["trace_id"] == "tenantless-private"
+    )
+    assert tenantless_sample["cluster_id"] is None
+    assert tenantless_sample["cluster_label"] is None
+
+    with sqlite3.connect(path) as partial:
+        partial.execute("DROP TABLE cluster_registry_versions")
+    partial_bundle = build_bundle(path, registry_tenant="tenant-a")
+    assert partial_bundle["meta"]["clusters"] == 0
+    assert all(sample["cluster_id"] is None for sample in partial_bundle["samples"])
 
 
 def test_registry_api_is_additive_for_old_stores_and_requires_explicit_shared_scope(

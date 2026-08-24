@@ -172,7 +172,11 @@ verdict-pipeline --storage sqlite:///./verdict.db \
 The same command accepts a PostgreSQL URL when the `postgres` extra is
 installed. Applications can instead mount `verdict.dashboard.create_app()`
 inside an existing FastAPI service; the browser API resolves relative to the
-mount path, so the packaged UI and server stay on the same version.
+mount path, so the packaged UI and server stay on the same version. When the
+authenticated host supplies `request.state.verdict_registry_tenant`, Overview,
+Trace Explorer, cluster pass-rate charts, and drift rows use the assignments and
+stable labels from that tenant's active registry. Standalone and legacy stores
+continue to use the trace's stored `cluster_id`.
 
 Content capture is **off by default** (a PII surface). With
 `verdict.init(capture_content=True)`, Verdict recursively sanitizes supported
@@ -338,8 +342,10 @@ Hexagonal / ports-and-adapters, ≥2 adapters per port (one real + in-memory for
   highest-volume clusters so the final redaction sink stays bounded. It is
   read-only unless an authenticated host
   supplies the existing same-origin Operations adapter; the host owns tenant
-  authorization and every mutation. Semantic/hybrid rows keep the experimental
-  disclosure above.
+  authorization and every mutation. That host-authorized active registry also
+  drives cluster labels and assignments in Overview, Trace Explorer, pass-rate
+  charts, and drift rows. Semantic/hybrid rows keep the experimental disclosure
+  above.
 - The batch drift runner uses each captured trace's `started_at` timestamp for
   its current and baseline windows. Every successful analysis atomically stores
   one `DriftRun` marker plus its exact signal set, including an explicit

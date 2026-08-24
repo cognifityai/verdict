@@ -174,7 +174,10 @@ migrating either store. Install `cognifity-verdict[dashboard]` for SQLite or
 `cognifity-verdict[dashboard,postgres]` for PostgreSQL, then run
 `verdict-dashboard --storage ...`. A FastAPI host can mount
 `verdict.dashboard.create_app()` so its authenticated application and the
-packaged Verdict UI run together.
+packaged Verdict UI run together. A host-authorized
+`request.state.verdict_registry_tenant` makes the active registry the cluster
+source for Overview, Trace Explorer, pass-rate charts, and drift labels;
+standalone and legacy stores retain their stored trace cluster IDs.
 The mount accepts an optional same-origin `operations_url`. When configured,
 the same packaged UI adds an Operations view for normalized host telemetry and
 job controls. Collection, authorization, CSRF, and execution stay in the host;
