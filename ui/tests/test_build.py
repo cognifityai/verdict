@@ -26,7 +26,7 @@ def test_generated_pages_fingerprint_local_assets():
 def test_cluster_ids_are_not_reformatted_as_rubric_dimensions():
     source = (build.HERE / "VerdictUI.jsx").read_text()
     assert "label: dimensionLabel(cluster.cluster_id)" not in source
-    assert "label: cluster.cluster_id" in source
+    assert "label: cluster.display_name || cluster.cluster_id" in source
 
 
 def test_overview_does_not_label_a_missing_effect_size_as_clear():

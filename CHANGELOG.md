@@ -6,6 +6,13 @@ the customer POC profile is refined.
 
 ## [Unreleased]
 
+### Fixed
+
+- Mounted dashboards now project Overview, Trace Explorer, cluster pass-rate
+  data, and drift labels from the host-authorized active registry instead of
+  showing stale or empty legacy `Trace.cluster_id` values. Standalone and legacy
+  stores keep their existing trace-cluster behavior.
+
 ## [0.1.0a9] - 2026-08-23
 
 ### Fixed

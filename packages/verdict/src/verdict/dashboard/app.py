@@ -29,6 +29,7 @@ from urllib.parse import urlsplit
 from verdict.dashboard.registry import (
     RegistryNotFoundError,
     RegistryStateError,
+    active_cluster_projection,
 )
 from verdict.dashboard.registry import (
     build_registry_bundle as _build_registry_bundle,
@@ -502,15 +503,21 @@ def build_bundle(
     storage: str | os.PathLike[str],
     *,
     evaluator_id: str | None = None,
+    registry_tenant: str | None = None,
 ) -> dict:
     configured = str(storage)
     if _is_postgres(configured):
-        return _build_from_postgres(configured, evaluator_id=evaluator_id)
+        return _build_from_postgres(
+            configured,
+            evaluator_id=evaluator_id,
+            registry_tenant=registry_tenant,
+        )
     path = _sqlite_path(configured)
     try:
         return _build_from_connection(
             sqlite3.connect(f"file:{path}?mode=ro", uri=True),
             evaluator_id=evaluator_id,
+            registry_tenant=registry_tenant,
         )
     except sqlite3.OperationalError as exc:
         if "unable to open database file" not in str(exc).lower():
@@ -523,7 +530,11 @@ def build_bundle(
         _log.warning("read-only SQLite URI failed; retrying with query-only connection: %s", exc)
         con = sqlite3.connect(path)
         con.execute("PRAGMA query_only = ON")
-        return _build_from_connection(con, evaluator_id=evaluator_id)
+        return _build_from_connection(
+            con,
+            evaluator_id=evaluator_id,
+            registry_tenant=registry_tenant,
+        )
 
 
 def build_registry_bundle(
@@ -584,6 +595,7 @@ def _build_from_connection(
     con: sqlite3.Connection,
     *,
     evaluator_id: str | None = None,
+    registry_tenant: str | None = None,
 ) -> dict:
     con.row_factory = sqlite3.Row
     try:
@@ -593,6 +605,7 @@ def _build_from_connection(
         bundle = _redacted_bundle(
             _SQLiteSession(con),
             evaluator_id=evaluator_id,
+            registry_tenant=registry_tenant,
         )
         if not isinstance(bundle, dict):
             raise DashboardBundleLimitError(
@@ -611,6 +624,7 @@ def _build_from_postgres(
     dsn: str,
     *,
     evaluator_id: str | None = None,
+    registry_tenant: str | None = None,
 ) -> dict:
     try:
         import psycopg
@@ -627,6 +641,7 @@ def _build_from_postgres(
             return _redacted_bundle(
                 _PostgresSession(connection),
                 evaluator_id=evaluator_id,
+                registry_tenant=registry_tenant,
             )
 
 
@@ -634,8 +649,15 @@ def _redacted_bundle(
     session: _QuerySession,
     *,
     evaluator_id: str | None,
+    registry_tenant: str | None,
 ) -> dict:
-    bundle = redact_structure(_build(session, evaluator_id=evaluator_id))
+    bundle = redact_structure(
+        _build(
+            session,
+            evaluator_id=evaluator_id,
+            registry_tenant=registry_tenant,
+        )
+    )
     if not isinstance(bundle, dict):
         raise DashboardBundleLimitError(
             "bounded dashboard bundle exceeded the redaction structure budget"
@@ -737,7 +759,12 @@ def _empty_bundle() -> dict:
     }
 
 
-def _build(cur, *, evaluator_id: str | None = None) -> dict:
+def _build(
+    cur,
+    *,
+    evaluator_id: str | None = None,
+    registry_tenant: str | None = None,
+) -> dict:
     if not _table_exists(cur, "traces"):
         return _empty_bundle()
     t0row = cur.execute("SELECT MIN(started_at) m, MAX(started_at) x FROM traces").fetchone()
@@ -827,6 +854,16 @@ def _build(cur, *, evaluator_id: str | None = None) -> dict:
             if known_models
             else ""
         )
+
+    cluster_labels: dict[str, str] = {}
+    if registry_tenant is not None:
+        projection = active_cluster_projection(cur, registry_tenant)
+        if projection is not None:
+            assignments, cluster_labels = projection
+            tcluster = {
+                trace_id: assignments.get(trace_id)
+                for trace_id in tcluster
+            }
 
     has_drift_table = _table_exists(cur, "drift_signals")
     has_drift_run_table = _table_exists(cur, "drift_runs")
@@ -1117,15 +1154,9 @@ def _build(cur, *, evaluator_id: str | None = None) -> dict:
     # Drift is detected per (cluster, dimension) and may span providers; the
     # detector does not establish a causal provider, so we never guess one.
     cluster_providers: dict[str, set] = {}
-    if "cluster_id" in trace_columns:
-        for r in cur.execute(
-            """SELECT DISTINCT cluster_id, provider
-                 FROM traces
-                WHERE cluster_id IS NOT NULL AND cluster_id <> ''"""
-        ):
-            cluster_providers.setdefault(r["cluster_id"], set()).add(
-                _provider_key(r["provider"])
-            )
+    for trace_id, cluster_id in tcluster.items():
+        if cluster_id:
+            cluster_providers.setdefault(cluster_id, set()).add(tp[trace_id])
 
     # ---- providers ----
     providers = []
@@ -1170,23 +1201,23 @@ def _build(cur, *, evaluator_id: str | None = None) -> dict:
     # ---- clusters ----
     from verdict_eval.stable_clustering import UNCLUSTERED_ID
 
-    clusters = (
-        [dict(cluster_id=r["cluster_id"], n=r["n"]) for r in cur.execute(
-            """SELECT cluster_id, COUNT(*) n FROM traces
-               WHERE cluster_id IS NOT NULL AND cluster_id <> ''
-                 AND cluster_id <> ?
-               GROUP BY cluster_id ORDER BY n DESC, cluster_id
-               LIMIT ?""",
-            (UNCLUSTERED_ID, MAX_DASHBOARD_CLUSTERS),
-        )]
-        if "cluster_id" in trace_columns
-        else []
+    cluster_counts = Counter(
+        cluster_id
+        for cluster_id in tcluster.values()
+        if cluster_id and cluster_id != UNCLUSTERED_ID
     )
-    cluster_ids = (
-        [r["cluster_id"] for r in cur.execute("SELECT cluster_id FROM traces")]
-        if "cluster_id" in trace_columns
-        else []
-    )
+    clusters = [
+        {
+            "cluster_id": cluster_id,
+            "display_name": cluster_labels.get(cluster_id, cluster_id),
+            "n": count,
+        }
+        for cluster_id, count in sorted(
+            cluster_counts.items(),
+            key=lambda item: (-item[1], item[0]),
+        )[:MAX_DASHBOARD_CLUSTERS]
+    ]
+    cluster_ids = list(tcluster.values())
     cluster_health = _cluster_health(cluster_ids)
 
     # ---- drift signals ----
@@ -1213,11 +1244,12 @@ def _build(cur, *, evaluator_id: str | None = None) -> dict:
         prov = _signal_provider(alias, set(keys), cluster_providers)
         drift.append({
             "id": s.get("signal_id") or "unknown-signal", "clusterId": alias,
+            "clusterLabel": cluster_labels.get(alias, alias),
             "dimension": s.get("dimension") or "unknown",
             "direction": s.get("direction") or "change",
             "provider": prov or "",
             "providerLabel": (_label_for(prov, model_of.get(prov, "")) if prov
-                              else f"cluster {alias} (mixed providers)"),
+                              else f"cluster {cluster_labels.get(alias, alias)} (mixed providers)"),
             "statName": s.get("statistic_name") or "unknown",
             "stat": _round_or_none(
                 s.get("statistic_value"),
@@ -1385,6 +1417,8 @@ def _build(cur, *, evaluator_id: str | None = None) -> dict:
     samples = []
     for r in pick:
         s = dict(r)
+        s["cluster_id"] = tcluster.get(r["trace_id"])
+        s["cluster_label"] = cluster_labels.get(s["cluster_id"], s["cluster_id"])
         for content_field in ("prompt_redacted", "response_redacted", "error"):
             s[content_field] = redact(s.get(content_field))
         s["providerKey"] = _provider_key(r["provider"])
@@ -1625,8 +1659,7 @@ def create_app(
     def config():
         return {"operationsUrl": operations_url}
 
-    @app.get("/api/data")
-    def data(evaluator: str | None = None):
+    def data(request: Request, evaluator: str | None = None):
         if not _is_postgres(configured_storage) and not _sqlite_path(
             configured_storage
         ).exists():
@@ -1636,7 +1669,15 @@ def create_app(
             _log.warning("dashboard data unavailable: SQLite database not found")
             return JSONResponse({"error": "data unavailable"}, status_code=503)
         try:
-            return build_bundle(configured_storage, evaluator_id=evaluator)
+            return build_bundle(
+                configured_storage,
+                evaluator_id=evaluator,
+                registry_tenant=getattr(
+                    request.state,
+                    "verdict_registry_tenant",
+                    None,
+                ),
+            )
         except DashboardBundleLimitError:
             _log.exception("dashboard bundle exceeded its safety budget")
             return JSONResponse(
@@ -1646,6 +1687,9 @@ def create_app(
         except Exception:  # pragma: no cover - defensive: corrupt/locked DB
             _log.exception("failed to build %s dashboard data bundle", backend)
             return JSONResponse({"error": "data unavailable"}, status_code=503)
+
+    data.__annotations__["request"] = Request
+    app.get("/api/data")(data)
 
     def registry(
         request,

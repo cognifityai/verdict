@@ -149,7 +149,10 @@ default and may select an explicit tenant with `?tenant=`. A mounted host can
 instead set `request.state.verdict_registry_tenant`; that authorization-owned
 value wins over query input. Mutation buttons appear only with the same-origin
 Operations adapter. Semantic and hybrid fallback retain their experimental
-disclosure.
+disclosure. When a mounted host supplies that authorized tenant, Overview,
+Trace Explorer, cluster pass-rate charts, and drift rows project assignments
+and stable labels from the same active registry. Standalone and legacy stores
+without an authorized active registry continue to use `Trace.cluster_id`.
 
 For published release `0.1.0a9`, the bounded POC entry points include Anthropic
 `messages.create(...)` (including `stream=True`), OpenAI

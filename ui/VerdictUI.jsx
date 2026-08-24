@@ -793,7 +793,7 @@ function Overview({ data = SEED }) {
   const driftClusters = new Set(DATA.driftSignals.map((signal) => signal.clusterId).filter(Boolean));
   const clusterSeries = DATA.clusters.map((cluster, index) => ({
     key: cluster.cluster_id,
-    label: cluster.cluster_id,
+    label: cluster.display_name || cluster.cluster_id,
     color: driftClusters.has(cluster.cluster_id) ? C.red : seriesColors[(index + 1) % seriesColors.length],
   }));
   const qualitySeries = clusterMode ? clusterSeries : providerSeries;
@@ -886,7 +886,7 @@ function Overview({ data = SEED }) {
           <ResponsiveContainer width="100%" height={188}>
             <BarChart data={DATA.clusters} layout="vertical" margin={{ top: 0, right: 16, left: 8, bottom: 0 }}>
               <XAxis type="number" hide />
-              <YAxis type="category" dataKey="cluster_id" tick={{ fill: C.sub, fontSize: 12 }} stroke={C.border} width={92} />
+              <YAxis type="category" dataKey={(cluster) => cluster.display_name || cluster.cluster_id} tick={{ fill: C.sub, fontSize: 12 }} stroke={C.border} width={120} />
               <Tooltip content={<ChartTooltip title=" " />} cursor={{ fill: "rgba(78,225,170,0.05)" }} />
               <Bar dataKey="n" name="traces" radius={[0, 2, 2, 0]} fill={C.accent} isAnimationActive={false}>
                 {DATA.clusters.map((_, i) => <Cell key={i} fill={i % 2 ? C.accent2 : C.accent} />)}
@@ -1009,7 +1009,7 @@ function Drift({ data = SEED, onOpenOperations = null }) {
                 <div className="flex items-center gap-2 flex-wrap">
                   <span className="font-semibold">{dimensionLabel(s.dimension)}</span>
                   <Pill color={signalColor} bg={signalBg}>{isCoverage ? "evaluability regression" : s.direction}</Pill>
-                  <span className="text-xs" style={{ color: C.sub }}>on {s.providerLabel}</span>
+                  <span className="text-xs" style={{ color: C.sub }}>in {s.clusterLabel || s.clusterId} · on {s.providerLabel}</span>
                 </div>
                 <div className="text-xs mt-0.5" style={{ color: C.sub }}>
                   {isCoverage ? <>UNCLEAR rate = {coveragePct(s.stat)} · deterministic coverage gate</> : <>{s.statName === "fisher_exact" ? "Fisher's exact" : "Mann-Whitney U"} · p<sub>adj</sub> = {sci(s.pAdj)} · {s.cliffsDelta != null ? <>Cliff&apos;s δ = {s.cliffsDelta} · </> : null}Cohen&apos;s d = {statValue(s.cohensD)}</>}
@@ -1183,7 +1183,7 @@ function Traces({ data = SEED }) {
                       {!capturedContent(s) ? "Historical metadata-only trace" : (s.prompt_redacted || "Captured prompt was empty")}
                     </span>
                   </span>
-                  <span><Pill color={C.sub}>{s.cluster_id || "Unassigned"}</Pill></span>
+                  <span><Pill color={C.sub}>{s.cluster_label || s.cluster_id || "Unassigned"}</Pill></span>
                   <span className="text-xs" style={{ color: C.sub }}>{s.input_tokens ?? "—"}/{s.output_tokens ?? "—"}</span>
                   <span className="text-xs" style={{ color: C.sub }}>{s.latency_ms ? `${(s.latency_ms / 1000).toFixed(1)}s` : "—"}</span>
                   <span>
@@ -1240,7 +1240,7 @@ function TraceDetail({ s, onClose }) {
       </div>
       <div className="p-4 space-y-3" style={{ maxHeight: 560, overflowY: "auto" }}>
         <div className="flex flex-wrap gap-1.5">
-          <Pill color={C.sub}>{s.cluster_id || "Unassigned"}</Pill>
+          <Pill color={C.sub}>{s.cluster_label || s.cluster_id || "Unassigned"}</Pill>
           <Pill color={hasContent ? C.green : C.amber} bg={hasContent ? C.greenBg : C.amberBg}>{contentLabel}</Pill>
           <Pill color={s.error ? C.red : C.green} bg={s.error ? C.redBg : C.greenBg}>{s.error ? "Failed trace" : "Provider succeeded"}</Pill>
           <Pill color={s.judgment ? C.blue : C.faint}>{s.judgment ? "Judge results available" : "No judge results"}</Pill>

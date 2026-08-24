@@ -275,6 +275,11 @@ were not captured when that trace was recorded, not that capture is currently
 disabled. Captured empty strings remain distinct from metadata-only history.
 Provider comparison badges are derived only from persisted signals in the
 selected completed drift run; provider identity alone never implies a regression.
+When an authenticated FastAPI host injects
+`request.state.verdict_registry_tenant`, Overview, Trace Explorer, cluster
+pass-rate charts, and drift rows use that tenant's active-registry assignments
+and stable labels. Browser query parameters cannot select that projection.
+Standalone and legacy stores keep using each trace's stored `cluster_id`.
 
 Before a drift or judge run exists, Overview, Drift, and Judge show the same live
 global content-bearing trace counts instead of rendering an empty chart as zero
@@ -362,7 +367,9 @@ the other captured workloads.
   the 20 highest-volume clusters. Standalone dashboards are read-only by
   default; mounted deployments may expose mutations only through their
   authenticated, CSRF-protected Operations adapter. The host must inject the
-  authorized registry tenant rather than trusting a browser query parameter.
+  authorized registry tenant rather than trusting a browser query parameter;
+  that same value projects the active assignments and stable labels throughout
+  the rest of the dashboard.
 - **Windows use capture time.** The pipeline places judgments into windows using
   the associated trace's `started_at`, not the time the judgment was created.
   Re-running the same hourly analysis bucket replaces that bucket's signals, so

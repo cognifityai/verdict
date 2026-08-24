@@ -47,6 +47,60 @@ class QuerySession(Protocol):
     def valid_session_predicate(self, trace_alias: str) -> str: ...
 
 
+def active_cluster_projection(
+    session: QuerySession,
+    tenant: str,
+) -> tuple[dict[str, str], dict[str, str]] | None:
+    """Return assigned trace IDs and labels for one authorized active registry."""
+    required = (
+        "cluster_registries",
+        "cluster_registry_versions",
+        "cluster_registry_clusters",
+        "active_cluster_registry",
+        "trace_cluster_assignments",
+        "cluster_identities",
+        "cluster_registry_events",
+    )
+    if any(not session.table_exists(table) for table in required):
+        return None
+    pointer = session.execute(
+        "SELECT version_id FROM active_cluster_registry WHERE tenant_id=?",
+        (tenant,),
+    ).fetchone()
+    if pointer is None or pointer.get("version_id") is None:
+        return None
+    version_id = pointer["version_id"]
+    label_rows = session.execute(
+        "SELECT c.cluster_id,i.display_name "
+        "FROM cluster_registry_clusters c "
+        "JOIN cluster_identities i ON i.tenant_id=c.tenant_id "
+        "AND i.cluster_id=c.cluster_id AND i.kind=c.kind "
+        "WHERE c.tenant_id=? AND c.version_id=?",
+        (tenant, version_id),
+    )
+    labels = {
+        str(row["cluster_id"]): str(row["display_name"])
+        for row in label_rows
+    }
+    rows = session.execute(
+        "SELECT a.trace_id,a.cluster_id "
+        "FROM trace_cluster_assignments a "
+        "JOIN traces t ON t.trace_id=a.trace_id "
+        "JOIN cluster_registry_clusters c ON c.tenant_id=a.tenant_id "
+        "AND c.version_id=a.version_id AND c.cluster_id=a.cluster_id "
+        "AND c.kind=a.cluster_kind "
+        "WHERE a.tenant_id=? AND a.version_id=? AND a.status='assigned' "
+        f"AND {_trace_tenant_predicate()}",
+        (tenant, version_id, tenant),
+    )
+    assignments: dict[str, str] = {}
+    for row in rows:
+        trace_id = str(row["trace_id"])
+        cluster_id = str(row["cluster_id"])
+        assignments[trace_id] = cluster_id
+    return assignments, labels
+
+
 def _trace_tenant_predicate() -> str:
     return (
         "(t.tenant_id=a.tenant_id OR "
