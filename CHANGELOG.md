@@ -6,6 +6,8 @@ the customer POC profile is refined.
 
 ## [Unreleased]
 
+## [0.1.0a11] - 2026-08-24
+
 ### Fixed
 
 - `verdict-pipeline --capture-judge-telemetry` now shuts down through the core
@@ -212,7 +214,8 @@ the customer POC profile is refined.
 - Content capture remains off by default and is documented as best-effort rather
   than a compliance control.
 
-[Unreleased]: https://github.com/cognifityai/verdict/compare/v0.1.0a10...HEAD
+[Unreleased]: https://github.com/cognifityai/verdict/compare/v0.1.0a11...HEAD
+[0.1.0a11]: https://github.com/cognifityai/verdict/compare/v0.1.0a10...v0.1.0a11
 [0.1.0a10]: https://github.com/cognifityai/verdict/compare/v0.1.0a9...v0.1.0a10
 [0.1.0a9]: https://github.com/cognifityai/verdict/compare/v0.1.0a8...v0.1.0a9
 [0.1.0a8]: https://github.com/cognifityai/verdict/compare/v0.1.0a7...v0.1.0a8
