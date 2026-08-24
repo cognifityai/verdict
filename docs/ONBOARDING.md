@@ -24,9 +24,9 @@ uv venv --python 3.12 && source .venv/bin/activate     # or your own 3.10+ venv
 
 # Include the provider extras you want to test live. Google capture needs `google`.
 python -m pip install \
-  "cognifity-verdict[anthropic,openai,google,dashboard]==0.1.0a8" \
-  "cognifity-verdict-eval[semantic]==0.1.0a8" \
-  "cognifity-verdict-inspect==0.1.0a8"
+  "cognifity-verdict[anthropic,openai,google,dashboard]==0.1.0a9" \
+  "cognifity-verdict-eval[semantic]==0.1.0a9" \
+  "cognifity-verdict-inspect==0.1.0a9"
 ```
 
 For a customer POC on the public alpha, use the pinned commands and provider
@@ -38,7 +38,7 @@ lists them as hard dependencies, so the line above brings them in.
 Minimal alternative without the local semantic model:
 
 ```bash
-python -m pip install "cognifity-verdict-eval==0.1.0a8"  # lexical hash fallback
+python -m pip install "cognifity-verdict-eval==0.1.0a9"  # lexical hash fallback
 ```
 
 Already on an earlier synchronized alpha? Use the upgrade command in the repository
@@ -110,12 +110,12 @@ clock value such as `12:34:56` is not classified as IPv6. Email discovery uses
 a linear `@`-anchored scanner to keep malformed and long inputs bounded. It
 remains best effort, not a compliance control, and opaque metadata such as
 tenant/session/cluster IDs must be non-sensitive. Keep content capture off for
-customer POC data. The `0.1.0a8` POC profile also keeps
+customer POC data. The `0.1.0a9` POC profile also keeps
 `buffered_writes=False`; buffered mode requires an explicit `shutdown()`
 imported from `verdict.client` before process exit.
 
 Use only the provider methods listed in the
-[`POC release profile`](POC_RELEASE_PROFILE.md). Release `0.1.0a8` includes the
+[`POC release profile`](POC_RELEASE_PROFILE.md). Release `0.1.0a9` includes the
 Anthropic `messages.stream(...)` helper plus OpenAI `responses.create(...)`,
 `responses.parse(...)`, and `responses.stream(...)` for new or existing
 responses, in addition to the earlier Chat/Google paths. OpenAI's
@@ -191,7 +191,7 @@ cost/latency traces written to the same store. Those traces are tagged as the
 `judge` workload and excluded from future drift inputs so the evaluator does not
 become part of the workload it evaluates. The flag is off by default.
 
-For PostgreSQL, install `cognifity-verdict[dashboard,postgres]==0.1.0a8` and pass
+For PostgreSQL, install `cognifity-verdict[dashboard,postgres]==0.1.0a9` and pass
 the same protected storage URL used by the SDK. The dashboard only reads
 existing Verdict tables; it never creates or migrates them.
 `python ui/server.py --db ...` remains a compatible source-checkout wrapper.

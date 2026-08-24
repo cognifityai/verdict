@@ -39,7 +39,7 @@ def test_every_relative_markdown_link_resolves_inside_skill() -> None:
 def test_skill_uses_resolved_skill_path_and_installed_runtime_commands() -> None:
     skill = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
 
-    assert "Verdict `0.1.0a8`" in skill
+    assert "Verdict `0.1.0a9`" in skill
     assert "<python> <skill-root>/scripts/inspect_environment.py" in skill
     assert "python3 <skill-root>/scripts/scan_repository.py" in skill
     assert "verdict-pipeline --help" in skill
