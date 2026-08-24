@@ -32,7 +32,12 @@ const SEED = (() => {
     meta: {
       runStart: 'sample-data', durationHours: 8, totalTraces: 96, totalJudged: 48,
       totalCost: 0.42, totalCostStatus: 'complete', regressionHour: 4,
-      providers: 3, clusters: 4,
+      providers: 3, clusters: 4, workload: 'sample-service',
+    },
+    driftAnalysis: {
+      runStatus: 'completed_with_signals', readinessStatus: 'global_minimum_met',
+      current: 48, baseline: 48, minimum: 30,
+      currentHours: 24, baselineLagHours: 24, baselineDays: 7,
     },
     evaluation: {
       status: "selected", selectedId: "sample-evaluator",
@@ -126,7 +131,12 @@ const SEED = (() => {
 })();
 
 const EMPTY = {
-  meta: { totalTraces: 0, totalJudged: 0, totalCost: null, providers: 0, clusters: 0 },
+  meta: { totalTraces: 0, totalJudged: 0, totalCost: null, providers: 0, clusters: 0, workload: null },
+  driftAnalysis: {
+    runStatus: 'no_completed_run', readinessStatus: 'not_enough_current',
+    current: 0, baseline: 0, minimum: 30,
+    currentHours: 24, baselineLagHours: 24, baselineDays: 7,
+  },
   evaluation: { status: "empty", selectedId: null, availableIdentities: [], driftStatus: "empty", unattributedDriftSignals: 0 },
   providers: [], clusters: [], driftSignals: [], dimensionOverall: [], tsRows: [],
   passrate: [], clusterPassrate: [], haikuDim: [], samples: [], providerDimension: [],
@@ -258,6 +268,91 @@ const sci = (n) => {
 };
 const coveragePct = (n) => n == null || !Number.isFinite(n) ? "n/a" : `${Math.round(n * 1000) / 10}%`;
 const statValue = (n) => n == null || !Number.isFinite(n) ? "n/a" : n;
+const TRACE_MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+function capturedContent(sample) {
+  if (typeof sample.contentCaptured === "boolean") return sample.contentCaptured;
+  return sample.prompt_redacted != null || sample.response_redacted != null;
+}
+
+function traceTime(sample) {
+  const date = new Date(sample.started_at);
+  if (!Number.isFinite(date.getTime())) {
+    return {
+      absolute: Number.isFinite(sample.hour) ? `Elapsed ${sample.hour}h` : "Recorded time unavailable",
+      relative: "",
+    };
+  }
+  const absolute = `${TRACE_MONTHS[date.getUTCMonth()]} ${date.getUTCDate()}, ${String(date.getUTCHours()).padStart(2, "0")}:${String(date.getUTCMinutes()).padStart(2, "0")} UTC`;
+  const elapsedSeconds = Math.max(0, Math.floor((Date.now() - date.getTime()) / 1000));
+  let relative = "just now";
+  if (elapsedSeconds >= 86400) relative = `${Math.floor(elapsedSeconds / 86400)} days ago`;
+  else if (elapsedSeconds >= 3600) relative = `${Math.floor(elapsedSeconds / 3600)} hours ago`;
+  else if (elapsedSeconds >= 60) relative = `${Math.floor(elapsedSeconds / 60)} minutes ago`;
+  return { absolute, relative };
+}
+
+function driftAnalysis(data) {
+  return data.driftAnalysis || {
+    runStatus: data.driftRun ? (data.driftSignals.length ? "completed_with_signals" : "completed_no_signals") : "no_completed_run",
+    readinessStatus: "not_enough_current",
+    current: 0,
+    baseline: 0,
+    minimum: 30,
+    currentHours: 24,
+    baselineLagHours: 24,
+    baselineDays: 7,
+  };
+}
+
+function analysisHeadline(analysis) {
+  if (analysis.runStatus === "selection_required") return "Select an evaluator";
+  if (analysis.runStatus === "invalid_selection") return "Selected evaluator is unavailable";
+  if (analysis.runStatus === "completed_with_signals") return "Completed with signals";
+  if (analysis.runStatus === "completed_no_signals") return "Completed with no signals";
+  if (analysis.readinessStatus === "not_enough_baseline") return "Collecting baseline traces";
+  if (analysis.readinessStatus === "global_minimum_met") return "Global trace minimum met";
+  return "Collecting current traces";
+}
+
+function ReadinessSummary({ analysis }) {
+  const globalMinimumMet = analysis.readinessStatus === "global_minimum_met";
+  return (
+    <div className="mt-4">
+      <div className="grid sm:grid-cols-2 gap-3">
+        <div className="rounded-md p-3" style={{ background: C.panel2, border: `1px solid ${C.border}` }}>
+          <div className="text-xs" style={{ color: C.sub }}>Current global content-bearing traces</div>
+          <div className="font-semibold mt-0.5" style={{ fontSize: 17 }}>{`${analysis.current} / ${analysis.minimum}`}</div>
+        </div>
+        <div className="rounded-md p-3" style={{ background: C.panel2, border: `1px solid ${C.border}` }}>
+          <div className="text-xs" style={{ color: C.sub }}>Baseline global content-bearing traces</div>
+          <div className="font-semibold mt-0.5" style={{ fontSize: 17 }}>{`${analysis.baseline} / ${analysis.minimum}`}</div>
+        </div>
+      </div>
+      <div className="grid sm:grid-cols-3 gap-3 mt-3">
+        {[
+          ["Default current window", `Latest ${analysis.currentHours} hours`],
+          ["Default baseline lag", `${analysis.baselineLagHours} hours`],
+          ["Default baseline window", `Previous ${analysis.baselineDays} days`],
+        ].map(([label, value]) => (
+          <div key={label} className="rounded-md p-3" style={{ background: C.panel2, border: `1px solid ${C.border}` }}>
+            <div className="text-xs" style={{ color: C.sub }}>{label}</div>
+            <div className="font-semibold mt-0.5" style={{ fontSize: 15 }}>{value}</div>
+          </div>
+        ))}
+      </div>
+      <div className="text-xs mt-3" style={{ color: C.faint }}>
+        {globalMinimumMet
+          ? "Enough content-bearing traces exist across the overall default windows. The pipeline will still check whether each cluster and rubric dimension has enough judged traces."
+          : "These global counts show content availability only. They do not establish whether each cluster and rubric dimension has enough judged traces."}
+        {" "}Actual job flags may use different windows or sample floors.
+      </div>
+      <div className="text-xs mt-2" style={{ color: C.faint }}>
+        New traces cannot simultaneously be recent current data and historical baseline data. The baseline matures only after its {analysis.baselineLagHours}-hour lag.
+      </div>
+    </div>
+  );
+}
 
 function ChartTooltip({ active, payload, label, unit = "", title }) {
   if (!active || !payload || !payload.length) return null;
@@ -516,6 +611,11 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
     .filter(([, resource]) => resource.shown < resource.available);
   const sourceLabel = source === "live" ? "Live store" : source === "sample" ? "Synthetic sample" : "Waiting for live store";
   const sourceColor = source === "live" ? C.green : C.amber;
+  const workloadLabel = source === "sample"
+    ? "Sample workload"
+    : DATA.meta.workload
+      ? `Workload: ${DATA.meta.workload}`
+      : "Live Verdict store";
   const nav = [
     { id: "overview", label: "Overview", icon: Gauge },
     { id: "drift", label: "Drift signals", icon: Signal, badge: DATA.driftSignals.length },
@@ -533,7 +633,7 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
             <Logo size={24} />
             <span className="font-semibold">Verdict</span>
           </button>
-          <span className="hidden lg:inline text-xs font-mono" style={{ color: C.faint }}>sample-service / local</span>
+          <span className="hidden lg:inline text-xs font-mono" style={{ color: C.faint }}>{source === "sample" ? "Sample service" : "Live Verdict store"}</span>
           <nav className="order-3 w-full sm:order-none sm:w-auto sm:self-stretch flex overflow-x-auto border-t sm:border-t-0" style={{ borderColor: C.border }}>
             {nav.map((n) => {
               const on = tab === n.id;
@@ -566,7 +666,7 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
       <main className="max-w-screen-2xl mx-auto px-4 sm:px-6 py-6 overflow-x-hidden">
         <div className="mb-5 flex flex-col sm:flex-row sm:items-end justify-between gap-3">
           <div>
-            <div className="text-xs font-mono" style={{ color: C.accent }}>WORKLOAD / SAMPLE-SERVICE</div>
+            <div className="text-xs font-mono" style={{ color: C.accent }}>{workloadLabel}</div>
             <h1 className="font-semibold mt-1" style={{ fontSize: 22, letterSpacing: 0 }}>{nav.find((n) => n.id === tab).label}</h1>
           </div>
           {source === "sample" && (
@@ -632,10 +732,10 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
           </div>
         )}
         {tab === "overview" && <Overview data={DATA} />}
-        {tab === "drift" && <Drift data={DATA} />}
+        {tab === "drift" && <Drift data={DATA} onOpenOperations={operationsUrl ? () => setTab("operations") : null} />}
         {tab === "traces" && <Traces key={evaluation.selectedId || "none"} data={DATA} />}
         {tab === "registry" && <Registry url={mountedRegistryUrl()} operationsUrl={operationsUrl} />}
-        {tab === "judge" && <Judge data={DATA} />}
+        {tab === "judge" && <Judge data={DATA} onOpenOperations={operationsUrl ? () => setTab("operations") : null} />}
         {tab === "compare" && <Compare data={DATA} source={source} />}
         {tab === "operations" && operationsUrl && <Operations url={operationsUrl} costBreakdown={DATA.meta.costBreakdown} />}
       </main>
@@ -667,7 +767,13 @@ function Overview({ data = SEED }) {
   const leadIsImprovement = leadSignal?.direction === "improvement";
   const leadColor = leadIsImprovement ? C.green : C.red;
   const leadBg = leadIsImprovement ? C.greenBg : C.redBg;
-  const driftUnavailable = DATA.evaluation?.driftStatus !== "selected";
+  const analysis = driftAnalysis(DATA);
+  const noCompletedRun = analysis.runStatus === "no_completed_run";
+  const evaluatorSelectionNeeded = ["selection_required", "invalid_selection"].includes(analysis.runStatus);
+  const analysisUnavailable = noCompletedRun || evaluatorSelectionNeeded;
+  const completedWithSignals = analysis.runStatus === "completed_with_signals";
+  const statusColor = analysisUnavailable ? C.amber : completedWithSignals ? leadColor : C.green;
+  const statusBg = analysisUnavailable ? C.amberBg : completedWithSignals ? leadBg : C.greenBg;
   const seriesColors = [C.accent, C.accent2, C.amber, C.green, C.blue, C.cyan];
   const providerSeries = DATA.providers.map((provider, index) => {
     const presentation = providerPresentation(
@@ -696,20 +802,26 @@ function Overview({ data = SEED }) {
     <div className="space-y-5">
       <div className="border-y flex flex-col lg:flex-row" style={{ borderColor: C.border, background: C.panel2 }}>
         <div className="px-4 py-4 flex items-start gap-3 flex-1">
-          <div className="w-8 h-8 flex items-center justify-center shrink-0" style={{ background: driftUnavailable ? C.amberBg : DATA.driftSignals.length ? leadBg : C.greenBg, borderRadius: 3 }}>
-            {driftUnavailable ? <AlertTriangle size={16} style={{ color: C.amber }} /> : DATA.driftSignals.length ? leadIsImprovement ? <TrendingUp size={16} style={{ color: leadColor }} /> : <AlertTriangle size={16} style={{ color: leadColor }} /> : <CheckCircle2 size={16} style={{ color: C.green }} />}
+          <div className="w-8 h-8 flex items-center justify-center shrink-0" style={{ background: statusBg, borderRadius: 3 }}>
+            {analysisUnavailable ? <Clock size={16} style={{ color: C.amber }} /> : completedWithSignals ? leadIsImprovement ? <TrendingUp size={16} style={{ color: leadColor }} /> : <AlertTriangle size={16} style={{ color: leadColor }} /> : <CheckCircle2 size={16} style={{ color: C.green }} />}
           </div>
           <div className="min-w-0">
-            <div className="text-xs font-mono" style={{ color: driftUnavailable ? C.amber : DATA.driftSignals.length ? leadColor : C.green }}>LATEST COMPLETED RUN{DATA.driftRun?.analysisTime ? ` · ${DATA.driftRun.analysisTime}` : ""}</div>
-            <div className="font-semibold mt-0.5">{driftUnavailable ? "Drift evidence unavailable" : `${DATA.driftSignals.length} persisted drift signal${DATA.driftSignals.length === 1 ? "" : "s"}`}</div>
+            <div className="text-xs font-mono" style={{ color: statusColor }}>{analysisUnavailable ? "DRIFT ANALYSIS" : `LATEST COMPLETED RUN${DATA.driftRun?.analysisTime ? ` · ${DATA.driftRun.analysisTime}` : ""}`}</div>
+            <div className="font-semibold mt-0.5">{analysisHeadline(analysis)}</div>
             <div className="text-sm mt-0.5" style={{ color: C.sub }}>
-              {driftUnavailable ? "Select an evaluator with attributed drift signals, or rerun the pipeline with the current schema." : DATA.driftSignals.length ? DATA.driftSignals.map((s) => dimensionLabel(s.dimension)).join(" and ") : "No dimensions currently clear both alert gates."}
+              {evaluatorSelectionNeeded
+                ? "Choose one evaluator identity to view its completed drift run."
+                : noCompletedRun
+                ? `No completed run · current ${analysis.current}/${analysis.minimum} · baseline ${analysis.baseline}/${analysis.minimum}.`
+                : completedWithSignals
+                  ? `${DATA.driftSignals.length} persisted signal${DATA.driftSignals.length === 1 ? "" : "s"}: ${DATA.driftSignals.map((s) => dimensionLabel(s.dimension)).join(" and ")}.`
+                  : "The latest completed run produced zero signals."}
             </div>
           </div>
         </div>
         <div className="grid grid-cols-3 border-t lg:border-t-0 lg:border-l" style={{ borderColor: C.border, minWidth: "min(100%, 430px)" }}>
-          <GateCell label="ADJUSTED P" value={driftUnavailable ? "—" : leadIsCoverage ? "n/a" : leadSignal ? sci(leadSignal.pAdj) : "clear"} color={driftUnavailable || leadIsCoverage ? C.amber : leadSignal ? C.red : C.green} />
-          <GateCell label="CLIFF'S DELTA" value={driftUnavailable ? "—" : leadIsCoverage ? "n/a" : leadSignal ? statValue(leadSignal.cliffsDelta) : "clear"} color={driftUnavailable || leadIsCoverage ? C.amber : leadSignal ? C.red : C.green} />
+          <GateCell label="ADJUSTED P" value={analysisUnavailable ? "—" : leadIsCoverage ? "n/a" : leadSignal ? sci(leadSignal.pAdj) : "clear"} color={analysisUnavailable || leadIsCoverage ? C.amber : leadSignal ? C.red : C.green} />
+          <GateCell label="CLIFF'S DELTA" value={analysisUnavailable ? "—" : leadIsCoverage ? "n/a" : leadSignal ? statValue(leadSignal.cliffsDelta) : "clear"} color={analysisUnavailable || leadIsCoverage ? C.amber : leadSignal ? C.red : C.green} />
           <GateCell label="CURRENT N" value={leadSignal?.nCur ?? "—"} color={C.text} />
         </div>
       </div>
@@ -717,7 +829,7 @@ function Overview({ data = SEED }) {
       <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-px border-y" style={{ borderColor: C.border, background: C.border }}>
         <MetricCell label="Traces captured" value={m.totalTraces.toLocaleString()} sub={`${m.providers} providers`} icon={Activity} accent={C.accent} />
         <MetricCell label="Responses judged" value={m.totalJudged} sub={`${DATA.dimensionOverall.length}-dimension rubric`} icon={Scale} accent={C.blue} />
-        <MetricCell label="Drift signals" value={driftUnavailable ? "Unavailable" : DATA.driftSignals.length} sub={driftUnavailable ? "identity not attributable" : "latest pipeline run"} icon={Signal} accent={driftUnavailable ? C.amber : C.red} />
+        <MetricCell label="Drift signals" value={evaluatorSelectionNeeded ? "Select evaluator" : noCompletedRun ? "Not run" : DATA.driftSignals.length} sub={analysisUnavailable ? analysisHeadline(analysis).toLowerCase() : "latest completed run"} icon={Signal} accent={analysisUnavailable ? C.amber : DATA.driftSignals.length ? C.red : C.green} />
         <MetricCell label="Estimated spend" value={usd(m.totalCost)} sub={m.totalCostStatus === "partial" ? "partial pricing coverage" : m.totalCostStatus === "unavailable" ? "pricing unavailable" : `${m.durationHours} hour window`} icon={DollarSign} accent={m.totalCostStatus === "complete" ? C.green : C.amber} />
         <MetricCell label="Intent clusters" value={m.clusters} sub={`median ${health.medianClusterSize || 0} traces`} icon={Layers} accent={healthColor} />
         <MetricCell label="Cluster readiness" value={healthLabel} sub={`${health.clustersMeetingSampleFloor}/${health.nClusters} meet n=${health.minSampleSize}`} icon={Gauge} accent={healthColor} />
@@ -833,9 +945,11 @@ function SeriesLegend({ series }) {
 }
 
 /* ----------------------------------------------------------------- DRIFT */
-function Drift({ data = SEED }) {
+function Drift({ data = SEED, onOpenOperations = null }) {
   const DATA = data;
   const [open, setOpen] = useState(DATA.driftSignals[0]?.id);
+  const analysis = driftAnalysis(DATA);
+  const evaluatorSelectionNeeded = ["selection_required", "invalid_selection"].includes(analysis.runStatus);
   const seriesColors = [C.accent, C.accent2, C.amber, C.green, C.blue, C.cyan];
   const dimensionSeries = DATA.dimensionOverall.map((dimension, index) => ({
     key: dimension.dim,
@@ -848,6 +962,37 @@ function Drift({ data = SEED }) {
         PASS/FAIL signals clear both the BH-adjusted p-value and minimum absolute Cliff&apos;s δ gates.
         UNCLEAR coverage signals instead use a deterministic 15-point increase and the configured sample floor. Signals come from the latest persisted pipeline run.
       </div>
+      {(analysis.runStatus === "no_completed_run" || evaluatorSelectionNeeded) && (
+        <Panel className="p-5">
+          <div className="flex items-start gap-3">
+            <Clock size={18} style={{ color: C.amber, marginTop: 1 }} />
+            <div className="flex-1">
+              <div className="font-semibold">{evaluatorSelectionNeeded ? "Select an evaluator to view drift analysis" : "No drift analysis has completed yet"}</div>
+              <div className="text-sm mt-1" style={{ color: C.sub }}>
+                {evaluatorSelectionNeeded
+                  ? "Choose an evaluator identity above to load its completed runs and persisted signals."
+                  : `${analysisHeadline(analysis)}. Capturing new content-bearing traces advances the current window first; the same traces cannot also fill the historical baseline.`}
+              </div>
+              {ReadinessSummary({ analysis })}
+              {onOpenOperations && (
+                <button onClick={onOpenOperations} className="mt-4 inline-flex items-center gap-2 text-sm font-semibold px-3 py-2"
+                  style={{ background: C.accent, color: C.bg, borderRadius: 3 }}>
+                  Open Operations
+                </button>
+              )}
+            </div>
+          </div>
+        </Panel>
+      )}
+      {analysis.runStatus === "completed_no_signals" && (
+        <Panel className="p-4 flex items-start gap-3">
+          <CheckCircle2 size={18} style={{ color: C.green, marginTop: 1 }} />
+          <div>
+            <div className="font-semibold">Completed with no signals</div>
+            <div className="text-sm mt-1" style={{ color: C.sub }}>The latest completed run evaluated its eligible cells and none cleared the configured alert gates.</div>
+          </div>
+        </Panel>
+      )}
       {DATA.driftSignals.map((s) => {
         const isOpen = open === s.id;
         const isCoverage = s.statName === "unclear_rate_increase";
@@ -912,7 +1057,7 @@ function Drift({ data = SEED }) {
         );
       })}
 
-      <Panel className="p-5">
+      {analysis.runStatus !== "no_completed_run" && <Panel className="p-5">
         <div className="font-semibold text-sm mb-1">Focused provider pass rate by dimension</div>
         <div className="text-xs mb-3" style={{ color: C.sub }}>
           {DATA.focusProviderLabel ? `${DATA.focusProviderLabel} is shown. Mixed-provider lead signals fall back to the first available provider rather than an empty chart.` : "No provider series is available."}
@@ -935,7 +1080,7 @@ function Drift({ data = SEED }) {
             <span key={dimension.key} className="flex items-center gap-1.5"><Dot color={dimension.color} />{dimension.label}</span>
           ))}
         </div>
-      </Panel>
+      </Panel>}
     </div>
   );
 }
@@ -954,6 +1099,7 @@ function Stat({ label, value, note }) {
 function Traces({ data = SEED }) {
   const DATA = data;
   const [prov, setProv] = useState("all");
+  const [capture, setCapture] = useState("all");
   const [q, setQ] = useState("");
   const [selectedTraceId, setSelectedTraceId] = useState(null);
   const sel = DATA.samples.find((sample) => sample.trace_id === selectedTraceId) || null;
@@ -967,9 +1113,13 @@ function Traces({ data = SEED }) {
   });
   const rows = DATA.samples.filter((s) =>
     (prov === "all" || (s.providerKey || s.provider) === prov) &&
+    (capture === "all" || (capture === "captured") === capturedContent(s)) &&
     (q === "" || (s.prompt_redacted || "").toLowerCase().includes(q.toLowerCase()) ||
       (s.trace_id || "").toLowerCase().includes(q.toLowerCase()))
   );
+  const traceResource = DATA.truncation?.resources?.traceSamples;
+  const shown = traceResource?.shown ?? DATA.samples.length;
+  const available = traceResource?.available ?? DATA.meta.totalTraces ?? DATA.samples.length;
 
   return (
     <div className="flex flex-col xl:flex-row gap-5">
@@ -982,9 +1132,21 @@ function Traces({ data = SEED }) {
           </div>
           <div className="flex items-center gap-1 px-1 py-1 border" style={{ borderColor: C.border, background: C.panel, borderRadius: 3 }}>
             <Filter size={13} style={{ color: C.faint, marginLeft: 4 }} />
-            {[{ key: "all", label: "All" }, ...providerOptions].map((option) => (
+            {[{ key: "all", label: "All providers" }, ...providerOptions].map((option) => (
               <button key={option.key} onClick={() => setProv(option.key)} className="text-xs px-2.5 py-1 rounded-md"
                 style={{ background: prov === option.key ? C.raised : "transparent", color: prov === option.key ? C.text : C.sub, fontWeight: prov === option.key ? 600 : 400 }}>
+                {option.label}
+              </button>
+            ))}
+          </div>
+          <div className="flex items-center gap-1 px-1 py-1 border" style={{ borderColor: C.border, background: C.panel, borderRadius: 3 }}>
+            {[
+              { key: "all", label: "All" },
+              { key: "captured", label: "Content captured" },
+              { key: "metadata", label: "Metadata only" },
+            ].map((option) => (
+              <button key={option.key} onClick={() => setCapture(option.key)} className="text-xs px-2.5 py-1 rounded-md"
+                style={{ background: capture === option.key ? C.raised : "transparent", color: capture === option.key ? C.text : C.sub, fontWeight: capture === option.key ? 600 : 400 }}>
                 {option.label}
               </button>
             ))}
@@ -992,9 +1154,9 @@ function Traces({ data = SEED }) {
         </div>
 
         <Panel className="overflow-x-auto">
-          <div style={{ minWidth: 720 }}>
-          <div className="grid text-xs px-4 py-2.5 border-b" style={{ borderColor: C.border, color: C.sub, gridTemplateColumns: "44px 1fr 88px 96px 70px 64px" }}>
-            <span>Hour</span><span>Prompt</span><span>Cluster</span><span>Tokens</span><span>Latency</span><span>Status</span>
+          <div style={{ minWidth: 840 }}>
+          <div className="grid text-xs px-4 py-2.5 border-b" style={{ borderColor: C.border, color: C.sub, gridTemplateColumns: "150px 1fr 88px 96px 70px 64px" }}>
+            <span>Recorded</span><span>Prompt</span><span>Cluster</span><span>Tokens</span><span>Latency</span><span>Status</span>
           </div>
           <div style={{ maxHeight: 520, overflowY: "auto" }}>
             {rows.map((s) => {
@@ -1006,19 +1168,23 @@ function Traces({ data = SEED }) {
                     : verdicts ? "pass" : "unavailable"
               );
               const provider = providerPresentation(s.provider, s.request_model);
+              const recorded = traceTime(s);
               return (
                 <button key={s.trace_id} onClick={() => setSelectedTraceId(s.trace_id)}
                   className="w-full grid items-center text-left px-4 py-2.5 border-b text-sm"
-                  style={{ borderColor: C.grid, gridTemplateColumns: "44px 1fr 88px 96px 70px 64px", background: on ? C.raised : "transparent" }}>
-                  <span className="text-xs font-mono" style={{ color: C.faint }}>{s.hour}h</span>
+                  style={{ borderColor: C.grid, gridTemplateColumns: "150px 1fr 88px 96px 70px 64px", background: on ? C.raised : "transparent" }}>
+                  <span className="text-xs" style={{ color: C.faint }}>
+                    <span className="block font-mono">{recorded.absolute}</span>
+                    {recorded.relative && <span className="block mt-0.5">{recorded.relative}</span>}
+                  </span>
                   <span className="flex items-center gap-2 min-w-0 pr-3">
                     <Dot color={provider.color} />
                     <span className="truncate" style={{ color: C.text }}>
-                      {s.prompt_redacted == null ? "Content capture off" : (s.prompt_redacted || "Captured prompt was empty")}
+                      {!capturedContent(s) ? "Historical metadata-only trace" : (s.prompt_redacted || "Captured prompt was empty")}
                     </span>
                   </span>
-                  <span><Pill color={C.sub}>{s.cluster_id}</Pill></span>
-                  <span className="text-xs" style={{ color: C.sub }}>{s.input_tokens}/{s.output_tokens}</span>
+                  <span><Pill color={C.sub}>{s.cluster_id || "Unassigned"}</Pill></span>
+                  <span className="text-xs" style={{ color: C.sub }}>{s.input_tokens ?? "—"}/{s.output_tokens ?? "—"}</span>
                   <span className="text-xs" style={{ color: C.sub }}>{s.latency_ms ? `${(s.latency_ms / 1000).toFixed(1)}s` : "—"}</span>
                   <span>
                     {s.error ? <Pill color={C.red} bg={C.redBg}>error</Pill>
@@ -1034,7 +1200,9 @@ function Traces({ data = SEED }) {
           </div>
           </div>
         </Panel>
-        <div className="text-xs mt-2" style={{ color: C.faint }}>{rows.length} of {DATA.samples.length} sampled traces</div>
+        <div className="text-xs mt-2" style={{ color: C.faint }}>
+          {`Showing newest ${shown.toLocaleString()} of ${available.toLocaleString()} total traces. Store totals are complete. Filters apply to this bounded view. ${rows.length.toLocaleString()} match the current filters.`}
+        </div>
       </div>
 
       {/* detail */}
@@ -1052,6 +1220,15 @@ function Traces({ data = SEED }) {
 
 function TraceDetail({ s, onClose }) {
   const provider = providerPresentation(s.provider, s.request_model);
+  const recorded = traceTime(s);
+  const hasContent = capturedContent(s);
+  const hasPrompt = s.prompt_redacted != null;
+  const hasResponse = s.response_redacted != null;
+  const contentLabel = hasPrompt && hasResponse
+    ? "Content captured"
+    : hasContent
+      ? "Content partially captured"
+      : "Historical metadata-only trace";
   return (
     <Panel className="overflow-hidden sticky top-20">
       <div className="flex items-center justify-between px-4 py-3 border-b" style={{ borderColor: C.border }}>
@@ -1063,29 +1240,38 @@ function TraceDetail({ s, onClose }) {
       </div>
       <div className="p-4 space-y-3" style={{ maxHeight: 560, overflowY: "auto" }}>
         <div className="flex flex-wrap gap-1.5">
-          <Pill color={C.sub}>{s.cluster_id}</Pill>
-          <Pill color={C.sub}>{s.hour}h</Pill>
-          <Pill color={C.sub}>{s.input_tokens}/{s.output_tokens} tok</Pill>
-          <Pill color={C.sub}>{usd(s.cost_usd || 0)}</Pill>
+          <Pill color={C.sub}>{s.cluster_id || "Unassigned"}</Pill>
+          <Pill color={hasContent ? C.green : C.amber} bg={hasContent ? C.greenBg : C.amberBg}>{contentLabel}</Pill>
+          <Pill color={s.error ? C.red : C.green} bg={s.error ? C.redBg : C.greenBg}>{s.error ? "Failed trace" : "Provider succeeded"}</Pill>
+          <Pill color={s.judgment ? C.blue : C.faint}>{s.judgment ? "Judge results available" : "No judge results"}</Pill>
         </div>
+        <div className="text-xs font-mono" style={{ color: C.sub }}>{recorded.absolute}{recorded.relative ? ` · ${recorded.relative}` : ""}</div>
         <div className="text-xs" style={{ color: C.faint }}>
           Provider: <span style={{ color: C.sub }}>{s.provider == null || s.provider === "" ? "<unknown>" : String(s.provider)}</span>
           {" · "}Model: <span style={{ color: C.sub }}>{s.request_model == null || s.request_model === "" ? "<unknown>" : String(s.request_model)}</span>
         </div>
+        {!hasContent && (
+          <div className="text-sm p-3" style={{ background: C.amberBg, color: C.text, border: `1px solid #6b5529`, borderRadius: 3 }}>
+            Prompt and response content were not captured when this trace was recorded.
+          </div>
+        )}
         <div>
           <div className="text-xs mb-1" style={{ color: C.faint }}>PROMPT</div>
           <div className="text-sm p-2.5" style={{ background: C.panel2, color: C.text, border: `1px solid ${C.border}`, borderRadius: 3 }}>
-            {s.prompt_redacted == null ? "Content was not captured for this trace." : (s.prompt_redacted || "Captured prompt was empty.")}
+            {s.prompt_redacted == null ? (hasContent ? "Prompt was not captured for this trace." : "Not available for this historical metadata-only trace.") : (s.prompt_redacted || "Captured prompt was empty.")}
           </div>
         </div>
         <div>
           <div className="text-xs mb-1" style={{ color: C.faint }}>RESPONSE</div>
           <div className="text-sm p-2.5" style={{ background: C.panel2, color: C.sub, border: `1px solid ${C.border}`, borderRadius: 3, lineHeight: 1.5 }}>
-            {s.error ? <span style={{ color: C.red }}>Error: {s.error}</span> : (
-              s.response_redacted == null ? "Content was not captured for this trace." : (s.response_redacted || "Captured response was empty.")
-            )}
+            {s.response_redacted == null ? (hasContent ? "Response was not captured for this trace." : "Not available for this historical metadata-only trace.") : (s.response_redacted || "Captured response was empty.")}
           </div>
         </div>
+        {s.error && (
+          <div className="text-sm p-2.5" style={{ background: C.redBg, color: C.red, border: `1px solid ${C.red}`, borderRadius: 3 }}>
+            Provider failure: {s.error}
+          </div>
+        )}
         {s.judgment && (
           <div>
             <div className="text-xs mb-1.5 flex items-center justify-between">
@@ -1110,6 +1296,11 @@ function TraceDetail({ s, onClose }) {
             </div>
           </div>
         )}
+        {!s.judgment && (
+          <div className="text-sm p-2.5" style={{ background: C.panel2, color: C.sub, border: `1px solid ${C.border}`, borderRadius: 3 }}>
+            No judge results are stored for this trace.
+          </div>
+        )}
         <div className="text-xs font-mono pt-1" style={{ color: C.faint }}>trace {s.trace_id.slice(0, 12)}</div>
       </div>
     </Panel>
@@ -1117,7 +1308,7 @@ function TraceDetail({ s, onClose }) {
 }
 
 /* ----------------------------------------------------------------- JUDGE */
-function Judge({ data = SEED }) {
+function Judge({ data = SEED, onOpenOperations = null }) {
   const DATA = data;
   const providerKeys = DATA.providers.map((provider) => provider.key);
   const providerPresentations = Object.fromEntries(DATA.providers.map((provider) => [
@@ -1135,6 +1326,40 @@ function Judge({ data = SEED }) {
     { label: "Errors", value: scoreCoverage.error, color: C.red },
     { label: "Evaluable", value: scoreCoverage.evaluable, color: C.accent },
   ];
+  const hasJudgeEvidence = (DATA.meta.totalJudged || 0) > 0
+    || coverageItems.some((item) => (item.value || 0) > 0)
+    || DATA.dimensionOverall.length > 0;
+  if (!hasJudgeEvidence) {
+    const analysis = driftAnalysis(DATA);
+    const evaluatorSelectionNeeded = ["selection_required", "invalid_selection"].includes(analysis.runStatus);
+    return (
+      <div className="space-y-5">
+        <div className="text-sm" style={{ color: C.sub }}>
+          Judged responses are scored on configured rubric dimensions, with reasoning stored beside each PASS/FAIL decision.
+        </div>
+        <Panel className="p-5">
+          <div className="flex items-start gap-3">
+            <Scale size={18} style={{ color: C.amber, marginTop: 1 }} />
+            <div className="flex-1">
+              <div className="font-semibold">{evaluatorSelectionNeeded ? "Select an evaluator to view judge results" : "No eligible evaluation pipeline run has completed yet"}</div>
+              <div className="text-sm mt-1" style={{ color: C.sub }}>
+                {evaluatorSelectionNeeded
+                  ? "Choose an evaluator identity above to load its persisted judgments and completed runs."
+                  : "Judge charts appear only after an eligible run stores evaluator results. The availability summary uses the same default content-bearing trace windows as drift analysis."}
+              </div>
+              {ReadinessSummary({ analysis })}
+              {onOpenOperations && (
+                <button onClick={onOpenOperations} className="mt-4 inline-flex items-center gap-2 text-sm font-semibold px-3 py-2"
+                  style={{ background: C.accent, color: C.bg, borderRadius: 3 }}>
+                  Open Operations
+                </button>
+              )}
+            </div>
+          </div>
+        </Panel>
+      </div>
+    );
+  }
   return (
     <div className="space-y-5">
       <div className="text-sm" style={{ color: C.sub }}>

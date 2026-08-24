@@ -248,6 +248,222 @@ def test_trace_explorer_includes_metadata_only_capture(tmp_path):
     assert bundle["truncation"]["resources"]["traceSamples"]["available"] == 1
 
 
+def test_trace_explorer_prioritizes_newest_traces_with_deterministic_ties(tmp_path):
+    path = tmp_path / "newest-traces.db"
+    storage = SQLiteStorage(str(path))
+    started_at = datetime(2026, 8, 20, tzinfo=timezone.utc)
+    for index in range(31):
+        storage.insert_trace(Trace(
+            trace_id=f"trace-{index:02d}",
+            started_at=started_at + timedelta(hours=index),
+            prompt_redacted=None if index < 15 else f"captured prompt {index}",
+            response_redacted=None if index < 15 else f"captured response {index}",
+            error="historical failure" if index == 0 else None,
+        ))
+    for trace_id in ("tie-a", "tie-z"):
+        storage.insert_trace(Trace(
+            trace_id=trace_id,
+            started_at=started_at + timedelta(hours=31),
+            prompt_redacted="newest captured prompt",
+            response_redacted="newest captured response",
+        ))
+    storage.close()
+
+    bundle = build_bundle(path)
+    sample_ids = [sample["trace_id"] for sample in bundle["samples"]]
+
+    assert sample_ids[:3] == ["tie-z", "tie-a", "trace-30"]
+    assert sample_ids[-1] == "trace-03"
+    assert "trace-00" not in sample_ids
+    assert bundle["samples"][0]["contentCaptured"] is True
+    assert bundle["samples"][-1]["contentCaptured"] is False
+    assert bundle["meta"]["totalTraces"] == 33
+    assert bundle["truncation"]["resources"]["traceSamples"] == {
+        "available": 33,
+        "shown": 30,
+        "limit": 30,
+    }
+
+
+def test_dashboard_reports_global_content_availability_without_claiming_readiness(
+    monkeypatch,
+    tmp_path,
+):
+    path = tmp_path / "content-readiness.db"
+    storage = SQLiteStorage(str(path))
+    analysis_time = datetime(2026, 8, 23, 12, tzinfo=timezone.utc)
+    monkeypatch.setattr(
+        server_module,
+        "_now_utc",
+        lambda: analysis_time,
+        raising=False,
+    )
+    for index in range(29):
+        storage.insert_trace(Trace(
+            trace_id=f"current-{index:02d}",
+            started_at=analysis_time - timedelta(hours=1),
+            prompt_redacted="current prompt",
+            response_redacted="current response",
+            tags={"verdict.workload": "agent"},
+        ))
+    for index in range(30):
+        storage.insert_trace(Trace(
+            trace_id=f"baseline-{index:02d}",
+            started_at=analysis_time - timedelta(days=2),
+            prompt_redacted="baseline prompt",
+            response_redacted="baseline response",
+            tags={"verdict.workload": "agent"},
+        ))
+    storage.insert_trace(Trace(
+        trace_id="current-metadata-only",
+        started_at=analysis_time - timedelta(hours=1),
+        tags={"verdict.workload": "agent"},
+    ))
+    storage.insert_trace(Trace(
+        trace_id="current-failed-with-content",
+        started_at=analysis_time - timedelta(hours=1),
+        prompt_redacted="captured prompt",
+        response_redacted="partial response",
+        error="provider failed",
+        tags={"verdict.workload": "agent"},
+    ))
+    storage.insert_trace(Trace(
+        trace_id="current-empty-error",
+        started_at=analysis_time - timedelta(hours=1),
+        prompt_redacted="captured prompt",
+        response_redacted="captured response",
+        error="",
+        tags={"verdict.workload": "agent"},
+    ))
+    python_whitespace = "".join(
+        chr(codepoint)
+        for codepoint in range(0x110000)
+        if chr(codepoint).isspace()
+    )
+    for index, whitespace in enumerate(
+        ("\t", "\n", "\N{NO-BREAK SPACE}", python_whitespace)
+    ):
+        storage.insert_trace(Trace(
+            trace_id=f"current-whitespace-only-{index}",
+            started_at=analysis_time - timedelta(hours=1),
+            prompt_redacted=whitespace,
+            response_redacted="captured response",
+            tags={"verdict.workload": "agent"},
+        ))
+    storage.insert_trace(Trace(
+        trace_id="current-judge-workload",
+        started_at=analysis_time - timedelta(hours=1),
+        prompt_redacted="judge prompt",
+        response_redacted="judge response",
+        tags={"verdict.workload": "judge"},
+    ))
+    storage.insert_trace(Trace(
+        trace_id="outside-window",
+        started_at=analysis_time - timedelta(days=9),
+        prompt_redacted="old prompt",
+        response_redacted="old response",
+        tags={"verdict.workload": "agent"},
+    ))
+    storage.close()
+
+    bundle = build_bundle(path)
+
+    assert bundle["meta"]["workload"] == "agent"
+    assert bundle["driftAnalysis"] == {
+        "runStatus": "no_completed_run",
+        "readinessStatus": "global_minimum_met",
+        "current": 30,
+        "baseline": 30,
+        "minimum": 30,
+        "currentHours": 24,
+        "baselineLagHours": 24,
+        "baselineDays": 7,
+    }
+
+
+def test_dashboard_uses_neutral_identity_for_mixed_or_secret_shaped_workloads(
+    tmp_path,
+):
+    path = tmp_path / "neutral-workload.db"
+    storage = SQLiteStorage(str(path))
+    for trace_id, workload in (
+        ("safe", "agent"),
+        ("secret-shaped", "123-45-6789"),
+    ):
+        storage.insert_trace(Trace(
+            trace_id=trace_id,
+            tags={"verdict.workload": workload},
+        ))
+    storage.close()
+
+    bundle = build_bundle(path)
+
+    assert bundle["meta"]["workload"] is None
+    assert "123-45-6789" not in str(bundle)
+
+
+def test_dashboard_distinguishes_completed_zero_signal_and_signaling_runs(
+    monkeypatch,
+    tmp_path,
+):
+    path = tmp_path / "drift-run-states.db"
+    storage = SQLiteStorage(str(path))
+    analysis_time = datetime(2026, 8, 23, 12, tzinfo=timezone.utc)
+    monkeypatch.setattr(
+        server_module,
+        "_now_utc",
+        lambda: analysis_time,
+        raising=False,
+    )
+    trace = Trace(
+        trace_id="evaluated-trace",
+        started_at=analysis_time - timedelta(hours=1),
+        prompt_redacted="safe prompt",
+        response_redacted="safe response",
+    )
+    storage.insert_trace(trace)
+    storage.insert_judgment(Judgment(
+        trace_id=trace.trace_id,
+        evaluator_provider="fake",
+        evaluator_fingerprint="run-state-evaluator",
+        expected_dimensions=["quality"],
+        judge_models=["judge-model"],
+        dimensions=[DimensionScore(name="quality", verdict=Verdict.PASS)],
+    ))
+    zero_run = DriftRun(
+        run_id="completed-zero",
+        analysis_time=analysis_time,
+        completed_at=analysis_time + timedelta(seconds=1),
+        evaluator_fingerprint="run-state-evaluator",
+        signal_count=0,
+    )
+    storage.replace_drift_run(zero_run, [])
+
+    zero_bundle = build_bundle(path)
+    assert zero_bundle["driftAnalysis"]["runStatus"] == "completed_no_signals"
+
+    signal = DriftSignal(
+        signal_id="completed-signal",
+        run_id="completed-with-signal",
+        detected_at=analysis_time + timedelta(hours=1),
+        cluster_id="support",
+        dimension="quality",
+        evaluator_fingerprint="run-state-evaluator",
+    )
+    signal_run = DriftRun(
+        run_id=signal.run_id,
+        analysis_time=signal.detected_at,
+        completed_at=signal.detected_at + timedelta(seconds=1),
+        evaluator_fingerprint="run-state-evaluator",
+        signal_count=1,
+    )
+    storage.replace_drift_run(signal_run, [signal])
+    storage.close()
+
+    signal_bundle = build_bundle(path)
+    assert signal_bundle["driftAnalysis"]["runStatus"] == "completed_with_signals"
+
+
 def test_dashboard_app_can_be_mounted_below_a_host_application(tmp_path):
     import httpx
     from fastapi import FastAPI
@@ -662,6 +878,7 @@ def test_bundle_filters_drift_by_selected_evaluator_and_excludes_historical_rows
     ):
         trace = Trace(
             trace_id=f"trace-{suffix}",
+            started_at=datetime(2026, 8, 15, 10, tzinfo=timezone.utc),
             provider="openai",
             cluster_id="support",
             prompt_redacted="Prompt",
@@ -688,12 +905,24 @@ def test_bundle_filters_drift_by_selected_evaluator_and_excludes_historical_rows
         cluster_id="support",
         dimension="historical",
     ))
+    assert storage.prune_before("2026-08-16T00:00:00+00:00") == 2
+    storage.insert_trace(Trace(
+        trace_id="trace-after-multi-retention",
+        started_at=datetime(2026, 8, 16, 13, tzinfo=timezone.utc),
+        prompt_redacted="New prompt",
+        response_redacted="New response",
+    ))
     storage.close()
 
     ambiguous = build_bundle(path)
     assert ambiguous["evaluation"]["status"] == "selection_required"
     assert ambiguous["evaluation"]["driftStatus"] == "selection_required"
+    assert ambiguous["driftAnalysis"]["runStatus"] == "selection_required"
     assert ambiguous["driftSignals"] == []
+    assert all(
+        identity["complete"] is False
+        for identity in ambiguous["evaluation"]["availableIdentities"]
+    )
 
     evaluator_a = next(
         identity for identity in ambiguous["evaluation"]["availableIdentities"]
@@ -710,6 +939,7 @@ def test_bundle_uses_latest_completed_drift_run_even_when_it_has_zero_signals(tm
     storage = SQLiteStorage(str(path))
     trace = Trace(
         trace_id="trace-latest-run",
+        started_at=datetime(2026, 8, 15, 10, tzinfo=timezone.utc),
         provider="openai",
         cluster_id="support",
         prompt_redacted="Prompt",
@@ -749,6 +979,13 @@ def test_bundle_uses_latest_completed_drift_run_even_when_it_has_zero_signals(tm
         ),
         [],
     )
+    assert storage.prune_before("2026-08-16T00:00:00+00:00") == 1
+    storage.insert_trace(Trace(
+        trace_id="trace-after-retention",
+        started_at=datetime(2026, 8, 16, 13, tzinfo=timezone.utc),
+        prompt_redacted="New prompt",
+        response_redacted="New response",
+    ))
     storage.close()
 
     bundle = build_bundle(path)
@@ -757,6 +994,10 @@ def test_bundle_uses_latest_completed_drift_run_even_when_it_has_zero_signals(tm
     assert bundle["driftRun"]["id"] == "latest-zero-run"
     assert bundle["driftRun"]["signalCount"] == 0
     assert bundle["evaluation"]["driftStatus"] == "selected"
+    assert bundle["evaluation"]["selectedIdentity"]["complete"] is False
+    assert bundle["evaluation"]["selectedIdentity"]["fingerprint"] == (
+        "latest-run-evaluator"
+    )
 
 
 def test_bundle_builds_independent_cluster_pass_rate_series(tmp_path):

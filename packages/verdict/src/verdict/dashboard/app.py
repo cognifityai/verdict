@@ -16,11 +16,12 @@ import json
 import logging
 import math
 import os
+import re
 import sqlite3
 from collections import Counter, defaultdict
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import urlsplit
@@ -85,6 +86,11 @@ MAX_DASHBOARD_EVALUATORS = 20
 MAX_DASHBOARD_DRIFT_SIGNALS = 40
 MAX_PROVIDER_MODELS = 20
 MAX_TRACE_SAMPLES = 30
+DRIFT_CURRENT_HOURS = 24
+DRIFT_BASELINE_LAG_HOURS = 24
+DRIFT_BASELINE_DAYS = 7
+DRIFT_MIN_SAMPLE_SIZE = 30
+_DISPLAY_WORKLOAD = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,63}")
 
 
 class DashboardBundleLimitError(RuntimeError):
@@ -102,6 +108,10 @@ def _dt(ts: str | datetime) -> datetime:
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
+
+
+def _now_utc() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 def _label_for(provider: str, model: str) -> str:
@@ -244,6 +254,36 @@ class _QuerySession(Protocol):
 
     def valid_session_predicate(self, trace_alias: str) -> str: ...
 
+    def content_bearing_predicate(self, trace_alias: str) -> str: ...
+
+
+# Code points removed by Python 3.12 ``str.strip``. The drift CLI uses that
+# predicate for judgeable content; dashboard SQL must produce the same boolean
+# without transferring every stored prompt/response across the adapter.
+_PYTHON_STRIP_CODEPOINTS = (
+    0x0009, 0x000A, 0x000B, 0x000C, 0x000D,
+    0x001C, 0x001D, 0x001E, 0x001F, 0x0020,
+    0x0085, 0x00A0, 0x1680,
+    0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005,
+    0x2006, 0x2007, 0x2008, 0x2009, 0x200A,
+    0x2028, 0x2029, 0x202F, 0x205F, 0x3000,
+)
+
+
+def _content_bearing_sql(
+    trace_alias: str,
+    strip_sql: Callable[[str], str],
+) -> str:
+    def has_non_whitespace(column: str) -> str:
+        value = f"COALESCE({trace_alias}.{column},'')"
+        return f"{strip_sql(value)}<>''"
+
+    return (
+        f"COALESCE({trace_alias}.error,'')='' AND "
+        f"{has_non_whitespace('prompt_redacted')} AND "
+        f"{has_non_whitespace('response_redacted')}"
+    )
+
 
 def _valid_utf8(value: object) -> int:
     if not isinstance(value, bytes):
@@ -286,6 +326,15 @@ class _SQLiteSession:
             f"verdict_valid_utf8(CAST({value} AS BLOB)) ELSE 0 END=1"
         )
 
+    def content_bearing_predicate(self, trace_alias: str) -> str:
+        whitespace = "char(" + ",".join(
+            str(value) for value in _PYTHON_STRIP_CODEPOINTS
+        ) + ")"
+        return _content_bearing_sql(
+            trace_alias,
+            lambda value: f"TRIM({value},{whitespace})",
+        )
+
 
 class _PostgresSession:
     def __init__(self, connection: Any) -> None:
@@ -316,6 +365,15 @@ class _PostgresSession:
         return (
             f"{value} IS NOT NULL AND {value}<>'' "
             f"AND octet_length({value})<=256"
+        )
+
+    def content_bearing_predicate(self, trace_alias: str) -> str:
+        whitespace = "||".join(
+            f"chr({value})" for value in _PYTHON_STRIP_CODEPOINTS
+        )
+        return _content_bearing_sql(
+            trace_alias,
+            lambda value: f"BTRIM({value},{whitespace})",
         )
 
 
@@ -358,6 +416,30 @@ def _truncation_metadata(resources: dict[str, dict[str, int]]) -> dict:
             for resource in resources.values()
         ),
         "resources": resources,
+    }
+
+
+def _drift_analysis(
+    *,
+    current: int,
+    baseline: int,
+    run_status: str,
+) -> dict[str, Any]:
+    if current < DRIFT_MIN_SAMPLE_SIZE:
+        readiness_status = "not_enough_current"
+    elif baseline < DRIFT_MIN_SAMPLE_SIZE:
+        readiness_status = "not_enough_baseline"
+    else:
+        readiness_status = "global_minimum_met"
+    return {
+        "runStatus": run_status,
+        "readinessStatus": readiness_status,
+        "current": current,
+        "baseline": baseline,
+        "minimum": DRIFT_MIN_SAMPLE_SIZE,
+        "currentHours": DRIFT_CURRENT_HOURS,
+        "baselineLagHours": DRIFT_BASELINE_LAG_HOURS,
+        "baselineDays": DRIFT_BASELINE_DAYS,
     }
 
 
@@ -614,11 +696,17 @@ def _empty_bundle() -> dict:
             "regressionHour": 0,
             "providers": 0,
             "clusters": 0,
+            "workload": None,
         },
         "providers": [],
         "clusters": [],
         "driftSignals": [],
         "driftRun": None,
+        "driftAnalysis": _drift_analysis(
+            current=0,
+            baseline=0,
+            run_status="no_completed_run",
+        ),
         "clusterHealth": _cluster_health([]),
         "evaluation": {
             "status": "empty",
@@ -671,16 +759,28 @@ def _build(cur, *, evaluator_id: str | None = None) -> dict:
     total_cost = 0.0
     priced_traces = 0
 
+    analysis_time = _now_utc()
+    current_start = analysis_time - timedelta(hours=DRIFT_CURRENT_HOURS)
+    baseline_end = analysis_time - timedelta(hours=DRIFT_BASELINE_LAG_HOURS)
+    baseline_start = baseline_end - timedelta(days=DRIFT_BASELINE_DAYS)
+    current_content_traces = 0
+    baseline_content_traces = 0
+    display_workloads: set[str] = set()
+    has_undisplayable_workload = False
+
     # trace_id -> (provider, started_at) and provider model
     tp, ttime, tcluster, model_of, models_of, raw_provider_of = (
         {}, {}, {}, {}, defaultdict(set), {}
     )
     provider_trace_counts = Counter()
+    content_bearing_predicate = cur.content_bearing_predicate("traces")
     for r in cur.execute(
         # ``cluster_select`` is selected from the two literals above; it never
         # contains request data or a database value.
         "SELECT trace_id, provider, request_model, started_at, cost_usd, "
-        f"{cluster_select}, {tags_column} AS workload_tags FROM traces"  # nosec B608
+        f"{cluster_select}, {tags_column} AS workload_tags, "  # nosec B608
+        f"CASE WHEN {content_bearing_predicate} "  # nosec B608
+        "THEN 1 ELSE 0 END AS content_bearing FROM traces"
     ):
         provider_key = _provider_key(r["provider"])
         tp[r["trace_id"]] = provider_key
@@ -690,8 +790,27 @@ def _build(cur, *, evaluator_id: str | None = None) -> dict:
         raw_provider_of.setdefault(provider_key, r["provider"])
         provider_trace_counts[provider_key] += 1
         tags = _json_value(r["workload_tags"], {})
+        workload_present = (
+            isinstance(tags, dict) and "verdict.workload" in tags
+        )
         workload = tags.get("verdict.workload") if isinstance(tags, dict) else None
         group = workload if workload in {"agent", "judge"} else "unclassified"
+        displayable_workload = (
+            isinstance(workload, str)
+            and workload != "judge"
+            and _DISPLAY_WORKLOAD.fullmatch(workload) is not None
+            and redact(workload) == workload
+        )
+        if displayable_workload:
+            display_workloads.add(workload)
+        elif workload_present and workload != "judge":
+            has_undisplayable_workload = True
+        if workload != "judge" and r["content_bearing"]:
+            started_at = _dt(r["started_at"])
+            if current_start <= started_at <= analysis_time:
+                current_content_traces += 1
+            elif baseline_start <= started_at < baseline_end:
+                baseline_content_traces += 1
         cost_counts[group]["traces"] += 1
         cost = _round_or_none(r["cost_usd"], 9)
         if cost is not None:
@@ -709,8 +828,14 @@ def _build(cur, *, evaluator_id: str | None = None) -> dict:
             else ""
         )
 
+    has_drift_table = _table_exists(cur, "drift_signals")
+    has_drift_run_table = _table_exists(cur, "drift_runs")
+    drift_columns = cur.columns("drift_signals") if has_drift_table else set()
+
     # Group persisted judgments by evaluator identity before calculating any
-    # score. Multiple identities require an explicit API/UI selection.
+    # score. Multiple identities require an explicit API/UI selection. Retention
+    # may remove the last judgment while intentionally preserving its completed
+    # run; keep that fingerprint selectable as an explicitly incomplete identity.
     identity_rows: list[tuple[dict, Mapping[str, Any]]] = []
     identity_by_id: dict[str, dict] = {}
     judgment_rows = (
@@ -722,6 +847,33 @@ def _build(cur, *, evaluator_id: str | None = None) -> dict:
         identity = _evaluator_identity(row)
         identity_by_id.setdefault(identity["id"], identity)
         identity_rows.append((identity, row))
+    known_fingerprints = {
+        identity["fingerprint"]
+        for identity in identity_by_id.values()
+        if identity["fingerprint"]
+    }
+    retained_fingerprints = set()
+    if has_drift_run_table:
+        retained_fingerprints.update(
+            row["evaluator_fingerprint"]
+            for row in cur.execute(
+                """SELECT DISTINCT evaluator_fingerprint FROM drift_runs
+                     WHERE evaluator_fingerprint IS NOT NULL
+                       AND evaluator_fingerprint != ''"""
+            )
+        )
+    if has_drift_table and "evaluator_fingerprint" in drift_columns:
+        retained_fingerprints.update(
+            row["evaluator_fingerprint"]
+            for row in cur.execute(
+                """SELECT DISTINCT evaluator_fingerprint FROM drift_signals
+                     WHERE evaluator_fingerprint IS NOT NULL
+                       AND evaluator_fingerprint != ''"""
+            )
+        )
+    for fingerprint in sorted(retained_fingerprints - known_fingerprints):
+        identity = _evaluator_identity({"evaluator_fingerprint": fingerprint})
+        identity_by_id[identity["id"]] = identity
     all_available_identities = sorted(
         identity_by_id.values(), key=lambda identity: (identity["label"], identity["id"])
     )
@@ -768,9 +920,6 @@ def _build(cur, *, evaluator_id: str | None = None) -> dict:
     selected_fingerprint = (
         selected_identity.get("fingerprint") if selected_identity else None
     )
-    has_drift_table = _table_exists(cur, "drift_signals")
-    has_drift_run_table = _table_exists(cur, "drift_runs")
-    drift_columns = cur.columns("drift_signals") if has_drift_table else set()
     drift_signal_count = (
         cur.execute("SELECT COUNT(*) AS n FROM drift_signals").fetchone()["n"]
         if has_drift_table
@@ -1216,38 +1365,32 @@ def _build(cur, *, evaluator_id: str | None = None) -> dict:
         haikuDim.append(row)
 
     # ---- sample traces for the explorer ----
-    rows = [dict(r) for r in cur.execute(
+    sample_trace_ids = sorted(
+        ttime,
+        key=lambda trace_id: (_dt(ttime[trace_id]), trace_id),
+        reverse=True,
+    )[:MAX_TRACE_SAMPLES]
+    placeholders = ",".join("?" for _ in sample_trace_ids)
+    sample_rows = [dict(r) for r in cur.execute(
         # ``cluster_select`` is the same closed-set schema compatibility
-        # expression used above, not user-controlled SQL.
+        # expression used above, and placeholders bound the selected IDs.
         "SELECT trace_id, provider, request_model, "
         f"{cluster_select}, input_tokens, output_tokens, "  # nosec B608
         "latency_ms, cost_usd, finish_reason, error, started_at, "
-        "prompt_redacted, response_redacted FROM traces "
-        "ORDER BY started_at"
+        f"prompt_redacted, response_redacted FROM traces WHERE trace_id IN ({placeholders})",
+        tuple(sample_trace_ids),
     )]
-    errs = [r for r in rows if r["error"]]
-    late = [
-        r for r in rows
-        if _provider_key(r["provider"]) == focus
-        and (_dt(r["started_at"]) - t0).total_seconds() > 4 * 3600
-    ]
-    pick, seen = [], set()
-    for r in errs[:4] + late[:6]:
-        if r["trace_id"] not in seen:
-            pick.append(r)
-            seen.add(r["trace_id"])
-    for r in rows:
-        if len(pick) >= MAX_TRACE_SAMPLES:
-            break
-        if r["trace_id"] not in seen:
-            pick.append(r)
-            seen.add(r["trace_id"])
+    rows_by_trace_id = {row["trace_id"]: row for row in sample_rows}
+    pick = [rows_by_trace_id[trace_id] for trace_id in sample_trace_ids]
     samples = []
     for r in pick:
         s = dict(r)
         for content_field in ("prompt_redacted", "response_redacted", "error"):
             s[content_field] = redact(s.get(content_field))
         s["providerKey"] = _provider_key(r["provider"])
+        s["contentCaptured"] = (
+            r["prompt_redacted"] is not None or r["response_redacted"] is not None
+        )
         s["hour"] = round((_dt(r["started_at"]) - t0).total_seconds() / 3600, 2)
         latency = _round_or_none(r["latency_ms"], 0)
         s["latency_ms"] = int(latency) if latency is not None else None
@@ -1310,7 +1453,7 @@ def _build(cur, *, evaluator_id: str | None = None) -> dict:
             MAX_SERIES_POINTS,
         ),
         "traceSamples": _resource_limit(
-            len(rows),
+            total_traces,
             len(samples),
             MAX_TRACE_SAMPLES,
         ),
@@ -1334,6 +1477,11 @@ def _build(cur, *, evaluator_id: str | None = None) -> dict:
             "regressionHour": int(os.environ.get("VERDICT_REGRESSION_HOUR", "4")),
             "providers": len(all_keys),
             "clusters": cluster_health["nClusters"],
+            "workload": (
+                next(iter(display_workloads))
+                if len(display_workloads) == 1 and not has_undisplayable_workload
+                else None
+            ),
         },
         "providers": providers,
         "clusters": clusters,
@@ -1343,6 +1491,19 @@ def _build(cur, *, evaluator_id: str | None = None) -> dict:
         "scoreCoverage": dict(score_coverage),
         "driftSignals": drift,
         "driftRun": drift_run,
+        "driftAnalysis": _drift_analysis(
+            current=current_content_traces,
+            baseline=baseline_content_traces,
+            run_status=(
+                evaluation["status"]
+                if evaluation["status"] in {"selection_required", "invalid_selection"}
+                else "completed_with_signals"
+                if evaluation["driftStatus"] == "selected" and total_drift_signals
+                else "completed_no_signals"
+                if evaluation["driftStatus"] == "selected" and drift_run is not None
+                else "no_completed_run"
+            ),
+        ),
         "dimensionOverall": dimensionOverall,
         "tsRows": tsRows,
         "passrate": passrate,
