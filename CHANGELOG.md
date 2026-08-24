@@ -6,6 +6,8 @@ the customer POC profile is refined.
 
 ## [Unreleased]
 
+## [0.1.0a10] - 2026-08-24
+
 ### Fixed
 
 - Mounted dashboards now project Overview, Trace Explorer, cluster pass-rate
@@ -204,7 +206,8 @@ the customer POC profile is refined.
 - Content capture remains off by default and is documented as best-effort rather
   than a compliance control.
 
-[Unreleased]: https://github.com/cognifityai/verdict/compare/v0.1.0a9...HEAD
+[Unreleased]: https://github.com/cognifityai/verdict/compare/v0.1.0a10...HEAD
+[0.1.0a10]: https://github.com/cognifityai/verdict/compare/v0.1.0a9...v0.1.0a10
 [0.1.0a9]: https://github.com/cognifityai/verdict/compare/v0.1.0a8...v0.1.0a9
 [0.1.0a8]: https://github.com/cognifityai/verdict/compare/v0.1.0a7...v0.1.0a8
 [0.1.0a7]: https://github.com/cognifityai/verdict/compare/v0.1.0a6...v0.1.0a7
