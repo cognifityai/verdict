@@ -1201,7 +1201,7 @@ function Traces({ data = SEED }) {
           </div>
         </Panel>
         <div className="text-xs mt-2" style={{ color: C.faint }}>
-          {`Showing newest ${shown.toLocaleString()} of ${available.toLocaleString()} total traces. Store totals are complete. Filters apply to this bounded view. ${rows.length.toLocaleString()} match the current filters.`}
+          {`Showing newest ${shown.toLocaleString()} of ${available.toLocaleString()} application traces. Judge telemetry remains in store totals and is excluded here. Filters apply to this bounded view. ${rows.length.toLocaleString()} match the current filters.`}
         </div>
       </div>
 
