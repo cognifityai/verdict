@@ -1,7 +1,7 @@
-# Verdict 0.1.0a9 target
+# Verdict 0.1.0a10 target
 
 This Python public alpha uses the bounded
-[`0.1.0a9` POC release profile](https://github.com/cognifityai/verdict/blob/v0.1.0a9/docs/POC_RELEASE_PROFILE.md).
+[`0.1.0a10` POC release profile](https://github.com/cognifityai/verdict/blob/v0.1.0a10/docs/POC_RELEASE_PROFILE.md).
 It is not a production-readiness claim.
 
 ## Install one synchronized set
@@ -11,9 +11,9 @@ provider and storage extras it needs:
 
 ```bash
 python -m pip install \
-  "cognifity-verdict[anthropic,dashboard]==0.1.0a9" \
-  "cognifity-verdict-eval[semantic]==0.1.0a9" \
-  "cognifity-verdict-inspect==0.1.0a9"
+  "cognifity-verdict[anthropic,dashboard]==0.1.0a10" \
+  "cognifity-verdict-eval[semantic]==0.1.0a10" \
+  "cognifity-verdict-inspect==0.1.0a10"
 ```
 
 Replace `anthropic` with `openai` or `google` when appropriate. Add `postgres`
@@ -68,9 +68,10 @@ pinned to the authorized tenant's active version.
 - Use the same protected PostgreSQL DSN for shared or multi-instance capture and
   the dashboard; install the `postgres` extra.
 - Moving SQLite data to PostgreSQL is a separate migration, not a package upgrade.
-- The Registry tab is a bounded read-only view. Mounted hosts own tenant
-  authorization and mutations through the existing same-origin Operations
-  adapter.
+- The Registry tab is a bounded read-only view. When a mounted host injects its
+  authorized registry tenant, that active registry also supplies Overview,
+  Trace Explorer, pass-rate, and drift labels. Mounted hosts own tenant
+  authorization and mutations through the existing same-origin Operations adapter.
 
 `VerdictClient.runtime_metrics` exposes aggregate process-local counters and
 latency summaries without prompts, responses, storage URLs, or exception text.

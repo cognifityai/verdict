@@ -13,8 +13,8 @@ from importlib import metadata
 from typing import Any
 from urllib.parse import urlsplit
 
-TARGET_VERSION = "0.1.0a9"
-UPGRADE_VERSIONS = {"0.1.0a5", "0.1.0a6", "0.1.0a7", "0.1.0a8"}
+TARGET_VERSION = "0.1.0a10"
+UPGRADE_VERSIONS = {"0.1.0a5", "0.1.0a6", "0.1.0a7", "0.1.0a8", "0.1.0a9"}
 REQUIRED_DISTRIBUTIONS = (
     "cognifity-verdict",
     "cognifity-verdict-eval",
@@ -98,7 +98,7 @@ def inspect_environment() -> dict[str, Any]:
 
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Inspect the active Python environment for Verdict 0.1.0a9."
+        description="Inspect the active Python environment for Verdict 0.1.0a10."
     )
     parser.add_argument("--format", choices=("json", "text"), default="json")
     return parser.parse_args(argv)
