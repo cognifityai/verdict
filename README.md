@@ -59,12 +59,12 @@ you use:
 
 ```bash
 python -m pip install \
-  "cognifity-verdict[anthropic,openai,google,dashboard]==0.1.0a10" \
-  "cognifity-verdict-eval[semantic]==0.1.0a10" \
-  "cognifity-verdict-inspect==0.1.0a10"
+  "cognifity-verdict[anthropic,openai,google,dashboard]==0.1.0a11" \
+  "cognifity-verdict-eval[semantic]==0.1.0a11" \
+  "cognifity-verdict-inspect==0.1.0a11"
 ```
 
-For a customer proof of concept on `0.1.0a10`, follow the bounded
+For a customer proof of concept on `0.1.0a11`, follow the bounded
 [`POC release profile`](docs/POC_RELEASE_PROFILE.md). It names the provider
 entry points exercised for this release, keeps persistence synchronous, and
 separates a workflow demonstration from a production-readiness claim.
@@ -81,9 +81,9 @@ PostgreSQL store:
 
 ```bash
 python -m pip install \
-  "cognifity-verdict[dashboard,postgres]==0.1.0a10" \
-  "cognifity-verdict-eval==0.1.0a10" \
-  "cognifity-verdict-inspect==0.1.0a10"
+  "cognifity-verdict[dashboard,postgres]==0.1.0a11" \
+  "cognifity-verdict-eval==0.1.0a11" \
+  "cognifity-verdict-inspect==0.1.0a11"
 ```
 
 The `all` extra preserves its existing provider-and-storage dependency set; it
@@ -97,9 +97,9 @@ do not delete or reclone it:
 
 ```bash
 python -m pip install --upgrade \
-  "cognifity-verdict[anthropic,openai,google,dashboard]==0.1.0a10" \
-  "cognifity-verdict-eval[semantic]==0.1.0a10" \
-  "cognifity-verdict-inspect==0.1.0a10"
+  "cognifity-verdict[anthropic,openai,google,dashboard]==0.1.0a11" \
+  "cognifity-verdict-eval[semantic]==0.1.0a11" \
+  "cognifity-verdict-inspect==0.1.0a11"
 
 python -m pip check
 python -c "import verdict, verdict_eval, verdict_inspect; print(verdict.__version__, verdict_eval.__version__, verdict_inspect.__version__)"
@@ -123,7 +123,7 @@ API remains `import verdict`.
 Minimal install without the local semantic model:
 
 ```bash
-python -m pip install "cognifity-verdict-eval==0.1.0a10"  # lexical hash fallback
+python -m pip install "cognifity-verdict-eval==0.1.0a11"  # lexical hash fallback
 ```
 
 The full test suite also needs pytest and the dashboard's HTTP test dependency:
@@ -188,7 +188,7 @@ international identifiers, and opaque application metadata are not guaranteed
 to be found. IPv6 validation preserves trailing text that is not part of the
 validated address; clock values such as `12:34:56` are not treated as IPv6. Use
 non-sensitive tenant/session/cluster IDs. `sample_rate`
-controls what fraction of supported calls is retained. The `0.1.0a10` POC
+controls what fraction of supported calls is retained. The `0.1.0a11` POC
 profile keeps `buffered_writes=False`, so a normal process exit cannot strand
 queued telemetry. `buffered_writes=True` moves writes to a background batched
 writer but requires an explicit `shutdown()` imported from `verdict.client`
@@ -262,7 +262,7 @@ Hexagonal / ports-and-adapters, ≥2 adapters per port (one real + in-memory for
 ## Honest limits / not in v0
 
 - **No OpenTelemetry/OpenInference span emission** yet (vendor-neutral schema today; exporter is planned).
-- **Published capture coverage in `0.1.0a10`:** the bounded POC profile names
+- **Published capture coverage in `0.1.0a11`:** the bounded POC profile names
   Anthropic
   `messages.create(...)` (including `stream=True`), OpenAI
   `chat.completions.create(...)` and its stream helper, and Google
@@ -375,7 +375,7 @@ Hexagonal / ports-and-adapters, ≥2 adapters per port (one real + in-memory for
   prevents a `healthy` status: too few usable examples remain
   `insufficient_data`; otherwise the result is `degraded`.
   Signals retain up to five current-window trace IDs as review evidence.
-- The `0.1.0a10` POC drift demonstration assumes independently sampled calls.
+- The `0.1.0a11` POC drift demonstration assumes independently sampled calls.
   Do not treat repeated turns from the same conversation as independent
   evidence or use that profile for a production decision.
 - The v0 drift runner supports one tenant scope per store and rejects mixed-
