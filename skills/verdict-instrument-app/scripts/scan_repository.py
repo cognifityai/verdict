@@ -205,7 +205,7 @@ RULES: tuple[Rule, ...] = (
         "openai-responses-raw-manager",
         "provider-call",
         r"\.responses\.with_streaming_response\.(?:create|parse)\s*\(",
-        "OpenAI Responses raw-response manager call is outside the a8 surface.",
+        "OpenAI Responses raw-response manager call is outside the a9 surface.",
         "conflict",
         "Use a released Responses create, parse, or stream path and exercise final storage.",
         python_supported=True,

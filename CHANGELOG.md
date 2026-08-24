@@ -6,6 +6,23 @@ the customer POC profile is refined.
 
 ## [Unreleased]
 
+## [0.1.0a9] - 2026-08-23
+
+### Fixed
+
+- Trace Explorer now shows the bounded 30 newest traces with deterministic ties,
+  recorded UTC timestamps, relative age, provider and content-state filters,
+  complete store totals, and distinct metadata-only, empty, partial, failed, and
+  judged states.
+- Dashboard drift and judge views distinguish no completed run, evaluator
+  selection, a completed zero-signal run, and a completed signaling run. The
+  displayed default-window counts are labeled global content availability rather
+  than statistical readiness; the pipeline still decides judged sufficiency for
+  each eligible cluster and rubric dimension.
+- Completed drift runs remain selectable by a bounded incomplete evaluator
+  fingerprint when normal retention has removed the last defining judgment.
+  Missing provider, model, and rubric details are not reconstructed.
+
 ## [0.1.0a8] - 2026-08-23
 
 ### Added
@@ -180,7 +197,8 @@ the customer POC profile is refined.
 - Content capture remains off by default and is documented as best-effort rather
   than a compliance control.
 
-[Unreleased]: https://github.com/cognifityai/verdict/compare/v0.1.0a8...HEAD
+[Unreleased]: https://github.com/cognifityai/verdict/compare/v0.1.0a9...HEAD
+[0.1.0a9]: https://github.com/cognifityai/verdict/compare/v0.1.0a8...v0.1.0a9
 [0.1.0a8]: https://github.com/cognifityai/verdict/compare/v0.1.0a7...v0.1.0a8
 [0.1.0a7]: https://github.com/cognifityai/verdict/compare/v0.1.0a6...v0.1.0a7
 [0.1.0a6]: https://github.com/cognifityai/verdict/compare/v0.1.0a5...v0.1.0a6

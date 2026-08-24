@@ -98,6 +98,10 @@ class ScannerTests(unittest.TestCase):
             by_rule_and_path[("openai-responses-raw-manager", "app.py")]["support"],
             "conflict",
         )
+        self.assertIn(
+            "outside the a9 surface",
+            by_rule_and_path[("openai-responses-raw-manager", "app.py")]["finding"],
+        )
         self.assertEqual(
             by_rule_and_path[("anthropic-messages-stream", "app.py")]["support"],
             "supported-with-constraints",
