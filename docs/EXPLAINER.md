@@ -9,10 +9,10 @@ what you can try today, and where to look for implementation details.
 
 ## Short Version
 
-Verdict instruments your Python LLM app with a small SDK call. It captures
-requests and responses from supported providers, stores traces locally by
-default, runs rubric-based evaluation with a judge model you choose, and gives
-you tools to inspect quality, cost, and drift across your own traffic.
+Verdict can instrument your Python LLM app with a small SDK call or import the
+telemetry you already collect. Both paths store the same normalized traces
+locally by default, run rubric-based evaluation with a judge model you choose,
+and expose quality, cost, and drift across your own traffic.
 
 For agents, Verdict works at the LLM-call layer: planning prompts, tool-selection
 prompts, replanning prompts, and final-response prompts can all be captured when
@@ -22,6 +22,9 @@ they go through a supported provider SDK.
 
 - Captures Anthropic, OpenAI, and Google GenAI calls through lightweight Python
   instrumentation.
+- Imports OTLP GenAI/OpenInference, Langfuse, LangSmith, Datadog LLM
+  Observability, Phoenix, Opik, MLflow, and bounded voice transcript records
+  without storing a second raw vendor envelope.
 - Supports non-streaming and streaming responses for the supported SDK paths.
   The versioned [`0.1.0a12 POC release profile`](POC_RELEASE_PROFILE.md) names
   the released entry points explicitly, including Anthropic
@@ -41,10 +44,10 @@ they go through a supported provider SDK.
 
 ## How It Works
 
-1. **Capture**: call `verdict.init(...)` in your app. Verdict wraps supported
-   provider SDK methods and records request metadata, response metadata, token
-   usage, cost estimates, errors, and optional redacted content. `sample_rate`
-   controls the retained fraction.
+1. **Produce traces**: call `verdict.init(...)` to wrap supported provider SDK
+   methods, or run `verdict-import` against an existing telemetry source. SDK
+   capture honors `sample_rate`; import intentionally stores every eligible LLM
+   call and leaves judgment sampling to the pipeline.
 2. **Store**: traces are written through a storage interface. SQLite is the
    default local store; Postgres is available for shared environments. Optional
    buffered writes move persistence to a background batched writer and require
@@ -76,6 +79,8 @@ For a visual overview, see `docs/architecture-current.svg`.
 ## What You Can Try Today
 
 - Run the quickstart in `README.md` to capture real provider traffic.
+- Import one of the source-shaped fixtures in `examples/telemetry/`, or point a
+  bounded API reader at an existing telemetry project.
 - Run `verdict-pipeline` to cluster, judge, and persist a drift snapshot.
 - Run `verdict-probes` for the separately gated synthetic probe suite.
 - Run `scripts/live_capture_check.py` to verify capture against your configured
@@ -149,6 +154,9 @@ a retained trace.
 
 - Content capture is opt-in. You can capture metadata without storing prompts or
   responses.
+- Telemetry import is an explicit content-transfer path: supported source
+  prompt/response fields are copied when present, bounded and redacted at the
+  storage boundary. Treat the destination database as sensitive.
 - Supported message top-level fields are allowlisted. Their nested JSON strings,
   including tool arguments/results and metadata, are sanitized before Trace
   assignment and again at storage; judge reasoning, manual-span attributes, and
@@ -212,8 +220,8 @@ application.
 - `docs/architecture-current.svg`: current architecture diagram.
 - `docs/adrs/`: architecture decision records for major design choices.
 - `docs/v1-roadmap.md`: planned work and known product boundaries.
-- `packages/verdict/`: SDK, instrumentation, storage, core APIs, and packaged
-  dashboard runtime.
+- `packages/verdict/`: SDK, instrumentation, telemetry importers, storage, core
+  APIs, and packaged dashboard runtime.
 - `packages/verdict_eval/`: evaluation, clustering, and drift logic.
 - `packages/verdict_inspect/`: inspection CLI and report tools.
 - `ui/`: dashboard source and contributor build tools; compiled customer assets

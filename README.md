@@ -35,6 +35,7 @@ Verdict never ships with anyone's API key. It reads **your** provider key from t
 | Capability | Needs a provider API key? |
 |---|---|
 | Capture (traces, tokens, latency, estimated cost, errors) | **No** |
+| Import existing telemetry into Verdict | **No** (source APIs need their own credentials) |
 | Structural checks (refusal/JSON/length/latency drift) | **No** |
 | Lexical embedding drift (built-in hash fallback) | **No** |
 | Semantic embedding drift (local MiniLM; extra install) | **No** |
@@ -74,8 +75,10 @@ To let a customer coding agent discover and implement that POC, use the
 includes a cross-agent prompt, approval boundaries, staged acceptance criteria,
 and the current automation limits.
 
-Extras for `cognifity-verdict`: `anthropic`, `openai`, `google`, `postgres`, or
-`dashboard`. Google capture specifically needs the `google` extra
+Extras for `cognifity-verdict`: `anthropic`, `openai`, `google`, `postgres`,
+`telemetry`, or `dashboard`. The `telemetry` extra adds OTLP protobuf decoding;
+JSON/JSONL imports and hosted API readers use the Python standard library.
+Google capture specifically needs the `google` extra
 (`google-genai`). Install `dashboard` with `postgres` when the dashboard reads a
 PostgreSQL store:
 
@@ -138,6 +141,66 @@ Contributor smoke test from a source checkout (needs only numpy + wrapt):
 ```bash
 python scripts/smoke_test.py
 ```
+
+## Import telemetry you already have
+
+`verdict-import` converts existing telemetry into Verdict's current `Trace`
+rows and writes them through the same SQLite/PostgreSQL storage port used by SDK
+capture. It does not create a raw-envelope database or replace the clustering,
+sampling, judge, drift, or dashboard paths.
+
+This section describes the unreleased source candidate. Until its synchronized
+alpha is published, use
+`uv sync --package cognifity-verdict --extra telemetry --extra postgres` from a
+checkout. After release, install the `telemetry` extra when accepting OTLP
+protobuf; it is optional for JSON files and API readers:
+
+```bash
+python -m pip install "cognifity-verdict[telemetry,postgres]"
+
+# JSON, JSONL, or NDJSON; use --format auto or name the source explicitly.
+verdict-import file ./langsmith-runs.jsonl --format langsmith \
+  --storage sqlite:///./verdict.db --tenant-id support
+
+# Existing hosted telemetry. Every API import requires a bounded source-time window.
+export LANGFUSE_PUBLIC_KEY=...
+export LANGFUSE_SECRET_KEY=...
+verdict-import langfuse --from 2026-08-01T00:00:00Z --to 2026-08-02T00:00:00Z \
+  --storage postgresql://user:pass@host/verdict --tenant-id support
+
+# Loopback OTLP/HTTP JSON or protobuf receiver (POST /v1/traces).
+verdict-import receive-otlp --storage sqlite:///./verdict.db
+```
+
+Supported readers are OTLP/HTTP and OTLP JSON (current/legacy `gen_ai.*`,
+OpenInference, Vercel AI SDK call spans, and OpenLLMetry aliases), Langfuse
+observations API v2, LangSmith run query/export, Datadog LLM Observability span
+export, Phoenix trace export, Opik span search, MLflow 2.x/3.x trace files, and
+a bounded text-only voice conversation format. See the exact commands,
+environment variables, and sample files in
+[`examples/telemetry/README.md`](examples/telemetry/README.md).
+
+Langfuse's deprecated `/api/public/traces` list is intentionally not queried.
+The supported Langfuse v4 reader uses the vendor-recommended bounded v2
+Observations API so each generation/embedding retains its own content, tokens,
+cost, and latency when available.
+
+Import is intentionally unsampled: every eligible LLM call is normalized and
+stored, while duplicates from retries resolve to the same tenant/source-scoped
+ID (including the parent source trace ID when present). The existing pipeline
+decides which stored traces to judge. Missing optional
+tokens, cost, end time, model, session, or content remain `None`; Verdict does
+not invent them. Records without a stable source ID or valid start time are
+skipped with an explicit reason. Imported prompt/response text is an explicit
+content transfer: only allowlisted fields are copied and the storage boundary
+applies Verdict's best-effort redaction, but operators must still treat the
+Verdict database as sensitive.
+
+Files are bounded to 64 MiB for JSON and 16 MiB per NDJSON row; hosted API
+responses are bounded to 64 MiB; the OTLP listener defaults to a 16 MiB request
+cap. Content is bounded to 1,000 messages and 100,000 UTF-8 characters per
+input/output direction. For retry-stable IDs after moving a file, pass a stable,
+non-secret `--source-scope`; the file default is its absolute path.
 
 ## Five-line install pattern
 
@@ -257,11 +320,24 @@ You hand-label a sample PASS/FAIL (blind, before the judge runs), then the harne
 
 ## Architecture
 
-Hexagonal / ports-and-adapters, ≥2 adapters per port (one real + in-memory for tests). Storage: `SQLiteStorage`, `PostgresStorage`, `InMemoryStorage`, plus a `BufferedStorage` wrapper for async batched writes. Judge providers: Anthropic, OpenAI, Google, optional LiteLLM, and a `FakeProvider` for tests. Capture uses a **vendor-neutral `Trace` schema** (it borrows OpenTelemetry GenAI *attribute names* but does **not** emit OTel/OpenInference spans — an exporter is a v1 roadmap item). See the ADRs in [`docs/adrs/`](docs/adrs/).
+Hexagonal / ports-and-adapters, ≥2 adapters per port (one real + in-memory for tests). Storage: `SQLiteStorage`, `PostgresStorage`, `InMemoryStorage`, plus a `BufferedStorage` wrapper for async batched writes. Judge providers: Anthropic, OpenAI, Google, optional LiteLLM, and a `FakeProvider` for tests. SDK capture and existing-telemetry import both produce the same **vendor-neutral `Trace` schema**. Verdict accepts OTLP/OpenInference inputs but does **not** emit OTel/OpenInference spans; an exporter remains a v1 roadmap item. See the ADRs in [`docs/adrs/`](docs/adrs/).
 
 ## Honest limits / not in v0
 
-- **No OpenTelemetry/OpenInference span emission** yet (vendor-neutral schema today; exporter is planned).
+- **No OpenTelemetry/OpenInference span emission** yet. OTLP/OpenInference
+  import is supported; exporting Verdict records is still planned.
+- Hosted vendor APIs change independently. Langfuse v2, LangSmith, Phoenix, and
+  Opik readers follow their documented current contracts; Datadog's LLM
+  Observability export API is preview. Synthetic contract servers and fixtures
+  do not substitute for a credentialed check against a customer's deployment.
+- The generic voice reader maps completed assistant transcript turns, not raw
+  audio or a provider's agent graph. Tokens, cost, model, and latency exist only
+  when the source turn supplies them. Verify a voice vendor's export against the
+  documented generic schema before relying on it.
+- Import does not change the current Trace Explorer's bounded 30-newest-trace
+  view. All imported rows remain in SQLite/PostgreSQL and participate in the
+  existing query/pipeline paths; a paginated full-store explorer is separate UI
+  work.
 - **Published capture coverage in `0.1.0a12`:** the bounded POC profile names
   Anthropic
   `messages.create(...)` (including `stream=True`), OpenAI

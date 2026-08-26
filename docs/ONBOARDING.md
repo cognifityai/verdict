@@ -79,7 +79,93 @@ run may download model weights; embedding inference then runs locally. Set
 substantive turns each, but treat those small-window results as exploratory;
 roughly 30 or more per window gives more useful evidence.
 
-## 4. Instrument your own app (the five-line pattern)
+## 4. Import telemetry you already collect
+
+This is the shortest path when a customer already has LLM observability. The
+importer writes normalized `Trace` rows into the same Verdict database used by
+the current pipeline and dashboard:
+
+This section describes the unreleased source candidate. Until its synchronized
+alpha is published, install it from a checkout with
+`uv sync --package cognifity-verdict --extra telemetry`; the pinned `0.1.0a12`
+wheel above does not contain `verdict-import`.
+
+```bash
+verdict-import file ./traces.ndjson --format auto \
+  --storage sqlite:///./verdict.db --tenant-id my-team
+
+verdict-pipeline --storage sqlite:///./verdict.db \
+  --judge-provider anthropic --judge-model claude-haiku-4-5
+verdict-dashboard --storage sqlite:///./verdict.db
+```
+
+Use an explicit format (`otlp`, `langfuse`, `langsmith`, `datadog`, `phoenix`,
+`opik`, `mlflow`, or `voice`) when auto-detection is ambiguous. The hosted API
+commands require `--from` and `--to` so every run is bounded:
+
+| Command | Credentials | Contract |
+|---|---|---|
+| `langfuse` | `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY` | `/api/public/v2/observations` |
+| `langsmith --project NAME` | `LANGSMITH_API_KEY` | `/runs/query` |
+| `datadog` | `DD_API_KEY`, `DD_APP_KEY` | LLM Observability span event export (preview) |
+| `phoenix --base-url URL --project NAME` | optional `PHOENIX_API_KEY` | `/v1/projects/{project}/traces` |
+| `opik --project NAME` | optional `OPIK_API_KEY`, `OPIK_WORKSPACE` | `/v1/private/spans/search` |
+
+Langfuse's legacy `/api/public/traces` read is not used. Langfuse now marks it
+deprecated and recommends the bounded v2 Observations API; observations also
+preserve one Verdict row per generation/embedding instead of a trace-level
+aggregate. Langfuse v4 is the supported API-reader contract. For older
+self-hosted exports, use a supported file/OTLP path or validate that deployment
+before relying on the importer.
+
+The OTLP receiver accepts JSON, gzip JSON, and protobuf at `/v1/traces`. Its
+built-in listener is deliberately loopback-only; put an authenticated TLS OTel
+Collector or reverse proxy in front of it for remote producers.
+The mapper recognizes current/legacy GenAI fields, Semantic Kernel content
+events, OpenInference, Vercel AI SDK provider-call spans, and OpenLLMetry
+aliases. It also recognizes Claude Code's enhanced-telemetry
+`claude_code.llm_request` spans, including the currently non-standard flat token
+fields. It skips Vercel wrapper/tool spans to avoid double-counting a call.
+Claude Code response content is commonly absent, so those rows retain useful
+model/token/latency metadata but are not judgeable unless the source supplies
+prompt and response text.
+
+Import has no sampling switch. Every eligible source LLM call is stored with a
+deterministic ID scoped by adapter, tenant, source project/file, and source
+trace plus record. Repeating or overlapping an import updates the same rows,
+while reused child span IDs in different parent traces remain distinct. The existing
+pipeline—not the importer—selects the traces to judge. Source `started_at`
+continues to control drift-window membership even when the import happens later.
+
+Missing optional fields remain unavailable. A stable source record ID and valid
+start time are required; invalid records and non-LLM spans are counted with
+skip reasons. Sparse rows can remain visible as metadata but cannot be judged or
+clustered from absent prompt/response text. Verbose text is bounded per Trace,
+unknown metadata is not copied, and storage reapplies best-effort redaction.
+This is an explicit content-transfer operation, so protect the Verdict database
+like the source telemetry store.
+
+Safety limits are 64 MiB per JSON file or hosted API response, 16 MiB per
+NDJSON row, and 16 MiB per OTLP receiver request by default (including bounded
+gzip decompression). One mapped Trace retains at most 1,000 messages and
+100,000 UTF-8 characters in each input/output direction. These limits truncate
+content inside an otherwise valid record; they do not randomly sample source
+records. Use NDJSON to stream exports larger than 64 MiB.
+
+Deterministic IDs include `--source-scope`. API commands default it to the base
+URL plus project, while file commands default it to the absolute path. Supply a
+stable, non-secret `--source-scope` when the same export may move between paths
+or when multiple source projects could otherwise share a scope.
+
+For voice logs, the generic schema emits one Trace for each completed assistant
+text turn and uses the preceding transcript as its prompt. It ignores audio
+bytes/URLs and interrupted turns. This is not a claim that a transcript turn is
+always a provider LLM call; tokens, model, cost, and latency are retained only
+when the exported turn contains them. Start with the contract fixtures and
+generator in `examples/telemetry/`. One source conversation is limited to 1,000
+turns and reports `conversation_turn_limit` when additional turns are omitted.
+
+## 5. Instrument your own app (the five-line pattern)
 
 ```python
 import verdict
@@ -142,7 +228,7 @@ command exits nonzero; use `--providers` and `--no-streaming` only to narrow the
 gate explicitly. The final summary names every provider and entry point that
 actually passed, so saved output records the exact live surface exercised.
 
-## 5. Judge calibration with `verdict_eval` (only if you want quality-drift)
+## 6. Judge calibration with `verdict_eval` (only if you want quality-drift)
 
 `verdict_eval` is a library, not a separate app — you exercise it through the
 research calibration scripts in a Verdict source checkout. These scripts are
@@ -166,7 +252,7 @@ reports per-dimension and pooled agreement with 95% bootstrap CIs. A threshold
 counts as "cleared" only when the **CI lower bound** clears it — not the point
 estimate. Needs a provider key (the judge makes calls).
 
-## 6. See your results — run the pipeline, then open the dashboard
+## 7. See your results — run the pipeline, then open the dashboard
 
 Capture starts when `verdict.init()` installs the supported provider wrappers.
 By default, supported calls that pass the configured sampling policy are

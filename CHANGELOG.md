@@ -6,6 +6,19 @@ the customer POC profile is refined.
 
 ## [Unreleased]
 
+### Added
+
+- `verdict-import` now normalizes existing OTLP/HTTP JSON or protobuf,
+  Langfuse v2, LangSmith, Datadog LLM Observability, Phoenix, Opik, MLflow
+  2.x/3.x, and bounded text-only voice exports into the existing Verdict
+  `Trace` storage contract. File imports accept JSON/JSONL/NDJSON, hosted API
+  reads require bounded time windows, and the OTLP listener is loopback-only.
+- Deterministic adapter/tenant/source-scoped IDs make retries idempotent without
+  storing raw vendor envelopes. Imported content uses an allowlist and the
+  existing storage redaction boundary; missing optional metrics remain absent.
+- Synthetic source-shaped fixtures and an 80-trace end-to-end generator exercise
+  import, SQLite persistence, clustering, judging, drift, and dashboard reads.
+
 ## [0.1.0a12] - 2026-08-24
 
 ### Fixed

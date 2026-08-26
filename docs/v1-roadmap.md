@@ -7,19 +7,24 @@ commitment.
 ## Current Scope
 
 Verdict v0 focuses on the LLM-call layer inside LLM apps and agents. It can
-capture supported provider calls, store traces, evaluate responses with a rubric,
-cluster similar prompts, and inspect quality or cost changes over time.
+capture supported provider calls or import existing telemetry, store traces,
+evaluate responses with a rubric, cluster similar prompts, and inspect quality
+or cost changes over time.
 
-Today, Verdict can capture and evaluate calls such as:
+Today, Verdict can capture or import and evaluate calls such as:
 
 - Planning prompts
 - Tool-selection prompts
 - Replanning prompts
 - Final-response prompts
 - Regular chat or completion calls made by an LLM application
+- OTLP GenAI/OpenInference LLM spans
+- Langfuse, LangSmith, Datadog LLM Observability, Phoenix, and Opik exports
+- MLflow tracing files and bounded text-only voice conversation exports
 
-Each captured LLM call is stored and evaluated independently. Verdict v0 does not
-yet reconstruct a full multi-step agent run as a first-class object.
+Each captured or imported LLM call is stored independently. The pipeline then
+samples eligible stored calls for judging. Verdict v0 does not yet reconstruct
+a full multi-step agent run as a first-class object.
 
 ## Planned Agent-Level Work
 
@@ -76,14 +81,18 @@ Planned capabilities:
 
 ## Integration Direction
 
-Verdict should remain easy to adopt alongside existing observability stacks. The
-planned integration work is to export Verdict traces, judgments, and drift
-signals through standard formats where possible.
+Verdict should remain easy to adopt alongside existing observability stacks.
+Existing telemetry readers normalize allowlisted source fields directly into
+the current Verdict `Trace` schema; they do not duplicate raw vendor envelopes
+or alter downstream statistics. Planned outbound integration work is to export
+Verdict traces, judgments, and drift signals through standard formats where
+possible.
 
 Areas under consideration:
 
 - OpenTelemetry and OpenInference-compatible export paths
-- Additional provider instrumentation through maintained OSS packages
+- Additional source contracts through maintained OSS packages when they reduce
+  format-specific maintenance
 - Optional model-provider abstraction for evaluation calls
 - Optional specialized evaluators for domains such as RAG faithfulness
 
@@ -107,6 +116,9 @@ Areas under consideration:
   judge calibration for their own environment.
 - Provider SDKs change over time; live capture checks should stay part of the
   release process.
+- Hosted telemetry APIs also change over time. Synthetic contract tests prove
+  local mapping and pagination behavior, not live compatibility with every
+  hosted deployment; credentialed pre-release checks remain required.
 - Judge calls run sequentially. Verdict does not yet retain judge token/cost
   usage or enforce an evaluation budget.
 - Tool-call sequences are not a first-class capture/evaluation unit. Manual
