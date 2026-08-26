@@ -69,7 +69,7 @@ jobs:
             numpy scipy scikit-learn \
             "pyyaml>=6" "pytest>=8" "pytest-asyncio>=0.23" "ruff>=0.5" \
             -r ui/requirements.txt
-          uv pip install --system -e "packages/verdict[anthropic,openai,google]"
+          uv pip install --system -e "packages/verdict[anthropic,openai,google,telemetry]"
           uv pip install --system -e packages/verdict_eval
           uv pip install --system -e packages/verdict_inspect
 
@@ -181,6 +181,7 @@ jobs:
         run: >-
           python -m pytest -v
           packages/verdict/tests/test_postgres_integration.py
+          packages/verdict/tests/test_telemetry_postgres.py
           ui/tests/test_postgres_dashboard.py
 
   release-artifacts:
@@ -238,7 +239,7 @@ jobs:
           /tmp/verdict-wheel-venv/bin/python -m pip install --disable-pip-version-check dist/eval/*.whl
           /tmp/verdict-wheel-venv/bin/python -m pip install --disable-pip-version-check dist/inspect/*.whl
           /tmp/verdict-wheel-venv/bin/python -m pip install --disable-pip-version-check \
-            "dist/core/cognifity_verdict-0.1.0a12-py3-none-any.whl[dashboard,postgres]"
+            "dist/core/cognifity_verdict-0.1.0a12-py3-none-any.whl[dashboard,postgres,telemetry]"
           /tmp/verdict-wheel-venv/bin/python -m pip check
           cd /tmp
           /tmp/verdict-wheel-venv/bin/python -c \
@@ -248,6 +249,7 @@ jobs:
           /tmp/verdict-wheel-venv/bin/verdict-probes --help
           /tmp/verdict-wheel-venv/bin/verdict-cluster --help
           /tmp/verdict-wheel-venv/bin/verdict-dashboard --help
+          /tmp/verdict-wheel-venv/bin/verdict-import --help
           /tmp/verdict-wheel-venv/bin/python -c \
             "from importlib.resources import files; root = files('verdict.dashboard').joinpath('static'); assert root.joinpath('dashboard.html').is_file(); assert root.joinpath('assets/dashboard.js').is_file()"
 
@@ -258,7 +260,7 @@ jobs:
           /tmp/verdict-sdist-venv/bin/python -m pip install --disable-pip-version-check dist/eval/*.tar.gz
           /tmp/verdict-sdist-venv/bin/python -m pip install --disable-pip-version-check dist/inspect/*.tar.gz
           /tmp/verdict-sdist-venv/bin/python -m pip install --disable-pip-version-check \
-            "dist/core/cognifity_verdict-0.1.0a12.tar.gz[dashboard,postgres]"
+            "dist/core/cognifity_verdict-0.1.0a12.tar.gz[dashboard,postgres,telemetry]"
           /tmp/verdict-sdist-venv/bin/python -m pip check
           cd /tmp
           /tmp/verdict-sdist-venv/bin/python -c \
@@ -268,6 +270,7 @@ jobs:
           /tmp/verdict-sdist-venv/bin/verdict-probes --help
           /tmp/verdict-sdist-venv/bin/verdict-cluster --help
           /tmp/verdict-sdist-venv/bin/verdict-dashboard --help
+          /tmp/verdict-sdist-venv/bin/verdict-import --help
           /tmp/verdict-sdist-venv/bin/python -c \
             "from importlib.resources import files; root = files('verdict.dashboard').joinpath('static'); assert root.joinpath('dashboard.html').is_file(); assert root.joinpath('assets/dashboard.js').is_file()"
 

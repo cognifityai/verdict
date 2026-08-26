@@ -1,0 +1,16 @@
+{
+  "content": [{
+    "id": "44444444-4444-4444-8444-111111111111",
+    "trace_id": "44444444-4444-4444-8444-222222222222",
+    "type": "llm",
+    "start_time": "2026-08-01T12:06:00Z",
+    "end_time": "2026-08-01T12:06:00.550Z",
+    "provider": "openai",
+    "model": "gpt-4o-mini",
+    "input": {"messages": [{"role": "user", "content": "Track package 8"}]},
+    "output": {"choices": [{"message": {"role": "assistant", "content": "Package 8 arrives tomorrow."}, "finish_reason": "stop"}]},
+    "usage": {"prompt_tokens": 13, "completion_tokens": 7},
+    "metadata": {"session_id": "demo-session-7", "temperature": 0.0},
+    "total_estimated_cost": 0.0005
+  }]
+}

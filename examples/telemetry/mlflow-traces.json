@@ -1,0 +1,25 @@
+{
+  "info": {
+    "trace_id": "tr-55555555555555555555555555555555",
+    "request_time": 1785586020000,
+    "execution_duration": 650,
+    "state": "OK",
+    "trace_metadata": {"mlflow.trace.session": "demo-session-8"}
+  },
+  "data": {
+    "spans": [{
+      "context": {"trace_id": "0x55555555555555555555555555555555", "span_id": "0x5555555555555555"},
+      "start_time_unix_nano": 1785586020000000000,
+      "end_time_unix_nano": 1785586020650000000,
+      "status_code": "OK",
+      "attributes": {
+        "mlflow.spanType": "\"LLM\"",
+        "mlflow.spanInputs": "{\"messages\":[{\"role\":\"user\",\"content\":\"Pause my subscription\"}]}",
+        "mlflow.spanOutputs": "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"Your subscription is paused.\"}}]}",
+        "mlflow.llm.model": "gpt-4o-mini",
+        "mlflow.llm.provider": "openai",
+        "mlflow.chat.tokenUsage": "{\"input_tokens\":18,\"output_tokens\":6,\"total_tokens\":24}"
+      }
+    }]
+  }
+}

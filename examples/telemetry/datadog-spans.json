@@ -1,0 +1,23 @@
+{
+  "data": [{
+    "id": "datadog-event-1",
+    "type": "span",
+    "attributes": {
+      "trace_id": "1152921504606846976",
+      "span_id": "576460752303423488",
+      "timestamp": "2026-08-01T12:04:00Z",
+      "duration": 800000000,
+      "status": "ok",
+      "session_id": "demo-session-5",
+      "meta": {
+        "span": {"kind": "llm"},
+        "model_name": "gemini-2.5-flash",
+        "model_provider": "google",
+        "input": {"messages": [{"role": "user", "content": "Change my address"}]},
+        "output": {"messages": [{"role": "assistant", "content": "Your address is updated."}]},
+        "metadata": {"temperature": 0.0, "max_tokens": 128}
+      },
+      "metrics": {"input_tokens": 21, "output_tokens": 6, "total_cost": 0.0008}
+    }
+  }]
+}
