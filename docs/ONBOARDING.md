@@ -388,7 +388,8 @@ trusted reverse proxy. Dashboard time series include only observed hourly bins
 and half-hour latency bins. Presentation data is capped at the latest 100
 observed chart points, 8 providers, 20 usable intent clusters, 12 dimensions,
 20 evaluator identities, 20 models per displayed provider, 40 drift signals,
-and 30 non-judge application trace samples. The non-intent `unclustered` bucket
+and one 30-row page of non-judge application traces. Trace Explorer can page
+through the remaining application traces. The non-intent `unclustered` bucket
 is excluded from the cluster chart and its cap counts, and capped drift signals
 are ordered by absolute effect size. Full-store totals remain in the summary, while a visible
 banner reports every shown-versus-available capped count. A bundle that still

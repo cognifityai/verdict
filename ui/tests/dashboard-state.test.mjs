@@ -592,6 +592,36 @@ test("trace explorer filters the newest bounded view by capture state", async ()
   assert.doesNotMatch(rendered, /\bHour\b/);
 });
 
+test("live trace explorer pages through the existing bounded trace samples", async () => {
+  const ui = await loadUiModule();
+  const offsets = [];
+  const data = bundle("evaluator-a", [
+    { trace_id: "trace-030", prompt_redacted: "page two", response_redacted: "response" },
+  ]);
+  data.truncation.resources.traceSamples = { available: 65, shown: 1, limit: 30 };
+
+  const tree = render(ui.Traces, createHooks(), {
+    data,
+    source: "live",
+    traceOffset: 30,
+    reloading: false,
+    onTracePageChange(offset) { offsets.push(offset); },
+  });
+  const previous = findAll(
+    tree,
+    (node) => node.type === "button" && textOf(node) === "Previous",
+  )[0];
+  const next = findAll(
+    tree,
+    (node) => node.type === "button" && textOf(node) === "Next",
+  )[0];
+
+  assert.match(textOf(tree), /Showing 31–31 of 65 application traces/);
+  previous.props.onClick();
+  next.props.onClick();
+  assert.deepEqual(offsets, [0, 60]);
+});
+
 test("trace detail distinguishes content, provider failure, and judge availability", async () => {
   const ui = await loadUiModule();
   const sample = {

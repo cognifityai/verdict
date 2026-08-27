@@ -504,13 +504,21 @@ def build_bundle(
     *,
     evaluator_id: str | None = None,
     registry_tenant: str | None = None,
+    trace_offset: int = 0,
 ) -> dict:
+    if (
+        not isinstance(trace_offset, int)
+        or isinstance(trace_offset, bool)
+        or trace_offset < 0
+    ):
+        raise ValueError("trace_offset must be a non-negative integer")
     configured = str(storage)
     if _is_postgres(configured):
         return _build_from_postgres(
             configured,
             evaluator_id=evaluator_id,
             registry_tenant=registry_tenant,
+            trace_offset=trace_offset,
         )
     path = _sqlite_path(configured)
     try:
@@ -518,6 +526,7 @@ def build_bundle(
             sqlite3.connect(f"file:{path}?mode=ro", uri=True),
             evaluator_id=evaluator_id,
             registry_tenant=registry_tenant,
+            trace_offset=trace_offset,
         )
     except sqlite3.OperationalError as exc:
         if "unable to open database file" not in str(exc).lower():
@@ -534,6 +543,7 @@ def build_bundle(
             con,
             evaluator_id=evaluator_id,
             registry_tenant=registry_tenant,
+            trace_offset=trace_offset,
         )
 
 
@@ -596,6 +606,7 @@ def _build_from_connection(
     *,
     evaluator_id: str | None = None,
     registry_tenant: str | None = None,
+    trace_offset: int = 0,
 ) -> dict:
     con.row_factory = sqlite3.Row
     try:
@@ -606,6 +617,7 @@ def _build_from_connection(
             _SQLiteSession(con),
             evaluator_id=evaluator_id,
             registry_tenant=registry_tenant,
+            trace_offset=trace_offset,
         )
         if not isinstance(bundle, dict):
             raise DashboardBundleLimitError(
@@ -625,6 +637,7 @@ def _build_from_postgres(
     *,
     evaluator_id: str | None = None,
     registry_tenant: str | None = None,
+    trace_offset: int = 0,
 ) -> dict:
     try:
         import psycopg
@@ -642,6 +655,7 @@ def _build_from_postgres(
                 _PostgresSession(connection),
                 evaluator_id=evaluator_id,
                 registry_tenant=registry_tenant,
+                trace_offset=trace_offset,
             )
 
 
@@ -650,12 +664,14 @@ def _redacted_bundle(
     *,
     evaluator_id: str | None,
     registry_tenant: str | None,
+    trace_offset: int,
 ) -> dict:
     bundle = redact_structure(
         _build(
             session,
             evaluator_id=evaluator_id,
             registry_tenant=registry_tenant,
+            trace_offset=trace_offset,
         )
     )
     if not isinstance(bundle, dict):
@@ -764,6 +780,7 @@ def _build(
     *,
     evaluator_id: str | None = None,
     registry_tenant: str | None = None,
+    trace_offset: int = 0,
 ) -> dict:
     if not _table_exists(cur, "traces"):
         return _empty_bundle()
@@ -1404,7 +1421,7 @@ def _build(
         explorer_trace_ids,
         key=lambda trace_id: (_dt(ttime[trace_id]), trace_id),
         reverse=True,
-    )[:MAX_TRACE_SAMPLES]
+    )[trace_offset:trace_offset + MAX_TRACE_SAMPLES]
     placeholders = ",".join("?" for _ in sample_trace_ids) or "NULL"
     sample_rows = [dict(r) for r in cur.execute(
         # ``cluster_select`` is the same closed-set schema compatibility
@@ -1565,7 +1582,7 @@ def create_app(
     import base64
     import secrets
 
-    from fastapi import FastAPI, Request
+    from fastapi import FastAPI, Query, Request
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import HTMLResponse, JSONResponse, Response
     from fastapi.staticfiles import StaticFiles
@@ -1662,7 +1679,11 @@ def create_app(
     def config():
         return {"operationsUrl": operations_url}
 
-    def data(request: Request, evaluator: str | None = None):
+    def data(
+        request: Request,
+        evaluator: str | None = None,
+        trace_offset: int = Query(default=0, ge=0),
+    ):
         if not _is_postgres(configured_storage) and not _sqlite_path(
             configured_storage
         ).exists():
@@ -1680,6 +1701,7 @@ def create_app(
                     "verdict_registry_tenant",
                     None,
                 ),
+                trace_offset=trace_offset,
             )
         except DashboardBundleLimitError:
             _log.exception("dashboard bundle exceeded its safety budget")

@@ -167,6 +167,77 @@ def test_dashboard_api_preserves_captured_empty_content(tmp_path):
     assert api_sample["response_redacted"] == ""
 
 
+def test_dashboard_api_paginates_application_traces_with_deterministic_ties(tmp_path):
+    import httpx
+
+    path = tmp_path / "trace-pages.db"
+    storage = SQLiteStorage(str(path))
+    started_at = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    for index in range(65):
+        storage.insert_trace(Trace(
+            trace_id=f"trace-{index:03d}",
+            started_at=started_at,
+            prompt_redacted=f"prompt {index}",
+            response_redacted=f"response {index}",
+        ))
+    storage.insert_trace(Trace(
+        trace_id="trace-judge-newest",
+        started_at=started_at + timedelta(days=1),
+        tags={"verdict.workload": "judge"},
+    ))
+    storage.close()
+
+    async def request_pages():
+        transport = httpx.ASGITransport(
+            app=create_app(storage=f"sqlite:///{path}"),
+        )
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            return (
+                await client.get("/api/data"),
+                await client.get("/api/data?trace_offset=30"),
+                await client.get("/api/data?trace_offset=60"),
+                await client.get("/api/data?trace_offset=-1"),
+            )
+
+    first, second, third, invalid = asyncio.run(request_pages())
+
+    assert first.status_code == second.status_code == third.status_code == 200
+    assert invalid.status_code == 422
+    assert [sample["trace_id"] for sample in first.json()["samples"]] == [
+        f"trace-{index:03d}" for index in range(64, 34, -1)
+    ]
+    assert [sample["trace_id"] for sample in second.json()["samples"]] == [
+        f"trace-{index:03d}" for index in range(34, 4, -1)
+    ]
+    assert [sample["trace_id"] for sample in third.json()["samples"]] == [
+        f"trace-{index:03d}" for index in range(4, -1, -1)
+    ]
+    assert all(
+        page.json()["truncation"]["resources"]["traceSamples"]["available"] == 65
+        for page in (first, second, third)
+    )
+    for field in (
+        "meta",
+        "providers",
+        "clusters",
+        "dimensionOverall",
+        "driftSignals",
+        "driftAnalysis",
+        "scoreCoverage",
+    ):
+        assert first.json()[field] == second.json()[field] == third.json()[field]
+    assert "trace-judge-newest" not in {
+        sample["trace_id"]
+        for page in (first, second, third)
+        for sample in page.json()["samples"]
+    }
+    with pytest.raises(ValueError, match="non-negative integer"):
+        build_bundle(path, trace_offset=0.5)
+
+
 def test_bundle_keeps_agent_judge_and_unclassified_cost_provenance_separate(tmp_path):
     path = tmp_path / "cost-provenance.db"
     storage = SQLiteStorage(str(path))
