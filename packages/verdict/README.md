@@ -122,10 +122,13 @@ Add the `postgres` extra for a PostgreSQL store. Verdict requires PostgreSQL
 databases to use UTF-8 encoding. Legacy SQL_ASCII databases are not supported.
 The dashboard is read-only and can also be mounted with
 `verdict.dashboard.create_app()` behind an existing
-FastAPI application's authentication. Trace Explorer shows the 30 newest
-non-judge application traces with complete store totals and provider/content-
-state filters. Judge telemetry remains in aggregate cost and store totals but
-does not displace application traces from this bounded view. A `Historical
+FastAPI application's authentication. In the unreleased source, Trace Explorer
+pages through every non-judge application trace in the store, with database-side
+search and provider/content-state filters. Page sizes are 25, 50, or 100; opening
+a row fetches one bounded redacted detail record. Judge telemetry remains in
+aggregate cost and store totals but is excluded from explorer pages. The
+published `0.1.0a12` dashboard still has the earlier 30-row explorer; the
+paginated read model will ship in the next synchronized alpha. A `Historical
 metadata-only trace` means content was not captured when that specific trace was
 recorded; it does not report the application's current capture setting. Drift
 and Judge empty states show global content-bearing trace availability over the
@@ -134,6 +137,23 @@ totals does not establish statistical readiness: the pipeline still checks each
 eligible cluster and rubric dimension for enough judged traces, and job flags
 may use different windows or sample floors. The dashboard distinguishes a run
 that has not completed from a completed run with zero signals.
+
+The read-only endpoints used by the packaged UI are:
+
+```text
+GET /api/traces?limit=50&cursor=...&q=...&provider=...&capture=...
+GET /api/traces/{trace_id}?evaluator=...
+```
+
+List rows contain a bounded prompt preview but not the response body. Full
+redacted prompt/response content and the selected evaluator's latest judgment
+are returned only by detail. Cursors are opaque and tied to the active filters;
+reusing one with another query is rejected. `/api/data` retains its bounded
+30-row `samples` field for compatibility, but the live Trace Explorer no longer
+uses that field as its dataset. If more than 500 retained judgment rows are
+associated with one page, Verdict keeps the trace page available and labels
+some row-level judgment status unavailable instead of running an unbounded
+history scan; stored judgments and aggregate drift results are unchanged.
 
 Upgrade an existing synchronized `0.1.0a5` through `0.1.0a11` environment with
 `python -m pip install --upgrade`

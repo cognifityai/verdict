@@ -158,6 +158,143 @@ function mountedRegistryUrl() {
   return mountedApiUrl().replace(/\/api\/data(?:\?.*)?$/, "/api/registry");
 }
 
+function mountedTracesUrl() {
+  return mountedApiUrl().replace(/\/api\/data(?:\?.*)?$/, "/api/traces");
+}
+
+const EMPTY_TRACE_PAGE = { items: [], total: 0, limit: 50, nextCursor: null };
+
+function tracePageUrl({ limit, cursor, q, provider, capture }, evaluatorId) {
+  const parameters = new URLSearchParams();
+  parameters.set("limit", String(limit));
+  if (cursor) parameters.set("cursor", cursor);
+  if (q) parameters.set("q", q);
+  if (provider) parameters.set("provider", provider);
+  if (capture && capture !== "all") parameters.set("capture", capture);
+  if (evaluatorId) parameters.set("evaluator", evaluatorId);
+  return `${mountedTracesUrl()}?${parameters.toString()}`;
+}
+
+function traceDetailUrl(traceId, evaluatorId) {
+  const base = `${mountedTracesUrl()}/${encodeURIComponent(traceId)}`;
+  return evaluatorId ? `${base}?evaluator=${encodeURIComponent(evaluatorId)}` : base;
+}
+
+function useTraceExplorer(enabled, evaluatorId) {
+  const [pageState, setPageState] = useState({
+    page: EMPTY_TRACE_PAGE,
+    loading: false,
+    error: null,
+  });
+  const [detailState, setDetailState] = useState({
+    traceId: null,
+    detail: null,
+    loading: false,
+    error: null,
+  });
+  const pageSequence = useRef(0);
+  const detailSequence = useRef(0);
+  const pageController = useRef(null);
+  const detailController = useRef(null);
+
+  const loadPage = React.useCallback(async (parameters) => {
+    if (!enabled) return false;
+    const requestId = pageSequence.current + 1;
+    pageSequence.current = requestId;
+    if (pageController.current) pageController.current.abort();
+    const controller = new AbortController();
+    pageController.current = controller;
+    setPageState((current) => ({ ...current, loading: true, error: null }));
+    try {
+      const response = await fetch(tracePageUrl(parameters, evaluatorId), {
+        credentials: "same-origin",
+        headers: { Accept: "application/json" },
+        signal: controller.signal,
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const page = await response.json();
+      if (!page || !Array.isArray(page.items) || !Number.isInteger(page.total)
+        || !Number.isInteger(page.limit)) {
+        throw new Error("invalid trace page response");
+      }
+      if (requestId !== pageSequence.current) return false;
+      setPageState({ page, loading: false, error: null });
+      return true;
+    } catch (error) {
+      if (requestId !== pageSequence.current || error?.name === "AbortError") return false;
+      setPageState((current) => ({
+        ...current,
+        loading: false,
+        error: "Could not load traces. Still showing the last confirmed trace page.",
+      }));
+      return false;
+    } finally {
+      if (requestId === pageSequence.current) pageController.current = null;
+    }
+  }, [enabled, evaluatorId]);
+
+  const loadDetail = React.useCallback(async (traceId) => {
+    if (!enabled) return false;
+    const requestId = detailSequence.current + 1;
+    detailSequence.current = requestId;
+    if (detailController.current) detailController.current.abort();
+    const controller = new AbortController();
+    detailController.current = controller;
+    setDetailState({ traceId, detail: null, loading: true, error: null });
+    try {
+      const response = await fetch(traceDetailUrl(traceId, evaluatorId), {
+        credentials: "same-origin",
+        headers: { Accept: "application/json" },
+        signal: controller.signal,
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const detail = await response.json();
+      if (!detail || detail.trace_id !== traceId) throw new Error("invalid trace detail response");
+      if (requestId !== detailSequence.current) return false;
+      setDetailState({ traceId, detail, loading: false, error: null });
+      return true;
+    } catch (error) {
+      if (requestId !== detailSequence.current || error?.name === "AbortError") return false;
+      setDetailState({
+        traceId,
+        detail: null,
+        loading: false,
+        error: "Could not load this trace detail.",
+      });
+      return false;
+    } finally {
+      if (requestId === detailSequence.current) detailController.current = null;
+    }
+  }, [enabled, evaluatorId]);
+
+  const clearDetail = React.useCallback(() => {
+    detailSequence.current += 1;
+    if (detailController.current) detailController.current.abort();
+    detailController.current = null;
+    setDetailState({ traceId: null, detail: null, loading: false, error: null });
+  }, []);
+
+  useEffect(() => () => {
+    pageSequence.current += 1;
+    detailSequence.current += 1;
+    if (pageController.current) pageController.current.abort();
+    if (detailController.current) detailController.current.abort();
+  }, [enabled, evaluatorId]);
+
+  return {
+    page: pageState.page,
+    loading: pageState.loading,
+    error: pageState.error,
+    detailTraceId: detailState.traceId,
+    detail: detailState.detail,
+    detailLoading: detailState.loading,
+    detailError: detailState.error,
+    loadPage,
+    loadDetail,
+    clearDetail,
+  };
+}
+
 function useOperationsConfig() {
   const [operationsUrl, setOperationsUrl] = useState(null);
   useEffect(() => {
@@ -608,7 +745,10 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
   const evaluation = DATA.evaluation || { status: "empty", selectedId: null, availableIdentities: [] };
   const evaluatorSelectionNeeded = ["selection_required", "invalid_selection"].includes(evaluation.status);
   const boundedResources = Object.entries(DATA.truncation?.resources || {})
-    .filter(([, resource]) => resource.shown < resource.available);
+    .filter(([name, resource]) => (
+      (source !== "live" || name !== "traceSamples")
+      && resource.shown < resource.available
+    ));
   const sourceLabel = source === "live" ? "Live store" : source === "sample" ? "Synthetic sample" : "Waiting for live store";
   const sourceColor = source === "live" ? C.green : C.amber;
   const workloadLabel = source === "sample"
@@ -733,7 +873,12 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
         )}
         {tab === "overview" && <Overview data={DATA} />}
         {tab === "drift" && <Drift data={DATA} onOpenOperations={operationsUrl ? () => setTab("operations") : null} />}
-        {tab === "traces" && <Traces key={evaluation.selectedId || "none"} data={DATA} />}
+        {tab === "traces" && <Traces
+          key={`${source}:${evaluation.selectedId || "none"}`}
+          data={DATA}
+          source={source}
+          evaluatorId={evaluation.selectedId}
+        />}
         {tab === "registry" && <Registry url={mountedRegistryUrl()} operationsUrl={operationsUrl} />}
         {tab === "judge" && <Judge data={DATA} onOpenOperations={operationsUrl ? () => setTab("operations") : null} />}
         {tab === "compare" && <Compare data={DATA} source={source} />}
@@ -1096,40 +1241,110 @@ function Stat({ label, value, note }) {
 }
 
 /* ---------------------------------------------------------------- TRACES */
-function Traces({ data = SEED }) {
+function Traces({ data = SEED, source = "sample", evaluatorId = null }) {
   const DATA = data;
   const [prov, setProv] = useState("all");
   const [capture, setCapture] = useState("all");
   const [q, setQ] = useState("");
+  const [committedQ, setCommittedQ] = useState("");
+  const [limit, setLimit] = useState(50);
+  const [cursorStack, setCursorStack] = useState([null]);
   const [selectedTraceId, setSelectedTraceId] = useState(null);
-  const sel = DATA.samples.find((sample) => sample.trace_id === selectedTraceId) || null;
+  const live = source === "live";
+  const explorer = useTraceExplorer(live, evaluatorId);
   const providerOptions = DATA.providers.map((provider) => {
+    const rawProvider = provider.rawProvider ?? provider.key;
     const presentation = providerPresentation(
-      provider.rawProvider ?? provider.key,
+      rawProvider,
       provider.model,
       provider.label,
     );
-    return { key: provider.key, label: presentation.short };
+    return {
+      key: live ? String(rawProvider ?? "") : provider.key,
+      label: presentation.short,
+    };
   });
-  const rows = DATA.samples.filter((s) =>
+  const sampleRows = DATA.samples.filter((s) =>
     (prov === "all" || (s.providerKey || s.provider) === prov) &&
     (capture === "all" || (capture === "captured") === capturedContent(s)) &&
     (q === "" || (s.prompt_redacted || "").toLowerCase().includes(q.toLowerCase()) ||
       (s.trace_id || "").toLowerCase().includes(q.toLowerCase()))
   );
+  const rows = live ? explorer.page.items : sampleRows;
+  const sampleSelection = DATA.samples.find(
+    (sample) => sample.trace_id === selectedTraceId,
+  ) || null;
+  const sel = live
+    ? explorer.detailTraceId === selectedTraceId ? explorer.detail : null
+    : sampleSelection;
   const traceResource = DATA.truncation?.resources?.traceSamples;
   const shown = traceResource?.shown ?? DATA.samples.length;
   const available = traceResource?.available ?? DATA.meta.totalTraces ?? DATA.samples.length;
+  const currentCursor = cursorStack[cursorStack.length - 1];
+  const pageParameters = (cursor = currentCursor) => ({
+    limit,
+    cursor,
+    q: committedQ,
+    provider: prov === "all" ? "" : prov,
+    capture,
+  });
+
+  useEffect(() => {
+    if (!live) return;
+    setCursorStack([null]);
+    setSelectedTraceId(null);
+    explorer.clearDetail();
+    explorer.loadPage(pageParameters(null));
+  }, [live, evaluatorId, limit, committedQ, prov, capture, DATA]);
+
+  const selectTrace = (traceId) => {
+    setSelectedTraceId(traceId);
+    if (live) explorer.loadDetail(traceId);
+  };
+
+  const closeDetail = () => {
+    setSelectedTraceId(null);
+    if (live) explorer.clearDetail();
+  };
+
+  const nextPage = async () => {
+    if (!live || !explorer.page.nextCursor) return;
+    const nextCursor = explorer.page.nextCursor;
+    closeDetail();
+    if (await explorer.loadPage(pageParameters(nextCursor))) {
+      setCursorStack((current) => [...current, nextCursor]);
+    }
+  };
+
+  const previousPage = async () => {
+    if (!live || cursorStack.length <= 1) return;
+    const previousCursor = cursorStack[cursorStack.length - 2];
+    closeDetail();
+    if (await explorer.loadPage(pageParameters(previousCursor))) {
+      setCursorStack((current) => current.slice(0, -1));
+    }
+  };
+
+  const pageStart = explorer.page.items.length === 0
+    ? 0
+    : (cursorStack.length - 1) * explorer.page.limit + 1;
+  const pageEnd = pageStart === 0
+    ? 0
+    : pageStart + explorer.page.items.length - 1;
 
   return (
     <div className="flex flex-col xl:flex-row gap-5">
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2 mb-3 flex-wrap">
-          <div className="flex items-center gap-2 px-3 py-1.5 border flex-1" style={{ borderColor: C.border, background: C.panel, minWidth: 180, borderRadius: 3 }}>
+          <form onSubmit={(event) => {
+            event.preventDefault();
+            setCommittedQ(q.trim());
+          }} className="flex items-center gap-2 px-3 py-1.5 border flex-1" style={{ borderColor: C.border, background: C.panel, minWidth: 180, borderRadius: 3 }}>
             <Search size={14} style={{ color: C.faint }} />
             <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search prompt or trace ID…"
               className="bg-transparent outline-none text-sm flex-1" style={{ color: C.text }} />
-          </div>
+            {live && <button type="submit" className="text-xs font-semibold" style={{ color: C.accent }}>Search</button>}
+          </form>
           <div className="flex items-center gap-1 px-1 py-1 border" style={{ borderColor: C.border, background: C.panel, borderRadius: 3 }}>
             <Filter size={13} style={{ color: C.faint, marginLeft: 4 }} />
             {[{ key: "all", label: "All providers" }, ...providerOptions].map((option) => (
@@ -1170,7 +1385,7 @@ function Traces({ data = SEED }) {
               const provider = providerPresentation(s.provider, s.request_model);
               const recorded = traceTime(s);
               return (
-                <button key={s.trace_id} onClick={() => setSelectedTraceId(s.trace_id)}
+                <button key={s.trace_id} onClick={() => selectTrace(s.trace_id)}
                   className="w-full grid items-center text-left px-4 py-2.5 border-b text-sm"
                   style={{ borderColor: C.grid, gridTemplateColumns: "150px 1fr 88px 96px 70px 64px", background: on ? C.raised : "transparent" }}>
                   <span className="text-xs" style={{ color: C.faint }}>
@@ -1196,18 +1411,52 @@ function Traces({ data = SEED }) {
                 </button>
               );
             })}
-            {rows.length === 0 && <div className="p-8 text-center text-sm" style={{ color: C.faint }}>No traces match.</div>}
+            {rows.length === 0 && !explorer.loading && <div className="p-8 text-center text-sm" style={{ color: C.faint }}>No traces match.</div>}
+            {live && explorer.loading && <div className="p-8 text-center text-sm" style={{ color: C.faint }}>Loading traces…</div>}
           </div>
           </div>
         </Panel>
-        <div className="text-xs mt-2" style={{ color: C.faint }}>
-          {`Showing newest ${shown.toLocaleString()} of ${available.toLocaleString()} application traces. Judge telemetry remains in store totals and is excluded here. Filters apply to this bounded view. ${rows.length.toLocaleString()} match the current filters.`}
-        </div>
+        {live ? (
+          <div className="mt-2 flex flex-col sm:flex-row sm:items-center gap-2 text-xs" style={{ color: C.faint }}>
+            <span className="flex-1">
+              {`Showing ${pageStart.toLocaleString()}–${pageEnd.toLocaleString()} of ${explorer.page.total.toLocaleString()} matching application traces. Judge telemetry remains in store totals and is excluded here. Search and filters cover the entire store.`}
+            </span>
+            <label className="flex items-center gap-1">
+              Rows
+              <select aria-label="Trace rows per page" value={limit} onChange={(event) => setLimit(Number(event.target.value))}
+                className="px-2 py-1 border" style={{ background: C.panel, color: C.text, borderColor: C.border, borderRadius: 3 }}>
+                {[25, 50, 100].map((size) => <option key={size} value={size}>{size}</option>)}
+              </select>
+            </label>
+            <button onClick={previousPage} disabled={explorer.loading || cursorStack.length <= 1}
+              className="px-2.5 py-1 border" style={{ borderColor: C.border, opacity: explorer.loading || cursorStack.length <= 1 ? 0.45 : 1, borderRadius: 3 }}>
+              Previous
+            </button>
+            <button onClick={nextPage} disabled={explorer.loading || !explorer.page.nextCursor}
+              className="px-2.5 py-1 border" style={{ borderColor: C.border, opacity: explorer.loading || !explorer.page.nextCursor ? 0.45 : 1, borderRadius: 3 }}>
+              Next
+            </button>
+          </div>
+        ) : (
+          <div className="text-xs mt-2" style={{ color: C.faint }}>
+            {`Showing newest ${shown.toLocaleString()} of ${available.toLocaleString()} application traces. Judge telemetry remains in store totals and is excluded here. Filters apply to this bounded view. ${rows.length.toLocaleString()} match the current filters.`}
+          </div>
+        )}
+        {live && explorer.error && <div role="alert" className="text-xs mt-2" style={{ color: C.amber }}>{explorer.error}</div>}
+        {live && explorer.page.judgmentsTruncated && (
+          <div role="status" className="text-xs mt-2" style={{ color: C.amber }}>
+            Judgment status is unavailable for some rows because their retained judgment history exceeds the explorer safety bound. Trace storage and drift results are unchanged.
+          </div>
+        )}
       </div>
 
       {/* detail */}
       <div className="shrink-0" style={{ width: "min(100%, 360px)" }}>
-        {sel ? <TraceDetail s={sel} onClose={() => setSelectedTraceId(null)} /> : (
+        {sel ? <TraceDetail s={sel} onClose={closeDetail} /> : live && explorer.detailLoading ? (
+          <Panel className="p-8 text-center"><div className="text-sm" style={{ color: C.sub }}>Loading trace detail…</div></Panel>
+        ) : live && explorer.detailError ? (
+          <Panel className="p-8 text-center"><div role="alert" className="text-sm" style={{ color: C.amber }}>{explorer.detailError}</div></Panel>
+        ) : (
           <Panel className="p-8 text-center">
             <Eye size={22} style={{ color: C.faint, margin: "0 auto" }} />
             <div className="text-sm mt-2" style={{ color: C.sub }}>Select a trace to inspect its metadata and any captured content or judge verdicts.</div>
@@ -1250,6 +1499,11 @@ function TraceDetail({ s, onClose }) {
           Provider: <span style={{ color: C.sub }}>{s.provider == null || s.provider === "" ? "<unknown>" : String(s.provider)}</span>
           {" · "}Model: <span style={{ color: C.sub }}>{s.request_model == null || s.request_model === "" ? "<unknown>" : String(s.request_model)}</span>
         </div>
+        {s.truncation && Object.values(s.truncation).some(Boolean) && (
+          <div className="text-sm p-3" style={{ background: C.amberBg, color: C.text, border: `1px solid #6b5529`, borderRadius: 3 }}>
+            One or more oversized fields were shortened for this dashboard view. The stored trace was not changed.
+          </div>
+        )}
         {!hasContent && (
           <div className="text-sm p-3" style={{ background: C.amberBg, color: C.text, border: `1px solid #6b5529`, borderRadius: 3 }}>
             Prompt and response content were not captured when this trace was recorded.

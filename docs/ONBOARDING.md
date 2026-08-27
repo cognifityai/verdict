@@ -352,11 +352,15 @@ replace a newer selection. If a load fails, the dashboard explicitly names the
 last confirmed evaluator that remains on screen, and trace/drift detail is
 derived from IDs in that confirmed snapshot.
 
-Trace Explorer is a bounded newest-first view with complete store totals. It
-shows up to 30 newest non-judge application traces, breaks equal timestamps by
-trace ID, and lets you filter the bounded view by provider and by `Content
-captured` or `Metadata only`. Judge telemetry remains in aggregate cost and
-store totals but does not displace application traces from this view.
+Trace Explorer pages newest-first through every stored non-judge application
+trace. Equal timestamps are broken by trace ID. Search, provider filtering, and
+`Content captured` / `Metadata only` filtering run against the database rather
+than only the visible page. Choose 25, 50, or 100 rows per page; opening a row
+fetches its bounded redacted prompt, response, metadata, and latest judgment for
+the selected evaluator. Judge telemetry remains in aggregate cost and store
+totals but is excluded from explorer pages. The published `0.1.0a12` UI still
+has the earlier bounded 30-row view; pagination is in unreleased source until the
+next synchronized alpha.
 Each row uses its recorded UTC time plus relative age. A metadata-only row is
 described as a **historical metadata-only trace**: this means prompt and response
 were not captured when that trace was recorded, not that capture is currently
@@ -368,6 +372,13 @@ When an authenticated FastAPI host injects
 pass-rate charts, and drift rows use that tenant's active-registry assignments
 and stable labels. Browser query parameters cannot select that projection.
 Standalone and legacy stores keep using each trace's stored `cluster_id`.
+
+The pagination API uses opaque keyset cursors ordered by
+`started_at DESC, trace_id DESC`. A cursor belongs to one exact search/filter
+set and returns HTTP 400 if reused with different filters. The legacy
+`/api/data.samples` field remains bounded to 30 rows for compatibility; live
+Trace Explorer pages come from `/api/traces`, so that compatibility limit does
+not hide stored rows.
 
 Before a drift or judge run exists, Overview, Drift, and Judge show the same live
 global content-bearing trace counts instead of rendering an empty chart as zero
@@ -383,12 +394,14 @@ same-origin Operations adapter also exposes the action from the empty state.
 
 Set both `VERDICT_USER` and `VERDICT_PASS` before starting the server to require
 HTTP Basic authentication for the dashboard shells at `/` and `/dashboard` plus
-`/api/data`; `/api/health` remains public. Do not bind beyond localhost without that gate or a
+`/api/data`, `/api/traces`, and `/api/registry`; `/api/health` remains public.
+Do not bind beyond localhost without that gate or a
 trusted reverse proxy. Dashboard time series include only observed hourly bins
 and half-hour latency bins. Presentation data is capped at the latest 100
 observed chart points, 8 providers, 20 usable intent clusters, 12 dimensions,
 20 evaluator identities, 20 models per displayed provider, 40 drift signals,
-and 30 non-judge application trace samples. The non-intent `unclustered` bucket
+and the legacy 30-row non-judge trace compatibility sample. The paginated live
+explorer does not use that sample. The non-intent `unclustered` bucket
 is excluded from the cluster chart and its cap counts, and capped drift signals
 are ordered by absolute effect size. Full-store totals remain in the summary, while a visible
 banner reports every shown-versus-available capped count. A bundle that still

@@ -334,10 +334,11 @@ Hexagonal / ports-and-adapters, ≥2 adapters per port (one real + in-memory for
   audio or a provider's agent graph. Tokens, cost, model, and latency exist only
   when the source turn supplies them. Verify a voice vendor's export against the
   documented generic schema before relying on it.
-- Import does not change the current Trace Explorer's bounded 30-newest-trace
-  view. All imported rows remain in SQLite/PostgreSQL and participate in the
-  existing query/pipeline paths; a paginated full-store explorer is separate UI
-  work.
+- In unreleased source, Trace Explorer pages through all imported non-judge
+  application traces with database-side search and filters; the published
+  `0.1.0a12` UI retains the earlier 30-row view until the next synchronized
+  alpha. The compatibility `/api/data.samples` field remains bounded to 30 and
+  does not drive the new explorer.
 - **Published capture coverage in `0.1.0a12`:** the bounded POC profile names
   Anthropic
   `messages.create(...)` (including `stream=True`), OpenAI
@@ -472,7 +473,9 @@ Hexagonal / ports-and-adapters, ≥2 adapters per port (one real + in-memory for
 - Dashboard responses keep full-store totals but bound presentation data to the
   latest 100 observed chart points, 8 providers, 20 usable intent clusters,
   12 dimensions, 20 models per displayed provider, 20 evaluator identities,
-  40 drift signals, and 30 non-judge application trace samples. The non-intent
+  40 drift signals, and the legacy 30-row non-judge trace compatibility sample.
+  The live Trace Explorer uses separate bounded list/detail reads, so this
+  compatibility sample does not limit browsing. The non-intent
   `unclustered` bucket
   is outside the cluster chart and its cap counts. Drift-signal truncation keeps
   the largest absolute effect sizes. A visible banner reports every capped

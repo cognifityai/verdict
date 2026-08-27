@@ -10,7 +10,11 @@ from uuid import uuid4
 
 import pytest
 from verdict.dashboard import build_bundle
-from verdict.dashboard.app import build_registry_bundle
+from verdict.dashboard.app import (
+    build_registry_bundle,
+    build_trace_detail,
+    build_trace_page,
+)
 from verdict.schema import (
     ClusterIdentity,
     ClusterRegistryCluster,
@@ -153,8 +157,31 @@ def test_live_postgres_and_sqlite_produce_the_same_dashboard_bundle(
 
         sqlite_bundle = build_bundle(f"sqlite:///{sqlite_path}")
         postgres_bundle = build_bundle(scoped_dsn)
+        evaluator_id = sqlite_bundle["evaluation"]["selectedId"]
+        sqlite_trace_page = build_trace_page(
+            f"sqlite:///{sqlite_path}",
+            limit=2,
+            evaluator_id=evaluator_id,
+        )
+        postgres_trace_page = build_trace_page(
+            scoped_dsn,
+            limit=2,
+            evaluator_id=evaluator_id,
+        )
+        sqlite_trace_detail = build_trace_detail(
+            f"sqlite:///{sqlite_path}",
+            trace_id=trace.trace_id,
+            evaluator_id=evaluator_id,
+        )
+        postgres_trace_detail = build_trace_detail(
+            scoped_dsn,
+            trace_id=trace.trace_id,
+            evaluator_id=evaluator_id,
+        )
 
         assert postgres_bundle == sqlite_bundle
+        assert postgres_trace_page == sqlite_trace_page
+        assert postgres_trace_detail == sqlite_trace_detail
         json.dumps(postgres_bundle)
         assert type(postgres_bundle["providers"][0]["cost"]) is type(
             sqlite_bundle["providers"][0]["cost"]

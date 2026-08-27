@@ -8,6 +8,12 @@ the customer POC profile is refined.
 
 ### Added
 
+- Trace Explorer now reaches every stored non-judge application trace through
+  deterministic cursor pages (25, 50, or 100 rows), with database-side search,
+  provider/content-state filters, and a bounded redacted detail read. The
+  existing `/api/data` aggregate bundle and its 30-row compatibility sample are
+  unchanged; clustering, judging, drift statistics, and storage writes are
+  unaffected.
 - `verdict-import` now normalizes existing OTLP/HTTP JSON or protobuf,
   Langfuse v2, LangSmith, Datadog LLM Observability, Phoenix, Opik, MLflow
   2.x/3.x, and bounded text-only voice exports into the existing Verdict

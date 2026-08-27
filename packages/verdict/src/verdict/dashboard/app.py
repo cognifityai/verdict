@@ -11,8 +11,6 @@ The aggregation is shared across storage dialects so the browser sees one DTO.
 """
 from __future__ import annotations
 
-import hashlib
-import json
 import logging
 import math
 import os
@@ -26,6 +24,15 @@ from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import urlsplit
 
+from verdict.dashboard.presentation import (
+    evaluator_identity as _evaluator_identity,
+)
+from verdict.dashboard.presentation import json_column as _json_column
+from verdict.dashboard.presentation import json_value as _json_value
+from verdict.dashboard.presentation import (
+    judgment_presentation as _judgment_presentation,
+)
+from verdict.dashboard.presentation import provider_key as _provider_key
 from verdict.dashboard.registry import (
     RegistryNotFoundError,
     RegistryStateError,
@@ -34,7 +41,15 @@ from verdict.dashboard.registry import (
 from verdict.dashboard.registry import (
     build_registry_bundle as _build_registry_bundle,
 )
-from verdict.metrics import ScoreCounts, verdict_label
+from verdict.dashboard.traces import (
+    DEFAULT_TRACE_PAGE_SIZE,
+    MAX_TRACE_PAGE_SIZE,
+    TraceNotFoundError,
+    TraceQueryError,
+    read_trace_detail,
+    read_trace_page,
+)
+from verdict.metrics import ScoreCounts
 from verdict.redaction import redact, redact_structure
 
 HERE = Path(__file__).resolve().parent
@@ -119,91 +134,6 @@ def _label_for(provider: str, model: str) -> str:
     return PRETTY.get(model, model or provider)
 
 
-def _provider_key(provider: object) -> str:
-    """Return a chart-safe key without erasing the raw provider value."""
-    if provider in PROVIDER_ORDER:
-        return str(provider)
-    encoded = json.dumps(
-        {"type": type(provider).__name__, "value": provider},
-        sort_keys=True,
-        ensure_ascii=False,
-        default=str,
-    )
-    return f"provider_{hashlib.sha256(encoded.encode('utf-8')).hexdigest()[:16]}"
-
-
-def _row_value(row: Mapping[str, Any], key: str, default=None):
-    """Read a column from both current and pre-migration judgment rows."""
-    return row[key] if key in row.keys() else default
-
-
-def _json_value(raw: object, default):
-    if raw in (None, ""):
-        return default
-    try:
-        return json.loads(raw) if isinstance(raw, str) else deepcopy(raw)
-    except (TypeError, json.JSONDecodeError):
-        return default
-
-
-def _json_column(row: Mapping[str, Any], name: str, default):
-    """Read one logical JSON field from either adapter's physical schema."""
-    raw = _row_value(row, f"{name}_json", _row_value(row, name))
-    return _json_value(raw, default)
-
-
-def _evaluator_identity(row: Mapping[str, Any]) -> dict:
-    """Build a stable evaluator discriminator, including legacy rows.
-
-    The August dashboard blocker can already separate model/rubric definitions.
-    Newer schema fields are included whenever present so complete identities
-    never collapse into historical incomplete identities.
-    """
-    models = _json_column(row, "judge_models", [])
-    config = _json_column(row, "evaluator_config", {})
-    expected_dimensions = _json_column(row, "expected_dimensions", [])
-    provider = _row_value(row, "evaluator_provider", "") or ""
-    fingerprint = _row_value(row, "evaluator_fingerprint", "") or ""
-    canonical = {
-        "provider": provider,
-        "models": models if isinstance(models, list) else [],
-        "rubricName": _row_value(row, "rubric_name", "default") or "default",
-        "rubricVersion": _row_value(row, "rubric_version", "1") or "1",
-        "config": config if isinstance(config, dict) else {},
-        "expectedDimensions": (
-            expected_dimensions if isinstance(expected_dimensions, list) else []
-        ),
-        "fingerprint": fingerprint,
-    }
-    complete = bool(
-        provider
-        and fingerprint
-        and canonical["models"]
-        and canonical["expectedDimensions"]
-    )
-    encoded = json.dumps(canonical, sort_keys=True, separators=(",", ":"))
-    identity_id = hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:20]
-    model_label = "+".join(str(model) for model in canonical["models"]) or "unknown judge"
-    rubric_label = f"{canonical['rubricName']} v{canonical['rubricVersion']}"
-    identity_suffix = (
-        f" · fp {fingerprint[:8]}"
-        if complete
-        else " · historical identity incomplete"
-    )
-    return {
-        "id": identity_id,
-        "provider": provider or None,
-        "models": canonical["models"],
-        "rubricName": canonical["rubricName"],
-        "rubricVersion": canonical["rubricVersion"],
-        "fingerprint": fingerprint or None,
-        "config": canonical["config"],
-        "expectedDimensions": canonical["expectedDimensions"],
-        "complete": complete,
-        "label": f"{model_label} · {rubric_label}{identity_suffix}",
-    }
-
-
 def _score_rate(counts: Counter) -> float | None:
     """Canonical PASS / (PASS + FAIL), excluding every unknown state."""
     rate = ScoreCounts(
@@ -256,6 +186,10 @@ class _QuerySession(Protocol):
     def valid_session_predicate(self, trace_alias: str) -> str: ...
 
     def content_bearing_predicate(self, trace_alias: str) -> str: ...
+
+    def json_text_expression(self, column: str, key: str) -> str: ...
+
+    def cast_text_expression(self, expression: str) -> str: ...
 
 
 # Code points removed by Python 3.12 ``str.strip``. The drift CLI uses that
@@ -336,6 +270,16 @@ class _SQLiteSession:
             lambda value: f"TRIM({value},{whitespace})",
         )
 
+    def json_text_expression(self, column: str, key: str) -> str:
+        path = f'$."{key}"'.replace("'", "''")
+        return (
+            f"CASE WHEN json_valid({column}) THEN "
+            f"json_extract({column},'{path}') END"
+        )
+
+    def cast_text_expression(self, expression: str) -> str:
+        return f"CAST({expression} AS TEXT)"
+
 
 class _PostgresSession:
     def __init__(self, connection: Any) -> None:
@@ -376,6 +320,13 @@ class _PostgresSession:
             trace_alias,
             lambda value: f"BTRIM({value},{whitespace})",
         )
+
+    def json_text_expression(self, column: str, key: str) -> str:
+        escaped = key.replace("'", "''")
+        return f"{column}->>'{escaped}'"
+
+    def cast_text_expression(self, expression: str) -> str:
+        return f"CAST({expression} AS TEXT)"
 
 
 def _table_exists(cur: _QuerySession, table: str) -> bool:
@@ -589,6 +540,99 @@ def build_registry_bundle(
             "bounded registry dashboard bundle exceeded the redaction budget"
         )
     return redacted
+
+
+def _build_trace_read_model(
+    storage: str | os.PathLike[str],
+    builder: Callable[[_QuerySession], dict[str, Any]],
+) -> dict[str, Any]:
+    """Run one bounded trace read on a coherent, read-only snapshot."""
+    configured = str(storage)
+    if _is_postgres(configured):
+        try:
+            import psycopg
+            from psycopg.rows import dict_row
+        except ImportError as exc:
+            raise ImportError(
+                "PostgreSQL dashboard support requires "
+                '`pip install "cognifity-verdict[postgres,dashboard]"`'
+            ) from exc
+        connect: Any = psycopg.connect
+        with connect(
+            configured,
+            autocommit=False,
+            row_factory=dict_row,
+        ) as connection:
+            with connection.transaction():
+                connection.execute(
+                    "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"
+                )
+                result = builder(_PostgresSession(connection))
+    else:
+        path = _sqlite_path(configured)
+        connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        connection.row_factory = sqlite3.Row
+        try:
+            connection.execute("BEGIN")
+            result = builder(_SQLiteSession(connection))
+            connection.commit()
+        except BaseException:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+    redacted = redact_structure(result)
+    if not isinstance(redacted, dict):
+        raise DashboardBundleLimitError(
+            "bounded trace dashboard response exceeded the redaction budget"
+        )
+    return redacted
+
+
+def build_trace_page(
+    storage: str | os.PathLike[str],
+    *,
+    limit: int = DEFAULT_TRACE_PAGE_SIZE,
+    cursor: str | None = None,
+    query: str | None = None,
+    provider: str | None = None,
+    capture: str = "all",
+    evaluator_id: str | None = None,
+    registry_tenant: str | None = None,
+) -> dict[str, Any]:
+    """Build one redacted, store-wide Trace Explorer page."""
+    return _build_trace_read_model(
+        storage,
+        lambda session: read_trace_page(
+            session,
+            limit=limit,
+            cursor=cursor,
+            query=query,
+            provider=provider,
+            capture=capture,
+            evaluator_id=evaluator_id,
+            registry_tenant=registry_tenant,
+        ),
+    )
+
+
+def build_trace_detail(
+    storage: str | os.PathLike[str],
+    *,
+    trace_id: str,
+    evaluator_id: str | None = None,
+    registry_tenant: str | None = None,
+) -> dict[str, Any]:
+    """Build one redacted, bounded Trace Explorer detail record."""
+    return _build_trace_read_model(
+        storage,
+        lambda session: read_trace_detail(
+            session,
+            trace_id=trace_id,
+            evaluator_id=evaluator_id,
+            registry_tenant=registry_tenant,
+        ),
+    )
 
 
 def _build_from_connection(
@@ -1091,55 +1135,26 @@ def _build(
     })
     judg_by_trace = {}
     for trace_id, row in latest_row_by_trace.items():
-        status = (_row_value(row, "status", "completed") or "completed").lower()
-        if status == "error":
+        judgment = _judgment_presentation(row)
+        if judgment is None:
             score_coverage["error"] += 1
             continue
-        dims_raw = _json_column(row, "dimensions", [])
-        dims_raw = dims_raw if isinstance(dims_raw, list) else []
-        expected = _json_column(row, "expected_dimensions", [])
-        if not isinstance(expected, list) or not expected:
-            expected = [d.get("name") for d in dims_raw if isinstance(d, dict) and d.get("name")]
-        normalized_dims = []
-        present_names = set()
-        nameless_unclear = 0
         prov = tp.get(trace_id, "__provider_unknown__")
-        for dimension in dims_raw:
-            if not isinstance(dimension, dict) or not dimension.get("name"):
-                score_coverage["unclear"] += 1
-                nameless_unclear += 1
-                continue
-            name = str(dimension["name"])
-            verdict = verdict_label(dimension.get("verdict", "unclear")).lower()
-            present_names.add(name)
-            normalized_dims.append({
-                "name": name,
-                "verdict": verdict,
-                "reasoning": redact(str(dimension.get("reasoning", ""))) or "",
-            })
+        for dimension in judgment["dims"]:
+            name = dimension["name"]
+            verdict = dimension["verdict"]
             dim_overall[name][verdict] += 1
             prov_dim[prov][name][verdict] += 1
             score_coverage[verdict] += 1
-        score_coverage["missing"] += len(set(expected) - present_names)
-        trace_counts = Counter(dimension["verdict"] for dimension in normalized_dims)
-        trace_status = (
-            "fail" if trace_counts["fail"]
-            else "unclear" if trace_counts["unclear"] or nameless_unclear or set(expected) - present_names
-            else "pass" if trace_counts["pass"]
-            else "unavailable"
+        normalized_unclear = sum(
+            dimension["verdict"] == "unclear"
+            for dimension in judgment["dims"]
         )
-        judg_by_trace[trace_id] = {
-            "judges": _json_column(row, "judge_models", []),
-            "dims": normalized_dims,
-            "summary": {
-                "status": trace_status,
-                "pass": trace_counts["pass"],
-                "fail": trace_counts["fail"],
-                "unclear": trace_counts["unclear"] + nameless_unclear,
-                "missing": len(set(expected) - present_names),
-                "passRate": _score_rate(trace_counts),
-            },
-        }
+        score_coverage["unclear"] += (
+            judgment["summary"]["unclear"] - normalized_unclear
+        )
+        score_coverage["missing"] += judgment["summary"]["missing"]
+        judg_by_trace[trace_id] = judgment
     score_coverage["evaluable"] = score_coverage["pass"] + score_coverage["fail"]
 
     all_keys = _provider_order(set(raw_provider_of))
@@ -1565,7 +1580,7 @@ def create_app(
     import base64
     import secrets
 
-    from fastapi import FastAPI, Request
+    from fastapi import FastAPI, Query, Request
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import HTMLResponse, JSONResponse, Response
     from fastapi.staticfiles import StaticFiles
@@ -1601,7 +1616,7 @@ def create_app(
     # assets contain no stored telemetry and remain public.
     def _is_gated(path: str) -> bool:
         return path in {"/", "/dashboard", "/api/config"} or path.startswith(
-            ("/api/data", "/api/registry")
+            ("/api/data", "/api/registry", "/api/traces")
         )
 
     @app.middleware("http")
@@ -1693,6 +1708,86 @@ def create_app(
 
     data.__annotations__["request"] = Request
     app.get("/api/data")(data)
+
+    def trace_page(
+        request: Request,
+        limit: int = Query(
+            default=DEFAULT_TRACE_PAGE_SIZE,
+            ge=1,
+            le=MAX_TRACE_PAGE_SIZE,
+        ),
+        cursor: str | None = None,
+        q: str | None = None,
+        provider: str | None = None,
+        capture: str = "all",
+        evaluator: str | None = None,
+    ):
+        if not _is_postgres(configured_storage) and not _sqlite_path(
+            configured_storage
+        ).exists():
+            _log.warning("trace explorer unavailable: SQLite database not found")
+            return JSONResponse({"error": "data unavailable"}, status_code=503)
+        try:
+            return build_trace_page(
+                configured_storage,
+                limit=limit,
+                cursor=cursor,
+                query=q,
+                provider=provider,
+                capture=capture,
+                evaluator_id=evaluator,
+                registry_tenant=getattr(
+                    request.state,
+                    "verdict_registry_tenant",
+                    None,
+                ),
+            )
+        except TraceQueryError:
+            return JSONResponse({"error": "invalid trace query"}, status_code=400)
+        except DashboardBundleLimitError:
+            _log.exception("trace explorer page exceeded its safety budget")
+            return JSONResponse({"error": "data unavailable"}, status_code=503)
+        except Exception:  # pragma: no cover - corrupt/locked/adapter failure
+            _log.exception("failed to read %s trace explorer page", backend)
+            return JSONResponse({"error": "data unavailable"}, status_code=503)
+
+    trace_page.__annotations__["request"] = Request
+    app.get("/api/traces")(trace_page)
+
+    def trace_detail(
+        request: Request,
+        trace_id: str,
+        evaluator: str | None = None,
+    ):
+        if not _is_postgres(configured_storage) and not _sqlite_path(
+            configured_storage
+        ).exists():
+            _log.warning("trace explorer unavailable: SQLite database not found")
+            return JSONResponse({"error": "data unavailable"}, status_code=503)
+        try:
+            return build_trace_detail(
+                configured_storage,
+                trace_id=trace_id,
+                evaluator_id=evaluator,
+                registry_tenant=getattr(
+                    request.state,
+                    "verdict_registry_tenant",
+                    None,
+                ),
+            )
+        except TraceNotFoundError:
+            return JSONResponse({"error": "trace not found"}, status_code=404)
+        except TraceQueryError:
+            return JSONResponse({"error": "invalid trace query"}, status_code=400)
+        except DashboardBundleLimitError:
+            _log.exception("trace explorer detail exceeded its safety budget")
+            return JSONResponse({"error": "data unavailable"}, status_code=503)
+        except Exception:  # pragma: no cover - corrupt/locked/adapter failure
+            _log.exception("failed to read %s trace explorer detail", backend)
+            return JSONResponse({"error": "data unavailable"}, status_code=503)
+
+    trace_detail.__annotations__["request"] = Request
+    app.get("/api/traces/{trace_id:path}")(trace_detail)
 
     def registry(
         request,

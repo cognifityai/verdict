@@ -138,11 +138,26 @@ def test_registry_api_uses_host_authorized_tenant_and_explains_terminal_membersh
                     params={"tenant": "tenant-b", "version": version_b},
                 ),
                 await client.get("/admin/verdict/api/data"),
+                await client.get(
+                    "/admin/verdict/api/traces",
+                    params={"q": "Billing requests 100"},
+                ),
+                await client.get(
+                    "/admin/verdict/api/traces/tenant-a-trace",
+                ),
             )
 
-    response, rejected_version, data_response = asyncio.run(request_registry())
+    (
+        response,
+        rejected_version,
+        data_response,
+        traces_response,
+        trace_detail_response,
+    ) = asyncio.run(request_registry())
     payload = response.json()
     data_payload = data_response.json()
+    traces_payload = traces_response.json()
+    trace_detail_payload = trace_detail_response.json()
 
     assert response.status_code == 200
     assert payload["schema"] == "cluster-registry-dashboard-v1"
@@ -231,6 +246,15 @@ def test_registry_api_uses_host_authorized_tenant_and_explains_terminal_membersh
     )
     assert tenantless_sample["cluster_id"] is None
     assert tenantless_sample["cluster_label"] is None
+    assert traces_response.status_code == 200
+    assert [item["trace_id"] for item in traces_payload["items"]] == [
+        "tenant-a-trace"
+    ]
+    assert traces_payload["items"][0]["cluster_id"] == cluster_id
+    assert traces_payload["items"][0]["cluster_label"] == "Billing requests 100"
+    assert trace_detail_response.status_code == 200
+    assert trace_detail_payload["cluster_id"] == cluster_id
+    assert trace_detail_payload["cluster_label"] == "Billing requests 100"
 
     with sqlite3.connect(path) as partial:
         partial.execute("DROP TABLE cluster_registry_versions")

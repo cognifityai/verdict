@@ -28,7 +28,7 @@ function componentStub(names) {
 }
 
 async function loadUiModule() {
-  const source = `${await readFile(UI_SOURCE, "utf8")}\nexport { Dashboard, Overview, Traces, TraceDetail, Drift, Judge, Compare, mountedApiUrl };\nexport { useOperations } from "./Operations.jsx";\nexport { RegistryView } from "./Registry.jsx";`;
+  const source = `${await readFile(UI_SOURCE, "utf8")}\nexport { Dashboard, Overview, Traces, TraceDetail, Drift, Judge, Compare, mountedApiUrl, mountedTracesUrl, useTraceExplorer };\nexport { useOperations } from "./Operations.jsx";\nexport { RegistryView } from "./Registry.jsx";`;
   const result = await build({
     stdin: {
       contents: source,
@@ -176,9 +176,81 @@ test("a mounted dashboard derives its API path from the host prefix", async () =
   try {
     const ui = await loadUiModule();
     assert.equal(ui.mountedApiUrl(), "/admin/verdict/api/data");
+    assert.equal(ui.mountedTracesUrl(), "/admin/verdict/api/traces");
   } finally {
     delete globalThis.window;
   }
+});
+
+function renderTraceExplorerHook(ui, hooks, evaluator = "evaluator-a") {
+  globalThis.__VERDICT_TEST_HOOKS__ = hooks;
+  hooks.begin();
+  return ui.useTraceExplorer(true, evaluator);
+}
+
+function tracePage(traceId, nextCursor = null) {
+  return {
+    items: [{ trace_id: traceId, prompt_redacted: traceId }],
+    total: 1,
+    limit: 25,
+    nextCursor,
+  };
+}
+
+test("an older trace page cannot replace a newer store-wide query", async () => {
+  const ui = await loadUiModule();
+  const hooks = createHooks();
+  const requests = deferredFetches();
+  let explorer = renderTraceExplorerHook(ui, hooks);
+
+  explorer.loadPage({ limit: 25, q: "old", provider: "", capture: "all" });
+  explorer.loadPage({ limit: 25, q: "new", provider: "", capture: "all" });
+  assert.equal(requests.length, 2);
+  assert.match(requests[0].url, /q=old/);
+  assert.match(requests[1].url, /q=new/);
+
+  await resolveJson(requests[1], tracePage("new-result"));
+  await resolveJson(requests[0], tracePage("old-result"));
+  explorer = renderTraceExplorerHook(ui, hooks);
+
+  assert.equal(explorer.page.items[0].trace_id, "new-result");
+});
+
+test("a failed trace page keeps the last confirmed page visible", async () => {
+  const ui = await loadUiModule();
+  const hooks = createHooks();
+  const requests = deferredFetches();
+  let explorer = renderTraceExplorerHook(ui, hooks);
+
+  explorer.loadPage({ limit: 25, q: "confirmed", provider: "", capture: "all" });
+  await resolveJson(requests[0], tracePage("confirmed-result", "next-a"));
+  explorer = renderTraceExplorerHook(ui, hooks);
+  explorer.loadPage({ limit: 25, q: "failed", provider: "", capture: "all" });
+  requests[1].reject(new Error("network unavailable"));
+  for (let index = 0; index < 6; index += 1) await Promise.resolve();
+  explorer = renderTraceExplorerHook(ui, hooks);
+
+  assert.equal(explorer.page.items[0].trace_id, "confirmed-result");
+  assert.match(explorer.error, /Still showing the last confirmed trace page/);
+});
+
+test("a stale trace detail cannot replace the currently selected trace", async () => {
+  const ui = await loadUiModule();
+  const hooks = createHooks();
+  const requests = deferredFetches();
+  let explorer = renderTraceExplorerHook(ui, hooks);
+
+  explorer.loadDetail("trace / old");
+  explorer.loadDetail("trace-new");
+  assert.equal(requests.length, 2);
+  assert.match(requests[0].url, /trace%20%2F%20old/);
+  assert.match(requests[0].url, /evaluator=evaluator-a/);
+
+  await resolveJson(requests[1], { trace_id: "trace-new" });
+  await resolveJson(requests[0], { trace_id: "trace / old" });
+  explorer = renderTraceExplorerHook(ui, hooks);
+
+  assert.equal(explorer.detail.trace_id, "trace-new");
 });
 
 test("operations navigation is present only when the host configures an adapter", async () => {
