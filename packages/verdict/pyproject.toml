@@ -32,11 +32,15 @@ dashboard = [
     "fastapi>=0.116",
     "uvicorn[standard]>=0.35",
 ]
+telemetry = [
+    "opentelemetry-proto>=1.30,<2",
+    "protobuf>=5,<7",
+]
 
 # NOTE: Redaction is built in (pattern scanners + Luhn; see redaction.py) and
 # needs no extra dependencies. Presidio-based redaction is a planned option,
 # not yet wired, so no `redaction` extra is published.
-all = ["cognifity-verdict[anthropic,openai,google,postgres]"]
+all = ["cognifity-verdict[anthropic,openai,google,postgres,telemetry]"]
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.23",
@@ -48,6 +52,7 @@ cognifity-verdict-eval = { workspace = true }
 
 [project.scripts]
 verdict-dashboard = "verdict.dashboard.app:main"
+verdict-import = "verdict.telemetry.cli:main"
 
 [project.urls]
 Homepage = "https://cognifity.ai/verdict"

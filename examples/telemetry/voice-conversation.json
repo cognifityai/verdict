@@ -1,0 +1,11 @@
+{
+  "conversation_id": "demo-voice-session",
+  "provider": "voice-agent",
+  "model": "realtime-model",
+  "turns": [
+    {"id": "voice-turn-1", "speaker": "caller", "started_at": "2026-08-01T12:08:00Z", "ended_at": "2026-08-01T12:08:01Z", "text": "I need to reschedule"},
+    {"id": "voice-turn-2", "speaker": "agent", "started_at": "2026-08-01T12:08:01Z", "ended_at": "2026-08-01T12:08:02Z", "text": "What date works for you?", "status": "completed", "input_tokens": 12, "output_tokens": 7},
+    {"id": "voice-turn-3", "speaker": "caller", "started_at": "2026-08-01T12:08:03Z", "ended_at": "2026-08-01T12:08:04Z", "text": "Next Monday"},
+    {"id": "voice-turn-4", "speaker": "agent", "started_at": "2026-08-01T12:08:04Z", "ended_at": "2026-08-01T12:08:05Z", "text": "You are rescheduled for Monday.", "status": "completed", "input_tokens": 20, "output_tokens": 8}
+  ]
+}

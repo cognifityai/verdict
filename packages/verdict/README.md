@@ -5,6 +5,8 @@ PyPI distribution: `cognifity-verdict`. Python import: `verdict`.
 The Verdict Python SDK. Auto-instruments your LLM calls via `wrapt` and
 captures them into a vendor-neutral `Trace` schema (attribute *names* follow
 the OpenTelemetry GenAI semantic conventions, but no OTel spans are emitted).
+The same package also imports existing OTLP and vendor telemetry into that
+unchanged schema with the `verdict-import` command.
 Traces are written to SQLite by default (or any `Storage` adapter). Content
 capture (prompts/completions) is **off by default** — opt in with
 `capture_content=True`; when enabled, captured content is run through built-in
@@ -21,6 +23,26 @@ retains caller-owned aliases. Redacted mapping-key collisions keep every value
 under deterministic suffixed keys rather than overwriting one entry.
 This is best-effort matching, not a compliance guarantee; keep content capture
 off when its documented coverage is insufficient.
+
+Import existing telemetry without instrumenting the application:
+
+```bash
+pip install "cognifity-verdict[telemetry]"  # telemetry extra is for OTLP protobuf
+verdict-import file traces.jsonl --format auto --storage sqlite:///./verdict.db
+verdict-import receive-otlp --storage sqlite:///./verdict.db
+```
+
+Native readers cover Langfuse v2, LangSmith, Datadog LLM Observability,
+Phoenix, Opik, MLflow files, and a text-only voice-conversation schema. The
+importer stores every eligible LLM call; the existing evaluation pipeline later
+samples stored traces for judging. It never stores a second raw vendor envelope
+or imputes missing token, latency, cost, model, session, or content fields. See
+the repository's `examples/telemetry/README.md` and ADR-006 for exact source
+contracts and privacy limits.
+
+The Langfuse reader targets the supported v4 Observations API v2, not the
+deprecated trace-list endpoint, so Verdict receives one record per actual
+generation or embedding rather than a trace aggregate.
 
 For a customer proof of concept, follow the versioned
 [`0.1.0a12 POC release profile`](https://github.com/cognifityai/verdict/blob/v0.1.0a12/docs/POC_RELEASE_PROFILE.md).

@@ -20,8 +20,10 @@ the target functions with `wrapt`.
 This is a common pattern for Python
 auto-instrumentation libraries.
 
-**We do NOT depend on OpenLLMetry / OpenTelemetry instrumentation packages.** Our
-capture layer is our own `wrapt`-based instrumentors. (Earlier drafts of this ADR
+**We do NOT depend on OpenLLMetry / OpenTelemetry instrumentation packages for
+in-process capture.** Our capture layer is our own `wrapt`-based instrumentors.
+Existing applications may instead send OTLP or import supported telemetry as
+described by ADR-006. (Earlier drafts of this ADR
 proposed reusing OpenLLMetry's `opentelemetry-instrumentation-*` packages and
 emitting OpenTelemetry spans. That was not built; this ADR has been corrected to
 describe what the code actually does. See "Planned / not yet implemented" below
@@ -49,8 +51,9 @@ running code in-process is impossible.
 
 ## Implementation
 
-The SDK is a self-contained capture + storage layer with **no OpenTelemetry or
-OpenLLMetry runtime dependency**. It:
+The SDK's in-process capture path has **no OpenTelemetry or OpenLLMetry runtime
+dependency**. Optional OTLP protobuf import uses the `telemetry` extra; JSON
+imports remain dependency-free. The capture path:
 
 1. Installs `wrapt` wrappers over supported provider SDK call sites at
    `verdict.init()` time.
@@ -130,12 +133,13 @@ by provider, storage type, and exception type.
 
 ## Wire format / schema
 
-There is **no OpenTelemetry/OpenInference span emission today.** Instead we use an
-internal, **vendor-neutral schema** (`Trace`, `Judgment`, `SpanRecord`,
+There is **no OpenTelemetry/OpenInference span emission today.** Verdict can
+receive/import those formats through ADR-006. Internally, both paths use a
+**vendor-neutral schema** (`Trace`, `Judgment`, `SpanRecord`,
 `DriftSignal`, `UserSignalRecord`) defined in `verdict/schema.py` and written to
 storage. Field names are our own and are stable within v0.
 
-**Planned:** an optional exporter that maps the internal
+**Planned:** an optional outbound exporter that maps the internal
 schema onto OpenTelemetry GenAI semantic conventions and/or OpenInference
 formats. This is a future interop layer, not part of the current build.
 
@@ -199,8 +203,8 @@ while deciding which shared parent spans remain protected.
   rather than inheriting OpenLLMetry's coverage. This is more maintenance than the
   originally-proposed "reuse OpenLLMetry" approach would have been, but keeps us
   free of an OTel runtime dependency and gives us full control of the schema.
-- The captured data lives in our own vendor-neutral schema. Interop with the
-  OpenTelemetry/OpenInference ecosystems is possible later via an exporter, but is
+- Captured and imported data live in the same vendor-neutral schema. Inbound
+  OTLP/OpenInference interop is available through ADR-006; outbound export is
   not available today.
 - Existing calls through supported provider SDK methods remain unchanged after
   adding the Verdict import and `init()` call.
@@ -216,7 +220,7 @@ while deciding which shared parent spans remain protected.
 ## References
 
 - `wrapt` library: github.com/GrahamDumpleton/wrapt (BSD-2)
-- OpenTelemetry GenAI semconv (relevant only to the *planned* future exporter):
+- OpenTelemetry GenAI semconv (inbound import and planned outbound exporter):
   github.com/open-telemetry/semantic-conventions/tree/main/docs/gen-ai
-- OpenInference (relevant only to the *planned* future exporter):
+- OpenInference (inbound import and planned outbound exporter):
   github.com/Arize-ai/openinference (Apache 2.0)

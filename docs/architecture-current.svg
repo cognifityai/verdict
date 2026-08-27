@@ -19,13 +19,17 @@
 
   <rect width="1300" height="900" fill="#F5F7FA"/>
   <text x="40" y="44" class="title">Verdict v0 — Current Architecture</text>
-  <text x="40" y="66" class="subtitle">What's actually in the repo today: SDK capture, storage adapters, eval engine, local dashboard, and reproducible verification scripts.</text>
+  <text x="40" y="66" class="subtitle">What's actually in the repo today: SDK capture or existing-telemetry import → one Trace schema → unchanged storage, eval, drift, and dashboard.</text>
 
   <!-- USER LAYER -->
   <text x="40" y="80" class="plane">USER APPLICATION</text>
   <rect x="220" y="90" width="320" height="60" rx="10" fill="#FFFFFF" stroke="#0B1730" stroke-width="1.5"/>
   <text x="380" y="115" class="node-title" text-anchor="middle">Application Code</text>
   <text x="380" y="133" class="node-sub" text-anchor="middle">existing SDK calls remain unchanged after verdict.init(...)</text>
+
+  <rect x="650" y="90" width="530" height="60" rx="10" fill="#FFFFFF" stroke="#0B1730" stroke-width="1.5"/>
+  <text x="915" y="115" class="node-title" text-anchor="middle">Existing Telemetry Import</text>
+  <text x="915" y="133" class="node-sub" text-anchor="middle">OTLP · Langfuse · LangSmith · Datadog · Phoenix · Opik · MLflow · voice files</text>
 
   <!-- INSTRUMENTATION (wrapt monkey-patch) -->
   <text x="40" y="170" class="plane">SDK · WRAPT MONKEY-PATCH</text>
@@ -61,6 +65,7 @@
   <line x1="380" y1="150" x2="220" y2="180" class="arrow-cyan" marker-end="url(#arrow-cyan)"/>
   <line x1="380" y1="150" x2="440" y2="180" class="arrow-cyan" marker-end="url(#arrow-cyan)"/>
   <line x1="380" y1="150" x2="660" y2="180" class="arrow-cyan" marker-end="url(#arrow-cyan)"/>
+  <line x1="915" y1="150" x2="1090" y2="180" class="arrow-cyan" marker-end="url(#arrow-cyan)"/>
 
   <!-- STORAGE LAYER -->
   <text x="40" y="290" class="plane">STORAGE · 3 ADAPTERS + BUFFERED WRAPPER</text>
@@ -91,6 +96,7 @@
   <line x1="440" y1="260" x2="440" y2="300" class="arrow-cyan" marker-end="url(#arrow-cyan)"/>
   <line x1="660" y1="260" x2="660" y2="300" class="arrow-cyan" marker-end="url(#arrow-cyan)"/>
   <line x1="880" y1="260" x2="660" y2="300" class="arrow" marker-end="url(#arrow)"/>
+  <line x1="1090" y1="260" x2="970" y2="300" class="arrow-cyan" marker-end="url(#arrow-cyan)"/>
 
   <!-- EVAL ENGINE -->
   <text x="40" y="410" class="plane">EVAL ENGINE · verdict_eval</text>
