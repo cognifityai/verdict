@@ -1,6 +1,6 @@
 [project]
 name = "cognifity-verdict-inspect"
-version = "0.1.0a12"
+version = "0.1.0a13"
 description = "Verdict Inspect — analyze chat exports for drift, hedging, refusals, and quality. Drop in a conversations.json from ChatGPT/Claude/Cursor, get a report."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -20,7 +20,7 @@ classifiers = [
 ]
 
 dependencies = [
-    "cognifity-verdict-eval>=0.1.0a12,<0.2",
+    "cognifity-verdict-eval>=0.1.0a13,<0.2",
     "click>=8.1",
 ]
 

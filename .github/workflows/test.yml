@@ -239,11 +239,11 @@ jobs:
           /tmp/verdict-wheel-venv/bin/python -m pip install --disable-pip-version-check dist/eval/*.whl
           /tmp/verdict-wheel-venv/bin/python -m pip install --disable-pip-version-check dist/inspect/*.whl
           /tmp/verdict-wheel-venv/bin/python -m pip install --disable-pip-version-check \
-            "dist/core/cognifity_verdict-0.1.0a12-py3-none-any.whl[dashboard,postgres,telemetry]"
+            "dist/core/cognifity_verdict-0.1.0a13-py3-none-any.whl[dashboard,postgres,telemetry]"
           /tmp/verdict-wheel-venv/bin/python -m pip check
           cd /tmp
           /tmp/verdict-wheel-venv/bin/python -c \
-            "import verdict, verdict_eval, verdict_inspect; assert {verdict.__version__, verdict_eval.__version__, verdict_inspect.__version__} == {'0.1.0a12'}"
+            "import verdict, verdict_eval, verdict_inspect; assert {verdict.__version__, verdict_eval.__version__, verdict_inspect.__version__} == {'0.1.0a13'}"
           /tmp/verdict-wheel-venv/bin/verdict-inspect --help
           /tmp/verdict-wheel-venv/bin/verdict-pipeline --help
           /tmp/verdict-wheel-venv/bin/verdict-probes --help
@@ -253,6 +253,94 @@ jobs:
           /tmp/verdict-wheel-venv/bin/python -c \
             "from importlib.resources import files; root = files('verdict.dashboard').joinpath('static'); assert root.joinpath('dashboard.html').is_file(); assert root.joinpath('assets/dashboard.js').is_file()"
 
+      - name: Exercise installed telemetry through pipeline and dashboard
+        run: |
+          /tmp/verdict-wheel-venv/bin/python scripts/generate_telemetry_samples.py \
+            --output /tmp/verdict-release-telemetry \
+            --as-of 2026-08-26T12:00:00Z \
+            --per-source-window 5
+          for import_pass in initial retry; do
+            for source_name in otlp langfuse langsmith datadog phoenix opik mlflow voice; do
+              /tmp/verdict-wheel-venv/bin/verdict-import file \
+                "/tmp/verdict-release-telemetry/$source_name.jsonl" \
+                --format "$source_name" \
+                --source-scope "release-$source_name" \
+                --tenant-id release-e2e \
+                --storage sqlite:////tmp/verdict-a13-telemetry.db
+            done
+          done
+          /tmp/verdict-wheel-venv/bin/verdict-pipeline \
+            --storage sqlite:////tmp/verdict-a13-telemetry.db \
+            --judge-provider fake \
+            --judge-model fake-judge \
+            --embedder deterministic \
+            --clustering-version telemetry-release-a13 \
+            --cluster-threshold 0.1 \
+            --as-of 2026-08-26T12:00:00Z \
+            --sampling stratified \
+            --target-per-cluster 40 \
+            --min-sample-size 30 \
+            --limit 1000
+          /tmp/verdict-wheel-venv/bin/verdict-dashboard \
+            --storage sqlite:////tmp/verdict-a13-telemetry.db \
+            --host 127.0.0.1 \
+            --port 18773 \
+            >/tmp/verdict-a13-dashboard.log 2>&1 &
+          dashboard_pid=$!
+          trap 'kill "$dashboard_pid" 2>/dev/null || true; cat /tmp/verdict-a13-dashboard.log' EXIT
+          cd /tmp
+          DASHBOARD_URL=http://127.0.0.1:18773 \
+          /tmp/verdict-wheel-venv/bin/python - <<'PY'
+          import json
+          import os
+          import time
+          from urllib.error import URLError
+          from urllib.request import urlopen
+
+          from verdict.storage.sqlite import SQLiteStorage
+
+          database = "/tmp/verdict-a13-telemetry.db"
+          storage = SQLiteStorage(database)
+          traces = storage.list_traces(tenant_id="release-e2e", limit=1000)
+          assert len(traces) == 80
+          assert {trace.tags["verdict.source"] for trace in traces} == {
+              "otlp", "langfuse", "langsmith", "datadog",
+              "phoenix", "opik", "mlflow", "voice",
+          }
+          assert all(trace.cluster_id for trace in traces)
+          assert all(trace.input_tokens is not None for trace in traces)
+          assert all(trace.output_tokens is not None for trace in traces)
+          assert all(trace.latency_ms is not None for trace in traces)
+          storage.close()
+
+          base_url = os.environ["DASHBOARD_URL"]
+          for _ in range(100):
+              try:
+                  with urlopen(f"{base_url}/api/health", timeout=1) as response:
+                      assert response.status == 200
+                  break
+              except URLError:
+                  time.sleep(0.05)
+          else:
+              raise AssertionError("installed dashboard did not become healthy")
+
+          pages = []
+          for offset in (0, 30, 60):
+              with urlopen(f"{base_url}/api/data?trace_offset={offset}", timeout=10) as response:
+                  assert response.status == 200
+                  pages.append(json.load(response))
+          assert [len(page["samples"]) for page in pages] == [30, 30, 20]
+          assert pages[0]["meta"]["totalTraces"] == 80
+          assert pages[0]["meta"]["totalJudged"] == 80
+          assert pages[0]["driftRun"]["signalCount"] == 0
+          with urlopen(f"{base_url}/dashboard", timeout=10) as response:
+              assert response.status == 200
+              assert b"<!doctype html>" in response.read(256)
+          PY
+          kill "$dashboard_pid" 2>/dev/null || true
+          wait "$dashboard_pid" || true
+          trap - EXIT
+
       - name: Cold-install source distributions
         run: |
           python -m venv /tmp/verdict-sdist-venv
@@ -260,11 +348,11 @@ jobs:
           /tmp/verdict-sdist-venv/bin/python -m pip install --disable-pip-version-check dist/eval/*.tar.gz
           /tmp/verdict-sdist-venv/bin/python -m pip install --disable-pip-version-check dist/inspect/*.tar.gz
           /tmp/verdict-sdist-venv/bin/python -m pip install --disable-pip-version-check \
-            "dist/core/cognifity_verdict-0.1.0a12.tar.gz[dashboard,postgres,telemetry]"
+            "dist/core/cognifity_verdict-0.1.0a13.tar.gz[dashboard,postgres,telemetry]"
           /tmp/verdict-sdist-venv/bin/python -m pip check
           cd /tmp
           /tmp/verdict-sdist-venv/bin/python -c \
-            "import verdict, verdict_eval, verdict_inspect; assert {verdict.__version__, verdict_eval.__version__, verdict_inspect.__version__} == {'0.1.0a12'}"
+            "import verdict, verdict_eval, verdict_inspect; assert {verdict.__version__, verdict_eval.__version__, verdict_inspect.__version__} == {'0.1.0a13'}"
           /tmp/verdict-sdist-venv/bin/verdict-inspect --help
           /tmp/verdict-sdist-venv/bin/verdict-pipeline --help
           /tmp/verdict-sdist-venv/bin/verdict-probes --help
@@ -274,23 +362,23 @@ jobs:
           /tmp/verdict-sdist-venv/bin/python -c \
             "from importlib.resources import files; root = files('verdict.dashboard').joinpath('static'); assert root.joinpath('dashboard.html').is_file(); assert root.joinpath('assets/dashboard.js').is_file()"
 
-      - name: Upgrade a published 0.1.0a11 SQLite store in place
+      - name: Upgrade a published 0.1.0a12 SQLite store in place
         run: |
           python -m venv /tmp/verdict-upgrade-venv
           /tmp/verdict-upgrade-venv/bin/python -m pip install --disable-pip-version-check \
-            "cognifity-verdict==0.1.0a11" \
-            "cognifity-verdict-eval==0.1.0a11" \
-            "cognifity-verdict-inspect==0.1.0a11"
+            "cognifity-verdict==0.1.0a12" \
+            "cognifity-verdict-eval==0.1.0a12" \
+            "cognifity-verdict-inspect==0.1.0a12"
           /tmp/verdict-upgrade-venv/bin/python - <<'PY'
           from datetime import datetime, timezone
           from verdict.schema import Trace
           from verdict.storage.sqlite import SQLiteStorage
 
           instant = datetime.now(timezone.utc)
-          storage = SQLiteStorage("/tmp/verdict-a11-upgrade.db")
+          storage = SQLiteStorage("/tmp/verdict-a12-upgrade.db")
           storage.insert_trace(
               Trace(
-                  trace_id="published-a11-trace",
+                  trace_id="published-a12-trace",
                   started_at=instant,
                   ended_at=instant,
                   tenant_id=None,
@@ -303,7 +391,7 @@ jobs:
             dist/core/*.whl dist/eval/*.whl dist/inspect/*.whl
           /tmp/verdict-upgrade-venv/bin/python -m pip check
           /tmp/verdict-upgrade-venv/bin/verdict-cluster \
-            --storage sqlite:////tmp/verdict-a11-upgrade.db \
+            --storage sqlite:////tmp/verdict-a12-upgrade.db \
             --tenant __verdict_local__ --actor release normalize --limit 100
           /tmp/verdict-upgrade-venv/bin/python - <<'PY'
           import verdict
@@ -315,9 +403,9 @@ jobs:
               verdict.__version__,
               verdict_eval.__version__,
               verdict_inspect.__version__,
-          } == {"0.1.0a12"}
-          storage = SQLiteStorage("/tmp/verdict-a11-upgrade.db")
-          trace = storage.get_trace("published-a11-trace")
+          } == {"0.1.0a13"}
+          storage = SQLiteStorage("/tmp/verdict-a12-upgrade.db")
+          trace = storage.get_trace("published-a12-trace")
           assert trace is not None
           assert trace.tags["verdict.intent_key"] == "billing.v1"
           assert trace.analysis_started_at_state == "valid"

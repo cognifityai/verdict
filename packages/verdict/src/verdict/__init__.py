@@ -25,7 +25,7 @@ from verdict.trace import (
     workload_context,
 )
 
-__version__ = "0.1.0a12"
+__version__ = "0.1.0a13"
 
 __all__ = [
     "DriftRun",
