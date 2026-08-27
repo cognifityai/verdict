@@ -60,12 +60,12 @@ you use:
 
 ```bash
 python -m pip install \
-  "cognifity-verdict[anthropic,openai,google,dashboard]==0.1.0a12" \
-  "cognifity-verdict-eval[semantic]==0.1.0a12" \
-  "cognifity-verdict-inspect==0.1.0a12"
+  "cognifity-verdict[anthropic,openai,google,dashboard]==0.1.0a13" \
+  "cognifity-verdict-eval[semantic]==0.1.0a13" \
+  "cognifity-verdict-inspect==0.1.0a13"
 ```
 
-For a customer proof of concept on `0.1.0a12`, follow the bounded
+For a customer proof of concept on `0.1.0a13`, follow the bounded
 [`POC release profile`](docs/POC_RELEASE_PROFILE.md). It names the provider
 entry points exercised for this release, keeps persistence synchronous, and
 separates a workflow demonstration from a production-readiness claim.
@@ -84,9 +84,9 @@ PostgreSQL store:
 
 ```bash
 python -m pip install \
-  "cognifity-verdict[dashboard,postgres]==0.1.0a12" \
-  "cognifity-verdict-eval==0.1.0a12" \
-  "cognifity-verdict-inspect==0.1.0a12"
+  "cognifity-verdict[dashboard,postgres]==0.1.0a13" \
+  "cognifity-verdict-eval==0.1.0a13" \
+  "cognifity-verdict-inspect==0.1.0a13"
 ```
 
 The `all` extra preserves its existing provider-and-storage dependency set; it
@@ -100,9 +100,9 @@ do not delete or reclone it:
 
 ```bash
 python -m pip install --upgrade \
-  "cognifity-verdict[anthropic,openai,google,dashboard]==0.1.0a12" \
-  "cognifity-verdict-eval[semantic]==0.1.0a12" \
-  "cognifity-verdict-inspect==0.1.0a12"
+  "cognifity-verdict[anthropic,openai,google,dashboard]==0.1.0a13" \
+  "cognifity-verdict-eval[semantic]==0.1.0a13" \
+  "cognifity-verdict-inspect==0.1.0a13"
 
 python -m pip check
 python -c "import verdict, verdict_eval, verdict_inspect; print(verdict.__version__, verdict_eval.__version__, verdict_inspect.__version__)"
@@ -126,7 +126,7 @@ API remains `import verdict`.
 Minimal install without the local semantic model:
 
 ```bash
-python -m pip install "cognifity-verdict-eval==0.1.0a12"  # lexical hash fallback
+python -m pip install "cognifity-verdict-eval==0.1.0a13"  # lexical hash fallback
 ```
 
 The full test suite also needs pytest and the dashboard's HTTP test dependency:
@@ -149,14 +149,11 @@ rows and writes them through the same SQLite/PostgreSQL storage port used by SDK
 capture. It does not create a raw-envelope database or replace the clustering,
 sampling, judge, drift, or dashboard paths.
 
-This section describes the unreleased source candidate. Until its synchronized
-alpha is published, use
-`uv sync --package cognifity-verdict --extra telemetry --extra postgres` from a
-checkout. After release, install the `telemetry` extra when accepting OTLP
-protobuf; it is optional for JSON files and API readers:
+Install the `telemetry` extra when accepting OTLP protobuf; it is optional for
+JSON files and API readers:
 
 ```bash
-python -m pip install "cognifity-verdict[telemetry,postgres]"
+python -m pip install "cognifity-verdict[telemetry,postgres]==0.1.0a13"
 
 # JSON, JSONL, or NDJSON; use --format auto or name the source explicitly.
 verdict-import file ./langsmith-runs.jsonl --format langsmith \
@@ -251,7 +248,7 @@ international identifiers, and opaque application metadata are not guaranteed
 to be found. IPv6 validation preserves trailing text that is not part of the
 validated address; clock values such as `12:34:56` are not treated as IPv6. Use
 non-sensitive tenant/session/cluster IDs. `sample_rate`
-controls what fraction of supported calls is retained. The `0.1.0a12` POC
+controls what fraction of supported calls is retained. The `0.1.0a13` POC
 profile keeps `buffered_writes=False`, so a normal process exit cannot strand
 queued telemetry. `buffered_writes=True` moves writes to a background batched
 writer but requires an explicit `shutdown()` imported from `verdict.client`
@@ -334,11 +331,10 @@ Hexagonal / ports-and-adapters, ≥2 adapters per port (one real + in-memory for
   audio or a provider's agent graph. Tokens, cost, model, and latency exist only
   when the source turn supplies them. Verify a voice vendor's export against the
   documented generic schema before relying on it.
-- Import does not change the current Trace Explorer's bounded 30-newest-trace
-  view. All imported rows remain in SQLite/PostgreSQL and participate in the
-  existing query/pipeline paths; a paginated full-store explorer is separate UI
-  work.
-- **Published capture coverage in `0.1.0a12`:** the bounded POC profile names
+- Trace Explorer pages through every stored non-judge application trace in
+  30-row pages. Search and provider/content-state filters apply to the current
+  page; dashboard aggregates continue to use the complete store.
+- **Published capture coverage in `0.1.0a13`:** the bounded POC profile names
   Anthropic
   `messages.create(...)` (including `stream=True`), OpenAI
   `chat.completions.create(...)` and its stream helper, and Google
@@ -451,7 +447,7 @@ Hexagonal / ports-and-adapters, ≥2 adapters per port (one real + in-memory for
   prevents a `healthy` status: too few usable examples remain
   `insufficient_data`; otherwise the result is `degraded`.
   Signals retain up to five current-window trace IDs as review evidence.
-- The `0.1.0a12` POC drift demonstration assumes independently sampled calls.
+- The `0.1.0a13` POC drift demonstration assumes independently sampled calls.
   Do not treat repeated turns from the same conversation as independent
   evidence or use that profile for a production decision.
 - The v0 drift runner supports one tenant scope per store and rejects mixed-

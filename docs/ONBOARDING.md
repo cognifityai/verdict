@@ -24,9 +24,9 @@ uv venv --python 3.12 && source .venv/bin/activate     # or your own 3.10+ venv
 
 # Include the provider extras you want to test live. Google capture needs `google`.
 python -m pip install \
-  "cognifity-verdict[anthropic,openai,google,dashboard]==0.1.0a12" \
-  "cognifity-verdict-eval[semantic]==0.1.0a12" \
-  "cognifity-verdict-inspect==0.1.0a12"
+  "cognifity-verdict[anthropic,openai,google,dashboard]==0.1.0a13" \
+  "cognifity-verdict-eval[semantic]==0.1.0a13" \
+  "cognifity-verdict-inspect==0.1.0a13"
 ```
 
 For a customer POC on the public alpha, use the pinned commands and provider
@@ -38,7 +38,7 @@ lists them as hard dependencies, so the line above brings them in.
 Minimal alternative without the local semantic model:
 
 ```bash
-python -m pip install "cognifity-verdict-eval==0.1.0a12"  # lexical hash fallback
+python -m pip install "cognifity-verdict-eval==0.1.0a13"  # lexical hash fallback
 ```
 
 Already on an earlier synchronized alpha? Use the upgrade command in the repository
@@ -85,12 +85,13 @@ This is the shortest path when a customer already has LLM observability. The
 importer writes normalized `Trace` rows into the same Verdict database used by
 the current pipeline and dashboard:
 
-This section describes the unreleased source candidate. Until its synchronized
-alpha is published, install it from a checkout with
-`uv sync --package cognifity-verdict --extra telemetry`; the pinned `0.1.0a12`
-wheel above does not contain `verdict-import`.
+Install the synchronized release with the optional `telemetry` extra when the
+source uses OTLP protobuf. JSON files and hosted API readers do not require that
+extra:
 
 ```bash
+python -m pip install "cognifity-verdict[telemetry]==0.1.0a13"
+
 verdict-import file ./traces.ndjson --format auto \
   --storage sqlite:///./verdict.db --tenant-id my-team
 
@@ -196,12 +197,12 @@ clock value such as `12:34:56` is not classified as IPv6. Email discovery uses
 a linear `@`-anchored scanner to keep malformed and long inputs bounded. It
 remains best effort, not a compliance control, and opaque metadata such as
 tenant/session/cluster IDs must be non-sensitive. Keep content capture off for
-customer POC data. The `0.1.0a12` POC profile also keeps
+customer POC data. The `0.1.0a13` POC profile also keeps
 `buffered_writes=False`; buffered mode requires an explicit `shutdown()`
 imported from `verdict.client` before process exit.
 
 Use only the provider methods listed in the
-[`POC release profile`](POC_RELEASE_PROFILE.md). Release `0.1.0a12` includes the
+[`POC release profile`](POC_RELEASE_PROFILE.md). Release `0.1.0a13` includes the
 Anthropic `messages.stream(...)` helper plus OpenAI `responses.create(...)`,
 `responses.parse(...)`, and `responses.stream(...)` for new or existing
 responses, in addition to the earlier Chat/Google paths. OpenAI's
@@ -277,7 +278,7 @@ cost/latency traces written to the same store. Those traces are tagged as the
 `judge` workload and excluded from future drift inputs so the evaluator does not
 become part of the workload it evaluates. The flag is off by default.
 
-For PostgreSQL, install `cognifity-verdict[dashboard,postgres]==0.1.0a12` and pass
+For PostgreSQL, install `cognifity-verdict[dashboard,postgres]==0.1.0a13` and pass
 the same protected storage URL used by the SDK. The dashboard only reads
 existing Verdict tables; it never creates or migrates them.
 `python ui/server.py --db ...` remains a compatible source-checkout wrapper.
@@ -352,11 +353,11 @@ replace a newer selection. If a load fails, the dashboard explicitly names the
 last confirmed evaluator that remains on screen, and trace/drift detail is
 derived from IDs in that confirmed snapshot.
 
-Trace Explorer is a bounded newest-first view with complete store totals. It
-shows up to 30 newest non-judge application traces, breaks equal timestamps by
-trace ID, and lets you filter the bounded view by provider and by `Content
-captured` or `Metadata only`. Judge telemetry remains in aggregate cost and
-store totals but does not displace application traces from this view.
+Trace Explorer pages newest-first through every stored non-judge application
+trace in deterministic 30-row pages, breaking equal timestamps by trace ID.
+Provider and `Content captured` or `Metadata only` filters apply to the current
+page. Judge telemetry remains in aggregate cost and store totals but does not
+displace application traces from this view.
 Each row uses its recorded UTC time plus relative age. A metadata-only row is
 described as a **historical metadata-only trace**: this means prompt and response
 were not captured when that trace was recorded, not that capture is currently

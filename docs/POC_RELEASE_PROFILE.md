@@ -1,4 +1,4 @@
-# Run a customer POC with Verdict 0.1.0a12
+# Run a customer POC with Verdict 0.1.0a13
 
 Use this profile to demonstrate Verdict on verified provider calls without
 presenting the public alpha as production-ready. The historical `0.1.0a4`
@@ -11,14 +11,14 @@ provider, dashboard, semantic, and storage extras the POC needs:
 
 ```bash
 python -m pip install \
-  "cognifity-verdict[anthropic,openai,google,dashboard]==0.1.0a12" \
-  "cognifity-verdict-eval[semantic]==0.1.0a12" \
-  "cognifity-verdict-inspect==0.1.0a12"
+  "cognifity-verdict[anthropic,openai,google,dashboard]==0.1.0a13" \
+  "cognifity-verdict-eval[semantic]==0.1.0a13" \
+  "cognifity-verdict-inspect==0.1.0a13"
 python -m pip check
 python -c "import verdict, verdict_eval, verdict_inspect; print(verdict.__version__, verdict_eval.__version__, verdict_inspect.__version__)"
 ```
 
-The final command must print `0.1.0a12 0.1.0a12 0.1.0a12`. Add the `postgres`
+The final command must print `0.1.0a13 0.1.0a13 0.1.0a13`. Add the `postgres`
 extra only when the existing deployment uses PostgreSQL. Back up an existing
 store and dependency lockfile before upgrading; the additive registry migration
 preserves existing trace and evaluation tables.
@@ -108,7 +108,7 @@ semantic quality.
 
 The POC is ready to show only when all of these are true:
 
-1. All three installed packages report `0.1.0a12` and `python -m pip check` passes.
+1. All three installed packages report `0.1.0a13` and `python -m pip check` passes.
 2. The application uses only a provider entry point in the supported column.
 3. `buffered_writes` and `capture_content` are both `False`, unless content was
    separately approved with synthetic privacy tests.
