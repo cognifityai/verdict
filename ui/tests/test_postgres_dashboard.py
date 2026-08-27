@@ -153,8 +153,11 @@ def test_live_postgres_and_sqlite_produce_the_same_dashboard_bundle(
 
         sqlite_bundle = build_bundle(f"sqlite:///{sqlite_path}")
         postgres_bundle = build_bundle(scoped_dsn)
+        sqlite_page = build_bundle(f"sqlite:///{sqlite_path}", trace_offset=1)
+        postgres_page = build_bundle(scoped_dsn, trace_offset=1)
 
         assert postgres_bundle == sqlite_bundle
+        assert postgres_page == sqlite_page
         json.dumps(postgres_bundle)
         assert type(postgres_bundle["providers"][0]["cost"]) is type(
             sqlite_bundle["providers"][0]["cost"]

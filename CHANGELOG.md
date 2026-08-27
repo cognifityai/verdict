@@ -8,6 +8,8 @@ the customer POC profile is refined.
 
 ### Added
 
+- Trace Explorer can page through every stored non-judge application trace in
+  30-row pages without changing dashboard aggregates or trace persistence.
 - `verdict-import` now normalizes existing OTLP/HTTP JSON or protobuf,
   Langfuse v2, LangSmith, Datadog LLM Observability, Phoenix, Opik, MLflow
   2.x/3.x, and bounded text-only voice exports into the existing Verdict

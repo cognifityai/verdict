@@ -176,10 +176,12 @@ function useOperationsConfig() {
 
 const API_URL = mountedApiUrl();
 
-function apiUrlForEvaluator(evaluatorId) {
-  if (!evaluatorId) return API_URL;
-  const separator = API_URL.includes("?") ? "&" : "?";
-  return `${API_URL}${separator}evaluator=${encodeURIComponent(evaluatorId)}`;
+function apiUrlForEvaluator(evaluatorId, traceOffset = 0) {
+  const params = new URLSearchParams();
+  if (evaluatorId) params.set("evaluator", evaluatorId);
+  if (traceOffset > 0) params.set("trace_offset", String(traceOffset));
+  const query = params.toString();
+  return query ? `${API_URL}?${query}` : API_URL;
 }
 
 function useDashboardData() {
@@ -188,11 +190,12 @@ function useDashboardData() {
     source: "loading",
     loading: false,
     error: null,
+    traceOffset: 0,
   });
   const requestSequence = useRef(0);
   const activeController = useRef(null);
 
-  const load = React.useCallback(async (evaluatorId = null) => {
+  const load = React.useCallback(async (evaluatorId = null, traceOffset = 0) => {
     const requestId = requestSequence.current + 1;
     requestSequence.current = requestId;
     if (activeController.current) activeController.current.abort();
@@ -200,7 +203,7 @@ function useDashboardData() {
     activeController.current = controller;
     setState((current) => ({ ...current, loading: true, error: null }));
     try {
-      const response = await fetch(apiUrlForEvaluator(evaluatorId), {
+      const response = await fetch(apiUrlForEvaluator(evaluatorId, traceOffset), {
         headers: { Accept: "application/json" },
         signal: controller.signal,
       });
@@ -210,7 +213,7 @@ function useDashboardData() {
         throw new Error("invalid dashboard response");
       }
       if (requestId !== requestSequence.current) return false;
-      setState({ snapshot, source: "live", loading: false, error: null });
+      setState({ snapshot, source: "live", loading: false, error: null, traceOffset });
       return true;
     } catch (error) {
       if (requestId !== requestSequence.current) return false;
@@ -241,8 +244,9 @@ function useDashboardData() {
 
   return {
     ...state,
-    load,
-    reload: () => load(state.snapshot.evaluation?.selectedId || null),
+    load: (evaluatorId) => load(evaluatorId, 0),
+    loadTracePage: (traceOffset) => load(state.snapshot.evaluation?.selectedId || null, traceOffset),
+    reload: () => load(state.snapshot.evaluation?.selectedId || null, state.traceOffset),
   };
 }
 
@@ -602,13 +606,13 @@ const TRUNCATION_LABELS = {
   traceSamples: "trace samples",
 };
 
-function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluatorChange, reloading, loadError, operationsUrl = null }) {
+function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluatorChange, onTracePageChange, traceOffset = 0, reloading, loadError, operationsUrl = null }) {
   const DATA = data;
   const [tab, setTab] = useState("overview");
   const evaluation = DATA.evaluation || { status: "empty", selectedId: null, availableIdentities: [] };
   const evaluatorSelectionNeeded = ["selection_required", "invalid_selection"].includes(evaluation.status);
   const boundedResources = Object.entries(DATA.truncation?.resources || {})
-    .filter(([, resource]) => resource.shown < resource.available);
+    .filter(([name, resource]) => (source !== "live" || name !== "traceSamples") && resource.shown < resource.available);
   const sourceLabel = source === "live" ? "Live store" : source === "sample" ? "Synthetic sample" : "Waiting for live store";
   const sourceColor = source === "live" ? C.green : C.amber;
   const workloadLabel = source === "sample"
@@ -733,7 +737,8 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
         )}
         {tab === "overview" && <Overview data={DATA} />}
         {tab === "drift" && <Drift data={DATA} onOpenOperations={operationsUrl ? () => setTab("operations") : null} />}
-        {tab === "traces" && <Traces key={evaluation.selectedId || "none"} data={DATA} />}
+        {tab === "traces" && <Traces key={evaluation.selectedId || "none"} data={DATA} source={source}
+          traceOffset={traceOffset} reloading={reloading} onTracePageChange={onTracePageChange} />}
         {tab === "registry" && <Registry url={mountedRegistryUrl()} operationsUrl={operationsUrl} />}
         {tab === "judge" && <Judge data={DATA} onOpenOperations={operationsUrl ? () => setTab("operations") : null} />}
         {tab === "compare" && <Compare data={DATA} source={source} />}
@@ -1096,7 +1101,7 @@ function Stat({ label, value, note }) {
 }
 
 /* ---------------------------------------------------------------- TRACES */
-function Traces({ data = SEED }) {
+function Traces({ data = SEED, source = "sample", traceOffset = 0, reloading = false, onTracePageChange = null }) {
   const DATA = data;
   const [prov, setProv] = useState("all");
   const [capture, setCapture] = useState("all");
@@ -1120,6 +1125,9 @@ function Traces({ data = SEED }) {
   const traceResource = DATA.truncation?.resources?.traceSamples;
   const shown = traceResource?.shown ?? DATA.samples.length;
   const available = traceResource?.available ?? DATA.meta.totalTraces ?? DATA.samples.length;
+  const pageSize = traceResource?.limit ?? 30;
+  const pageStart = shown ? traceOffset + 1 : 0;
+  const pageEnd = shown ? traceOffset + shown : 0;
 
   return (
     <div className="flex flex-col xl:flex-row gap-5">
@@ -1200,9 +1208,21 @@ function Traces({ data = SEED }) {
           </div>
           </div>
         </Panel>
-        <div className="text-xs mt-2" style={{ color: C.faint }}>
-          {`Showing newest ${shown.toLocaleString()} of ${available.toLocaleString()} application traces. Judge telemetry remains in store totals and is excluded here. Filters apply to this bounded view. ${rows.length.toLocaleString()} match the current filters.`}
-        </div>
+        {source === "live" ? (
+          <div className="text-xs mt-2 flex flex-wrap items-center gap-2" style={{ color: C.faint }}>
+            <span className="flex-1">{`Showing ${pageStart.toLocaleString()}–${pageEnd.toLocaleString()} of ${available.toLocaleString()} application traces. Judge telemetry remains excluded. Filters apply to this page.`}</span>
+            <button onClick={() => onTracePageChange(Math.max(0, traceOffset - pageSize))}
+              disabled={reloading || traceOffset === 0 || !onTracePageChange}
+              className="px-2.5 py-1 border" style={{ borderColor: C.border, borderRadius: 3 }}>Previous</button>
+            <button onClick={() => onTracePageChange(traceOffset + pageSize)}
+              disabled={reloading || traceOffset + shown >= available || !onTracePageChange}
+              className="px-2.5 py-1 border" style={{ borderColor: C.border, borderRadius: 3 }}>Next</button>
+          </div>
+        ) : (
+          <div className="text-xs mt-2" style={{ color: C.faint }}>
+            {`Showing newest ${shown.toLocaleString()} of ${available.toLocaleString()} application traces. Judge telemetry remains in store totals and is excluded here. Filters apply to this bounded view. ${rows.length.toLocaleString()} match the current filters.`}
+          </div>
+        )}
       </div>
 
       {/* detail */}
@@ -1567,14 +1587,15 @@ function MiniBar({ title, data, fmt }) {
 }
 
 /* ------------------------------------------------------------------- APP */
-function App({ data = SEED, source = "sample", onReload, onEvaluatorChange, reloading, loadError, operationsUrl = null }) {
+function App({ data = SEED, source = "sample", onReload, onEvaluatorChange, onTracePageChange, traceOffset = 0, reloading, loadError, operationsUrl = null }) {
   const [mode, setMode] = useState("landing");
   return (
     <div style={{ fontFamily: "ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif", height: "100%", background: C.bg }}>
       {mode === "landing"
         ? <Landing onEnter={() => setMode("dashboard")} />
         : <Dashboard data={data} onExit={() => setMode("landing")} source={source} onReload={onReload}
-          onEvaluatorChange={onEvaluatorChange} reloading={reloading} loadError={loadError}
+          onEvaluatorChange={onEvaluatorChange} onTracePageChange={onTracePageChange} traceOffset={traceOffset}
+          reloading={reloading} loadError={loadError}
           operationsUrl={operationsUrl} />}
     </div>
   );
@@ -1594,7 +1615,8 @@ export function DashboardRoot() {
   return (
     <div style={{ fontFamily: "ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif", minHeight: "100%", background: C.bg }}>
       <Dashboard data={data.snapshot} onExit={() => { window.location.href = "/"; }} source={data.source}
-        onReload={data.reload} onEvaluatorChange={data.load} reloading={data.loading}
+        onReload={data.reload} onEvaluatorChange={data.load} onTracePageChange={data.loadTracePage}
+        traceOffset={data.traceOffset} reloading={data.loading}
         loadError={data.error} operationsUrl={operationsUrl} />
     </div>
   );
@@ -1604,5 +1626,6 @@ export default function Root() {
   const data = useDashboardData();
   const operationsUrl = useOperationsConfig();
   return <App data={data.snapshot} source={data.source} onReload={data.reload}
-    onEvaluatorChange={data.load} reloading={data.loading} loadError={data.error} operationsUrl={operationsUrl} />;
+    onEvaluatorChange={data.load} onTracePageChange={data.loadTracePage} traceOffset={data.traceOffset}
+    reloading={data.loading} loadError={data.error} operationsUrl={operationsUrl} />;
 }
