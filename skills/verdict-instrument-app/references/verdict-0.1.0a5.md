@@ -13,8 +13,8 @@ The operational delta is intentionally small:
 - the dashboard reads SQLite or PostgreSQL in a read-only transaction and never
   creates or migrates the selected store;
 - `verdict-pipeline` ships in `cognifity-verdict-eval`;
-- the three historical source entry points remain wrappers when the workspace
-  packages are installed;
+- `scripts/run_drift_pipeline.py` and `ui/server.py` remain wrappers when the
+  workspace packages are installed;
 - live dashboard mode starts empty and never substitutes synthetic values after a
   pending or failed store request; and
 - `VERDICT_STORAGE` can supply the pipeline/dashboard storage URL while logs expose

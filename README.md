@@ -113,9 +113,10 @@ uses. The upgrade reuses existing SQLite files and PostgreSQL tables in place;
 it does not delete or rewrite traces, judgments, calibration records, drift
 runs, or dashboard history. It does not move SQLite data to PostgreSQL or upgrade
 a PostgreSQL server. Preserve the existing backend unless a separate migration is
-approved. Existing source entry points continue as wrappers after the workspace
-packages are installed. Back up the store and lockfile before any alpha upgrade,
-then run the pipeline and dashboard smoke checks against a non-production copy.
+approved. The retained `scripts/run_drift_pipeline.py` and `ui/server.py` source
+entry points continue as wrappers after the workspace packages are installed.
+Back up the store and lockfile before any alpha upgrade, then run the pipeline
+and dashboard smoke checks against a non-production copy.
 
 An unrelated project owns the `verdict` distribution on PyPI and exposes the
 same top-level `verdict` import. Do not install that distribution in the same
