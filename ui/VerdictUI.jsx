@@ -777,6 +777,9 @@ function Overview({ data = SEED }) {
   const evaluatorSelectionNeeded = ["selection_required", "invalid_selection"].includes(analysis.runStatus);
   const analysisUnavailable = noCompletedRun || evaluatorSelectionNeeded;
   const completedWithSignals = analysis.runStatus === "completed_with_signals";
+  const countCohorts = DATA.driftSignals.some((signal) =>
+    signal.layers?.some((layer) => ["structural", "matched_structural"].includes(layer))
+  );
   const statusColor = analysisUnavailable ? C.amber : completedWithSignals ? leadColor : C.green;
   const statusBg = analysisUnavailable ? C.amberBg : completedWithSignals ? leadBg : C.greenBg;
   const seriesColors = [C.accent, C.accent2, C.amber, C.green, C.blue, C.cyan];
@@ -837,10 +840,10 @@ function Overview({ data = SEED }) {
         <MetricCell label="Drift signals" value={evaluatorSelectionNeeded ? "Select evaluator" : noCompletedRun ? "Not run" : DATA.driftSignals.length} sub={analysisUnavailable ? analysisHeadline(analysis).toLowerCase() : "latest completed run"} icon={Signal} accent={analysisUnavailable ? C.amber : DATA.driftSignals.length ? C.red : C.green} />
         <MetricCell label="Estimated spend" value={usd(m.totalCost)} sub={m.totalCostStatus === "partial" ? "partial pricing coverage" : m.totalCostStatus === "unavailable" ? "pricing unavailable" : `${m.durationHours} hour window`} icon={DollarSign} accent={m.totalCostStatus === "complete" ? C.green : C.amber} />
         <MetricCell label="Intent clusters" value={m.clusters} sub={`median ${health.medianClusterSize || 0} traces`} icon={Layers} accent={healthColor} />
-        <MetricCell label="Cluster readiness" value={healthLabel} sub={`${health.clustersMeetingSampleFloor}/${health.nClusters} meet n=${health.minSampleSize}`} icon={Gauge} accent={healthColor} />
+        <MetricCell label={countCohorts ? "Registry diagnostic" : "Cluster readiness"} value={countCohorts ? "Separate" : healthLabel} sub={countCohorts ? "does not gate count cohorts" : `${health.clustersMeetingSampleFloor}/${health.nClusters} meet n=${health.minSampleSize}`} icon={Gauge} accent={countCohorts ? C.blue : healthColor} />
       </div>
 
-      {health.messages && health.messages.length > 0 && (
+      {!countCohorts && health.messages && health.messages.length > 0 && (
         <div className="px-4 py-3 border flex items-start gap-2 text-sm" style={{ borderColor: healthColor, background: C.amberBg, color: C.text, borderRadius: 3 }}>
           <AlertTriangle size={16} style={{ color: healthColor, marginTop: 1, flexShrink: 0 }} />
           <span>{health.messages.join(" ")}</span>
@@ -873,8 +876,8 @@ function Overview({ data = SEED }) {
         <Panel className="p-5 lg:col-span-4" style={{ background: C.panel2 }}>
           <div className="flex items-start justify-between gap-3 mb-1">
             <div>
-              <div className="font-semibold text-sm">Intent readiness</div>
-              <div className="text-xs mt-1" style={{ color: C.sub }}>Stable assignment volume by cluster</div>
+              <div className="font-semibold text-sm">{countCohorts ? "Legacy registry readiness" : "Intent readiness"}</div>
+              <div className="text-xs mt-1" style={{ color: C.sub }}>{countCohorts ? "Diagnostic only; does not gate count-cohort signals" : "Stable assignment volume by cluster"}</div>
             </div>
             <Pill color={healthColor} bg={health.status === "ready" ? C.greenBg : C.amberBg}>{healthLabel}</Pill>
           </div>
@@ -954,6 +957,8 @@ function Drift({ data = SEED, onOpenOperations = null }) {
   const DATA = data;
   const [open, setOpen] = useState(DATA.driftSignals[0]?.id);
   const analysis = driftAnalysis(DATA);
+  const structuralCohorts = DATA.driftSignals.some((signal) => signal.layers?.includes("structural"));
+  const matchedCohorts = DATA.driftSignals.some((signal) => signal.layers?.includes("matched_structural"));
   const evaluatorSelectionNeeded = ["selection_required", "invalid_selection"].includes(analysis.runStatus);
   const seriesColors = [C.accent, C.accent2, C.amber, C.green, C.blue, C.cyan];
   const dimensionSeries = DATA.dimensionOverall.map((dimension, index) => ({
@@ -964,8 +969,11 @@ function Drift({ data = SEED, onOpenOperations = null }) {
   return (
     <div className="space-y-4">
       <div className="text-sm" style={{ color: C.sub }}>
-        PASS/FAIL signals clear both the BH-adjusted p-value and minimum absolute Cliff&apos;s δ gates.
-        UNCLEAR coverage signals instead use a deterministic 15-point increase and the configured sample floor. Signals come from the latest persisted pipeline run.
+        {matchedCohorts
+          ? "Controlled signals compare the same explicit intent IDs under two model configurations with a paired Wilcoxon test and BH correction."
+          : structuralCohorts
+          ? "Structural signals compare equal-sized, non-overlapping count cohorts inside frozen intent clusters. They clear both the BH-adjusted p-value and minimum absolute Cliff's δ gates."
+          : "PASS/FAIL signals clear both the BH-adjusted p-value and minimum absolute Cliff's δ gates. UNCLEAR coverage signals instead use a deterministic 15-point increase and the configured sample floor. Signals come from the latest persisted pipeline run."}
       </div>
       {(analysis.runStatus === "no_completed_run" || evaluatorSelectionNeeded) && (
         <Panel className="p-5">
@@ -1001,6 +1009,7 @@ function Drift({ data = SEED, onOpenOperations = null }) {
       {DATA.driftSignals.map((s) => {
         const isOpen = open === s.id;
         const isCoverage = s.statName === "unclear_rate_increase";
+        const isMatched = s.layers?.includes("matched_structural");
         const isImprovement = s.direction === "improvement";
         const signalColor = isImprovement ? C.green : C.red;
         const signalBg = isImprovement ? C.greenBg : C.redBg;
@@ -1017,13 +1026,13 @@ function Drift({ data = SEED, onOpenOperations = null }) {
                   <span className="text-xs" style={{ color: C.sub }}>in {s.clusterLabel || s.clusterId} · on {s.providerLabel}</span>
                 </div>
                 <div className="text-xs mt-0.5" style={{ color: C.sub }}>
-                  {isCoverage ? <>UNCLEAR rate = {coveragePct(s.stat)} · deterministic coverage gate</> : <>{s.statName === "fisher_exact" ? "Fisher's exact" : "Mann-Whitney U"} · p<sub>adj</sub> = {sci(s.pAdj)} · {s.cliffsDelta != null ? <>Cliff&apos;s δ = {s.cliffsDelta} · </> : null}Cohen&apos;s d = {statValue(s.cohensD)}</>}
+                  {isCoverage ? <>UNCLEAR rate = {coveragePct(s.stat)} · deterministic coverage gate</> : isMatched ? <>Wilcoxon paired · p<sub>adj</sub> = {sci(s.pAdj)} · median paired delta = {statValue(s.stat)}</> : <>{s.statName === "fisher_exact" ? "Fisher's exact" : "Mann-Whitney U"} · p<sub>adj</sub> = {sci(s.pAdj)} · {s.cliffsDelta != null ? <>Cliff&apos;s δ = {s.cliffsDelta} · </> : null}Cohen&apos;s d = {statValue(s.cohensD)}</>}
                 </div>
               </div>
               <div className="ml-auto flex items-center gap-3">
                 <div className="text-right">
-                  <div className="font-semibold" style={{ color: signalColor, fontSize: 18 }}>{isCoverage ? coveragePct(s.stat) : statValue(s.cliffsDelta ?? s.cohensD)}</div>
-                  <div className="text-xs" style={{ color: C.faint }}>{isCoverage ? "UNCLEAR rate" : s.cliffsDelta != null ? "Cliff's δ" : "effect size"}</div>
+                  <div className="font-semibold" style={{ color: signalColor, fontSize: 18 }}>{isCoverage ? coveragePct(s.stat) : isMatched ? statValue(s.stat) : statValue(s.cliffsDelta ?? s.cohensD)}</div>
+                  <div className="text-xs" style={{ color: C.faint }}>{isCoverage ? "UNCLEAR rate" : isMatched ? "paired delta" : s.cliffsDelta != null ? "Cliff's δ" : "effect size"}</div>
                 </div>
                 <ChevronRight size={18} style={{ color: C.faint, transform: isOpen ? "rotate(90deg)" : "none", transition: "transform .15s" }} />
               </div>
@@ -1031,9 +1040,9 @@ function Drift({ data = SEED, onOpenOperations = null }) {
             {isOpen && (
               <div className="px-4 pb-4 border-t" style={{ borderColor: C.border }}>
                 <div className="grid sm:grid-cols-4 gap-3 mt-4">
-                  <Stat label="Statistic" value={isCoverage ? coveragePct(s.stat) : s.statName === "fisher_exact" ? `OR = ${statValue(s.stat)}` : `U = ${statValue(s.stat)}`} note={isCoverage ? "current UNCLEAR fraction" : s.statName === "fisher_exact" ? "Fisher's exact" : "Mann-Whitney"} />
+                  <Stat label="Statistic" value={isCoverage ? coveragePct(s.stat) : isMatched ? `Δ = ${statValue(s.stat)}` : s.statName === "fisher_exact" ? `OR = ${statValue(s.stat)}` : `U = ${statValue(s.stat)}`} note={isCoverage ? "current UNCLEAR fraction" : isMatched ? "paired median change" : s.statName === "fisher_exact" ? "Fisher's exact" : "Mann-Whitney"} />
                   <Stat label="p-value" value={isCoverage ? "n/a" : sci(s.p)} note={isCoverage ? "deterministic threshold" : `adjusted ${sci(s.pAdj)} (BH)`} />
-                  <Stat label="Cliff's δ" value={isCoverage ? "n/a" : statValue(s.cliffsDelta)} note={isCoverage ? "not a PASS/FAIL test" : "primary effect-size gate"} />
+                  <Stat label={isMatched ? "Design" : "Cliff's δ"} value={isCoverage || isMatched ? "n/a" : statValue(s.cliffsDelta)} note={isCoverage ? "not a PASS/FAIL test" : isMatched ? "matched intent pairs" : "primary effect-size gate"} />
                   <Stat label="Samples" value={`${statValue(s.nCur)} vs ${statValue(s.nBase)}`} note="current vs baseline" />
                 </div>
                 <div className="mt-4 rounded-md p-3 flex items-start gap-2.5" style={{ background: C.panel2, border: `1px solid ${C.border}` }}>
@@ -1062,7 +1071,7 @@ function Drift({ data = SEED, onOpenOperations = null }) {
         );
       })}
 
-      {analysis.runStatus !== "no_completed_run" && <Panel className="p-5">
+      {analysis.runStatus !== "no_completed_run" && DATA.dimensionOverall.length > 0 && <Panel className="p-5">
         <div className="font-semibold text-sm mb-1">Focused provider pass rate by dimension</div>
         <div className="text-xs mb-3" style={{ color: C.sub }}>
           {DATA.focusProviderLabel ? `${DATA.focusProviderLabel} is shown. Mixed-provider lead signals fall back to the first available provider rather than an empty chart.` : "No provider series is available."}

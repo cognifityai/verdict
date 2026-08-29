@@ -697,6 +697,21 @@ test("overview reports insufficient readiness without calling it zero drift", as
   assert.doesNotMatch(rendered, /No dimensions currently clear/);
 });
 
+test("count-cohort overview does not present the legacy n=30 diagnostic as a gate", async () => {
+  const ui = await loadUiModule();
+  const data = bundle("structural", [], [{
+    id: "count-signal", dimension: "response_words", direction: "change",
+    layers: ["structural"], pAdj: 0.01, cliffsDelta: 1, nCur: 8,
+  }]);
+  data.driftAnalysis.runStatus = "completed_with_signals";
+  data.clusterHealth.messages = ["No usable intent-cluster assignments are available."];
+
+  const rendered = textOf(render(ui.Overview, createHooks(), { data })).replace(/\s+/g, " ");
+
+  assert.match(rendered, /Legacy registry readiness Diagnostic only; does not gate count-cohort signals/);
+  assert.doesNotMatch(rendered, /No usable intent-cluster assignments are available/);
+});
+
 test("judge scores explains the empty state using shared readiness", async () => {
   const ui = await loadUiModule();
   const data = bundle("evaluator-a");
