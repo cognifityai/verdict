@@ -67,8 +67,8 @@ tagged `skills/verdict-instrument-app` directory using that host's documented
 mechanism. A skill install does not install Python dependencies. The skill first
 inspects the customer application's interpreter, then proposes a fresh install,
 `0.1.0a5` through `0.1.0a12` upgrade, synchronized repair, or no package change. It must obtain
-approval before running that command. The registry, pipeline, probe runner,
-Inspect, and dashboard commands come from the installed packages and do not need a Verdict source
+approval before running that command. The registry, pipeline, Inspect, and
+dashboard commands come from the installed packages and do not need a Verdict source
 checkout. The direct-file prompt above remains the cross-host fallback.
 
 ## What happens when the skill runs again

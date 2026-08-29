@@ -30,8 +30,8 @@ class RubricDimension:
     # Groundedness ("supported by the retrieved context") is the canonical case:
     # with no context there is nothing to ground against, so a context-aware
     # caller should skip it rather than let the judge guess (and FAIL unverifiable
-    # claims). Probe suites that use groundedness to mean "factually correct per
-    # world knowledge" leave the Judge's skip flag off, so this has no effect there.
+    # claims). Callers that intentionally use groundedness for another meaning can
+    # leave the Judge's skip flag off.
     requires_context: bool = False
 
 
@@ -176,8 +176,8 @@ class Judge:
     # are dropped entirely when no context is supplied — they aren't sent to the
     # judge and aren't returned. Chat-export / RAG-observability callers set this
     # True so groundedness-without-context stops being scored as a failure.
-    # Probe suites leave it False (they use groundedness as a world-knowledge
-    # correctness check that doesn't need retrieved context).
+    # It remains False by default for backward compatibility; context-aware callers
+    # opt in explicitly.
     skip_context_dependent_when_missing: bool = False
 
     def _effective_rubric(self, context: str | None) -> Rubric:

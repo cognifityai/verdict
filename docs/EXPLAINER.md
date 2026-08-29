@@ -82,7 +82,6 @@ For a visual overview, see `docs/architecture-current.svg`.
 - Import one of the source-shaped fixtures in `examples/telemetry/`, or point a
   bounded API reader at an existing telemetry project.
 - Run `verdict-pipeline` to cluster, judge, and persist a drift snapshot.
-- Run `verdict-probes` for the separately gated synthetic probe suite.
 - Run `scripts/live_capture_check.py` to verify capture against your configured
   providers from a source checkout.
 - Use `scripts/sample_to_label.py`, `scripts/label_ui.py`, and

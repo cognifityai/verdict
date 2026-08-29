@@ -4,8 +4,7 @@ An internal validation run surfaced that groundedness ("supported by retrieved c
 was being scored as FAIL on a chat transcript that has no retrieved context —
 the judge returns FAIL for unverifiable claims rather than UNCLEAR, so the
 UNCLEAR-exclusion didn't help. Fix: a context-aware caller skips groundedness
-entirely when no context is supplied. Probe suites (which use groundedness as
-a world-knowledge correctness check) leave the flag off and are unaffected.
+entirely when no context is supplied. The default remains backward compatible.
 """
 
 from __future__ import annotations
@@ -65,8 +64,7 @@ def test_groundedness_kept_with_context() -> None:
 
 
 def test_groundedness_kept_when_flag_off_even_without_context() -> None:
-    """Default behavior (flag off) preserves groundedness — this is what probe
-    suites rely on (groundedness = world-knowledge correctness)."""
+    """Default behavior (flag off) preserves groundedness."""
     prov = _CapturingProvider()
     judge = Judge(provider=prov, model="m")  # flag defaults to False
     judgment = judge.judge(query="Q", response="R")

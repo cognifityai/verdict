@@ -18,7 +18,7 @@ python -m pip install \
 
 Replace `anthropic` with `openai` or `google` when appropriate. Add `postgres`
 for PostgreSQL. Do not install the unrelated distribution named `verdict`.
-Normal capture, pipeline, probe, Inspect, dashboard, and registry operation does
+Normal capture, pipeline, Inspect, dashboard, and registry operation does
 not require a Verdict source checkout.
 
 ## Released capture surface

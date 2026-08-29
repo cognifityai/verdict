@@ -7,8 +7,8 @@ test is insufficient evidence of trace collection or a rendered regression.
 
 Record the interpreter and installed distributions. Confirm the imported `verdict`
 module belongs to `cognifity-verdict`, not the unrelated package named `verdict`.
-Pin the synchronized `0.1.0a13` distributions and verify the installed pipeline,
-probe, and dashboard commands.
+Pin the synchronized `0.1.0a13` distributions and verify the installed pipeline
+and dashboard commands.
 
 ## Trace capture gate
 
@@ -50,7 +50,6 @@ value.
 | Job | Purpose | Frequency basis | Final sink |
 |---|---|---|---|
 | Drift analysis | compare baseline/current quality | eligible volume, window length, delay, judge cost/latency | persisted latest `DriftRun` |
-| Probes | deterministic behavioral gate | change events plus bounded periodic coverage | JSON artifact and exit code |
 | Retention | remove expired rows | retention boundary and operational load | rows older than cutoff absent |
 | Health check | confirm capture/dashboard dependencies | incident-detection need and noise budget | customer's existing monitor/log sink |
 
@@ -199,11 +198,7 @@ Basic authentication is enabled only when both `VERDICT_USER` and `VERDICT_PASS`
 are non-empty. Fail readiness when exactly one is set. Treat `/` and `/api/health`
 as public even when auth is enabled; only `/dashboard` and `/api/data` are gated.
 
-## Probe and retention gates
-
-For probes, exercise exit `0` (pass), exit `1` (gate failure), and exit `2`
-(execution error), and preserve the JSON artifact in the customer's normal CI/job
-logs. Do not claim probe results appear on the dashboard.
+## Retention gate
 
 For retention, seed rows on both sides of a synthetic cutoff, call
 `prune_before(cutoff_iso)`, and independently prove only expired rows were removed.

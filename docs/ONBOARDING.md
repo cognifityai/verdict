@@ -233,7 +233,7 @@ actually passed, so saved output records the exact live surface exercised.
 
 `verdict_eval` is a library, not a separate app — you exercise it through the
 research calibration scripts in a Verdict source checkout. These scripts are
-not required for normal capture, pipeline, probe, or dashboard operation. This
+not required for normal capture, pipeline, or dashboard operation. This
 is the honest per-workload step: the shippable judge number is **your** held-out,
 human-labeled data, not a public benchmark.
 
@@ -314,16 +314,6 @@ otherwise the status is `degraded`. When the sentinel option is
 present, `degraded` or `insufficient_data` status is a hard gate: the command
 persists the health record, exits 2, and does not write production judgments or
 drift signals.
-
-For scheduled synthetic probes, `verdict-probes` requires a weighted
-probe pass rate of 100% by default. Each probe's weight enters the suite and
-category gate once, and a probe passes only when every declared expectation
-passes. Weighted expectation agreement, including its per-dimension breakdown,
-is a separate diagnostic and never the quality-gate denominator. Persisted JSON
-contains both summaries under metric-schema version 3. Use `--min-pass-rate`
-only for an intentionally chosen workload gate. A below-threshold run exits 1;
-malformed or contradictory results fail closed, while target, follow-up, or
-judge execution errors remain visible in each declared dimension and exit 2.
 
 The dashboard shows per-provider traffic (trace counts, error rate, latency,
 tokens, **estimated cost**), intent clusters, pass-rate by dimension, and the

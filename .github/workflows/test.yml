@@ -67,7 +67,7 @@ jobs:
           uv pip install --system \
             wrapt httpx \
             numpy scipy scikit-learn \
-            "pyyaml>=6" "pytest>=8" "pytest-asyncio>=0.23" "ruff>=0.5" \
+            "pytest>=8" "pytest-asyncio>=0.23" "ruff>=0.5" \
             -r ui/requirements.txt
           uv pip install --system -e "packages/verdict[anthropic,openai,google,telemetry]"
           uv pip install --system -e packages/verdict_eval
@@ -246,7 +246,7 @@ jobs:
             "import verdict, verdict_eval, verdict_inspect; assert {verdict.__version__, verdict_eval.__version__, verdict_inspect.__version__} == {'0.1.0a13'}"
           /tmp/verdict-wheel-venv/bin/verdict-inspect --help
           /tmp/verdict-wheel-venv/bin/verdict-pipeline --help
-          /tmp/verdict-wheel-venv/bin/verdict-probes --help
+          test ! -e /tmp/verdict-wheel-venv/bin/verdict-probes
           /tmp/verdict-wheel-venv/bin/verdict-cluster --help
           /tmp/verdict-wheel-venv/bin/verdict-dashboard --help
           /tmp/verdict-wheel-venv/bin/verdict-import --help
@@ -355,7 +355,7 @@ jobs:
             "import verdict, verdict_eval, verdict_inspect; assert {verdict.__version__, verdict_eval.__version__, verdict_inspect.__version__} == {'0.1.0a13'}"
           /tmp/verdict-sdist-venv/bin/verdict-inspect --help
           /tmp/verdict-sdist-venv/bin/verdict-pipeline --help
-          /tmp/verdict-sdist-venv/bin/verdict-probes --help
+          test ! -e /tmp/verdict-sdist-venv/bin/verdict-probes
           /tmp/verdict-sdist-venv/bin/verdict-cluster --help
           /tmp/verdict-sdist-venv/bin/verdict-dashboard --help
           /tmp/verdict-sdist-venv/bin/verdict-import --help

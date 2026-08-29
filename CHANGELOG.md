@@ -6,6 +6,14 @@ the customer POC profile is refined.
 
 ## [Unreleased]
 
+### Removed
+
+- Removed the standalone scheduled-probe subsystem, including the
+  `verdict-probes` command and the public `verdict_eval` probe classes. It was a
+  separate JSON/exit-code runner and was not integrated with trace capture,
+  persisted drift analysis, or the dashboard. Existing trace, judgment, drift,
+  registry, and dashboard data are unchanged.
+
 ## [0.1.0a13] - 2026-08-27
 
 ### Added
