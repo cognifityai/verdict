@@ -1,6 +1,6 @@
 """Verdict eval engine.
 
-Five components, each independently usable. Imports are LAZY so that
+Components are independently usable. Imports are LAZY so that
 importing `verdict_eval` doesn't pull scipy/sklearn unless you reach for
 the components that need them.
 """
@@ -65,24 +65,6 @@ def __getattr__(name: str):
             "StructuralSignal": StructuralSignal,
             "StructuralDriftSignal": StructuralDriftSignal,
         }[name]
-    if name in {"ProbeRunner", "ProbeSuite", "Probe", "ProbeExpectation",
-                "ProbeResult", "ProbeRun", "default_suite", "load_suite_yaml"}:
-        from verdict_eval.probes import (
-            Probe,
-            ProbeExpectation,
-            ProbeResult,
-            ProbeRun,
-            ProbeRunner,
-            ProbeSuite,
-            default_suite,
-            load_suite_yaml,
-        )
-        return {
-            "ProbeRunner": ProbeRunner, "ProbeSuite": ProbeSuite,
-            "Probe": Probe, "ProbeExpectation": ProbeExpectation,
-            "ProbeResult": ProbeResult, "ProbeRun": ProbeRun,
-            "default_suite": default_suite, "load_suite_yaml": load_suite_yaml,
-        }[name]
     if name in {"UserSignalCorrelator", "CorrelationPair", "CorrelationReport"}:
         from verdict_eval.correlator import (
             CorrelationPair,
@@ -112,18 +94,10 @@ __all__ = [
     "PairwiseJudgeEnsemble",
     "PairwiseResult",
     "PairwiseStatus",
-    "Probe",
-    "ProbeExpectation",
-    "ProbeResult",
-    "ProbeRun",
-    "ProbeRunner",
-    "ProbeSuite",
     "Rubric",
     "StructuralChecker",
     "StructuralDriftSignal",
     "StructuralSignal",
     "UserSignalCorrelator",
     "__version__",
-    "default_suite",
-    "load_suite_yaml",
 ]

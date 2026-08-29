@@ -32,7 +32,6 @@ REQUIRED_DISTRIBUTIONS = (
 COMMANDS = (
     "verdict-dashboard",
     "verdict-pipeline",
-    "verdict-probes",
     "verdict-inspect",
     "verdict-cluster",
 )

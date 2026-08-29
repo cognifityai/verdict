@@ -1,6 +1,6 @@
 ---
 name: verdict-instrument-app
-description: Inspect an existing LLM application and plan, implement, or audit a safe Verdict by Cognifity integration. Use for locating supported Python provider calls, placing process-level initialization, choosing SQLite or Postgres trace storage, configuring capture and retention, scheduling evaluation or probe jobs, launching the bundled dashboard, and verifying regression evidence. Do not use for generic observability work or for adding features to Verdict itself.
+description: Inspect an existing LLM application and plan, implement, or audit a safe Verdict by Cognifity integration. Use for locating supported Python provider calls, placing process-level initialization, choosing SQLite or Postgres trace storage, configuring capture and retention, scheduling evaluation jobs, launching the bundled dashboard, and verifying regression evidence. Do not use for generic observability work or for adding features to Verdict itself.
 ---
 
 # Instrument an App with Verdict
@@ -12,15 +12,14 @@ public alpha, not a production-readiness claim.
 ## Resolve the installed runtime before doing anything
 
 Set `<skill-root>` to the absolute directory containing this `SKILL.md`. Resolve
-the customer repository independently. Normal capture, analysis, probe, and
-dashboard operation uses the released distributions and does not require a Verdict
+the customer repository independently. Normal capture, analysis, and dashboard
+operation uses the released distributions and does not require a Verdict
 source checkout. Set `<python>` to the customer application's actual interpreter,
 then inspect it before proposing customer edits:
 
 ```bash
 <python> <skill-root>/scripts/inspect_environment.py --format json
 verdict-pipeline --help
-verdict-probes --help
 verdict-dashboard --help
 ```
 
@@ -223,12 +222,12 @@ privacy tests, and held-out judge calibration, or after independent labels prove
 narrow rubric remains valid without that context.
 
 Follow [`references/operations-and-verification.md`](references/operations-and-verification.md)
-for drift, probe, retention, dashboard, and rollback verification.
+for drift, retention, dashboard, and rollback verification.
 
 ### 8. Schedule jobs outside the dashboard
 
-Discover and recommend analysis, probes, retention cleanup, and health checks
-separately. Reuse the customer's existing cron, systemd, GitHub Actions, Kubernetes,
+Discover and recommend analysis, retention cleanup, and health checks separately.
+Reuse the customer's existing cron, systemd, GitHub Actions, Kubernetes,
 or cloud scheduler. Use a non-overlap lock. Base frequency on eligible trace volume,
 elapsed detection delay, provider latency, and evaluation cost—not a universal cron.
 
@@ -245,8 +244,7 @@ outside the runner. Pin the distribution versions in the deployment lockfile.
 The current dashboard signal is the latest persisted `DriftRun` in SQLite or
 PostgreSQL. Launch it locally by default, or mount `verdict.dashboard.create_app()`
 behind the host application's authentication, and verify `/api/health`, `/api/data`,
-and the rendered regression view. Probes produce JSON and exit codes and do not
-automatically appear as dashboard alerts. Do not promise outbound notifications
+and the rendered regression view. Do not promise outbound notifications
 unless the installed release actually supports them.
 
 ## Stop instead of guessing

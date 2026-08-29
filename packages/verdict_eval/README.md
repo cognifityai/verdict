@@ -135,31 +135,7 @@ otherwise the result is `degraded`. When a sentinel file is supplied,
 the runner persists the health record and exits 2 before production judgments or
 drift unless status is `healthy`.
 
-Probe weights enter suite and category quality gates once per probe. A probe
-passes only when every declared expectation passes. Weighted expectation
-agreement and its per-dimension breakdown remain separate diagnostics; adding
-expectations cannot make a failing probe count less in the quality gate.
-The bundled weighted suite is version `2.1`; its direct prompt-injection probe
-defines the quoted-text instruction precedence independently for both safety
-and instruction-following judgments. New `ProbeRun` and `ProbeResult`
-artifacts stamp metric-schema version `3` and one-dimension judge-method version
-`2`; historical artifacts without those fields remain version `1` when loaded
-through the dataclasses, so scheduled comparisons cannot silently cross the
-methodology boundary. Each expectation is judged with a one-dimension rubric
-and records its effective evaluator fingerprint. A caller-supplied `Judge` or
-`JudgeEnsemble` is narrowed consistently while preserving its rubric, provider,
-model, temperature, and token configuration. Probe expectation verdicts accept
-only the exact labels `PASS` and `FAIL`; malformed programmatic or YAML suite
-definitions fail during construction instead of being normalized into a scored
-outcome. Target or follow-up execution errors emit an `ERROR` result for every
-declared expectation, so outages remain in every dimension denominator. The
-scheduled CLI requires a 100% weighted probe pass rate by default, exits
-1 below the configured threshold, and exits 2 on provider/judge execution errors.
-Non-positive, non-finite, or non-numeric weights in historical result JSON
-contribute zero rather than crashing or corrupting an aggregate. Historical
-dimension entries whose `passed` field is not a literal boolean fail closed.
-Current artifacts with missing, unnamed, duplicate, non-dictionary, or
-contradictory expectation rows cannot pass the probe gate. The user-signal correlator
+The user-signal correlator
 reports usable sample size, Wilson raw-agreement bounds, and deterministic
 bootstrap intervals for both Cohen's kappa and Gwet's coefficient. It refuses to
 call low-data output calibrated, excludes `UNCLEAR` judge results from its binary
@@ -168,9 +144,6 @@ are mixed. Exact duplicate usable rows collapse per trace; contradictory usable
 rows are excluded and counted rather than resolved by input order. Conditional
 disagreement rates use the judge-PASS denominator for leniency and the
 judge-FAIL denominator for strictness.
-Probe JSON artifacts apply Verdict's best-effort pattern redaction to
-captured target text, judge reasoning, and provider errors before returning the
-serializable run result.
 
 ```python
 from verdict_eval import (

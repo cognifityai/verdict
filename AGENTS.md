@@ -24,7 +24,6 @@ work and should not be described as current functionality.
 - **Cluster**: a group of similar prompts used for like-with-like comparison.
 - **Reference baseline**: the historical distribution used for drift comparison.
 - **Drift signal**: a statistically meaningful change for a cluster/dimension.
-- **Probe**: a configured external evaluation run.
 - **Shadow traffic**: sampled traffic mirrored to another model for comparison.
 
 ## Architecture Principles
@@ -188,9 +187,6 @@ The following cases are mandatory whenever their area changes:
 - Judge-health gates count exact-match sentinel examples, never correlated
   labels. Keep label agreement as a separately named diagnostic and test
   unequal label counts per example.
-- Probe quality gates count each probe weight once; expectation agreement is a
-  separately named diagnostic. Test malformed, contradictory, and historical
-  artifacts fail closed without changing published constructor positions.
 - Drift consumers read one atomic latest `DriftRun` snapshot, including an
   explicit zero-signal run. Test rollback, concurrent replacement, legacy
   signals without run identity, and deletion without partial snapshots.

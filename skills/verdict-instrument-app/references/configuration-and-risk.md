@@ -40,7 +40,7 @@ An approval to add Verdict is not approval to store prompts and responses.
 
 ### Jobs, latency, and cost
 
-- Which are needed: drift analysis, probes, retention cleanup, or health checks?
+- Which are needed: drift analysis, retention cleanup, or health checks?
 - What is the slowest acceptable detection delay?
 - What eligible trace volume exists per cluster/window?
 - Which evaluator and rubric are approved, and what is the spend/rate limit?

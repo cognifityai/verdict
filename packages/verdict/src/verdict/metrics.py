@@ -10,7 +10,7 @@ def verdict_label(value: object) -> str:
     """Normalize enum and string verdicts to PASS, FAIL, or UNCLEAR.
 
     Unknown, missing, and malformed values are deliberately UNCLEAR. This is
-    the only normalization contract used by core, eval, inspect, probes, and
+    the only normalization contract used by core, eval, and inspect, and
     dashboard aggregation.
     """
     label = str(getattr(value, "value", value)).strip().upper()
