@@ -11,6 +11,7 @@ import copy
 import json
 import threading
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import datetime, timedelta
 
 from verdict.redaction import sanitize_judgment, sanitize_span, sanitize_trace
@@ -25,6 +26,9 @@ from verdict.schema import (
     DriftSignal,
     EvaluatorHealthRecord,
     Judgment,
+    MonitorMember,
+    MonitorResult,
+    MonitorSeries,
     SpanRecord,
     Trace,
     TraceClusterAssignment,
@@ -45,6 +49,9 @@ class InMemoryStorage:
         self._evaluator_health: dict[str, EvaluatorHealthRecord] = {}
         self._drift_runs: dict[str, DriftRun] = {}
         self._signals: dict[str, DriftSignal] = {}
+        self._monitor_series: dict[str, MonitorSeries] = {}
+        self._monitor_members: dict[tuple[str, str], MonitorMember] = {}
+        self._monitor_results: dict[tuple[str, str, int], MonitorResult] = {}
         self._drift_lock = threading.RLock()
         self._cluster_registries: dict[str, str] = {}
         self._cluster_identities: dict[tuple[str, str], ClusterIdentity] = {}
@@ -239,28 +246,33 @@ class InMemoryStorage:
     ) -> None:
         _validate_drift_run_snapshot(run, signals)
         with self._drift_lock:
-            existing = self._drift_runs.get(run.run_id)
-            if existing is not None and existing.evaluator_fingerprint != run.evaluator_fingerprint:
-                raise ValueError("run_id already belongs to another evaluator")
-            signal_ids = {signal.signal_id for signal in signals}
-            for signal_id in signal_ids:
-                existing_signal = self._signals.get(signal_id)
-                if (
-                    existing_signal is not None
-                    and existing_signal.run_id
-                    and existing_signal.run_id != run.run_id
-                ):
-                    raise ValueError("signal_id already belongs to another drift run")
-            replacement_signals = {
-                signal_id: signal
-                for signal_id, signal in self._signals.items()
-                if signal.run_id != run.run_id
-            }
-            replacement_signals.update(
-                {signal.signal_id: copy.deepcopy(signal) for signal in signals}
-            )
-            self._signals = replacement_signals
-            self._drift_runs[run.run_id] = copy.deepcopy(run)
+            self._validate_snapshot_ownership_locked(run, signals)
+            self._store_snapshot_locked(run, signals)
+
+    def _validate_snapshot_ownership_locked(
+        self, run: DriftRun, signals: list[DriftSignal]
+    ) -> None:
+        existing = self._drift_runs.get(run.run_id)
+        if existing is not None and existing.evaluator_fingerprint != run.evaluator_fingerprint:
+            raise ValueError("run_id already belongs to another evaluator")
+        for signal in signals:
+            existing_signal = self._signals.get(signal.signal_id)
+            if (
+                existing_signal is not None
+                and existing_signal.run_id
+                and existing_signal.run_id != run.run_id
+            ):
+                raise ValueError("signal_id already belongs to another drift run")
+
+    def _store_snapshot_locked(self, run: DriftRun, signals: list[DriftSignal]) -> None:
+        replacement_signals = {
+            signal_id: signal
+            for signal_id, signal in self._signals.items()
+            if signal.run_id != run.run_id
+        }
+        replacement_signals.update({signal.signal_id: copy.deepcopy(signal) for signal in signals})
+        self._signals = replacement_signals
+        self._drift_runs[run.run_id] = copy.deepcopy(run)
 
     def get_latest_drift_run_snapshot(
         self,
@@ -321,6 +333,192 @@ class InMemoryStorage:
         with self._drift_lock:
             items = sorted(self._signals.values(), key=lambda s: s.detected_at, reverse=True)
             return items[:limit]
+
+    # -- Count-cohort monitoring -----------------------------------------
+
+    def create_monitor_series(
+        self,
+        series: MonitorSeries,
+        members: list[MonitorMember],
+        *,
+        snapshot: tuple[DriftRun, list[DriftSignal]] | None = None,
+    ) -> None:
+        if snapshot is not None:
+            _validate_drift_run_snapshot(*snapshot)
+        with self._drift_lock:
+            existing = self._monitor_series.get(series.series_id)
+            if existing is not None:
+                if existing != series:
+                    raise ValueError("monitor series identity conflict")
+                if snapshot is not None:
+                    self._validate_snapshot_ownership_locked(*snapshot)
+                    self._store_snapshot_locked(*snapshot)
+                return
+            if series.state == "active" and any(
+                item.scope_key == series.scope_key and item.state == "active"
+                for item in self._monitor_series.values()
+            ):
+                raise ValueError("monitor scope already has an active series")
+            keys = [(member.series_id, member.trace_id) for member in members]
+            if any(member.series_id != series.series_id for member in members) or len(keys) != len(
+                set(keys)
+            ):
+                raise ValueError("invalid monitor membership")
+            if snapshot is not None:
+                self._validate_snapshot_ownership_locked(*snapshot)
+            self._monitor_series[series.series_id] = copy.deepcopy(series)
+            self._monitor_members.update(
+                {key: copy.deepcopy(member) for key, member in zip(keys, members, strict=True)}
+            )
+            if snapshot is not None:
+                self._store_snapshot_locked(*snapshot)
+
+    def get_monitor_series(self, series_id: str) -> MonitorSeries | None:
+        with self._drift_lock:
+            return copy.deepcopy(self._monitor_series.get(series_id))
+
+    def get_active_monitor_series(self, scope_key: str) -> MonitorSeries | None:
+        with self._drift_lock:
+            matches = [
+                series
+                for series in self._monitor_series.values()
+                if series.scope_key == scope_key and series.state == "active"
+            ]
+            return copy.deepcopy(matches[0]) if matches else None
+
+    def list_monitor_series(self, *, scope_key: str | None = None) -> list[MonitorSeries]:
+        with self._drift_lock:
+            rows = [
+                series
+                for series in self._monitor_series.values()
+                if scope_key is None or series.scope_key == scope_key
+            ]
+            rows.sort(key=lambda series: (series.created_at, series.series_id))
+            return copy.deepcopy(rows)
+
+    def list_monitor_members(self, series_id: str) -> list[MonitorMember]:
+        with self._drift_lock:
+            rows = [
+                member for (owner, _), member in self._monitor_members.items() if owner == series_id
+            ]
+            rows.sort(
+                key=lambda member: (
+                    member.role,
+                    member.cluster_id,
+                    member.bucket_index,
+                    member.event_time,
+                    member.trace_id,
+                )
+            )
+            return copy.deepcopy(rows)
+
+    def list_monitor_results(self, series_id: str) -> list[MonitorResult]:
+        with self._drift_lock:
+            rows = [
+                result
+                for (owner, _, _), result in self._monitor_results.items()
+                if owner == series_id
+            ]
+            rows.sort(key=lambda result: (result.cluster_id, result.bucket_index))
+            return copy.deepcopy(rows)
+
+    def commit_monitor_cycle(
+        self,
+        *,
+        series_id: str,
+        expected_generation: int,
+        members: list[MonitorMember],
+        results: list[MonitorResult],
+        snapshots: list[tuple[DriftRun, list[DriftSignal]]],
+        late_arrival_delta: int,
+    ) -> MonitorSeries:
+        for run, signals in snapshots:
+            _validate_drift_run_snapshot(run, signals)
+        with self._drift_lock:
+            series = self._monitor_series.get(series_id)
+            if series is None or series.state != "active":
+                raise ValueError("active monitor series not found")
+            if series.generation != expected_generation:
+                raise ValueError("monitor generation conflict")
+            next_members = copy.deepcopy(self._monitor_members)
+            next_results = copy.deepcopy(self._monitor_results)
+            next_runs = copy.deepcopy(self._drift_runs)
+            next_signals = copy.deepcopy(self._signals)
+            for member in members:
+                if member.series_id != series_id:
+                    raise ValueError("monitor member belongs to another series")
+                key = (series_id, member.trace_id)
+                if (existing := next_members.get(key)) is not None and existing != member:
+                    raise ValueError("monitor trace membership conflict")
+                next_members[key] = copy.deepcopy(member)
+            for result in results:
+                if result.series_id != series_id:
+                    raise ValueError("monitor result belongs to another series")
+                key = (series_id, result.cluster_id, result.bucket_index)
+                if (existing := next_results.get(key)) is not None and existing != result:
+                    raise ValueError("monitor result identity conflict")
+                next_results[key] = copy.deepcopy(result)
+            for run, signals in snapshots:
+                next_runs[run.run_id] = copy.deepcopy(run)
+                next_signals = {
+                    signal_id: signal
+                    for signal_id, signal in next_signals.items()
+                    if signal.run_id != run.run_id
+                }
+                next_signals.update({signal.signal_id: copy.deepcopy(signal) for signal in signals})
+            updated = replace(
+                series,
+                generation=series.generation + 1,
+                late_arrival_count=series.late_arrival_count + late_arrival_delta,
+                updated_at=max(
+                    [series.updated_at]
+                    + [result.completed_at for result in results]
+                    + [run.completed_at for run, _ in snapshots]
+                ),
+            )
+            self._monitor_members = next_members
+            self._monitor_results = next_results
+            self._drift_runs = next_runs
+            self._signals = next_signals
+            self._monitor_series[series_id] = updated
+            return copy.deepcopy(updated)
+
+    def activate_monitor_series(
+        self,
+        series_id: str,
+        *,
+        expected_active_series_id: str,
+        snapshot: tuple[DriftRun, list[DriftSignal]] | None = None,
+    ) -> MonitorSeries:
+        if snapshot is not None:
+            _validate_drift_run_snapshot(*snapshot)
+        with self._drift_lock:
+            candidate = self._monitor_series.get(series_id)
+            active = self._monitor_series.get(expected_active_series_id)
+            if candidate is None or candidate.state not in {"candidate", "retired"}:
+                raise ValueError("monitor candidate not found")
+            if (
+                active is None
+                or active.state != "active"
+                or active.scope_key != candidate.scope_key
+            ):
+                raise ValueError("active monitor compare-and-swap conflict")
+            if snapshot is not None:
+                self._validate_snapshot_ownership_locked(*snapshot)
+            now = max(active.updated_at, candidate.updated_at)
+            self._monitor_series[active.series_id] = replace(
+                active, state="retired", generation=active.generation + 1, updated_at=now
+            )
+            activated = replace(
+                candidate,
+                state="active",
+                generation=candidate.generation + 1,
+                updated_at=now,
+            )
+            self._monitor_series[candidate.series_id] = activated
+            if snapshot is not None:
+                self._store_snapshot_locked(*snapshot)
+            return copy.deepcopy(activated)
 
     def insert_span(self, span: SpanRecord) -> None:
         sanitize_span(span)

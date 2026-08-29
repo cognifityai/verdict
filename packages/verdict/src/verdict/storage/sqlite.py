@@ -30,6 +30,9 @@ from verdict.schema import (
     EvaluatorHealthStatus,
     Judgment,
     JudgmentStatus,
+    MonitorMember,
+    MonitorResult,
+    MonitorSeries,
     Operation,
     SpanRecord,
     Trace,
@@ -172,6 +175,52 @@ CREATE TABLE IF NOT EXISTS drift_signals (
 CREATE INDEX IF NOT EXISTS idx_signals_detected ON drift_signals(detected_at);
 CREATE INDEX IF NOT EXISTS idx_signals_cluster_dim ON drift_signals(cluster_id, dimension);
 CREATE INDEX IF NOT EXISTS idx_signals_run ON drift_signals(run_id);
+
+CREATE TABLE IF NOT EXISTS monitor_series (
+    series_id TEXT PRIMARY KEY,
+    scope_key TEXT NOT NULL,
+    scope_json TEXT NOT NULL,
+    state TEXT NOT NULL CHECK(state IN ('active','candidate','retired')),
+    generation INTEGER NOT NULL CHECK(generation >= 0),
+    parent_series_id TEXT,
+    registry_json TEXT NOT NULL,
+    boundary_time TEXT NOT NULL,
+    boundary_trace_id TEXT NOT NULL,
+    target_units INTEGER NOT NULL CHECK(target_units >= 2),
+    late_arrival_count INTEGER NOT NULL DEFAULT 0 CHECK(late_arrival_count >= 0),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_monitor_one_active_scope
+    ON monitor_series(scope_key) WHERE state='active';
+CREATE INDEX IF NOT EXISTS idx_monitor_series_scope ON monitor_series(scope_key, created_at);
+
+CREATE TABLE IF NOT EXISTS monitor_members (
+    series_id TEXT NOT NULL,
+    trace_id TEXT NOT NULL,
+    role TEXT NOT NULL CHECK(role IN ('baseline','bootstrap','current','late')),
+    bucket_index INTEGER NOT NULL CHECK(bucket_index >= 0),
+    cluster_id TEXT NOT NULL,
+    unit_id TEXT NOT NULL,
+    event_time TEXT NOT NULL,
+    PRIMARY KEY (series_id, trace_id),
+    FOREIGN KEY (series_id) REFERENCES monitor_series(series_id)
+);
+CREATE INDEX IF NOT EXISTS idx_monitor_members_bucket
+    ON monitor_members(series_id, role, cluster_id, bucket_index, event_time, trace_id);
+
+CREATE TABLE IF NOT EXISTS monitor_results (
+    series_id TEXT NOT NULL,
+    cluster_id TEXT NOT NULL,
+    bucket_index INTEGER NOT NULL CHECK(bucket_index > 0),
+    run_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    direction_key TEXT NOT NULL,
+    completed_at TEXT NOT NULL,
+    PRIMARY KEY (series_id, cluster_id, bucket_index),
+    UNIQUE (run_id),
+    FOREIGN KEY (series_id) REFERENCES monitor_series(series_id)
+);
 
 CREATE TABLE IF NOT EXISTS cluster_registries (
     version TEXT PRIMARY KEY,
@@ -983,44 +1032,47 @@ class SQLiteStorage:
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
             try:
-                existing = self._conn.execute(
-                    "SELECT evaluator_fingerprint FROM drift_runs WHERE run_id = ?",
-                    (run.run_id,),
-                ).fetchone()
-                if existing and existing["evaluator_fingerprint"] != run.evaluator_fingerprint:
-                    raise ValueError("run_id already belongs to another evaluator")
-                for signal in signals:
-                    owner = self._conn.execute(
-                        "SELECT run_id FROM drift_signals WHERE signal_id = ?",
-                        (signal.signal_id,),
-                    ).fetchone()
-                    if owner and owner["run_id"] and owner["run_id"] != run.run_id:
-                        raise ValueError("signal_id already belongs to another drift run")
-                self._conn.execute(
-                    """INSERT INTO drift_runs (
-                        run_id, analysis_time, completed_at,
-                        evaluator_fingerprint, signal_count
-                    ) VALUES (?, ?, ?, ?, ?)
-                    ON CONFLICT(run_id) DO UPDATE SET
-                        analysis_time = excluded.analysis_time,
-                        completed_at = excluded.completed_at,
-                        evaluator_fingerprint = excluded.evaluator_fingerprint,
-                        signal_count = excluded.signal_count""",
-                    (
-                        run.run_id,
-                        _iso(run.analysis_time),
-                        _iso(run.completed_at),
-                        run.evaluator_fingerprint,
-                        run.signal_count,
-                    ),
-                )
-                self._conn.execute("DELETE FROM drift_signals WHERE run_id = ?", (run.run_id,))
-                for signal in signals:
-                    self._insert_drift_signal_locked(signal)
+                self._replace_drift_run_locked(run, signals)
                 self._conn.execute("COMMIT")
             except BaseException:
                 self._conn.execute("ROLLBACK")
                 raise
+
+    def _replace_drift_run_locked(self, run: DriftRun, signals: list[DriftSignal]) -> None:
+        existing = self._conn.execute(
+            "SELECT evaluator_fingerprint FROM drift_runs WHERE run_id = ?",
+            (run.run_id,),
+        ).fetchone()
+        if existing and existing["evaluator_fingerprint"] != run.evaluator_fingerprint:
+            raise ValueError("run_id already belongs to another evaluator")
+        for signal in signals:
+            owner = self._conn.execute(
+                "SELECT run_id FROM drift_signals WHERE signal_id = ?",
+                (signal.signal_id,),
+            ).fetchone()
+            if owner and owner["run_id"] and owner["run_id"] != run.run_id:
+                raise ValueError("signal_id already belongs to another drift run")
+        self._conn.execute(
+            """INSERT INTO drift_runs (
+                run_id, analysis_time, completed_at,
+                evaluator_fingerprint, signal_count
+            ) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(run_id) DO UPDATE SET
+                analysis_time = excluded.analysis_time,
+                completed_at = excluded.completed_at,
+                evaluator_fingerprint = excluded.evaluator_fingerprint,
+                signal_count = excluded.signal_count""",
+            (
+                run.run_id,
+                _iso(run.analysis_time),
+                _iso(run.completed_at),
+                run.evaluator_fingerprint,
+                run.signal_count,
+            ),
+        )
+        self._conn.execute("DELETE FROM drift_signals WHERE run_id = ?", (run.run_id,))
+        for signal in signals:
+            self._insert_drift_signal_locked(signal)
 
     def get_latest_drift_run_snapshot(
         self,
@@ -1139,6 +1191,301 @@ class SQLiteStorage:
             else [],
             recommended_action=r["recommended_action"] or "",
         )
+
+    # -- Count-cohort monitoring -----------------------------------------
+
+    def _row_to_monitor_series(self, row: sqlite3.Row) -> MonitorSeries:
+        return MonitorSeries(
+            series_id=row["series_id"],
+            scope_key=row["scope_key"],
+            scope_json=row["scope_json"],
+            state=row["state"],
+            generation=row["generation"],
+            parent_series_id=row["parent_series_id"],
+            registry_json=row["registry_json"],
+            boundary_time=_parse_iso(row["boundary_time"]) or datetime.now(timezone.utc),
+            boundary_trace_id=row["boundary_trace_id"],
+            target_units=row["target_units"],
+            late_arrival_count=row["late_arrival_count"],
+            created_at=_parse_iso(row["created_at"]) or datetime.now(timezone.utc),
+            updated_at=_parse_iso(row["updated_at"]) or datetime.now(timezone.utc),
+        )
+
+    @staticmethod
+    def _row_to_monitor_member(row: sqlite3.Row) -> MonitorMember:
+        return MonitorMember(
+            series_id=row["series_id"],
+            trace_id=row["trace_id"],
+            role=row["role"],
+            bucket_index=row["bucket_index"],
+            cluster_id=row["cluster_id"],
+            unit_id=row["unit_id"],
+            event_time=_parse_iso(row["event_time"]) or datetime.now(timezone.utc),
+        )
+
+    @staticmethod
+    def _row_to_monitor_result(row: sqlite3.Row) -> MonitorResult:
+        return MonitorResult(
+            series_id=row["series_id"],
+            cluster_id=row["cluster_id"],
+            bucket_index=row["bucket_index"],
+            run_id=row["run_id"],
+            status=row["status"],
+            direction_key=row["direction_key"],
+            completed_at=_parse_iso(row["completed_at"]) or datetime.now(timezone.utc),
+        )
+
+    def _insert_monitor_member_locked(self, member: MonitorMember) -> None:
+        self._conn.execute(
+            """INSERT INTO monitor_members (
+                series_id, trace_id, role, bucket_index, cluster_id, unit_id, event_time
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (
+                member.series_id,
+                member.trace_id,
+                member.role,
+                member.bucket_index,
+                member.cluster_id,
+                member.unit_id,
+                _iso(member.event_time),
+            ),
+        )
+
+    def create_monitor_series(
+        self,
+        series: MonitorSeries,
+        members: list[MonitorMember],
+        *,
+        snapshot: tuple[DriftRun, list[DriftSignal]] | None = None,
+    ) -> None:
+        if snapshot is not None:
+            _validate_drift_run_snapshot(*snapshot)
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                existing = self._conn.execute(
+                    "SELECT * FROM monitor_series WHERE series_id = ?", (series.series_id,)
+                ).fetchone()
+                if existing is not None:
+                    if self._row_to_monitor_series(existing) != series:
+                        raise ValueError("monitor series identity conflict")
+                    if snapshot is not None:
+                        self._replace_drift_run_locked(*snapshot)
+                    self._conn.execute("COMMIT")
+                    return
+                self._conn.execute(
+                    """INSERT INTO monitor_series (
+                        series_id, scope_key, scope_json, state, generation,
+                        parent_series_id, registry_json, boundary_time,
+                        boundary_trace_id, target_units, late_arrival_count,
+                        created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        series.series_id,
+                        series.scope_key,
+                        series.scope_json,
+                        series.state,
+                        series.generation,
+                        series.parent_series_id,
+                        series.registry_json,
+                        _iso(series.boundary_time),
+                        series.boundary_trace_id,
+                        series.target_units,
+                        series.late_arrival_count,
+                        _iso(series.created_at),
+                        _iso(series.updated_at),
+                    ),
+                )
+                seen: set[str] = set()
+                for member in members:
+                    if member.series_id != series.series_id or member.trace_id in seen:
+                        raise ValueError("invalid monitor membership")
+                    seen.add(member.trace_id)
+                    self._insert_monitor_member_locked(member)
+                if snapshot is not None:
+                    self._replace_drift_run_locked(*snapshot)
+                self._conn.execute("COMMIT")
+            except BaseException:
+                self._conn.execute("ROLLBACK")
+                raise
+
+    def get_monitor_series(self, series_id: str) -> MonitorSeries | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM monitor_series WHERE series_id = ?", (series_id,)
+            ).fetchone()
+        return self._row_to_monitor_series(row) if row else None
+
+    def get_active_monitor_series(self, scope_key: str) -> MonitorSeries | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM monitor_series WHERE scope_key = ? AND state = 'active'",
+                (scope_key,),
+            ).fetchone()
+        return self._row_to_monitor_series(row) if row else None
+
+    def list_monitor_series(self, *, scope_key: str | None = None) -> list[MonitorSeries]:
+        with self._lock:
+            if scope_key is None:
+                rows = self._conn.execute(
+                    "SELECT * FROM monitor_series ORDER BY created_at, series_id"
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    """SELECT * FROM monitor_series WHERE scope_key = ?
+                       ORDER BY created_at, series_id""",
+                    (scope_key,),
+                ).fetchall()
+        return [self._row_to_monitor_series(row) for row in rows]
+
+    def list_monitor_members(self, series_id: str) -> list[MonitorMember]:
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT * FROM monitor_members WHERE series_id = ?
+                   ORDER BY role, cluster_id, bucket_index, event_time, trace_id""",
+                (series_id,),
+            ).fetchall()
+        return [self._row_to_monitor_member(row) for row in rows]
+
+    def list_monitor_results(self, series_id: str) -> list[MonitorResult]:
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT * FROM monitor_results WHERE series_id = ?
+                   ORDER BY cluster_id, bucket_index""",
+                (series_id,),
+            ).fetchall()
+        return [self._row_to_monitor_result(row) for row in rows]
+
+    def commit_monitor_cycle(
+        self,
+        *,
+        series_id: str,
+        expected_generation: int,
+        members: list[MonitorMember],
+        results: list[MonitorResult],
+        snapshots: list[tuple[DriftRun, list[DriftSignal]]],
+        late_arrival_delta: int,
+    ) -> MonitorSeries:
+        for run, signals in snapshots:
+            _validate_drift_run_snapshot(run, signals)
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                row = self._conn.execute(
+                    "SELECT * FROM monitor_series WHERE series_id = ?", (series_id,)
+                ).fetchone()
+                if row is None or row["state"] != "active":
+                    raise ValueError("active monitor series not found")
+                if row["generation"] != expected_generation:
+                    raise ValueError("monitor generation conflict")
+                for member in members:
+                    if member.series_id != series_id:
+                        raise ValueError("monitor member belongs to another series")
+                    existing = self._conn.execute(
+                        """SELECT * FROM monitor_members
+                           WHERE series_id = ? AND trace_id = ?""",
+                        (series_id, member.trace_id),
+                    ).fetchone()
+                    if existing is not None:
+                        if self._row_to_monitor_member(existing) != member:
+                            raise ValueError("monitor trace membership conflict")
+                    else:
+                        self._insert_monitor_member_locked(member)
+                for result in results:
+                    if result.series_id != series_id:
+                        raise ValueError("monitor result belongs to another series")
+                    existing = self._conn.execute(
+                        """SELECT * FROM monitor_results
+                           WHERE series_id = ? AND cluster_id = ? AND bucket_index = ?""",
+                        (series_id, result.cluster_id, result.bucket_index),
+                    ).fetchone()
+                    if existing is not None:
+                        if self._row_to_monitor_result(existing) != result:
+                            raise ValueError("monitor result identity conflict")
+                        continue
+                    self._conn.execute(
+                        """INSERT INTO monitor_results (
+                            series_id, cluster_id, bucket_index, run_id,
+                            status, direction_key, completed_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                        (
+                            result.series_id,
+                            result.cluster_id,
+                            result.bucket_index,
+                            result.run_id,
+                            result.status,
+                            result.direction_key,
+                            _iso(result.completed_at),
+                        ),
+                    )
+                for run, signals in snapshots:
+                    self._replace_drift_run_locked(run, signals)
+                updated_at = datetime.now(timezone.utc)
+                self._conn.execute(
+                    """UPDATE monitor_series
+                       SET generation = generation + 1,
+                           late_arrival_count = late_arrival_count + ?,
+                           updated_at = ?
+                       WHERE series_id = ?""",
+                    (late_arrival_delta, _iso(updated_at), series_id),
+                )
+                updated = self._conn.execute(
+                    "SELECT * FROM monitor_series WHERE series_id = ?", (series_id,)
+                ).fetchone()
+                self._conn.execute("COMMIT")
+                return self._row_to_monitor_series(updated)
+            except BaseException:
+                self._conn.execute("ROLLBACK")
+                raise
+
+    def activate_monitor_series(
+        self,
+        series_id: str,
+        *,
+        expected_active_series_id: str,
+        snapshot: tuple[DriftRun, list[DriftSignal]] | None = None,
+    ) -> MonitorSeries:
+        if snapshot is not None:
+            _validate_drift_run_snapshot(*snapshot)
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                candidate = self._conn.execute(
+                    "SELECT * FROM monitor_series WHERE series_id = ?", (series_id,)
+                ).fetchone()
+                active = self._conn.execute(
+                    "SELECT * FROM monitor_series WHERE series_id = ?",
+                    (expected_active_series_id,),
+                ).fetchone()
+                if candidate is None or candidate["state"] not in {"candidate", "retired"}:
+                    raise ValueError("monitor candidate not found")
+                if (
+                    active is None
+                    or active["state"] != "active"
+                    or active["scope_key"] != candidate["scope_key"]
+                ):
+                    raise ValueError("active monitor compare-and-swap conflict")
+                updated_at = _iso(datetime.now(timezone.utc))
+                self._conn.execute(
+                    """UPDATE monitor_series SET state = 'retired',
+                       generation = generation + 1, updated_at = ? WHERE series_id = ?""",
+                    (updated_at, expected_active_series_id),
+                )
+                self._conn.execute(
+                    """UPDATE monitor_series SET state = 'active',
+                       generation = generation + 1, updated_at = ? WHERE series_id = ?""",
+                    (updated_at, series_id),
+                )
+                if snapshot is not None:
+                    self._replace_drift_run_locked(*snapshot)
+                row = self._conn.execute(
+                    "SELECT * FROM monitor_series WHERE series_id = ?", (series_id,)
+                ).fetchone()
+                self._conn.execute("COMMIT")
+                return self._row_to_monitor_series(row)
+            except BaseException:
+                self._conn.execute("ROLLBACK")
+                raise
 
     # -- Spans -------------------------------------------------------------
 

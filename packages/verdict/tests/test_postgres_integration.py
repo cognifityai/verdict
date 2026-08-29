@@ -28,6 +28,9 @@ from verdict.schema import (
     EvaluatorHealthRecord,
     EvaluatorHealthStatus,
     Judgment,
+    MonitorMember,
+    MonitorResult,
+    MonitorSeries,
     SpanRecord,
     Trace,
     TraceClusterAssignment,
@@ -1043,3 +1046,86 @@ def test_live_buffered_postgres_inserts_each_manual_span_once():
         postgres._exec("DELETE FROM spans WHERE name = ANY(%s)", (list(names),))
         postgres._exec("DELETE FROM traces WHERE trace_id = %s", (trace_id,))
         buffered.close()
+
+
+def test_live_postgres_count_monitor_cycle_and_atomic_handoff():
+    prefix = f"monitor-{uuid4().hex}"
+    now = datetime.now(timezone.utc)
+
+    def series(series_id: str, state: str, parent: str | None = None) -> MonitorSeries:
+        return MonitorSeries(
+            series_id=series_id,
+            scope_key=f"{prefix}-scope",
+            scope_json='{"granularity":"session","workload":"production"}',
+            state=state,
+            generation=0,
+            parent_series_id=parent,
+            registry_json='{"clusters":[],"version":"1"}',
+            boundary_time=now,
+            boundary_trace_id=f"{prefix}-history",
+            target_units=2,
+            late_arrival_count=0,
+            created_at=now,
+            updated_at=now,
+        )
+
+    active_id = f"{prefix}-active"
+    candidate_id = f"{prefix}-candidate"
+    member = MonitorMember(
+        series_id=active_id,
+        trace_id=f"{prefix}-trace",
+        role="current",
+        bucket_index=1,
+        cluster_id="cluster",
+        unit_id="session",
+        event_time=now,
+    )
+    result = MonitorResult(
+        series_id=active_id,
+        cluster_id="cluster",
+        bucket_index=1,
+        run_id=f"{prefix}-run",
+        status="candidate",
+        direction_key="response_words:+",
+        completed_at=now,
+    )
+    storage = PostgresStorage(DSN, min_pool=1, max_pool=2)
+    try:
+        storage.create_monitor_series(series(active_id, "active"), [])
+        updated = storage.commit_monitor_cycle(
+            series_id=active_id,
+            expected_generation=0,
+            members=[member],
+            results=[result],
+            snapshots=[],
+            late_arrival_delta=0,
+        )
+        assert updated.generation == 1
+        assert storage.list_monitor_members(active_id) == [member]
+        assert storage.list_monitor_results(active_id) == [result]
+
+        storage.create_monitor_series(series(candidate_id, "candidate", active_id), [])
+        handoff_run = DriftRun(
+            run_id=f"{prefix}-handoff-run",
+            analysis_time=now,
+            completed_at=now,
+            evaluator_fingerprint=f"{prefix}-evaluator",
+            signal_count=0,
+        )
+        activated = storage.activate_monitor_series(
+            candidate_id,
+            expected_active_series_id=active_id,
+            snapshot=(handoff_run, []),
+        )
+        assert activated.state == "active"
+        assert storage.get_monitor_series(active_id).state == "retired"
+        assert storage.get_latest_drift_run_snapshot(f"{prefix}-evaluator") == (
+            handoff_run,
+            [],
+        )
+    finally:
+        storage._exec("DELETE FROM monitor_results WHERE series_id LIKE %s", (f"{prefix}%",))
+        storage._exec("DELETE FROM monitor_members WHERE series_id LIKE %s", (f"{prefix}%",))
+        storage._exec("DELETE FROM monitor_series WHERE scope_key = %s", (f"{prefix}-scope",))
+        storage._exec("DELETE FROM drift_runs WHERE run_id = %s", (f"{prefix}-handoff-run",))
+        storage.close()

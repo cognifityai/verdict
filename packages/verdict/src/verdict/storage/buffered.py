@@ -69,6 +69,9 @@ from verdict.schema import (
     DriftSignal,
     EvaluatorHealthRecord,
     Judgment,
+    MonitorMember,
+    MonitorResult,
+    MonitorSeries,
     SpanRecord,
     Trace,
     UserSignalRecord,
@@ -89,6 +92,7 @@ class _FlushBarrier:
     """FIFO marker used to wait only for writes preceding a flush call."""
 
     reached: threading.Event
+
 
 # Sentinel pushed on close() so the drain loop wakes up and exits promptly
 # instead of waiting out a full flush_interval.
@@ -176,11 +180,7 @@ class BufferedStorage:
                 batch.append(item)
 
             # Greedily pull up to batch_size-1 more without blocking, to batch.
-            while (
-                not got_shutdown
-                and barrier is None
-                and len(batch) < self._batch_size
-            ):
+            while not got_shutdown and barrier is None and len(batch) < self._batch_size:
                 try:
                     nxt = self._queue.get_nowait()
                 except queue.Empty:
@@ -417,6 +417,21 @@ class BufferedStorage:
             evaluator_fingerprint,
         )
 
+    def get_monitor_series(self, series_id: str) -> MonitorSeries | None:
+        return self._read(self._inner.get_monitor_series, series_id)
+
+    def get_active_monitor_series(self, scope_key: str) -> MonitorSeries | None:
+        return self._read(self._inner.get_active_monitor_series, scope_key)
+
+    def list_monitor_series(self, *, scope_key: str | None = None) -> list[MonitorSeries]:
+        return self._read(self._inner.list_monitor_series, scope_key=scope_key)
+
+    def list_monitor_members(self, series_id: str) -> list[MonitorMember]:
+        return self._read(self._inner.list_monitor_members, series_id)
+
+    def list_monitor_results(self, series_id: str) -> list[MonitorResult]:
+        return self._read(self._inner.list_monitor_results, series_id)
+
     def list_evaluator_health(
         self,
         *,
@@ -429,9 +444,7 @@ class BufferedStorage:
             limit=limit,
         )
 
-    def list_spans(
-        self, *, trace_id: str | None = None, limit: int = 100
-    ) -> list[SpanRecord]:
+    def list_spans(self, *, trace_id: str | None = None, limit: int = 100) -> list[SpanRecord]:
         return self._read(self._inner.list_spans, trace_id=trace_id, limit=limit)
 
     def list_user_signals(self, *, limit: int = 1000) -> list[UserSignalRecord]:
@@ -478,6 +491,49 @@ class BufferedStorage:
 
     def save_cluster_registry(self, version: str, payload_json: str) -> None:
         self._maintenance(self._inner.save_cluster_registry, version, payload_json)
+
+    def create_monitor_series(
+        self,
+        series: MonitorSeries,
+        members: list[MonitorMember],
+        *,
+        snapshot: tuple[DriftRun, list[DriftSignal]] | None = None,
+    ) -> None:
+        self._maintenance(self._inner.create_monitor_series, series, members, snapshot=snapshot)
+
+    def commit_monitor_cycle(
+        self,
+        *,
+        series_id: str,
+        expected_generation: int,
+        members: list[MonitorMember],
+        results: list[MonitorResult],
+        snapshots: list[tuple[DriftRun, list[DriftSignal]]],
+        late_arrival_delta: int,
+    ) -> MonitorSeries:
+        return self._maintenance(
+            self._inner.commit_monitor_cycle,
+            series_id=series_id,
+            expected_generation=expected_generation,
+            members=members,
+            results=results,
+            snapshots=snapshots,
+            late_arrival_delta=late_arrival_delta,
+        )
+
+    def activate_monitor_series(
+        self,
+        series_id: str,
+        *,
+        expected_active_series_id: str,
+        snapshot: tuple[DriftRun, list[DriftSignal]] | None = None,
+    ) -> MonitorSeries:
+        return self._maintenance(
+            self._inner.activate_monitor_series,
+            series_id,
+            expected_active_series_id=expected_active_series_id,
+            snapshot=snapshot,
+        )
 
     # ======================================================================
     # Lifecycle

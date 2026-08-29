@@ -499,6 +499,51 @@ class DriftSignal:
             self.direction = DriftDirection(self.direction)
 
 
+@dataclass(frozen=True)
+class MonitorSeries:
+    """One frozen-baseline monitoring generation for an analysis scope."""
+
+    series_id: str
+    scope_key: str
+    scope_json: str
+    state: str
+    generation: int
+    parent_series_id: str | None
+    registry_json: str
+    boundary_time: datetime
+    boundary_trace_id: str
+    target_units: int
+    late_arrival_count: int
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True)
+class MonitorMember:
+    """Immutable membership of one trace in one monitoring series."""
+
+    series_id: str
+    trace_id: str
+    role: str
+    bucket_index: int
+    cluster_id: str
+    unit_id: str
+    event_time: datetime
+
+
+@dataclass(frozen=True)
+class MonitorResult:
+    """Terminal result for one cluster's prospective cohort."""
+
+    series_id: str
+    cluster_id: str
+    bucket_index: int
+    run_id: str
+    status: str
+    direction_key: str
+    completed_at: datetime
+
+
 # ---------------------------------------------------------------------------
 # Versioned cluster registry
 # ---------------------------------------------------------------------------

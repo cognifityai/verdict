@@ -37,6 +37,9 @@ from verdict.schema import (
     EvaluatorHealthStatus,
     Judgment,
     JudgmentStatus,
+    MonitorMember,
+    MonitorResult,
+    MonitorSeries,
     Operation,
     SpanRecord,
     Trace,
@@ -162,6 +165,49 @@ ALTER TABLE drift_signals ADD COLUMN IF NOT EXISTS run_id TEXT;
 CREATE INDEX IF NOT EXISTS idx_signals_detected     ON drift_signals(detected_at DESC);
 CREATE INDEX IF NOT EXISTS idx_signals_cluster_dim  ON drift_signals(cluster_id, dimension);
 CREATE INDEX IF NOT EXISTS idx_signals_run          ON drift_signals(run_id);
+
+CREATE TABLE IF NOT EXISTS monitor_series (
+    series_id TEXT PRIMARY KEY,
+    scope_key TEXT NOT NULL,
+    scope_json JSONB NOT NULL,
+    state TEXT NOT NULL CHECK(state IN ('active','candidate','retired')),
+    generation INTEGER NOT NULL CHECK(generation >= 0),
+    parent_series_id TEXT,
+    registry_json JSONB NOT NULL,
+    boundary_time TIMESTAMPTZ NOT NULL,
+    boundary_trace_id TEXT NOT NULL,
+    target_units INTEGER NOT NULL CHECK(target_units >= 2),
+    late_arrival_count INTEGER NOT NULL DEFAULT 0 CHECK(late_arrival_count >= 0),
+    created_at TIMESTAMPTZ NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_monitor_one_active_scope
+    ON monitor_series(scope_key) WHERE state='active';
+CREATE INDEX IF NOT EXISTS idx_monitor_series_scope ON monitor_series(scope_key, created_at);
+
+CREATE TABLE IF NOT EXISTS monitor_members (
+    series_id TEXT NOT NULL REFERENCES monitor_series(series_id),
+    trace_id TEXT NOT NULL,
+    role TEXT NOT NULL CHECK(role IN ('baseline','bootstrap','current','late')),
+    bucket_index INTEGER NOT NULL CHECK(bucket_index >= 0),
+    cluster_id TEXT NOT NULL,
+    unit_id TEXT NOT NULL,
+    event_time TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (series_id, trace_id)
+);
+CREATE INDEX IF NOT EXISTS idx_monitor_members_bucket
+    ON monitor_members(series_id, role, cluster_id, bucket_index, event_time, trace_id);
+
+CREATE TABLE IF NOT EXISTS monitor_results (
+    series_id TEXT NOT NULL REFERENCES monitor_series(series_id),
+    cluster_id TEXT NOT NULL,
+    bucket_index INTEGER NOT NULL CHECK(bucket_index > 0),
+    run_id TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL,
+    direction_key TEXT NOT NULL,
+    completed_at TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (series_id, cluster_id, bucket_index)
+);
 
 CREATE TABLE IF NOT EXISTS cluster_registries (
     version      TEXT PRIMARY KEY,
@@ -960,56 +1006,46 @@ class PostgresStorage:
         with self._pool.connection() as conn:
             with conn.transaction():
                 with conn.cursor() as cur:
-                    # Advisory locks close the absent-row race: two transactions
-                    # must not both claim the same signal_id for different runs.
-                    lock_names = {
-                        f"verdict:drift-run:{run.run_id}",
-                        *(f"verdict:drift-signal:{signal.signal_id}" for signal in signals),
-                    }
-                    for lock_name in sorted(lock_names):
-                        cur.execute(
-                            "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
-                            (lock_name,),
-                        )
-                    cur.execute(
-                        "SELECT evaluator_fingerprint FROM drift_runs WHERE run_id = %s",
-                        (run.run_id,),
-                    )
-                    existing = cur.fetchone()
-                    if existing and existing[0] != run.evaluator_fingerprint:
-                        raise ValueError("run_id already belongs to another evaluator")
-                    for signal in signals:
-                        cur.execute(
-                            "SELECT run_id FROM drift_signals WHERE signal_id = %s",
-                            (signal.signal_id,),
-                        )
-                        owner = cur.fetchone()
-                        if owner and owner[0] and owner[0] != run.run_id:
-                            raise ValueError("signal_id already belongs to another drift run")
-                    cur.execute(
-                        """INSERT INTO drift_runs (
-                            run_id, analysis_time, completed_at,
-                            evaluator_fingerprint, signal_count
-                        ) VALUES (%s,%s,%s,%s,%s)
-                        ON CONFLICT (run_id) DO UPDATE SET
-                            analysis_time = EXCLUDED.analysis_time,
-                            completed_at = EXCLUDED.completed_at,
-                            evaluator_fingerprint = EXCLUDED.evaluator_fingerprint,
-                            signal_count = EXCLUDED.signal_count""",
-                        (
-                            run.run_id,
-                            run.analysis_time,
-                            run.completed_at,
-                            run.evaluator_fingerprint,
-                            run.signal_count,
-                        ),
-                    )
-                    cur.execute(
-                        "DELETE FROM drift_signals WHERE run_id = %s",
-                        (run.run_id,),
-                    )
-                    for signal in signals:
-                        self._insert_drift_signal_cursor(cur, signal)
+                    self._replace_drift_run_cursor(cur, run, signals)
+
+    def _replace_drift_run_cursor(self, cur, run: DriftRun, signals: list[DriftSignal]) -> None:
+        lock_names = {
+            f"verdict:drift-run:{run.run_id}",
+            *(f"verdict:drift-signal:{signal.signal_id}" for signal in signals),
+        }
+        for lock_name in sorted(lock_names):
+            cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (lock_name,))
+        cur.execute("SELECT evaluator_fingerprint FROM drift_runs WHERE run_id = %s", (run.run_id,))
+        existing = cur.fetchone()
+        if existing and existing[0] != run.evaluator_fingerprint:
+            raise ValueError("run_id already belongs to another evaluator")
+        for signal in signals:
+            cur.execute(
+                "SELECT run_id FROM drift_signals WHERE signal_id = %s", (signal.signal_id,)
+            )
+            owner = cur.fetchone()
+            if owner and owner[0] and owner[0] != run.run_id:
+                raise ValueError("signal_id already belongs to another drift run")
+        cur.execute(
+            """INSERT INTO drift_runs (
+                run_id, analysis_time, completed_at, evaluator_fingerprint, signal_count
+            ) VALUES (%s,%s,%s,%s,%s)
+            ON CONFLICT (run_id) DO UPDATE SET
+                analysis_time = EXCLUDED.analysis_time,
+                completed_at = EXCLUDED.completed_at,
+                evaluator_fingerprint = EXCLUDED.evaluator_fingerprint,
+                signal_count = EXCLUDED.signal_count""",
+            (
+                run.run_id,
+                run.analysis_time,
+                run.completed_at,
+                run.evaluator_fingerprint,
+                run.signal_count,
+            ),
+        )
+        cur.execute("DELETE FROM drift_signals WHERE run_id = %s", (run.run_id,))
+        for signal in signals:
+            self._insert_drift_signal_cursor(cur, signal)
 
     def get_latest_drift_run_snapshot(
         self,
@@ -1126,6 +1162,338 @@ class PostgresStorage:
             ),
             recommended_action=r[19] or "",
         )
+
+    # -- Count-cohort monitoring -----------------------------------------
+
+    @staticmethod
+    def _monitor_json(value) -> str:
+        return (
+            value
+            if isinstance(value, str)
+            else json.dumps(value, sort_keys=True, separators=(",", ":"))
+        )
+
+    @classmethod
+    def _row_to_monitor_series(cls, row) -> MonitorSeries:
+        return MonitorSeries(
+            series_id=row[0],
+            scope_key=row[1],
+            scope_json=cls._monitor_json(row[2]),
+            state=row[3],
+            generation=row[4],
+            parent_series_id=row[5],
+            registry_json=cls._monitor_json(row[6]),
+            boundary_time=row[7],
+            boundary_trace_id=row[8],
+            target_units=row[9],
+            late_arrival_count=row[10],
+            created_at=row[11],
+            updated_at=row[12],
+        )
+
+    @staticmethod
+    def _row_to_monitor_member(row) -> MonitorMember:
+        return MonitorMember(
+            series_id=row[0],
+            trace_id=row[1],
+            role=row[2],
+            bucket_index=row[3],
+            cluster_id=row[4],
+            unit_id=row[5],
+            event_time=row[6],
+        )
+
+    @staticmethod
+    def _row_to_monitor_result(row) -> MonitorResult:
+        return MonitorResult(
+            series_id=row[0],
+            cluster_id=row[1],
+            bucket_index=row[2],
+            run_id=row[3],
+            status=row[4],
+            direction_key=row[5],
+            completed_at=row[6],
+        )
+
+    _MONITOR_SERIES_COLUMNS = (
+        "series_id, scope_key, scope_json, state, generation, parent_series_id, "
+        "registry_json, boundary_time, boundary_trace_id, target_units, "
+        "late_arrival_count, created_at, updated_at"
+    )
+
+    def create_monitor_series(
+        self,
+        series: MonitorSeries,
+        members: list[MonitorMember],
+        *,
+        snapshot: tuple[DriftRun, list[DriftSignal]] | None = None,
+    ) -> None:
+        if snapshot is not None:
+            _validate_drift_run_snapshot(*snapshot)
+        seen: set[str] = set()
+        for member in members:
+            if member.series_id != series.series_id or member.trace_id in seen:
+                raise ValueError("invalid monitor membership")
+            seen.add(member.trace_id)
+        with self._pool.connection() as conn:
+            with conn.transaction():
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                        (f"verdict:monitor-scope:{series.scope_key}",),
+                    )
+                    cur.execute(
+                        f"SELECT {self._MONITOR_SERIES_COLUMNS} FROM monitor_series "  # nosec B608
+                        "WHERE series_id = %s",
+                        (series.series_id,),
+                    )
+                    row = cur.fetchone()
+                    if row is not None:
+                        if self._row_to_monitor_series(row) != series:
+                            raise ValueError("monitor series identity conflict")
+                        if snapshot is not None:
+                            self._replace_drift_run_cursor(cur, *snapshot)
+                        return
+                    cur.execute(
+                        """INSERT INTO monitor_series (
+                            series_id, scope_key, scope_json, state, generation,
+                            parent_series_id, registry_json, boundary_time,
+                            boundary_trace_id, target_units, late_arrival_count,
+                            created_at, updated_at
+                        ) VALUES (%s,%s,%s::jsonb,%s,%s,%s,%s::jsonb,%s,%s,%s,%s,%s,%s)""",
+                        (
+                            series.series_id,
+                            series.scope_key,
+                            series.scope_json,
+                            series.state,
+                            series.generation,
+                            series.parent_series_id,
+                            series.registry_json,
+                            series.boundary_time,
+                            series.boundary_trace_id,
+                            series.target_units,
+                            series.late_arrival_count,
+                            series.created_at,
+                            series.updated_at,
+                        ),
+                    )
+                    for member in members:
+                        cur.execute(
+                            """INSERT INTO monitor_members (
+                                series_id, trace_id, role, bucket_index,
+                                cluster_id, unit_id, event_time
+                            ) VALUES (%s,%s,%s,%s,%s,%s,%s)""",
+                            (
+                                member.series_id,
+                                member.trace_id,
+                                member.role,
+                                member.bucket_index,
+                                member.cluster_id,
+                                member.unit_id,
+                                member.event_time,
+                            ),
+                        )
+                    if snapshot is not None:
+                        self._replace_drift_run_cursor(cur, *snapshot)
+
+    def get_monitor_series(self, series_id: str) -> MonitorSeries | None:
+        row = self._fetchone(
+            f"SELECT {self._MONITOR_SERIES_COLUMNS} FROM monitor_series "  # nosec B608
+            "WHERE series_id = %s",
+            (series_id,),
+        )
+        return self._row_to_monitor_series(row) if row else None
+
+    def get_active_monitor_series(self, scope_key: str) -> MonitorSeries | None:
+        row = self._fetchone(
+            f"SELECT {self._MONITOR_SERIES_COLUMNS} FROM monitor_series "  # nosec B608
+            "WHERE scope_key = %s AND state = 'active'",
+            (scope_key,),
+        )
+        return self._row_to_monitor_series(row) if row else None
+
+    def list_monitor_series(self, *, scope_key: str | None = None) -> list[MonitorSeries]:
+        if scope_key is None:
+            rows = self._fetchall(
+                f"SELECT {self._MONITOR_SERIES_COLUMNS} FROM monitor_series "  # nosec B608
+                "ORDER BY created_at, series_id",
+                (),
+            )
+        else:
+            rows = self._fetchall(
+                f"SELECT {self._MONITOR_SERIES_COLUMNS} FROM monitor_series "  # nosec B608
+                "WHERE scope_key = %s ORDER BY created_at, series_id",
+                (scope_key,),
+            )
+        return [self._row_to_monitor_series(row) for row in rows]
+
+    def list_monitor_members(self, series_id: str) -> list[MonitorMember]:
+        rows = self._fetchall(
+            """SELECT series_id, trace_id, role, bucket_index, cluster_id, unit_id, event_time
+               FROM monitor_members WHERE series_id = %s
+               ORDER BY role, cluster_id, bucket_index, event_time, trace_id""",
+            (series_id,),
+        )
+        return [self._row_to_monitor_member(row) for row in rows]
+
+    def list_monitor_results(self, series_id: str) -> list[MonitorResult]:
+        rows = self._fetchall(
+            """SELECT series_id, cluster_id, bucket_index, run_id,
+                      status, direction_key, completed_at
+               FROM monitor_results WHERE series_id = %s
+               ORDER BY cluster_id, bucket_index""",
+            (series_id,),
+        )
+        return [self._row_to_monitor_result(row) for row in rows]
+
+    def commit_monitor_cycle(
+        self,
+        *,
+        series_id: str,
+        expected_generation: int,
+        members: list[MonitorMember],
+        results: list[MonitorResult],
+        snapshots: list[tuple[DriftRun, list[DriftSignal]]],
+        late_arrival_delta: int,
+    ) -> MonitorSeries:
+        for run, signals in snapshots:
+            _validate_drift_run_snapshot(run, signals)
+        with self._pool.connection() as conn:
+            with conn.transaction():
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"SELECT {self._MONITOR_SERIES_COLUMNS} FROM monitor_series "  # nosec B608
+                        "WHERE series_id = %s FOR UPDATE",
+                        (series_id,),
+                    )
+                    row = cur.fetchone()
+                    if row is None or row[3] != "active":
+                        raise ValueError("active monitor series not found")
+                    if row[4] != expected_generation:
+                        raise ValueError("monitor generation conflict")
+                    for member in members:
+                        if member.series_id != series_id:
+                            raise ValueError("monitor member belongs to another series")
+                        cur.execute(
+                            """INSERT INTO monitor_members (
+                                series_id, trace_id, role, bucket_index,
+                                cluster_id, unit_id, event_time
+                            ) VALUES (%s,%s,%s,%s,%s,%s,%s)
+                            ON CONFLICT (series_id, trace_id) DO NOTHING""",
+                            (
+                                member.series_id,
+                                member.trace_id,
+                                member.role,
+                                member.bucket_index,
+                                member.cluster_id,
+                                member.unit_id,
+                                member.event_time,
+                            ),
+                        )
+                        if cur.rowcount == 0:
+                            cur.execute(
+                                """SELECT series_id, trace_id, role, bucket_index,
+                                          cluster_id, unit_id, event_time
+                                   FROM monitor_members
+                                   WHERE series_id = %s AND trace_id = %s""",
+                                (series_id, member.trace_id),
+                            )
+                            if self._row_to_monitor_member(cur.fetchone()) != member:
+                                raise ValueError("monitor trace membership conflict")
+                    for result in results:
+                        if result.series_id != series_id:
+                            raise ValueError("monitor result belongs to another series")
+                        cur.execute(
+                            """INSERT INTO monitor_results (
+                                series_id, cluster_id, bucket_index, run_id,
+                                status, direction_key, completed_at
+                            ) VALUES (%s,%s,%s,%s,%s,%s,%s)
+                            ON CONFLICT (series_id, cluster_id, bucket_index) DO NOTHING""",
+                            (
+                                result.series_id,
+                                result.cluster_id,
+                                result.bucket_index,
+                                result.run_id,
+                                result.status,
+                                result.direction_key,
+                                result.completed_at,
+                            ),
+                        )
+                        if cur.rowcount == 0:
+                            cur.execute(
+                                """SELECT series_id, cluster_id, bucket_index, run_id,
+                                          status, direction_key, completed_at
+                                   FROM monitor_results
+                                   WHERE series_id = %s AND cluster_id = %s
+                                     AND bucket_index = %s""",
+                                (series_id, result.cluster_id, result.bucket_index),
+                            )
+                            if self._row_to_monitor_result(cur.fetchone()) != result:
+                                raise ValueError("monitor result identity conflict")
+                    for run, signals in snapshots:
+                        self._replace_drift_run_cursor(cur, run, signals)
+                    cur.execute(
+                        """UPDATE monitor_series SET generation = generation + 1,
+                           late_arrival_count = late_arrival_count + %s,
+                           updated_at = now() WHERE series_id = %s
+                           RETURNING """
+                        + self._MONITOR_SERIES_COLUMNS,
+                        (late_arrival_delta, series_id),
+                    )
+                    return self._row_to_monitor_series(cur.fetchone())
+
+    def activate_monitor_series(
+        self,
+        series_id: str,
+        *,
+        expected_active_series_id: str,
+        snapshot: tuple[DriftRun, list[DriftSignal]] | None = None,
+    ) -> MonitorSeries:
+        if snapshot is not None:
+            _validate_drift_run_snapshot(*snapshot)
+        with self._pool.connection() as conn:
+            with conn.transaction():
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT scope_key FROM monitor_series WHERE series_id = %s",
+                        (series_id,),
+                    )
+                    candidate_scope = cur.fetchone()
+                    if candidate_scope is None:
+                        raise ValueError("monitor candidate not found")
+                    cur.execute(
+                        "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                        (f"verdict:monitor-scope:{candidate_scope[0]}",),
+                    )
+                    cur.execute(
+                        f"SELECT {self._MONITOR_SERIES_COLUMNS} FROM monitor_series "  # nosec B608
+                        "WHERE series_id IN (%s, %s) ORDER BY series_id FOR UPDATE",
+                        (series_id, expected_active_series_id),
+                    )
+                    rows = {row[0]: row for row in cur.fetchall()}
+                    candidate = rows.get(series_id)
+                    active = rows.get(expected_active_series_id)
+                    if candidate is None or candidate[3] not in {"candidate", "retired"}:
+                        raise ValueError("monitor candidate not found")
+                    if active is None or active[3] != "active" or active[1] != candidate[1]:
+                        raise ValueError("active monitor compare-and-swap conflict")
+                    cur.execute(
+                        """UPDATE monitor_series SET state = 'retired',
+                           generation = generation + 1, updated_at = now()
+                           WHERE series_id = %s""",
+                        (expected_active_series_id,),
+                    )
+                    cur.execute(
+                        """UPDATE monitor_series SET state = 'active',
+                           generation = generation + 1, updated_at = now()
+                           WHERE series_id = %s RETURNING """
+                        + self._MONITOR_SERIES_COLUMNS,
+                        (series_id,),
+                    )
+                    activated_row = cur.fetchone()
+                    if snapshot is not None:
+                        self._replace_drift_run_cursor(cur, *snapshot)
+                    return self._row_to_monitor_series(activated_row)
 
     # -- Spans ------------------------------------------------------------
 
