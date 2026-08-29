@@ -51,9 +51,9 @@ class DeferredTraceStore(InMemoryStorage):
 
 @pytest.fixture(autouse=True)
 def _reset_client():
-    client_module._client = None
+    client_module.shutdown()
     yield
-    client_module._client = None
+    client_module.shutdown()
 
 
 def _init(storage):
@@ -277,7 +277,7 @@ def test_randomized_trace_resolution_never_loses_or_duplicates_spans():
     for seed in range(50):
         rng = random.Random(seed)
         storage = DeferredTraceStore()
-        client_module._client = None
+        client_module.shutdown()
         client = _init(storage)
         outcomes = {f"TRACE-{index}": rng.choice([True, False]) for index in range(4)}
 
