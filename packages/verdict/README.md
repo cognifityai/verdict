@@ -7,6 +7,10 @@ captures them into a vendor-neutral `Trace` schema (attribute *names* follow
 the OpenTelemetry GenAI semantic conventions, but no OTel spans are emitted).
 The same package also imports existing OTLP and vendor telemetry into that
 unchanged schema with the `verdict-import` command.
+It also provides `verdict-agent-capture`, a standalone source adapter for
+completed root Claude Code and Codex turns. That command uses the same import
+context, normalization, redaction, summary, and storage path as every other
+telemetry source; it does not maintain an adapter-owned SQLite schema.
 Traces are written to SQLite by default (or any `Storage` adapter). Content
 capture (prompts/completions) is **off by default** — opt in with
 `capture_content=True`; when enabled, captured content is run through built-in
@@ -31,6 +35,19 @@ pip install "cognifity-verdict[telemetry]==0.1.0a13"  # extra is for OTLP protob
 verdict-import file traces.jsonl --format auto --storage sqlite:///./verdict.db
 verdict-import receive-otlp --storage sqlite:///./verdict.db
 ```
+
+Import local agent histories and then open the existing Verdict server:
+
+```bash
+verdict-agent-capture --storage sqlite:///./verdict.db
+verdict-dashboard --storage sqlite:///./verdict.db
+```
+
+The capture command requires no optional dependency. For capture, count-cohort
+analysis, and the dashboard in one command, install
+`cognifity-verdict[local]` and run `verdict-local`. Capture requires durable
+SQLite or PostgreSQL storage so a later Verdict process can reopen the traces.
+Install `cognifity-verdict[local,postgres]` when the storage URL is PostgreSQL.
 
 Native readers cover Langfuse v2, LangSmith, Datadog LLM Observability,
 Phoenix, Opik, MLflow files, and a text-only voice-conversation schema. The
@@ -143,6 +160,12 @@ view and do not depend on the dashboard's legacy calendar-window availability
 counts. Count monitoring adds three tables (`monitor_series`,
 `monitor_members`, and `monitor_results`) when the existing store is opened;
 existing traces, judgments, and drift snapshots are preserved.
+
+Local agent capture represents one completed root turn as one Trace and keeps
+the pseudonymous source session as the independent cohort unit. It deliberately
+omits thinking, tool inputs/results, subagent histories, and arbitrary source
+metadata. It is a prompt/final-response structural view, not evidence that a
+claimed command, test, file mutation, or deployment actually occurred.
 
 Upgrade an existing synchronized `0.1.0a5` through `0.1.0a12` environment with
 `python -m pip install --upgrade`

@@ -36,6 +36,24 @@ unconsumed, unclosed stream does not guarantee trace persistence. Before a
 customer demonstration, run the repository's live capture check with only the
 providers actually configured and retain its named entry-point results.
 
+### Local-history POC without instrumentation
+
+Claude Code and Codex histories may instead be demonstrated through the
+separate local profile:
+
+```bash
+python -m pip install "cognifity-verdict[local]==0.1.0a13"
+verdict-local
+```
+
+This path imports one completed root turn per Trace through the canonical
+telemetry importer and uses the pseudonymous source session as the independent
+count-cohort unit. It explicitly transfers prompt/final-response content into
+the local store, so use only approved histories and protect the database.
+Thinking, tool arguments/results, child sessions, and arbitrary source
+envelopes are omitted. This profile supports structural drift only; it does not
+establish task success or execution honesty and makes no paid judge call.
+
 ## 3. Configure the POC safely
 
 Keep writes synchronous and content capture off:

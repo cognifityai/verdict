@@ -16,6 +16,19 @@ session together as one independent unit, orders by trace event time, and
 compares equal older/newer count cohorts inside intent clusters. It does not
 wait for a calendar window or require 30 observations per cluster.
 
+For local Claude Code and Codex history, the installed `verdict-local` command
+composes the core package's canonical source adapters with this monitor and the
+packaged dashboard:
+
+```bash
+python -m pip install "cognifity-verdict[local]==0.1.0a13"
+verdict-local
+```
+
+Run `verdict-agent-capture` instead when capture must be a standalone step.
+Both commands write the same canonical Trace rows; `verdict-local` adds no
+second ingestion or persistence implementation.
+
 ```bash
 verdict-monitor --storage sqlite:///verdict.db bootstrap --activate --json
 verdict-monitor --storage sqlite:///verdict.db run --json

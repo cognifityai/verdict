@@ -9,14 +9,18 @@ what you can try today, and where to look for implementation details.
 
 ## Short Version
 
-Verdict can instrument your Python LLM app with a small SDK call or import the
-telemetry you already collect. Both paths store the same normalized traces
-locally by default, run rubric-based evaluation with a judge model you choose,
-and expose quality, cost, and drift across your own traffic.
+Verdict can instrument your Python LLM app with a small SDK call, import the
+telemetry you already collect, or interpret completed root turns from local
+Claude Code and Codex histories. All paths store the same normalized traces
+locally by default and expose structural behavior and drift across your own
+traffic. Rubric-based quality evaluation remains a separately configured judge
+workflow.
 
 For agents, Verdict works at the LLM-call layer: planning prompts, tool-selection
 prompts, replanning prompts, and final-response prompts can all be captured when
-they go through a supported provider SDK.
+they go through a supported provider SDK. The local-history adapters provide a
+separate prompt/final-response turn view; they do not prove tool execution,
+file mutations, tests, or deployment success.
 
 ## What Verdict Does
 
@@ -25,6 +29,8 @@ they go through a supported provider SDK.
 - Imports OTLP GenAI/OpenInference, Langfuse, LangSmith, Datadog LLM
   Observability, Phoenix, Opik, MLflow, and bounded voice transcript records
   without storing a second raw vendor envelope.
+- Imports completed root Claude Code and Codex turns through the same telemetry
+  contract while omitting thinking, tool arguments/results, and child sessions.
 - Supports non-streaming and streaming responses for the supported SDK paths.
   The versioned [`0.1.0a13 POC release profile`](POC_RELEASE_PROFILE.md) names
   the released entry points explicitly, including Anthropic
@@ -45,7 +51,8 @@ they go through a supported provider SDK.
 ## How It Works
 
 1. **Produce traces**: call `verdict.init(...)` to wrap supported provider SDK
-   methods, or run `verdict-import` against an existing telemetry source. SDK
+   methods, run `verdict-import` against existing telemetry, or run
+   `verdict-agent-capture` against local agent histories. SDK
    capture honors `sample_rate`; import intentionally stores every eligible LLM
    call and leaves judgment sampling to the pipeline.
 2. **Store**: traces are written through a storage interface. SQLite is the
@@ -81,6 +88,8 @@ For a visual overview, see `docs/architecture-current.svg`.
 - Run the quickstart in `README.md` to capture real provider traffic.
 - Import one of the source-shaped fixtures in `examples/telemetry/`, or point a
   bounded API reader at an existing telemetry project.
+- Run `verdict-local` to import local Claude Code/Codex history, bootstrap
+  count-cohort drift, and open the dashboard without a provider key.
 - Run `verdict-pipeline` to cluster, judge, and persist a drift snapshot.
 - Run `scripts/live_capture_check.py` to verify capture against your configured
   providers from a source checkout.

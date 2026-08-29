@@ -32,6 +32,11 @@ dashboard = [
     "fastapi>=0.116",
     "uvicorn[standard]>=0.35",
 ]
+local = [
+    "cognifity-verdict-eval>=0.1.0a13,<0.2",
+    "fastapi>=0.116",
+    "uvicorn[standard]>=0.35",
+]
 telemetry = [
     "opentelemetry-proto>=1.30,<2",
     "protobuf>=5,<7",
@@ -53,6 +58,7 @@ cognifity-verdict-eval = { workspace = true }
 [project.scripts]
 verdict-dashboard = "verdict.dashboard.app:main"
 verdict-import = "verdict.telemetry.cli:main"
+verdict-agent-capture = "verdict.telemetry.local_cli:main"
 
 [project.urls]
 Homepage = "https://cognifity.ai/verdict"

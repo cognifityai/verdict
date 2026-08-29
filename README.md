@@ -26,7 +26,13 @@ Verdict instruments supported Anthropic, OpenAI, and Google SDK methods with one
 
 Verdict is **not a better judge** than the model you point it at — it *uses* that model as a measuring instrument and adds the monitoring system around it (capture → cluster → sample → judge → aggregate over time → detect drift).
 
-**Scope (v0, honest):** Verdict measures the **individual LLM-call layer**. Agent-level metrics (tool-call patterns, plan adherence, multi-step task success) are **v1 roadmap, not shipping today** — see [`docs/v1-roadmap.md`](docs/v1-roadmap.md). Do not read v0 as agent-task evaluation.
+**Scope (v0, honest):** SDK and telemetry capture measure the **individual
+LLM-call layer**. Local Claude/Codex history can additionally project one
+completed root turn into a prompt/final-response Trace for structural drift.
+First-class agent runs, authoritative tool execution, plan adherence, and
+multi-step task success remain **v1 roadmap, not shipping today** — see
+[`docs/v1-roadmap.md`](docs/v1-roadmap.md). Do not read the local projection as
+agent-task evaluation.
 
 ## Runs key-free; add a key for the judge (BYOK)
 
@@ -36,6 +42,7 @@ Verdict never ships with anyone's API key. It reads **your** provider key from t
 |---|---|
 | Capture (traces, tokens, latency, estimated cost, errors) | **No** |
 | Import existing telemetry into Verdict | **No** (source APIs need their own credentials) |
+| Import local Claude Code/Codex history | **No** |
 | Structural checks (refusal/JSON/length/latency drift) | **No** |
 | Lexical embedding drift (built-in hash fallback) | **No** |
 | Semantic embedding drift (local MiniLM; extra install) | **No** |
@@ -65,6 +72,43 @@ python -m pip install \
   "cognifity-verdict-inspect==0.1.0a13"
 ```
 
+### Local Claude Code and Codex history
+
+No instrumentation or provider key is required to inspect histories already on
+your laptop. Install the local extra and run one command:
+
+```bash
+python -m pip install "cognifity-verdict[local]==0.1.0a13"
+verdict-local
+```
+
+`verdict-local` discovers root Claude Code and Codex histories, imports
+completed turns through Verdict's existing telemetry importer, bootstraps equal
+historical count cohorts, and serves the dashboard at
+`http://127.0.0.1:8765`. It performs no judge call and reads source files
+without modifying them. It is an idempotent full rescan, not a filesystem
+watcher; rerun `verdict-local` after new turns or schedule
+`verdict-agent-capture` plus `verdict-monitor run`.
+
+Capture can also run independently from analysis and the server:
+
+```bash
+verdict-agent-capture --storage sqlite:///./verdict.db
+verdict-monitor --storage sqlite:///./verdict.db bootstrap --activate --json
+verdict-dashboard --storage sqlite:///./verdict.db
+```
+
+One imported trace is one completed root agent turn; the pseudonymous source
+session remains the independent statistical unit. Thinking, tool arguments and
+results, child/subagent histories, ambient injected context, and raw source
+envelopes are not persisted. Prompt and final-response content is still
+sensitive: Verdict applies its best-effort storage redaction, not a compliance
+guarantee, and the local SQLite file is restricted to the current user. Local
+capture requires durable SQLite or PostgreSQL storage; `memory://` is rejected
+because a later monitor or dashboard process could not reopen it.
+For PostgreSQL, install `cognifity-verdict[local,postgres]` and pass the same
+PostgreSQL URL to capture, monitoring, and the dashboard.
+
 For a customer proof of concept on `0.1.0a13`, follow the bounded
 [`POC release profile`](docs/POC_RELEASE_PROFILE.md). It names the provider
 entry points exercised for this release, keeps persistence synchronous, and
@@ -91,7 +135,9 @@ The older `verdict-pipeline` command retains its judge-based calendar windows
 for compatibility.
 
 Extras for `cognifity-verdict`: `anthropic`, `openai`, `google`, `postgres`,
-`telemetry`, or `dashboard`. The `telemetry` extra adds OTLP protobuf decoding;
+`telemetry`, `dashboard`, or `local`. The `local` extra installs the evaluator
+and dashboard needed by `verdict-local`; standalone `verdict-agent-capture`
+requires only the core package. The `telemetry` extra adds OTLP protobuf decoding;
 JSON/JSONL imports and hosted API readers use the Python standard library.
 Google capture specifically needs the `google` extra
 (`google-genai`). Install `dashboard` with `postgres` when the dashboard reads a
@@ -164,6 +210,12 @@ python scripts/smoke_test.py
 rows and writes them through the same SQLite/PostgreSQL storage port used by SDK
 capture. It does not create a raw-envelope database or replace the clustering,
 sampling, judge, drift, or dashboard paths.
+
+Local Claude Code and Codex histories use the same importer contract through
+`verdict-agent-capture`; their source adapters are stateful because one
+completed agent turn spans multiple JSONL events. They still share Verdict's
+identity, normalization, redaction, accounting, and storage path rather than
+maintaining a second importer.
 
 Install the `telemetry` extra when accepting OTLP protobuf; it is optional for
 JSON files and API readers:

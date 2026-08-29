@@ -239,7 +239,7 @@ jobs:
           /tmp/verdict-wheel-venv/bin/python -m pip install --disable-pip-version-check dist/eval/*.whl
           /tmp/verdict-wheel-venv/bin/python -m pip install --disable-pip-version-check dist/inspect/*.whl
           /tmp/verdict-wheel-venv/bin/python -m pip install --disable-pip-version-check \
-            "dist/core/cognifity_verdict-0.1.0a13-py3-none-any.whl[dashboard,postgres,telemetry]"
+            "dist/core/cognifity_verdict-0.1.0a13-py3-none-any.whl[dashboard,local,postgres,telemetry]"
           /tmp/verdict-wheel-venv/bin/python -m pip check
           cd /tmp
           /tmp/verdict-wheel-venv/bin/python -c \
@@ -252,6 +252,9 @@ jobs:
           /tmp/verdict-wheel-venv/bin/verdict-cluster --help
           /tmp/verdict-wheel-venv/bin/verdict-dashboard --help
           /tmp/verdict-wheel-venv/bin/verdict-import --help
+          /tmp/verdict-wheel-venv/bin/verdict-agent-capture --help
+          /tmp/verdict-wheel-venv/bin/verdict-monitor --help
+          /tmp/verdict-wheel-venv/bin/verdict-local --help
           /tmp/verdict-wheel-venv/bin/python -c \
             "from importlib.resources import files; root = files('verdict.dashboard').joinpath('static'); assert root.joinpath('dashboard.html').is_file(); assert root.joinpath('assets/dashboard.js').is_file()"
 
@@ -350,7 +353,7 @@ jobs:
           /tmp/verdict-sdist-venv/bin/python -m pip install --disable-pip-version-check dist/eval/*.tar.gz
           /tmp/verdict-sdist-venv/bin/python -m pip install --disable-pip-version-check dist/inspect/*.tar.gz
           /tmp/verdict-sdist-venv/bin/python -m pip install --disable-pip-version-check \
-            "dist/core/cognifity_verdict-0.1.0a13.tar.gz[dashboard,postgres,telemetry]"
+            "dist/core/cognifity_verdict-0.1.0a13.tar.gz[dashboard,local,postgres,telemetry]"
           /tmp/verdict-sdist-venv/bin/python -m pip check
           cd /tmp
           /tmp/verdict-sdist-venv/bin/python -c \
@@ -363,6 +366,9 @@ jobs:
           /tmp/verdict-sdist-venv/bin/verdict-cluster --help
           /tmp/verdict-sdist-venv/bin/verdict-dashboard --help
           /tmp/verdict-sdist-venv/bin/verdict-import --help
+          /tmp/verdict-sdist-venv/bin/verdict-agent-capture --help
+          /tmp/verdict-sdist-venv/bin/verdict-monitor --help
+          /tmp/verdict-sdist-venv/bin/verdict-local --help
           /tmp/verdict-sdist-venv/bin/python -c \
             "from importlib.resources import files; root = files('verdict.dashboard').joinpath('static'); assert root.joinpath('dashboard.html').is_file(); assert root.joinpath('assets/dashboard.js').is_file()"
 

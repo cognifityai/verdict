@@ -6,6 +6,18 @@ the customer POC profile is refined.
 
 ## [Unreleased]
 
+### Added
+
+- `verdict-agent-capture` now imports completed root Claude Code and Codex
+  histories through Verdict's existing telemetry normalization and storage
+  contract. `verdict-local` composes the same importer with count-cohort drift
+  and the packaged dashboard; no separate Agent Capture database or trace
+  mapping path is introduced.
+- Count-cohort monitoring persists frozen per-scope baselines, independent
+  per-cluster prospective buckets, late/new-intent outcomes, candidate and
+  confirmed signals, and atomic candidate-baseline activation in additive
+  SQLite/PostgreSQL tables.
+
 ### Removed
 
 - Removed the standalone scheduled-probe subsystem, including the
@@ -13,7 +25,6 @@ the customer POC profile is refined.
   separate JSON/exit-code runner and was not integrated with trace capture,
   persisted drift analysis, or the dashboard. Existing trace, judgment, drift,
   registry, and dashboard data are unchanged.
-
 ## [0.1.0a13] - 2026-08-27
 
 ### Added

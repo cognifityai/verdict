@@ -409,6 +409,42 @@ future cohort size from that baseline (capped at 10). Schedule
 about 24-hour/7-day windows and 30 judgments apply to the separate judge-based
 `verdict-pipeline` path.
 
+For histories already saved by Claude Code or Codex, the shortest local flow is:
+
+```bash
+python -m pip install "cognifity-verdict[local]==0.1.0a13"
+verdict-local
+```
+
+The command reads the default `~/.claude/projects` and `~/.codex/sessions`
+trees without modifying them, imports completed root turns, persists an initial
+count-cohort comparison when history permits it, and serves
+`http://127.0.0.1:8765`. Use `--claude-root`, `--codex-root`, `--source`, or
+`--storage` to override discovery. Use `--no-serve --json` for automation.
+The command performs a deterministic full rescan at startup; the dashboard does
+not watch history files. Rerun it after new local turns, or schedule the
+standalone capture and monitor commands below.
+
+Capture is independently runnable when analysis and serving have separate
+lifecycle owners. Use durable SQLite or PostgreSQL storage; local capture
+rejects `memory://` because the monitor and server must reopen the same data:
+
+```bash
+verdict-agent-capture --storage sqlite:///./verdict.db
+verdict-monitor --storage sqlite:///./verdict.db bootstrap --activate --json
+verdict-dashboard --storage sqlite:///./verdict.db
+```
+
+For PostgreSQL, install `cognifity-verdict[local,postgres]` and use the same
+PostgreSQL URL in all three commands.
+
+One imported Trace contains the user prompt and final visible response for one
+completed root turn. The source session is pseudonymized and retained as the
+independent statistical unit. Thinking, tool arguments/results, child sessions,
+and arbitrary source metadata are omitted. The resulting database contains
+content and must be protected even though storage applies Verdict's best-effort
+redaction.
+
 - **It's periodic, not real-time.** "Live results" means "run the pipeline, then
   refresh the dashboard." The dashboard is a read view over the DB — as fresh as
   your last pipeline run, not a streaming detector. Re-run `verdict-pipeline`
@@ -523,8 +559,9 @@ about 24-hour/7-day windows and 30 judgments apply to the separate judge-based
   alerts.
 - Pairwise model rankings and PASS/FAIL drift scoring are different tasks; use
   the included alignment scripts to verify the mode you plan to rely on.
-- Agent-run / tool-call tracing is **v1 roadmap, not shipping** — v0 measures the
-  individual LLM-call layer only.
+- First-class agent-run/tool-call evidence remains **v1 roadmap, not shipping**.
+  Local Claude/Codex capture is a bounded prompt/final-response turn projection,
+  not authoritative execution or task-success tracing.
 - Judge calls run sequentially. Judge usage/budget controls, cache-token
   accounting, human-readable cluster naming, and automatic cluster fusion are
   not implemented; see `docs/v1-roadmap.md` for the scoped follow-ups.

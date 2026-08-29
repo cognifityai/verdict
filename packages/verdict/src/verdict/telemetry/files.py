@@ -31,6 +31,27 @@ _MAX_JSON_BYTES = 64 * 1024 * 1024
 _MAX_NDJSON_LINE_BYTES = 16 * 1024 * 1024
 
 
+def iter_jsonl_records(path: str | Path, *, max_records: int | None = None) -> Iterator[object]:
+    """Yield bounded JSONL/NDJSON records through the shared import boundary."""
+    if max_records is not None and max_records < 1:
+        raise ValueError("max_records must be positive")
+    source_path = Path(path)
+    with source_path.open("rb") as handle:
+        line_number = 0
+        while raw := handle.readline(_MAX_NDJSON_LINE_BYTES + 1):
+            line_number += 1
+            if max_records is not None and line_number > max_records:
+                raise ValueError(f"NDJSON file exceeds {max_records} records")
+            if len(raw) > _MAX_NDJSON_LINE_BYTES:
+                raise ValueError(f"NDJSON line {line_number} exceeds 16 MiB")
+            if not raw.strip():
+                continue
+            try:
+                yield json.loads(raw)
+            except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
+                raise ValueError(f"invalid NDJSON at line {line_number}") from exc
+
+
 def _detected_format(record: object) -> str | None:
     if not isinstance(record, dict):
         return None
@@ -122,19 +143,8 @@ def iter_telemetry_file(
     source_path = Path(path)
     suffix = source_path.suffix.lower()
     if suffix in {".ndjson", ".jsonl"}:
-        with source_path.open("rb") as handle:
-            line_number = 0
-            while raw := handle.readline(_MAX_NDJSON_LINE_BYTES + 1):
-                line_number += 1
-                if len(raw) > _MAX_NDJSON_LINE_BYTES:
-                    raise ValueError(f"NDJSON line {line_number} exceeds 16 MiB")
-                if not raw.strip():
-                    continue
-                try:
-                    record = json.loads(raw)
-                except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
-                    raise ValueError(f"invalid NDJSON at line {line_number}") from exc
-                yield from _map_record(record, file_format, context)
+        for record in iter_jsonl_records(source_path):
+            yield from _map_record(record, file_format, context)
         return
     try:
         with source_path.open("rb") as handle:

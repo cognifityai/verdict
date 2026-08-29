@@ -41,6 +41,7 @@ dev = [
 verdict-pipeline = "verdict_eval.cli.pipeline:main"
 verdict-cluster = "verdict_eval.cli.cluster:main"
 verdict-monitor = "verdict_eval.cli.monitor:main"
+verdict-local = "verdict_eval.cli.local:main"
 
 [project.urls]
 Homepage = "https://cognifity.ai/verdict"

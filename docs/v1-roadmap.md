@@ -9,7 +9,10 @@ commitment.
 Verdict v0 focuses on the LLM-call layer inside LLM apps and agents. It can
 capture supported provider calls or import existing telemetry, store traces,
 evaluate responses with a rubric, cluster similar prompts, and inspect quality
-or cost changes over time.
+or cost changes over time. A bounded local-history adapter can also project one
+completed root Claude Code or Codex turn into the current Trace schema using
+only the user prompt, final visible response, and allowlisted structural
+metadata.
 
 Today, Verdict can capture or import and evaluate calls such as:
 
@@ -21,10 +24,14 @@ Today, Verdict can capture or import and evaluate calls such as:
 - OTLP GenAI/OpenInference LLM spans
 - Langfuse, LangSmith, Datadog LLM Observability, Phoenix, and Opik exports
 - MLflow tracing files and bounded text-only voice conversation exports
+- Completed root Claude Code and Codex turns imported as prompt/final-response
+  projections
 
-Each captured or imported LLM call is stored independently. The pipeline then
-samples eligible stored calls for judging. Verdict v0 does not yet reconstruct
-a full multi-step agent run as a first-class object.
+Each SDK or ordinary telemetry LLM call is stored independently. A local agent
+turn projection is explicitly tagged with `capture.granularity=agent-turn` so
+it cannot be silently combined with LLM-call traces. Verdict v0 does not yet
+reconstruct a full multi-step agent run as a first-class object, store tool
+evidence, or verify execution claims.
 
 ## Planned Agent-Level Work
 
