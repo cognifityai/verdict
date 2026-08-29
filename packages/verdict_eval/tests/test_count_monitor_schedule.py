@@ -82,7 +82,8 @@ def test_scheduled_monitor_is_idempotent_confirms_and_refits_atomically(
     )
     bootstrap = _json(capsys)
     series_id = bootstrap["active_series_id"]
-    assert bootstrap["scopes"][0]["status"] == "no_drift_detected"
+    assert bootstrap["scopes"][0]["status"] == "not_evaluable"
+    assert bootstrap["scopes"][0]["tested_hypotheses"] == 0
     initial_dashboard = build_bundle(db)
     assert initial_dashboard["driftRun"] is not None
     assert initial_dashboard["driftAnalysis"]["runStatus"] == "completed_no_signals"

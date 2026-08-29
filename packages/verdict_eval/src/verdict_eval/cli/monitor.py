@@ -86,6 +86,7 @@ def main(argv: list[str] | None = None) -> int:
         print("ERROR: cannot open configured storage")
         return 2
     traces = storage.list_traces(limit=args.limit)
+    judgments = storage.list_judgments(limit=max(1000, args.limit * 5))
     if args.command in {"bootstrap", "refit"}:
         try:
             from_time = _parse_time(args.from_time) if args.from_time else None
@@ -109,7 +110,7 @@ def main(argv: list[str] | None = None) -> int:
         payload = {
             "schema": "verdict-count-monitor-v1",
             "mode": "run",
-            **run_scheduled(storage, traces),
+            **run_scheduled(storage, traces, judgments=judgments),
         }
         storage.close()
         return _emit(args, payload)
@@ -127,7 +128,7 @@ def main(argv: list[str] | None = None) -> int:
             storage.close()
             print("ERROR: monitor candidate not found")
             return 2
-        snapshot = build_series_bootstrap_snapshot(storage, candidate, traces)
+        snapshot = build_series_bootstrap_snapshot(storage, candidate, traces, judgments=judgments)
         try:
             activated = storage.activate_monitor_series(
                 args.series_id,
@@ -154,7 +155,11 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         try:
             candidates = create_series_from_history(
-                storage, traces, target_units=args.target_units, state="candidate"
+                storage,
+                traces,
+                target_units=args.target_units,
+                state="candidate",
+                judgments=judgments,
             )
         except ValueError:
             storage.close()
@@ -190,7 +195,7 @@ def main(argv: list[str] | None = None) -> int:
         payload["persisted_run_id"] = run.run_id if run else None
         reports = ()
     else:
-        reports = analyze_traces(traces)
+        reports = analyze_traces(traces, judgments=judgments)
         payload = {
             "schema": "verdict-count-monitor-v1",
             "mode": args.command,
@@ -198,7 +203,11 @@ def main(argv: list[str] | None = None) -> int:
         }
         if args.activate:
             activated = create_series_from_history(
-                storage, traces, target_units=args.target_units, state="active"
+                storage,
+                traces,
+                target_units=args.target_units,
+                state="active",
+                judgments=judgments,
             )
             payload["active_series_id"] = activated[0].series_id if len(activated) == 1 else None
             payload["active_series_ids"] = [series.series_id for series in activated]

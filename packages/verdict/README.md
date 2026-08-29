@@ -154,10 +154,14 @@ may use different windows or sample floors. The dashboard distinguishes a run
 that has not completed from a completed run with zero signals.
 
 The optional `cognifity-verdict-eval` package also provides
-`verdict-monitor`, which persists key-free structural drift from equal
-event-time count cohorts. Those completed snapshots appear in the same Drift
-view and do not depend on the dashboard's legacy calendar-window availability
-counts. Count monitoring adds three tables (`monitor_series`,
+`verdict-monitor`, which persists key-free structural and already-judged
+quality evidence from equal event-time count cohorts. It never calls a judge.
+Completed judgments are isolated by their complete evaluator fingerprint;
+PASS/FAIL, UNCLEAR, and missing outcomes are not pooled. Constant descriptive
+columns do not count as tested hypotheses. Frozen-registry misses are preserved
+as `new_intent_traffic` instead of being silently dropped. Those completed
+snapshots appear in the same Drift view and do not depend on the dashboard's
+legacy calendar-window availability counts. Count monitoring adds three tables (`monitor_series`,
 `monitor_members`, and `monitor_results`) when the existing store is opened;
 existing traces, judgments, and drift snapshots are preserved.
 

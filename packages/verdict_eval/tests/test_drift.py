@@ -183,6 +183,25 @@ def test_benjamini_hochberg_matches_independent_known_answer_vector():
     assert adjusted == pytest.approx([0.02, 0.04, 0.04, 0.008], abs=1e-15)
 
 
+def test_benjamini_hochberg_treats_non_finite_null_results_conservatively():
+    """Constant metrics must not turn unrelated large p-values significant."""
+    raw = [float("nan"), float("inf"), float("-inf"), 0.75, 0.02, 0.90]
+
+    adjusted = _benjamini_hochberg(raw)
+
+    assert adjusted == pytest.approx([1.0, 1.0, 1.0, 1.0, 0.12, 1.0], abs=1e-15)
+    assert all(
+        adjusted_value >= raw_value
+        for raw_value, adjusted_value in zip(raw[3:], adjusted[3:], strict=True)
+    )
+
+
+@pytest.mark.parametrize("invalid", [-0.001, 1.001])
+def test_benjamini_hochberg_rejects_finite_values_outside_probability_range(invalid):
+    with pytest.raises(ValueError, match="between 0 and 1"):
+        _benjamini_hochberg([0.5, invalid])
+
+
 def test_detector_requires_both_significance_and_effect_gates(monkeypatch):
     import verdict_eval.drift as drift
 

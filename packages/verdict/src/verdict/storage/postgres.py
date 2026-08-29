@@ -801,6 +801,25 @@ class PostgresStorage:
             position_swap_consistent=row[7],
         )
 
+    def list_judgments(
+        self,
+        *,
+        evaluator_fingerprint: str | None = None,
+        limit: int = 1000,
+    ) -> list[Judgment]:
+        params: list = []
+        clause = ""
+        if evaluator_fingerprint is not None:
+            clause = " WHERE j.evaluator_fingerprint = %s"
+            params.append(evaluator_fingerprint)
+        params.append(limit)
+        rows = self._fetchall(
+            f"""SELECT {self._JUDGMENT_COLUMNS} FROM judgments j{clause}
+                ORDER BY j.created_at DESC, j.judgment_id DESC LIMIT %s""",
+            tuple(params),
+        )
+        return [self._row_to_judgment(row) for row in rows]
+
     def list_judgments_for_cluster(
         self,
         cluster_id: str,

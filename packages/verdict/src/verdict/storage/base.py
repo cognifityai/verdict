@@ -70,6 +70,13 @@ class Storage(Protocol):
 
     def insert_judgment(self, judgment: Judgment) -> None: ...
 
+    def list_judgments(
+        self,
+        *,
+        evaluator_fingerprint: str | None = None,
+        limit: int = 1000,
+    ) -> list[Judgment]: ...
+
     def list_judgments_for_cluster(
         self,
         cluster_id: str,

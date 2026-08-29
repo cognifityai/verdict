@@ -569,11 +569,25 @@ def _cohens_d(a: np.ndarray, b: np.ndarray) -> float:
 
 
 def _benjamini_hochberg(p_values: list[float]) -> list[float]:
-    """Benjamini-Hochberg FDR control. Returns adjusted p-values, original order."""
+    """Benjamini-Hochberg FDR control. Returns adjusted p-values, original order.
+
+    Some statistical tests return ``nan`` for a constant null distribution.
+    Such a result carries no evidence against the null, so fail closed by
+    including it in the correction family as ``1.0``.  Finite values outside
+    the probability range indicate a caller bug and are rejected.
+    """
     if not p_values:
         return []
-    n = len(p_values)
-    indexed = sorted(enumerate(p_values), key=lambda x: x[1])
+    normalized: list[float] = []
+    for p_value in p_values:
+        if not math.isfinite(p_value):
+            normalized.append(1.0)
+        elif 0.0 <= p_value <= 1.0:
+            normalized.append(float(p_value))
+        else:
+            raise ValueError("p-values must be between 0 and 1")
+    n = len(normalized)
+    indexed = sorted(enumerate(normalized), key=lambda x: x[1])
     adjusted = [0.0] * n
     prev = 1.0
     for rank, (orig_idx, p) in enumerate(reversed(indexed), start=1):

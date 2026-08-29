@@ -391,6 +391,18 @@ class BufferedStorage:
             limit=limit,
         )
 
+    def list_judgments(
+        self,
+        *,
+        evaluator_fingerprint: str | None = None,
+        limit: int = 1000,
+    ) -> list[Judgment]:
+        return self._read(
+            self._inner.list_judgments,
+            evaluator_fingerprint=evaluator_fingerprint,
+            limit=limit,
+        )
+
     def list_judgments_for_cluster(
         self,
         cluster_id: str,

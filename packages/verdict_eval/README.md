@@ -11,7 +11,8 @@ regression injector for verifying the pipeline catches what it should.
 ## Count-cohort bootstrap and monitoring
 
 `verdict-monitor` is the key-free path for fast historical and prospective
-structural drift. It groups traces by workload and capture granularity, keeps a
+structural drift plus reuse of judgments already in the store. It never makes
+a judge call. It groups traces by workload and capture granularity, keeps a
 session together as one independent unit, orders by trace event time, and
 compares equal older/newer count cohorts inside intent clusters. It does not
 wait for a calendar window or require 30 observations per cluster.
@@ -44,6 +45,11 @@ explicit timezone-aware historical slice. Results report `low_power` or
 `not_evaluable` rather than turning insufficient evidence into “no drift.” A
 cohort that does not fit the frozen registry produces a separate
 `new_intent_traffic` signal and does not contaminate known-intent comparisons.
+Completed judgments enter separate scopes keyed by complete evaluator
+fingerprint. PASS/FAIL supplies each dimension's pass-rate denominator;
+UNCLEAR and missing dimensions remain separately visible. Constant columns are
+descriptive, have `tested=false`, and do not enter multiplicity correction or
+the `tested_hypotheses` count.
 
 For a controlled POC, stamp the same `verdict.intent_key` around both model
 variants and run:

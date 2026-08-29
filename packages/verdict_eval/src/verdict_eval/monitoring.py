@@ -12,6 +12,7 @@ from verdict.schema import (
     DriftDirection,
     DriftRun,
     DriftSignal,
+    Judgment,
     MonitorMember,
     MonitorResult,
     MonitorSeries,
@@ -26,6 +27,7 @@ from verdict_eval.count_monitor import (
     HistoryUnit,
     MatchedReport,
     ScopeKey,
+    _quality_scores,
     build_bootstrap_bundles,
     compare_cohorts,
     scope_for_trace,
@@ -119,13 +121,14 @@ def create_series_from_history(
     *,
     target_units: int | None,
     state: str,
+    judgments: list[Judgment] | tuple[Judgment, ...] = (),
 ) -> list[MonitorSeries]:
     if target_units is not None and target_units < 2:
         raise ValueError("target_units must be at least 2")
     if state not in {"active", "candidate"}:
         raise ValueError("monitor series state must be active or candidate")
     created: list[MonitorSeries] = []
-    for bundle in build_bootstrap_bundles(traces):
+    for bundle in build_bootstrap_bundles(traces, judgments=judgments):
         if not bundle.plan.baseline or not bundle.plan.current:
             continue
         scope_json = json.dumps(
@@ -204,13 +207,17 @@ def _bootstrap_snapshot(
         detected_at=analysis_time,
         episode="historical bootstrap",
         current_units=bundle.plan.current,
+        assignments=bundle.assignments,
+        evaluator_fingerprint=_evaluator_for_scope(bundle.report.scope),
+        evidence_layer=bundle.report.scope.evidence_layer,
     )
+    evaluator_fingerprint = _evaluator_for_scope(bundle.report.scope)
     return (
         DriftRun(
             run_id=run_id,
             analysis_time=analysis_time,
             completed_at=datetime.now(timezone.utc),
-            evaluator_fingerprint=STRUCTURAL_EVALUATOR,
+            evaluator_fingerprint=evaluator_fingerprint,
             signal_count=len(signals),
         ),
         signals,
@@ -218,7 +225,11 @@ def _bootstrap_snapshot(
 
 
 def build_series_bootstrap_snapshot(
-    storage: MonitorStorage, series: MonitorSeries, traces: list[Trace]
+    storage: MonitorStorage,
+    series: MonitorSeries,
+    traces: list[Trace],
+    *,
+    judgments: list[Judgment] | tuple[Judgment, ...] = (),
 ) -> tuple[DriftRun, list[DriftSignal]]:
     """Build an activation snapshot from one candidate's frozen membership."""
     traces, missing = _load_required_traces(
@@ -241,7 +252,13 @@ def build_series_bootstrap_snapshot(
         for member in members
         if member.role in {"baseline", "bootstrap"}
     }
-    results, _ = compare_cohorts(baseline, current, assignments)
+    scope = _scope_from_json(series.scope_json)
+    quality_scores = (
+        _quality_scores(judgments, set(trace_by_id)).get(scope.evaluator_fingerprint or "")
+        if scope.evidence_layer == "quality"
+        else None
+    )
+    results, _ = compare_cohorts(baseline, current, assignments, quality_scores=quality_scores)
     analysis_time = max(unit.event_time for unit in current)
     run_id = uuid5(NAMESPACE_URL, f"verdict-monitor-bootstrap-v1|{series.series_id}").hex
     signals = _drift_signals(
@@ -250,22 +267,32 @@ def build_series_bootstrap_snapshot(
         detected_at=analysis_time,
         episode="historical bootstrap",
         current_units=current,
+        assignments=assignments,
+        evaluator_fingerprint=_evaluator_for_scope(scope),
+        evidence_layer=scope.evidence_layer,
     )
+    evaluator_fingerprint = _evaluator_for_scope(scope)
     run = DriftRun(
         run_id=run_id,
         analysis_time=analysis_time,
         completed_at=datetime.now(timezone.utc),
-        evaluator_fingerprint=STRUCTURAL_EVALUATOR,
+        evaluator_fingerprint=evaluator_fingerprint,
         signal_count=len(signals),
     )
     return run, signals
 
 
-def run_scheduled(storage: MonitorStorage, traces: list[Trace]) -> dict[str, object]:
+def run_scheduled(
+    storage: MonitorStorage,
+    traces: list[Trace],
+    *,
+    judgments: list[Judgment] | tuple[Judgment, ...] = (),
+) -> dict[str, object]:
     closed: list[dict[str, object]] = []
     blocked: list[dict[str, object]] = []
     late_total = 0
     changed_series = 0
+    quality_by_evaluator = _quality_scores(judgments, {trace.trace_id for trace in traces})
     for series in storage.list_monitor_series():
         if series.state != "active":
             continue
@@ -283,15 +310,21 @@ def run_scheduled(storage: MonitorStorage, traces: list[Trace]) -> dict[str, obj
             continue
         for attempt in range(2):
             scope = _scope_from_json(series.scope_json)
+            quality_scores = (
+                quality_by_evaluator.get(scope.evaluator_fingerprint or "", {})
+                if scope.evidence_layer == "quality"
+                else None
+            )
             scoped = [
                 trace
                 for trace in series_traces
-                if scope_for_trace(trace) == scope
+                if _trace_matches_scope(trace, scope)
                 and trace.started_at.tzinfo is not None
                 and (trace.prompt_redacted or "").strip()
                 and trace.tags.get("verdict.workload") != "judge"
+                and (quality_scores is None or trace.trace_id in quality_scores)
             ]
-            cycle = _plan_cycle(storage, series, scoped)
+            cycle = _plan_cycle(storage, series, scoped, quality_scores=quality_scores)
             if not cycle["members"] and not cycle["results"]:
                 break
             try:
@@ -380,6 +413,8 @@ def _plan_cycle(
     storage: MonitorStorage,
     series: MonitorSeries,
     traces: list[Trace],
+    *,
+    quality_scores: dict[str, dict[str, float]] | None = None,
 ) -> dict[str, object]:
     existing = storage.list_monitor_members(series.series_id)
     existing_ids = {member.trace_id for member in existing}
@@ -495,14 +530,19 @@ def _plan_cycle(
                 NAMESPACE_URL,
                 f"verdict-monitor-run-v1|{series.series_id}|{cluster_id}|{bucket_index}",
             ).hex
-            signal = _new_intent_signal(run_id, current_units)
+            scope = _scope_from_json(series.scope_json)
+            signal = _new_intent_signal(
+                run_id,
+                current_units,
+                evaluator_fingerprint=_evaluator_for_scope(scope),
+            )
             snapshots.append(
                 (
                     DriftRun(
                         run_id=run_id,
                         analysis_time=signal.detected_at,
                         completed_at=completed_at,
-                        evaluator_fingerprint=STRUCTURAL_EVALUATOR,
+                        evaluator_fingerprint=_evaluator_for_scope(scope),
                         signal_count=1,
                     ),
                     [signal],
@@ -543,7 +583,12 @@ def _plan_cycle(
             for unit in (*baseline_units, *current_units)
             for trace in unit.traces
         }
-        metric_results, status = compare_cohorts(baseline_units, current_units, assignments)
+        metric_results, status = compare_cohorts(
+            baseline_units,
+            current_units,
+            assignments,
+            quality_scores=quality_scores,
+        )
         direction_key = "|".join(
             f"{result.metric}:{'+' if result.effect_size > 0 else '-'}"
             for result in metric_results
@@ -579,12 +624,15 @@ def _plan_cycle(
             detected_at=max(unit.event_time for unit in current_units),
             episode=episode,
             current_units=current_units,
+            assignments=assignments,
+            evaluator_fingerprint=_evaluator_for_scope(_scope_from_json(series.scope_json)),
+            evidence_layer=_scope_from_json(series.scope_json).evidence_layer,
         )
         run = DriftRun(
             run_id=run_id,
             analysis_time=max(unit.event_time for unit in current_units),
             completed_at=completed_at,
-            evaluator_fingerprint=STRUCTURAL_EVALUATOR,
+            evaluator_fingerprint=_evaluator_for_scope(_scope_from_json(series.scope_json)),
             signal_count=len(signals),
         )
         snapshots.append((run, signals))
@@ -656,11 +704,29 @@ def _drift_signals(
     detected_at: datetime,
     episode: str,
     current_units: tuple[HistoryUnit, ...],
+    assignments: dict[str, str],
+    evaluator_fingerprint: str,
+    evidence_layer: str,
 ) -> list[DriftSignal]:
     example_ids = [unit.traces[0].trace_id for unit in current_units[:5]]
     signals: list[DriftSignal] = []
     for result in results:
         if result.status is not AnalysisStatus.DRIFT_DETECTED:
+            continue
+        if result.metric == "new_intent_traffic":
+            new_intent_units = tuple(
+                unit
+                for unit in current_units
+                if any(assignments.get(trace.trace_id) == "new_intent" for trace in unit.traces)
+            )
+            if new_intent_units:
+                signals.append(
+                    _new_intent_signal(
+                        run_id,
+                        new_intent_units,
+                        evaluator_fingerprint=evaluator_fingerprint,
+                    )
+                )
             continue
         signal_id = uuid5(
             NAMESPACE_URL,
@@ -672,7 +738,7 @@ def _drift_signals(
                 detected_at=detected_at,
                 cluster_id=result.cluster_id,
                 dimension=result.metric,
-                direction=DriftDirection.CHANGE,
+                direction=_direction_for_metric(result.metric, result.effect_size),
                 statistic_name="mann_whitney_u",
                 statistic_value=result.effect_size,
                 p_value=result.p_value,
@@ -680,17 +746,22 @@ def _drift_signals(
                 effect_size_cliffs_delta=result.effect_size,
                 sample_size_current=result.current_n,
                 sample_size_baseline=result.baseline_n,
-                contributing_layers=["structural"],
+                contributing_layers=[evidence_layer],
                 example_trace_ids=example_ids,
                 recommended_action=f"{episode} count-cohort structural change",
-                evaluator_fingerprint=STRUCTURAL_EVALUATOR,
+                evaluator_fingerprint=evaluator_fingerprint,
                 run_id=run_id,
             )
         )
     return signals
 
 
-def _new_intent_signal(run_id: str, current_units: tuple[HistoryUnit, ...]) -> DriftSignal:
+def _new_intent_signal(
+    run_id: str,
+    current_units: tuple[HistoryUnit, ...],
+    *,
+    evaluator_fingerprint: str = STRUCTURAL_EVALUATOR,
+) -> DriftSignal:
     detected_at = max(unit.event_time for unit in current_units)
     return DriftSignal(
         signal_id=uuid5(NAMESPACE_URL, f"verdict-monitor-signal-v1|{run_id}|new-intent").hex,
@@ -710,14 +781,47 @@ def _new_intent_signal(run_id: str, current_units: tuple[HistoryUnit, ...]) -> D
         recommended_action=(
             "Review these unmatched intents and refit the baseline if they are expected traffic."
         ),
-        evaluator_fingerprint=STRUCTURAL_EVALUATOR,
+        evaluator_fingerprint=evaluator_fingerprint,
         run_id=run_id,
     )
 
 
 def _scope_from_json(payload: str) -> ScopeKey:
     values = json.loads(payload)
-    return ScopeKey(values.get("tenant_id"), values["workload"], values["granularity"])
+    return ScopeKey(
+        values.get("tenant_id"),
+        values["workload"],
+        values["granularity"],
+        values.get("evidence_layer", "structural"),
+        values.get("evaluator_fingerprint"),
+    )
+
+
+def _trace_matches_scope(trace: Trace, scope: ScopeKey) -> bool:
+    trace_scope = scope_for_trace(trace)
+    return (
+        trace_scope.tenant_id,
+        trace_scope.workload,
+        trace_scope.granularity,
+    ) == (scope.tenant_id, scope.workload, scope.granularity)
+
+
+def _evaluator_for_scope(scope: ScopeKey) -> str:
+    if scope.evidence_layer == "quality":
+        if not scope.evaluator_fingerprint:
+            raise ValueError("quality monitor scope is missing evaluator identity")
+        return scope.evaluator_fingerprint
+    return STRUCTURAL_EVALUATOR
+
+
+def _direction_for_metric(metric: str, effect_size: float) -> DriftDirection:
+    if metric.endswith(".pass_rate"):
+        return DriftDirection.REGRESSION if effect_size < 0 else DriftDirection.IMPROVEMENT
+    if metric.endswith((".missing_rate", ".unclear_rate")):
+        return DriftDirection.REGRESSION if effect_size > 0 else DriftDirection.IMPROVEMENT
+    if metric in {"error_rate", "refusal_rate", "latency_ms", "output_tokens"}:
+        return DriftDirection.REGRESSION if effect_size > 0 else DriftDirection.IMPROVEMENT
+    return DriftDirection.CHANGE
 
 
 def _event_time(trace: Trace) -> datetime:

@@ -17,6 +17,19 @@ the customer POC profile is refined.
   per-cluster prospective buckets, late/new-intent outcomes, candidate and
   confirmed signals, and atomic candidate-baseline activation in additive
   SQLite/PostgreSQL tables.
+- Count-cohort monitoring can reuse completed stored judgments without making
+  provider calls. Quality scopes are isolated by complete evaluator identity;
+  PASS/FAIL, UNCLEAR, and missing outcomes retain separate denominators.
+- Historical frozen-registry misses now produce explicit
+  `new_intent_traffic` coverage signals instead of disappearing from results.
+
+### Fixed
+
+- Non-finite null-test p-values now fail closed as `1.0` and JSON output never
+  emits `NaN`. Benjamini-Hochberg rejects invalid finite probabilities and
+  cannot turn large raw p-values into false drift.
+- Constant columns remain descriptive but no longer inflate multiplicity or
+  the tested-hypothesis count; a run with no actual tests is `not_evaluable`.
 
 ### Removed
 
@@ -25,6 +38,7 @@ the customer POC profile is refined.
   separate JSON/exit-code runner and was not integrated with trace capture,
   persisted drift analysis, or the dashboard. Existing trace, judgment, drift,
   registry, and dashboard data are unchanged.
+
 ## [0.1.0a13] - 2026-08-27
 
 ### Added

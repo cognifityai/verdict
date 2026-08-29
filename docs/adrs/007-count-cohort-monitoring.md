@@ -19,9 +19,16 @@ The first release keeps the model deliberately small:
 - Historical bootstrap sorts independent units by their earliest event time,
   splits them into equal non-overlapping older and newer cohorts, and excludes
   one middle unit when the count is odd.
-- Deterministic refusal, response-length, latency, error, and token metrics can
-  run without a judge or network call. Judge-derived dimensions are added only
-  when one complete evaluator identity is available on both sides.
+- Deterministic refusal, response-length, latency, error, token, and tool-count
+  metrics can run without a judge or network call. Existing completed
+  judge-derived dimensions are added only under one complete evaluator
+  identity; the monitor itself never invokes a judge.
+- PASS/FAIL is the binary quality denominator. UNCLEAR and missing dimensions
+  remain separate. Constant columns remain descriptive but are not statistical
+  tests and do not enter multiplicity correction.
+- Current observations that do not fit the older frozen registry produce a
+  separate `new_intent_traffic` coverage signal. They are never dropped or
+  folded into a known-intent quality comparison.
 - There is no universal 30-sample gate. Results always report counts, effect
   size, uncertainty, and whether inference is evaluable or low-power.
 - A scheduled monitor owns one frozen baseline and one open current cohort per
@@ -55,6 +62,8 @@ partial baseline.
 | Retry can duplicate or partially expose a run | Freeze membership and results atomically | Storage/API | failure before/after membership, retry, concurrent scheduler, shutdown |
 | Late imports can rewrite conclusions | Closed manifests are immutable | Alert/dashboard | before/on/after tie boundary, replay, deleted trace |
 | Evaluator or granularity changes can masquerade as drift | Both are required scope keys | Detector/dashboard | unknown provider/model/dimension, incomplete identity, mixed workload |
+| Constant or undefined tests corrupt multiplicity | Only finite, non-constant hypotheses enter correction | CLI/API/dashboard | all-zero error/refusal, NaN p-values, invalid probability, zero tested hypotheses |
+| Frozen-registry misses disappear | Unmatched current traffic is an explicit coverage signal | Historical report/dashboard | one/many new intents, sparse evaluator scope, refit boundary |
 | Two baselines create conflicting authority | One active generation pointer | Alerts/UI | failed candidate, compare-and-swap loss, rollback, old history read |
 | Local history can leak private source data | Adapter persists an allowlist and defaults offline | SQLite/API/browser/logs | malformed/oversized/nested source, secret/path canaries, unknown fields |
 

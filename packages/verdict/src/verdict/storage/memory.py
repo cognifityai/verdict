@@ -194,6 +194,23 @@ class InMemoryStorage:
         sanitize_judgment(judgment)
         self._judgments[judgment.judgment_id] = judgment
 
+    def list_judgments(
+        self,
+        *,
+        evaluator_fingerprint: str | None = None,
+        limit: int = 1000,
+    ) -> list[Judgment]:
+        rows = sorted(
+            self._judgments.values(),
+            key=lambda judgment: (judgment.created_at, judgment.judgment_id),
+            reverse=True,
+        )
+        if evaluator_fingerprint is not None:
+            rows = [
+                row for row in rows if row.evaluator_fingerprint == evaluator_fingerprint
+            ]
+        return rows[:limit]
+
     def list_judgments_for_cluster(
         self,
         cluster_id: str,

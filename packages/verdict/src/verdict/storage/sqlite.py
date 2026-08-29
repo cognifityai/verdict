@@ -856,6 +856,26 @@ class SQLiteStorage:
             position_swap_consistent=None if swap is None else bool(swap),
         )
 
+    def list_judgments(
+        self,
+        *,
+        evaluator_fingerprint: str | None = None,
+        limit: int = 1000,
+    ) -> list[Judgment]:
+        params: list[object] = []
+        clause = ""
+        if evaluator_fingerprint is not None:
+            clause = " WHERE evaluator_fingerprint = ?"
+            params.append(evaluator_fingerprint)
+        params.append(limit)
+        with self._lock:
+            rows = self._conn.execute(
+                f"""SELECT * FROM judgments{clause}
+                    ORDER BY created_at DESC, judgment_id DESC LIMIT ?""",
+                params,
+            ).fetchall()
+        return [self._row_to_judgment(row) for row in rows]
+
     def list_judgments_for_cluster(
         self,
         cluster_id: str,

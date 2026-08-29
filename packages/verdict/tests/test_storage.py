@@ -431,6 +431,34 @@ def test_insert_and_list_judgments_for_cluster(storage):
     assert fetched[0].pass_rate == 0.5
 
 
+def test_list_judgments_is_stable_and_can_isolate_one_evaluator(storage):
+    trace = _trace(cluster_id=None)
+    storage.insert_trace(trace)
+    older = Judgment(
+        judgment_id="judgment-older",
+        trace_id=trace.trace_id,
+        created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        evaluator_fingerprint="evaluator-a",
+    )
+    newer = Judgment(
+        judgment_id="judgment-newer",
+        trace_id=trace.trace_id,
+        created_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+        evaluator_fingerprint="evaluator-b",
+    )
+    storage.insert_judgment(older)
+    storage.insert_judgment(newer)
+
+    assert [row.judgment_id for row in storage.list_judgments(limit=10)] == [
+        "judgment-newer",
+        "judgment-older",
+    ]
+    assert [
+        row.judgment_id
+        for row in storage.list_judgments(evaluator_fingerprint="evaluator-a", limit=10)
+    ] == ["judgment-older"]
+
+
 def test_evaluator_health_round_trip_and_identity_filter(storage):
     older = EvaluatorHealthRecord(
         evaluator_fingerprint="judge-a",
@@ -1230,6 +1258,12 @@ def test_postgres_judgment_query_uses_fixed_columns_and_maps_them_in_order():
     assert judgment.position_swap_consistent is True
     assert judgment.evaluator_fingerprint == "fp-1"
     assert judgment.dimensions[0].verdict is Verdict.PASS
+
+    [judgment] = storage.list_judgments(evaluator_fingerprint="fp-1", limit=4)
+    assert "WHERE j.evaluator_fingerprint = %s" in captured["sql"]
+    assert "ORDER BY j.created_at DESC, j.judgment_id DESC" in captured["sql"]
+    assert captured["params"] == ("fp-1", 4)
+    assert judgment.judgment_id == "judgment-1"
 
 
 def test_postgres_span_upsert_assigns_trace_id_in_both_directions():
