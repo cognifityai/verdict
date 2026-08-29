@@ -75,6 +75,21 @@ To let a customer coding agent discover and implement that POC, use the
 includes a cross-agent prompt, approval boundaries, staged acceptance criteria,
 and the current automation limits.
 
+To get a structural drift result from an existing Verdict store without a
+provider key or elapsed calendar wait:
+
+```bash
+verdict-monitor --storage sqlite:///verdict.db bootstrap --activate --json
+verdict-dashboard --storage sqlite:///verdict.db
+```
+
+This count-cohort path uses trace event time, keeps sessions intact, compares
+equal older/newer historical cohorts within frozen intent clusters, and derives
+the future cohort size from available baseline evidence (capped at 10). Run
+`verdict-monitor --storage sqlite:///verdict.db run --json` from cron or CI.
+The older `verdict-pipeline` command retains its judge-based calendar windows
+for compatibility.
+
 Extras for `cognifity-verdict`: `anthropic`, `openai`, `google`, `postgres`,
 `telemetry`, or `dashboard`. The `telemetry` extra adds OTLP protobuf decoding;
 JSON/JSONL imports and hosted API readers use the Python standard library.

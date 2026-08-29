@@ -394,6 +394,21 @@ the other captured workloads.
 
 **Two things to know so you don't think it's broken:**
 
+For a fast, judge-free POC over saved history, use count cohorts instead of the
+legacy calendar-window pipeline:
+
+```bash
+verdict-monitor --storage sqlite:///verdict.db bootstrap --activate --json
+verdict-dashboard --storage sqlite:///verdict.db
+```
+
+This reads all eligible historical event times, splits sessions into equal
+older/newer groups, persists the initial result immediately, and derives the
+future cohort size from that baseline (capped at 10). Schedule
+`verdict-monitor ... run --json` for production monitoring. The notes below
+about 24-hour/7-day windows and 30 judgments apply to the separate judge-based
+`verdict-pipeline` path.
+
 - **It's periodic, not real-time.** "Live results" means "run the pipeline, then
   refresh the dashboard." The dashboard is a read view over the DB — as fresh as
   your last pipeline run, not a streaming detector. Re-run `verdict-pipeline`

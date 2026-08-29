@@ -8,6 +8,42 @@ for binary PASS/FAIL dimensions, Mann-Whitney U for continuous metrics),
 Bradley-Terry pairwise comparator for cross-LLM evaluation, and a synthetic
 regression injector for verifying the pipeline catches what it should.
 
+## Count-cohort bootstrap and monitoring
+
+`verdict-monitor` is the key-free path for fast historical and prospective
+structural drift. It groups traces by workload and capture granularity, keeps a
+session together as one independent unit, orders by trace event time, and
+compares equal older/newer count cohorts inside intent clusters. It does not
+wait for a calendar window or require 30 observations per cluster.
+
+```bash
+verdict-monitor --storage sqlite:///verdict.db bootstrap --activate --json
+verdict-monitor --storage sqlite:///verdict.db run --json
+verdict-monitor --storage sqlite:///verdict.db status --json
+verdict-monitor --storage sqlite:///verdict.db refit --json
+verdict-monitor --storage sqlite:///verdict.db activate \
+  --series-id <candidate> --expected-active <active> --json
+```
+
+The prospective cohort size is derived from the historical baseline and capped
+at 10 unless `--target-units` is supplied. `--from` and `--through` select an
+explicit timezone-aware historical slice. Results report `low_power` or
+`not_evaluable` rather than turning insufficient evidence into “no drift.” A
+cohort that does not fit the frozen registry produces a separate
+`new_intent_traffic` signal and does not contaminate known-intent comparisons.
+
+For a controlled POC, stamp the same `verdict.intent_key` around both model
+variants and run:
+
+```bash
+verdict-monitor --storage sqlite:///verdict.db matched \
+  --baseline-model model-a --current-model model-b --json
+```
+
+Historical, scheduled, and matched commands persist completed snapshots that
+the packaged dashboard can display. The legacy judge pipeline below keeps its
+calendar-window methodology for compatibility.
+
 ## Pairwise result contract
 
 `PairwiseJudge.compare()` separates preference from execution state. A usable

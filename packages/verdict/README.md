@@ -136,6 +136,14 @@ eligible cluster and rubric dimension for enough judged traces, and job flags
 may use different windows or sample floors. The dashboard distinguishes a run
 that has not completed from a completed run with zero signals.
 
+The optional `cognifity-verdict-eval` package also provides
+`verdict-monitor`, which persists key-free structural drift from equal
+event-time count cohorts. Those completed snapshots appear in the same Drift
+view and do not depend on the dashboard's legacy calendar-window availability
+counts. Count monitoring adds three tables (`monitor_series`,
+`monitor_members`, and `monitor_results`) when the existing store is opened;
+existing traces, judgments, and drift snapshots are preserved.
+
 Upgrade an existing synchronized `0.1.0a5` through `0.1.0a12` environment with
 `python -m pip install --upgrade`
 and the same provider, dashboard, semantic, and storage extras already in use.
