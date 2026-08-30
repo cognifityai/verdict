@@ -363,6 +363,74 @@ def test_historical_new_intent_traffic_is_visible_instead_of_silently_dropped() 
     assert signal.contributing_layers == ["cluster_coverage"]
 
 
+def test_new_intent_traffic_is_not_duplicated_as_a_quality_signal() -> None:
+    traces: list[Trace] = []
+    judgments: list[Judgment] = []
+    assignments: dict[str, str] = {}
+    for index in range(16):
+        trace = _trace(
+            index,
+            session=f"intent-{index:02d}",
+            when=NOW + timedelta(hours=index),
+            response="same response",
+        )
+        traces.append(trace)
+        assignments[trace.trace_id] = "known-intent" if index < 8 else "new_intent"
+        judgments.append(
+            Judgment(
+                judgment_id=f"judgment-{index:02d}",
+                trace_id=trace.trace_id,
+                created_at=trace.started_at + timedelta(minutes=1),
+                judge_models=["judge-model"],
+                dimensions=[
+                    DimensionScore(
+                        name="completeness",
+                        verdict=Verdict.PASS,
+                        judge_model="judge-model",
+                    )
+                ],
+                evaluator_provider="test",
+                evaluator_config={"temperature": 0},
+                evaluator_fingerprint="quality-evaluator-v1",
+                expected_dimensions=["completeness"],
+            )
+        )
+
+    reports = analyze_traces(traces, judgments=judgments, assignments=assignments)
+
+    structural = next(report for report in reports if report.scope.evidence_layer == "structural")
+    quality = next(report for report in reports if report.scope.evidence_layer == "quality")
+    assert any(result.metric == "new_intent_traffic" for result in structural.results)
+    assert all(result.metric != "new_intent_traffic" for result in quality.results)
+    assert quality.status is AnalysisStatus.NOT_EVALUABLE
+
+    storage = InMemoryStorage()
+    try:
+        for trace in traces:
+            storage.insert_trace(trace)
+        for judgment in judgments:
+            storage.insert_judgment(judgment)
+        create_series_from_history(
+            storage,
+            traces,
+            target_units=8,
+            state="active",
+            judgments=judgments,
+            assignments=assignments,
+        )
+        structural_snapshot = storage.get_latest_drift_run_snapshot(
+            "deterministic-structural-count-v1"
+        )
+        quality_snapshot = storage.get_latest_drift_run_snapshot("quality-evaluator-v1")
+    finally:
+        storage.close()
+    assert structural_snapshot is not None
+    assert [signal.dimension for signal in structural_snapshot[1]] == ["new_intent_traffic"]
+    assert quality_snapshot is not None
+    assert quality_snapshot[0].signal_count == 0
+    assert quality_snapshot[1] == []
+
+
 def test_zero_tested_hypotheses_is_not_reported_as_no_drift(tmp_path, capsys) -> None:
     db = tmp_path / "empty.db"
     storage = SQLiteStorage(str(db))

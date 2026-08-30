@@ -414,10 +414,11 @@ def _analyze_scope(
         p_threshold=p_threshold,
         quality_scores=quality_scores,
     )
-    new_intent = _new_intent_result(plan, resolved_assignments)
-    if new_intent is not None:
-        results = (*results, new_intent)
-        overall = AnalysisStatus.DRIFT_DETECTED
+    if quality_scores is None:
+        new_intent = _new_intent_result(plan, resolved_assignments)
+        if new_intent is not None:
+            results = (*results, new_intent)
+            overall = AnalysisStatus.DRIFT_DETECTED
     return BootstrapBundle(
         _report(scope, plan, overall, results),
         plan,
