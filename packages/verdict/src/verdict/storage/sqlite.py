@@ -198,7 +198,7 @@ CREATE INDEX IF NOT EXISTS idx_monitor_series_scope ON monitor_series(scope_key,
 CREATE TABLE IF NOT EXISTS monitor_members (
     series_id TEXT NOT NULL,
     trace_id TEXT NOT NULL,
-    role TEXT NOT NULL CHECK(role IN ('baseline','bootstrap','current','late')),
+    role TEXT NOT NULL CHECK(role IN ('baseline','bootstrap','current','late','excluded')),
     bucket_index INTEGER NOT NULL CHECK(bucket_index >= 0),
     cluster_id TEXT NOT NULL,
     unit_id TEXT NOT NULL,
@@ -497,6 +497,13 @@ class SQLiteStorage:
                 }
                 if "run_id" not in drift_columns:
                     self._conn.execute("ALTER TABLE drift_signals ADD COLUMN run_id TEXT")
+            if "monitor_members" in existing_tables:
+                monitor_sql_row = self._conn.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name='monitor_members'"
+                ).fetchone()
+                monitor_sql = str(monitor_sql_row[0] or "") if monitor_sql_row else ""
+                if "'excluded'" not in monitor_sql:
+                    self._migrate_monitor_members_for_excluded_role()
             self._conn.executescript(_SCHEMA)
             try:
                 self._conn.execute("ALTER TABLE traces ADD COLUMN parent_span_id TEXT")
@@ -543,6 +550,42 @@ class SQLiteStorage:
                     self._conn.execute(f"ALTER TABLE evaluator_health ADD COLUMN {col} {ddl}")
                 except sqlite3.OperationalError:
                     pass
+
+    def _migrate_monitor_members_for_excluded_role(self) -> None:
+        """Expand the immutable member-role check without losing candidate data."""
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            self._conn.execute(
+                "ALTER TABLE monitor_members RENAME TO monitor_members_before_excluded_role"
+            )
+            self._conn.execute(
+                """CREATE TABLE monitor_members (
+                    series_id TEXT NOT NULL,
+                    trace_id TEXT NOT NULL,
+                    role TEXT NOT NULL CHECK(
+                        role IN ('baseline','bootstrap','current','late','excluded')
+                    ),
+                    bucket_index INTEGER NOT NULL CHECK(bucket_index >= 0),
+                    cluster_id TEXT NOT NULL,
+                    unit_id TEXT NOT NULL,
+                    event_time TEXT NOT NULL,
+                    PRIMARY KEY (series_id, trace_id),
+                    FOREIGN KEY (series_id) REFERENCES monitor_series(series_id)
+                )"""
+            )
+            self._conn.execute(
+                """INSERT INTO monitor_members (
+                    series_id, trace_id, role, bucket_index, cluster_id, unit_id, event_time
+                ) SELECT
+                    series_id, trace_id, role, bucket_index, cluster_id, unit_id, event_time
+                FROM monitor_members_before_excluded_role"""
+            )
+            self._conn.execute("DROP TABLE monitor_members_before_excluded_role")
+        except Exception:
+            self._conn.execute("ROLLBACK")
+            raise
+        else:
+            self._conn.execute("COMMIT")
 
     # -- Traces ------------------------------------------------------------
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -120,3 +121,62 @@ def test_monitor_storage_cycle_is_atomic_and_activation_is_compare_and_swap(
     assert monitor_storage.get_monitor_series("active").state == "retired"
     with pytest.raises(ValueError, match="compare-and-swap"):
         monitor_storage.activate_monitor_series("active", expected_active_series_id="active")
+
+
+def test_sqlite_expands_existing_monitor_member_role_check_without_data_loss(
+    tmp_path: Path,
+) -> None:
+    db = tmp_path / "role-migration.db"
+    storage = SQLiteStorage(str(db))
+    storage.create_monitor_series(_series("active", "active"), [_member("active", "history-1")])
+    storage.close()
+
+    connection = sqlite3.connect(db)
+    try:
+        connection.executescript(
+            """PRAGMA foreign_keys=OFF;
+            ALTER TABLE monitor_members RENAME TO monitor_members_new_schema;
+            CREATE TABLE monitor_members (
+                series_id TEXT NOT NULL,
+                trace_id TEXT NOT NULL,
+                role TEXT NOT NULL CHECK(role IN ('baseline','bootstrap','current','late')),
+                bucket_index INTEGER NOT NULL CHECK(bucket_index >= 0),
+                cluster_id TEXT NOT NULL,
+                unit_id TEXT NOT NULL,
+                event_time TEXT NOT NULL,
+                PRIMARY KEY (series_id, trace_id),
+                FOREIGN KEY (series_id) REFERENCES monitor_series(series_id)
+            );
+            INSERT INTO monitor_members SELECT * FROM monitor_members_new_schema;
+            DROP TABLE monitor_members_new_schema;
+            """
+        )
+    finally:
+        connection.close()
+
+    storage = SQLiteStorage(str(db))
+    try:
+        preserved = storage.list_monitor_members("active")
+        excluded = MonitorMember(
+            series_id="active",
+            trace_id="excluded-2",
+            role="excluded",
+            bucket_index=0,
+            cluster_id="",
+            unit_id="session-excluded",
+            event_time=NOW + timedelta(minutes=2),
+        )
+        storage.commit_monitor_cycle(
+            series_id="active",
+            expected_generation=0,
+            members=[excluded],
+            results=[],
+            snapshots=[],
+            late_arrival_delta=0,
+        )
+        migrated = storage.list_monitor_members("active")
+    finally:
+        storage.close()
+
+    assert [member.trace_id for member in preserved] == ["history-1"]
+    assert {member.role for member in migrated} == {"baseline", "excluded"}

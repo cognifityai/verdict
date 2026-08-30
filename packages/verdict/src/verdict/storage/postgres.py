@@ -188,13 +188,28 @@ CREATE INDEX IF NOT EXISTS idx_monitor_series_scope ON monitor_series(scope_key,
 CREATE TABLE IF NOT EXISTS monitor_members (
     series_id TEXT NOT NULL REFERENCES monitor_series(series_id),
     trace_id TEXT NOT NULL,
-    role TEXT NOT NULL CHECK(role IN ('baseline','bootstrap','current','late')),
+    role TEXT NOT NULL CHECK(role IN ('baseline','bootstrap','current','late','excluded')),
     bucket_index INTEGER NOT NULL CHECK(bucket_index >= 0),
     cluster_id TEXT NOT NULL,
     unit_id TEXT NOT NULL,
     event_time TIMESTAMPTZ NOT NULL,
     PRIMARY KEY (series_id, trace_id)
 );
+DO $monitor_member_role_migration$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conrelid = 'monitor_members'::regclass
+          AND conname = 'monitor_members_role_check'
+          AND pg_get_constraintdef(oid) NOT LIKE '%excluded%'
+    ) THEN
+        ALTER TABLE monitor_members DROP CONSTRAINT monitor_members_role_check;
+        ALTER TABLE monitor_members ADD CONSTRAINT monitor_members_role_check
+            CHECK(role IN ('baseline','bootstrap','current','late','excluded'));
+    END IF;
+END
+$monitor_member_role_migration$;
 CREATE INDEX IF NOT EXISTS idx_monitor_members_bucket
     ON monitor_members(series_id, role, cluster_id, bucket_index, event_time, trace_id);
 

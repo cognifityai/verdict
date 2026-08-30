@@ -200,3 +200,51 @@ def test_scheduled_monitor_is_idempotent_confirms_and_refits_atomically(
             "missing_traces": 1,
         }
     ]
+
+
+def test_excluded_middle_session_is_not_reclassified_as_a_late_arrival(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    db = tmp_path / "odd-history.db"
+    _insert(
+        db,
+        prefix="odd",
+        start_index=0,
+        count=5,
+        when=START,
+        response="identical response",
+    )
+    storage_url = f"sqlite:///{db}"
+
+    assert (
+        main(
+            [
+                "--storage",
+                storage_url,
+                "bootstrap",
+                "--activate",
+                "--target-units",
+                "2",
+                "--json",
+            ]
+        )
+        == 0
+    )
+    bootstrap = _json(capsys)
+    [series_id] = bootstrap["active_series_ids"]
+
+    assert main(["--storage", storage_url, "run", "--json"]) == 0
+    scheduled = _json(capsys)
+    assert scheduled["status"] == "no_op"
+    assert scheduled["late_arrivals"] == 0
+
+    storage = SQLiteStorage(str(db))
+    try:
+        excluded = [
+            member
+            for member in storage.list_monitor_members(series_id)
+            if member.role == "excluded"
+        ]
+    finally:
+        storage.close()
+    assert len({member.unit_id for member in excluded}) == 1

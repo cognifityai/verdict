@@ -18,7 +18,8 @@ The first release keeps the model deliberately small:
   trace. A session is assigned wholly to one cohort.
 - Historical bootstrap sorts independent units by their earliest event time,
   splits them into equal non-overlapping older and newer cohorts, and excludes
-  one middle unit when the count is odd.
+  one middle unit when the count is odd. That unit is persisted with an
+  explicit `excluded` role so a restart cannot reinterpret it as late input.
 - Deterministic refusal, response-length, latency, error, token, and tool-count
   metrics can run without a judge or network call. Existing completed
   judge-derived dimensions are added only under one complete evaluator

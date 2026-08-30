@@ -30,6 +30,10 @@ the customer POC profile is refined.
   cannot turn large raw p-values into false drift.
 - Constant columns remain descriptive but no longer inflate multiplicity or
   the tested-hypothesis count; a run with no actual tests is `not_evaluable`.
+- The intentionally excluded middle session in an odd historical split is now
+  persisted as `excluded`, so the first scheduler run cannot misclassify it as
+  a late arrival. Existing monitor-member role constraints migrate in place
+  without dropping membership data.
 
 ### Removed
 

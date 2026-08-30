@@ -406,6 +406,20 @@ def _bootstrap_members(series: MonitorSeries, bundle: BootstrapBundle) -> list[M
                         event_time=_event_time(trace),
                     )
                 )
+    if bundle.plan.excluded_middle is not None:
+        unit = bundle.plan.excluded_middle
+        for trace in unit.traces:
+            members.append(
+                MonitorMember(
+                    series_id=series.series_id,
+                    trace_id=trace.trace_id,
+                    role="excluded",
+                    bucket_index=0,
+                    cluster_id="",
+                    unit_id=unit.unit_id,
+                    event_time=_event_time(trace),
+                )
+            )
     return members
 
 
