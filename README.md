@@ -50,7 +50,7 @@ Verdict never ships with anyone's API key. It reads **your** provider key from t
 | Judge-based PASS/FAIL quality drift | **Yes** (your key) |
 | Cross-model Bradley–Terry comparison | **Yes** (your key) |
 
-After installation, capture and structural checks can run without a provider key. The built-in hash embedder can report lexical embedding-distribution changes, but it is not a semantic model and may split paraphrases into separate intent clusters. Install the local `sentence-transformers/all-MiniLM-L6-v2` extra shown below for semantic intent clustering and semantic drift. Capture never invokes a judge automatically. A provider-backed judge run requires that provider's key; `verdict-inspect` skips its optional Anthropic judge when no Anthropic key is set.
+After installation, capture and structural checks can run without a provider key. The local workflow uses the pinned `sentence-transformers/all-MiniLM-L6-v2` model for semantic intent clustering; the first run downloads that exact revision when it is not already cached. Capture never invokes a judge automatically. A provider-backed judge run requires an explicit provider choice and that provider's key.
 
 ```bash
 export ANTHROPIC_API_KEY=...     # or OPENAI_API_KEY / GOOGLE_API_KEY
@@ -85,16 +85,34 @@ verdict-local
 `verdict-local` discovers root Claude Code and Codex histories, imports
 completed turns through Verdict's existing telemetry importer, bootstraps equal
 historical count cohorts, and serves the dashboard at
-`http://127.0.0.1:8765`. It performs no judge call and reads source files
+`http://127.0.0.1:8765`. It fits semantic clusters from one representative per
+older session, assigns every turn in that session to the same frozen intent,
+and reads source files
 without modifying them. It is an idempotent full rescan, not a filesystem
 watcher; rerun `verdict-local` after new turns or schedule
 `verdict-agent-capture` plus `verdict-monitor run`.
+
+Structural drift and new-intent traffic require no API key. To add real
+per-trace PASS/FAIL and quality-drift scopes with a conservative spend guard:
+
+```bash
+export ANTHROPIC_API_KEY=...
+verdict-local --judge-provider anthropic --judge-budget-usd 15
+```
+
+The paid path performs a conservative all-call preflight before the first
+provider request, reports returned token usage, and resumes completed judgments
+on retry. It blocks subsequent calls if usage is unavailable. As with any
+provider request, a connection failure after the provider accepted a request
+can make billing ambiguous. It does not use fake judgments in a live run.
 
 Capture can also run independently from analysis and the server:
 
 ```bash
 verdict-agent-capture --storage sqlite:///./verdict.db
-verdict-monitor --storage sqlite:///./verdict.db bootstrap --activate --json
+verdict-monitor --storage sqlite:///./verdict.db \
+  --semantic-model-path /path/to/pinned-MiniLM-snapshot \
+  bootstrap --activate --json
 verdict-dashboard --storage sqlite:///./verdict.db
 ```
 

@@ -22,8 +22,24 @@ the customer POC profile is refined.
   PASS/FAIL, UNCLEAR, and missing outcomes retain separate denominators.
 - Historical frozen-registry misses now produce explicit
   `new_intent_traffic` coverage signals instead of disappearing from results.
+- Local and imported-history bootstrap can fit the existing versioned semantic
+  registry from the exact older-session manifest. One representative per
+  independent session prevents long histories from dominating cluster fit;
+  all turns retain the session assignment for dashboard and judgment joins.
+- `verdict-local --judge-provider anthropic` adds resumable real judgments only
+  after a conservative token-cost preflight and guards each subsequent call
+  using returned provider usage. The default local command remains key-free and
+  makes no paid call.
 
 ### Fixed
+
+- The standalone dashboard now applies the reserved local registry scope to its
+  main data bundle, so clusters fitted by `verdict-local` appear in both the
+  Registry view and the Overview/trace projections.
+- Anthropic Python SDK 1.x no longer accepts the legacy `temperature` method
+  keyword. The adapter now preserves the requested sampling value through the
+  SDK's explicit extra-body compatibility boundary while retaining older SDK
+  support.
 
 - Non-finite null-test p-values now fail closed as `1.0` and JSON output never
   emits `NaN`. Benjamini-Hochberg rejects invalid finite probabilities and

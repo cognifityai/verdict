@@ -28,8 +28,15 @@ def _langfuse_row(index: int, when: datetime, response: str) -> dict[str, object
 
 
 def test_imported_history_bootstraps_immediately_and_reimport_is_idempotent(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    import verdict_eval.clustering as clustering
+
+    monkeypatch.setattr(
+        clustering,
+        "FrozenMiniLMEmbedder",
+        lambda _path: clustering.DeterministicHashEmbedder(),
+    )
     path = tmp_path / "langfuse.jsonl"
     start = datetime(2026, 5, 1, tzinfo=timezone.utc)
     rows = [
@@ -68,7 +75,20 @@ def test_imported_history_bootstraps_immediately_and_reimport_is_idempotent(
     finally:
         storage.close()
 
-    assert monitor_main(["--storage", f"sqlite:///{db}", "bootstrap", "--json"]) == 0
+    assert (
+        monitor_main(
+            [
+                "--storage",
+                f"sqlite:///{db}",
+                "--semantic-model-path",
+                str(tmp_path),
+                "bootstrap",
+                "--activate",
+                "--json",
+            ]
+        )
+        == 0
+    )
     analysis = json.loads(capsys.readouterr().out)
     report = analysis["scopes"][0]
     assert report["scope"]["tenant_id"] == "tenant-poc"

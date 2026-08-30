@@ -122,13 +122,20 @@ def create_series_from_history(
     target_units: int | None,
     state: str,
     judgments: list[Judgment] | tuple[Judgment, ...] = (),
+    assignments: dict[str, str] | None = None,
+    registry_references: dict[str | None, str] | None = None,
 ) -> list[MonitorSeries]:
     if target_units is not None and target_units < 2:
         raise ValueError("target_units must be at least 2")
     if state not in {"active", "candidate"}:
         raise ValueError("monitor series state must be active or candidate")
     created: list[MonitorSeries] = []
-    for bundle in build_bootstrap_bundles(traces, judgments=judgments):
+    for bundle in build_bootstrap_bundles(
+        traces,
+        judgments=judgments,
+        assignments=assignments,
+        registry_references=registry_references,
+    ):
         if not bundle.plan.baseline or not bundle.plan.current:
             continue
         scope_payload = {
@@ -209,7 +216,11 @@ def _derived_target_units(bundle: BootstrapBundle) -> int:
     units_by_cluster: dict[str, set[str]] = defaultdict(set)
     for unit in bundle.plan.baseline:
         for trace in unit.traces:
-            if cluster_id := bundle.assignments.get(trace.trace_id):
+            if (cluster_id := bundle.assignments.get(trace.trace_id)) not in {
+                None,
+                "not_evaluable",
+                "new_intent",
+            }:
                 units_by_cluster[cluster_id].add(unit.unit_id)
     counts = sorted(len(units) for units in units_by_cluster.values() if len(units) >= 2)
     return min(10, counts[len(counts) // 2]) if counts else 2
@@ -306,6 +317,7 @@ def run_scheduled(
     traces: list[Trace],
     *,
     judgments: list[Judgment] | tuple[Judgment, ...] = (),
+    assignments: dict[str, str] | None = None,
 ) -> dict[str, object]:
     closed: list[dict[str, object]] = []
     blocked: list[dict[str, object]] = []
@@ -343,7 +355,13 @@ def run_scheduled(
                 and trace.tags.get("verdict.workload") != "judge"
                 and (quality_scores is None or trace.trace_id in quality_scores)
             ]
-            cycle = _plan_cycle(storage, series, scoped, quality_scores=quality_scores)
+            cycle = _plan_cycle(
+                storage,
+                series,
+                scoped,
+                quality_scores=quality_scores,
+                assignments=assignments,
+            )
             if not cycle["members"] and not cycle["results"]:
                 break
             try:
@@ -448,6 +466,7 @@ def _plan_cycle(
     traces: list[Trace],
     *,
     quality_scores: dict[str, dict[str, float]] | None = None,
+    assignments: dict[str, str] | None = None,
 ) -> dict[str, object]:
     existing = storage.list_monitor_members(series.series_id)
     existing_ids = {member.trace_id for member in existing}
@@ -476,13 +495,21 @@ def _plan_cycle(
     bootstrap_late_ids = {trace.trace_id for trace in bootstrap_late}
     prospective = [trace for trace in unseen if trace.trace_id not in bootstrap_late_ids]
 
-    registry = ClusterRegistry.from_json(series.registry_json)
-    baseline_clusters = set(registry.ids)
-    clusterer = StableIntentClusterer(
-        HashingEmbedder(), threshold=0.5, freeze_after=1, registry=registry
-    )
     prospective.sort(key=lambda trace: (_event_time(trace), trace.trace_id))
-    cluster_ids = clusterer.assign([trace.prompt_redacted or "" for trace in prospective])
+    if assignments is None:
+        registry = ClusterRegistry.from_json(series.registry_json)
+        baseline_clusters = set(registry.ids)
+        clusterer = StableIntentClusterer(
+            HashingEmbedder(), threshold=0.5, freeze_after=1, registry=registry
+        )
+        cluster_ids = clusterer.assign([trace.prompt_redacted or "" for trace in prospective])
+    else:
+        baseline_clusters = {
+            member.cluster_id
+            for member in existing
+            if member.role == "baseline" and member.cluster_id not in {"", "not_evaluable"}
+        }
+        cluster_ids = [assignments.get(trace.trace_id, "not_evaluable") for trace in prospective]
     results_so_far = storage.list_monitor_results(series.series_id)
     result_keys = {(result.cluster_id, result.bucket_index) for result in results_so_far}
     closed_unit_events: dict[tuple[str, str], datetime] = {}
@@ -505,7 +532,11 @@ def _plan_cycle(
     late = list(bootstrap_late)
     prospective_by_unit: dict[tuple[str, str], list[Trace]] = defaultdict(list)
     for trace, cluster_id in zip(prospective, cluster_ids, strict=True):
-        cluster = cluster_id if cluster_id in baseline_clusters else "new_intent"
+        cluster = (
+            cluster_id
+            if cluster_id in baseline_clusters or cluster_id == "not_evaluable"
+            else "new_intent"
+        )
         prospective_by_unit[(cluster, trace.session_id or trace.trace_id)].append(trace)
     for key, rows in list(prospective_by_unit.items()):
         cluster, unit_id = key
@@ -570,7 +601,9 @@ def _plan_cycle(
     ready_keys = sorted(
         key
         for key, units in by_bucket.items()
-        if len(units) >= series.target_units and key not in result_keys
+        if key[0] != "not_evaluable"
+        and len(units) >= series.target_units
+        and key not in result_keys
     )
     for cluster_id, bucket_index in ready_keys:
         if cluster_id == "new_intent":

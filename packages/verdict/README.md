@@ -45,7 +45,10 @@ verdict-dashboard --storage sqlite:///./verdict.db
 
 The capture command requires no optional dependency. For capture, count-cohort
 analysis, and the dashboard in one command, install
-`cognifity-verdict[local]` and run `verdict-local`. Capture requires durable
+`cognifity-verdict[local]` and run `verdict-local`. The local extra includes the
+pinned semantic runtime; first use may download the pinned MiniLM revision.
+Structural drift remains key-free, while real quality PASS/FAIL requires the
+explicit budgeted judge flags. Capture requires durable
 SQLite or PostgreSQL storage so a later Verdict process can reopen the traces.
 Install `cognifity-verdict[local,postgres]` when the storage URL is PostgreSQL.
 

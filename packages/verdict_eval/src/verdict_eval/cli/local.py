@@ -12,7 +12,9 @@ from verdict.telemetry.local_agents import capture_local_history_url
 from verdict.telemetry.local_cli import default_storage
 from verdict.telemetry.runner import ImportRunError
 
+from verdict_eval.clustering_strategies import FitConfig
 from verdict_eval.count_monitor import analyze_traces
+from verdict_eval.live_judging import JudgeBudgetError
 from verdict_eval.monitoring import create_series_from_history, run_scheduled
 
 
@@ -27,6 +29,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--source", choices=["all", "codex", "claude"], default="all")
     parser.add_argument("--tenant-id")
     parser.add_argument("--target-units", type=int)
+    parser.add_argument(
+        "--semantic-model-path",
+        type=Path,
+        help="Pinned MiniLM snapshot path (auto-resolved or downloaded when omitted).",
+    )
+    parser.add_argument(
+        "--judge-provider",
+        choices=["none", "anthropic"],
+        default="none",
+        help="Optional real response-quality judge (never enabled implicitly).",
+    )
+    parser.add_argument("--judge-model", default="claude-haiku-4-5-20251001")
+    parser.add_argument("--judge-budget-usd", type=float, default=15.0)
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--no-serve", action="store_true")
     parser.add_argument("--json", action="store_true")
@@ -41,6 +56,12 @@ def main(argv: list[str] | None = None) -> int:
     if not 1 <= args.port <= 65535:
         print("ERROR: --port must be between 1 and 65535")
         return 2
+    if args.judge_budget_usd <= 0:
+        print("ERROR: --judge-budget-usd must be positive")
+        return 2
+    if args.judge_provider == "anthropic" and args.judge_model != "claude-haiku-4-5-20251001":
+        print("ERROR: budgeted local judging currently supports claude-haiku-4-5-20251001")
+        return 2
     try:
         summaries = capture_local_history_url(
             args.storage,
@@ -52,20 +73,72 @@ def main(argv: list[str] | None = None) -> int:
         storage = _resolve_storage(args.storage)
         try:
             traces = storage.list_traces(limit=100_000)
-            reports = analyze_traces(traces)
+            from verdict_eval.clustering import FrozenMiniLMEmbedder, resolve_frozen_minilm_path
+            from verdict_eval.semantic_monitoring import (
+                assign_active_semantic,
+                fit_semantic_bootstrap,
+                has_active_semantic_registry,
+            )
+
+            embedder = FrozenMiniLMEmbedder(
+                resolve_frozen_minilm_path(args.semantic_model_path)
+            )
+            if has_active_semantic_registry(storage, traces):
+                semantic = assign_active_semantic(storage, traces, embedder=embedder)
+            else:
+                semantic = fit_semantic_bootstrap(
+                    storage,
+                    traces,
+                    embedder=embedder,
+                    actor="verdict-local",
+                    config=FitConfig(
+                        strategy="semantic",
+                        min_cluster_size=2,
+                        max_semantic_clusters=12,
+                    ),
+                )
+            judge_summary = None
+            if args.judge_provider == "anthropic":
+                from verdict_eval.live_judging import judge_with_budget
+                from verdict_eval.providers import AnthropicAdapter
+
+                judge_summary = judge_with_budget(
+                    storage,
+                    traces,
+                    provider=AnthropicAdapter(max_retries=1),
+                    model=args.judge_model,
+                    budget_usd=args.judge_budget_usd,
+                    input_usd_per_million=1.0,
+                    output_usd_per_million=5.0,
+                )
+            judgments = storage.list_judgments(limit=max(1_000, len(traces) * 10))
             active = create_series_from_history(
                 storage,
                 traces,
                 target_units=args.target_units,
                 state="active",
+                judgments=judgments,
+                assignments=semantic.assignments,
+                registry_references=semantic.registry_references,
             )
-            scheduled = run_scheduled(storage, traces)
+            reports = analyze_traces(
+                traces,
+                judgments=judgments,
+                assignments=semantic.assignments,
+                registry_references=semantic.registry_references,
+            )
+            scheduled = run_scheduled(
+                storage,
+                traces,
+                judgments=judgments,
+                assignments=semantic.assignments,
+            )
         finally:
             storage.close()
     except Exception as exc:
         error = (
             str(exc)
-            if isinstance(exc, ImportRunError)
+            if isinstance(exc, (ImportRunError, JudgeBudgetError))
             else f"local analysis failed ({type(exc).__name__})"
         )
         print(f"ERROR: {error}")
@@ -83,6 +156,8 @@ def main(argv: list[str] | None = None) -> int:
             "schema": "verdict-count-monitor-v1",
             "scopes": [report.to_dict() for report in reports],
             "active_series_ids": [series.series_id for series in active],
+            "cluster_registry_version_ids": semantic.version_ids,
+            "judge": asdict(judge_summary) if judge_summary is not None else None,
             "scheduled": scheduled,
         },
     }
@@ -97,6 +172,12 @@ def main(argv: list[str] | None = None) -> int:
                 f"{report.scope.workload}/{report.scope.granularity}: "
                 f"{report.status.value} "
                 f"({report.baseline_units} baseline, {report.current_units} current sessions)"
+            )
+        if judge_summary is not None:
+            print(
+                f"Real judge: {judge_summary.completed} completed, "
+                f"{judge_summary.reused} reused, {judge_summary.errors} errors; "
+                f"token-accounted spend ${judge_summary.spent_usd:.4f}."
             )
         if not args.no_serve:
             print(f"Verdict local dashboard -> http://127.0.0.1:{args.port}")

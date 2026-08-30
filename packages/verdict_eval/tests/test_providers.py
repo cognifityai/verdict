@@ -6,6 +6,8 @@ import sys
 import time
 from types import SimpleNamespace
 
+import pytest
+
 
 def _fake_google_types():
     class Part:
@@ -88,6 +90,68 @@ def test_completion_request_constructs() -> None:
     assert req.model == "gemini/gemini-2.5-flash"
     assert req.temperature == 0.0
     assert req.max_tokens == 1024
+
+
+def test_anthropic_v1_sdk_routes_legacy_temperature_through_extra_body() -> None:
+    from verdict_eval.providers import AnthropicAdapter, CompletionRequest
+
+    captured = {}
+
+    def create(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(
+            content=[SimpleNamespace(text="ok")],
+            usage=SimpleNamespace(input_tokens=3, output_tokens=1),
+            stop_reason="end_turn",
+        )
+
+    adapter = object.__new__(AnthropicAdapter)
+    adapter._client = SimpleNamespace(messages=SimpleNamespace(create=create))
+    adapter._supports_temperature = False
+    response = adapter._complete_once(
+        CompletionRequest(
+            model="claude-haiku-test",
+            messages=[{"role": "user", "content": "question"}],
+            temperature=0.0,
+        )
+    )
+
+    assert "temperature" not in captured
+    assert captured["extra_body"] == {"temperature": 0.0}
+    assert response.input_tokens == 3
+
+
+def test_budget_guard_stops_calling_after_provider_omits_usage() -> None:
+    from verdict_eval.providers import (
+        BudgetedProvider,
+        BudgetExceededError,
+        CompletionRequest,
+        CompletionResponse,
+    )
+
+    calls = 0
+
+    class Provider:
+        name = "missing-usage"
+
+        def complete(self, req: CompletionRequest) -> CompletionResponse:
+            nonlocal calls
+            calls += 1
+            return CompletionResponse("{}")
+
+    guarded = BudgetedProvider(
+        Provider(),
+        budget_usd=1,
+        input_usd_per_million=1,
+        output_usd_per_million=1,
+    )
+    request = CompletionRequest(model="test", messages=[])
+
+    with pytest.raises(RuntimeError, match="omitted usage"):
+        guarded.complete(request)
+    with pytest.raises(BudgetExceededError, match="accounting is blocked"):
+        guarded.complete(request)
+    assert calls == 1
 
 
 def test_google_adapter_handles_empty_optional_response_fields(monkeypatch) -> None:

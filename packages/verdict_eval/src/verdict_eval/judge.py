@@ -232,18 +232,9 @@ class Judge:
         trace_id: str = "",
     ) -> Judgment:
         """Run the judge on a single (query, response, optional context) tuple."""
-        rubric = self._effective_rubric(context)
         identity = self.evaluator_identity(context)
-        messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": _user_prompt(query, response, context, rubric)},
-        ]
-        req = CompletionRequest(
-            model=self.model,
-            messages=messages,
-            temperature=self.temperature,
-            max_tokens=self.max_tokens,
-        )
+        rubric = self._effective_rubric(context)
+        req = self.completion_request(query=query, response=response, context=context)
         with workload_context("judge"):
             resp = self.provider.complete(req)
         parsed = _parse_verdict_json(resp.text, rubric)
@@ -261,6 +252,26 @@ class Judge:
             trace_id=trace_id,
             dimensions=dimensions,
             **identity,
+        )
+
+    def completion_request(
+        self,
+        *,
+        query: str,
+        response: str,
+        context: str | None = None,
+    ) -> CompletionRequest:
+        """Build the exact provider request, enabling no-I/O cost preflight."""
+        rubric = self._effective_rubric(context)
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": _user_prompt(query, response, context, rubric)},
+        ]
+        return CompletionRequest(
+            model=self.model,
+            messages=messages,
+            temperature=self.temperature,
+            max_tokens=self.max_tokens,
         )
 
 

@@ -14,7 +14,10 @@ regression injector for verifying the pipeline catches what it should.
 structural drift plus reuse of judgments already in the store. It never makes
 a judge call. It groups traces by workload and capture granularity, keeps a
 session together as one independent unit, orders by trace event time, and
-compares equal older/newer count cohorts inside intent clusters. It does not
+compares equal older/newer count cohorts inside intent clusters. Semantic
+bootstrap fits one chronological representative per older session so a long
+session cannot dominate the cluster model; every turn in that session inherits
+the frozen assignment. It does not
 wait for a calendar window or require 30 observations per cluster.
 
 For local Claude Code and Codex history, the installed `verdict-local` command
@@ -38,6 +41,22 @@ verdict-monitor --storage sqlite:///verdict.db refit --json
 verdict-monitor --storage sqlite:///verdict.db activate \
   --series-id <candidate> --expected-active <active> --json
 ```
+
+For saved third-party telemetry with captured prompts, opt into the same
+versioned semantic registry used by `verdict-local`:
+
+```bash
+verdict-monitor --storage sqlite:///verdict.db \
+  --semantic-model-path /path/to/pinned-MiniLM-snapshot \
+  bootstrap --activate --json
+verdict-monitor --storage sqlite:///verdict.db \
+  --semantic-model-path /path/to/pinned-MiniLM-snapshot run --json
+```
+
+The model path is required on the general monitor CLI; `verdict-local`
+auto-resolves or downloads the pinned revision. Semantic refit is deliberately
+blocked until the guided re-bootstrap handoff is implemented. Omitting the
+semantic option retains the previous hashing workflow for upgrade compatibility.
 
 The prospective cohort size is derived from the historical baseline and capped
 at 10 unless `--target-units` is supplied. `--from` and `--through` select an
@@ -106,7 +125,9 @@ quality evaluation missed one preregistered fragmentation gate (largest
 nonoutlier cluster `30.1047%`, maximum `30%`) and must not be described as
 generally validated. `verdict-cluster inspect` reports the strategy and this
 experimental status. Local semantic work uses the frozen
-`sentence-transformers/all-MiniLM-L6-v2` model; runtime download is forbidden.
+`sentence-transformers/all-MiniLM-L6-v2` revision. `verdict-local` may download
+that pinned revision when the cache is empty; versioned registry commands still
+require an explicit local model path.
 The legacy trace clustering pipeline remains a separate methodology.
 
 ### Supported explicit registry workflow

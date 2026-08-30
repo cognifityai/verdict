@@ -9,6 +9,7 @@ an LLM. Never `from anthropic import ...` outside an adapter.
 
 from __future__ import annotations
 
+import inspect
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
@@ -36,6 +37,69 @@ class LLMProvider(Protocol):
     name: str
 
     def complete(self, req: CompletionRequest) -> CompletionResponse: ...
+
+
+class BudgetExceededError(RuntimeError):
+    """Raised before a provider call that could exceed its declared ceiling."""
+
+
+class BudgetedProvider:
+    """Serial provider guard using a byte-safe preflight and actual token usage."""
+
+    _INPUT_PROTOCOL_TOKEN_CEILING = 1_024
+
+    def __init__(
+        self,
+        provider: LLMProvider,
+        *,
+        budget_usd: float,
+        input_usd_per_million: float,
+        output_usd_per_million: float,
+    ) -> None:
+        if budget_usd <= 0 or input_usd_per_million < 0 or output_usd_per_million < 0:
+            raise ValueError("budget and token prices must be nonnegative")
+        self._provider = provider
+        self.name = provider.name
+        self.budget_usd = float(budget_usd)
+        self.input_usd_per_million = float(input_usd_per_million)
+        self.output_usd_per_million = float(output_usd_per_million)
+        self.spent_usd = 0.0
+        self.calls = 0
+        self.input_tokens = 0
+        self.output_tokens = 0
+        self._blocked = False
+
+    def upper_bound_usd(self, req: CompletionRequest) -> float:
+        input_token_ceiling = self._INPUT_PROTOCOL_TOKEN_CEILING + sum(
+            len(message.get("content", "").encode("utf-8", "surrogatepass"))
+            for message in req.messages
+        )
+        return (
+            input_token_ceiling * self.input_usd_per_million
+            + req.max_tokens * self.output_usd_per_million
+        ) / 1_000_000
+
+    def complete(self, req: CompletionRequest) -> CompletionResponse:
+        if self._blocked:
+            raise BudgetExceededError("judge budget accounting is blocked")
+        if self.spent_usd + self.upper_bound_usd(req) > self.budget_usd:
+            raise BudgetExceededError("judge budget ceiling reached before provider call")
+        response = self._provider.complete(req)
+        if response.input_tokens is None or response.output_tokens is None:
+            self._blocked = True
+            raise RuntimeError("provider omitted usage; budget accounting cannot continue")
+        cost = (
+            response.input_tokens * self.input_usd_per_million
+            + response.output_tokens * self.output_usd_per_million
+        ) / 1_000_000
+        if self.spent_usd + cost > self.budget_usd:
+            self._blocked = True
+            raise RuntimeError("provider usage exceeded the pre-call byte-safe budget bound")
+        self.spent_usd += cost
+        self.calls += 1
+        self.input_tokens += response.input_tokens
+        self.output_tokens += response.output_tokens
+        return response
 
 
 # ---------------------------------------------------------------------------
@@ -73,6 +137,9 @@ class AnthropicAdapter:
             ) from e
         self._client = Anthropic(api_key=api_key) if api_key else Anthropic()
         self._max_retries = max_retries
+        self._supports_temperature = (
+            "temperature" in inspect.signature(self._client.messages.create).parameters
+        )
 
     def complete(self, req: CompletionRequest) -> CompletionResponse:
         return _with_retry(self._complete_once, req, max_attempts=self._max_retries)
@@ -84,9 +151,14 @@ class AnthropicAdapter:
         kwargs: dict = {
             "model": req.model,
             "messages": chat,
-            "temperature": req.temperature,
             "max_tokens": req.max_tokens,
         }
+        if getattr(self, "_supports_temperature", True):
+            kwargs["temperature"] = req.temperature
+        else:
+            # Anthropic Python SDK 1.x removed the typed sampling kwargs. Older
+            # Claude models still accept them at the HTTP boundary.
+            kwargs["extra_body"] = {"temperature": req.temperature}
         if system_parts:
             kwargs["system"] = "\n\n".join(system_parts)
         resp = self._client.messages.create(**kwargs)

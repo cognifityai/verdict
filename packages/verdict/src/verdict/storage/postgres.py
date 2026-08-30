@@ -2007,7 +2007,7 @@ class PostgresStorage:
                 raise ValueError("cluster registry generation conflict")
             cur.execute(
                 "SELECT fit_definition_json->>'model_fingerprint',parent_version_id,"
-                "fit_definition_json->'config',cutoff,lookback_days "
+                "fit_definition_json,cutoff,lookback_days "
                 "FROM cluster_registry_versions "
                 "WHERE tenant_id=%s AND version_id=%s",
                 (authorized_tenant, version_id),
@@ -2026,27 +2026,51 @@ class PostgresStorage:
             validation = cur.fetchone()
             if validation is None or validation[0] != "validated":
                 raise ValueError("cluster registry version is not validated")
-            config = version[2] or {}
+            fit_definition = version[2] or {}
+            config = fit_definition.get("config", {})
             cur.execute("LOCK TABLE traces IN SHARE MODE")
             token = self._cluster_snapshot_connection.set(conn)
             try:
-                rows = self.list_cluster_trace_candidates(
-                    authorized_tenant,
-                    datetime_to_utc_us(version[3] - timedelta(days=version[4])),
-                    datetime_to_utc_us(version[3]),
-                    target_workload=config.get("target_workload"),
-                    limit=config.get("max_fit_candidates", 50_000) + 1,
-                )
-                candidate_ids = [row.trace_id for row in rows if row.trace_id is not None]
+                if fit_definition.get("selector") == "trace-manifest-v1":
+                    cur.execute(
+                        "SELECT a.trace_id,t.trace_id IS NOT NULL "
+                        "FROM trace_cluster_assignments a "
+                        "LEFT JOIN traces t ON t.trace_id=a.trace_id "
+                        "WHERE a.tenant_id=%s AND a.version_id=%s AND a.origin='fit'",
+                        (authorized_tenant, version_id),
+                    )
+                    rows = cur.fetchall()
+                    candidate_ids = [row[0] for row in rows]
+                    manifest = fit_definition.get("manifest", {})
+                    manifest_changed = (
+                        len(candidate_ids) != manifest.get("candidate_count")
+                        or cluster_candidate_digest(candidate_ids)
+                        != manifest.get("candidate_digest")
+                        or any(not row[1] for row in rows)
+                    )
+                else:
+                    rows = self.list_cluster_trace_candidates(
+                        authorized_tenant,
+                        datetime_to_utc_us(version[3] - timedelta(days=version[4])),
+                        datetime_to_utc_us(version[3]),
+                        target_workload=config.get("target_workload"),
+                        limit=config.get("max_fit_candidates", 50_000) + 1,
+                    )
+                    candidate_ids = [row.trace_id for row in rows if row.trace_id is not None]
+                    manifest_changed = False
                 assigned_ids = {
                     item.trace_id
                     for item in self.list_trace_cluster_assignments(authorized_tenant, version_id)
                 }
-                pending = self.count_pending_analysis_rows(authorized_tenant)
+                pending = (
+                    fit_definition.get("selector") != "trace-manifest-v1"
+                    and self.count_pending_analysis_rows(authorized_tenant)
+                )
             finally:
                 self._cluster_snapshot_connection.reset(token)
             if (
-                pending
+                manifest_changed
+                or pending
                 or len(rows) > config.get("max_fit_candidates", 50_000)
                 or len(candidate_ids) != len(rows)
                 or cluster_candidate_digest(candidate_ids) != expected_candidate_digest

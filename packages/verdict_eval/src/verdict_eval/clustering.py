@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
@@ -171,6 +172,32 @@ class FrozenMiniLMEmbedder:
                 pooled = self._torch.nn.functional.normalize(pooled,p=2,dim=1)
                 rows.append(pooled[0].cpu().numpy().astype(np.float32,copy=False))
         return np.asarray(rows,dtype=np.float32).reshape((-1,self.dim))
+
+
+def resolve_frozen_minilm_path(model_path: str | Path | None = None) -> Path:
+    """Resolve the pinned local MiniLM snapshot, downloading that revision if absent."""
+    if model_path is not None:
+        return Path(model_path).expanduser().resolve(strict=True)
+    relative = Path(
+        "hub/models--sentence-transformers--all-MiniLM-L6-v2/snapshots/"
+        + FrozenMiniLMEmbedder.model_revision
+    )
+    cache_roots = [
+        Path(os.environ["HF_HOME"]) if os.environ.get("HF_HOME") else None,
+        Path.home() / ".cache" / "huggingface",
+    ]
+    for root in cache_roots:
+        if root is not None and (root / relative).is_dir():
+            return (root / relative).resolve(strict=True)
+    try:
+        from huggingface_hub import snapshot_download
+    except ImportError as exc:
+        raise ImportError("semantic clustering requires the semantic extra") from exc
+    downloaded = snapshot_download(
+        repo_id=FrozenMiniLMEmbedder.model_name,
+        revision=FrozenMiniLMEmbedder.model_revision,
+    )
+    return Path(downloaded).resolve(strict=True)
 
 
 class DeterministicHashEmbedder:

@@ -178,6 +178,8 @@ def analyze_traces(
     traces: Iterable[Trace],
     *,
     judgments: Iterable[Judgment] = (),
+    assignments: dict[str, str] | None = None,
+    registry_references: dict[str | None, str] | None = None,
     effect_threshold: float = 0.147,
     p_threshold: float = 0.05,
 ) -> tuple[ScopeReport, ...]:
@@ -187,6 +189,8 @@ def analyze_traces(
         for bundle in build_bootstrap_bundles(
             traces,
             judgments=judgments,
+            assignments=assignments,
+            registry_references=registry_references,
             effect_threshold=effect_threshold,
             p_threshold=p_threshold,
         )
@@ -197,6 +201,8 @@ def build_bootstrap_bundles(
     traces: Iterable[Trace],
     *,
     judgments: Iterable[Judgment] = (),
+    assignments: dict[str, str] | None = None,
+    registry_references: dict[str | None, str] | None = None,
     effect_threshold: float = 0.147,
     p_threshold: float = 0.05,
 ) -> tuple[BootstrapBundle, ...]:
@@ -209,7 +215,14 @@ def build_bootstrap_bundles(
             continue
         scopes[scope_for_trace(trace)].append(trace)
     bundles = [
-        _analyze_scope(scope, rows, effect_threshold=effect_threshold, p_threshold=p_threshold)
+        _analyze_scope(
+            scope,
+            rows,
+            effect_threshold=effect_threshold,
+            p_threshold=p_threshold,
+            assignments=assignments,
+            registry_json=(registry_references or {}).get(scope.tenant_id),
+        )
         for scope, rows in sorted(
             scopes.items(),
             key=lambda item: (
@@ -249,6 +262,8 @@ def build_bootstrap_bundles(
                     effect_threshold=effect_threshold,
                     p_threshold=p_threshold,
                     quality_scores=quality_scores,
+                    assignments=assignments,
+                    registry_json=(registry_references or {}).get(scope.tenant_id),
                 )
             )
     return tuple(bundles)
@@ -364,6 +379,8 @@ def _analyze_scope(
     effect_threshold: float,
     p_threshold: float,
     quality_scores: dict[str, dict[str, float]] | None = None,
+    assignments: dict[str, str] | None = None,
+    registry_json: str | None = None,
 ) -> BootstrapBundle:
     plan = plan_history(traces)
     if not plan.baseline or not plan.current:
@@ -375,24 +392,37 @@ def _analyze_scope(
             quality_scores,
         )
 
-    assignments, registry_json = _cluster_assignments(plan)
+    if assignments is None:
+        resolved_assignments, resolved_registry_json = _cluster_assignments(plan)
+    else:
+        trace_ids = {
+            trace.trace_id
+            for unit in (*plan.baseline, *plan.current)
+            for trace in unit.traces
+        }
+        resolved_assignments = {
+            trace_id: cluster_id
+            for trace_id, cluster_id in assignments.items()
+            if trace_id in trace_ids
+        }
+        resolved_registry_json = registry_json or ""
     results, overall = compare_cohorts(
         plan.baseline,
         plan.current,
-        assignments,
+        resolved_assignments,
         effect_threshold=effect_threshold,
         p_threshold=p_threshold,
         quality_scores=quality_scores,
     )
-    new_intent = _new_intent_result(plan, assignments)
+    new_intent = _new_intent_result(plan, resolved_assignments)
     if new_intent is not None:
         results = (*results, new_intent)
         overall = AnalysisStatus.DRIFT_DETECTED
     return BootstrapBundle(
         _report(scope, plan, overall, results),
         plan,
-        assignments,
-        registry_json,
+        resolved_assignments,
+        resolved_registry_json,
         quality_scores,
     )
 
@@ -598,7 +628,7 @@ def _metric_values(
         by_cluster: dict[str, list[Trace]] = defaultdict(list)
         for trace in unit.traces:
             cluster_id = assignments.get(trace.trace_id)
-            if cluster_id:
+            if cluster_id and cluster_id != "not_evaluable":
                 by_cluster[cluster_id].append(trace)
         for cluster_id, traces in by_cluster.items():
             metrics = (

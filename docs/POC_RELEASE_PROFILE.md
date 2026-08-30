@@ -51,8 +51,15 @@ telemetry importer and uses the pseudonymous source session as the independent
 count-cohort unit. It explicitly transfers prompt/final-response content into
 the local store, so use only approved histories and protect the database.
 Thinking, tool arguments/results, child sessions, and arbitrary source
-envelopes are omitted. This profile supports structural drift only; it does not
-establish task success or execution honesty and makes no paid judge call.
+envelopes are omitted. By default this profile supports structural and
+new-intent drift and makes no paid judge call. Real response-quality PASS/FAIL
+is opt-in with `--judge-provider anthropic --judge-budget-usd <ceiling>` and the
+matching key. The runner preflights the complete batch before its first call,
+accounts returned token usage, and resumes only completed judgments. Provider
+acceptance followed by a connection failure can leave billing ambiguous. It
+still does not establish tool
+execution, deployment success, or execution honesty because local history
+stores only the user prompt and final visible response for each root turn.
 
 ## 3. Configure the POC safely
 

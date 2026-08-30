@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta, timezone
 
+import numpy as np
 from verdict.schema import (
     DimensionScore,
     DriftDirection,
@@ -18,6 +19,16 @@ from verdict_eval.count_monitor import AnalysisStatus, analyze_traces, plan_hist
 from verdict_eval.monitoring import create_series_from_history
 
 NOW = datetime(2026, 8, 29, tzinfo=timezone.utc)
+
+
+class _SemanticEmbedder:
+    dim = 2
+    model_name = "test-semantic"
+    model_revision = "v1"
+    model_file_sha256 = "test"
+
+    def embed(self, texts: list[str]) -> np.ndarray:
+        return np.asarray([[1.0, 0.0] for _ in texts], dtype=np.float64)
 
 
 def _trace(
@@ -155,6 +166,53 @@ def test_bootstrap_detects_old_count_cohort_drift_with_fewer_than_thirty_session
     assert sliced["scopes"][0]["current_units"] == 6
 
 
+def test_monitor_cli_semantic_bootstrap_uses_versioned_registry(
+    tmp_path, capsys, monkeypatch
+) -> None:
+    import verdict_eval.clustering as clustering
+
+    db = tmp_path / "semantic.db"
+    storage = SQLiteStorage(str(db))
+    try:
+        for index in range(8):
+            trace = _trace(
+                index,
+                session=f"session-{index}",
+                when=NOW + timedelta(hours=index),
+                response="useful response",
+            )
+            trace.raw_messages = [{"role": "user", "content": trace.prompt_redacted}]
+            storage.insert_trace(trace)
+    finally:
+        storage.close()
+    monkeypatch.setattr(clustering, "FrozenMiniLMEmbedder", lambda _path: _SemanticEmbedder())
+
+    assert (
+        main(
+            [
+                "--storage",
+                f"sqlite:///{db}",
+                "--semantic-model-path",
+                str(tmp_path),
+                "bootstrap",
+                "--activate",
+                "--json",
+            ]
+        )
+        == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["active_series_ids"]
+    storage = SQLiteStorage(str(db))
+    try:
+        pointer = storage.get_active_cluster_registry("__verdict_local__")
+        [series] = storage.list_monitor_series()
+    finally:
+        storage.close()
+    assert pointer.version_id is not None
+    assert "cluster-registry-reference-v1" in series.registry_json
+
+
 def test_quality_cohort_uses_completed_judgments_without_pooling_evaluators() -> None:
     traces: list[Trace] = []
     judgments: list[Judgment] = []
@@ -243,6 +301,24 @@ def test_constant_metrics_are_descriptive_but_not_counted_as_tested_hypotheses()
     assert report.status is AnalysisStatus.NOT_EVALUABLE
     assert report.results
     assert all(not result.tested for result in report.results)
+
+
+def test_semantically_ineligible_units_are_not_compared_as_an_intent_cluster() -> None:
+    traces = [
+        _trace(
+            index,
+            session=f"session-{index}",
+            when=NOW + timedelta(hours=index),
+            response="same response",
+        )
+        for index in range(8)
+    ]
+    assignments = {trace.trace_id: "not_evaluable" for trace in traces}
+
+    [report] = analyze_traces(traces, assignments=assignments)
+
+    assert report.status is AnalysisStatus.NOT_EVALUABLE
+    assert report.results == ()
 
 
 def test_historical_new_intent_traffic_is_visible_instead_of_silently_dropped() -> None:

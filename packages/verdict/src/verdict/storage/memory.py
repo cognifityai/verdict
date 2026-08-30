@@ -815,22 +815,47 @@ class InMemoryStorage:
             if not validations or validations[-1].action != "validated":
                 raise ValueError("cluster registry version is not validated")
             clusters = self.list_cluster_registry_clusters(authorized_tenant, version_id)
-            config = json.loads(version.fit_definition_json).get("config", {})
-            rows = self.list_cluster_trace_candidates(
-                authorized_tenant,
-                datetime_to_utc_us(version.cutoff - timedelta(days=version.lookback_days)),
-                datetime_to_utc_us(version.cutoff),
-                target_workload=config.get("target_workload"),
-                limit=config.get("max_fit_candidates", 50_000) + 1,
-            )
-            candidate_ids = [row.trace_id for row in rows if row.trace_id is not None]
+            fit_definition = json.loads(version.fit_definition_json)
+            config = fit_definition.get("config", {})
+            if fit_definition.get("selector") == "trace-manifest-v1":
+                candidate_ids = [
+                    trace_id
+                    for (tenant, candidate_version, trace_id), assignment in (
+                        self._trace_cluster_assignments.items()
+                    )
+                    if tenant == authorized_tenant
+                    and candidate_version == version_id
+                    and assignment.origin == "fit"
+                ]
+                rows = candidate_ids
+                manifest = fit_definition.get("manifest", {})
+                manifest_changed = (
+                    len(candidate_ids) != manifest.get("candidate_count")
+                    or cluster_candidate_digest(candidate_ids)
+                    != manifest.get("candidate_digest")
+                    or any(trace_id not in self._traces for trace_id in candidate_ids)
+                )
+            else:
+                rows = self.list_cluster_trace_candidates(
+                    authorized_tenant,
+                    datetime_to_utc_us(version.cutoff - timedelta(days=version.lookback_days)),
+                    datetime_to_utc_us(version.cutoff),
+                    target_workload=config.get("target_workload"),
+                    limit=config.get("max_fit_candidates", 50_000) + 1,
+                )
+                candidate_ids = [row.trace_id for row in rows if row.trace_id is not None]
+                manifest_changed = False
             assigned_ids = {
                 trace_id
                 for tenant, candidate_version, trace_id in self._trace_cluster_assignments
                 if tenant == authorized_tenant and candidate_version == version_id
             }
             if (
-                self.count_pending_analysis_rows(authorized_tenant)
+                manifest_changed
+                or (
+                    fit_definition.get("selector") != "trace-manifest-v1"
+                    and self.count_pending_analysis_rows(authorized_tenant)
+                )
                 or len(rows) > config.get("max_fit_candidates", 50_000)
                 or len(candidate_ids) != len(rows)
                 or cluster_candidate_digest(candidate_ids) != expected_candidate_digest

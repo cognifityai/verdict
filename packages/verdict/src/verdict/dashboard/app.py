@@ -183,9 +183,14 @@ def _evaluator_identity(row: Mapping[str, Any]) -> dict:
     )
     encoded = json.dumps(canonical, sort_keys=True, separators=(",", ":"))
     identity_id = hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:20]
-    model_label = "+".join(str(model) for model in canonical["models"]) or "unknown judge"
+    structural = fingerprint == "deterministic-structural-count-v1"
+    model_label = (
+        "Structural count monitor"
+        if structural
+        else "+".join(str(model) for model in canonical["models"]) or "unknown judge"
+    )
     rubric_label = f"{canonical['rubricName']} v{canonical['rubricVersion']}"
-    identity_suffix = (
+    identity_suffix = " · key-free metrics" if structural else (
         f" · fp {fingerprint[:8]}"
         if complete
         else " · historical identity incomplete"
@@ -936,10 +941,14 @@ def _build(
     )
 
     selected_id = evaluator_id
+    complete_identities = [identity for identity in all_available_identities if identity["complete"]]
     if selected_id is not None and selected_id not in identity_by_id:
         evaluation_status = "invalid_selection"
         selected_id = None
     elif selected_id is not None:
+        evaluation_status = "selected"
+    elif len(complete_identities) == 1:
+        selected_id = complete_identities[0]["id"]
         evaluation_status = "selected"
     elif len(all_available_identities) == 1:
         selected_id = all_available_identities[0]["id"]
@@ -1700,7 +1709,8 @@ def create_app(
                     request.state,
                     "verdict_registry_tenant",
                     None,
-                ),
+                )
+                or "__verdict_local__",
                 trace_offset=trace_offset,
             )
         except DashboardBundleLimitError:

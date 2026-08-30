@@ -218,6 +218,30 @@ def _provisional_id(kind: str, value: bytes) -> str:
     return f"{kind}:{hashlib.sha256(value).hexdigest()[:20]}"
 
 
+def _semantic_display_name(text: str | None, fallback_index: int) -> str:
+    """Return a bounded redacted representative title for a semantic cluster."""
+    cleaned = "".join(
+        character
+        for character in unicodedata.normalize("NFC", text or "")
+        if not unicodedata.category(character).startswith("C")
+    )
+    cleaned = re.sub(r"<[^>]{1,120}>", " ", cleaned)
+    cleaned = re.sub(r"[`#*_]+", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" -:;,.\t\r\n")
+    if not cleaned:
+        return f"Semantic cluster {fallback_index + 1}"
+    words = cleaned.split()
+    title = ""
+    for word in words:
+        candidate = f"{title} {word}".strip()
+        if len(candidate) > 72 or len(candidate.encode("utf-8")) > 220:
+            break
+        title = candidate
+        if len(title) >= 48:
+            break
+    return title or f"Semantic cluster {fallback_index + 1}"
+
+
 class ExplicitClusteringStrategy:
     name = "explicit"
 
@@ -346,7 +370,7 @@ class SemanticClusteringStrategy:
         labels: np.ndarray,
         config: FitConfig,
     ) -> tuple[ClusterDefinition, ...]:
-        provisional: list[tuple[int, np.ndarray, float]] = []
+        provisional: list[tuple[int, np.ndarray, float, str | None]] = []
         for label in sorted(set(int(value) for value in labels)):
             indices = np.flatnonzero(labels == label)
             centroid = _unit(np.mean(vectors[indices], axis=0))
@@ -360,17 +384,22 @@ class SemanticClusteringStrategy:
                 ),
             )
             first = int(indices[0])
-            provisional.append((first, centroid, radius))
+            representative = int(indices[int(np.argmin(distances))])
+            provisional.append(
+                (first, centroid, radius, inputs[representative].semantic_text)
+            )
         provisional.sort(key=lambda row: (row[0], row[1].tobytes()))
         return tuple(
             ClusterDefinition(
                 f"semantic:{index:04d}",
                 "semantic",
-                f"Semantic cluster {index + 1}",
+                _semantic_display_name(representative_text, index),
                 centroid=tuple(float(value) for value in centroid),
                 radius=radius,
             )
-            for index, (_first_rank, centroid, radius) in enumerate(provisional)
+            for index, (_first_rank, centroid, radius, representative_text) in enumerate(
+                provisional
+            )
         )
 
     @staticmethod

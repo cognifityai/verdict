@@ -243,6 +243,18 @@ def test_semantic_strategy_has_defined_k1_fit_for_five_rows() -> None:
     assert result.clusters[0].radius >= max(item.distance or 0.0 for item in result.assignments)
 
 
+def test_semantic_display_name_removes_control_characters_and_stays_bounded() -> None:
+    title = strategy_module._semantic_display_name(
+        "Repair\x00 the\u200b parser " + ("safely " * 30),
+        0,
+    )
+
+    assert "\x00" not in title
+    assert "\u200b" not in title
+    assert len(title) <= 72
+    assert len(title.encode("utf-8")) <= 220
+
+
 def test_cosine_distance_roundoff_is_clamped_to_the_persisted_domain() -> None:
     distances = strategy_module._cosine_distances(
         np.asarray([1.0 + np.finfo(float).eps, -1.0 - np.finfo(float).eps])

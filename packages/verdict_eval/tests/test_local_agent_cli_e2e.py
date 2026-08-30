@@ -4,11 +4,23 @@ import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import numpy as np
 from fastapi.testclient import TestClient
 from verdict.dashboard import create_app
+from verdict.schema import DimensionScore, Judgment, Verdict
 from verdict.storage.sqlite import SQLiteStorage
 from verdict.telemetry.local_cli import main as capture_main
 from verdict_eval.cli.local import main as local_main
+
+
+class _SemanticEmbedder:
+    dim = 2
+    model_name = "test-semantic"
+    model_revision = "v1"
+    model_file_sha256 = "test"
+
+    def embed(self, texts: list[str]) -> np.ndarray:
+        return np.asarray([[1.0, 0.0] for _ in texts], dtype=np.float64)
 
 
 def _write_jsonl(path: Path, rows: list[dict[str, object]]) -> bytes:
@@ -153,8 +165,12 @@ def test_standalone_capture_then_verdict_server_reads_canonical_traces(
 
 
 def test_one_local_command_imports_detects_drift_persists_and_retries_idempotently(
-    tmp_path: Path, capsys
+    tmp_path: Path, capsys, monkeypatch
 ) -> None:
+    import verdict_eval.clustering as clustering
+
+    monkeypatch.setattr(clustering, "resolve_frozen_minilm_path", lambda _path: tmp_path)
+    monkeypatch.setattr(clustering, "FrozenMiniLMEmbedder", lambda _path: _SemanticEmbedder())
     codex_root, claude_root, _ = _histories(tmp_path)
     database = tmp_path / "verdict.db"
     arguments = [
@@ -175,11 +191,41 @@ def test_one_local_command_imports_detects_drift_persists_and_retries_idempotent
     [series_id] = first["analysis"]["active_series_ids"]
     assert first["analysis"]["scheduled"]["status"] == "no_op"
 
+    storage = SQLiteStorage(str(database))
+    traces = sorted(storage.list_traces(limit=100), key=lambda trace: trace.started_at)
+    for index, trace in enumerate(traces):
+        storage.insert_judgment(
+            Judgment(
+                trace_id=trace.trace_id,
+                evaluator_provider="test",
+                evaluator_config={"temperature": 0},
+                evaluator_fingerprint="test-quality-v1",
+                expected_dimensions=["quality"],
+                judge_models=["test-judge"],
+                dimensions=[
+                    DimensionScore(
+                        name="quality",
+                        verdict=Verdict.PASS if index < 8 else Verdict.FAIL,
+                    )
+                ],
+            )
+        )
+    storage.close()
+
     assert local_main(arguments) == 0
     second = json.loads(capsys.readouterr().out)
-    assert second["analysis"]["active_series_ids"] == [series_id]
+    assert series_id in second["analysis"]["active_series_ids"]
+    assert len(second["analysis"]["active_series_ids"]) == 2
     assert second["analysis"]["scheduled"]["status"] == "no_op"
 
-    dashboard = TestClient(create_app(storage=f"sqlite:///{database}")).get("/api/data").json()
+    client = TestClient(create_app(storage=f"sqlite:///{database}"))
+    dashboard = client.get("/api/data").json()
+    registry = client.get("/api/registry").json()
     assert dashboard["meta"]["totalTraces"] == 16
     assert dashboard["driftRun"]["signalCount"] > 0
+    assert dashboard["evaluation"]["selectedIdentity"]["complete"] is True
+    assert dashboard["scoreCoverage"]["pass"] == 8
+    assert dashboard["scoreCoverage"]["fail"] == 8
+    assert dashboard["clusters"]
+    assert registry["tenant"] == "__verdict_local__"
+    assert registry["clusters"]

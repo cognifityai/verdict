@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 from datetime import datetime, timezone
+from pathlib import Path
 
 from verdict_eval.count_monitor import analyze_matched, analyze_traces
 from verdict_eval.monitoring import (
@@ -25,6 +26,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Verdict SQLite path/URL or PostgreSQL URL.",
     )
     parser.add_argument("--limit", type=int, default=100_000, help="Maximum traces to analyze.")
+    parser.add_argument(
+        "--semantic-model-path",
+        type=Path,
+        help="Use the pinned local MiniLM model and immutable semantic registry.",
+    )
     commands = parser.add_subparsers(dest="command", required=True)
     bootstrap = commands.add_parser(
         "bootstrap", help="Compare equal older/newer historical count cohorts."
@@ -106,11 +112,56 @@ def main(argv: list[str] | None = None) -> int:
             and (through is None or trace.started_at.astimezone(timezone.utc) < through)
         ]
 
+    semantic = None
+    if args.semantic_model_path and args.command in {"bootstrap", "run", "refit"}:
+        if args.command == "refit":
+            storage.close()
+            print("ERROR: semantic refit requires a guided re-bootstrap and is not yet available")
+            return 2
+        if args.command == "bootstrap" and not args.activate:
+            storage.close()
+            print("ERROR: semantic bootstrap requires --activate")
+            return 2
+        try:
+            from verdict_eval.clustering import FrozenMiniLMEmbedder
+            from verdict_eval.clustering_strategies import FitConfig
+            from verdict_eval.semantic_monitoring import (
+                assign_active_semantic,
+                fit_semantic_bootstrap,
+                has_active_semantic_registry,
+            )
+
+            embedder = FrozenMiniLMEmbedder(args.semantic_model_path)
+            semantic = (
+                assign_active_semantic(storage, traces, embedder=embedder)
+                if args.command == "run" or has_active_semantic_registry(storage, traces)
+                else fit_semantic_bootstrap(
+                    storage,
+                    traces,
+                    embedder=embedder,
+                    actor="verdict-monitor",
+                    config=FitConfig(
+                        strategy="semantic",
+                        min_cluster_size=2,
+                        max_semantic_clusters=50,
+                    ),
+                )
+            )
+        except (ImportError, OSError, ValueError):
+            storage.close()
+            print("ERROR: semantic registry preparation failed")
+            return 2
+
     if args.command == "run":
         payload = {
             "schema": "verdict-count-monitor-v1",
             "mode": "run",
-            **run_scheduled(storage, traces, judgments=judgments),
+            **run_scheduled(
+                storage,
+                traces,
+                judgments=judgments,
+                assignments=semantic.assignments if semantic else None,
+            ),
         }
         storage.close()
         return _emit(args, payload)
@@ -195,7 +246,12 @@ def main(argv: list[str] | None = None) -> int:
         payload["persisted_run_id"] = run.run_id if run else None
         reports = ()
     else:
-        reports = analyze_traces(traces, judgments=judgments)
+        reports = analyze_traces(
+            traces,
+            judgments=judgments,
+            assignments=semantic.assignments if semantic else None,
+            registry_references=semantic.registry_references if semantic else None,
+        )
         payload = {
             "schema": "verdict-count-monitor-v1",
             "mode": args.command,
@@ -208,6 +264,8 @@ def main(argv: list[str] | None = None) -> int:
                 target_units=args.target_units,
                 state="active",
                 judgments=judgments,
+                assignments=semantic.assignments if semantic else None,
+                registry_references=semantic.registry_references if semantic else None,
             )
             payload["active_series_id"] = activated[0].series_id if len(activated) == 1 else None
             payload["active_series_ids"] = [series.series_id for series in activated]

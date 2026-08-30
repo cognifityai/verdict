@@ -362,12 +362,12 @@ Standalone and legacy stores keep using each trace's stored `cluster_id`.
 
 Before a drift or judge run exists, Overview, Drift, and Judge show the same live
 global content-bearing trace counts instead of rendering an empty chart as zero
-drift. The displayed default current window is the latest 24 hours; the default
-baseline is the preceding 7 days after its 24-hour lag, with a global minimum of
-30 traces in each. Meeting those totals means only that the global trace minimum
-is met. The pipeline still checks judged-sample sufficiency for every eligible
-cluster and rubric dimension, and actual job flags may use different windows or
-sample floors.
+drift. The legacy `verdict-pipeline` defaults to a latest-24-hour current window
+and a preceding 7-day baseline after a 24-hour lag, with a global minimum of 30
+traces in each. `verdict-local` and `verdict-monitor` instead use equal older and
+newer count cohorts over independent sessions and do not impose that n=30 gate.
+Both paths still report insufficient per-cluster evidence rather than treating
+it as zero drift.
 `No drift analysis has completed yet`, `Completed with no signals`, and
 `Completed with signals` are separate states. A mounted host that supplies the
 same-origin Operations adapter also exposes the action from the empty state.
@@ -418,12 +418,22 @@ verdict-local
 
 The command reads the default `~/.claude/projects` and `~/.codex/sessions`
 trees without modifying them, imports completed root turns, persists an initial
-count-cohort comparison when history permits it, and serves
+count-cohort comparison when history permits it, fits the pinned local MiniLM
+model from one representative per older session, and serves
 `http://127.0.0.1:8765`. Use `--claude-root`, `--codex-root`, `--source`, or
 `--storage` to override discovery. Use `--no-serve --json` for automation.
 The command performs a deterministic full rescan at startup; the dashboard does
 not watch history files. Rerun it after new local turns, or schedule the
 standalone capture and monitor commands below.
+
+The first semantic run downloads the pinned MiniLM revision if it is not
+already cached. No judge call is automatic. Add real response-quality evidence
+only with an explicit budgeted invocation:
+
+```bash
+ANTHROPIC_API_KEY=... verdict-local \
+  --judge-provider anthropic --judge-budget-usd 15
+```
 
 Capture is independently runnable when analysis and serving have separate
 lifecycle owners. Use durable SQLite or PostgreSQL storage; local capture
@@ -431,7 +441,9 @@ rejects `memory://` because the monitor and server must reopen the same data:
 
 ```bash
 verdict-agent-capture --storage sqlite:///./verdict.db
-verdict-monitor --storage sqlite:///./verdict.db bootstrap --activate --json
+verdict-monitor --storage sqlite:///./verdict.db \
+  --semantic-model-path /path/to/pinned-MiniLM-snapshot \
+  bootstrap --activate --json
 verdict-dashboard --storage sqlite:///./verdict.db
 ```
 

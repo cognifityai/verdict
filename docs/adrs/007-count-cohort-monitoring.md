@@ -88,14 +88,19 @@ The corrective contract is:
 - the bootstrap planner resolves and persists cohort membership once, before
   clustering or judging;
 - uninstrumented local history fits the existing frozen MiniLM semantic
-  strategy on the older cohort only; it never falls back silently to hashing;
+  strategy on one chronological representative per older independent session;
+  every turn in that session inherits the representative's assignment, so long
+  sessions cannot dominate either cluster fitting or statistical power; it
+  never falls back silently to hashing;
 - the current cohort is assigned to that frozen definition, and unmatched rows
   remain explicit new-intent/outlier evidence;
 - one complete real evaluator identity is joined to both cohorts for quality
   analysis; fake judgments remain test-only evidence and are never presented
   as a live local result;
 - paid judging performs a token/cost preflight, persists resumable completed
-  judgments, and fails closed before the approved spend ceiling; and
+  judgments, and blocks calls that exceed its conservative pre-call ceiling;
+  provider acceptance followed by transport failure remains billing-ambiguous;
+  and
 - the count monitor, not the legacy calendar pipeline, owns the resulting
   comparison and persisted status.
 
@@ -108,7 +113,7 @@ The corrective contract is:
 | Cluster fit and cohort planning could select different evidence | A timestamp cutoff cannot exactly express whole-session count membership when sessions span the boundary | The immutable bootstrap manifest is the sole membership authority for fit, assignment, judgment and detection | Persisted monitor members and statistical claim | odd/even units, long sessions, timestamp ties, reordered import, late arrivals |
 | Real judging and count detection were separate paths | The real-judge pipeline used calendar windows while the count monitor ignored judgments | One count-cohort path joins complete evaluator identities without changing windows | Drift run, signals and dashboard judgments | PASS/FAIL/UNCLEAR/missing/error, duplicate judgments, multiple evaluator fingerprints, unknown dimensions |
 | Fake judgments remained visible after a local run | All displayed dimensions were synthetic PASS and no real conclusion was possible | Fake provider is test-only unless the UI and run are explicitly labeled synthetic | Trace details, Judge Scores and drift summary | mixed fake/live rows, stale database, rerun, zero completed live judgments |
-| Paid runner had no spend boundary | CLI could start an unbounded sequence of provider calls | Preflight plus a hard approved ceiling precedes every paid call; completed rows are resumable | Provider bill and CLI terminal status | price/model mismatch, retries, partial failure, interruption, usage missing, budget exhausted |
+| Paid runner had no spend boundary | CLI could start an unbounded sequence of provider calls | Full-batch preflight plus a returned-usage guard precedes paid calls; completed rows are resumable and transport ambiguity is disclosed | Provider bill and CLI terminal status | price/model mismatch, retries, partial failure, interruption, usage missing, budget exhausted |
 | Zero/constant hypotheses could masquerade as a successful comparison | Real-history falsification found non-finite p-values and inflated tested counts | Only finite non-constant hypotheses enter correction; zero tested hypotheses is `not_evaluable` | Stored result and dashboard status | NaN/inf, constant columns, empty cluster, sparse cluster, BH family membership |
 
 ### Alternatives considered
@@ -127,7 +132,8 @@ component of the count-bootstrap result.
 
 ## User-flow acceptance contract
 
-1. A clean installed-wheel command imports Claude and Codex fixtures read-only,
+1. A clean installed-wheel command with the pinned model already cached imports
+   Claude and Codex fixtures read-only,
    bootstraps historical cohorts, persists a deterministic result, and serves it
    in the dashboard without network access.
 2. A supported 60--90 day telemetry export imported twice produces the same
@@ -147,3 +153,6 @@ This requires additive persisted analysis state and an upgrade migration. It
 does not change public `Trace`, `Judgment`, `DriftRun`, or `DriftSignal`
 constructor positions. The SDK capture hot path does not import clustering,
 statistics, dashboard, or scheduler dependencies.
+
+The 2026-08-30 correction reuses those already-migrated registry and monitor
+tables and adds no new database migration.

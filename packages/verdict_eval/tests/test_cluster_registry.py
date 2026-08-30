@@ -201,6 +201,111 @@ def test_incremental_semantic_assignment_commits_byte_bounded_prefixes() -> None
     } == {"base", "later-0", "later-1"}
 
 
+@pytest.mark.parametrize("adapter", ["memory", "sqlite"])
+def test_semantic_manifest_fit_uses_only_declared_cohort_and_activates(
+    adapter: str,
+    tmp_path,
+) -> None:
+    storage = (
+        InMemoryStorage()
+        if adapter == "memory"
+        else SQLiteStorage(str(tmp_path / "manifest.db"))
+    )
+    cutoff = datetime(2026, 8, 22, tzinfo=timezone.utc)
+    baseline = [
+        _trace(f"baseline-{index}", cutoff - timedelta(minutes=10 - index), content="billing")
+        for index in range(5)
+    ]
+    excluded = _trace("excluded", cutoff - timedelta(minutes=3), content="shipping")
+    current = _trace("current", cutoff + timedelta(minutes=1), content="billing")
+    for trace in [*baseline, excluded, current]:
+        storage.insert_trace(trace)
+
+    service = ClusterRegistryService(storage, embedder=_SemanticEmbedder())
+    version = service.fit_manifest(
+        "tenant-a",
+        actor="admin",
+        strategy="semantic",
+        traces=baseline,
+        config=FitConfig(strategy="semantic", min_cluster_size=5),
+    )
+    assert service.assign_manifest("tenant-a", version.version_id, traces=[current]) == 1
+    report = service.validate("tenant-a", version.version_id, actor="admin")
+    pointer = service.activate(
+        "tenant-a",
+        version.version_id,
+        expected_generation=0,
+        actor="admin",
+    )
+
+    assert report["passed"] is True
+    assert report["candidate_count"] == 5
+    assert pointer.version_id == version.version_id
+    assignments = storage.list_trace_cluster_assignments("tenant-a", version.version_id)
+    assert {item.trace_id for item in assignments} == {
+        *(trace.trace_id for trace in baseline),
+        "current",
+    }
+    assert "excluded" not in {item.trace_id for item in assignments}
+    definition = json.loads(version.fit_definition_json)
+    assert definition["selector"] == "trace-manifest-v1"
+    assert definition["manifest"]["candidate_count"] == 5
+    assert "trace_ids" not in definition["manifest"]
+    storage.close()
+
+
+@pytest.mark.parametrize("adapter", ["memory", "sqlite"])
+def test_manifest_activation_fails_if_declared_fit_trace_disappears(
+    adapter: str,
+    tmp_path,
+) -> None:
+    storage = (
+        InMemoryStorage()
+        if adapter == "memory"
+        else SQLiteStorage(str(tmp_path / "manifest-delete.db"))
+    )
+    cutoff = datetime(2026, 8, 22, tzinfo=timezone.utc)
+    baseline = [
+        _trace(f"baseline-{index}", cutoff - timedelta(minutes=index + 1), content="billing")
+        for index in range(5)
+    ]
+    for trace in baseline:
+        storage.insert_trace(trace)
+    service = ClusterRegistryService(storage, embedder=_SemanticEmbedder())
+    version = service.fit_manifest(
+        "tenant-a",
+        actor="admin",
+        strategy="semantic",
+        traces=baseline,
+        config=FitConfig(strategy="semantic", min_cluster_size=5),
+    )
+    storage.delete_trace(baseline[0].trace_id)
+
+    with pytest.raises(ValueError, match="coverage changed"):
+        service.activate(
+            "tenant-a",
+            version.version_id,
+            expected_generation=0,
+            actor="admin",
+        )
+    storage.close()
+
+
+def test_manifest_fit_rejects_cross_tenant_trace() -> None:
+    storage = InMemoryStorage()
+    service = ClusterRegistryService(storage, embedder=_SemanticEmbedder())
+    trace = _trace("other", datetime.now(timezone.utc), content="billing")
+    trace.tenant_id = "tenant-b"
+
+    with pytest.raises(ValueError, match="crosses tenant boundaries"):
+        service.fit_manifest(
+            "tenant-a",
+            actor="admin",
+            strategy="semantic",
+            traces=[trace],
+        )
+
+
 def test_cluster_cli_emits_versioned_json_without_model_for_explicit(
     tmp_path,
     capsys,

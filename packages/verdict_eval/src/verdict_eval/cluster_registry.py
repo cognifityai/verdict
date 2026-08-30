@@ -172,7 +172,13 @@ class ClusterRegistryService:
             return HybridClusteringStrategy(embedder)
         raise ValueError("invalid clustering strategy")
 
-    def _definition(self, strategy: str, config: FitConfig) -> tuple[str, str, str]:
+    def _definition(
+        self,
+        strategy: str,
+        config: FitConfig,
+        *,
+        manifest: dict[str, Any] | None = None,
+    ) -> tuple[str, str, str]:
         model = None
         if strategy != "explicit":
             embedder = self._require_embedder()
@@ -190,19 +196,87 @@ class ClusterRegistryService:
                 except PackageNotFoundError:
                     runtime[package] = "missing"
         model_fingerprint = _fingerprint(_json(model)) if model is not None else ""
-        definition = _json(
-            {
-                "schema": "fit-definition-v1",
-                "strategy": strategy,
-                "selector": "latest-user-v1",
-                "algorithm": "ward-best-k-v2",
-                "model": model,
-                "model_fingerprint": model_fingerprint,
-                "runtime": runtime,
-                "config": asdict(config),
-            }
-        )
+        payload: dict[str, Any] = {
+            "schema": "fit-definition-v1",
+            "strategy": strategy,
+            "selector": "trace-manifest-v1" if manifest is not None else "latest-user-v1",
+            "algorithm": "ward-best-k-v2",
+            "model": model,
+            "model_fingerprint": model_fingerprint,
+            "runtime": runtime,
+            "config": asdict(config),
+        }
+        if manifest is not None:
+            payload["manifest"] = manifest
+        definition = _json(payload)
         return definition, _fingerprint(definition), model_fingerprint
+
+    def _manifest_inputs(
+        self,
+        tenant: str,
+        traces: list[Trace],
+        config: FitConfig,
+    ) -> tuple[list[ClusterInput], dict[str, Any]]:
+        """Build bounded semantic inputs from one exact, caller-declared cohort."""
+        if not traces:
+            raise ValueError("fit manifest must not be empty")
+        if len(traces) > config.max_fit_candidates:
+            raise ValueError("fit_candidate_limit")
+        source_tenants = {trace.tenant_id for trace in traces}
+        if len(source_tenants) != 1 or next(iter(source_tenants)) not in {None, tenant}:
+            raise ValueError("fit manifest crosses tenant boundaries")
+        trace_ids = [trace.trace_id for trace in traces]
+        if len(set(trace_ids)) != len(trace_ids):
+            raise ValueError("fit manifest contains duplicate trace IDs")
+        ordered = sorted(traces, key=lambda trace: (self._rank(tenant, trace.trace_id), trace.trace_id))
+        metadata_bytes = 0
+        content_bytes = 0
+        eligible = 0
+        reasons: Counter[str] = Counter()
+        inputs: list[ClusterInput] = []
+        for trace in ordered:
+            if trace.started_at.tzinfo is None:
+                raise ValueError("fit manifest trace has no event-time offset")
+            try:
+                metadata_bytes += len(trace.trace_id.encode("utf-8", "strict")) + len(
+                    _json(trace.tags).encode("utf-8", "strict")
+                )
+                raw_size = len(_json(trace.raw_messages).encode("utf-8", "strict"))
+            except (TypeError, UnicodeError) as exc:
+                raise ValueError("fit candidate metadata is invalid") from exc
+            content_bytes += raw_size
+            if metadata_bytes > config.max_fit_candidate_metadata_bytes:
+                raise ValueError("fit_candidate_limit")
+            if content_bytes > config.max_fit_content_scan_bytes:
+                raise ValueError("fit_content_scan_limit")
+            choice = select_cluster_input(trace)
+            if choice.text is not None:
+                eligible += 1
+                if eligible > config.max_semantic_fit_inputs:
+                    raise ValueError("fit_candidate_limit")
+            else:
+                reasons[choice.reason or "content_not_captured"] += 1
+            inputs.append(
+                ClusterInput(
+                    trace.trace_id,
+                    tenant,
+                    datetime_to_utc_us(trace.started_at),
+                    semantic_text=choice.text,
+                    ineligible_reason=choice.reason,
+                )
+            )
+        return inputs, {
+            "schema": "candidate-summary-v1",
+            "candidate_count": len(ordered),
+            "branches": {
+                "explicit": 0,
+                "semantic": eligible,
+                "not_selected": 0,
+            },
+            "ineligible_count": sum(reasons.values()),
+            "ineligible_reasons": dict(sorted(reasons.items())),
+            "fit_evidence_count": len(inputs),
+        }
 
     @staticmethod
     def _rank(tenant: str, trace_id: str) -> bytes:
@@ -490,20 +564,11 @@ class ClusterRegistryService:
         )
         return replace(result, clusters=clusters, assignments=assignments), new_identities
 
-    def fit(
+    def _fit_state(
         self,
         tenant: str,
-        *,
-        actor: str,
-        strategy: str,
-        cutoff: datetime,
-        config: FitConfig | None = None,
-    ) -> ClusterRegistryVersion:
-        _valid_tenant(tenant)
-        _valid_actor(actor)
-        config = config or FitConfig(strategy=strategy)
-        if config.strategy != strategy:
-            raise ValueError("fit strategy/config mismatch")
+        config: FitConfig,
+    ) -> tuple[ActiveClusterRegistry, list[ClusterIdentity]]:
         pointer = self.storage.get_active_cluster_registry(tenant)
         existing = self.storage.list_cluster_identities(tenant)
         active_counts = {
@@ -517,42 +582,41 @@ class ClusterRegistryService:
             or active_counts["semantic"] > config.max_semantic_identities_per_tenant
         ):
             raise ValueError("identity_limit")
-        with self.storage.cluster_analysis_snapshot() as source:
-            rows = self._candidates(
-                tenant,
-                cutoff - timedelta(days=config.lookback_days),
-                cutoff,
-                config,
-                source=source,
-            )
-            candidate_summary: dict[str, Any] = {}
-            inputs = self._inputs(
-                tenant,
-                rows,
-                strategy,
-                config,
-                evidence_only=True,
-                source=source,
-                candidate_summary=candidate_summary,
-            )
-        definition, definition_fingerprint, model_fingerprint = self._definition(strategy, config)
+        return pointer, existing
+
+    def _persist_fit(
+        self,
+        tenant: str,
+        *,
+        actor: str,
+        strategy: str,
+        cutoff: datetime,
+        config: FitConfig,
+        inputs: list[ClusterInput],
+        candidate_summary: dict[str, Any],
+        candidate_count: int,
+        definition: str,
+        definition_fingerprint: str,
+        model_fingerprint: str,
+        pointer: ActiveClusterRegistry,
+        existing: list[ClusterIdentity],
+    ) -> ClusterRegistryVersion:
         result = self._strategy(strategy).fit(inputs, config)
         result, identities = self._stable_result(
             tenant, result, config, model_fingerprint, existing, actor
         )
-        statuses = {
-            status: sum(item.status.value == status for item in result.assignments)
-            for status in ("assigned", "outlier", "ineligible")
-        }
         preview = _json(
             {
                 "schema": "preview-report-v1",
-                "candidate_count": len(rows),
+                "candidate_count": candidate_count,
                 "fit_assignment_count": len(result.assignments),
                 "cluster_count": len(result.clusters),
                 "explicit_cluster_count": sum(item.kind == "explicit" for item in result.clusters),
                 "semantic_cluster_count": sum(item.kind == "semantic" for item in result.clusters),
-                "statuses": statuses,
+                "statuses": {
+                    status: sum(item.status.value == status for item in result.assignments)
+                    for status in ("assigned", "outlier", "ineligible")
+                },
                 "chosen_k": result.chosen_k,
                 "metrics": result.metrics,
                 "warnings": result.warnings,
@@ -590,6 +654,98 @@ class ClusterRegistryService:
         self.storage.insert_cluster_preview(version, identities, clusters, assignments)
         return version
 
+    def fit(
+        self,
+        tenant: str,
+        *,
+        actor: str,
+        strategy: str,
+        cutoff: datetime,
+        config: FitConfig | None = None,
+    ) -> ClusterRegistryVersion:
+        _valid_tenant(tenant)
+        _valid_actor(actor)
+        config = config or FitConfig(strategy=strategy)
+        if config.strategy != strategy:
+            raise ValueError("fit strategy/config mismatch")
+        pointer, existing = self._fit_state(tenant, config)
+        with self.storage.cluster_analysis_snapshot() as source:
+            rows = self._candidates(
+                tenant,
+                cutoff - timedelta(days=config.lookback_days),
+                cutoff,
+                config,
+                source=source,
+            )
+            candidate_summary: dict[str, Any] = {}
+            inputs = self._inputs(
+                tenant,
+                rows,
+                strategy,
+                config,
+                evidence_only=True,
+                source=source,
+                candidate_summary=candidate_summary,
+            )
+        definition, definition_fingerprint, model_fingerprint = self._definition(strategy, config)
+        return self._persist_fit(
+            tenant,
+            actor=actor,
+            strategy=strategy,
+            cutoff=cutoff,
+            config=config,
+            inputs=inputs,
+            candidate_summary=candidate_summary,
+            candidate_count=len(rows),
+            definition=definition,
+            definition_fingerprint=definition_fingerprint,
+            model_fingerprint=model_fingerprint,
+            pointer=pointer,
+            existing=existing,
+        )
+
+    def fit_manifest(
+        self,
+        tenant: str,
+        *,
+        actor: str,
+        strategy: str,
+        traces: list[Trace],
+        config: FitConfig | None = None,
+    ) -> ClusterRegistryVersion:
+        """Fit an immutable registry from exactly the supplied historical cohort."""
+        _valid_tenant(tenant)
+        _valid_actor(actor)
+        config = config or FitConfig(strategy=strategy)
+        if strategy != "semantic" or config.strategy != strategy:
+            raise ValueError("manifest fit requires the semantic strategy")
+        pointer, existing = self._fit_state(tenant, config)
+
+        inputs, candidate_summary = self._manifest_inputs(tenant, traces, config)
+        candidate_ids = [item.trace_id for item in inputs]
+        manifest = {
+            "candidate_count": len(candidate_ids),
+            "candidate_digest": cluster_candidate_digest(candidate_ids),
+        }
+        definition, definition_fingerprint, model_fingerprint = self._definition(
+            strategy, config, manifest=manifest
+        )
+        return self._persist_fit(
+            tenant,
+            actor=actor,
+            strategy=strategy,
+            cutoff=max(trace.started_at for trace in traces),
+            config=config,
+            inputs=inputs,
+            candidate_summary=candidate_summary,
+            candidate_count=len(candidate_ids),
+            definition=definition,
+            definition_fingerprint=definition_fingerprint,
+            model_fingerprint=model_fingerprint,
+            pointer=pointer,
+            existing=existing,
+        )
+
     @staticmethod
     def _stored_assignment(
         tenant: str,
@@ -614,22 +770,35 @@ class ClusterRegistryService:
             payload = json.loads(version.fit_definition_json)
             canonical = _json(payload)
             expected_fields = set(asdict(FitConfig()))
+            selector = payload.get("selector") if isinstance(payload, dict) else None
+            expected_payload_fields = {
+                "schema",
+                "strategy",
+                "selector",
+                "algorithm",
+                "model",
+                "model_fingerprint",
+                "runtime",
+                "config",
+            }
+            if selector == "trace-manifest-v1":
+                expected_payload_fields.add("manifest")
+            manifest = payload.get("manifest") if isinstance(payload, dict) else None
+            manifest_valid = selector != "trace-manifest-v1" or (
+                isinstance(manifest, dict)
+                and set(manifest) == {"candidate_count", "candidate_digest"}
+                and type(manifest["candidate_count"]) is int
+                and manifest["candidate_count"] > 0
+                and isinstance(manifest["candidate_digest"], str)
+                and re.fullmatch(r"[0-9a-f]{64}", manifest["candidate_digest"]) is not None
+            )
             if (
                 not isinstance(payload, dict)
-                or set(payload)
-                != {
-                    "schema",
-                    "strategy",
-                    "selector",
-                    "algorithm",
-                    "model",
-                    "model_fingerprint",
-                    "runtime",
-                    "config",
-                }
+                or set(payload) != expected_payload_fields
                 or payload["schema"] != "fit-definition-v1"
                 or payload["strategy"] != version.strategy
-                or payload["selector"] != "latest-user-v1"
+                or selector not in {"latest-user-v1", "trace-manifest-v1"}
+                or not manifest_valid
                 or payload["algorithm"] != "ward-best-k-v2"
                 or not isinstance(payload["config"], dict)
                 or set(payload["config"]) != expected_fields
@@ -655,7 +824,7 @@ class ClusterRegistryService:
             )
             for item in self.storage.list_cluster_registry_clusters(tenant, version.version_id)
         )
-        return config, RegistryDefinition(version.strategy, clusters)
+        return config, RegistryDefinition(version.strategy, clusters), payload
 
     def assign(
         self,
@@ -667,8 +836,10 @@ class ClusterRegistryService:
         version = self.storage.get_cluster_registry_version(tenant, version_id)
         if version is None:
             raise ValueError("unknown cluster registry version")
-        config, definition = self._loaded_definition(tenant, version)
-        _, current_fingerprint, _ = self._definition(version.strategy, config)
+        config, definition, payload = self._loaded_definition(tenant, version)
+        _, current_fingerprint, _ = self._definition(
+            version.strategy, config, manifest=payload.get("manifest")
+        )
         if current_fingerprint != version.fit_definition_fingerprint:
             raise ValueError("model_unavailable")
         with self.storage.cluster_analysis_snapshot() as source:
@@ -713,13 +884,48 @@ class ClusterRegistryService:
             self.storage.insert_trace_cluster_assignments(tenant, stored[start : start + 1_000])
         return len(stored)
 
+    def assign_manifest(
+        self,
+        tenant: str,
+        version_id: str,
+        *,
+        traces: list[Trace],
+    ) -> int:
+        """Assign exactly the supplied traces against a frozen manifest-fit registry."""
+        version = self.storage.get_cluster_registry_version(tenant, version_id)
+        if version is None:
+            raise ValueError("unknown cluster registry version")
+        config, definition, payload = self._loaded_definition(tenant, version)
+        if payload["selector"] != "trace-manifest-v1":
+            raise ValueError("cluster registry is not manifest based")
+        _, current_fingerprint, _ = self._definition(
+            version.strategy, config, manifest=payload["manifest"]
+        )
+        if current_fingerprint != version.fit_definition_fingerprint:
+            raise ValueError("model_unavailable")
+        existing = {
+            item.trace_id
+            for item in self.storage.list_trace_cluster_assignments(tenant, version_id)
+        }
+        pending = [trace for trace in traces if trace.trace_id not in existing]
+        if not pending:
+            return 0
+        inputs, _ = self._manifest_inputs(tenant, pending, config)
+        results = self._strategy(version.strategy).assign(definition, inputs)
+        stored = [
+            self._stored_assignment(tenant, version_id, item, "incremental") for item in results
+        ]
+        for start in range(0, len(stored), 1_000):
+            self.storage.insert_trace_cluster_assignments(tenant, stored[start : start + 1_000])
+        return len(stored)
+
     def validate(self, tenant: str, version_id: str, *, actor: str) -> dict[str, Any]:
         _valid_tenant(tenant)
         _valid_actor(actor)
         version = self.storage.get_cluster_registry_version(tenant, version_id)
         if version is None:
             raise ValueError("unknown cluster registry version")
-        config, definition = self._loaded_definition(tenant, version)
+        config, definition, payload = self._loaded_definition(tenant, version)
         assignments = self.storage.list_trace_cluster_assignments(tenant, version_id)
         fit_counts = {cluster.cluster_id: 0 for cluster in definition.clusters}
         for item in assignments:
@@ -745,36 +951,67 @@ class ClusterRegistryService:
                 for cluster in definition.clusters
             )
         )
-        with self.storage.cluster_analysis_snapshot() as source:
-            rows = self._candidates(
-                tenant,
-                version.cutoff - timedelta(days=version.lookback_days),
-                version.cutoff,
-                config,
-                source=source,
+        fit_assignments = [item for item in assignments if item.origin == "fit"]
+        if payload["selector"] == "trace-manifest-v1":
+            candidate_id_rows = [item.trace_id for item in fit_assignments]
+            candidate_ids = set(candidate_id_rows)
+            manifest = payload["manifest"]
+            coverage = (
+                len(candidate_ids) == len(candidate_id_rows) == manifest["candidate_count"]
+                and cluster_candidate_digest(candidate_id_rows) == manifest["candidate_digest"]
             )
-            candidate_summary: dict[str, Any] = {}
-            self._inputs(
-                tenant,
-                rows,
-                version.strategy,
-                config,
-                evidence_only=True,
-                source=source,
-                candidate_summary=candidate_summary,
+            ineligible = [item for item in fit_assignments if item.status == "ineligible"]
+            ineligible_reasons = Counter(item.reason or "content_not_captured" for item in ineligible)
+            candidate_summary = {
+                "schema": "candidate-summary-v1",
+                "candidate_count": len(candidate_id_rows),
+                "branches": {
+                    "explicit": 0,
+                    "semantic": len(candidate_id_rows) - len(ineligible),
+                    "not_selected": 0,
+                },
+                "ineligible_count": len(ineligible),
+                "ineligible_reasons": dict(sorted(ineligible_reasons.items())),
+                "fit_evidence_count": len(candidate_id_rows),
+            }
+            candidate_count = len(candidate_id_rows)
+            candidate_digest = cluster_candidate_digest(candidate_id_rows)
+        else:
+            with self.storage.cluster_analysis_snapshot() as source:
+                rows = self._candidates(
+                    tenant,
+                    version.cutoff - timedelta(days=version.lookback_days),
+                    version.cutoff,
+                    config,
+                    source=source,
+                )
+                candidate_summary = {}
+                self._inputs(
+                    tenant,
+                    rows,
+                    version.strategy,
+                    config,
+                    evidence_only=True,
+                    source=source,
+                    candidate_summary=candidate_summary,
+                )
+            candidate_ids = {row.trace_id for row in rows}
+            assigned_candidate_ids = {
+                item.trace_id for item in assignments if item.trace_id in candidate_ids
+            }
+            coverage = assigned_candidate_ids == candidate_ids
+            candidate_count = len(rows)
+            candidate_digest = cluster_candidate_digest(
+                [row.trace_id for row in rows if row.trace_id is not None]
             )
-        candidate_ids = {row.trace_id for row in rows}
-        assigned_candidate_ids = {
-            item.trace_id for item in assignments if item.trace_id in candidate_ids
-        }
-        coverage = assigned_candidate_ids == candidate_ids
         stored_definition = _json(json.loads(version.fit_definition_json))
-        current_definition, current_fingerprint, _ = self._definition(version.strategy, config)
+        current_definition, current_fingerprint, _ = self._definition(
+            version.strategy, config, manifest=payload.get("manifest")
+        )
         try:
             preview = json.loads(version.preview_report_json)
         except (TypeError, ValueError):
             preview = {}
-        fit_assignments = [item for item in assignments if item.origin == "fit"]
         expected_statuses = {
             status: sum(item.status == status for item in fit_assignments)
             for status in ("assigned", "outlier", "ineligible")
@@ -796,7 +1033,7 @@ class ClusterRegistryService:
                 "candidate_summary",
             }
             and preview.get("schema") == "preview-report-v1"
-            and preview.get("candidate_count") == len(rows)
+            and preview.get("candidate_count") == candidate_count
             and preview.get("fit_assignment_count") == len(fit_assignments)
             and preview.get("cluster_count") == len(definition.clusters)
             and preview.get("explicit_cluster_count") == explicit_count
@@ -827,10 +1064,8 @@ class ClusterRegistryService:
             "fit_counts": fit_counts,
             "coverage": coverage,
             "assignment_count": len(assignments),
-            "candidate_count": len(rows),
-            "candidate_digest": cluster_candidate_digest(
-                [row.trace_id for row in rows if row.trace_id is not None]
-            ),
+            "candidate_count": candidate_count,
+            "candidate_digest": candidate_digest,
             "definition": definition_ok,
             "model": model_ok,
         }

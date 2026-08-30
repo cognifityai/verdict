@@ -2075,18 +2075,37 @@ class SQLiteStorage:
                 ).fetchone()
                 if validation is None or validation["action"] != "validated":
                     raise ValueError("cluster registry version is not validated")
-                config = json.loads(version["fit_definition_json"]).get("config", {})
+                fit_definition = json.loads(version["fit_definition_json"])
+                config = fit_definition.get("config", {})
                 cutoff = _parse_iso(version["cutoff"])
                 if cutoff is None:
                     raise ValueError("cluster registry cutoff is invalid")
-                rows = self.list_cluster_trace_candidates(
-                    authorized_tenant,
-                    datetime_to_utc_us(cutoff - timedelta(days=version["lookback_days"])),
-                    datetime_to_utc_us(cutoff),
-                    target_workload=config.get("target_workload"),
-                    limit=config.get("max_fit_candidates", 50_000) + 1,
-                )
-                candidate_ids = [row.trace_id for row in rows if row.trace_id is not None]
+                if fit_definition.get("selector") == "trace-manifest-v1":
+                    rows = self._conn.execute(
+                        "SELECT a.trace_id,t.trace_id AS stored_trace_id "
+                        "FROM trace_cluster_assignments a "
+                        "LEFT JOIN traces t ON t.trace_id=a.trace_id "
+                        "WHERE a.tenant_id=? AND a.version_id=? AND a.origin='fit'",
+                        (authorized_tenant, version_id),
+                    ).fetchall()
+                    candidate_ids = [row["trace_id"] for row in rows]
+                    manifest = fit_definition.get("manifest", {})
+                    manifest_changed = (
+                        len(candidate_ids) != manifest.get("candidate_count")
+                        or cluster_candidate_digest(candidate_ids)
+                        != manifest.get("candidate_digest")
+                        or any(row["stored_trace_id"] is None for row in rows)
+                    )
+                else:
+                    rows = self.list_cluster_trace_candidates(
+                        authorized_tenant,
+                        datetime_to_utc_us(cutoff - timedelta(days=version["lookback_days"])),
+                        datetime_to_utc_us(cutoff),
+                        target_workload=config.get("target_workload"),
+                        limit=config.get("max_fit_candidates", 50_000) + 1,
+                    )
+                    candidate_ids = [row.trace_id for row in rows if row.trace_id is not None]
+                    manifest_changed = False
                 assigned_ids = {
                     row[0]
                     for row in self._conn.execute(
@@ -2096,7 +2115,11 @@ class SQLiteStorage:
                     ).fetchall()
                 }
                 if (
-                    self.count_pending_analysis_rows(authorized_tenant)
+                    manifest_changed
+                    or (
+                        fit_definition.get("selector") != "trace-manifest-v1"
+                        and self.count_pending_analysis_rows(authorized_tenant)
+                    )
                     or len(rows) > config.get("max_fit_candidates", 50_000)
                     or len(candidate_ids) != len(rows)
                     or cluster_candidate_digest(candidate_ids) != expected_candidate_digest
