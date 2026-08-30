@@ -393,6 +393,52 @@ test("only one same-dimension drift card opens because state is keyed by signal 
   assert.match(textOf(tree), /Billing support/);
 });
 
+test("new-intent coverage signals do not masquerade as statistical tests", async () => {
+  const ui = await loadUiModule();
+  const driftHooks = createHooks();
+  const overviewHooks = createHooks();
+  const data = bundle("evaluator-a", [], [{
+    id: "new-intent-signal",
+    clusterId: "new_intent",
+    clusterLabel: "New intent",
+    dimension: "new_intent_traffic",
+    direction: "change",
+    providerLabel: "cluster New intent (mixed providers)",
+    statName: "novel_intent_count",
+    stat: 15,
+    p: 1,
+    pAdj: 1,
+    cliffsDelta: 0,
+    cohensD: 0,
+    nCur: 15,
+    nBase: 0,
+    layers: ["cluster_coverage"],
+    exampleTraceIds: [],
+    action: "Review the unmatched intents.",
+  }]);
+  data.driftAnalysis.runStatus = "completed_with_signals";
+  data.driftRun = { id: "run-a", signalCount: 1 };
+
+  const driftTree = render(ui.Drift, driftHooks, { data });
+  const driftText = textOf(driftTree).replace(/\s+/g, " ");
+  const overviewTree = render(ui.Overview, overviewHooks, { data });
+  const stats = findAll(driftTree, (node) => node.type?.name === "Stat");
+  const pValue = stats.find((node) => node.props.label === "p-value");
+  const gateCells = findAll(overviewTree, (node) => node.type?.name === "GateCell");
+  const metricCells = findAll(overviewTree, (node) => node.type?.name === "MetricCell");
+
+  assert.match(driftText, /deterministic traffic-coverage detector/i);
+  assert.match(driftText, /15 unmatched current sessions/i);
+  assert.equal(pValue.props.value, "n/a");
+  assert.equal(pValue.props.note, "not applicable");
+  assert.doesNotMatch(driftText, /Mann-Whitney/i);
+  assert.ok(stats.every((node) => node.props.note !== "primary effect-size gate"));
+  assert.equal(gateCells.find((node) => node.props.label === "ADJUSTED P").props.value, "n/a");
+  assert.equal(gateCells.find((node) => node.props.label === "CLIFF'S DELTA").props.value, "n/a");
+  assert.equal(metricCells.find((node) => node.props.label === "Registry diagnostic").props.value, "Separate");
+  assert.equal(metricCells.some((node) => node.props.label === "Cluster readiness"), false);
+});
+
 test("drift chart renders custom dimensions and the runtime regression marker", async () => {
   const ui = await loadUiModule();
   const hooks = createHooks();

@@ -761,6 +761,11 @@ function MetricCell({ label, value, sub, icon: Icon, accent }) {
   );
 }
 
+function isIntentCoverageSignal(signal) {
+  return signal?.statName === "novel_intent_count"
+    || signal?.layers?.includes("cluster_coverage");
+}
+
 function Overview({ data = SEED }) {
   const DATA = data;
   const m = DATA.meta;
@@ -768,17 +773,19 @@ function Overview({ data = SEED }) {
   const healthColor = health.status === "ready" ? C.green : health.status === "fragmented" ? C.red : C.amber;
   const healthLabel = health.status === "ready" ? "Ready" : health.status === "fragmented" ? "Fragmented" : "Needs volume";
   const leadSignal = DATA.driftSignals[0];
-  const leadIsCoverage = leadSignal?.statName === "unclear_rate_increase";
+  const leadIsCoverage = leadSignal?.statName === "unclear_rate_increase"
+    || isIntentCoverageSignal(leadSignal);
+  const leadIsIntentCoverage = isIntentCoverageSignal(leadSignal);
   const leadIsImprovement = leadSignal?.direction === "improvement";
-  const leadColor = leadIsImprovement ? C.green : C.red;
-  const leadBg = leadIsImprovement ? C.greenBg : C.redBg;
+  const leadColor = leadIsIntentCoverage ? C.amber : leadIsImprovement ? C.green : C.red;
+  const leadBg = leadIsIntentCoverage ? C.amberBg : leadIsImprovement ? C.greenBg : C.redBg;
   const analysis = driftAnalysis(DATA);
   const noCompletedRun = analysis.runStatus === "no_completed_run";
   const evaluatorSelectionNeeded = ["selection_required", "invalid_selection"].includes(analysis.runStatus);
   const analysisUnavailable = noCompletedRun || evaluatorSelectionNeeded;
   const completedWithSignals = analysis.runStatus === "completed_with_signals";
   const countCohorts = DATA.driftSignals.some((signal) =>
-    signal.layers?.some((layer) => ["structural", "matched_structural"].includes(layer))
+    signal.layers?.some((layer) => ["structural", "matched_structural", "cluster_coverage"].includes(layer))
   );
   const statusColor = analysisUnavailable ? C.amber : completedWithSignals ? leadColor : C.green;
   const statusBg = analysisUnavailable ? C.amberBg : completedWithSignals ? leadBg : C.greenBg;
@@ -959,6 +966,7 @@ function Drift({ data = SEED, onOpenOperations = null }) {
   const analysis = driftAnalysis(DATA);
   const structuralCohorts = DATA.driftSignals.some((signal) => signal.layers?.includes("structural"));
   const matchedCohorts = DATA.driftSignals.some((signal) => signal.layers?.includes("matched_structural"));
+  const intentCoverageCohorts = DATA.driftSignals.some(isIntentCoverageSignal);
   const evaluatorSelectionNeeded = ["selection_required", "invalid_selection"].includes(analysis.runStatus);
   const seriesColors = [C.accent, C.accent2, C.amber, C.green, C.blue, C.cyan];
   const dimensionSeries = DATA.dimensionOverall.map((dimension, index) => ({
@@ -973,6 +981,8 @@ function Drift({ data = SEED, onOpenOperations = null }) {
           ? "Controlled signals compare the same explicit intent IDs under two model configurations with a paired Wilcoxon test and BH correction."
           : structuralCohorts
           ? "Structural signals compare equal-sized, non-overlapping count cohorts inside frozen intent clusters. They clear both the BH-adjusted p-value and minimum absolute Cliff's δ gates."
+          : intentCoverageCohorts
+          ? "New-intent traffic signals use a deterministic traffic-coverage detector over independent sessions. They are traffic changes, not p-value-based quality regressions."
           : "PASS/FAIL signals clear both the BH-adjusted p-value and minimum absolute Cliff's δ gates. UNCLEAR coverage signals instead use a deterministic 15-point increase and the configured sample floor. Signals come from the latest persisted pipeline run."}
       </div>
       {(analysis.runStatus === "no_completed_run" || evaluatorSelectionNeeded) && (
@@ -1008,31 +1018,32 @@ function Drift({ data = SEED, onOpenOperations = null }) {
       )}
       {DATA.driftSignals.map((s) => {
         const isOpen = open === s.id;
-        const isCoverage = s.statName === "unclear_rate_increase";
+        const isUnclearCoverage = s.statName === "unclear_rate_increase";
+        const isIntentCoverage = isIntentCoverageSignal(s);
         const isMatched = s.layers?.includes("matched_structural");
         const isImprovement = s.direction === "improvement";
-        const signalColor = isImprovement ? C.green : C.red;
-        const signalBg = isImprovement ? C.greenBg : C.redBg;
+        const signalColor = isIntentCoverage ? C.amber : isImprovement ? C.green : C.red;
+        const signalBg = isIntentCoverage ? C.amberBg : isImprovement ? C.greenBg : C.redBg;
         return (
           <Panel key={s.id} className="overflow-hidden">
             <button onClick={() => setOpen(isOpen ? null : s.id)} className="w-full flex items-center gap-4 p-4 text-left">
               <div className="w-10 h-10 flex items-center justify-center shrink-0" style={{ background: signalBg, borderRadius: 3 }}>
-                {isImprovement ? <TrendingUp size={19} style={{ color: signalColor }} /> : <TrendingDown size={19} style={{ color: signalColor }} />}
+                {isIntentCoverage ? <Signal size={19} style={{ color: signalColor }} /> : isImprovement ? <TrendingUp size={19} style={{ color: signalColor }} /> : <TrendingDown size={19} style={{ color: signalColor }} />}
               </div>
               <div className="min-w-0">
                 <div className="flex items-center gap-2 flex-wrap">
                   <span className="font-semibold">{dimensionLabel(s.dimension)}</span>
-                  <Pill color={signalColor} bg={signalBg}>{isCoverage ? "evaluability regression" : s.direction}</Pill>
+                  <Pill color={signalColor} bg={signalBg}>{isUnclearCoverage ? "evaluability regression" : isIntentCoverage ? "traffic change" : s.direction}</Pill>
                   <span className="text-xs" style={{ color: C.sub }}>in {s.clusterLabel || s.clusterId} · on {s.providerLabel}</span>
                 </div>
                 <div className="text-xs mt-0.5" style={{ color: C.sub }}>
-                  {isCoverage ? <>UNCLEAR rate = {coveragePct(s.stat)} · deterministic coverage gate</> : isMatched ? <>Wilcoxon paired · p<sub>adj</sub> = {sci(s.pAdj)} · median paired delta = {statValue(s.stat)}</> : <>{s.statName === "fisher_exact" ? "Fisher's exact" : "Mann-Whitney U"} · p<sub>adj</sub> = {sci(s.pAdj)} · {s.cliffsDelta != null ? <>Cliff&apos;s δ = {s.cliffsDelta} · </> : null}Cohen&apos;s d = {statValue(s.cohensD)}</>}
+                  {isUnclearCoverage ? <>UNCLEAR rate = {coveragePct(s.stat)} · deterministic coverage gate</> : isIntentCoverage ? <>{statValue(s.nCur)} unmatched current sessions · deterministic traffic-coverage detector</> : isMatched ? <>Wilcoxon paired · p<sub>adj</sub> = {sci(s.pAdj)} · median paired delta = {statValue(s.stat)}</> : <>{s.statName === "fisher_exact" ? "Fisher's exact" : "Mann-Whitney U"} · p<sub>adj</sub> = {sci(s.pAdj)} · {s.cliffsDelta != null ? <>Cliff&apos;s δ = {s.cliffsDelta} · </> : null}Cohen&apos;s d = {statValue(s.cohensD)}</>}
                 </div>
               </div>
               <div className="ml-auto flex items-center gap-3">
                 <div className="text-right">
-                  <div className="font-semibold" style={{ color: signalColor, fontSize: 18 }}>{isCoverage ? coveragePct(s.stat) : isMatched ? statValue(s.stat) : statValue(s.cliffsDelta ?? s.cohensD)}</div>
-                  <div className="text-xs" style={{ color: C.faint }}>{isCoverage ? "UNCLEAR rate" : isMatched ? "paired delta" : s.cliffsDelta != null ? "Cliff's δ" : "effect size"}</div>
+                  <div className="font-semibold" style={{ color: signalColor, fontSize: 18 }}>{isUnclearCoverage ? coveragePct(s.stat) : isIntentCoverage ? statValue(s.nCur) : isMatched ? statValue(s.stat) : statValue(s.cliffsDelta ?? s.cohensD)}</div>
+                  <div className="text-xs" style={{ color: C.faint }}>{isUnclearCoverage ? "UNCLEAR rate" : isIntentCoverage ? "unmatched sessions" : isMatched ? "paired delta" : s.cliffsDelta != null ? "Cliff's δ" : "effect size"}</div>
                 </div>
                 <ChevronRight size={18} style={{ color: C.faint, transform: isOpen ? "rotate(90deg)" : "none", transition: "transform .15s" }} />
               </div>
@@ -1040,10 +1051,10 @@ function Drift({ data = SEED, onOpenOperations = null }) {
             {isOpen && (
               <div className="px-4 pb-4 border-t" style={{ borderColor: C.border }}>
                 <div className="grid sm:grid-cols-4 gap-3 mt-4">
-                  <Stat label="Statistic" value={isCoverage ? coveragePct(s.stat) : isMatched ? `Δ = ${statValue(s.stat)}` : s.statName === "fisher_exact" ? `OR = ${statValue(s.stat)}` : `U = ${statValue(s.stat)}`} note={isCoverage ? "current UNCLEAR fraction" : isMatched ? "paired median change" : s.statName === "fisher_exact" ? "Fisher's exact" : "Mann-Whitney"} />
-                  <Stat label="p-value" value={isCoverage ? "n/a" : sci(s.p)} note={isCoverage ? "deterministic threshold" : `adjusted ${sci(s.pAdj)} (BH)`} />
-                  <Stat label={isMatched ? "Design" : "Cliff's δ"} value={isCoverage || isMatched ? "n/a" : statValue(s.cliffsDelta)} note={isCoverage ? "not a PASS/FAIL test" : isMatched ? "matched intent pairs" : "primary effect-size gate"} />
-                  <Stat label="Samples" value={`${statValue(s.nCur)} vs ${statValue(s.nBase)}`} note="current vs baseline" />
+                  <Stat label={isIntentCoverage ? "Current coverage" : "Statistic"} value={isUnclearCoverage ? coveragePct(s.stat) : isIntentCoverage ? statValue(s.nCur) : isMatched ? `Δ = ${statValue(s.stat)}` : s.statName === "fisher_exact" ? `OR = ${statValue(s.stat)}` : `U = ${statValue(s.stat)}`} note={isUnclearCoverage ? "current UNCLEAR fraction" : isIntentCoverage ? "unmatched current sessions" : isMatched ? "paired median change" : s.statName === "fisher_exact" ? "Fisher's exact" : "Mann-Whitney"} />
+                  <Stat label="p-value" value={isUnclearCoverage || isIntentCoverage ? "n/a" : sci(s.p)} note={isUnclearCoverage ? "deterministic threshold" : isIntentCoverage ? "not applicable" : `adjusted ${sci(s.pAdj)} (BH)`} />
+                  <Stat label={isIntentCoverage ? "Detector" : isMatched ? "Design" : "Cliff's δ"} value={isUnclearCoverage || isMatched ? "n/a" : isIntentCoverage ? "coverage" : statValue(s.cliffsDelta)} note={isUnclearCoverage ? "not a PASS/FAIL test" : isIntentCoverage ? "deterministic traffic change" : isMatched ? "matched intent pairs" : "primary effect-size gate"} />
+                  <Stat label={isIntentCoverage ? "Baseline coverage" : "Samples"} value={isIntentCoverage ? statValue(s.nBase) : `${statValue(s.nCur)} vs ${statValue(s.nBase)}`} note={isIntentCoverage ? "unmatched baseline sessions" : "current vs baseline"} />
                 </div>
                 <div className="mt-4 rounded-md p-3 flex items-start gap-2.5" style={{ background: C.panel2, border: `1px solid ${C.border}` }}>
                   <Zap size={15} style={{ color: C.amber, marginTop: 1 }} />

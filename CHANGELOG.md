@@ -39,6 +39,10 @@ the customer POC profile is refined.
   older session can no longer make genuinely newer sessions look late, and one
   session is classified atomically rather than trace by trace. Existing series
   keep their recorded legacy boundary semantics until an explicit refit.
+- The dashboard now presents `new_intent_traffic` as a deterministic,
+  session-count traffic-coverage change. It no longer labels that signal as a
+  Mann-Whitney test, displays placeholder p-values or effect sizes as evidence,
+  or applies the unrelated legacy registry n=30 readiness diagnostic.
 
 ### Removed
 

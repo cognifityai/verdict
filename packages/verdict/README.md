@@ -161,7 +161,10 @@ PASS/FAIL, UNCLEAR, and missing outcomes are not pooled. Constant descriptive
 columns do not count as tested hypotheses. Frozen-registry misses are preserved
 as `new_intent_traffic` instead of being silently dropped. Those completed
 snapshots appear in the same Drift view and do not depend on the dashboard's
-legacy calendar-window availability counts. Count monitoring adds three tables (`monitor_series`,
+legacy calendar-window availability counts. The dashboard labels new-intent
+coverage as a deterministic session-count traffic change, with p-value and
+effect-size fields marked not applicable; it does not present that evidence as
+a quality regression. Count monitoring adds three tables (`monitor_series`,
 `monitor_members`, and `monitor_results`) when the existing store is opened;
 existing traces, judgments, and drift snapshots are preserved.
 

@@ -33,7 +33,9 @@ The first release keeps the model deliberately small:
   tests and do not enter multiplicity correction.
 - Current observations that do not fit the older frozen registry produce a
   separate `new_intent_traffic` coverage signal. They are never dropped or
-  folded into a known-intent quality comparison.
+  folded into a known-intent quality comparison. Dashboard consumers must
+  render this as a deterministic session-count traffic change, not as a
+  p-value/effect-size test or a quality regression.
 - There is no universal 30-sample gate. Results always report counts, effect
   size, uncertainty, and whether inference is evaluable or low-power.
 - A scheduled monitor owns one frozen baseline and one open current cohort per
