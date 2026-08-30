@@ -58,6 +58,57 @@ partial baseline.
 | Two baselines create conflicting authority | One active generation pointer | Alerts/UI | failed candidate, compare-and-swap loss, rollback, old history read |
 | Local history can leak private source data | Adapter persists an allowlist and defaults offline | SQLite/API/browser/logs | malformed/oversized/nested source, secret/path canaries, unknown fields |
 
+## 2026-08-30 local bootstrap correction
+
+The first real local-history run falsified the original local bootstrap wiring.
+The count monitor used lexical hashing, the separately supported registry path
+was invoked with the explicit-key strategy even though uninstrumented Claude
+and Codex history has no intent key, and the paid-judge pipeline still owned a
+different calendar-window comparison.  Those paths cannot be combined as
+evidence for the one-command local claim.
+
+The corrective contract is:
+
+- the bootstrap planner resolves and persists cohort membership once, before
+  clustering or judging;
+- uninstrumented local history fits the existing frozen MiniLM semantic
+  strategy on the older cohort only; it never falls back silently to hashing;
+- the current cohort is assigned to that frozen definition, and unmatched rows
+  remain explicit new-intent/outlier evidence;
+- one complete real evaluator identity is joined to both cohorts for quality
+  analysis; fake judgments remain test-only evidence and are never presented
+  as a live local result;
+- paid judging performs a token/cost preflight, persists resumable completed
+  judgments, and fails closed before the approved spend ceiling; and
+- the count monitor, not the legacy calendar pipeline, owns the resulting
+  comparison and persisted status.
+
+### Corrective defect-class ledger
+
+| Finding | Observed failure | Governing contract | Last affected sink | Adjacent cases and compatibility |
+| --- | --- | --- | --- | --- |
+| Local count bootstrap used `HashingEmbedder` | 356 lexical clusters from 1,036 real turns, including 258 singletons and one catch-all | Local uninstrumented history uses the pinned semantic strategy or stops `not_evaluable` | Registry and dashboard cluster views | empty/tiny fit, paraphrases, dominant cluster, outliers, missing model, no change to SDK capture |
+| Explicit-key strategy was applied to uninstrumented history | Zero fitted clusters because every candidate lacked an intent key | Strategy selection follows evidence: explicit only for a valid explicit-key contract, semantic for local history | Cluster fit/validation output | missing/invalid/unsafe keys, hybrid input, named and tenantless scopes |
+| Cluster fit and cohort planning could select different evidence | A timestamp cutoff cannot exactly express whole-session count membership when sessions span the boundary | The immutable bootstrap manifest is the sole membership authority for fit, assignment, judgment and detection | Persisted monitor members and statistical claim | odd/even units, long sessions, timestamp ties, reordered import, late arrivals |
+| Real judging and count detection were separate paths | The real-judge pipeline used calendar windows while the count monitor ignored judgments | One count-cohort path joins complete evaluator identities without changing windows | Drift run, signals and dashboard judgments | PASS/FAIL/UNCLEAR/missing/error, duplicate judgments, multiple evaluator fingerprints, unknown dimensions |
+| Fake judgments remained visible after a local run | All displayed dimensions were synthetic PASS and no real conclusion was possible | Fake provider is test-only unless the UI and run are explicitly labeled synthetic | Trace details, Judge Scores and drift summary | mixed fake/live rows, stale database, rerun, zero completed live judgments |
+| Paid runner had no spend boundary | CLI could start an unbounded sequence of provider calls | Preflight plus a hard approved ceiling precedes every paid call; completed rows are resumable | Provider bill and CLI terminal status | price/model mismatch, retries, partial failure, interruption, usage missing, budget exhausted |
+| Zero/constant hypotheses could masquerade as a successful comparison | Real-history falsification found non-finite p-values and inflated tested counts | Only finite non-constant hypotheses enter correction; zero tested hypotheses is `not_evaluable` | Stored result and dashboard status | NaN/inf, constant columns, empty cluster, sparse cluster, BH family membership |
+
+### Alternatives considered
+
+1. Add count-window flags to the legacy pipeline. This preserves two owners for
+   membership, cluster assignment, judgment reuse and result persistence, so a
+   later change can make the local and scheduled paths disagree again.
+2. Keep the count monitor as the sole lifecycle owner and inject the existing
+   semantic registry assignments plus complete judgments into its immutable
+   cohort manifest. This reuses the canonical storage and evaluator contracts
+   and removes hashing from the local default.
+
+The second design is selected. It adds no new lifecycle state or database
+table. The legacy calendar pipeline remains a compatibility command, not a
+component of the count-bootstrap result.
+
 ## User-flow acceptance contract
 
 1. A clean installed-wheel command imports Claude and Codex fixtures read-only,
