@@ -131,10 +131,26 @@ def create_series_from_history(
     for bundle in build_bootstrap_bundles(traces, judgments=judgments):
         if not bundle.plan.baseline or not bundle.plan.current:
             continue
-        scope_json = json.dumps(
-            bundle.report.scope.to_dict(), sort_keys=True, separators=(",", ":")
-        )
-        scope_key = hashlib.sha256(scope_json.encode()).hexdigest()
+        scope_payload = {
+            **bundle.report.scope.to_dict(),
+            "boundary_method": "session_first_event_v2",
+        }
+        scope_json = json.dumps(scope_payload, sort_keys=True, separators=(",", ":"))
+        scope_identity = {
+            "tenant_id": bundle.report.scope.tenant_id,
+            "workload": bundle.report.scope.workload,
+            "granularity": bundle.report.scope.granularity,
+        }
+        if bundle.report.scope.evidence_layer == "quality":
+            scope_identity.update(
+                {
+                    "evidence_layer": "quality",
+                    "evaluator_fingerprint": bundle.report.scope.evaluator_fingerprint,
+                }
+            )
+        scope_key = hashlib.sha256(
+            json.dumps(scope_identity, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
         active = storage.get_active_monitor_series(scope_key)
         if state == "active" and active is not None:
             created.append(active)
@@ -150,7 +166,10 @@ def create_series_from_history(
             if state == "candidate" and active
             else _derived_target_units(bundle)
         )
-        boundary = max(all_rows, key=lambda trace: (_event_time(trace), trace.trace_id))
+        boundary = max(
+            (*bundle.plan.baseline, *bundle.plan.current),
+            key=lambda unit: (unit.event_time, unit.unit_id),
+        )
         identity = "|".join(
             [
                 "verdict-monitor-series-v1",
@@ -170,8 +189,8 @@ def create_series_from_history(
             generation=0,
             parent_series_id=active.series_id if active else None,
             registry_json=bundle.registry_json,
-            boundary_time=_event_time(boundary),
-            boundary_trace_id=boundary.trace_id,
+            boundary_time=boundary.event_time,
+            boundary_trace_id=boundary.unit_id,
             target_units=resolved_target,
             late_arrival_count=0,
             created_at=now,
@@ -432,13 +451,28 @@ def _plan_cycle(
 ) -> dict[str, object]:
     existing = storage.list_monitor_members(series.series_id)
     existing_ids = {member.trace_id for member in existing}
+    existing_unit_ids = {member.unit_id for member in existing}
     unseen = [trace for trace in traces if trace.trace_id not in existing_ids]
-    bootstrap_late = [
-        trace
-        for trace in unseen
-        if (_event_time(trace), trace.trace_id)
-        <= (series.boundary_time.astimezone(timezone.utc), series.boundary_trace_id)
-    ]
+    scope_payload = json.loads(series.scope_json)
+    if scope_payload.get("boundary_method") == "session_first_event_v2":
+        unseen_by_unit: dict[str, list[Trace]] = defaultdict(list)
+        for trace in unseen:
+            unseen_by_unit[trace.session_id or trace.trace_id].append(trace)
+        bootstrap_late = [
+            trace
+            for unit_id, rows in unseen_by_unit.items()
+            if unit_id in existing_unit_ids
+            or (min(_event_time(trace) for trace in rows), unit_id)
+            <= (series.boundary_time.astimezone(timezone.utc), series.boundary_trace_id)
+            for trace in rows
+        ]
+    else:
+        bootstrap_late = [
+            trace
+            for trace in unseen
+            if (_event_time(trace), trace.trace_id)
+            <= (series.boundary_time.astimezone(timezone.utc), series.boundary_trace_id)
+        ]
     bootstrap_late_ids = {trace.trace_id for trace in bootstrap_late}
     prospective = [trace for trace in unseen if trace.trace_id not in bootstrap_late_ids]
 
@@ -451,25 +485,36 @@ def _plan_cycle(
     cluster_ids = clusterer.assign([trace.prompt_redacted or "" for trace in prospective])
     results_so_far = storage.list_monitor_results(series.series_id)
     result_keys = {(result.cluster_id, result.bucket_index) for result in results_so_far}
-    closed_watermarks: dict[str, tuple[datetime, str]] = {}
+    closed_unit_events: dict[tuple[str, str], datetime] = {}
     for member in existing:
         if member.role == "current" and (member.cluster_id, member.bucket_index) in result_keys:
-            closed_watermarks[member.cluster_id] = max(
-                closed_watermarks.get(
-                    member.cluster_id, (datetime.min.replace(tzinfo=timezone.utc), "")
-                ),
-                (member.event_time.astimezone(timezone.utc), member.trace_id),
+            key = (member.cluster_id, member.unit_id)
+            closed_unit_events[key] = min(
+                closed_unit_events.get(key, datetime.max.replace(tzinfo=timezone.utc)),
+                member.event_time.astimezone(timezone.utc),
             )
+    closed_watermarks: dict[str, tuple[datetime, str]] = {}
+    for (cluster_id, unit_id), event_time in closed_unit_events.items():
+        closed_watermarks[cluster_id] = max(
+            closed_watermarks.get(
+                cluster_id, (datetime.min.replace(tzinfo=timezone.utc), "")
+            ),
+            (event_time, unit_id),
+        )
 
     late = list(bootstrap_late)
     prospective_by_unit: dict[tuple[str, str], list[Trace]] = defaultdict(list)
     for trace, cluster_id in zip(prospective, cluster_ids, strict=True):
         cluster = cluster_id if cluster_id in baseline_clusters else "new_intent"
+        prospective_by_unit[(cluster, trace.session_id or trace.trace_id)].append(trace)
+    for key, rows in list(prospective_by_unit.items()):
+        cluster, unit_id = key
         watermark = closed_watermarks.get(cluster)
-        if watermark is not None and (_event_time(trace), trace.trace_id) <= watermark:
-            late.append(trace)
-        else:
-            prospective_by_unit[(cluster, trace.session_id or trace.trace_id)].append(trace)
+        if watermark is not None and (
+            min(_event_time(trace) for trace in rows), unit_id
+        ) <= watermark:
+            late.extend(rows)
+            prospective_by_unit.pop(key)
 
     new_members = [
         MonitorMember(

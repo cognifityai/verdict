@@ -34,6 +34,11 @@ the customer POC profile is refined.
   persisted as `excluded`, so the first scheduler run cannot misclassify it as
   a late arrival. Existing monitor-member role constraints migrate in place
   without dropping membership data.
+- Prospective boundaries and closed-cohort watermarks now use the same
+  first-event plus stable-session ordering as cohort planning. A long-running
+  older session can no longer make genuinely newer sessions look late, and one
+  session is classified atomically rather than trace by trace. Existing series
+  keep their recorded legacy boundary semantics until an explicit refit.
 
 ### Removed
 

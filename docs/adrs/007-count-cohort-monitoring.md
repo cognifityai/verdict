@@ -20,6 +20,10 @@ The first release keeps the model deliberately small:
   splits them into equal non-overlapping older and newer cohorts, and excludes
   one middle unit when the count is odd. That unit is persisted with an
   explicit `excluded` role so a restart cannot reinterpret it as late input.
+- Prospective boundaries use that same earliest-event plus stable-unit-ID key,
+  not the latest turn inside an older long-running session. Unseen data is
+  classified as a whole session. Existing persisted series retain their
+  recorded legacy boundary method until explicit refit and activation.
 - Deterministic refusal, response-length, latency, error, token, and tool-count
   metrics can run without a judge or network call. Existing completed
   judge-derived dimensions are added only under one complete evaluator

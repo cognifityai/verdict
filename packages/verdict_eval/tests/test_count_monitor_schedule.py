@@ -248,3 +248,67 @@ def test_excluded_middle_session_is_not_reclassified_as_a_late_arrival(
     finally:
         storage.close()
     assert len({member.unit_id for member in excluded}) == 1
+
+
+def test_prospective_boundary_uses_session_order_not_latest_turn_inside_session(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    db = tmp_path / "overlapping-sessions.db"
+    storage = SQLiteStorage(str(db))
+    try:
+        for trace_id, session_id, when in (
+            ("a-early", "session-a", START),
+            ("a-late", "session-a", START + timedelta(days=100)),
+            ("b", "session-b", START + timedelta(days=1)),
+            ("c", "session-c", START + timedelta(days=2)),
+            ("d", "session-d", START + timedelta(days=3)),
+        ):
+            storage.insert_trace(
+                Trace(
+                    trace_id=trace_id,
+                    started_at=when,
+                    ended_at=when + timedelta(seconds=1),
+                    provider="future-provider",
+                    operation=Operation.CHAT,
+                    request_model="future-model",
+                    response_model="future-model",
+                    prompt_redacted="summarize the incident report",
+                    response_redacted="identical response",
+                    latency_ms=100,
+                    output_tokens=10,
+                    session_id=session_id,
+                    tags={"verdict.workload": "production"},
+                )
+            )
+    finally:
+        storage.close()
+    storage_url = f"sqlite:///{db}"
+
+    assert (
+        main(
+            [
+                "--storage",
+                storage_url,
+                "bootstrap",
+                "--activate",
+                "--target-units",
+                "2",
+                "--json",
+            ]
+        )
+        == 0
+    )
+    _json(capsys)
+    _insert(
+        db,
+        prefix="heldout",
+        start_index=0,
+        count=2,
+        when=START + timedelta(days=4),
+        response="identical response",
+    )
+
+    assert main(["--storage", storage_url, "run", "--json"]) == 0
+    scheduled = _json(capsys)
+    assert scheduled["late_arrivals"] == 0
+    assert scheduled["closed_cohorts"] == 1
