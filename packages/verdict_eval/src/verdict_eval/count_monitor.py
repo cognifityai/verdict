@@ -6,7 +6,7 @@ import hashlib
 from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from enum import Enum
 from statistics import fmean, median
 
@@ -431,7 +431,7 @@ def _report(
 def _event_time(trace: Trace) -> datetime:
     if trace.started_at.tzinfo is None:
         raise ValueError(f"trace {trace.trace_id!r} has no event-time offset")
-    return trace.started_at.astimezone(UTC)
+    return trace.started_at.astimezone(timezone.utc)
 
 
 def _cluster_assignments(plan: HistoryPlan) -> tuple[dict[str, str], str]:

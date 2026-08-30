@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -10,7 +10,7 @@ from verdict.schema import Operation, Trace
 from verdict.storage import SQLiteStorage
 from verdict_eval.cli.monitor import main
 
-START = datetime(2026, 5, 1, tzinfo=UTC)
+START = datetime(2026, 5, 1, tzinfo=timezone.utc)
 
 
 def _insert(

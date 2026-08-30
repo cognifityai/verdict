@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import re
 from collections.abc import Mapping
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from verdict.telemetry.model import ImportContext, MappingResult
@@ -30,7 +30,7 @@ def object_mapping(value: object) -> dict[str, object] | None:
 
 def parse_time(value: object) -> datetime | None:
     parsed = parse_datetime(value)
-    return parsed.astimezone(UTC) if parsed is not None else None
+    return parsed.astimezone(timezone.utc) if parsed is not None else None
 
 
 def safe_agent_text(value: object, *, home: Path | None = None) -> str:

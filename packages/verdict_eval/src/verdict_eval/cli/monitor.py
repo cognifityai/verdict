@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 
 from verdict_eval.count_monitor import analyze_matched, analyze_traces
 from verdict_eval.monitoring import (
@@ -101,8 +101,8 @@ def main(argv: list[str] | None = None) -> int:
         traces = [
             trace
             for trace in traces
-            if (from_time is None or trace.started_at.astimezone(UTC) >= from_time)
-            and (through is None or trace.started_at.astimezone(UTC) < through)
+            if (from_time is None or trace.started_at.astimezone(timezone.utc) >= from_time)
+            and (through is None or trace.started_at.astimezone(timezone.utc) < through)
         ]
 
     if args.command == "run":
@@ -240,7 +240,7 @@ def _parse_time(value: str) -> datetime:
     parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     if parsed.tzinfo is None:
         raise ValueError("timezone required")
-    return parsed.astimezone(UTC)
+    return parsed.astimezone(timezone.utc)
 
 
 if __name__ == "__main__":

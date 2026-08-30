@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import NAMESPACE_URL, uuid5
 
@@ -31,7 +31,7 @@ def test_imported_history_bootstraps_immediately_and_reimport_is_idempotent(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     path = tmp_path / "langfuse.jsonl"
-    start = datetime(2026, 5, 1, tzinfo=UTC)
+    start = datetime(2026, 5, 1, tzinfo=timezone.utc)
     rows = [
         _langfuse_row(index, start + timedelta(days=index), "short useful answer")
         for index in range(8)

@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections import defaultdict
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from uuid import NAMESPACE_URL, uuid5
 
 from verdict.schema import (
@@ -105,7 +105,7 @@ def persist_matched_report(
     run = DriftRun(
         run_id=run_id,
         analysis_time=analysis_time,
-        completed_at=datetime.now(UTC),
+        completed_at=datetime.now(timezone.utc),
         evaluator_fingerprint=evaluator,
         signal_count=len(signals),
     )
@@ -143,7 +143,9 @@ def create_series_from_history(
             trace for unit in (*bundle.plan.baseline, *bundle.plan.current) for trace in unit.traces
         ]
         resolved_target = target_units or (
-            active.target_units if state == "candidate" and active else _derived_target_units(bundle)
+            active.target_units
+            if state == "candidate" and active
+            else _derived_target_units(bundle)
         )
         boundary = max(all_rows, key=lambda trace: (_event_time(trace), trace.trace_id))
         identity = "|".join(
@@ -156,7 +158,7 @@ def create_series_from_history(
             ]
         )
         series_id = uuid5(NAMESPACE_URL, identity).hex
-        now = datetime.now(UTC)
+        now = datetime.now(timezone.utc)
         series = MonitorSeries(
             series_id=series_id,
             scope_key=scope_key,
@@ -207,7 +209,7 @@ def _bootstrap_snapshot(
         DriftRun(
             run_id=run_id,
             analysis_time=analysis_time,
-            completed_at=datetime.now(UTC),
+            completed_at=datetime.now(timezone.utc),
             evaluator_fingerprint=STRUCTURAL_EVALUATOR,
             signal_count=len(signals),
         ),
@@ -252,7 +254,7 @@ def build_series_bootstrap_snapshot(
     run = DriftRun(
         run_id=run_id,
         analysis_time=analysis_time,
-        completed_at=datetime.now(UTC),
+        completed_at=datetime.now(timezone.utc),
         evaluator_fingerprint=STRUCTURAL_EVALUATOR,
         signal_count=len(signals),
     )
@@ -334,7 +336,7 @@ def run_scheduled(storage: MonitorStorage, traces: list[Trace]) -> dict[str, obj
 def monitor_status(storage: MonitorStorage) -> dict[str, object]:
     series = storage.list_monitor_series()
     active = [item.series_id for item in series if item.state == "active"]
-    now = datetime.now(UTC)
+    now = datetime.now(timezone.utc)
     return {
         "active_series_id": active[0] if len(active) == 1 else None,
         "active_series_ids": active,
@@ -346,8 +348,8 @@ def monitor_status(storage: MonitorStorage) -> dict[str, object]:
                 "generation": item.generation,
                 "target_units": item.target_units,
                 "late_arrival_count": item.late_arrival_count,
-                "baseline_age_days": max(0, (now - item.created_at.astimezone(UTC)).days),
-                "refit_recommended": (now - item.created_at.astimezone(UTC)).days >= 90,
+                "baseline_age_days": max(0, (now - item.created_at.astimezone(timezone.utc)).days),
+                "refit_recommended": (now - item.created_at.astimezone(timezone.utc)).days >= 90,
                 "result_count": len(storage.list_monitor_results(item.series_id)),
             }
             for item in series
@@ -386,7 +388,7 @@ def _plan_cycle(
         trace
         for trace in unseen
         if (_event_time(trace), trace.trace_id)
-        <= (series.boundary_time.astimezone(UTC), series.boundary_trace_id)
+        <= (series.boundary_time.astimezone(timezone.utc), series.boundary_trace_id)
     ]
     bootstrap_late_ids = {trace.trace_id for trace in bootstrap_late}
     prospective = [trace for trace in unseen if trace.trace_id not in bootstrap_late_ids]
@@ -404,8 +406,10 @@ def _plan_cycle(
     for member in existing:
         if member.role == "current" and (member.cluster_id, member.bucket_index) in result_keys:
             closed_watermarks[member.cluster_id] = max(
-                closed_watermarks.get(member.cluster_id, (datetime.min.replace(tzinfo=UTC), "")),
-                (member.event_time.astimezone(UTC), member.trace_id),
+                closed_watermarks.get(
+                    member.cluster_id, (datetime.min.replace(tzinfo=timezone.utc), "")
+                ),
+                (member.event_time.astimezone(timezone.utc), member.trace_id),
             )
 
     late = list(bootstrap_late)
@@ -486,7 +490,7 @@ def _plan_cycle(
                 ],
                 trace_by_id,
             )
-            completed_at = datetime.now(UTC)
+            completed_at = datetime.now(timezone.utc)
             run_id = uuid5(
                 NAMESPACE_URL,
                 f"verdict-monitor-run-v1|{series.series_id}|{cluster_id}|{bucket_index}",
@@ -564,7 +568,7 @@ def _plan_cycle(
             )
         else:
             episode = status.value
-        completed_at = datetime.now(UTC)
+        completed_at = datetime.now(timezone.utc)
         run_id = uuid5(
             NAMESPACE_URL,
             f"verdict-monitor-run-v1|{series.series_id}|{cluster_id}|{bucket_index}",
@@ -719,4 +723,4 @@ def _scope_from_json(payload: str) -> ScopeKey:
 def _event_time(trace: Trace) -> datetime:
     if trace.started_at.tzinfo is None:
         raise ValueError(f"trace {trace.trace_id!r} has no event-time offset")
-    return trace.started_at.astimezone(UTC)
+    return trace.started_at.astimezone(timezone.utc)

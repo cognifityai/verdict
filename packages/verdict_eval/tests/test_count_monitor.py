@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from verdict.schema import Operation, Trace
 from verdict.storage import SQLiteStorage
 from verdict_eval.cli.monitor import main
 from verdict_eval.count_monitor import AnalysisStatus, plan_history
 
-NOW = datetime(2026, 8, 29, tzinfo=UTC)
+NOW = datetime(2026, 8, 29, tzinfo=timezone.utc)
 
 
 def _trace(

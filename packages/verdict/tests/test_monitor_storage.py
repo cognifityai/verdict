@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -9,7 +9,7 @@ from verdict.storage import BufferedStorage
 from verdict.storage.memory import InMemoryStorage
 from verdict.storage.sqlite import SQLiteStorage
 
-NOW = datetime(2026, 8, 29, tzinfo=UTC)
+NOW = datetime(2026, 8, 29, tzinfo=timezone.utc)
 
 
 def _series(series_id: str, state: str, *, parent: str | None = None) -> MonitorSeries:

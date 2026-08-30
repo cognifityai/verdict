@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -105,7 +105,7 @@ def _histories(tmp_path: Path) -> tuple[Path, Path, dict[Path, bytes]]:
     codex_root = tmp_path / "codex"
     claude_root = tmp_path / "claude"
     originals: dict[Path, bytes] = {}
-    start = datetime(2026, 5, 1, tzinfo=UTC)
+    start = datetime(2026, 5, 1, tzinfo=timezone.utc)
     for index in range(16):
         writer = _codex_session if index % 2 == 0 else _claude_session
         root = codex_root if index % 2 == 0 else claude_root
