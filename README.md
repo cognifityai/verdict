@@ -17,16 +17,90 @@ A [Cognifity AI](https://cognifity.ai) project. Apache 2.0.
 
 ## What this is
 
-Verdict instruments supported Anthropic, OpenAI, and Google SDK methods with one line (`wrapt` monkey-patching), capturing model, tokens, latency, estimated cost, finish reason, and (opt-in) redacted content. On top of that capture it adds a monitoring stack:
+Verdict imports local Claude Code/Codex histories, normalizes existing telemetry,
+and instruments supported Anthropic, OpenAI, and Google SDK methods. It keeps a
+typed distinction between an agent session/run/turn/event and a genuine provider
+LLM `Trace`; one agent turn is never relabeled as a provider call. Bounded,
+best-effort-redacted content retention is on by default; explicitly set
+`capture_content=False` for metadata-only capture.
+
+The first agent-run analysis pass is deterministic and key-free: it reports
+evidence coverage, source-exposed completion state, model/tool-call counts,
+tokens and latency, observed tool/command failures, and possible repeated-tool
+patterns. Programmatic policies can additionally require event types, prohibit
+named tools, or require JSON responses. Verdict does not infer task success,
+retries, file state, or cost when the source evidence does not establish them.
+On top of that capture Verdict also retains its existing monitoring stack:
 
 - **Structural checks** (no LLM needed): refusal-rate spikes, JSON-validity drops, response-length and latency drift, hedge/apology rate.
 - **Embedding drift** (no API key): MiniLM detects semantic distribution shifts; the built-in hash fallback is lexical only and is labeled as such.
 - **Judge-based quality drift** (needs a provider key — see BYOK below): an LLM "judge" scores each response PASS/FAIL on a rubric; Verdict clusters prompts by intent, samples, and runs non-parametric statistics (Fisher's exact, Cliff's δ, Benjamini–Hochberg) per cluster per dimension over rolling windows, emitting a drift signal only when both the configured significance and effect-size gates clear.
 - **Cross-model comparison** (Bradley–Terry) and a **synthetic regression injector** for verifying the pipeline catches known corruptions.
 
-Verdict is **not a better judge** than the model you point it at — it *uses* that model as a measuring instrument and adds the monitoring system around it (capture → cluster → sample → judge → aggregate over time → detect drift).
+Verdict is **not a better judge** than the model you point it at. Missing
+evidence produces an unavailable/not-evaluable result before any optional judge
+call. Semantic clustering is optional discovery, not a prerequisite for useful
+findings or a default claim about intent.
 
-**Scope (v0, honest):** Verdict measures the **individual LLM-call layer**. Agent-level metrics (tool-call patterns, plan adherence, multi-step task success) are **v1 roadmap, not shipping today** — see [`docs/v1-roadmap.md`](docs/v1-roadmap.md). Do not read v0 as agent-task evaluation.
+**Scope (honest):** typed local-agent evidence supports observable execution
+claims such as tool/command status and loop detection. Semantic correctness,
+groundedness, and task success still require the relevant captured context,
+authoritative outcomes, or a separately validated evaluator.
+
+## Fastest local start
+
+```bash
+python -m pip install cognifity-verdict
+verdict
+```
+
+The `verdict` command binds to loopback, opens the packaged setup UI, and lets
+you approve local Claude Code/Codex directories, import supported telemetry, or
+connect an existing store. Local history capture retains bounded redacted
+content by default so the first analysis is useful. The local setup wizard does
+not offer a metadata-only shortcut; SDK and programmatic capture can still set
+`capture_content=False` when that privacy tradeoff is intentional. Capture and
+historical import remain disabled until the exact paths have been previewed in
+the current server process.
+
+After local capture, Verdict opens **Agent runs** and turns **Setup** into
+**Data sources**. The header reports Agent Runs and genuine/imported LLM Traces
+separately; a successful local capture can therefore show agent evidence while
+the LLM Trace count remains zero. A manual rescan requires fresh in-process path
+approval. If the user explicitly saves a daily schedule, Verdict intentionally
+retains those source paths in the local control store so `verdict-service` can
+rescan them; that durable schedule is configuration, not captured evidence.
+
+The findings-first dashboard exposes persisted dataset-wide evidence health,
+Reliability, Performance, Behavior, ordered run/turn/event exploration,
+evidence-aware judging, review queues, schedules, alerts, and a single Drift
+workspace for cohort design, monitoring, completed signals, and optional
+clusters. Cluster and monitor activation are explicit transitions; previews
+never silently replace active state. A Trace explicitly reports provider
+success/error and `not judged`, `judge error`, `pass`, `fail`, or `unclear` as
+separate facts. No drift conclusion is shown until a comparison is persisted.
+
+The equivalent non-interactive local import is:
+
+```bash
+verdict-import local --storage sqlite:///./verdict.db
+verdict-dashboard --storage sqlite:///./verdict.db
+```
+
+An initial monitor proposal uses exact event-time membership. The count-mode
+default is an older 80% reference and newer 20% current cohort; explicit date
+ranges are also supported. Membership is frozen before metrics are compared,
+and insufficient data is reported as `insufficient`, never as “no drift.” No
+clustering or judge is required. Activating a reviewed preview freezes its
+reference but starts an empty prospective current bucket; the preview itself
+can never become an authoritative alert. Scheduled looks use a summable
+quadratic alpha-spending rule in addition to within-look Benjamini-Hochberg
+correction. After activating one reviewed policy, schedule
+the idempotent one-shot runner with cron or your existing scheduler:
+
+```bash
+verdict-monitor run --storage sqlite:///./verdict.db
+```
 
 ## Runs key-free; add a key for the judge (BYOK)
 
@@ -35,6 +109,7 @@ Verdict never ships with anyone's API key. It reads **your** provider key from t
 | Capability | Needs a provider API key? |
 |---|---|
 | Capture (traces, tokens, latency, estimated cost, errors) | **No** |
+| Local Claude/Codex run, turn, tool, command, and evidence findings | **No** |
 | Import existing telemetry into Verdict | **No** (source APIs need their own credentials) |
 | Structural checks (refusal/JSON/length/latency drift) | **No** |
 | Lexical embedding drift (built-in hash fallback) | **No** |
@@ -210,18 +285,24 @@ verdict.init(
     service_name="my-app",
     storage="sqlite:///./verdict.db",
     buffered_writes=False,
-    capture_content=False,
+    capture_content=True,
 )
 client = Anthropic()
 # Use Anthropic normally; supported calls are captured.
 # Run verdict-pipeline separately for sampling, judging, and drift.
 ```
 
-Open the read-only dashboard for a local SQLite store:
+Open the dashboard for a local SQLite store:
 
 ```bash
 verdict-dashboard --storage sqlite:///./verdict.db
 ```
+
+The Overview and explorer APIs do not mutate trace/judgment history. Setup,
+capture, import, and Monitor actions are explicit write operations; do not
+expose the standalone server beyond loopback without an authenticated host.
+Non-loopback binding is refused unless HTTP credentials and an explicit
+`VERDICT_ALLOWED_HOSTS` allowlist are both configured.
 
 Run the installed analysis pipeline without cloning this repository:
 
@@ -239,14 +320,15 @@ Trace Explorer, cluster pass-rate charts, and drift rows use the assignments and
 stable labels from that tenant's active registry. Standalone and legacy stores
 continue to use the trace's stored `cluster_id`.
 
-Content capture is **off by default** (a PII surface). With
-`verdict.init(capture_content=True)`, Verdict recursively sanitizes supported
+Content capture is **on by default** and is a PII surface. Verdict recursively sanitizes supported
 JSON-compatible message fields, including nested tool inputs/results and OpenAI
 tool arguments, before `Trace` assignment and again at storage. The detector is
-best-effort pattern matching with Luhn card checks and standard-library IP
+best-effort pattern matching with common provider/API credential patterns,
+Luhn card checks, and standard-library IP
 address validation, not a compliance control; names, addresses, many
 international identifiers, and opaque application metadata are not guaranteed
-to be found. IPv6 validation preserves trailing text that is not part of the
+to be found. Set `capture_content=False` when that residual risk is
+unacceptable. IPv6 validation preserves trailing text that is not part of the
 validated address; clock values such as `12:34:56` are not treated as IPv6. Use
 non-sensitive tenant/session/cluster IDs. `sample_rate`
 controls what fraction of supported calls is retained. The `0.1.0a13` POC
@@ -358,7 +440,14 @@ Hexagonal / ports-and-adapters, ≥2 adapters per port (one real + in-memory for
 - **`encrypt` redaction mode** is not implemented (rejected at `init()`);
   redaction uses a linear email scanner plus regex candidates, Luhn card checks,
   and standard-library IP validation. Presidio is not used.
-- **Agent-run / tool-call tracing** is v1, not built. Manual `@trace` spans *are* persisted, but multi-step agent-run stitching is not.
+- **Agent-run evidence is source-bounded.** Local Claude Code/Codex capture now
+  persists session/run/turn/event projections atomically and separately from
+  genuine provider `Trace` rows. It currently normalizes model, tool,
+  tool-result, command, and context events exposed by the supported history
+  formats; it does not yet claim authoritative artifact state, deployment
+  success, or subagent correctness. If opted-in content would exceed the
+  atomic evidence-row limit, Verdict keeps the metadata-only run rather than
+  dropping the session.
 - A supported instrumented provider call made inside a manual span now stores
   that span's ID in `Trace.parent_span_id`. This is the sole automatic link
   direction: one manual span can contain many distinct provider calls, so no
@@ -402,7 +491,7 @@ Hexagonal / ports-and-adapters, ≥2 adapters per port (one real + in-memory for
   tenantless Memory/SQLite uses the reserved `__verdict_local__` scope. Shadow
   analysis is disabled pending the tenant-isolation correction tracked in issue
   #24.
-  The packaged dashboard's Registry tab reads these immutable versions and
+  The packaged dashboard's **Drift → Clusters** workspace reads these immutable versions and
   shows stable labels, the frozen selector/algorithm/model definition,
   representative redacted prompts, provider/model mix, membership explanations,
   terminal reasons, coverage, and activation readiness. Per-cluster planning

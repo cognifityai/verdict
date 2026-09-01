@@ -15,7 +15,20 @@ from uuid import uuid4
 import pytest
 import verdict
 import verdict.client as client_module
+from verdict.analysis_records import (
+    AnalysisRunStatus,
+    DeliveryOutcome,
+    DeterministicAnalysisRun,
+    NotificationDeliveryAttempt,
+)
 from verdict.instrumentors.base import apply_routing_context, persist_trace
+from verdict.monitoring import (
+    AnalysisUnitRecord,
+    MonitorPolicy,
+    compare_manifest,
+    plan_historical_manifest,
+    plan_prospective_manifest,
+)
 from verdict.schema import (
     ClusterIdentity,
     ClusterRegistryCluster,
@@ -50,6 +63,79 @@ pytestmark = [
     pytest.mark.skipif(not DSN, reason="no disposable live Postgres DSN"),
     pytest.mark.filterwarnings("error::DeprecationWarning:psycopg_pool.*"),
 ]
+
+
+def test_live_postgres_analysis_and_delivery_contracts():
+    suffix = uuid4().hex
+    tenant = f"analysis-{suffix}"
+    now = datetime.now(timezone.utc)
+    run = DeterministicAnalysisRun(
+        analysis_id=uuid4().hex * 2,
+        tenant_id=tenant,
+        scope_key="agent-and-trace",
+        cutoff=now,
+        completed_at=now + timedelta(seconds=1),
+        status=AnalysisRunStatus.COMPLETED,
+        analyzer_version="agent-insights-v1",
+        input_fingerprint=uuid4().hex * 2,
+        result={"scope": {"runs": 0}, "findings": []},
+    )
+    notification_id = uuid4().hex * 2
+    destination = uuid4().hex * 2
+    failed = NotificationDeliveryAttempt(
+        attempt_id=uuid4().hex * 2,
+        notification_id=notification_id,
+        tenant_id=tenant,
+        source_kind="analysis",
+        source_id=run.analysis_id,
+        destination_fingerprint=destination,
+        attempted_at=now,
+        outcome=DeliveryOutcome.FAILED,
+        payload={"kind": "finding", "code": "tool_error", "runs": 0},
+        http_status=503,
+        error_code="http_rejected",
+    )
+    delivered = NotificationDeliveryAttempt(
+        attempt_id=uuid4().hex * 2,
+        notification_id=notification_id,
+        tenant_id=tenant,
+        source_kind="analysis",
+        source_id=run.analysis_id,
+        destination_fingerprint=destination,
+        attempted_at=now + timedelta(seconds=1),
+        outcome=DeliveryOutcome.DELIVERED,
+        payload=failed.payload,
+        http_status=204,
+    )
+    storage = PostgresStorage(DSN, min_pool=1, max_pool=2)
+    try:
+        storage.save_deterministic_analysis_run(run)
+        storage.save_deterministic_analysis_run(run)
+        assert storage.get_latest_deterministic_analysis_run(
+            tenant, "agent-and-trace"
+        ) == run
+        assert storage.get_latest_deterministic_analysis_run(
+            f"other-{tenant}", "agent-and-trace"
+        ) is None
+
+        storage.save_notification_delivery_attempt(failed)
+        storage.save_notification_delivery_attempt(delivered)
+        storage.save_notification_delivery_attempt(delivered)
+        assert storage.list_notification_delivery_attempts(
+            notification_id, destination
+        ) == [delivered, failed]
+        assert storage.notification_was_delivered(notification_id, destination)
+        assert storage.list_notification_delivery_attempts_for_tenant(tenant) == [
+            delivered, failed
+        ]
+    finally:
+        storage._exec(
+            "DELETE FROM notification_delivery_attempts WHERE tenant_id=%s", (tenant,)
+        )
+        storage._exec(
+            "DELETE FROM deterministic_analysis_runs WHERE tenant_id=%s", (tenant,)
+        )
+        storage.close()
 
 
 def test_live_postgres_versioned_registry_and_analysis_normalization():
@@ -139,6 +225,102 @@ def test_live_postgres_versioned_registry_and_analysis_normalization():
         assert preserved.tags["verdict.intent_key"] == "billing"
         assert preserved.analysis_started_at_us == int(now.timestamp() * 1_000_000)
     finally:
+        storage.close()
+
+
+def test_live_postgres_agent_run_bundle_is_atomic_redacted_and_tenant_scoped():
+    suffix = uuid4().hex
+    tenant = f"evidence-{suffix}"
+    now = datetime.now(timezone.utc)
+    bundle = verdict.AgentRunBundle(
+        session=verdict.SourceSession(
+            source_session_id=f"session-{suffix}",
+            tenant_id=tenant,
+            source_kind="unknown-agent",
+            source_locator_hash="a" * 64,
+            started_at=now,
+            ended_at=now,
+            observed_at=now,
+        ),
+        run=verdict.AgentRun(
+            run_id=f"run-{suffix}",
+            source_session_id=f"session-{suffix}",
+            tenant_id=tenant,
+            started_at=now,
+            ended_at=now,
+            status=verdict.ExecutionStatus.COMPLETED,
+        ),
+        turns=(
+            verdict.AgentTurn(
+                turn_id=f"turn-{suffix}",
+                run_id=f"run-{suffix}",
+                sequence=0,
+                started_at=now,
+                ended_at=now,
+                status=verdict.ExecutionStatus.COMPLETED,
+                user_request_redacted="email customer@example.com",
+                final_response_redacted="done",
+                request_state=verdict.EvidenceState.PRESENT,
+                response_state=verdict.EvidenceState.PRESENT,
+            ),
+        ),
+    )
+    storage = PostgresStorage(DSN, min_pool=1, max_pool=2)
+    try:
+        storage.replace_agent_run_bundle(bundle)
+        storage.replace_agent_run_bundle(bundle)
+
+        loaded = storage.get_agent_run_bundle(tenant, bundle.run.run_id)
+        assert loaded is not None
+        assert loaded.turns[0].user_request_redacted == "email <EMAIL>"
+        assert storage.get_agent_run_bundle(f"other-{tenant}", bundle.run.run_id) is None
+        assert storage.list_agent_run_bundles(tenant, limit=10) == [loaded]
+    finally:
+        storage._exec("DELETE FROM agent_run_bundles WHERE tenant_id = %s", (tenant,))
+        storage.close()
+
+
+def test_live_postgres_monitor_policy_activation_and_snapshot():
+    suffix = uuid4().hex
+    scope = f"monitor-{suffix}"
+    first = MonitorPolicy(f"policy-a-{suffix}", scope, reference_ratio=0.5,
+                          minimum_reference=2, minimum_current=2)
+    second = MonitorPolicy(f"policy-b-{suffix}", scope, reference_ratio=0.5,
+                           minimum_reference=2, minimum_current=2)
+    now = datetime.now(timezone.utc)
+    units = tuple(
+        AnalysisUnitRecord(f"unit-{suffix}-{index}", now + timedelta(minutes=index),
+                           {"failed": index >= 3})
+        for index in range(6)
+    )
+    manifest = plan_historical_manifest(units, first, cutoff=now + timedelta(hours=1))
+    comparison = compare_manifest(units, manifest, first)
+    storage = PostgresStorage(DSN, min_pool=1, max_pool=2)
+    try:
+        storage.save_monitor_policy(first)
+        storage.save_monitor_policy(second)
+        assert storage.activate_monitor_policy(
+            scope, first.policy_id, expected_active_policy_id=None,
+        ) == first
+        storage.save_monitor_snapshot(first.policy_id, manifest, comparison)
+        storage.save_monitor_snapshot(first.policy_id, manifest, comparison)
+        assert storage.get_latest_monitor_snapshot(first.policy_id) == (manifest, comparison)
+        with pytest.raises(ValueError, match="does not match policy"):
+            storage.save_monitor_snapshot(second.policy_id, manifest, comparison)
+        collecting = plan_prospective_manifest(manifest, (), first)
+        collecting_result = compare_manifest((), collecting, first)
+        storage.save_monitor_snapshot(first.policy_id, collecting, collecting_result)
+        assert storage.get_latest_monitor_snapshot(first.policy_id) == (
+            collecting, collecting_result,
+        )
+        assert storage.activate_monitor_policy(
+            scope, second.policy_id, expected_active_policy_id=first.policy_id,
+        ) == second
+        assert storage.get_monitor_policy(first.policy_id) == (first, "retired")
+    finally:
+        storage._exec("DELETE FROM monitor_snapshots WHERE policy_id IN (%s,%s)",
+                      (first.policy_id, second.policy_id))
+        storage._exec("DELETE FROM monitor_policies WHERE scope_key=%s", (scope,))
         storage.close()
 
 

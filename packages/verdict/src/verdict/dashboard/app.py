@@ -1,7 +1,9 @@
-"""Installable read-only Verdict dashboard for SQLite and PostgreSQL stores.
+"""Installable Verdict dashboard for SQLite and PostgreSQL stores.
 
-The application factory can be mounted inside another ASGI application. Every
-request reads one database snapshot and never migrates or mutates the store.
+The application factory can be mounted inside another ASGI application. Read
+views use one storage snapshot per request. Explicit setup, registry,
+evaluator, monitor, and control-plane actions are the only mutating endpoints;
+they retain immutable source traces and append versioned product state.
 
 Run:
     pip install "cognifity-verdict[dashboard]"
@@ -19,13 +21,20 @@ import os
 import re
 import sqlite3
 from collections import Counter, defaultdict
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Mapping
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any
 from urllib.parse import urlsplit
 
+from verdict.analysis import analyze_agent_run
+from verdict.analysis_records import analysis_run_from_json
+from verdict.cluster_health import UNCLUSTERED_ID, assess_cluster_health
+from verdict.dashboard.analysis_service import read_latest_analysis, run_analysis
+from verdict.dashboard.query import PostgresSession as _PostgresSession
+from verdict.dashboard.query import QuerySession as _QuerySession
+from verdict.dashboard.query import SQLiteSession as _SQLiteSession
 from verdict.dashboard.registry import (
     RegistryNotFoundError,
     RegistryStateError,
@@ -34,8 +43,10 @@ from verdict.dashboard.registry import (
 from verdict.dashboard.registry import (
     build_registry_bundle as _build_registry_bundle,
 )
+from verdict.evidence import agent_run_bundle_from_json
 from verdict.metrics import ScoreCounts, verdict_label
 from verdict.redaction import redact, redact_structure
+from verdict.structural import count_hedges, is_apology_start, is_refusal, is_valid_json
 
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
@@ -92,6 +103,19 @@ DRIFT_BASELINE_LAG_HOURS = 24
 DRIFT_BASELINE_DAYS = 7
 DRIFT_MIN_SAMPLE_SIZE = 30
 _DISPLAY_WORKLOAD = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,63}")
+_FINDING_SUMMARIES = {
+    "run_status_unknown": "The source does not expose a terminal status for these agent sessions.",
+    "response_not_evaluable": "At least one response is unavailable, so response quality is not evaluable.",
+    "event_capture_partial": "The source exceeded the bounded event limit; event analysis is partial.",
+    "tool_error": "One or more captured tool results reported failure.",
+    "command_failed": "One or more captured commands returned a non-zero status.",
+    "possible_tool_loop": (
+        "Identical tool calls with identical arguments repeated within a turn past the configured threshold."
+    ),
+    "required_step_missing": "A policy-required evidence type was not observed.",
+    "prohibited_tool_used": "A policy-prohibited tool was called.",
+    "response_schema_invalid": "A response did not satisfy the configured JSON requirement.",
+}
 
 
 class DashboardBundleLimitError(RuntimeError):
@@ -212,170 +236,6 @@ def _score_rate(counts: Counter) -> float | None:
         unclear=counts.get("unclear", 0),
     ).pass_rate
     return round(100 * rate, 1) if rate is not None else None
-
-
-class _Result:
-    """Normalize driver rows without copying query or aggregation logic."""
-
-    def __init__(self, cursor: Any) -> None:
-        self._cursor = cursor
-
-    @staticmethod
-    def _row(row: Any) -> dict[str, Any] | None:
-        if row is None:
-            return None
-        values = dict(row)
-        return {
-            key: (
-                (value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc))
-                .astimezone(timezone.utc)
-                .isoformat()
-                if isinstance(value, datetime)
-                else value
-            )
-            for key, value in values.items()
-        }
-
-    def fetchone(self) -> dict[str, Any] | None:
-        return self._row(self._cursor.fetchone())
-
-    def __iter__(self) -> Iterator[dict[str, Any]]:
-        for row in self._cursor:
-            normalized = self._row(row)
-            if normalized is not None:
-                yield normalized
-
-
-class _QuerySession(Protocol):
-    def execute(self, query: str, params: tuple[Any, ...] = ()) -> _Result: ...
-
-    def table_exists(self, table: str) -> bool: ...
-
-    def columns(self, table: str) -> set[str]: ...
-
-    def valid_session_predicate(self, trace_alias: str) -> str: ...
-
-    def content_bearing_predicate(self, trace_alias: str) -> str: ...
-
-
-# Code points removed by Python 3.12 ``str.strip``. The drift CLI uses that
-# predicate for judgeable content; dashboard SQL must produce the same boolean
-# without transferring every stored prompt/response across the adapter.
-_PYTHON_STRIP_CODEPOINTS = (
-    0x0009, 0x000A, 0x000B, 0x000C, 0x000D,
-    0x001C, 0x001D, 0x001E, 0x001F, 0x0020,
-    0x0085, 0x00A0, 0x1680,
-    0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005,
-    0x2006, 0x2007, 0x2008, 0x2009, 0x200A,
-    0x2028, 0x2029, 0x202F, 0x205F, 0x3000,
-)
-
-
-def _content_bearing_sql(
-    trace_alias: str,
-    strip_sql: Callable[[str], str],
-) -> str:
-    def has_non_whitespace(column: str) -> str:
-        value = f"COALESCE({trace_alias}.{column},'')"
-        return f"{strip_sql(value)}<>''"
-
-    return (
-        f"COALESCE({trace_alias}.error,'')='' AND "
-        f"{has_non_whitespace('prompt_redacted')} AND "
-        f"{has_non_whitespace('response_redacted')}"
-    )
-
-
-def _valid_utf8(value: object) -> int:
-    if not isinstance(value, bytes):
-        return 0
-    try:
-        value.decode("utf-8", errors="strict")
-    except UnicodeDecodeError:
-        return 0
-    return 1
-
-
-class _SQLiteSession:
-    def __init__(self, connection: sqlite3.Connection) -> None:
-        self._connection = connection
-        connection.create_function(
-            "verdict_valid_utf8",
-            1,
-            _valid_utf8,
-            deterministic=True,
-        )
-
-    def execute(self, query: str, params: tuple[Any, ...] = ()) -> _Result:
-        return _Result(self._connection.execute(query, params))
-
-    def table_exists(self, table: str) -> bool:
-        return bool(self.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
-            (table,),
-        ).fetchone())
-
-    def columns(self, table: str) -> set[str]:
-        return {row["name"] for row in self.execute(f"PRAGMA table_info({table})")}
-
-    def valid_session_predicate(self, trace_alias: str) -> str:
-        value = f"{trace_alias}.session_id"
-        return (
-            f"typeof({value})='text' AND CASE WHEN "
-            f"length(CAST({value} AS BLOB)) BETWEEN 1 AND 256 "
-            f"AND instr({value},char(0))=0 THEN "
-            f"verdict_valid_utf8(CAST({value} AS BLOB)) ELSE 0 END=1"
-        )
-
-    def content_bearing_predicate(self, trace_alias: str) -> str:
-        whitespace = "char(" + ",".join(
-            str(value) for value in _PYTHON_STRIP_CODEPOINTS
-        ) + ")"
-        return _content_bearing_sql(
-            trace_alias,
-            lambda value: f"TRIM({value},{whitespace})",
-        )
-
-
-class _PostgresSession:
-    def __init__(self, connection: Any) -> None:
-        self._connection = connection
-
-    def execute(self, query: str, params: tuple[Any, ...] = ()) -> _Result:
-        return _Result(self._connection.execute(query.replace("?", "%s"), params))
-
-    def table_exists(self, table: str) -> bool:
-        return bool(self.execute(
-            "SELECT 1 FROM information_schema.tables "
-            "WHERE table_schema = current_schema() AND table_name = ?",
-            (table,),
-        ).fetchone())
-
-    def columns(self, table: str) -> set[str]:
-        return {
-            row["column_name"]
-            for row in self.execute(
-                "SELECT column_name FROM information_schema.columns "
-                "WHERE table_schema = current_schema() AND table_name = ?",
-                (table,),
-            )
-        }
-
-    def valid_session_predicate(self, trace_alias: str) -> str:
-        value = f"{trace_alias}.session_id"
-        return (
-            f"{value} IS NOT NULL AND {value}<>'' "
-            f"AND octet_length({value})<=256"
-        )
-
-    def content_bearing_predicate(self, trace_alias: str) -> str:
-        whitespace = "||".join(
-            f"chr({value})" for value in _PYTHON_STRIP_CODEPOINTS
-        )
-        return _content_bearing_sql(
-            trace_alias,
-            lambda value: f"BTRIM({value},{whitespace})",
-        )
 
 
 def _table_exists(cur: _QuerySession, table: str) -> bool:
@@ -505,6 +365,8 @@ def build_bundle(
     evaluator_id: str | None = None,
     registry_tenant: str | None = None,
     trace_offset: int = 0,
+    trace_judge_status: str = "all",
+    trace_id: str | None = None,
 ) -> dict:
     if (
         not isinstance(trace_offset, int)
@@ -512,6 +374,14 @@ def build_bundle(
         or trace_offset < 0
     ):
         raise ValueError("trace_offset must be a non-negative integer")
+    if trace_judge_status not in {
+        "all", "judged", "not_judged", "judge_error", "pass", "fail", "unclear",
+    }:
+        raise ValueError("invalid trace judge status")
+    if trace_id is not None and (
+        not isinstance(trace_id, str) or not trace_id or len(trace_id.encode("utf-8")) > 256
+    ):
+        raise ValueError("invalid trace_id")
     configured = str(storage)
     if _is_postgres(configured):
         return _build_from_postgres(
@@ -519,6 +389,8 @@ def build_bundle(
             evaluator_id=evaluator_id,
             registry_tenant=registry_tenant,
             trace_offset=trace_offset,
+            trace_judge_status=trace_judge_status,
+            trace_id=trace_id,
         )
     path = _sqlite_path(configured)
     try:
@@ -527,6 +399,8 @@ def build_bundle(
             evaluator_id=evaluator_id,
             registry_tenant=registry_tenant,
             trace_offset=trace_offset,
+            trace_judge_status=trace_judge_status,
+            trace_id=trace_id,
         )
     except sqlite3.OperationalError as exc:
         if "unable to open database file" not in str(exc).lower():
@@ -544,6 +418,8 @@ def build_bundle(
             evaluator_id=evaluator_id,
             registry_tenant=registry_tenant,
             trace_offset=trace_offset,
+            trace_judge_status=trace_judge_status,
+            trace_id=trace_id,
         )
 
 
@@ -601,12 +477,732 @@ def build_registry_bundle(
     return redacted
 
 
+def build_agent_runs_bundle(
+    storage: str | os.PathLike[str], *, tenant: str, limit: int = 30,
+    run_id: str | None = None, run_ids: tuple[str, ...] | None = None,
+    evaluator_fingerprint: str | None = None,
+) -> dict:
+    """Read a bounded, analyzed agent-run view without migrating the store."""
+    if not isinstance(tenant, str) or not tenant or len(tenant.encode("utf-8")) > 256:
+        raise ValueError("invalid tenant")
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+        raise ValueError("invalid limit")
+    if run_id is not None and (
+        not isinstance(run_id, str) or not run_id or len(run_id.encode("utf-8")) > 256
+    ):
+        raise ValueError("invalid run_id")
+    if run_id is not None and run_ids is not None:
+        raise ValueError("run_id and run_ids are mutually exclusive")
+    if run_ids is not None:
+        if not isinstance(run_ids, tuple) or not 1 <= len(run_ids) <= 50:
+            raise ValueError("invalid run_ids")
+        if len(set(run_ids)) != len(run_ids):
+            raise ValueError("run_ids must be unique")
+        for selected_run_id in run_ids:
+            if (
+                not isinstance(selected_run_id, str)
+                or not selected_run_id
+                or len(selected_run_id.encode("utf-8")) > 256
+            ):
+                raise ValueError("invalid run_ids")
+    if evaluator_fingerprint is not None and (
+        len(evaluator_fingerprint) != 64
+        or any(character not in "0123456789abcdef" for character in evaluator_fingerprint)
+    ):
+        raise ValueError("invalid evaluator fingerprint")
+    configured = str(storage)
+
+    def builder(session: _QuerySession) -> dict:
+        if not session.table_exists("agent_run_bundles"):
+            return {"summary": {"available": 0, "shown": 0}, "runs": []}
+        selected_run_ids = run_ids or ((run_id,) if run_id is not None else None)
+        if selected_run_ids is None:
+            count = session.execute(
+                "SELECT COUNT(*) AS count FROM agent_run_bundles WHERE tenant_id=?", (tenant,)
+            ).fetchone()
+            rows = session.execute(
+                "SELECT payload_json FROM agent_run_bundles WHERE tenant_id=? "
+                "ORDER BY started_at DESC, run_id DESC LIMIT ?", (tenant, limit),
+            )
+        else:
+            placeholders = ",".join("?" for _ in selected_run_ids)
+            parameters = (tenant, *selected_run_ids)
+            count = session.execute(
+                "SELECT COUNT(*) AS count FROM agent_run_bundles "
+                f"WHERE tenant_id=? AND run_id IN ({placeholders})",  # nosec B608
+                parameters,
+            ).fetchone()
+            rows = session.execute(
+                "SELECT payload_json FROM agent_run_bundles "
+                f"WHERE tenant_id=? AND run_id IN ({placeholders}) "  # nosec B608
+                "ORDER BY started_at DESC, run_id DESC",
+                parameters,
+            )
+        runs = []
+        for row in rows:
+            raw = row["payload_json"]
+            if isinstance(raw, dict):
+                raw = json.dumps(raw, sort_keys=True, separators=(",", ":"))
+            bundle = agent_run_bundle_from_json(raw)
+            analysis = analyze_agent_run(bundle)
+            turn_outcomes = Counter(turn.status.value for turn in bundle.turns)
+            finding_severity = Counter(finding.severity for finding in analysis.findings)
+            runs.append({
+                "runId": bundle.run.run_id,
+                "sourceKind": bundle.session.source_kind,
+                "startedAt": bundle.run.started_at.isoformat(),
+                "status": bundle.run.status.value,
+                "sourceOutcome": bundle.run.status.value,
+                "agentVersion": bundle.run.agent_version or None,
+                "turnCount": len(bundle.turns),
+                "eventCount": len(bundle.events),
+                "metrics": analysis.metrics,
+                "evidenceCoverage": analysis.evidence_coverage,
+                "turnOutcomes": dict(sorted(turn_outcomes.items())),
+                "findingSeverity": dict(sorted(finding_severity.items())),
+                "findings": [{
+                    "code": finding.code, "severity": finding.severity,
+                    "message": finding.message,
+                    "evidenceEventIds": list(finding.evidence_event_ids),
+                    "judgeUsed": finding.judge_used,
+                } for finding in analysis.findings],
+            })
+        runs_by_id = {run["runId"]: run for run in runs}
+        linked_trace_ids: dict[str, set[str]] = defaultdict(set)
+        trace_scan_complete = True
+        trace_ids: set[str] = set()
+        if runs and session.table_exists("traces"):
+            columns = session.columns("traces")
+            tags_column = "tags_json" if "tags_json" in columns else "tags" if "tags" in columns else None
+            if tags_column is not None:
+                trace_rows = list(session.execute(
+                    f"SELECT trace_id,{tags_column} AS tags FROM traces "  # nosec B608
+                    "WHERE tenant_id=? ORDER BY trace_id LIMIT 100001",
+                    (tenant,),
+                ))
+                trace_scan_complete = len(trace_rows) <= 100_000
+                for trace in trace_rows[:100_000]:
+                    tags = _json_value(trace["tags"], {})
+                    linked_run_id = tags.get("verdict.agent_run_id") if isinstance(tags, dict) else None
+                    if linked_run_id in runs_by_id:
+                        linked_trace_ids[linked_run_id].add(trace["trace_id"])
+                        trace_ids.add(trace["trace_id"])
+        latest_judgment_status: dict[str, tuple[tuple[str, str], str]] = {}
+        if evaluator_fingerprint is not None and trace_ids and session.table_exists("judgments"):
+            for judgment in session.execute(
+                """SELECT trace_id,status,created_at,judgment_id FROM judgments
+                   WHERE evaluator_fingerprint=? ORDER BY created_at,judgment_id""",
+                (evaluator_fingerprint,),
+            ):
+                if judgment["trace_id"] not in trace_ids:
+                    continue
+                key = (judgment["created_at"] or "", judgment["judgment_id"] or "")
+                current = latest_judgment_status.get(judgment["trace_id"])
+                if current is None or key > current[0]:
+                    latest_judgment_status[judgment["trace_id"]] = (
+                        key, (judgment["status"] or "completed").lower(),
+                    )
+        for run in runs:
+            linked = linked_trace_ids[run["runId"]]
+            completed = sum(
+                latest_judgment_status.get(trace_id, (("", ""), "not_judged"))[1]
+                == "completed" for trace_id in linked
+            )
+            errors = sum(
+                latest_judgment_status.get(trace_id, (("", ""), "not_judged"))[1]
+                == "error" for trace_id in linked
+            )
+            run["evaluationCoverage"] = {
+                "state": "selected" if evaluator_fingerprint is not None else "not_selected",
+                "evaluatorFingerprint": evaluator_fingerprint,
+                "linkedTraces": len(linked),
+                "judged": completed,
+                "judgeErrors": errors,
+                "notJudged": len(linked) - completed - errors,
+                "complete": trace_scan_complete,
+            }
+        result = {"summary": {"available": int(count["count"] if count else 0),
+                              "shown": len(runs)}, "runs": runs}
+        if selected_run_ids is not None:
+            result["filter"] = {
+                "requested": len(selected_run_ids),
+                "matched": len(runs),
+                "complete": len(runs) == len(selected_run_ids),
+            }
+        return result
+
+    if _is_postgres(configured):
+        try:
+            import psycopg
+            from psycopg.rows import dict_row
+        except ImportError as exc:
+            raise ImportError("PostgreSQL dashboard support requires the postgres extra") from exc
+        with psycopg.connect(configured, autocommit=False, row_factory=dict_row) as connection:
+            with connection.transaction():
+                connection.execute("SET TRANSACTION READ ONLY")
+                result = builder(_PostgresSession(connection))
+    else:
+        path = _sqlite_path(configured)
+        connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        connection.row_factory = sqlite3.Row
+        try:
+            connection.execute("BEGIN")
+            result = builder(_SQLiteSession(connection))
+            connection.commit()
+        finally:
+            connection.close()
+    redacted = redact_structure(result)
+    if not isinstance(redacted, dict):
+        raise DashboardBundleLimitError("bounded agent-run bundle exceeded redaction budget")
+    return redacted
+
+
+def build_agent_run_detail(
+    storage: str | os.PathLike[str],
+    *,
+    tenant: str,
+    run_id: str,
+    event_limit: int = 100,
+    event_offset: int = 0,
+    turn_limit: int = 20,
+    turn_offset: int = 0,
+    event_id: str | None = None,
+) -> dict:
+    """Read one tenant-scoped run with its canonical ordered evidence timeline."""
+    for name, value in (("tenant", tenant), ("run_id", run_id)):
+        if not isinstance(value, str) or not value or len(value.encode("utf-8")) > 256:
+            raise ValueError(f"invalid {name}")
+    if (
+        isinstance(event_limit, bool)
+        or not isinstance(event_limit, int)
+        or not 1 <= event_limit <= 200
+        or isinstance(event_offset, bool)
+        or not isinstance(event_offset, int)
+        or event_offset < 0
+        or isinstance(turn_limit, bool)
+        or not isinstance(turn_limit, int)
+        or not 1 <= turn_limit <= 50
+        or isinstance(turn_offset, bool)
+        or not isinstance(turn_offset, int)
+        or turn_offset < 0
+    ):
+        raise ValueError("invalid event page")
+    if event_id is not None and (
+        not isinstance(event_id, str) or not event_id or len(event_id.encode("utf-8")) > 256
+    ):
+        raise ValueError("invalid event_id")
+    configured = str(storage)
+
+    def builder(session: _QuerySession) -> dict:
+        if not session.table_exists("agent_run_bundles"):
+            raise KeyError(run_id)
+        row = session.execute(
+            "SELECT payload_json FROM agent_run_bundles WHERE tenant_id=? AND run_id=?",
+            (tenant, run_id),
+        ).fetchone()
+        if row is None:
+            raise KeyError(run_id)
+        raw = row["payload_json"]
+        if isinstance(raw, dict):
+            raw = json.dumps(raw, sort_keys=True, separators=(",", ":"))
+        bundle = agent_run_bundle_from_json(raw)
+        available = len(bundle.events)
+        resolved_event_offset = event_offset
+        if event_id is not None:
+            matching_index = next(
+                (index for index, event in enumerate(bundle.events) if event.event_id == event_id),
+                None,
+            )
+            if matching_index is None:
+                raise KeyError(event_id)
+            resolved_event_offset = (matching_index // event_limit) * event_limit
+        shown = bundle.events[resolved_event_offset:resolved_event_offset + event_limit]
+        shown_turns = bundle.turns[turn_offset:turn_offset + turn_limit]
+        judgment_summaries: dict[str, dict[str, object]] = {}
+        if session.table_exists("judgments"):
+            columns = session.columns("judgments")
+            dimensions_column = (
+                "dimensions_json" if "dimensions_json" in columns else "dimensions"
+            )
+            for trace_id in {event.trace_id for event in shown if event.trace_id}:
+                judgment = session.execute(
+                    f"SELECT judgment_id,evaluator_fingerprint,status,{dimensions_column} AS dimensions "  # nosec B608 -- schema-selected identifier
+                    "FROM judgments WHERE trace_id=? ORDER BY created_at DESC,judgment_id DESC LIMIT 1",
+                    (trace_id,),
+                ).fetchone()
+                if judgment is None:
+                    continue
+                dimensions = judgment["dimensions"]
+                if isinstance(dimensions, str):
+                    try:
+                        dimensions = json.loads(dimensions)
+                    except json.JSONDecodeError:
+                        dimensions = []
+                safe_dimensions = []
+                for dimension in dimensions if isinstance(dimensions, list) else []:
+                    if not isinstance(dimension, dict):
+                        continue
+                    name = dimension.get("name")
+                    verdict = dimension.get("verdict")
+                    if isinstance(name, str) and verdict in {"pass", "fail", "unclear"}:
+                        safe_dimensions.append({"name": name[:80], "verdict": verdict})
+                judgment_summaries[trace_id] = {
+                    "judgmentId": judgment["judgment_id"],
+                    "evaluatorFingerprint": judgment["evaluator_fingerprint"],
+                    "status": judgment["status"],
+                    "dimensions": safe_dimensions,
+                }
+        return {
+            "runId": bundle.run.run_id,
+            "focusEventId": event_id,
+            "sourceKind": bundle.session.source_kind,
+            "startedAt": bundle.run.started_at.isoformat(),
+            "endedAt": bundle.run.ended_at.isoformat() if bundle.run.ended_at else None,
+            "status": bundle.run.status.value,
+            "turns": [{
+                "turnId": turn.turn_id, "sequence": turn.sequence,
+                "startedAt": turn.started_at.isoformat(), "status": turn.status.value,
+                "requestState": turn.request_state.value,
+                "responseState": turn.response_state.value,
+                "request": turn.user_request_redacted,
+                "response": turn.final_response_redacted,
+            } for turn in shown_turns],
+            "turnPage": {
+                "available": len(bundle.turns), "shown": len(shown_turns),
+                "offset": turn_offset, "limit": turn_limit,
+                "truncated": turn_offset + len(shown_turns) < len(bundle.turns),
+            },
+            "events": [{
+                "eventId": event.event_id,
+                "turnId": event.turn_id,
+                "sequence": event.sequence,
+                "timelineIndex": resolved_event_offset + index,
+                "occurredAt": event.occurred_at.isoformat(),
+                "type": event.event_type.value,
+                "status": event.status.value,
+                "provenance": event.provenance,
+                "privacy": event.privacy_classification.value,
+                "omissionReason": event.omission_reason,
+                "traceId": event.trace_id,
+                "judgment": judgment_summaries.get(event.trace_id),
+                "attributes": event.attributes,
+            } for index, event in enumerate(shown)],
+            "page": {
+                "available": available,
+                "shown": len(shown),
+                "offset": resolved_event_offset,
+                "limit": event_limit,
+                "truncated": resolved_event_offset + len(shown) < available,
+            },
+        }
+
+    if _is_postgres(configured):
+        try:
+            import psycopg
+            from psycopg.rows import dict_row
+        except ImportError as exc:
+            raise ImportError("PostgreSQL dashboard support requires the postgres extra") from exc
+        with psycopg.connect(configured, autocommit=False, row_factory=dict_row) as connection:
+            with connection.transaction():
+                connection.execute("SET TRANSACTION READ ONLY")
+                result = builder(_PostgresSession(connection))
+    else:
+        path = _sqlite_path(configured)
+        connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        connection.row_factory = sqlite3.Row
+        try:
+            connection.execute("BEGIN")
+            result = builder(_SQLiteSession(connection))
+            connection.commit()
+        finally:
+            connection.close()
+    redacted = redact_structure(result)
+    if not isinstance(redacted, dict):
+        raise DashboardBundleLimitError("bounded agent-run detail exceeded redaction budget")
+    return redacted
+
+
+def build_agent_insights_bundle(
+    storage: str | os.PathLike[str], *, tenant: str, scan_limit: int = 10_000,
+    _include_input_fingerprint: bool = False,
+) -> dict:
+    """Aggregate evidence coverage and judge-free findings across captured runs.
+
+    The result never includes request, response, tool, or command content. When
+    a tenant exceeds ``scan_limit``, the response is explicitly marked partial.
+    """
+    if not isinstance(tenant, str) or not tenant or len(tenant.encode("utf-8")) > 256:
+        raise ValueError("invalid tenant")
+    if (
+        isinstance(scan_limit, bool)
+        or not isinstance(scan_limit, int)
+        or not 1 <= scan_limit <= 100_000
+    ):
+        raise ValueError("invalid scan limit")
+    configured = str(storage)
+
+    def builder(session: _QuerySession) -> dict:
+        if not session.table_exists("agent_run_bundles"):
+            return _empty_agent_insights()
+        count_row = session.execute(
+            "SELECT COUNT(*) AS count FROM agent_run_bundles WHERE tenant_id=?", (tenant,)
+        ).fetchone()
+        available = int(count_row["count"] if count_row else 0)
+        input_hasher = hashlib.sha256()
+        rows = session.execute(
+            "SELECT payload_json FROM agent_run_bundles WHERE tenant_id=? "
+            "ORDER BY started_at ASC, run_id ASC LIMIT ?",
+            (tenant, scan_limit),
+        )
+        event_types: Counter[str] = Counter()
+        event_statuses: Counter[str] = Counter()
+        run_outcomes: Counter[str] = Counter()
+        turn_outcomes: Counter[str] = Counter()
+        prompt_states: Counter[str] = Counter()
+        response_states: Counter[str] = Counter()
+        finding_counts: Counter[tuple[str, str]] = Counter()
+        finding_messages: dict[tuple[str, str], str] = {}
+        finding_run_ids: dict[tuple[str, str], list[str]] = defaultdict(list)
+        source_metrics: dict[str, Counter[str]] = defaultdict(Counter)
+        source_outcomes: dict[str, Counter[str]] = defaultdict(Counter)
+        run_trace_metrics: dict[str, Counter[str]] = defaultdict(Counter)
+        totals: Counter[str] = Counter()
+        latency_values: list[float] = []
+        trace_scope = {"available": 0, "analyzed": 0, "complete": True}
+        trace_metrics: dict[tuple[str, str], Counter[str]] = defaultdict(Counter)
+        behavior = Counter()
+        trace_tokens = Counter()
+        trace_latency_values: list[float] = []
+        trace_cost_values: list[float] = []
+        if session.table_exists("traces"):
+            trace_tenant_predicate = (
+                "(tenant_id=? OR tenant_id IS NULL OR tenant_id='')"
+                if tenant == "__verdict_local__"
+                else "tenant_id=?"
+            )
+            trace_columns = session.columns("traces")
+            trace_tags = (
+                "tags_json" if "tags_json" in trace_columns
+                else "tags" if "tags" in trace_columns else "NULL"
+            )
+            trace_count_row = session.execute(
+                f"SELECT COUNT(*) AS count FROM traces WHERE {trace_tenant_predicate}",  # nosec B608 -- fixed predicate
+                (tenant,),
+            ).fetchone()
+            trace_available = int(trace_count_row["count"] if trace_count_row else 0)
+            trace_rows = list(session.execute(
+                "SELECT provider, request_model, input_tokens, output_tokens, latency_ms, "
+                f"cost_usd, error, response_redacted, {trace_tags} AS trace_tags "  # nosec B608 -- schema-selected identifier
+                f"FROM traces WHERE {trace_tenant_predicate} "  # nosec B608 -- fixed predicate
+                "ORDER BY started_at ASC, trace_id ASC LIMIT ?",
+                (tenant, scan_limit),
+            ))
+            for trace in trace_rows:
+                input_hasher.update(json.dumps(
+                    {key: trace[key] for key in trace.keys()},
+                    sort_keys=True, separators=(",", ":"), default=str,
+                ).encode("utf-8"))
+            trace_scope = {
+                "available": trace_available,
+                "analyzed": len(trace_rows),
+                "complete": len(trace_rows) == trace_available,
+            }
+            for trace in trace_rows:
+                provider = trace["provider"] or "unknown"
+                model = trace["request_model"] or "unknown"
+                metrics = trace_metrics[(provider, model)]
+                metrics["traces"] += 1
+                tags = _json_value(trace["trace_tags"], {})
+                run_id = tags.get("verdict.agent_run_id") if isinstance(tags, dict) else None
+                run_metrics = (
+                    run_trace_metrics[run_id]
+                    if isinstance(run_id, str) and run_id else None
+                )
+                if run_metrics is not None:
+                    run_metrics["traces"] += 1
+                for name in ("input_tokens", "output_tokens"):
+                    value = trace[name]
+                    if isinstance(value, int):
+                        trace_tokens[name] += value
+                        metrics[name] += value
+                        if run_metrics is not None:
+                            run_metrics[name] += value
+                if trace["error"]:
+                    metrics["errors"] += 1
+                    if run_metrics is not None:
+                        run_metrics["errors"] += 1
+                latency = trace["latency_ms"]
+                if isinstance(latency, (int, float)) and not isinstance(latency, bool):
+                    trace_latency_values.append(float(latency))
+                    metrics["latency_known"] += 1
+                    metrics["latency_ms"] += float(latency)
+                    if run_metrics is not None:
+                        run_metrics["latency_known"] += 1
+                        run_metrics["latency_ms"] += float(latency)
+                cost = trace["cost_usd"]
+                if isinstance(cost, (int, float)) and not isinstance(cost, bool):
+                    trace_cost_values.append(float(cost))
+                    metrics["cost_known"] += 1
+                    metrics["cost_microusd"] += round(float(cost) * 1_000_000)
+                    if run_metrics is not None:
+                        run_metrics["cost_known"] += 1
+                        run_metrics["cost_microusd"] += round(float(cost) * 1_000_000)
+                response = trace["response_redacted"]
+                if isinstance(response, str) and response:
+                    behavior["captured_responses"] += 1
+                    behavior["response_characters"] += len(response)
+                    behavior["refusals"] += int(is_refusal(response))
+                    behavior["apology_starts"] += int(is_apology_start(response))
+                    behavior["hedges"] += count_hedges(response)
+                    behavior["valid_json"] += int(is_valid_json(response))
+        analyzed = 0
+        for row in rows:
+            raw = row["payload_json"]
+            if isinstance(raw, dict):
+                raw = json.dumps(raw, sort_keys=True, separators=(",", ":"))
+            input_hasher.update(raw.encode("utf-8"))
+            bundle = agent_run_bundle_from_json(raw)
+            analyzed += 1
+            analysis = analyze_agent_run(bundle)
+            source = bundle.session.source_kind
+            run_outcomes[bundle.run.status.value] += 1
+            source_outcomes[source][bundle.run.status.value] += 1
+            source_metrics[source]["runs"] += 1
+            linked = run_trace_metrics.get(bundle.run.run_id)
+            if linked is not None:
+                for name, value in linked.items():
+                    source_metrics[source][f"trace_{name}"] += value
+            for turn in bundle.turns:
+                turn_outcomes[turn.status.value] += 1
+                prompt_states[turn.request_state.value] += 1
+                response_states[turn.response_state.value] += 1
+            totals["turns"] += len(bundle.turns)
+            totals["events"] += len(bundle.events)
+            for event in bundle.events:
+                event_types[event.event_type.value] += 1
+                event_statuses[event.status.value] += 1
+                if event.event_type.value == "model_call":
+                    totals["model_calls"] += 1
+                    source_metrics[source]["model_calls"] += 1
+                    if event.trace_id:
+                        totals["linked_model_calls"] += 1
+                    for name in ("input_tokens", "output_tokens"):
+                        value = event.attributes.get(name)
+                        if isinstance(value, int):
+                            totals[name] += value
+                            source_metrics[source][name] += value
+                    latency = event.attributes.get("latency_ms")
+                    if isinstance(latency, (int, float)) and not isinstance(latency, bool):
+                        latency_values.append(float(latency))
+                        source_metrics[source]["latency_known"] += 1
+                        source_metrics[source]["latency_ms"] += float(latency)
+                elif event.event_type.value == "tool_call":
+                    totals["tool_calls"] += 1
+                    source_metrics[source]["tool_calls"] += 1
+            for name in ("tool_errors", "command_failures"):
+                value = analysis.metrics.get(name)
+                if isinstance(value, int):
+                    totals[name] += value
+                    source_metrics[source][name] += value
+            for finding in analysis.findings:
+                key = (finding.code, finding.severity)
+                finding_counts[key] += 1
+                finding_messages.setdefault(key, finding.message)
+                if len(finding_run_ids[key]) < 50:
+                    finding_run_ids[key].append(bundle.run.run_id)
+        model_calls = totals["model_calls"]
+        findings = [
+            {
+                "code": code,
+                "severity": severity,
+                "message": _FINDING_SUMMARIES.get(code, finding_messages[(code, severity)]),
+                "runs": count,
+                "runIds": finding_run_ids[(code, severity)],
+                "runIdsTruncated": count > len(finding_run_ids[(code, severity)]),
+            }
+            for (code, severity), count in sorted(
+                finding_counts.items(), key=lambda item: (-item[1], item[0][0])
+            )[:50]
+        ]
+        comparisons = []
+        for source, metrics in sorted(source_metrics.items()):
+            latency_known = metrics["trace_latency_known"] or metrics["latency_known"]
+            latency_total = metrics["trace_latency_ms"] or metrics["latency_ms"]
+            trace_calls = metrics["trace_traces"]
+            cost_known = metrics["trace_cost_known"]
+            comparisons.append({
+                "source": source,
+                "runs": metrics["runs"],
+                "modelCalls": metrics["model_calls"],
+                "toolCalls": metrics["tool_calls"],
+                "toolErrors": metrics["tool_errors"],
+                "commandFailures": metrics["command_failures"],
+                "inputTokens": metrics["trace_input_tokens"] or metrics["input_tokens"],
+                "outputTokens": metrics["trace_output_tokens"] or metrics["output_tokens"],
+                "averageModelLatencyMs": (
+                    round(latency_total / latency_known, 2)
+                    if latency_known else None
+                ),
+                "latencyKnownCalls": latency_known,
+                "costUsd": (
+                    round(metrics["trace_cost_microusd"] / 1_000_000, 8)
+                    if cost_known else None
+                ),
+                "costState": (
+                    "complete" if trace_calls and cost_known == trace_calls
+                    else "partial" if cost_known else "not_captured"
+                ),
+                "providerErrors": metrics["trace_errors"],
+                "runOutcomes": dict(sorted(source_outcomes[source].items())),
+                "retries": None,
+                "retryState": "not_captured",
+            })
+        model_comparisons = []
+        for (provider, model), metrics in sorted(trace_metrics.items()):
+            latency_known = metrics["latency_known"]
+            cost_known = metrics["cost_known"]
+            model_comparisons.append({
+                "provider": provider,
+                "model": model,
+                "traces": metrics["traces"],
+                "errors": metrics["errors"],
+                "inputTokens": metrics["input_tokens"],
+                "outputTokens": metrics["output_tokens"],
+                "averageLatencyMs": (
+                    round(metrics["latency_ms"] / latency_known, 2)
+                    if latency_known else None
+                ),
+                "costUsd": (
+                    round(metrics["cost_microusd"] / 1_000_000, 8)
+                    if cost_known else None
+                ),
+                "costKnownTraces": cost_known,
+            })
+        input_tokens = trace_tokens["input_tokens"] or totals["input_tokens"]
+        output_tokens = trace_tokens["output_tokens"] or totals["output_tokens"]
+        known_latency = trace_latency_values or latency_values
+        result = {
+            "schema": "agent-insights-v1",
+            "scope": {
+                "availableRuns": available,
+                "analyzedRuns": analyzed,
+                "complete": analyzed == available,
+                "traces": trace_scope,
+            },
+            "findings": findings,
+            "dataHealth": {
+                "counts": {"runs": analyzed, "turns": totals["turns"], "events": totals["events"]},
+                "eventTypes": dict(sorted(event_types.items())),
+                "eventStatuses": dict(sorted(event_statuses.items())),
+                "promptStates": dict(sorted(prompt_states.items())),
+                "responseStates": dict(sorted(response_states.items())),
+                "traceLinks": {
+                    "modelCalls": model_calls,
+                    "linked": totals["linked_model_calls"],
+                    "unlinked": model_calls - totals["linked_model_calls"],
+                },
+            },
+            "reliability": {
+                "runOutcomes": dict(sorted(run_outcomes.items())),
+                "turnOutcomes": dict(sorted(turn_outcomes.items())),
+                "toolErrors": totals["tool_errors"],
+                "commandFailures": totals["command_failures"],
+            },
+            "performance": {
+                "modelCalls": model_calls,
+                "toolCalls": totals["tool_calls"],
+                "inputTokens": input_tokens,
+                "outputTokens": output_tokens,
+                "averageModelLatencyMs": (
+                    round(sum(known_latency) / len(known_latency), 2)
+                    if known_latency else None
+                ),
+                "latencyKnownCalls": len(known_latency),
+                "costUsd": round(sum(trace_cost_values), 8) if trace_cost_values else None,
+                "costState": "complete" if trace_scope["analyzed"] and len(trace_cost_values) == trace_scope["analyzed"] else "partial" if trace_cost_values else "not_captured",
+            },
+            "behavior": {
+                "findingRuns": sum(finding_counts.values()),
+                "findingTypes": len({code for code, _ in finding_counts}),
+                "capturedResponses": behavior["captured_responses"],
+                "averageResponseCharacters": (
+                    round(behavior["response_characters"] / behavior["captured_responses"], 1)
+                    if behavior["captured_responses"] else None
+                ),
+                "refusals": behavior["refusals"],
+                "apologyStarts": behavior["apology_starts"],
+                "hedges": behavior["hedges"],
+                "validJsonResponses": behavior["valid_json"],
+            },
+            "comparisons": comparisons,
+            "modelComparisons": model_comparisons,
+        }
+        result["_analysisInputFingerprint"] = input_hasher.hexdigest()
+        return result
+
+    if _is_postgres(configured):
+        try:
+            import psycopg
+            from psycopg.rows import dict_row
+        except ImportError as exc:
+            raise ImportError("PostgreSQL dashboard support requires the postgres extra") from exc
+        with psycopg.connect(configured, autocommit=False, row_factory=dict_row) as connection:
+            with connection.transaction():
+                connection.execute("SET TRANSACTION READ ONLY")
+                result = builder(_PostgresSession(connection))
+    else:
+        path = _sqlite_path(configured)
+        connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        connection.row_factory = sqlite3.Row
+        try:
+            connection.execute("BEGIN")
+            result = builder(_SQLiteSession(connection))
+            connection.commit()
+        finally:
+            connection.close()
+    redacted = redact_structure(result)
+    if not isinstance(redacted, dict):
+        raise DashboardBundleLimitError("bounded agent insights exceeded redaction budget")
+    if not _include_input_fingerprint:
+        redacted.pop("_analysisInputFingerprint", None)
+    return redacted
+
+
+def _empty_agent_insights() -> dict:
+    return {
+        "schema": "agent-insights-v1",
+        "scope": {"availableRuns": 0, "analyzedRuns": 0, "complete": True,
+                  "traces": {"available": 0, "analyzed": 0, "complete": True}},
+        "findings": [],
+        "dataHealth": {
+            "counts": {"runs": 0, "turns": 0, "events": 0},
+            "eventTypes": {}, "eventStatuses": {}, "promptStates": {}, "responseStates": {},
+            "traceLinks": {"modelCalls": 0, "linked": 0, "unlinked": 0},
+        },
+        "reliability": {"runOutcomes": {}, "turnOutcomes": {}, "toolErrors": 0, "commandFailures": 0},
+        "performance": {
+            "modelCalls": 0, "toolCalls": 0, "inputTokens": 0, "outputTokens": 0,
+            "averageModelLatencyMs": None, "latencyKnownCalls": 0,
+            "costUsd": None, "costState": "not_captured",
+        },
+        "behavior": {
+            "findingRuns": 0, "findingTypes": 0, "capturedResponses": 0,
+            "averageResponseCharacters": None, "refusals": 0,
+            "apologyStarts": 0, "hedges": 0, "validJsonResponses": 0,
+        },
+        "comparisons": [],
+        "modelComparisons": [],
+    }
+
+
 def _build_from_connection(
     con: sqlite3.Connection,
     *,
     evaluator_id: str | None = None,
     registry_tenant: str | None = None,
     trace_offset: int = 0,
+    trace_judge_status: str = "all",
+    trace_id: str | None = None,
 ) -> dict:
     con.row_factory = sqlite3.Row
     try:
@@ -618,6 +1214,8 @@ def _build_from_connection(
             evaluator_id=evaluator_id,
             registry_tenant=registry_tenant,
             trace_offset=trace_offset,
+            trace_judge_status=trace_judge_status,
+            trace_id=trace_id,
         )
         if not isinstance(bundle, dict):
             raise DashboardBundleLimitError(
@@ -638,6 +1236,8 @@ def _build_from_postgres(
     evaluator_id: str | None = None,
     registry_tenant: str | None = None,
     trace_offset: int = 0,
+    trace_judge_status: str = "all",
+    trace_id: str | None = None,
 ) -> dict:
     try:
         import psycopg
@@ -656,6 +1256,8 @@ def _build_from_postgres(
                 evaluator_id=evaluator_id,
                 registry_tenant=registry_tenant,
                 trace_offset=trace_offset,
+                trace_judge_status=trace_judge_status,
+                trace_id=trace_id,
             )
 
 
@@ -665,6 +1267,8 @@ def _redacted_bundle(
     evaluator_id: str | None,
     registry_tenant: str | None,
     trace_offset: int,
+    trace_judge_status: str,
+    trace_id: str | None,
 ) -> dict:
     bundle = redact_structure(
         _build(
@@ -672,6 +1276,8 @@ def _redacted_bundle(
             evaluator_id=evaluator_id,
             registry_tenant=registry_tenant,
             trace_offset=trace_offset,
+            trace_judge_status=trace_judge_status,
+            trace_id=trace_id,
         )
     )
     if not isinstance(bundle, dict):
@@ -688,8 +1294,6 @@ def _provider_order(keys) -> list[str]:
 
 
 def _cluster_health(cluster_ids: list[str | None], min_sample_size: int = 30) -> dict:
-    from verdict_eval.stable_clustering import assess_cluster_health
-
     health = assess_cluster_health(cluster_ids, min_sample_size=min_sample_size)
     status = "fragmented" if health.is_fragmented else (
         "underpowered" if health.clusters_meeting_sample_floor < health.n_clusters else "ready"
@@ -707,7 +1311,49 @@ def _cluster_health(cluster_ids: list[str | None], min_sample_size: int = 30) ->
     }
 
 
-def _empty_bundle() -> dict:
+def _agent_run_metadata(cur: _QuerySession, tenant: str) -> dict[str, Any]:
+    if not cur.table_exists("agent_run_bundles"):
+        return {
+            "available": 0, "sources": [], "sourcesTruncated": False,
+            "lastCapturedAt": None,
+        }
+    count = cur.execute(
+        "SELECT COUNT(*) AS count FROM agent_run_bundles WHERE tenant_id=?", (tenant,)
+    ).fetchone()
+    rows = cur.execute(
+        "SELECT source_kind, COUNT(*) AS count FROM agent_run_bundles "
+        "WHERE tenant_id=? GROUP BY source_kind ORDER BY source_kind LIMIT 16",
+        (tenant,),
+    )
+    sources = [
+        {"sourceKind": row["source_kind"], "runs": int(row["count"])}
+        for row in rows
+    ]
+    source_count = cur.execute(
+        "SELECT COUNT(DISTINCT source_kind) AS count FROM agent_run_bundles "
+        "WHERE tenant_id=?", (tenant,),
+    ).fetchone()
+    last = cur.execute(
+        "SELECT MAX(started_at) AS newest_started_at FROM agent_run_bundles "
+        "WHERE tenant_id=?",
+        (tenant,),
+    ).fetchone()
+    newest_started_at = last["newest_started_at"] if last else None
+    if isinstance(newest_started_at, datetime):
+        newest_started_at = newest_started_at.isoformat()
+    return {
+        "available": int(count["count"] if count else 0),
+        "sources": sources,
+        "sourcesTruncated": int(source_count["count"] if source_count else 0) > len(sources),
+        "lastCapturedAt": newest_started_at,
+    }
+
+
+def _empty_bundle(*, agent_runs: dict[str, Any] | None = None) -> dict:
+    run_metadata = agent_runs or {
+        "available": 0, "sources": [], "sourcesTruncated": False,
+        "lastCapturedAt": None,
+    }
     truncation = _truncation_metadata({
         "providers": _resource_limit(0, 0, MAX_DASHBOARD_PROVIDERS),
         "providerModels": _resource_limit(0, 0, MAX_PROVIDER_MODELS),
@@ -724,6 +1370,10 @@ def _empty_bundle() -> dict:
             "runStart": None,
             "durationHours": 0,
             "totalTraces": 0,
+            "totalAgentRuns": run_metadata["available"],
+            "agentRunSources": run_metadata["sources"],
+            "agentRunSourcesTruncated": run_metadata["sourcesTruncated"],
+            "lastAgentCaptureAt": run_metadata["lastCapturedAt"],
             "totalJudged": 0,
             "totalCost": None,
             "totalCostStatus": "unavailable",
@@ -775,18 +1425,296 @@ def _empty_bundle() -> dict:
     }
 
 
+def _trace_samples(
+    cur: _QuerySession,
+    *,
+    requested_trace_id: str | None,
+    trace_judge_status: str,
+    trace_offset: int,
+    explorer_trace_ids: list[str],
+    judgment_status_by_trace: dict[str, str],
+    ttime: dict[str, str],
+    tcluster: dict[str, str | None],
+    cluster_labels: dict[str, str],
+    cluster_select: str,
+    judg_by_trace: dict[str, dict[str, Any]],
+    t0: datetime,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Build one evaluator-aware, bounded Trace Explorer page."""
+    filtered_trace_ids = explorer_trace_ids
+    if requested_trace_id is not None:
+        filtered_trace_ids = [
+            candidate
+            for candidate in filtered_trace_ids
+            if candidate == requested_trace_id
+        ]
+    elif trace_judge_status != "all":
+        def matches_judge_status(candidate: str) -> bool:
+            status = judgment_status_by_trace.get(candidate, "not_judged")
+            if trace_judge_status == "judged":
+                return status in {"pass", "fail", "unclear"}
+            return status == trace_judge_status
+
+        filtered_trace_ids = [
+            candidate for candidate in filtered_trace_ids
+            if matches_judge_status(candidate)
+        ]
+    sample_trace_ids = sorted(
+        filtered_trace_ids,
+        key=lambda candidate: (_dt(ttime[candidate]), candidate),
+        reverse=True,
+    )[trace_offset:trace_offset + MAX_TRACE_SAMPLES]
+    placeholders = ",".join("?" for _ in sample_trace_ids) or "NULL"
+    sample_rows = [dict(row) for row in cur.execute(
+        # ``cluster_select`` is a closed-set schema compatibility expression.
+        "SELECT trace_id, provider, request_model, "
+        f"{cluster_select}, input_tokens, output_tokens, "  # nosec B608
+        "latency_ms, cost_usd, finish_reason, error, started_at, "
+        f"prompt_redacted, response_redacted FROM traces WHERE trace_id IN ({placeholders})",
+        tuple(sample_trace_ids),
+    )]
+    rows_by_trace_id = {row["trace_id"]: row for row in sample_rows}
+    samples: list[dict[str, Any]] = []
+    for row in (rows_by_trace_id[trace_id] for trace_id in sample_trace_ids):
+        sample = dict(row)
+        sample["cluster_id"] = tcluster.get(row["trace_id"])
+        sample["cluster_label"] = cluster_labels.get(
+            sample["cluster_id"], sample["cluster_id"]
+        )
+        for content_field in ("prompt_redacted", "response_redacted", "error"):
+            sample[content_field] = redact(sample.get(content_field))
+        sample["providerKey"] = _provider_key(row["provider"])
+        sample["contentCaptured"] = (
+            row["prompt_redacted"] is not None or row["response_redacted"] is not None
+        )
+        sample["hour"] = round(
+            (_dt(row["started_at"]) - t0).total_seconds() / 3600, 2
+        )
+        latency = _round_or_none(row["latency_ms"], 0)
+        sample["latency_ms"] = int(latency) if latency is not None else None
+        if sample.get("response_redacted"):
+            sample["response_redacted"] = sample["response_redacted"][:600]
+        judgment = judg_by_trace.get(row["trace_id"])
+        if judgment:
+            sample["judgment"] = judgment
+        sample["providerStatus"] = (
+            "provider_error" if sample.get("error") else "provider_succeeded"
+        )
+        sample["judgeStatus"] = judgment_status_by_trace.get(
+            row["trace_id"], "not_judged"
+        )
+        samples.append(sample)
+    return samples, filtered_trace_ids
+
+
+def _time_series_read_model(
+    cur: _QuerySession,
+    *,
+    keys: list[str],
+    t0: datetime,
+    judg_by_trace: dict[str, dict[str, Any]],
+    ttime: dict[str, str],
+    tp: dict[str, str],
+    tcluster: dict[str, str | None],
+    all_keys: list[str],
+    clusters: list[dict[str, Any]],
+    dims_present: list[str],
+    drift: list[dict[str, Any]],
+    raw_provider_of: dict[str, object],
+    model_of: dict[str, str],
+) -> dict[str, Any]:
+    """Build bounded operational and evaluator time-series projections."""
+    bin_seconds = 30 * 60
+    bins = defaultdict(lambda: defaultdict(lambda: {"n": 0, "err": 0, "lat": []}))
+    for row in cur.execute("SELECT provider, started_at, latency_ms, error FROM traces"):
+        provider_key = _provider_key(row["provider"])
+        if provider_key not in keys:
+            continue
+        bucket = int((_dt(row["started_at"]) - t0).total_seconds() // bin_seconds)
+        cell = bins[provider_key][bucket]
+        cell["n"] += 1
+        if row["error"]:
+            cell["err"] += 1
+        latency = _round_or_none(row["latency_ms"], 6)
+        if latency is not None:
+            cell["lat"].append(latency)
+    all_observed_bins = sorted({bucket for provider in bins for bucket in bins[provider]})
+    observed_bins = all_observed_bins[-MAX_SERIES_POINTS:]
+    latency_rows = []
+    for bucket in observed_bins:
+        projected = {"hour": round(bucket * 0.5, 1)}
+        for provider in keys:
+            cell = bins[provider].get(bucket)
+            if cell and cell["n"]:
+                projected[f"{provider}_lat"] = (
+                    round(sum(cell["lat"]) / len(cell["lat"]) / 1000, 2)
+                    if cell["lat"] else None
+                )
+                projected[f"{provider}_err"] = round(
+                    100 * cell["err"] / cell["n"], 1
+                )
+                projected[f"{provider}_n"] = cell["n"]
+            else:
+                projected[f"{provider}_lat"] = None
+                projected[f"{provider}_err"] = None
+                projected[f"{provider}_n"] = 0
+        latency_rows.append(projected)
+
+    hour_seconds = 60 * 60
+    provider_rates = defaultdict(lambda: defaultdict(Counter))
+    cluster_rates = defaultdict(lambda: defaultdict(Counter))
+    dimension_rates = defaultdict(lambda: defaultdict(Counter))
+    drift_focus = drift[0].get("provider") if drift else None
+    focus = drift_focus if drift_focus in keys else (keys[0] if keys else None)
+    focus_provider_label = (
+        _label_for(str(raw_provider_of.get(focus) or ""), model_of.get(focus, ""))
+        if focus is not None else None
+    )
+    for trace_id, judgment in judg_by_trace.items():
+        started_at = ttime.get(trace_id)
+        if not started_at:
+            continue
+        provider = tp.get(trace_id)
+        cluster = tcluster.get(trace_id)
+        hour = int((_dt(started_at) - t0).total_seconds() // hour_seconds)
+        for dimension in judgment["dims"]:
+            verdict = dimension["verdict"]
+            if provider in keys:
+                provider_rates[provider][hour][verdict] += 1
+            if cluster and len(all_keys) == 1:
+                cluster_rates[cluster][hour][verdict] += 1
+            if provider == focus:
+                dimension_rates[dimension["name"]][hour][verdict] += 1
+    all_observed_hours = sorted({hour for provider in provider_rates for hour in provider_rates[provider]})
+    observed_hours = all_observed_hours[-MAX_SERIES_POINTS:]
+    passrate = []
+    for hour in observed_hours:
+        projected = {"hour": hour}
+        for provider in keys:
+            cell = provider_rates[provider].get(hour)
+            projected[provider] = _score_rate(cell) if cell else None
+        passrate.append(projected)
+    cluster_passrate = []
+    if len(all_keys) == 1:
+        cluster_keys = [cluster["cluster_id"] for cluster in clusters]
+        for hour in observed_hours:
+            projected = {"hour": hour}
+            for cluster in cluster_keys:
+                cell = cluster_rates[cluster].get(hour)
+                projected[cluster] = _score_rate(cell) if cell else None
+            cluster_passrate.append(projected)
+    dimension_passrate = []
+    for hour in observed_hours:
+        projected = {"hour": hour}
+        for dimension in dims_present:
+            cell = dimension_rates[dimension].get(hour)
+            projected[dimension] = _score_rate(cell) if cell else None
+        dimension_passrate.append(projected)
+    return {
+        "latencyRows": latency_rows,
+        "passrate": passrate,
+        "clusterPassrate": cluster_passrate,
+        "dimensionPassrate": dimension_passrate,
+        "focusProvider": focus,
+        "focusProviderLabel": focus_provider_label,
+        "availableLatencyPoints": len(all_observed_bins),
+        "shownLatencyPoints": len(observed_bins),
+        "availableHourlyPoints": len(all_observed_hours),
+        "shownHourlyPoints": len(observed_hours),
+    }
+
+
+def _analysis_coverage(
+    cur: _QuerySession,
+    *,
+    tenant: str,
+    agent_runs: dict[str, Any],
+    explorer_trace_ids: list[str],
+    judgment_status_by_trace: dict[str, str],
+    selected_evaluator_id: str | None,
+) -> dict[str, Any]:
+    """Project persisted deterministic and selected-evaluator coverage."""
+    deterministic = {
+        "status": "never_run",
+        "analysisId": None,
+        "completedAt": None,
+        "availableRuns": agent_runs["available"],
+        "analyzedRuns": 0,
+        "availableTraces": len(explorer_trace_ids),
+        "analyzedTraces": 0,
+        "complete": False,
+    }
+    if _table_exists(cur, "deterministic_analysis_runs"):
+        row = cur.execute(
+            """SELECT payload_json FROM deterministic_analysis_runs
+               WHERE tenant_id=? AND scope_key='agent-and-trace'
+               ORDER BY completed_at DESC, analysis_id DESC LIMIT 1""",
+            (tenant,),
+        ).fetchone()
+        if row is not None:
+            payload = row["payload_json"]
+            if isinstance(payload, dict):
+                payload = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+            persisted = analysis_run_from_json(payload)
+            scope = persisted.result.get("scope", {})
+            trace_scope = scope.get("traces", {}) if isinstance(scope, dict) else {}
+            deterministic = {
+                "status": persisted.status.value,
+                "analysisId": persisted.analysis_id,
+                "completedAt": persisted.completed_at.isoformat(),
+                "availableRuns": scope.get("availableRuns", agent_runs["available"]),
+                "analyzedRuns": scope.get("analyzedRuns", 0),
+                "availableTraces": trace_scope.get(
+                    "available", len(explorer_trace_ids)
+                ),
+                "analyzedTraces": trace_scope.get("analyzed", 0),
+                "complete": bool(
+                    scope.get("complete") and trace_scope.get("complete")
+                ),
+            }
+    application_trace_ids = set(explorer_trace_ids)
+    judged_trace_ids = {
+        trace_id
+        for trace_id, status in judgment_status_by_trace.items()
+        if trace_id in application_trace_ids and status != "judge_error"
+    }
+    judge_error_trace_ids = {
+        trace_id
+        for trace_id, status in judgment_status_by_trace.items()
+        if trace_id in application_trace_ids and status == "judge_error"
+    }
+    return {
+        "deterministicAnalysis": deterministic,
+        "evaluation": {
+            "selectedEvaluator": selected_evaluator_id,
+            "traces": len(application_trace_ids),
+            "judged": len(judged_trace_ids),
+            "judgeErrors": len(judge_error_trace_ids),
+            "notJudged": len(
+                application_trace_ids - judged_trace_ids - judge_error_trace_ids
+            ),
+            "completedCalls": len(judged_trace_ids),
+            "errorCalls": len(judge_error_trace_ids),
+        },
+    }
+
+
 def _build(
     cur,
     *,
     evaluator_id: str | None = None,
     registry_tenant: str | None = None,
     trace_offset: int = 0,
+    trace_judge_status: str = "all",
+    trace_id: str | None = None,
 ) -> dict:
+    requested_trace_id = trace_id
+    agent_runs = _agent_run_metadata(cur, registry_tenant or "__verdict_local__")
     if not _table_exists(cur, "traces"):
-        return _empty_bundle()
+        return _empty_bundle(agent_runs=agent_runs)
     t0row = cur.execute("SELECT MIN(started_at) m, MAX(started_at) x FROM traces").fetchone()
     if not t0row or not t0row["m"]:
-        return _empty_bundle()
+        return _empty_bundle(agent_runs=agent_runs)
     t0, tmax = _dt(t0row["m"]), _dt(t0row["x"])
     trace_columns = cur.columns("traces")
     cluster_select = (
@@ -1107,10 +2035,12 @@ def _build(
         "missing": 0, "error": 0, "evaluable": 0,
     })
     judg_by_trace = {}
+    judgment_status_by_trace: dict[str, str] = {}
     for trace_id, row in latest_row_by_trace.items():
         status = (_row_value(row, "status", "completed") or "completed").lower()
         if status == "error":
             score_coverage["error"] += 1
+            judgment_status_by_trace[trace_id] = "judge_error"
             continue
         dims_raw = _json_column(row, "dimensions", [])
         dims_raw = dims_raw if isinstance(dims_raw, list) else []
@@ -1157,6 +2087,7 @@ def _build(
                 "passRate": _score_rate(trace_counts),
             },
         }
+        judgment_status_by_trace[trace_id] = trace_status
     score_coverage["evaluable"] = score_coverage["pass"] + score_coverage["fail"]
 
     all_keys = _provider_order(set(raw_provider_of))
@@ -1219,8 +2150,6 @@ def _build(
         })
 
     # ---- clusters ----
-    from verdict_eval.stable_clustering import UNCLUSTERED_ID
-
     cluster_counts = Counter(
         cluster_id
         for cluster_id in tcluster.values()
@@ -1328,132 +2257,36 @@ def _build(
             row[p] = _score_rate(c)
         providerDimension.append(row)
 
-    # ---- time series: 30-min bins ----
-    BIN = 30 * 60
-    bins = defaultdict(lambda: defaultdict(lambda: {"n": 0, "err": 0, "lat": []}))
-    for r in cur.execute("SELECT provider, started_at, latency_ms, error FROM traces"):
-        provider_key = _provider_key(r["provider"])
-        if provider_key not in keys:
-            continue
-        b = int((_dt(r["started_at"]) - t0).total_seconds() // BIN)
-        cell = bins[provider_key][b]
-        cell["n"] += 1
-        if r["error"]:
-            cell["err"] += 1
-        latency = _round_or_none(r["latency_ms"], 6)
-        if latency is not None:
-            cell["lat"].append(latency)
-    all_observed_bins = sorted({b for p in bins for b in bins[p]})
-    observed_bins = all_observed_bins[-MAX_SERIES_POINTS:]
-    tsRows = []
-    for b in observed_bins:
-        row = {"hour": round(b * 0.5, 1)}
-        for p in keys:
-            cell = bins[p].get(b)
-            if cell and cell["n"]:
-                row[f"{p}_lat"] = round(sum(cell["lat"]) / len(cell["lat"]) / 1000, 2) if cell["lat"] else None
-                row[f"{p}_err"] = round(100 * cell["err"] / cell["n"], 1)
-                row[f"{p}_n"] = cell["n"]
-            else:
-                row[f"{p}_lat"] = None
-                row[f"{p}_err"] = None
-                row[f"{p}_n"] = 0
-        tsRows.append(row)
-
-    # ---- hourly pass rate by provider and cluster + per-dim drift focus ----
-    HB = 60 * 60
-    pr = defaultdict(lambda: defaultdict(Counter))
-    cluster_pr = defaultdict(lambda: defaultdict(Counter))
-    dim_hr = defaultdict(lambda: defaultdict(Counter))
-    drift_focus = drift[0].get("provider") if drift else None
-    focus = drift_focus if drift_focus in keys else (keys[0] if keys else None)
-    focus_provider_label = (
-        _label_for(
-            str(raw_provider_of.get(focus) or ""),
-            model_of.get(focus, ""),
-        )
-        if focus is not None
-        else None
+    series = _time_series_read_model(
+        cur,
+        keys=keys,
+        t0=t0,
+        judg_by_trace=judg_by_trace,
+        ttime=ttime,
+        tp=tp,
+        tcluster=tcluster,
+        all_keys=all_keys,
+        clusters=clusters,
+        dims_present=dims_present,
+        drift=drift,
+        raw_provider_of=raw_provider_of,
+        model_of=model_of,
     )
-    for tid, j in judg_by_trace.items():
-        st = ttime.get(tid)
-        if not st:
-            continue
-        prov = tp.get(tid)
-        cluster = tcluster.get(tid)
-        hb = int((_dt(st) - t0).total_seconds() // HB)
-        for d in j["dims"]:
-            verdict = d["verdict"]
-            if prov in keys:
-                pr[prov][hb][verdict] += 1
-            if cluster and len(all_keys) == 1:
-                cluster_pr[cluster][hb][verdict] += 1
-            if prov == focus:
-                dim_hr[d["name"]][hb][verdict] += 1
-    all_observed_hours = sorted({h for p in pr for h in pr[p]})
-    observed_hours = all_observed_hours[-MAX_SERIES_POINTS:]
-    passrate = []
-    for h in observed_hours:
-        row = {"hour": h}
-        for p in keys:
-            cell = pr[p].get(h)
-            row[p] = _score_rate(cell) if cell else None
-        passrate.append(row)
-    clusterPassrate = []
-    if len(all_keys) == 1:
-        cluster_keys = [cluster["cluster_id"] for cluster in clusters]
-        for h in observed_hours:
-            row = {"hour": h}
-            for cluster in cluster_keys:
-                cell = cluster_pr[cluster].get(h)
-                row[cluster] = _score_rate(cell) if cell else None
-            clusterPassrate.append(row)
-    haikuDim = []
-    for h in observed_hours:
-        row = {"hour": h}
-        for d in dims_present:
-            cell = dim_hr[d].get(h)
-            row[d] = _score_rate(cell) if cell else None
-        haikuDim.append(row)
 
-    # ---- sample traces for the explorer ----
-    sample_trace_ids = sorted(
-        explorer_trace_ids,
-        key=lambda trace_id: (_dt(ttime[trace_id]), trace_id),
-        reverse=True,
-    )[trace_offset:trace_offset + MAX_TRACE_SAMPLES]
-    placeholders = ",".join("?" for _ in sample_trace_ids) or "NULL"
-    sample_rows = [dict(r) for r in cur.execute(
-        # ``cluster_select`` is the same closed-set schema compatibility
-        # expression used above. Placeholders bind IDs; fixed NULL handles none.
-        "SELECT trace_id, provider, request_model, "
-        f"{cluster_select}, input_tokens, output_tokens, "  # nosec B608
-        "latency_ms, cost_usd, finish_reason, error, started_at, "
-        f"prompt_redacted, response_redacted FROM traces WHERE trace_id IN ({placeholders})",
-        tuple(sample_trace_ids),
-    )]
-    rows_by_trace_id = {row["trace_id"]: row for row in sample_rows}
-    pick = [rows_by_trace_id[trace_id] for trace_id in sample_trace_ids]
-    samples = []
-    for r in pick:
-        s = dict(r)
-        s["cluster_id"] = tcluster.get(r["trace_id"])
-        s["cluster_label"] = cluster_labels.get(s["cluster_id"], s["cluster_id"])
-        for content_field in ("prompt_redacted", "response_redacted", "error"):
-            s[content_field] = redact(s.get(content_field))
-        s["providerKey"] = _provider_key(r["provider"])
-        s["contentCaptured"] = (
-            r["prompt_redacted"] is not None or r["response_redacted"] is not None
-        )
-        s["hour"] = round((_dt(r["started_at"]) - t0).total_seconds() / 3600, 2)
-        latency = _round_or_none(r["latency_ms"], 0)
-        s["latency_ms"] = int(latency) if latency is not None else None
-        if s.get("response_redacted"):
-            s["response_redacted"] = s["response_redacted"][:600]
-        j = judg_by_trace.get(r["trace_id"])
-        if j:
-            s["judgment"] = j
-        samples.append(s)
+    samples, filtered_explorer_trace_ids = _trace_samples(
+        cur,
+        requested_trace_id=requested_trace_id,
+        trace_judge_status=trace_judge_status,
+        trace_offset=trace_offset,
+        explorer_trace_ids=explorer_trace_ids,
+        judgment_status_by_trace=judgment_status_by_trace,
+        ttime=ttime,
+        tcluster=tcluster,
+        cluster_labels=cluster_labels,
+        cluster_select=cluster_select,
+        judg_by_trace=judg_by_trace,
+        t0=t0,
+    )
 
     total_traces = sum(int(values["traces"]) for values in cost_counts.values())
     total_cost_status = (
@@ -1497,26 +2330,38 @@ def _build(
             MAX_DASHBOARD_DRIFT_SIGNALS,
         ),
         "latencyPoints": _resource_limit(
-            len(all_observed_bins),
-            len(observed_bins),
+            series["availableLatencyPoints"],
+            series["shownLatencyPoints"],
             MAX_SERIES_POINTS,
         ),
         "hourlyPoints": _resource_limit(
-            len(all_observed_hours),
-            len(observed_hours),
+            series["availableHourlyPoints"],
+            series["shownHourlyPoints"],
             MAX_SERIES_POINTS,
         ),
         "traceSamples": _resource_limit(
-            len(explorer_trace_ids),
+            len(filtered_explorer_trace_ids),
             len(samples),
             MAX_TRACE_SAMPLES,
         ),
     })
+    coverage = _analysis_coverage(
+        cur,
+        tenant=registry_tenant or "__verdict_local__",
+        agent_runs=agent_runs,
+        explorer_trace_ids=explorer_trace_ids,
+        judgment_status_by_trace=judgment_status_by_trace,
+        selected_evaluator_id=selected_id,
+    )
     return {
         "meta": {
             "runStart": t0row["m"],
             "durationHours": max(1, round((tmax - t0).total_seconds() / 3600)),
             "totalTraces": total_traces,
+            "totalAgentRuns": agent_runs["available"],
+            "agentRunSources": agent_runs["sources"],
+            "agentRunSourcesTruncated": agent_runs["sourcesTruncated"],
+            "lastAgentCaptureAt": agent_runs["lastCapturedAt"],
             "totalJudged": len(judg_by_trace),
             "totalCost": total_cost if priced_traces else None,
             "totalCostStatus": total_cost_status,
@@ -1543,6 +2388,7 @@ def _build(
         "evaluation": evaluation,
         "evaluatorHealth": evaluator_health,
         "scoreCoverage": dict(score_coverage),
+        "coverage": coverage,
         "driftSignals": drift,
         "driftRun": drift_run,
         "driftAnalysis": _drift_analysis(
@@ -1559,12 +2405,12 @@ def _build(
             ),
         ),
         "dimensionOverall": dimensionOverall,
-        "tsRows": tsRows,
-        "passrate": passrate,
-        "clusterPassrate": clusterPassrate,
-        "haikuDim": haikuDim,
-        "focusProvider": focus,
-        "focusProviderLabel": focus_provider_label,
+        "tsRows": series["latencyRows"],
+        "passrate": series["passrate"],
+        "clusterPassrate": series["clusterPassrate"],
+        "haikuDim": series["dimensionPassrate"],
+        "focusProvider": series["focusProvider"],
+        "focusProviderLabel": series["focusProviderLabel"],
         "samples": samples,
         "providerDimension": providerDimension,
         "truncation": truncation,
@@ -1578,6 +2424,7 @@ def create_app(
     *,
     storage: str | os.PathLike[str] | None = None,
     operations_url: str | None = None,
+    allowed_hosts: list[str] | None = None,
 ):
     import base64
     import secrets
@@ -1586,6 +2433,7 @@ def create_app(
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import HTMLResponse, JSONResponse, Response
     from fastapi.staticfiles import StaticFiles
+    from starlette.middleware.trustedhost import TrustedHostMiddleware
 
     configured_storage = resolve_storage(storage)
     if operations_url is not None:
@@ -1600,7 +2448,18 @@ def create_app(
         ):
             raise ValueError("operations_url must be a same-origin absolute path")
     backend = "postgresql" if _is_postgres(configured_storage) else "sqlite"
+    setup_token = secrets.token_urlsafe(32)
     app = FastAPI(title="Verdict Dashboard", version="0.1.0")
+    configured_hosts = allowed_hosts or [
+        host.strip()
+        for host in os.environ.get(
+            "VERDICT_ALLOWED_HOSTS", "127.0.0.1,localhost,[::1],testserver"
+        ).split(",")
+        if host.strip()
+    ]
+    if not configured_hosts:
+        raise ValueError("at least one trusted dashboard host is required")
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=configured_hosts)
     app.mount(
         "/assets",
         StaticFiles(directory=STATIC / "assets", check_dir=False),
@@ -1618,7 +2477,11 @@ def create_app(
     # assets contain no stored telemetry and remain public.
     def _is_gated(path: str) -> bool:
         return path in {"/", "/dashboard", "/api/config"} or path.startswith(
-            ("/api/data", "/api/registry")
+            (
+                "/api/data", "/api/registry", "/api/runs", "/api/insights",
+                "/api/evaluators", "/api/setup", "/api/monitor", "/api/clusters",
+                "/api/control",
+            )
         )
 
     @app.middleware("http")
@@ -1679,10 +2542,27 @@ def create_app(
     def config():
         return {"operationsUrl": operations_url}
 
+    from verdict.dashboard.setup_routes import SetupRoutes
+
+    setup_routes = SetupRoutes(configured_storage, setup_token)
+    setup_routes.register(app)
+    _setup_authorized = setup_routes.authorized
+
+    from verdict.dashboard.control_routes import ControlRoutes
+    from verdict.dashboard.lab_routes import register_lab_routes
+    from verdict.dashboard.monitor_routes import MonitorRoutes
+
+    register_lab_routes(app, setup_routes)
+    monitor_routes = MonitorRoutes(setup_routes)
+    monitor_routes.register(app)
+    ControlRoutes(configured_storage, setup_routes, monitor_routes).register(app)
+
     def data(
         request: Request,
         evaluator: str | None = None,
         trace_offset: int = Query(default=0, ge=0),
+        trace_judge_status: str = "all",
+        trace_id: str | None = None,
     ):
         if not _is_postgres(configured_storage) and not _sqlite_path(
             configured_storage
@@ -1702,6 +2582,8 @@ def create_app(
                     None,
                 ),
                 trace_offset=trace_offset,
+                trace_judge_status=trace_judge_status,
+                trace_id=trace_id,
             )
         except DashboardBundleLimitError:
             _log.exception("dashboard bundle exceeded its safety budget")
@@ -1756,6 +2638,115 @@ def create_app(
     registry.__annotations__["request"] = Request
     app.get("/api/registry")(registry)
 
+    def agent_runs(
+        request,
+        tenant: str | None = None,
+        limit: int = Query(default=30, ge=1, le=100),
+        run_id: str | None = None,
+        evaluator_fingerprint: str | None = None,
+    ):
+        authorized_tenant = getattr(
+            request.state, "verdict_registry_tenant", None,
+        ) or tenant or "__verdict_local__"
+        try:
+            requested_run_ids = request.query_params.getlist("run_ids")
+            selected_run_ids = tuple(requested_run_ids) if requested_run_ids else None
+            return build_agent_runs_bundle(
+                configured_storage,
+                tenant=authorized_tenant,
+                limit=limit,
+                run_id=run_id,
+                run_ids=selected_run_ids,
+                evaluator_fingerprint=evaluator_fingerprint,
+            )
+        except ValueError:
+            return JSONResponse({"error": "invalid runs request"}, status_code=400)
+        except (DashboardBundleLimitError, OSError, sqlite3.DatabaseError):
+            _log.exception("failed to build %s agent runs bundle", backend)
+            return JSONResponse({"error": "agent runs unavailable"}, status_code=503)
+
+    agent_runs.__annotations__["request"] = Request
+    app.get("/api/runs")(agent_runs)
+
+    def agent_run_detail(
+        run_id: str,
+        request,
+        tenant: str | None = None,
+        event_limit: int = Query(default=100, ge=1, le=200),
+        event_offset: int = Query(default=0, ge=0),
+        turn_limit: int = Query(default=20, ge=1, le=50),
+        turn_offset: int = Query(default=0, ge=0),
+        event_id: str | None = None,
+    ):
+        authorized_tenant = getattr(
+            request.state, "verdict_registry_tenant", None,
+        ) or tenant or "__verdict_local__"
+        try:
+            return build_agent_run_detail(
+                configured_storage,
+                tenant=authorized_tenant,
+                run_id=run_id,
+                event_limit=event_limit,
+                event_offset=event_offset,
+                turn_limit=turn_limit,
+                turn_offset=turn_offset,
+                event_id=event_id,
+            )
+        except KeyError:
+            return JSONResponse({"error": "agent run not found"}, status_code=404)
+        except ValueError:
+            return JSONResponse({"error": "invalid run detail request"}, status_code=400)
+        except (DashboardBundleLimitError, OSError, sqlite3.DatabaseError):
+            _log.exception("failed to build %s agent run detail", backend)
+            return JSONResponse({"error": "agent run unavailable"}, status_code=503)
+
+    agent_run_detail.__annotations__["request"] = Request
+    app.get("/api/runs/{run_id}")(agent_run_detail)
+
+    def agent_insights(request, tenant: str | None = None):
+        authorized_tenant = getattr(
+            request.state, "verdict_registry_tenant", None,
+        ) or tenant or "__verdict_local__"
+        try:
+            return read_latest_analysis(
+                configured_storage,
+                tenant=authorized_tenant,
+                empty_result=_empty_agent_insights(),
+            )
+        except ValueError:
+            return JSONResponse({"error": "invalid insights request"}, status_code=400)
+        except (DashboardBundleLimitError, OSError, sqlite3.DatabaseError):
+            _log.exception("failed to build %s agent insights", backend)
+            return JSONResponse({"error": "agent insights unavailable"}, status_code=503)
+
+    agent_insights.__annotations__["request"] = Request
+    app.get("/api/insights")(agent_insights)
+
+    def run_agent_insights(request, tenant: str | None = None):
+        if not _setup_authorized(request):
+            return JSONResponse({"error": "analysis authorization required"}, status_code=403)
+        authorized_tenant = getattr(
+            request.state, "verdict_registry_tenant", None,
+        ) or tenant or "__verdict_local__"
+        try:
+            return run_analysis(
+                configured_storage,
+                tenant=authorized_tenant,
+                build=lambda: build_agent_insights_bundle(
+                    configured_storage,
+                    tenant=authorized_tenant,
+                    _include_input_fingerprint=True,
+                ),
+            )
+        except ValueError:
+            return JSONResponse({"error": "invalid insights request"}, status_code=400)
+        except (DashboardBundleLimitError, OSError, sqlite3.DatabaseError, RuntimeError):
+            _log.exception("failed to run %s agent insights", backend)
+            return JSONResponse({"error": "agent insights failed"}, status_code=503)
+
+    run_agent_insights.__annotations__["request"] = Request
+    app.post("/api/insights/run")(run_agent_insights)
+
     @app.get("/", response_class=HTMLResponse)
     def index():
         return _serve("dashboard.html")
@@ -1774,6 +2765,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Serve the Verdict dashboard.")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--open-browser", action="store_true", help=argparse.SUPPRESS)
     source = parser.add_mutually_exclusive_group()
     source.add_argument("--storage", help="SQLite URL/path or PostgreSQL DSN")
     source.add_argument("--db", help="legacy SQLite path")
@@ -1783,15 +2775,23 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Verdict dashboard → http://{args.host}:{args.port}")
     print(f"Reading storage   → {backend}")
 
-    # Loud warning if exposed beyond localhost without auth: /dashboard and the
-    # full /api/data bundle would otherwise be world-readable.
-    if args.host not in ("127.0.0.1", "localhost", "::1") and not (
-        os.environ.get("VERDICT_USER") and os.environ.get("VERDICT_PASS")
-    ):
-        print("WARNING: binding to a non-localhost host without VERDICT_USER/VERDICT_PASS — "
-              "the dashboard and /api/data will be publicly accessible. Set both to require auth.")
+    if args.host not in ("127.0.0.1", "localhost", "::1"):
+        if not (os.environ.get("VERDICT_USER") and os.environ.get("VERDICT_PASS")):
+            parser.error(
+                "non-loopback binding requires VERDICT_USER and VERDICT_PASS"
+            )
+        if not os.environ.get("VERDICT_ALLOWED_HOSTS"):
+            parser.error(
+                "non-loopback binding requires an explicit VERDICT_ALLOWED_HOSTS allowlist"
+            )
 
     import uvicorn
+    if args.open_browser:
+        import threading
+        import webbrowser
+        threading.Timer(
+            0.5, webbrowser.open, args=(f"http://{args.host}:{args.port}/dashboard",),
+        ).start()
     uvicorn.run(
         create_app(storage=configured_storage),
         host=args.host,

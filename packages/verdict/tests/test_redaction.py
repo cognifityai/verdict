@@ -662,3 +662,21 @@ def test_ipv6_and_pii_canaries_are_absent_from_storage_api_and_dashboard_payload
             f"privacy canary fragment {fragment!r} reached the HTTP/UI payload"
         )
         assert fragment not in caplog.text
+
+
+def test_common_provider_keys_and_secret_assignments_are_redacted() -> None:
+    text = (
+        "ANTHROPIC_API_KEY=sk-ant-abcdefghijklmnopqrstuv "
+        "Authorization: Bearer abcdefghijklmnopqrstuvwxyz012345 "
+        "password='correct-horse-battery-staple' "
+        "AWS=AKIAABCDEFGHIJKLMNOP"
+    )
+
+    output = redact(text)
+
+    assert output is not None
+    assert "sk-ant-" not in output
+    assert "abcdefghijklmnopqrstuvwxyz012345" not in output
+    assert "correct-horse-battery-staple" not in output
+    assert "AKIAABCDEFGHIJKLMNOP" not in output
+    assert "<PROVIDER_KEY>" in output

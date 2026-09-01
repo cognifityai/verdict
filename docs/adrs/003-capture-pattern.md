@@ -151,11 +151,15 @@ target deployment before relying on them.
 
 ## PII handling
 
-- Content capture (prompts/completions) **off by default**.
+- Content capture (prompts/completions) **on by default** as of the V3 local
+  workflow; `capture_content=False` remains the explicit metadata-only mode.
 - When enabled, content is redacted by `verdict/redaction.py` before assignment
   to the captured `Trace`; every storage adapter applies a second boundary so a
   manually constructed record cannot bypass it. Dashboard/export paths reapply
   redaction for historical rows written before that boundary existed.
+- The best-effort pattern pass includes common Anthropic/OpenAI/Google/AWS key
+  shapes, bearer tokens, and secret assignments in addition to PII patterns.
+  It remains defense in depth, not a complete secret scanner.
 - Provider message persistence uses an allowlist of supported top-level fields.
   Every string key and value in their JSON-compatible nested structures is
   sanitized recursively, including OpenAI tool arguments and Anthropic-style
@@ -211,7 +215,7 @@ while deciding which shared parent spans remain protected.
 - For frameworks we don't auto-instrument (custom retrieval, business logic), the
   user can add `@verdict.trace`.
 - Redaction is best-effort pattern matching, not a full PII engine; teams with
-  strict requirements should keep content capture off or review the regex set.
+  strict requirements should explicitly disable content capture or review the regex set.
   Names, postal addresses, dates of birth, many international identifiers, and
   opaque tenant/session/cluster identifiers are not comprehensively detected.
   Application identifiers must be non-sensitive. `encrypt` mode is not

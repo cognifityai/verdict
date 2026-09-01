@@ -11,6 +11,7 @@ from uuid import uuid4
 import pytest
 from verdict.dashboard import build_bundle
 from verdict.dashboard.app import build_registry_bundle
+from verdict.evidence import AgentRun, AgentRunBundle, ExecutionStatus, SourceSession
 from verdict.schema import (
     ClusterIdentity,
     ClusterRegistryCluster,
@@ -136,6 +137,16 @@ def test_live_postgres_and_sqlite_produce_the_same_dashboard_bundle(
             example_trace_ids=[trace.trace_id],
             contributing_layers=["judge_rubric"],
         )
+        agent_bundle = AgentRunBundle(
+            SourceSession(
+                "dashboard-parity-session", "__verdict_local__", "codex",
+                "a" * 64, started_at, started_at,
+            ),
+            AgentRun(
+                "dashboard-parity-agent-run", "dashboard-parity-session",
+                "__verdict_local__", started_at, ExecutionStatus.UNKNOWN,
+            ),
+        )
 
         for storage in (sqlite, postgres):
             storage.insert_trace(deepcopy(trace))
@@ -145,6 +156,7 @@ def test_live_postgres_and_sqlite_produce_the_same_dashboard_bundle(
             storage.insert_trace(deepcopy(judge_trace))
             storage.insert_judgment(deepcopy(judgment))
             storage.replace_drift_run(deepcopy(run), [deepcopy(signal)])
+            storage.replace_agent_run_bundle(deepcopy(agent_bundle))
 
         sqlite.close()
         sqlite = None
@@ -166,6 +178,12 @@ def test_live_postgres_and_sqlite_produce_the_same_dashboard_bundle(
             sqlite_bundle["providers"][0]["inTok"]
         )
         assert postgres_bundle["meta"]["totalTraces"] == 5
+        assert postgres_bundle["meta"]["totalAgentRuns"] == 1
+        assert postgres_bundle["meta"]["agentRunSources"] == [
+            {"sourceKind": "codex", "runs": 1}
+        ]
+        assert postgres_bundle["meta"]["agentRunSourcesTruncated"] is False
+        assert postgres_bundle["meta"]["lastAgentCaptureAt"]
         assert postgres_bundle["meta"]["workload"] == "agent"
         assert postgres_bundle["meta"]["costBreakdown"]["judge"]["traces"] == 1
         assert postgres_bundle["truncation"]["resources"]["traceSamples"] == {

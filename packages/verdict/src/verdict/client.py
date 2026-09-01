@@ -41,8 +41,9 @@ class VerdictClient:
     service_name: str = "unknown-service"
     environment: str = "production"
 
-    # Content capture — OFF by default. PII risk surface.
-    capture_content: bool = False
+    # Content is bounded and redacted before persistence. Callers can still
+    # disable it explicitly for metadata-only deployments.
+    capture_content: bool = True
     redaction_mode: str = "redact"          # "redact" | "hash"  ("encrypt" planned)
     redaction_secret: str | None = None     # required for hash mode
 
@@ -79,7 +80,7 @@ def init(
     service_name: str = "unknown-service",
     environment: str = "production",
     storage: str | Storage = "sqlite:///./verdict.db",
-    capture_content: bool = False,
+    capture_content: bool = True,
     redaction_mode: str = "redact",
     redaction_secret: str | None = None,
     sample_rate: float = 1.0,
@@ -96,7 +97,9 @@ def init(
         service_name: Identifies your service in traces.
         environment: e.g. "production", "staging", "dev".
         storage: Either a URL ("sqlite:///path.db") or a Storage instance.
-        capture_content: If True, prompts/completions are stored (redacted).
+        capture_content: If True (the default), bounded prompts/completions are
+                         stored after recursive redaction. Set False for a
+                         metadata-only deployment.
         redaction_mode: "redact" | "hash" ("encrypt" is planned, not implemented).
         redaction_secret: HMAC secret (required for hash mode).
         sample_rate: Fraction of traces to capture (0.0-1.0). Default 1.0.

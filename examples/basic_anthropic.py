@@ -16,7 +16,7 @@ from verdict.client import get_client
 verdict.init(
     service_name="example-customer-support",
     storage="sqlite:///./verdict.db",
-    # capture_content=True,    # off by default; enable to log prompts/completions
+    # capture_content=False,   # optional metadata-only mode
 )
 
 # 2. Use Anthropic normally. Verdict captures everything transparently.

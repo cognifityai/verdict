@@ -6,13 +6,61 @@ the customer POC profile is refined.
 
 ## [Unreleased]
 
-### Removed
+### Added
 
-- Removed the standalone scheduled-probe subsystem, including the
-  `verdict-probes` command and the public `verdict_eval` probe classes. It was a
-  separate JSON/exit-code runner and was not integrated with trace capture,
-  persisted drift analysis, or the dashboard. Existing trace, judgment, drift,
-  registry, and dashboard data are unchanged.
+- `verdict` now launches a loopback setup UI after the base package install;
+  the base distribution includes its dashboard runtime without depending on
+  the separately versioned evaluation package.
+- Typed, bounded `AgentRun`, `AgentTurn`, and `AgentEvent` evidence with atomic
+  SQLite/PostgreSQL/in-memory storage, read APIs, and an Agent runs timeline.
+- Read-only, idempotent Claude Code/Codex history capture with deterministic
+  identities, typed observable events, recursive redaction, bounded content-on
+  local setup, explicit omissions/truncation, and no turn-as-Trace projection.
+- Key-free deterministic agent findings for execution status, tool/command
+  errors, possible loops, evidence coverage, and configurable required,
+  prohibited, and output-schema checks.
+- A reviewed Monitor lifecycle with immutable policy fingerprints and exact
+  cohort manifests, count or explicit event-time windows, per-metric eligible
+  denominators, Fisher's exact tests, Benjamini-Hochberg correction, effect
+  thresholds, prospective non-overlapping cohorts, late-arrival accounting,
+  `insufficient`, and `reference_stale` states.
+- `verdict-monitor run`, an idempotent one-shot command intended for cron or an
+  existing scheduler. Verdict does not install a scheduler daemon.
+- Immutable deterministic-analysis snapshots and append-only notification
+  delivery attempts on SQLite, PostgreSQL, memory, and buffered storage.
+- Evaluator-aware Trace status filters, dataset analysis/judge coverage, and
+  finding links that preserve affected run and evidence-event identity.
+
+### Changed
+
+- Completed local capture now routes to Agent runs, changes Setup into a
+  restart-stable Data sources view derived from stored evidence, and reports
+  Agent Run and LLM Trace totals separately. Filesystem paths remain
+  approval-time inputs rather than persisted display configuration.
+- Semantic clustering is no longer required for the new Monitor path. Existing
+  registry and legacy judge/drift workflows remain available and retain their
+  original semantics.
+- Setup and Monitor actions are explicit dashboard write operations; ordinary
+  overview/explorer reads continue not to rewrite trace or judgment history.
+- The dashboard now presents one Drift workspace with Overview, Explore,
+  Monitor, Signals, and Clusters subsections. Capture, deterministic findings,
+  judge results, source outcomes, and completed drift comparisons remain
+  separate states throughout the API and UI.
+- Manual local capture approvals remain process-local. An explicitly saved
+  daily schedule intentionally retains approved source paths as local control
+  configuration for `verdict-service`; no OS-level scheduler is installed.
+- Dashboard setup, monitor, control, evaluator, query, and analysis lifecycles
+  are separated into capability modules; the application factory now wires
+  those contracts instead of implementing each workflow inline.
+
+### Security
+
+- Setup writes require a process-local same-origin token, local source paths
+  must be explicitly approved, symlinked sources are skipped, and preview and
+  persisted evidence are bounded. No provider key is accepted or persisted by
+  the setup UI.
+- Local home-directory prefixes are normalized inside every nested captured
+  tool, command, result, stdout, and stderr string before evidence persistence.
 
 ## [0.1.0a13] - 2026-08-27
 
@@ -244,8 +292,9 @@ the customer POC profile is refined.
 ### Security
 
 - Redaction traversal and candidate matching have explicit work bounds.
-- Content capture remains off by default and is documented as best-effort rather
-  than a compliance control.
+- Bounded, redacted content capture is on by default; deployments that cannot
+  retain content must explicitly select metadata-only capture. Redaction remains
+  best-effort rather than a compliance control.
 
 [Unreleased]: https://github.com/cognifityai/verdict/compare/v0.1.0a13...HEAD
 [0.1.0a13]: https://github.com/cognifityai/verdict/compare/v0.1.0a12...v0.1.0a13

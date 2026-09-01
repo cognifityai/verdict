@@ -51,13 +51,51 @@ PostgreSQL store and does not require deleting or recloning an existing checkout
 python -c "import verdict, verdict_eval; print(verdict.__version__, verdict_eval.__version__)"
 verdict-pipeline --help
 verdict-dashboard --help
+verdict-monitor --help
 ```
 
 All three commands above come from the installed distributions. A Git checkout
 is needed only for contributor tests and the research calibration scripts later
 in this guide.
 
-## 3. Easiest first win — `verdict-inspect` on a file you already have
+## 3. Easiest first win — local Claude Code or Codex
+
+```bash
+verdict
+```
+
+An empty loopback-only UI opens at Setup. Select **Claude Code / Codex**, review
+the detected directories, choose **Preview sources**, then explicitly approve
+the capture. Bounded redacted content retention is on by default; clear it only
+for an intentional metadata-only run. The server rejects capture when those
+exact paths were not previewed in the current process. Source files are
+read-only and repeated rescans are idempotent.
+
+Successful capture opens **Agent runs**. On later visits, **Setup** is replaced
+by **Data sources**, which reports run totals, source kinds, and the last index
+time. Verdict does not retain approved filesystem paths merely for display or
+background access; **Edit or rescan** asks you to approve them again. The header
+reports Agent Runs and LLM Traces separately.
+
+The Agent runs view shows source sessions, typed turns and observable events,
+tool/command failures, completion evidence, possible repeated-tool loops, and
+what cannot be evaluated. Local sources that do not expose a genuine provider
+call do not create fake `Trace` rows, so the LLM-call Monitor may truthfully be
+empty while agent evidence is useful.
+
+Opted-in content remains bounded and recursively redacted. If a content-heavy
+session cannot fit the atomic evidence-row limit, Verdict preserves that
+session as metadata-only rather than failing the entire capture; the UI then
+labels its request/response evidence as not captured.
+
+The non-interactive equivalent is:
+
+```bash
+verdict-import local --storage sqlite:///./verdict.db
+verdict-dashboard --storage sqlite:///./verdict.db
+```
+
+## 3b. Existing conversation export with `verdict-inspect`
 
 This is the fastest way to see Verdict find something real, with **no
 instrumentation and no code changes**. Point it at a ChatGPT or Claude.ai data
@@ -146,6 +184,31 @@ unknown metadata is not copied, and storage reapplies best-effort redaction.
 This is an explicit content-transfer operation, so protect the Verdict database
 like the source telemetry store.
 
+After import, open **Monitor**. Preview either count cohorts (older 80% versus
+newer 20% by default) or explicit event-time ranges. Verdict freezes exact
+membership before computing outcomes. If each metric does not have enough
+eligible independent LLM calls, it reports `insufficient`; if new provider/model
+groups exceed the configured support threshold, it reports `reference_stale`.
+Previewed policies are candidates until explicitly activated. Activation does
+not promote the historical preview result: it freezes the reference and opens
+an empty prospective current bucket.
+
+To run the active policy from cron, systemd, Kubernetes, or another scheduler:
+
+```bash
+verdict-monitor run --storage sqlite:///./verdict.db
+```
+
+Each invocation consumes at most one new prospective non-overlapping cohort.
+Late-arriving units remain eligible for the next open cohort rather than being
+dropped. Across repeated looks, Verdict spends the configured alpha with the
+summable `6 / (pi² × look²)` schedule after applying Benjamini-Hochberg within
+each look.
+Repeating the command without new eligible traffic returns the same snapshot
+identity instead of duplicating work. The reference does not silently move or
+recluster; create and review a new candidate when the comparison contract must
+change.
+
 Safety limits are 64 MiB per JSON file or hosted API response, 16 MiB per
 NDJSON row, and 16 MiB per OTLP receiver request by default (including bounded
 gzip decompression). One mapped Trace retains at most 1,000 messages and
@@ -176,14 +239,13 @@ verdict.init(
     service_name="my-app",
     storage="sqlite:///./verdict.db",
     buffered_writes=False,
-    capture_content=False,
+    capture_content=True,
 )
 client = Anthropic()
 # use the client normally — supported SDK calls are captured
 ```
 
-Content capture is **off by default** (PII surface). With
-`verdict.init(capture_content=True)`, supported JSON-compatible message fields
+Content capture is **on by default** (PII surface). Supported JSON-compatible message fields
 are recursively sanitized before `Trace` assignment and again at storage. This
 includes nested OpenAI tool arguments and Anthropic-style tool inputs/results.
 Unknown top-level provider fields are dropped; malformed, cyclic, non-JSON, and
@@ -196,8 +258,8 @@ trailing text that is not part of a validated IPv6 address is preserved while a
 clock value such as `12:34:56` is not classified as IPv6. Email discovery uses
 a linear `@`-anchored scanner to keep malformed and long inputs bounded. It
 remains best effort, not a compliance control, and opaque metadata such as
-tenant/session/cluster IDs must be non-sensitive. Keep content capture off for
-customer POC data. The `0.1.0a13` POC profile also keeps
+tenant/session/cluster IDs must be non-sensitive. Set `capture_content=False`
+when the approved customer boundary is metadata-only. The `0.1.0a13` POC profile also keeps
 `buffered_writes=False`; buffered mode requires an explicit `shutdown()`
 imported from `verdict.client` before process exit.
 
@@ -253,25 +315,49 @@ reports per-dimension and pooled agreement with 95% bootstrap CIs. A threshold
 counts as "cleared" only when the **CI lower bound** clears it — not the point
 estimate. Needs a provider key (the judge makes calls).
 
-## 7. See your results — run the pipeline, then open the dashboard
+## 7. See findings, evaluate deliberately, and configure monitoring
 
 Capture starts when `verdict.init()` installs the supported provider wrappers.
-By default, supported calls that pass the configured sampling policy are
-persisted during capture; with `buffered_writes=True`, they are queued for a
-background batched writer. **Judging and drift detection are not automatic** -
-they are a batch step you run, then a dashboard you read. Two commands:
+By default, bounded redacted content from calls that pass the sampling policy is
+persisted during capture; `capture_content=False` is the explicit metadata-only
+mode. With `buffered_writes=True`, records are queued for a background writer.
+Start the findings-first dashboard against the same store:
 
 ```bash
-# 1. Cluster → judge a stratified sample → compute current-vs-baseline drift →
-#    write drift signals back into the DB. Use --judge-provider fake to run the
-#    whole pipeline key-free (the "judge" is a stub — no real quality signal).
-verdict-pipeline \
-    --storage sqlite:///./verdict.db \
-    --judge-provider anthropic --judge-model claude-haiku-4-5
-
-# 2. Launch the read-only dashboard and open http://127.0.0.1:8000/dashboard.
-verdict-dashboard --storage sqlite:///./verdict.db
+verdict --storage sqlite:///./verdict.db
 ```
+
+Reliability, Performance, Behavior, persisted evidence coverage, Agent Runs,
+and the ordered event explorer are key-free. The first deterministic analysis
+is stored as an immutable terminal snapshot; dashboard reads do not silently
+recompute it. In **Drift > Explore**, preview an older 80% versus newer 20%
+count cohort or explicit event-time ranges. No grouping is the default;
+provider/model facets and reviewed clusters are optional. A preview cannot
+become an authoritative alert: activation starts a new empty prospective
+bucket against the frozen reference.
+
+Evaluator Lab shows NOT_EVALUABLE reasons before any model call, reads provider
+keys only from environment variables, and requires an explicit egress approval.
+Treat its PASS/FAIL output as exploratory until it clears a customer-labelled
+calibration set. Verdict does not run a hidden fake judge.
+
+The Control page stores versioned schedule, alert, settings, review, and
+change-request decision documents. Recording approval on a generic decision
+does not deploy an evaluator, taxonomy, cluster, or baseline; use the linked
+typed workflow for that state transition. It stores environment-variable names
+rather than secret values. Run one configured rescan/analysis/monitor cycle with:
+
+```bash
+verdict-service --storage sqlite:///./verdict.db --once
+```
+
+Run that command from cron, systemd, Kubernetes, or another supervisor for
+production scheduling. The continuous `verdict-service` loop is also available.
+Manual capture path approval exists only in the current dashboard process. An
+explicitly saved daily schedule intentionally retains the approved source paths
+as local configuration so this worker can rescan them.
+Retention days are recorded policy in this version; automatic pruning remains
+an explicit operator action rather than a silent background deletion.
 
 Add `--capture-judge-telemetry` only when you intentionally want judge model
 cost/latency traces written to the same store. Those traces are tagged as the
@@ -279,8 +365,9 @@ cost/latency traces written to the same store. Those traces are tagged as the
 become part of the workload it evaluates. The flag is off by default.
 
 For PostgreSQL, install `cognifity-verdict[dashboard,postgres]==0.1.0a13` and pass
-the same protected storage URL used by the SDK. The dashboard only reads
-existing Verdict tables; it never creates or migrates them.
+the same protected storage URL used by the SDK. Evidence tables use Verdict's
+normal additive schema initialization. The dashboard control plane lazily
+creates its append-only configuration table on first use.
 `python ui/server.py --db ...` remains a compatible source-checkout wrapper.
 
 Applications that mount the dashboard can optionally pass a same-origin
@@ -345,9 +432,11 @@ derived from IDs in that confirmed snapshot.
 
 Trace Explorer pages newest-first through every stored non-judge application
 trace in deterministic 30-row pages, breaking equal timestamps by trace ID.
-Provider and `Content captured` or `Metadata only` filters apply to the current
-page. Judge telemetry remains in aggregate cost and store totals but does not
-displace application traces from this view.
+Evaluator-aware filters include judged, not judged, judge error, pass, fail,
+and unclear; the selected evaluator and exact Trace link survive refresh and
+pagination. Provider and `Content captured` or `Metadata only` filters apply to
+the current page. Judge telemetry remains in aggregate cost and store totals
+but does not displace application traces from this view.
 Each row uses its recorded UTC time plus relative age. A metadata-only row is
 described as a **historical metadata-only trace**: this means prompt and response
 were not captured when that trace was recorded, not that capture is currently
@@ -362,14 +451,15 @@ Standalone and legacy stores keep using each trace's stored `cluster_id`.
 
 Before a drift or judge run exists, Overview, Drift, and Judge show the same live
 global content-bearing trace counts instead of rendering an empty chart as zero
-drift. The displayed default current window is the latest 24 hours; the default
-baseline is the preceding 7 days after its 24-hour lag, with a global minimum of
+drift. The legacy pipeline's displayed default current window is the latest 24
+hours; its default baseline is the preceding 7 days after its 24-hour lag, with a global minimum of
 30 traces in each. Meeting those totals means only that the global trace minimum
 is met. The pipeline still checks judged-sample sufficiency for every eligible
 cluster and rubric dimension, and actual job flags may use different windows or
 sample floors.
-`No drift analysis has completed yet`, `Completed with no signals`, and
-`Completed with signals` are separate states. A mounted host that supplies the
+`No drift analysis has completed yet`, `Collecting n/target`, `Insufficient`,
+`Completed with no signals`, and `Completed with signals` are separate states.
+Only the latter two represent a persisted completed comparison. A mounted host that supplies the
 same-origin Operations adapter also exposes the action from the empty state.
 
 Set both `VERDICT_USER` and `VERDICT_PASS` before starting the server to require
@@ -398,7 +488,7 @@ the other captured workloads.
   refresh the dashboard." The dashboard is a read view over the DB — as fresh as
   your last pipeline run, not a streaming detector. Re-run `verdict-pipeline`
   on a schedule (cron / CI) to keep it current.
-- **Judge-based drift needs volume *and* elapsed time.** The defaults want n ≥ 30
+- **Legacy judge-based drift needs volume *and* elapsed time.** Its defaults want n ≥ 30
   judgments per (cluster, dimension) and a current-vs-baseline split (24h current
   vs a 7-day baseline with a 24h gap). Capturing a trickle for an afternoon gives
   you capture stats and maybe structural/semantic drift, but **no judge drift
@@ -432,7 +522,7 @@ the other captured workloads.
   tracked in Verdict issue #24. Tenantless Memory/SQLite uses the reserved
   `__verdict_local__` registry scope. See `packages/verdict_eval/README.md` for
   exact commands, safe error codes, inspect/rename, and rollback.
-  The dashboard Registry tab is the bounded product view over those same
+  The dashboard's **Drift → Clusters** workspace is the bounded product view over those same
   tenant/version rows. It explains exact-key matches, semantic
   distance-versus-radius matches, outliers, ineligible traces, validation
   coverage, active/preview state, the frozen definition/model, representative
@@ -508,8 +598,10 @@ the other captured workloads.
   alerts.
 - Pairwise model rankings and PASS/FAIL drift scoring are different tasks; use
   the included alignment scripts to verify the mode you plan to rely on.
-- Agent-run / tool-call tracing is **v1 roadmap, not shipping** — v0 measures the
-  individual LLM-call layer only.
+- Local Claude Code/Codex agent evidence now ships as typed, bounded
+  session/run/turn/event projections. It is not an authoritative agent-runtime
+  graph: task success, artifact state, deployments, subagents, and genuine LLM
+  `Trace` links remain unavailable unless an approved source exposes them.
 - Judge calls run sequentially. Judge usage/budget controls, cache-token
   accounting, human-readable cluster naming, and automatic cluster fusion are
   not implemented; see `docs/v1-roadmap.md` for the scoped follow-ups.

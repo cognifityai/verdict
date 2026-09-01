@@ -38,7 +38,8 @@ providers actually configured and retain its named entry-point results.
 
 ## 3. Configure the POC safely
 
-Keep writes synchronous and content capture off:
+Keep writes synchronous. Content capture is on by default for a useful local
+POC; disable it explicitly when approval is metadata-only:
 
 ```python
 import verdict
@@ -47,17 +48,17 @@ verdict.init(
     service_name="customer-poc",
     storage="sqlite:///./verdict-poc.db",
     buffered_writes=False,
-    capture_content=False,
+    capture_content=True,
 )
 ```
 
 `buffered_writes=True` requires an explicit `shutdown()` imported from
 `verdict.client` before process exit. Do not enable it for this POC.
 
-Content capture is opt-in and uses best-effort pattern redaction, not a
-compliance boundary. Keep it off for customer data. If the POC must demonstrate
-content-dependent evaluation, use synthetic or specifically approved
-non-sensitive fixtures in an isolated store.
+Content capture uses best-effort pattern redaction, not a compliance boundary.
+Use only specifically approved data, or set `capture_content=False`. For
+content-dependent evaluation, approved non-sensitive fixtures in an isolated
+store remain the safest POC path.
 
 Provider credentials remain in the customer's environment. Never put API keys
 in the skill file, repository, SQLite database, screenshots, or support bundle.
@@ -99,8 +100,10 @@ semantic quality.
 - Use independently sampled calls for a drift demonstration. Repeated turns
   from one conversation are correlated and outside this profile's inferential
   claim.
-- Treat the dashboard as a bounded read-only evidence view. It is not a hosted
-  multi-tenant monitoring or outbound-alerting service.
+- Treat the loopback dashboard as a bounded evidence and explicit-control view,
+  not as a hosted multi-tenant service. Outbound webhooks run only through the
+  separately configured scheduler process and an HTTPS URL held in an
+  environment variable.
 - Registry readiness estimates and fragmentation warnings are diagnostics, not
   activation or drift decisions.
 
@@ -110,8 +113,8 @@ The POC is ready to show only when all of these are true:
 
 1. All three installed packages report `0.1.0a13` and `python -m pip check` passes.
 2. The application uses only a provider entry point in the supported column.
-3. `buffered_writes` and `capture_content` are both `False`, unless content was
-   separately approved with synthetic privacy tests.
+3. `buffered_writes` is `False`; content capture is approved for the named POC
+   data or explicitly disabled before collection.
 4. Exactly one trace is stored for each sampled supported call.
 5. Tokens, latency, model, provider, finish reason, and errors are populated
    where the provider supplies them.
@@ -119,6 +122,10 @@ The POC is ready to show only when all of these are true:
    active tenant pointer; experimental strategies retain their disclosure.
 7. No credential or customer content appears in the skill, logs, screenshots,
    release material, or repository.
+
+The standalone dashboard binds to loopback by default. Non-loopback binding is
+refused unless `VERDICT_USER`, `VERDICT_PASS`, and an explicit
+`VERDICT_ALLOWED_HOSTS` allowlist are configured.
 
 If any check fails, stop the demonstration and retain the previous application
 configuration. Uninstall with:

@@ -39,79 +39,18 @@ from __future__ import annotations
 
 import json
 import math
-import statistics
-from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
-
-UNCLUSTERED_ID = "unclustered"
+from verdict.cluster_health import UNCLUSTERED_ID as UNCLUSTERED_ID
+from verdict.cluster_health import ClusterHealth as ClusterHealth
+from verdict.cluster_health import assess_cluster_health as assess_cluster_health
 
 
 def _unit(v: np.ndarray) -> np.ndarray:
     n = float(np.linalg.norm(v))
     return v / n if n > 0 else v
-
-
-@dataclass(frozen=True)
-class ClusterHealth:
-    """Observable health summary for an intent-clustering result."""
-
-    n_traces: int
-    n_clusters: int
-    median_cluster_size: float
-    clusters_meeting_sample_floor: int
-    min_sample_size: int
-    is_fragmented: bool
-    messages: tuple[str, ...]
-
-
-def assess_cluster_health(
-    cluster_ids: list[str | None], *, min_sample_size: int = 30,
-) -> ClusterHealth:
-    """Flag clustering that cannot support meaningful per-cluster drift tests.
-
-    Fragmentation and low volume are reported separately. Ten singleton
-    clusters are a clustering failure; two coherent clusters with twenty
-    traces each simply need more traffic.
-    """
-    usable = [cid for cid in cluster_ids if cid and cid != UNCLUSTERED_ID]
-    counts = Counter(usable)
-    sizes = list(counts.values())
-    n_traces = len(usable)
-    n_clusters = len(counts)
-    median_size = float(statistics.median(sizes)) if sizes else 0.0
-    ratio = n_clusters / n_traces if n_traces else 0.0
-    fragmented = n_traces >= 4 and ratio > 0.5
-    meeting_floor = sum(1 for size in sizes if size >= min_sample_size)
-
-    messages: list[str] = []
-    if not usable:
-        messages.append("No usable intent-cluster assignments are available.")
-    if fragmented:
-        messages.append(
-            f"Intent clustering is fragmented: {n_clusters} clusters for "
-            f"{n_traces} traces ({ratio:.0%} clusters-to-traces). Use the "
-            "semantic embedder or review the distance threshold before trusting drift results."
-        )
-    if sizes and median_size < min_sample_size:
-        messages.append(
-            f"Median cluster size is {median_size:g}; {meeting_floor}/{n_clusters} "
-            f"clusters meet the {min_sample_size}-sample floor. Drift tests remain "
-            "inactive for clusters below that floor; add traffic or use coarser, "
-            "validated clusters."
-        )
-
-    return ClusterHealth(
-        n_traces=n_traces,
-        n_clusters=n_clusters,
-        median_cluster_size=median_size,
-        clusters_meeting_sample_floor=meeting_floor,
-        min_sample_size=min_sample_size,
-        is_fragmented=fragmented,
-        messages=tuple(messages),
-    )
 
 
 @dataclass
