@@ -10,13 +10,19 @@ captures supported provider calls, stores traces, evaluates responses with a
 rubric, and helps inspect quality, cost, latency, and drift across similar
 workloads.
 
-Current scope: v0 operates at the individual LLM-call layer. Agent-run graphs,
-tool-call sequence analysis, plan adherence, and task-success metrics are planned
-work and should not be described as current functionality.
+Current scope includes individual LLM calls plus source-bounded local Claude
+Code/Codex session, run, turn, model-call, tool, command, and test evidence.
+Verdict does not infer authoritative task success, artifact state, deployment
+success, or retry causality when the source history does not establish it.
 
 ## Vocabulary
 
 - **Trace**: one captured LLM request/response pair plus metadata.
+- **Session**: one source conversation/history container.
+- **Agent run**: one source execution inside a session.
+- **Agent turn**: one user request and the observable work associated with it.
+- **Agent event**: one ordered, typed observation such as a model, tool,
+  command, test, context, or final-response event.
 - **Span**: a manually recorded non-LLM unit of work.
 - **Judge**: a model that scores responses using a rubric.
 - **Rubric**: PASS/FAIL dimensions such as groundedness, relevance,
@@ -32,7 +38,9 @@ work and should not be described as current functionality.
 2. Put external systems behind interfaces and keep in-memory adapters for tests.
 3. Capture through supported SDK instrumentation; do not require users to rewrite
    their application around Verdict-specific clients.
-4. Keep content capture opt-in and redact before persistence when it is enabled.
+4. Keep content capture bounded and recursively redacted before persistence. It
+   defaults on for useful analysis and remains explicitly disableable for
+   metadata-only deployments. Judge egress requires a separate explicit action.
 5. Keep provider names and model IDs data-driven where possible.
 6. Make validation workflows reproducible with scripts and tests.
 7. Prefer maintained OSS libraries when they reduce provider, parser, or
@@ -50,6 +58,9 @@ work and should not be described as current functionality.
 - `encrypt` redaction mode is rejected at init time; reversible encryption is not
   implemented.
 - The local dashboard is intended for localhost or trusted-network use.
+- Semantic clusters and judge output are optional, reviewable evidence. Neither
+  is required for key-free findings, and neither becomes authoritative merely
+  because it is repeatable.
 
 ## Working Conventions
 

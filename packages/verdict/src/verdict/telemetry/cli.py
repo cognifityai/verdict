@@ -12,6 +12,7 @@ from pathlib import Path
 from verdict.client import _resolve_storage
 from verdict.telemetry.files import SUPPORTED_FORMATS, iter_telemetry_file
 from verdict.telemetry.http import JsonHttpClient
+from verdict.telemetry.local_agents import capture_local_agents
 from verdict.telemetry.model import ImportContext
 from verdict.telemetry.normalize import parse_datetime
 from verdict.telemetry.receiver import OtlpHttpReceiver
@@ -48,6 +49,18 @@ def build_parser() -> argparse.ArgumentParser:
     file_parser.add_argument("path", type=Path)
     file_parser.add_argument("--format", choices=sorted(SUPPORTED_FORMATS), default="auto")
     _add_storage(file_parser)
+
+    local = sub.add_parser("local", help="Capture local Claude Code and Codex histories")
+    local.add_argument("--claude-root", type=Path, default=Path("~/.claude/projects"))
+    local.add_argument("--codex-root", type=Path, default=Path("~/.codex/sessions"))
+    local.set_defaults(capture_content=True)
+    local.add_argument(
+        "--no-capture-content",
+        action="store_false",
+        dest="capture_content",
+        help="Store metadata only; bounded redacted content is retained by default",
+    )
+    _add_storage(local)
 
     langfuse = sub.add_parser("langfuse", help="Read Langfuse observations API v2")
     langfuse.add_argument("--base-url", default="https://cloud.langfuse.com")
@@ -102,6 +115,8 @@ def _scope(args: argparse.Namespace) -> str:
         return args.source_scope
     if args.command == "file":
         return str(args.path.resolve())
+    if args.command == "local":
+        return "local-agent-history"
     base = getattr(args, "base_url", "otlp")
     project = getattr(args, "project", "")
     return f"{base}|{project}" if project else str(base)
@@ -169,6 +184,20 @@ def _api_source(args: argparse.Namespace, context: ImportContext):
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
+        if args.command == "local":
+            storage = _open_storage(args.storage)
+            try:
+                summary = capture_local_agents(
+                    storage,
+                    tenant_id=args.tenant_id or "__verdict_local__",
+                    claude_root=args.claude_root.expanduser(),
+                    codex_root=args.codex_root.expanduser(),
+                    capture_content=args.capture_content,
+                )
+            finally:
+                storage.close()
+            print(json.dumps(summary.as_dict(), sort_keys=True))
+            return 0
         context = ImportContext(
             adapter="otlp" if args.command == "receive-otlp" else args.command,
             source_scope=_scope(args),

@@ -176,8 +176,9 @@ a retained trace.
 - Before using Verdict with production data, review `SECURITY.md`, your
   retention requirements, and your provider data-handling settings.
 
-The bundled dashboard server reads SQLite and PostgreSQL without creating or
-migrating either store. Install `cognifity-verdict[dashboard]` for SQLite or
+The bundled dashboard's analytics reads do not rewrite trace or judgment
+history. Setup/import and Monitor controls are explicit write paths and create
+their additive tables when used. Install `cognifity-verdict[dashboard]` for SQLite or
 `cognifity-verdict[dashboard,postgres]` for PostgreSQL, then run
 `verdict-dashboard --storage ...`. A FastAPI host can mount
 `verdict.dashboard.create_app()` so its authenticated application and the
@@ -189,7 +190,7 @@ The mount accepts an optional same-origin `operations_url`. When configured,
 the same packaged UI adds an Operations view for normalized host telemetry and
 job controls. Collection, authorization, CSRF, and execution stay in the host;
 Verdict remains cloud-neutral. Omitting the option preserves the original
-read-only dashboard behavior.
+cloud-neutral dashboard behavior.
 When `VERDICT_USER` and `VERDICT_PASS` are both set, HTTP Basic authentication
 gates the dashboard shells at `/` and `/dashboard` plus `/api/data`, while
 `/api/health` remains public. Chart series contain observed bins only. The response keeps full-store

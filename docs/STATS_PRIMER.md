@@ -68,10 +68,13 @@ We ask: "are these two windows samples from the same underlying distribution, or
 
 That's what a two-sample test answers — Fisher's exact for binary PASS/FAIL data, Mann-Whitney U for continuous metrics.
 
-**Implementation note:** the repository drift runner places each judgment into
+**Legacy pipeline implementation note:** `verdict-pipeline` places each judgment into
 these windows using the associated captured trace's `started_at` timestamp, not
 the later time when the judge happened to score it. Its defaults are a 24-hour
 current window and a 7-day baseline ending 24 hours before the analysis time.
+The reviewed Monitor UI is a separate policy lifecycle: it freezes either
+count-based or explicit event-time membership before comparing per-metric
+eligible samples and then collects prospective non-overlapping cohorts.
 
 ---
 

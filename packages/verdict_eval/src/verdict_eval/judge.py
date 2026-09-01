@@ -194,8 +194,11 @@ class Judge:
         """Return the complete behavior-relevant identity for one evaluation."""
         rubric = self._effective_rubric(context)
         provider = str(getattr(self.provider, "name", type(self.provider).__name__))
+        temperature_applied = getattr(self.provider, "supports_temperature", True)
         config = {
-            "temperature": self.temperature,
+            "temperature": self.temperature if temperature_applied else None,
+            "requested_temperature": self.temperature,
+            "temperature_applied": temperature_applied,
             "max_tokens": self.max_tokens,
             "skip_context_dependent_when_missing": (
                 self.skip_context_dependent_when_missing

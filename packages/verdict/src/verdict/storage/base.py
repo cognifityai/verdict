@@ -10,6 +10,12 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Protocol, runtime_checkable
 
+from verdict.analysis_records import (
+    DeterministicAnalysisRun,
+    NotificationDeliveryAttempt,
+)
+from verdict.evidence import AgentRunBundle
+from verdict.monitoring import CohortManifest, MonitorComparison, MonitorPolicy
 from verdict.schema import (
     DriftRun,
     DriftSignal,
@@ -43,6 +49,30 @@ def _validate_drift_run_snapshot(
         signal_ids.add(signal.signal_id)
 
 
+def _validate_agent_bundle_query(tenant_id: str, limit: int) -> None:
+    if not isinstance(tenant_id, str) or not tenant_id or "\x00" in tenant_id:
+        raise ValueError("tenant_id must be bounded text")
+    try:
+        tenant_size = len(tenant_id.encode("utf-8"))
+    except UnicodeError as exc:
+        raise ValueError("tenant_id must be bounded text") from exc
+    if tenant_size > 256:
+        raise ValueError("tenant_id must be bounded text")
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
+        raise ValueError("limit must be between 1 and 1000")
+
+
+def _validate_agent_bundle_run_id(run_id: str) -> None:
+    if not isinstance(run_id, str) or not run_id or "\x00" in run_id:
+        raise ValueError("run_id must be bounded text")
+    try:
+        run_size = len(run_id.encode("utf-8"))
+    except UnicodeError as exc:
+        raise ValueError("run_id must be bounded text") from exc
+    if run_size > 256:
+        raise ValueError("run_id must be bounded text")
+
+
 @runtime_checkable
 class Storage(Protocol):
     """Persistent backing store for Traces, Judgments, and DriftSignals.
@@ -51,6 +81,71 @@ class Storage(Protocol):
     """
 
     def insert_trace(self, trace: Trace) -> None: ...
+
+    def replace_agent_run_bundle(self, bundle: AgentRunBundle) -> None: ...
+
+    def get_agent_run_bundle(
+        self,
+        tenant_id: str,
+        run_id: str,
+    ) -> AgentRunBundle | None: ...
+
+    def list_agent_run_bundles(
+        self,
+        tenant_id: str,
+        *,
+        limit: int = 100,
+    ) -> list[AgentRunBundle]: ...
+
+    def save_deterministic_analysis_run(
+        self, run: DeterministicAnalysisRun,
+    ) -> None: ...
+
+    def get_latest_deterministic_analysis_run(
+        self, tenant_id: str, scope_key: str,
+    ) -> DeterministicAnalysisRun | None: ...
+
+    def save_notification_delivery_attempt(
+        self, attempt: NotificationDeliveryAttempt,
+    ) -> None: ...
+
+    def list_notification_delivery_attempts(
+        self,
+        notification_id: str,
+        destination_fingerprint: str,
+        *,
+        limit: int = 100,
+    ) -> list[NotificationDeliveryAttempt]: ...
+
+    def notification_was_delivered(
+        self, notification_id: str, destination_fingerprint: str,
+    ) -> bool: ...
+
+    def list_notification_delivery_attempts_for_tenant(
+        self, tenant_id: str, *, limit: int = 100,
+    ) -> list[NotificationDeliveryAttempt]: ...
+
+    def save_monitor_policy(self, policy: MonitorPolicy) -> None: ...
+
+    def get_monitor_policy(self, policy_id: str) -> tuple[MonitorPolicy, str] | None: ...
+
+    def get_active_monitor_policy(self, scope_key: str) -> MonitorPolicy | None: ...
+
+    def activate_monitor_policy(
+        self, scope_key: str, policy_id: str, *, expected_active_policy_id: str | None
+    ) -> MonitorPolicy: ...
+
+    def save_monitor_snapshot(
+        self, policy_id: str, manifest: CohortManifest, comparison: MonitorComparison
+    ) -> None: ...
+
+    def get_latest_monitor_snapshot(
+        self, policy_id: str
+    ) -> tuple[CohortManifest, MonitorComparison] | None: ...
+
+    def get_latest_monitor_alert(
+        self, policy_id: str
+    ) -> tuple[CohortManifest, MonitorComparison] | None: ...
 
     def get_trace(self, trace_id: str) -> Trace | None: ...
 
@@ -69,6 +164,10 @@ class Storage(Protocol):
     def prune_before(self, cutoff_iso: str) -> int: ...
 
     def insert_judgment(self, judgment: Judgment) -> None: ...
+
+    def list_judgments_for_trace(
+        self, trace_id: str, *, limit: int = 100,
+    ) -> list[Judgment]: ...
 
     def list_judgments_for_cluster(
         self,

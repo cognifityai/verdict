@@ -372,7 +372,7 @@ def test_candidate_projection_preserves_json_type_and_bounds_routing_bodies(
     ]
 
 
-def test_local_scope_maps_only_missing_trace_tenants(registry_storage) -> None:
+def test_local_scope_maps_missing_and_internal_local_trace_tenants(registry_storage) -> None:
     started = datetime(2026, 8, 22, tzinfo=timezone.utc)
     registry_storage.insert_trace(
         Trace(
@@ -380,6 +380,16 @@ def test_local_scope_maps_only_missing_trace_tenants(registry_storage) -> None:
             started_at=started,
             ended_at=started,
             raw_messages=[{"role": "user", "content": "local"}],
+            tags={"verdict.workload": "agent"},
+        )
+    )
+    registry_storage.insert_trace(
+        Trace(
+            trace_id="internal-local-trace",
+            tenant_id="__verdict_local__",
+            started_at=started,
+            ended_at=started,
+            raw_messages=[{"role": "user", "content": "internal local"}],
             tags={"verdict.workload": "agent"},
         )
     )
@@ -391,7 +401,7 @@ def test_local_scope_maps_only_missing_trace_tenants(registry_storage) -> None:
         target_workload="agent",
         limit=10,
     )
-    assert [row.trace_id for row in local] == ["local-trace"]
+    assert [row.trace_id for row in local] == ["internal-local-trace", "local-trace"]
     assert (
         registry_storage.list_cluster_trace_candidates(
             "tenant-a", start_us, start_us + 1, target_workload="agent", limit=10

@@ -2,15 +2,63 @@
 
 PyPI distribution: `cognifity-verdict`. Python import: `verdict`.
 
+Install and start the loopback-only product UI:
+
+```bash
+python -m pip install cognifity-verdict
+verdict
+```
+
+The initial setup page can approve and rescan local Claude Code/Codex histories,
+import supported telemetry files, show the SDK snippet, or open an existing
+store. Local histories are persisted as typed `AgentRun`/`AgentTurn`/
+`AgentEvent` evidence; they are not converted into fake provider LLM traces.
+Bounded redacted content retention is on by default; metadata-only capture is
+an explicit SDK/programmatic override, not a shortcut in local setup. After capture, the same page becomes
+**Data sources**, reports the configured local evidence source, and requires
+fresh in-process path approval for manual edits or rescans. Agent Run and LLM
+Trace totals remain visibly separate. The server requires a successful preview
+of the exact local or historical paths before it accepts the corresponding
+write. An explicitly saved daily schedule intentionally retains source paths in
+the local control store for `verdict-service`; no OS scheduler is installed.
+
+For automation, the equivalent commands are:
+
+```bash
+verdict-import local --storage sqlite:///./verdict.db
+verdict-dashboard --storage sqlite:///./verdict.db
+verdict-monitor run --storage sqlite:///./verdict.db
+verdict-service --storage sqlite:///./verdict.db --once
+```
+
+The Monitor UI previews an immutable count-based (older 80% / newer 20% by
+default) or explicit-date policy before activation. Each metric has its own
+eligible denominator, Fisher's exact p-value, Benjamini-Hochberg adjustment,
+and effect-size gate. Ongoing cohorts are prospective and non-overlapping;
+late arrivals are counted and included in the next open cohort rather than
+silently discarded. An activated policy starts with an empty prospective
+bucket, and repeated looks use a summable quadratic alpha-spending rule.
+`insufficient` and `reference_stale` are first-class results. `verdict-monitor`
+is a one-shot idempotent runner. `verdict-service` executes the dashboard's
+saved schedule once or continuously.
+
+The dashboard reads key-free findings from immutable analysis snapshots rather
+than recomputing them on every page load. It reports provider outcome, judge
+status, finding severity, and drift comparison independently. `not judged` and
+`judge error` are explicit Trace states, and a prospective monitor says
+`collecting n/target` until a comparison can actually complete. One Drift
+workspace contains Overview, Explore, Monitor, Signals, and Clusters.
+
 The Verdict Python SDK. Auto-instruments your LLM calls via `wrapt` and
 captures them into a vendor-neutral `Trace` schema (attribute *names* follow
 the OpenTelemetry GenAI semantic conventions, but no OTel spans are emitted).
 The same package also imports existing OTLP and vendor telemetry into that
 unchanged schema with the `verdict-import` command.
 Traces are written to SQLite by default (or any `Storage` adapter). Content
-capture (prompts/completions) is **off by default** — opt in with
-`capture_content=True`; when enabled, captured content is run through built-in
-pattern redaction recursively across supported JSON-compatible message and tool
+capture (prompts/completions) is **on by default** and can be disabled with
+`capture_content=False`; captured content is run through built-in
+pattern redaction, including common provider/API credentials, recursively
+across supported JSON-compatible message and tool
 structures before `Trace` assignment and again at storage. Card candidates use
 Luhn validation; IPv6 candidates use standard-library address validation so
 trailing text that is not part of the validated address remains outside it
@@ -21,8 +69,8 @@ Traversal is bounded by node and character budgets, and cycles or repeated
 container references fail closed at every occurrence so sanitized output never
 retains caller-owned aliases. Redacted mapping-key collisions keep every value
 under deterministic suffixed keys rather than overwriting one entry.
-This is best-effort matching, not a compliance guarantee; keep content capture
-off when its documented coverage is insufficient.
+This is best-effort matching, not a compliance guarantee; explicitly disable
+content capture when its documented coverage is insufficient.
 
 Import existing telemetry without instrumenting the application:
 
@@ -120,7 +168,8 @@ verdict-dashboard --storage sqlite:///./verdict.db
 
 Add the `postgres` extra for a PostgreSQL store. Verdict requires PostgreSQL
 databases to use UTF-8 encoding. Legacy SQL_ASCII databases are not supported.
-The dashboard is read-only and can also be mounted with
+Dashboard analytics are read-only; the setup/import and Monitor controls are
+explicit storage mutations. The app can also be mounted with
 `verdict.dashboard.create_app()` behind an existing
 FastAPI application's authentication. Trace Explorer pages through every
 non-judge application trace in deterministic 30-row pages with complete store
@@ -128,9 +177,9 @@ totals. Provider/content-state filters apply to the current page. Judge
 telemetry remains in aggregate cost and store totals but does not displace
 application traces from this view. A `Historical
 metadata-only trace` means content was not captured when that specific trace was
-recorded; it does not report the application's current capture setting. Drift
-and Judge empty states show global content-bearing trace availability over the
-default 24-hour current and 7-day baseline windows. Meeting both displayed
+recorded; it does not report the application's current capture setting. Legacy
+Drift and Judge empty states show global content-bearing trace availability over
+the legacy pipeline's default 24-hour current and 7-day baseline windows. Meeting both displayed
 totals does not establish statistical readiness: the pipeline still checks each
 eligible cluster and rubric dimension for enough judged traces, and job flags
 may use different windows or sample floors. The dashboard distinguishes a run
@@ -159,7 +208,7 @@ responsible for cloud credentials, authorization, CSRF protection, collection,
 and job execution. Without `operations_url`, no Operations tab or extra request
 is present.
 
-The dashboard's Registry tab is a bounded, read-only view of the Task 5
+The dashboard's **Drift → Clusters** workspace is a bounded, read-only view of the Task 5
 tenant/version registry. It shows active and preview versions, stable display
 names, frozen algorithm/selector/model configuration, representative redacted
 prompts, bounded provider/model distributions, membership explanations,

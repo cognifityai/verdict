@@ -6,10 +6,12 @@ commitment.
 
 ## Current Scope
 
-Verdict v0 focuses on the LLM-call layer inside LLM apps and agents. It can
-capture supported provider calls or import existing telemetry, store traces,
-evaluate responses with a rubric, cluster similar prompts, and inspect quality
-or cost changes over time.
+Verdict's established path focuses on the LLM-call layer inside LLM apps and
+agents. It can capture supported provider calls or import existing telemetry,
+store traces, evaluate responses with a rubric, cluster similar prompts, and
+inspect quality or cost changes over time. The local Claude Code/Codex adapter
+also stores typed, bounded source sessions, runs, turns, and observable events
+without relabeling them as provider calls.
 
 Today, Verdict can capture or import and evaluate calls such as:
 
@@ -22,21 +24,23 @@ Today, Verdict can capture or import and evaluate calls such as:
 - Langfuse, LangSmith, Datadog LLM Observability, Phoenix, and Opik exports
 - MLflow tracing files and bounded text-only voice conversation exports
 
-Each captured or imported LLM call is stored independently. The pipeline then
-samples eligible stored calls for judging. Verdict v0 does not yet reconstruct
-a full multi-step agent run as a first-class object.
+Each captured or imported LLM call is still stored independently. The pipeline
+then samples eligible stored calls for judging. Local history projection is a
+first-class evidence view, but it is not a complete runtime graph and does not
+invent links to genuine provider calls that the source cannot establish.
 
 ## Planned Agent-Level Work
 
-The next layer of Verdict is agent-run observability: connecting individual LLM
-calls, tool calls, and outcomes into a single execution graph.
+The next layer is deeper agent-run observability: connecting genuine LLM calls,
+framework events, authoritative artifacts, and outcomes into one execution
+graph beyond the source-bounded local projection that now ships.
 
 ### Agent-Run Tracing
 
-Planned capabilities:
+Planned capabilities beyond the current typed evidence record:
 
-- Represent an agent run as a first-class record.
-- Link LLM calls, spans, and tool calls to the run that produced them.
+- Link genuine LLM calls and spans to the run that produced them when source
+  provenance establishes the relationship.
 - Track run-level metadata such as total steps, latency, token usage, cost, and
   terminal status.
 - Support rollups by run, intent cluster, model, provider, and time window.
@@ -45,8 +49,8 @@ Planned capabilities:
 
 Planned capabilities:
 
-- Capture tool or function calls emitted by common agent frameworks and provider
-  SDKs.
+- Extend current Claude Code/Codex history normalization to common agent
+  frameworks and provider SDKs.
 - Store tool name, arguments, result metadata, latency, and success or failure.
 - Inspect tool-use sequences within an agent run.
 - Detect changes in retry rate, tool-selection patterns, and escalation paths.
@@ -90,6 +94,11 @@ possible.
 
 Areas under consideration:
 
+- An authenticated remote-ingestion service so production SDKs do not require
+  database credentials or one PostgreSQL connection pool per application
+  process
+- Durable batching, retry, backpressure, and idempotency between remote
+  producers and storage
 - OpenTelemetry and OpenInference-compatible export paths
 - Additional source contracts through maintained OSS packages when they reduce
   format-specific maintenance
@@ -121,12 +130,17 @@ Areas under consideration:
   hosted deployment; credentialed pre-release checks remain required.
 - Judge calls run sequentially. Verdict does not yet retain judge token/cost
   usage or enforce an evaluation budget.
-- Tool-call sequences are not a first-class capture/evaluation unit. Manual
-  spans and supported provider traces now carry parent linkage, but they do not
-  reconstruct an agent-run graph or provide agent-run scoring.
+- Local tool-call sequences are first-class source evidence and support bounded
+  deterministic findings. Manual spans and supported provider traces still do
+  not automatically reconstruct an authoritative cross-source agent graph or
+  prove task success.
 - Cache-token accounting and cache-aware pricing are not modeled.
 - Stable intent clusters have IDs and health diagnostics, but no automatic
   human-readable naming or fragmented-cluster merge operation.
+- PostgreSQL capture currently connects from each instrumented process through
+  a process-local driver pool. Standard remote PostgreSQL URLs are supported,
+  but Verdict does not yet provide a durable remote-ingestion gateway; network
+  persistence failures can therefore leave a trace uncaptured.
 
 ## Prioritized Product Follow-ups
 
@@ -142,15 +156,20 @@ and an approved design before implementation.
 3. **Concurrent judging (medium effort, latency value):** bounded concurrency,
    provider rate-limit handling, cancellation, deterministic output, and load
    tests. This reduces wall time, not token spend.
-4. **First-class tool-call/run evaluation (large effort, high agent-workload
-   value):** requires a versioned sequence schema, privacy model, storage/UI,
-   and task-level evaluation contract.
-5. **Cluster naming (small/medium effort, usability value):** prefer explicit
+4. **Remote ingestion gateway (large effort, high production-deployment
+   value):** add an authenticated, horizontally scalable HTTPS/OTLP ingestion
+   boundary with batching, durable retry/spooling, backpressure, idempotency,
+   tenant isolation, and separate schema-migration credentials. Keep direct
+   SQLite/PostgreSQL storage as the simple local and embedded option.
+5. **Framework-wide agent outcomes (large effort, high agent-workload value):**
+   extend the shipped typed sequence/privacy/storage/UI contract with genuine
+   provider-call links, authoritative task outcomes, and framework adapters.
+6. **Cluster naming (small/medium effort, usability value):** prefer explicit
    customer labels; any generated name needs versioning and privacy controls.
-6. **Cluster fusion (large, high-risk effort):** requires offline quality
+7. **Cluster fusion (large, high-risk effort):** requires offline quality
    evaluation, immutable aliases/history, migration, rollback, and continuity
    across drift windows. v0 keeps explicit health warnings/reclustering instead.
-7. **Dependency/packaging cleanup (small/medium maintenance value):** handle as
+8. **Dependency/packaging cleanup (small/medium maintenance value):** handle as
    a standalone clean-install/release-artifact change rather than mixing it into
    behavioral remediation.
 
@@ -165,6 +184,6 @@ and an approved design before implementation.
 ## Current Feature Boundary
 
 Verdict currently ships LLM-call capture, local storage, rubric evaluation,
-clustering, drift inspection, and dashboard tooling. Agent-run graphs, tool-call
-sequence analysis, task-success tracking, and run-level outcome metrics are
-planned work.
+clustering, drift inspection, dashboard tooling, and source-bounded local
+agent-run/tool-sequence evidence. Cross-source execution graphs, authoritative
+task-success tracking, and outcome-backed run metrics are planned work.

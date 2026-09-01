@@ -146,7 +146,7 @@ class Trace:
     error: str | None = None
     latency_ms: float | None = None
 
-    # Content (off by default; controlled by client configuration)
+    # Content (on by default; disable explicitly for metadata-only capture)
     prompt_redacted: str | None = None
     response_redacted: str | None = None
     raw_messages: list[dict[str, Any]] | None = None  # only retained if capture_content=True

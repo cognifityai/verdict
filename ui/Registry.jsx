@@ -29,10 +29,19 @@ function requestUrl(base, version, offset) {
   return query ? `${base}?${query}` : base;
 }
 
-export function useRegistry(url, operationsUrl) {
+export function useRegistry(url, operationsUrl, configUrl) {
   const [state, setState] = useState({ data: null, loading: true, error: null, version: null, offset: 0 });
   const requestId = useRef(0);
   const operations = useOperations(operationsUrl);
+  const [direct, setDirect] = useState({ token: null, running: null, error: null });
+
+  useEffect(() => {
+    if (operationsUrl || !configUrl) return;
+    fetch(configUrl.replace(/\/api\/config$/, "/api/setup/token"), { credentials: "same-origin" })
+      .then((response) => response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`)))
+      .then((body) => setDirect((current) => ({ ...current, token: body.setupToken })))
+      .catch(() => setDirect((current) => ({ ...current, error: "Cluster controls are unavailable." })));
+  }, [configUrl, operationsUrl]);
 
   const load = React.useCallback(async (version = state.version, offset = state.offset) => {
     const activeRequest = ++requestId.current;
@@ -61,20 +70,49 @@ export function useRegistry(url, operationsUrl) {
   }, [url]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const run = React.useCallback(async (kind, parameters) => {
-    const result = await operations.run(kind, parameters);
-    if (result) await load(result.registry_version || state.version, 0);
+    let result;
+    if (operationsUrl) {
+      result = await operations.run(kind, parameters);
+    } else {
+      const action = kind.replace(/^cluster_/, "");
+      const payload = {
+        strategy: parameters.strategy,
+        targetWorkload: parameters.target_workload,
+        modelPath: parameters.model_path || undefined,
+        versionId: parameters.version,
+        expectedGeneration: parameters.expected_generation,
+        clusterId: parameters.cluster_id,
+        displayName: parameters.display_name,
+      };
+      setDirect((current) => ({ ...current, running: kind, error: null }));
+      try {
+        const response = await fetch(`${configUrl.replace(/\/api\/config$/, "")}/api/clusters/${action}`, {
+          method: "POST", credentials: "same-origin",
+          headers: { "Content-Type": "application/json", "X-Verdict-Setup": direct.token },
+          body: JSON.stringify(payload),
+        });
+        result = await response.json();
+        if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
+      } catch (_failure) {
+        setDirect((current) => ({ ...current, error: "Cluster action failed; no registry state was changed." }));
+        return false;
+      } finally {
+        setDirect((current) => ({ ...current, running: null }));
+      }
+    }
+    if (result) await load(result.registry_version || result.versionId || state.version, 0);
     return Boolean(result);
-  }, [load, operations, state.version]);
+  }, [configUrl, direct.token, load, operations, operationsUrl, state.version]);
 
   return {
     ...state,
     load,
     run,
     operations: {
-      available: Boolean(operationsUrl && operations.data?.csrfToken),
-      running: operations.running,
+      available: Boolean(operationsUrl ? operations.data?.csrfToken : direct.token),
+      running: operationsUrl ? operations.running : direct.running,
       jobs: operations.data?.jobs || [],
-      error: operations.error,
+      error: operations.error || direct.error,
     },
   };
 }
@@ -119,7 +157,8 @@ function ReadinessEstimate({ readiness }) {
 
 export function RegistryView({ data, operations, onRun, onVersion, onPage, onRefresh }) {
   const [strategy, setStrategy] = useState("explicit");
-  const [targetWorkload, setTargetWorkload] = useState("agent");
+  const [targetWorkload, setTargetWorkload] = useState("");
+  const [modelPath, setModelPath] = useState("");
   const [renameCluster, setRenameCluster] = useState("");
   const [renameName, setRenameName] = useState("");
 
@@ -128,7 +167,7 @@ export function RegistryView({ data, operations, onRun, onVersion, onPage, onRef
       <Panel className="p-6">
         <div className="flex items-start gap-3"><AlertTriangle size={18} style={{ color: COLOR.amber }} />
           <div><div className="font-semibold">Versioned registry unavailable</div>
-            <div className="text-sm mt-1" style={{ color: COLOR.sub }}>This store predates Task 5 or has not installed its additive registry tables. Legacy trace clusters remain visible in Overview and Trace explorer.</div></div>
+            <div className="text-sm mt-1" style={{ color: COLOR.sub }}>This store predates the cluster workspace or has not installed its additive cluster tables. Legacy trace clusters remain visible in Overview and Trace explorer.</div></div>
         </div>
       </Panel>
     );
@@ -168,7 +207,7 @@ export function RegistryView({ data, operations, onRun, onVersion, onPage, onRef
       {experimental && (
         <div role="status" className="p-4 border flex items-start gap-3" style={{ borderColor: "#6b5529", background: COLOR.amberBg }}>
           <AlertTriangle size={16} style={{ color: COLOR.amber, flexShrink: 0 }} />
-          <div className="text-sm"><span className="font-semibold" style={{ color: COLOR.amber }}>Experimental opt-in.</span> The frozen semantic holdout failed one dominant-cluster gate: 30.1047% versus the 30.0% maximum. The other 12 preregistered checks passed; this is not a general validated-quality claim.</div>
+          <div className="text-sm"><span className="font-semibold" style={{ color: COLOR.amber }}>Experimental opt-in.</span> Mechanical activation checks do not establish semantic cluster quality. Review representatives, outliers, coverage, and replay behavior before activation.</div>
         </div>
       )}
 
@@ -176,11 +215,11 @@ export function RegistryView({ data, operations, onRun, onVersion, onPage, onRef
         <Panel className="p-4"><div className="text-xs font-mono" style={{ color: COLOR.faint }}>ASSIGNED</div><div className="text-2xl font-semibold mt-2" style={{ color: COLOR.green }}>{data.counts.assigned}</div></Panel>
         <Panel className="p-4"><div className="text-xs font-mono" style={{ color: COLOR.faint }}>OUTLIERS</div><div className="text-2xl font-semibold mt-2" style={{ color: COLOR.amber }}>{data.counts.outlier}</div></Panel>
         <Panel className="p-4"><div className="text-xs font-mono" style={{ color: COLOR.faint }}>INELIGIBLE</div><div className="text-2xl font-semibold mt-2" style={{ color: COLOR.faint }}>{data.counts.ineligible}</div></Panel>
-        <Panel className="p-4"><div className="text-xs font-mono" style={{ color: COLOR.faint }}>READINESS</div><div className="text-lg font-semibold mt-2" style={{ color: data.readiness.passed ? COLOR.green : COLOR.amber }}>{data.readiness.passed ? "Validated" : data.readiness.status.replaceAll("_", " ")}</div></Panel>
+        <Panel className="p-4"><div className="text-xs font-mono" style={{ color: COLOR.faint }}>ACTIVATION CHECKS</div><div className="text-lg font-semibold mt-2" style={{ color: data.readiness.passed ? COLOR.green : COLOR.amber }}>{data.readiness.passed ? "Mechanically passed" : data.readiness.status.replaceAll("_", " ")}</div></Panel>
       </div>
 
       <Panel className="p-4">
-        <div className="font-semibold text-sm flex items-center gap-2"><CheckCircle2 size={15} style={{ color: data.readiness.passed ? COLOR.green : COLOR.amber }} />Activation readiness</div>
+        <div className="font-semibold text-sm flex items-center gap-2"><CheckCircle2 size={15} style={{ color: data.readiness.passed ? COLOR.green : COLOR.amber }} />Mechanical activation checks</div>
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-2 mt-3">
           <ReadinessTerm label="STRUCTURE" value={data.readiness.structural} />
           <ReadinessTerm label="COVERAGE" value={data.readiness.coverage} />
@@ -223,17 +262,20 @@ export function RegistryView({ data, operations, onRun, onVersion, onPage, onRef
               <select aria-label="Fit strategy" value={strategy} onChange={(event) => setStrategy(event.target.value)} className="px-2 py-2 border text-xs" style={{ color: COLOR.text, background: COLOR.panel, borderColor: COLOR.border }}>
                 <option value="explicit">Explicit (supported)</option><option value="semantic">Semantic (experimental)</option><option value="hybrid">Hybrid (experimental fallback)</option>
               </select>
-              <input aria-label="Target workload" value={targetWorkload} onChange={(event) => setTargetWorkload(event.target.value)} maxLength={64} className="px-2 py-2 border text-xs min-w-40" style={{ color: COLOR.text, background: COLOR.panel, borderColor: COLOR.border }} />
-              <ActionButton disabled={!operations?.available} running={running === "cluster_fit"} onClick={() => onRun("cluster_fit", { strategy, target_workload: targetWorkload || null })}>Fit preview</ActionButton>
+              <input aria-label="Optional workload filter" value={targetWorkload} onChange={(event) => setTargetWorkload(event.target.value)} placeholder="All eligible traces" maxLength={64} className="px-2 py-2 border text-xs min-w-40" style={{ color: COLOR.text, background: COLOR.panel, borderColor: COLOR.border }} />
+              <ActionButton disabled={!operations?.available || (strategy !== "explicit" && !modelPath)} running={running === "cluster_fit"} onClick={() => onRun("cluster_fit", { strategy, target_workload: targetWorkload || null, model_path: modelPath || null })}>Fit preview</ActionButton>
             </div>
           </div>
           <div className="p-3" style={{ background: COLOR.panel2 }}>
             <div className="text-xs font-mono" style={{ color: COLOR.faint }}>VERSION LIFECYCLE</div>
             <div className="flex flex-wrap gap-2 mt-2">
-              <ActionButton disabled={!operations?.available || !activeVersion} running={running === "cluster_refit"} onClick={() => onRun("cluster_refit", {})}>Refit active</ActionButton>
-              <ActionButton disabled={!operations?.available || active || !data.readiness.passed} running={running === "cluster_activate"} onClick={() => onRun("cluster_activate", { version: selected.versionId, expected_generation: data.active.generation })}>Activate version</ActionButton>
-              <ActionButton disabled={!operations?.available || active || !activatedBefore} running={running === "cluster_rollback"} onClick={() => onRun("cluster_rollback", { version: selected.versionId, expected_generation: data.active.generation })}>Rollback to version</ActionButton>
+              <ActionButton disabled={!operations?.available || !activeVersion || (activeVersion.strategy !== "explicit" && !modelPath)} running={running === "cluster_refit"} onClick={() => onRun("cluster_refit", activeVersion.strategy === "explicit" ? {} : { model_path: modelPath })}>Refit active</ActionButton>
+              <ActionButton disabled={!operations?.available || !selected || (selected.strategy !== "explicit" && !modelPath)} running={running === "cluster_validate"} onClick={() => onRun("cluster_validate", { version: selected.versionId, ...(modelPath ? { model_path: modelPath } : {}) })}>Validate version</ActionButton>
+              <ActionButton disabled={!operations?.available || !selected || (selected.strategy !== "explicit" && !modelPath)} running={running === "cluster_replay"} onClick={() => onRun("cluster_replay", { version: selected.versionId, ...(modelPath ? { model_path: modelPath } : {}) })}>Replay assignments</ActionButton>
+              <ActionButton disabled={!operations?.available || active || !data.readiness.passed || (selected.strategy !== "explicit" && !modelPath)} running={running === "cluster_activate"} onClick={() => onRun("cluster_activate", { version: selected.versionId, expected_generation: data.active.generation, ...(modelPath ? { model_path: modelPath } : {}) })}>Activate version</ActionButton>
+              <ActionButton disabled={!operations?.available || active || !activatedBefore || (selected.strategy !== "explicit" && !modelPath)} running={running === "cluster_rollback"} onClick={() => onRun("cluster_rollback", { version: selected.versionId, expected_generation: data.active.generation, ...(modelPath ? { model_path: modelPath } : {}) })}>Rollback to version</ActionButton>
             </div>
+            {(strategy !== "explicit" || selected.strategy !== "explicit") && <label className="block text-xs mt-3" style={{ color: COLOR.sub }}>Approved local frozen MiniLM directory<input aria-label="Semantic model path" value={modelPath} onChange={(event) => setModelPath(event.target.value)} placeholder="/path/to/all-MiniLM-L6-v2" className="block w-full mt-1 px-2 py-2 border" style={{ color: COLOR.text, background: COLOR.panel, borderColor: COLOR.border }} /></label>}
           </div>
         </div>
         <div className="p-3 mt-3" style={{ background: COLOR.panel2 }}>
@@ -270,8 +312,8 @@ export function RegistryView({ data, operations, onRun, onVersion, onPage, onRef
   );
 }
 
-export function Registry({ url, operationsUrl }) {
-  const state = useRegistry(url, operationsUrl);
+export function Registry({ url, operationsUrl, configUrl }) {
+  const state = useRegistry(url, operationsUrl, configUrl);
   if (!state.data && state.loading) return <div className="p-8 text-sm" style={{ color: COLOR.sub }}>Loading cluster registry…</div>;
   return (
     <div>

@@ -16,9 +16,11 @@ import json
 import math
 import re
 from collections import Counter
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
+    from verdict.evidence import AgentRunBundle
     from verdict.schema import Judgment, SpanRecord, Trace
 
 RedactionMode = Literal["redact", "hash", "encrypt"]
@@ -56,13 +58,22 @@ _MESSAGE_FIELDS = (
 
 # Cheap, fast first-pass patterns. This is NOT comprehensive PII detection — it
 # covers the common, high-frequency accidental leaks in LLM traffic:
-# email, URL, US SSN, payment-card-shaped digit runs, IPv4/IPv6, and US-style
-# phone numbers. Known gaps (NOT handled — regex has no entity model):
+# provider/API credentials, email, URL, US SSN, payment-card-shaped digit runs,
+# IPv4/IPv6, and US-style phone numbers. Known gaps (NOT handled — regex has no entity model):
 # names, postal addresses, dates of birth, IBAN/passport numbers, separator-less
 # phone numbers, and most non-US formats. Do not treat regex-only redaction as a
 # compliance guarantee. A deeper entity-aware pass (e.g. Presidio) is a possible
 # future addition but is NOT wired in today.
 _PATTERNS = {
+    "PROVIDER_KEY": re.compile(
+        r"\b(?:sk-ant-[A-Za-z0-9_-]{16,}|sk-(?:proj-)?[A-Za-z0-9_-]{20,}|"
+        r"AKIA[A-Z0-9]{16}|AIza[A-Za-z0-9_-]{30,})\b"
+    ),
+    "BEARER_TOKEN": re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{16,}"),
+    "SECRET_ASSIGNMENT": re.compile(
+        r"(?i)\b(?:api[_-]?key|access[_-]?token|auth[_-]?token|password|secret|token)"
+        r"\s*[:=]\s*[\"']?[A-Za-z0-9._~+/=:-]{8,}[\"']?"
+    ),
     # Email candidates are handled by the linear at-sign scanner below before
     # this mapping, so an email embedded in a URL is still classified as EMAIL.
     # More-specific numeric patterns run before greedier ones like PHONE.
@@ -618,3 +629,34 @@ def sanitize_span(
         else {"verdict.redaction_status": str(sanitized_attributes)}
     )
     return span
+
+
+def sanitize_agent_run_bundle(
+    bundle: AgentRunBundle,
+    mode: RedactionMode = "redact",
+    secret: str | None = None,
+) -> AgentRunBundle:
+    """Return a detached bundle with every content-bearing field sanitized."""
+    from verdict.evidence import AgentRunBundle
+
+    turns = tuple(
+        replace(
+            turn,
+            user_request_redacted=redact(turn.user_request_redacted, mode=mode, secret=secret),
+            final_response_redacted=redact(turn.final_response_redacted, mode=mode, secret=secret),
+        )
+        for turn in bundle.turns
+    )
+    events = []
+    for event in bundle.events:
+        attributes = {
+            key: redact_structure(value, mode=mode, secret=secret)
+            for key, value in event.attributes.items()
+        }
+        events.append(replace(event, attributes=attributes))
+    return AgentRunBundle(
+        session=bundle.session,
+        run=bundle.run,
+        turns=turns,
+        events=tuple(events),
+    )

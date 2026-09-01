@@ -13,6 +13,15 @@ import { dimensionAxisLabel, dimensionLabel } from "./dimension-labels.js";
 import { providerPresentation } from "./provider-presentation.js";
 import { Operations } from "./Operations.jsx";
 import { Registry } from "./Registry.jsx";
+import { Runs } from "./Runs.jsx";
+import { Insights } from "./Insights.jsx";
+import { EvaluatorLab } from "./EvaluatorLab.jsx";
+import { ControlCenter } from "./ControlCenter.jsx";
+import { Explore } from "./Explore.jsx";
+import { SetupWizard } from "./SetupWizard.jsx";
+import { initialDashboardTab, sourceNavigationLabel } from "./source-state.mjs";
+import { Monitor } from "./Monitor.jsx";
+import { parseDashboardRoute, serializeDashboardRoute } from "./dashboard-route.mjs";
 
 // Embedded synthetic sample data. This keeps the static dashboard renderable when
 // no live API is reachable. It is not a benchmark, experiment result, or claim
@@ -131,7 +140,7 @@ const SEED = (() => {
 })();
 
 const EMPTY = {
-  meta: { totalTraces: 0, totalJudged: 0, totalCost: null, providers: 0, clusters: 0, workload: null },
+  meta: { totalTraces: 0, totalAgentRuns: 0, agentRunSources: [], agentRunSourcesTruncated: false, lastAgentCaptureAt: null, totalJudged: 0, totalCost: null, providers: 0, clusters: 0, workload: null },
   driftAnalysis: {
     runStatus: 'no_completed_run', readinessStatus: 'not_enough_current',
     current: 0, baseline: 0, minimum: 30,
@@ -158,6 +167,14 @@ function mountedRegistryUrl() {
   return mountedApiUrl().replace(/\/api\/data(?:\?.*)?$/, "/api/registry");
 }
 
+function mountedRunsUrl() {
+  return mountedApiUrl().replace(/\/api\/data(?:\?.*)?$/, "/api/runs");
+}
+
+function mountedInsightsUrl() {
+  return mountedApiUrl().replace(/\/api\/data(?:\?.*)?$/, "/api/insights");
+}
+
 function useOperationsConfig() {
   const [operationsUrl, setOperationsUrl] = useState(null);
   useEffect(() => {
@@ -176,10 +193,12 @@ function useOperationsConfig() {
 
 const API_URL = mountedApiUrl();
 
-function apiUrlForEvaluator(evaluatorId, traceOffset = 0) {
+function apiUrlForEvaluator(evaluatorId, traceOffset = 0, traceJudgeStatus = "all", traceId = null) {
   const params = new URLSearchParams();
   if (evaluatorId) params.set("evaluator", evaluatorId);
   if (traceOffset > 0) params.set("trace_offset", String(traceOffset));
+  if (traceJudgeStatus !== "all") params.set("trace_judge_status", traceJudgeStatus);
+  if (traceId) params.set("trace_id", traceId);
   const query = params.toString();
   return query ? `${API_URL}?${query}` : API_URL;
 }
@@ -191,11 +210,13 @@ function useDashboardData() {
     loading: false,
     error: null,
     traceOffset: 0,
+    traceJudgeStatus: "all",
+    traceId: null,
   });
   const requestSequence = useRef(0);
   const activeController = useRef(null);
 
-  const load = React.useCallback(async (evaluatorId = null, traceOffset = 0) => {
+  const load = React.useCallback(async (evaluatorId = null, traceOffset = 0, traceJudgeStatus = "all", traceId = null) => {
     const requestId = requestSequence.current + 1;
     requestSequence.current = requestId;
     if (activeController.current) activeController.current.abort();
@@ -203,7 +224,7 @@ function useDashboardData() {
     activeController.current = controller;
     setState((current) => ({ ...current, loading: true, error: null }));
     try {
-      const response = await fetch(apiUrlForEvaluator(evaluatorId, traceOffset), {
+      const response = await fetch(apiUrlForEvaluator(evaluatorId, traceOffset, traceJudgeStatus, traceId), {
         headers: { Accept: "application/json" },
         signal: controller.signal,
       });
@@ -213,7 +234,7 @@ function useDashboardData() {
         throw new Error("invalid dashboard response");
       }
       if (requestId !== requestSequence.current) return false;
-      setState({ snapshot, source: "live", loading: false, error: null, traceOffset });
+      setState({ snapshot, source: "live", loading: false, error: null, traceOffset, traceJudgeStatus, traceId });
       return true;
     } catch (error) {
       if (requestId !== requestSequence.current) return false;
@@ -244,9 +265,10 @@ function useDashboardData() {
 
   return {
     ...state,
-    load: (evaluatorId) => load(evaluatorId, 0),
-    loadTracePage: (traceOffset) => load(state.snapshot.evaluation?.selectedId || null, traceOffset),
-    reload: () => load(state.snapshot.evaluation?.selectedId || null, state.traceOffset),
+    load: (evaluatorId) => load(evaluatorId, 0, state.traceJudgeStatus, state.traceId),
+    loadTracePage: (traceOffset) => load(state.snapshot.evaluation?.selectedId || null, traceOffset, state.traceJudgeStatus, state.traceId),
+    loadTraceFilter: (traceJudgeStatus, traceId = null) => load(state.snapshot.evaluation?.selectedId || null, 0, traceJudgeStatus, traceId),
+    reload: () => load(state.snapshot.evaluation?.selectedId || null, state.traceOffset, state.traceJudgeStatus, state.traceId),
   };
 }
 
@@ -421,9 +443,9 @@ function Landing({ onEnter }) {
   const steps = [
     { icon: Activity, t: "Capture", d: "One line of init instruments supported provider SDK calls into Verdict's vendor-neutral Trace schema." },
     { icon: Database, t: "Store", d: "The SDK stores traces through one protocol: SQLite locally, Postgres for shared environments, or memory for tests. The bundled dashboard reads SQLite and Postgres." },
-    { icon: Layers, t: "Cluster", d: "Persistent MiniLM-based assignment groups similar prompts so baseline and current windows compare like with like." },
-    { icon: Scale, t: "Judge", d: "A configurable judge model scores sampled responses on 5 binary dimensions, reasoning before its verdict." },
-    { icon: Signal, t: "Detect drift", d: "Fisher's exact test (binary dimensions) / Mann-Whitney U + Benjamini-Hochberg per (cluster, dimension), gated on Cliff's δ." },
+    { icon: Layers, t: "Explore", d: "Start without grouping, compare factual provider/model facets, or review optional semantic cluster exemplars before activation." },
+    { icon: Scale, t: "Evaluate", d: "Run a configured evidence-aware rubric only after previewing eligibility, egress, call count, and estimated maximum cost." },
+    { icon: Signal, t: "Monitor", d: "Freeze an exact older reference and newer current cohort, then test eligible metrics with multiplicity and effect-size gates." },
     { icon: GitBranch, t: "Compare", d: "Bradley-Terry pairwise ranking across providers on your own traffic, with bootstrap CIs." },
   ];
   const validation = [
@@ -432,7 +454,7 @@ function Landing({ onEnter }) {
     { k: "Drift", l: "Statistical review", d: "Inspect changes by cluster and dimension instead of relying on one global average.", icon: Signal, color: C.accent2 },
   ];
   const limits = [
-    "Agent-run and tool-call graphs are planned work",
+    "Agent evidence is limited to what supported source histories expose",
     "Judge calibration is workload-specific",
     "Redaction is best-effort pattern matching",
     "Dashboard is intended for local or trusted-network use",
@@ -606,10 +628,65 @@ const TRUNCATION_LABELS = {
   traceSamples: "trace samples",
 };
 
-function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluatorChange, onTracePageChange, traceOffset = 0, reloading, loadError, operationsUrl = null }) {
+function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluatorChange, onTracePageChange, onTraceFilterChange, traceOffset = 0, reloading, loadError, operationsUrl = null }) {
   const DATA = data;
-  const [tab, setTab] = useState("overview");
+  const initialRoute = useRef(parseDashboardRoute(
+    typeof window === "undefined" ? "" : window.location.hash,
+    initialDashboardTab(data.meta),
+  ));
+  const [route, setRoute] = useState(initialRoute.current);
+  const tab = route.tab;
+  const commitRoute = React.useCallback((next, replace = false) => {
+    const normalized = parseDashboardRoute(serializeDashboardRoute(next), "overview");
+    setRoute(normalized);
+    if (typeof window !== "undefined") {
+      window.history[replace ? "replaceState" : "pushState"](
+        {}, "", serializeDashboardRoute(normalized),
+      );
+    }
+  }, []);
+  const setTab = React.useCallback((nextTab) => {
+    commitRoute({
+      ...route, tab: nextTab, findingCode: null, runIds: [],
+      selectedRunId: null, runIdsTruncated: false,
+    });
+  }, [commitRoute, route]);
+  const openFindingRun = React.useCallback((finding) => {
+    const runIds = Array.isArray(finding?.runIds) ? finding.runIds : [];
+    commitRoute({ ...route,
+      tab: "runs", findingCode: finding?.code || null, runIds,
+      selectedRunId: runIds[0] || null,
+      runIdsTruncated: finding?.runIdsTruncated === true,
+    });
+  }, [commitRoute, route]);
+  useEffect(() => {
+    const restore = () => setRoute(parseDashboardRoute(window.location.hash, initialDashboardTab(DATA.meta)));
+    window.addEventListener("popstate", restore);
+    window.addEventListener("hashchange", restore);
+    return () => { window.removeEventListener("popstate", restore); window.removeEventListener("hashchange", restore); };
+  }, [DATA.meta]);
+  const traceFilterCallback = useRef(onTraceFilterChange);
+  useEffect(() => { traceFilterCallback.current = onTraceFilterChange; }, [onTraceFilterChange]);
+  useEffect(() => {
+    if (source === "live" && route.tab === "traces" && traceFilterCallback.current) {
+      traceFilterCallback.current(route.traceJudgeStatus, route.traceId);
+    }
+  }, [route.tab, route.traceId, route.traceJudgeStatus, source]);
+  const initialRouteResolved = useRef(source !== "loading" || initialRoute.current.explicit);
+  useEffect(() => {
+    if (source === "live" && !initialRouteResolved.current) {
+      initialRouteResolved.current = true;
+      setTab(initialDashboardTab(DATA.meta));
+    }
+  }, [source, DATA.meta]);
   const evaluation = DATA.evaluation || { status: "empty", selectedId: null, availableIdentities: [] };
+  const evaluatorCallback = useRef(onEvaluatorChange);
+  useEffect(() => { evaluatorCallback.current = onEvaluatorChange; }, [onEvaluatorChange]);
+  useEffect(() => {
+    if (source === "live" && route.evaluatorId && evaluation.selectedId !== route.evaluatorId) {
+      evaluatorCallback.current?.(route.evaluatorId);
+    }
+  }, [evaluation.selectedId, route.evaluatorId, source]);
   const evaluatorSelectionNeeded = ["selection_required", "invalid_selection"].includes(evaluation.status);
   const boundedResources = Object.entries(DATA.truncation?.resources || {})
     .filter(([name, resource]) => (source !== "live" || name !== "traceSamples") && resource.shown < resource.available);
@@ -621,11 +698,18 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
       ? `Workload: ${DATA.meta.workload}`
       : "Live Verdict store";
   const nav = [
+    { id: "setup", label: sourceNavigationLabel(DATA.meta), icon: Terminal },
+    { id: "insights", label: "Findings", icon: AlertTriangle },
     { id: "overview", label: "Overview", icon: Gauge },
-    { id: "drift", label: "Drift signals", icon: Signal, badge: DATA.driftSignals.length },
+    { id: "reliability", label: "Reliability", icon: Shield },
+    { id: "performance", label: "Performance", icon: Zap },
+    { id: "behavior", label: "Behavior", icon: Eye },
+    { id: "runs", label: "Agent runs", icon: Boxes },
+    { id: "drift", label: "Drift", icon: Signal, badge: DATA.driftSignals.filter((signal) => signal.direction === "regression").length },
     { id: "traces", label: "Trace explorer", icon: Activity },
-    { id: "registry", label: "Registry", icon: Layers },
     { id: "judge", label: "Judge scores", icon: Scale },
+    { id: "evaluators", label: "Evaluators", icon: FlaskConical },
+    { id: "control", label: "Settings & alerts", icon: Gauge },
     { id: "compare", label: "Compare LLMs", icon: GitBranch },
     ...(operationsUrl ? [{ id: "operations", label: "Operations", icon: Cpu }] : []),
   ];
@@ -657,7 +741,7 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
               <Dot color={sourceColor} />
               <span className="hidden sm:inline">{sourceLabel}</span>
             </span>
-            <span className="hidden xl:inline font-mono" style={{ color: C.faint }}>{DATA.meta.totalTraces.toLocaleString()} traces</span>
+            <span className="hidden xl:inline font-mono" style={{ color: C.faint }}>{(DATA.meta.totalAgentRuns || 0).toLocaleString()} agent runs · {DATA.meta.totalTraces.toLocaleString()} LLM traces</span>
             <button onClick={onReload} disabled={reloading} title="Refresh from API"
               className="w-8 h-8 inline-flex items-center justify-center border"
               style={{ borderColor: C.border, borderRadius: 3, color: C.sub, opacity: reloading ? 0.5 : 1 }}>
@@ -692,7 +776,7 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
             </div>
             <select aria-label="Evaluator identity" value={evaluation.selectedId || ""}
               disabled={reloading}
-              onChange={(event) => onEvaluatorChange(event.target.value)}
+              onChange={(event) => { const evaluatorId = event.target.value; commitRoute({ ...route, evaluatorId }); onEvaluatorChange(evaluatorId); }}
               className="text-xs px-3 py-2 border max-w-full"
               style={{ color: C.text, background: C.panel, borderColor: C.border, borderRadius: 3 }}>
               <option value="" disabled>Select an evaluator</option>
@@ -735,17 +819,61 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
             </span>
           </div>
         )}
+        {tab === "setup" && <SetupWizard configUrl={mountedConfigUrl()} agentSummary={DATA.meta} onNavigate={(destination) => destination === "explore" ? commitRoute({ ...route, tab: "drift", driftSection: "explore" }) : setTab(destination)} onComplete={(setupSource) => { onReload(); setTab(setupSource === "local" ? "runs" : "overview"); }} />}
+        {tab === "insights" && <Insights url={mountedInsightsUrl()} onOpenRuns={openFindingRun} />}
+        {tab === "reliability" && <Insights url={mountedInsightsUrl()} onOpenRuns={openFindingRun} mode="reliability" />}
+        {tab === "performance" && <Insights url={mountedInsightsUrl()} onOpenRuns={openFindingRun} mode="performance" />}
+        {tab === "behavior" && <Insights url={mountedInsightsUrl()} onOpenRuns={openFindingRun} mode="behavior" />}
         {tab === "overview" && <Overview data={DATA} />}
-        {tab === "drift" && <Drift data={DATA} onOpenOperations={operationsUrl ? () => setTab("operations") : null} />}
+        {tab === "runs" && <Runs
+          url={mountedRunsUrl()}
+          focusRunIds={route.runIds}
+          selectedRunId={route.selectedRunId}
+          findingCode={route.findingCode}
+          runIdsTruncated={route.runIdsTruncated}
+          evaluatorFingerprint={evaluation.selectedIdentity?.fingerprint || null}
+          onSelectRun={(runId) => commitRoute({ ...route, selectedRunId: runId })}
+          onShowAll={() => setTab("runs")}
+        />}
+        {tab === "drift" && <DriftWorkspace
+          section={route.driftSection}
+          onSection={(driftSection) => commitRoute({ ...route, tab: "drift", driftSection })}
+          data={DATA} configUrl={mountedConfigUrl()} registryUrl={mountedRegistryUrl()}
+          operationsUrl={operationsUrl}
+          onOpenOperations={operationsUrl ? () => setTab("operations") : null}
+        />}
         {tab === "traces" && <Traces key={evaluation.selectedId || "none"} data={DATA} source={source}
-          traceOffset={traceOffset} reloading={reloading} onTracePageChange={onTracePageChange} />}
-        {tab === "registry" && <Registry url={mountedRegistryUrl()} operationsUrl={operationsUrl} />}
+          traceOffset={traceOffset} reloading={reloading} onTracePageChange={onTracePageChange}
+          judgeStatus={route.traceJudgeStatus} selectedTraceId={route.traceId}
+          onJudgeStatus={(traceJudgeStatus) => commitRoute({
+            ...route, tab: "traces", traceJudgeStatus, traceId: null,
+          })}
+          onSelectTrace={(traceId) => commitRoute({ ...route, tab: "traces", traceId })} />}
         {tab === "judge" && <Judge data={DATA} onOpenOperations={operationsUrl ? () => setTab("operations") : null} />}
+        {tab === "evaluators" && <EvaluatorLab configUrl={mountedConfigUrl()} />}
+        {tab === "control" && <ControlCenter configUrl={mountedConfigUrl()} onNavigate={(target) => target?.tab === "drift" ? commitRoute({ ...route, tab: "drift", driftSection: target.section || "overview" }) : setTab(target?.tab || "control")} />}
         {tab === "compare" && <Compare data={DATA} source={source} />}
         {tab === "operations" && operationsUrl && <Operations url={operationsUrl} costBreakdown={DATA.meta.costBreakdown} />}
       </main>
     </div>
   );
+}
+
+function DriftWorkspace({ section, onSection, data, configUrl, registryUrl, operationsUrl, onOpenOperations }) {
+  const sections = [
+    ["overview", "Overview"], ["explore", "Explore"], ["monitor", "Monitor"],
+    ["signals", "Signals"], ["clusters", "Clusters"],
+  ];
+  return <div className="space-y-5">
+    <div className="flex overflow-x-auto border-b" style={{ borderColor: C.border }}>
+      {sections.map(([id, label]) => <button key={id} onClick={() => onSection(id)} className="px-4 py-3 text-sm border-b-2 shrink-0" style={{ color: section === id ? C.text : C.sub, borderColor: section === id ? C.accent : "transparent" }}>{label}</button>)}
+    </div>
+    {section === "overview" && <Drift data={data} onOpenOperations={onOpenOperations} />}
+    {section === "explore" && <Explore configUrl={configUrl} registryUrl={registryUrl} operationsUrl={operationsUrl} />}
+    {section === "monitor" && <Monitor configUrl={configUrl} />}
+    {section === "signals" && <Drift data={data} onOpenOperations={onOpenOperations} />}
+    {section === "clusters" && <Registry url={registryUrl} operationsUrl={operationsUrl} configUrl={configUrl} />}
+  </div>;
 }
 
 function MetricCell({ label, value, sub, icon: Icon, accent }) {
@@ -773,6 +901,16 @@ function Overview({ data = SEED }) {
   const leadColor = leadIsImprovement ? C.green : C.red;
   const leadBg = leadIsImprovement ? C.greenBg : C.redBg;
   const analysis = driftAnalysis(DATA);
+  const coverage = DATA.coverage || {};
+  const deterministic = coverage.deterministicAnalysis || {
+    status: "never_run", availableRuns: m.totalAgentRuns || 0, analyzedRuns: 0,
+    availableTraces: m.totalTraces || 0, analyzedTraces: 0, complete: false,
+  };
+  const evaluationCoverage = coverage.evaluation || {
+    traces: m.totalTraces || 0, judged: m.totalJudged || 0,
+    notJudged: Math.max(0, (m.totalTraces || 0) - (m.totalJudged || 0)),
+    judgeErrors: 0, completedCalls: m.totalJudged || 0, errorCalls: 0,
+  };
   const noCompletedRun = analysis.runStatus === "no_completed_run";
   const evaluatorSelectionNeeded = ["selection_required", "invalid_selection"].includes(analysis.runStatus);
   const analysisUnavailable = noCompletedRun || evaluatorSelectionNeeded;
@@ -832,6 +970,7 @@ function Overview({ data = SEED }) {
       </div>
 
       <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-px border-y" style={{ borderColor: C.border, background: C.border }}>
+        <MetricCell label="Agent runs" value={(m.totalAgentRuns || 0).toLocaleString()} sub={(m.agentRunSources || []).map((item) => `${item.sourceKind}: ${item.runs}`).join(" · ") || "No agent runs"} icon={Boxes} accent={C.green} />
         <MetricCell label="Traces captured" value={m.totalTraces.toLocaleString()} sub={`${m.providers} providers`} icon={Activity} accent={C.accent} />
         <MetricCell label="Responses judged" value={m.totalJudged} sub={`${DATA.dimensionOverall.length}-dimension rubric`} icon={Scale} accent={C.blue} />
         <MetricCell label="Drift signals" value={evaluatorSelectionNeeded ? "Select evaluator" : noCompletedRun ? "Not run" : DATA.driftSignals.length} sub={analysisUnavailable ? analysisHeadline(analysis).toLowerCase() : "latest completed run"} icon={Signal} accent={analysisUnavailable ? C.amber : DATA.driftSignals.length ? C.red : C.green} />
@@ -839,6 +978,19 @@ function Overview({ data = SEED }) {
         <MetricCell label="Intent clusters" value={m.clusters} sub={`median ${health.medianClusterSize || 0} traces`} icon={Layers} accent={healthColor} />
         <MetricCell label="Cluster readiness" value={healthLabel} sub={`${health.clustersMeetingSampleFloor}/${health.nClusters} meet n=${health.minSampleSize}`} icon={Gauge} accent={healthColor} />
       </div>
+
+      <Panel className="p-5">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div><div className="font-semibold text-sm">Evidence and analysis coverage</div><div className="text-xs mt-1" style={{ color: C.faint }}>Capture, deterministic analysis, judge execution, and drift are reported independently.</div></div>
+          <Pill color={deterministic.status === "completed" ? C.green : deterministic.status === "error" ? C.red : C.amber}>{deterministic.status.replaceAll("_", " ")}</Pill>
+        </div>
+        <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-3 mt-4">
+          <MetricCell label="Agent runs analyzed" value={`${deterministic.analyzedRuns}/${deterministic.availableRuns}`} sub={deterministic.complete ? "complete persisted snapshot" : "partial or not run"} />
+          <MetricCell label="Traces analyzed" value={`${deterministic.analyzedTraces}/${deterministic.availableTraces}`} sub="deterministic, judge-free analysis" />
+          <MetricCell label="Selected evaluator" value={`${evaluationCoverage.judged} judged`} sub={`${evaluationCoverage.notJudged} not judged · ${evaluationCoverage.judgeErrors} judge errors`} />
+          <MetricCell label="Drift comparison" value={noCompletedRun ? "Not run" : analysis.runStatus === "insufficient" ? "Insufficient" : "Completed"} sub={noCompletedRun ? "no persisted comparison" : `${DATA.driftSignals.length} persisted signals`} />
+        </div>
+      </Panel>
 
       {health.messages && health.messages.length > 0 && (
         <div className="px-4 py-3 border flex items-start gap-2 text-sm" style={{ borderColor: healthColor, background: C.amberBg, color: C.text, borderRadius: 3 }}>
@@ -1101,12 +1253,13 @@ function Stat({ label, value, note }) {
 }
 
 /* ---------------------------------------------------------------- TRACES */
-function Traces({ data = SEED, source = "sample", traceOffset = 0, reloading = false, onTracePageChange = null }) {
+function Traces({ data = SEED, source = "sample", traceOffset = 0, reloading = false, onTracePageChange = null, judgeStatus = "all", selectedTraceId: routedTraceId = null, onJudgeStatus = null, onSelectTrace = null }) {
   const DATA = data;
   const [prov, setProv] = useState("all");
   const [capture, setCapture] = useState("all");
   const [q, setQ] = useState("");
-  const [selectedTraceId, setSelectedTraceId] = useState(null);
+  const [selectedTraceId, setSelectedTraceId] = useState(routedTraceId);
+  useEffect(() => setSelectedTraceId(routedTraceId), [routedTraceId]);
   const sel = DATA.samples.find((sample) => sample.trace_id === selectedTraceId) || null;
   const providerOptions = DATA.providers.map((provider) => {
     const presentation = providerPresentation(
@@ -1147,6 +1300,9 @@ function Traces({ data = SEED, source = "sample", traceOffset = 0, reloading = f
               </button>
             ))}
           </div>
+          <select aria-label="Judge status" value={judgeStatus} onChange={(event) => onJudgeStatus?.(event.target.value)} className="border px-3 py-2 text-xs" style={{ borderColor: C.border, background: C.panel }}>
+            <option value="all">All judge states</option><option value="judged">Judged only</option><option value="not_judged">Not judged</option><option value="judge_error">Judge error</option><option value="pass">Pass</option><option value="fail">Fail</option><option value="unclear">Unclear</option>
+          </select>
           <div className="flex items-center gap-1 px-1 py-1 border" style={{ borderColor: C.border, background: C.panel, borderRadius: 3 }}>
             {[
               { key: "all", label: "All" },
@@ -1169,16 +1325,11 @@ function Traces({ data = SEED, source = "sample", traceOffset = 0, reloading = f
           <div style={{ maxHeight: 520, overflowY: "auto" }}>
             {rows.map((s) => {
               const on = sel && sel.trace_id === s.trace_id;
-              const verdicts = s.judgment ? s.judgment.dims : null;
-              const judgmentStatus = s.judgment?.summary?.status || (
-                verdicts?.some((d) => d.verdict === "fail") ? "fail"
-                  : verdicts?.some((d) => d.verdict === "unclear") ? "unclear"
-                    : verdicts ? "pass" : "unavailable"
-              );
+              const judgmentStatus = s.judgeStatus || "not_judged";
               const provider = providerPresentation(s.provider, s.request_model);
               const recorded = traceTime(s);
               return (
-                <button key={s.trace_id} onClick={() => setSelectedTraceId(s.trace_id)}
+                <button key={s.trace_id} onClick={() => { setSelectedTraceId(s.trace_id); onSelectTrace?.(s.trace_id); }}
                   className="w-full grid items-center text-left px-4 py-2.5 border-b text-sm"
                   style={{ borderColor: C.grid, gridTemplateColumns: "150px 1fr 88px 96px 70px 64px", background: on ? C.raised : "transparent" }}>
                   <span className="text-xs" style={{ color: C.faint }}>
@@ -1195,11 +1346,12 @@ function Traces({ data = SEED, source = "sample", traceOffset = 0, reloading = f
                   <span className="text-xs" style={{ color: C.sub }}>{s.input_tokens ?? "—"}/{s.output_tokens ?? "—"}</span>
                   <span className="text-xs" style={{ color: C.sub }}>{s.latency_ms ? `${(s.latency_ms / 1000).toFixed(1)}s` : "—"}</span>
                   <span>
-                    {s.error ? <Pill color={C.red} bg={C.redBg}>error</Pill>
+                    {s.providerStatus === "provider_error" ? <Pill color={C.red} bg={C.redBg}>provider error</Pill>
+                      : judgmentStatus === "judge_error" ? <Pill color={C.red} bg={C.redBg}>judge error</Pill>
                       : judgmentStatus === "fail" ? <Pill color={C.red} bg={C.redBg}>fail</Pill>
                         : judgmentStatus === "unclear" ? <Pill color={C.amber} bg={C.amberBg}>unclear</Pill>
                           : judgmentStatus === "pass" ? <Pill color={C.green} bg={C.greenBg}>pass</Pill>
-                          : <Pill color={C.faint}>—</Pill>}
+                          : <Pill color={C.faint}>not judged</Pill>}
                   </span>
                 </button>
               );
@@ -1227,7 +1379,10 @@ function Traces({ data = SEED, source = "sample", traceOffset = 0, reloading = f
 
       {/* detail */}
       <div className="shrink-0" style={{ width: "min(100%, 360px)" }}>
-        {sel ? <TraceDetail s={sel} onClose={() => setSelectedTraceId(null)} /> : (
+        {sel ? <TraceDetail s={sel} onClose={() => {
+          setSelectedTraceId(null);
+          onSelectTrace?.(null);
+        }} /> : (
           <Panel className="p-8 text-center">
             <Eye size={22} style={{ color: C.faint, margin: "0 auto" }} />
             <div className="text-sm mt-2" style={{ color: C.sub }}>Select a trace to inspect its metadata and any captured content or judge verdicts.</div>
@@ -1249,6 +1404,10 @@ function TraceDetail({ s, onClose }) {
     : hasContent
       ? "Content partially captured"
       : "Historical metadata-only trace";
+  const judgeStatus = s.judgeStatus || "not_judged";
+  const judgeLabel = judgeStatus === "judge_error" ? "Judge error"
+    : judgeStatus === "not_judged" ? "Not judged"
+      : `Judge ${judgeStatus}`;
   return (
     <Panel className="overflow-hidden sticky top-20">
       <div className="flex items-center justify-between px-4 py-3 border-b" style={{ borderColor: C.border }}>
@@ -1263,7 +1422,7 @@ function TraceDetail({ s, onClose }) {
           <Pill color={C.sub}>{s.cluster_label || s.cluster_id || "Unassigned"}</Pill>
           <Pill color={hasContent ? C.green : C.amber} bg={hasContent ? C.greenBg : C.amberBg}>{contentLabel}</Pill>
           <Pill color={s.error ? C.red : C.green} bg={s.error ? C.redBg : C.greenBg}>{s.error ? "Failed trace" : "Provider succeeded"}</Pill>
-          <Pill color={s.judgment ? C.blue : C.faint}>{s.judgment ? "Judge results available" : "No judge results"}</Pill>
+          <Pill color={judgeStatus === "judge_error" ? C.red : s.judgment ? C.blue : C.faint}>{judgeLabel}</Pill>
         </div>
         <div className="text-xs font-mono" style={{ color: C.sub }}>{recorded.absolute}{recorded.relative ? ` · ${recorded.relative}` : ""}</div>
         <div className="text-xs" style={{ color: C.faint }}>
@@ -1318,7 +1477,7 @@ function TraceDetail({ s, onClose }) {
         )}
         {!s.judgment && (
           <div className="text-sm p-2.5" style={{ background: C.panel2, color: C.sub, border: `1px solid ${C.border}`, borderRadius: 3 }}>
-            No judge results are stored for this trace.
+            {judgeStatus === "judge_error" ? "Judge error: the selected evaluator attempted this trace but failed; no PASS/FAIL result is inferred." : "No judge results: this trace has not been judged by the selected evaluator."}
           </div>
         )}
         <div className="text-xs font-mono pt-1" style={{ color: C.faint }}>trace {s.trace_id.slice(0, 12)}</div>
@@ -1587,14 +1746,14 @@ function MiniBar({ title, data, fmt }) {
 }
 
 /* ------------------------------------------------------------------- APP */
-function App({ data = SEED, source = "sample", onReload, onEvaluatorChange, onTracePageChange, traceOffset = 0, reloading, loadError, operationsUrl = null }) {
+function App({ data = SEED, source = "sample", onReload, onEvaluatorChange, onTracePageChange, onTraceFilterChange, traceOffset = 0, reloading, loadError, operationsUrl = null }) {
   const [mode, setMode] = useState("landing");
   return (
     <div style={{ fontFamily: "ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif", height: "100%", background: C.bg }}>
       {mode === "landing"
         ? <Landing onEnter={() => setMode("dashboard")} />
         : <Dashboard data={data} onExit={() => setMode("landing")} source={source} onReload={onReload}
-          onEvaluatorChange={onEvaluatorChange} onTracePageChange={onTracePageChange} traceOffset={traceOffset}
+          onEvaluatorChange={onEvaluatorChange} onTracePageChange={onTracePageChange} onTraceFilterChange={onTraceFilterChange} traceOffset={traceOffset}
           reloading={reloading} loadError={loadError}
           operationsUrl={operationsUrl} />}
     </div>
@@ -1616,6 +1775,7 @@ export function DashboardRoot() {
     <div style={{ fontFamily: "ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif", minHeight: "100%", background: C.bg }}>
       <Dashboard data={data.snapshot} onExit={() => { window.location.href = "/"; }} source={data.source}
         onReload={data.reload} onEvaluatorChange={data.load} onTracePageChange={data.loadTracePage}
+        onTraceFilterChange={data.loadTraceFilter}
         traceOffset={data.traceOffset} reloading={data.loading}
         loadError={data.error} operationsUrl={operationsUrl} />
     </div>
@@ -1626,6 +1786,6 @@ export default function Root() {
   const data = useDashboardData();
   const operationsUrl = useOperationsConfig();
   return <App data={data.snapshot} source={data.source} onReload={data.reload}
-    onEvaluatorChange={data.load} onTracePageChange={data.loadTracePage} traceOffset={data.traceOffset}
+    onEvaluatorChange={data.load} onTracePageChange={data.loadTracePage} onTraceFilterChange={data.loadTraceFilter} traceOffset={data.traceOffset}
     reloading={data.loading} loadError={data.error} operationsUrl={operationsUrl} />;
 }

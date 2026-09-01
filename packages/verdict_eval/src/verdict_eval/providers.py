@@ -65,6 +65,7 @@ class AnthropicAdapter:
     name = "anthropic"
 
     def __init__(self, api_key: str | None = None, *, max_retries: int = 4) -> None:
+        import inspect
         try:
             from anthropic import Anthropic
         except ImportError as e:
@@ -73,6 +74,9 @@ class AnthropicAdapter:
             ) from e
         self._client = Anthropic(api_key=api_key) if api_key else Anthropic()
         self._max_retries = max_retries
+        self.supports_temperature = (
+            "temperature" in inspect.signature(self._client.messages.create).parameters
+        )
 
     def complete(self, req: CompletionRequest) -> CompletionResponse:
         return _with_retry(self._complete_once, req, max_attempts=self._max_retries)
@@ -84,9 +88,10 @@ class AnthropicAdapter:
         kwargs: dict = {
             "model": req.model,
             "messages": chat,
-            "temperature": req.temperature,
             "max_tokens": req.max_tokens,
         }
+        if getattr(self, "supports_temperature", True):
+            kwargs["temperature"] = req.temperature
         if system_parts:
             kwargs["system"] = "\n\n".join(system_parts)
         resp = self._client.messages.create(**kwargs)

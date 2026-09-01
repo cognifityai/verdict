@@ -198,6 +198,46 @@ test("operations navigation is present only when the host configures an adapter"
   assert.equal(textOf(withAdapter).includes("Operations"), true);
 });
 
+test("drift lifecycle is one top-level workspace", async () => {
+  const ui = await loadUiModule();
+  const tree = render(ui.Dashboard, createHooks(), { data: bundle("judge-a") });
+  const navigation = findAll(tree, (node) => node.type === "nav")[0];
+  const labels = textOf(navigation);
+
+  assert.match(labels, /Drift/);
+  assert.doesNotMatch(labels, /Drift signals/);
+  assert.doesNotMatch(labels, /Registry/);
+  assert.doesNotMatch(labels, /Explore/);
+  assert.doesNotMatch(labels, /Monitor/);
+});
+
+test("Trace filters preserve the routed evaluator identity", async () => {
+  const ui = await loadUiModule();
+  let pushed = null;
+  globalThis.window = {
+    location: {
+      hash: "#tab=traces&evaluator=evaluator-a", pathname: "/dashboard",
+    },
+    history: { pushState: (_state, _title, url) => { pushed = url; } },
+  };
+  try {
+    const tree = render(ui.Dashboard, createHooks(), {
+      data: bundle("evaluator-a"), source: "live",
+    });
+    const traces = findAll(
+      tree,
+      (node) => typeof node.type === "function" && node.type.name === "Traces",
+    )[0];
+    traces.props.onJudgeStatus("judged");
+
+    assert.match(
+      pushed, /^#tab=traces&judge=judged&evaluator=evaluator-a$/,
+    );
+  } finally {
+    delete globalThis.window;
+  }
+});
+
 test("registry view discloses experimental status, readiness, explanations, and actions", async () => {
   const ui = await loadUiModule();
   const actions = [];
@@ -241,8 +281,10 @@ test("registry view discloses experimental status, readiness, explanations, and 
   const rendered = textOf(tree);
 
   assert.match(rendered, /Experimental opt-in/);
-  assert.match(rendered, /30\.1047%/);
-  assert.match(rendered, /Validated/);
+  assert.match(rendered, /Mechanical activation checks/);
+  assert.match(rendered, /Mechanically passed/);
+  assert.match(rendered, /do not establish semantic cluster quality/);
+  assert.doesNotMatch(rendered, /Validated/);
   assert.match(rendered, /Redacted billing prompt/);
   assert.match(rendered, /Baseline\s+20\s+\/\s+30/);
   assert.match(rendered, /split across many small clusters/);

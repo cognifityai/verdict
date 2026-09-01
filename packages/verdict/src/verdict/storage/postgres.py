@@ -14,6 +14,7 @@ data lives in both adapters; only the SQL dialect differs.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import threading
 from contextlib import contextmanager
@@ -21,7 +22,36 @@ from contextvars import ContextVar
 from dataclasses import asdict
 from datetime import datetime, timedelta
 
-from verdict.redaction import sanitize_judgment, sanitize_span, sanitize_trace
+from verdict.analysis_records import (
+    DeliveryOutcome,
+    DeterministicAnalysisRun,
+    NotificationDeliveryAttempt,
+    analysis_run_from_json,
+    analysis_run_to_json,
+    notification_attempt_from_json,
+    notification_attempt_to_json,
+    validate_delivery_query,
+)
+from verdict.evidence import (
+    AgentRunBundle,
+    agent_run_bundle_from_json,
+    agent_run_bundle_to_json,
+)
+from verdict.monitoring import (
+    CohortManifest,
+    MonitorComparison,
+    MonitorPolicy,
+    monitor_policy_from_json,
+    monitor_policy_to_json,
+    monitor_snapshot_from_json,
+    monitor_snapshot_to_json,
+)
+from verdict.redaction import (
+    sanitize_agent_run_bundle,
+    sanitize_judgment,
+    sanitize_span,
+    sanitize_trace,
+)
 from verdict.schema import (
     ActiveClusterRegistry,
     ClusterIdentity,
@@ -47,7 +77,11 @@ from verdict.schema import (
     datetime_to_utc_us,
     populate_trace_analysis_fields,
 )
-from verdict.storage.base import _validate_drift_run_snapshot
+from verdict.storage.base import (
+    _validate_agent_bundle_query,
+    _validate_agent_bundle_run_id,
+    _validate_drift_run_snapshot,
+)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS traces (
@@ -85,6 +119,76 @@ ALTER TABLE traces ADD COLUMN IF NOT EXISTS parent_span_id TEXT;
 CREATE INDEX IF NOT EXISTS idx_traces_cluster  ON traces(cluster_id);
 CREATE INDEX IF NOT EXISTS idx_traces_tenant   ON traces(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_traces_started  ON traces(started_at);
+
+CREATE TABLE IF NOT EXISTS agent_run_bundles (
+    tenant_id TEXT NOT NULL CHECK(octet_length(tenant_id) BETWEEN 1 AND 256),
+    run_id TEXT NOT NULL CHECK(octet_length(run_id) BETWEEN 1 AND 256),
+    source_session_id TEXT NOT NULL
+        CHECK(octet_length(source_session_id) BETWEEN 1 AND 256),
+    source_kind TEXT NOT NULL CHECK(octet_length(source_kind) BETWEEN 1 AND 256),
+    started_at TIMESTAMPTZ NOT NULL,
+    ended_at TIMESTAMPTZ,
+    status TEXT NOT NULL CHECK(status IN (
+        'completed','failed','timed_out','cancelled','unknown')),
+    content_hash TEXT NOT NULL CHECK(length(content_hash)=64),
+    payload_json TEXT NOT NULL CHECK(octet_length(payload_json)<=4194304),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (tenant_id, run_id)
+);
+CREATE INDEX IF NOT EXISTS idx_agent_run_bundles_tenant_started
+    ON agent_run_bundles(tenant_id, started_at DESC, run_id DESC);
+
+CREATE TABLE IF NOT EXISTS deterministic_analysis_runs (
+    analysis_id TEXT PRIMARY KEY CHECK(length(analysis_id)=64),
+    tenant_id TEXT NOT NULL CHECK(octet_length(tenant_id) BETWEEN 1 AND 256),
+    scope_key TEXT NOT NULL CHECK(octet_length(scope_key) BETWEEN 1 AND 512),
+    cutoff TIMESTAMPTZ NOT NULL,
+    completed_at TIMESTAMPTZ NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('completed','error')),
+    analyzer_version TEXT NOT NULL CHECK(octet_length(analyzer_version) BETWEEN 1 AND 128),
+    input_fingerprint TEXT NOT NULL CHECK(length(input_fingerprint)=64),
+    payload_json TEXT NOT NULL CHECK(octet_length(payload_json)<=4194304),
+    UNIQUE(tenant_id, scope_key, analyzer_version, input_fingerprint, status)
+);
+CREATE INDEX IF NOT EXISTS idx_analysis_runs_tenant_scope_latest
+    ON deterministic_analysis_runs(tenant_id, scope_key, completed_at DESC, analysis_id DESC);
+
+CREATE TABLE IF NOT EXISTS notification_delivery_attempts (
+    attempt_id TEXT PRIMARY KEY CHECK(length(attempt_id)=64),
+    notification_id TEXT NOT NULL CHECK(length(notification_id)=64),
+    tenant_id TEXT NOT NULL CHECK(octet_length(tenant_id) BETWEEN 1 AND 256),
+    destination_fingerprint TEXT NOT NULL CHECK(length(destination_fingerprint)=64),
+    attempted_at TIMESTAMPTZ NOT NULL,
+    outcome TEXT NOT NULL CHECK(outcome IN ('delivered','failed')),
+    payload_json TEXT NOT NULL CHECK(octet_length(payload_json)<=4194304)
+);
+CREATE INDEX IF NOT EXISTS idx_notification_attempts_lookup
+    ON notification_delivery_attempts(
+        notification_id, destination_fingerprint, attempted_at DESC, attempt_id DESC
+    );
+
+CREATE TABLE IF NOT EXISTS monitor_policies (
+    policy_id TEXT PRIMARY KEY CHECK(octet_length(policy_id) BETWEEN 1 AND 256),
+    scope_key TEXT NOT NULL CHECK(octet_length(scope_key) BETWEEN 1 AND 512),
+    state TEXT NOT NULL CHECK(state IN ('candidate','active','retired')),
+    content_hash TEXT NOT NULL CHECK(length(content_hash)=64),
+    payload_json TEXT NOT NULL CHECK(octet_length(payload_json)<=262144),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_monitor_policies_one_active
+    ON monitor_policies(scope_key) WHERE state='active';
+
+CREATE TABLE IF NOT EXISTS monitor_snapshots (
+    snapshot_id TEXT PRIMARY KEY CHECK(length(snapshot_id)=64),
+    policy_id TEXT NOT NULL REFERENCES monitor_policies(policy_id),
+    cutoff TIMESTAMPTZ NOT NULL,
+    content_hash TEXT NOT NULL CHECK(length(content_hash)=64),
+    payload_json TEXT NOT NULL CHECK(octet_length(payload_json)<=4194304),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_monitor_snapshots_latest
+    ON monitor_snapshots(policy_id, cutoff DESC, snapshot_id DESC);
 
 CREATE TABLE IF NOT EXISTS judgments (
     judgment_id              TEXT PRIMARY KEY,
@@ -548,6 +652,309 @@ class PostgresStorage:
             analysis_raw_messages_state=row[27],
         )
 
+    def replace_agent_run_bundle(self, bundle: AgentRunBundle) -> None:
+        sanitized = sanitize_agent_run_bundle(bundle)
+        payload = agent_run_bundle_to_json(sanitized)
+        self._exec(
+            """INSERT INTO agent_run_bundles (
+                tenant_id, run_id, source_session_id, source_kind,
+                started_at, ended_at, status, content_hash, payload_json, updated_at
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, now())
+            ON CONFLICT (tenant_id, run_id) DO UPDATE SET
+                source_session_id=EXCLUDED.source_session_id,
+                source_kind=EXCLUDED.source_kind,
+                started_at=EXCLUDED.started_at,
+                ended_at=EXCLUDED.ended_at,
+                status=EXCLUDED.status,
+                content_hash=EXCLUDED.content_hash,
+                payload_json=EXCLUDED.payload_json,
+                updated_at=now()""",
+            (
+                sanitized.run.tenant_id,
+                sanitized.run.run_id,
+                sanitized.session.source_session_id,
+                sanitized.session.source_kind,
+                sanitized.run.started_at,
+                sanitized.run.ended_at,
+                sanitized.run.status.value,
+                sanitized.content_hash,
+                payload,
+            ),
+        )
+
+    @staticmethod
+    def _row_to_agent_run_bundle(row) -> AgentRunBundle:
+        payload = (
+            json.dumps(row[0], ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            if isinstance(row[0], dict)
+            else row[0]
+        )
+        bundle = agent_run_bundle_from_json(payload)
+        if bundle.content_hash != row[1]:
+            raise RuntimeError("stored agent run bundle content hash is inconsistent")
+        return bundle
+
+    def get_agent_run_bundle(
+        self,
+        tenant_id: str,
+        run_id: str,
+    ) -> AgentRunBundle | None:
+        _validate_agent_bundle_query(tenant_id, 1)
+        _validate_agent_bundle_run_id(run_id)
+        row = self._fetchone(
+            """SELECT payload_json, content_hash FROM agent_run_bundles
+               WHERE tenant_id=%s AND run_id=%s""",
+            (tenant_id, run_id),
+        )
+        return self._row_to_agent_run_bundle(row) if row is not None else None
+
+    def list_agent_run_bundles(
+        self,
+        tenant_id: str,
+        *,
+        limit: int = 100,
+    ) -> list[AgentRunBundle]:
+        _validate_agent_bundle_query(tenant_id, limit)
+        rows = self._fetchall(
+            """SELECT payload_json, content_hash FROM agent_run_bundles
+               WHERE tenant_id=%s ORDER BY started_at DESC, run_id DESC LIMIT %s""",
+            (tenant_id, limit),
+        )
+        return [self._row_to_agent_run_bundle(row) for row in rows]
+
+    def save_deterministic_analysis_run(self, run: DeterministicAnalysisRun) -> None:
+        payload = analysis_run_to_json(run)
+        with self._pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO deterministic_analysis_runs (
+                       analysis_id,tenant_id,scope_key,cutoff,completed_at,status,
+                       analyzer_version,input_fingerprint,payload_json
+                   ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                   ON CONFLICT DO NOTHING""",
+                (
+                    run.analysis_id, run.tenant_id, run.scope_key, run.cutoff,
+                    run.completed_at, run.status.value, run.analyzer_version,
+                    run.input_fingerprint, payload,
+                ),
+            )
+            cur.execute(
+                "SELECT payload_json FROM deterministic_analysis_runs WHERE analysis_id=%s",
+                (run.analysis_id,),
+            )
+            by_id = cur.fetchone()
+            if by_id is not None:
+                if by_id[0] != payload:
+                    raise ValueError("analysis identity has different content")
+                return
+            cur.execute(
+                """SELECT payload_json FROM deterministic_analysis_runs
+                   WHERE tenant_id=%s AND scope_key=%s AND analyzer_version=%s
+                     AND input_fingerprint=%s AND status=%s""",
+                (
+                    run.tenant_id, run.scope_key, run.analyzer_version,
+                    run.input_fingerprint, run.status.value,
+                ),
+            )
+            prior = cur.fetchone()
+            if prior is None:
+                raise RuntimeError("analysis insert conflict could not be resolved")
+            previous = analysis_run_from_json(prior[0])
+            if previous.result != run.result or previous.cutoff != run.cutoff:
+                raise ValueError("analysis input produced different content")
+
+    def get_latest_deterministic_analysis_run(
+        self, tenant_id: str, scope_key: str,
+    ) -> DeterministicAnalysisRun | None:
+        row = self._fetchone(
+            """SELECT payload_json FROM deterministic_analysis_runs
+               WHERE tenant_id=%s AND scope_key=%s
+               ORDER BY completed_at DESC, analysis_id DESC LIMIT 1""",
+            (tenant_id, scope_key),
+        )
+        return analysis_run_from_json(row[0]) if row is not None else None
+
+    def save_notification_delivery_attempt(
+        self, attempt: NotificationDeliveryAttempt,
+    ) -> None:
+        payload = notification_attempt_to_json(attempt)
+        with self._pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO notification_delivery_attempts (
+                       attempt_id,notification_id,tenant_id,destination_fingerprint,
+                       attempted_at,outcome,payload_json
+                   ) VALUES (%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING""",
+                (
+                    attempt.attempt_id, attempt.notification_id, attempt.tenant_id,
+                    attempt.destination_fingerprint, attempt.attempted_at,
+                    attempt.outcome.value, payload,
+                ),
+            )
+            cur.execute(
+                "SELECT payload_json FROM notification_delivery_attempts WHERE attempt_id=%s",
+                (attempt.attempt_id,),
+            )
+            stored = cur.fetchone()
+            if stored is None:
+                raise RuntimeError("notification attempt insert could not be resolved")
+            if stored[0] != payload:
+                raise ValueError("notification attempt identity has different content")
+
+    def list_notification_delivery_attempts(
+        self,
+        notification_id: str,
+        destination_fingerprint: str,
+        *,
+        limit: int = 100,
+    ) -> list[NotificationDeliveryAttempt]:
+        validate_delivery_query(notification_id, destination_fingerprint, limit)
+        rows = self._fetchall(
+            """SELECT payload_json FROM notification_delivery_attempts
+               WHERE notification_id=%s AND destination_fingerprint=%s
+               ORDER BY attempted_at DESC, attempt_id DESC LIMIT %s""",
+            (notification_id, destination_fingerprint, limit),
+        )
+        return [notification_attempt_from_json(row[0]) for row in rows]
+
+    def notification_was_delivered(
+        self, notification_id: str, destination_fingerprint: str,
+    ) -> bool:
+        validate_delivery_query(notification_id, destination_fingerprint, 1)
+        row = self._fetchone(
+            """SELECT 1 FROM notification_delivery_attempts
+               WHERE notification_id=%s AND destination_fingerprint=%s
+                 AND outcome=%s LIMIT 1""",
+            (notification_id, destination_fingerprint, DeliveryOutcome.DELIVERED.value),
+        )
+        return row is not None
+
+    def list_notification_delivery_attempts_for_tenant(
+        self, tenant_id: str, *, limit: int = 100,
+    ) -> list[NotificationDeliveryAttempt]:
+        _validate_agent_bundle_query(tenant_id, limit)
+        rows = self._fetchall(
+            """SELECT payload_json FROM notification_delivery_attempts
+               WHERE tenant_id=%s ORDER BY attempted_at DESC, attempt_id DESC LIMIT %s""",
+            (tenant_id, limit),
+        )
+        return [notification_attempt_from_json(row[0]) for row in rows]
+
+    def save_monitor_policy(self, policy: MonitorPolicy) -> None:
+        payload = monitor_policy_to_json(policy)
+        digest = hashlib.sha256(payload.encode()).hexdigest()
+        with self._pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO monitor_policies "
+                "(policy_id,scope_key,state,content_hash,payload_json) "
+                "VALUES (%s,%s,'candidate',%s,%s) ON CONFLICT DO NOTHING",
+                (policy.policy_id, policy.scope_key, digest, payload),
+            )
+            cur.execute(
+                "SELECT content_hash FROM monitor_policies WHERE policy_id=%s",
+                (policy.policy_id,),
+            )
+            if cur.fetchone()[0] != digest:
+                raise ValueError("monitor policy identity has a different definition")
+
+    @staticmethod
+    def _monitor_policy_payload(value) -> str:
+        return (json.dumps(value, sort_keys=True, separators=(",", ":"))
+                if isinstance(value, dict) else value)
+
+    def get_monitor_policy(self, policy_id: str) -> tuple[MonitorPolicy, str] | None:
+        row = self._fetchone(
+            "SELECT payload_json,state FROM monitor_policies WHERE policy_id=%s", (policy_id,),
+        )
+        return (monitor_policy_from_json(self._monitor_policy_payload(row[0])), row[1]) if row else None
+
+    def get_active_monitor_policy(self, scope_key: str) -> MonitorPolicy | None:
+        row = self._fetchone(
+            "SELECT payload_json FROM monitor_policies WHERE scope_key=%s AND state='active'",
+            (scope_key,),
+        )
+        return monitor_policy_from_json(self._monitor_policy_payload(row[0])) if row else None
+
+    def activate_monitor_policy(
+        self, scope_key: str, policy_id: str, *, expected_active_policy_id: str | None
+    ) -> MonitorPolicy:
+        with self._pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
+            cur.execute("LOCK TABLE monitor_policies IN SHARE ROW EXCLUSIVE MODE")
+            cur.execute(
+                "SELECT policy_id FROM monitor_policies "
+                "WHERE scope_key=%s AND state='active'", (scope_key,),
+            )
+            row = cur.fetchone()
+            current_id = row[0] if row else None
+            if current_id != expected_active_policy_id:
+                raise ValueError("active policy changed")
+            cur.execute(
+                "SELECT payload_json FROM monitor_policies WHERE scope_key=%s AND policy_id=%s",
+                (scope_key, policy_id),
+            )
+            target = cur.fetchone()
+            if target is None:
+                raise ValueError("unknown monitor policy")
+            cur.execute(
+                "UPDATE monitor_policies SET state='retired',updated_at=now() "
+                "WHERE scope_key=%s AND state='active'", (scope_key,),
+            )
+            cur.execute(
+                "UPDATE monitor_policies SET state='active',updated_at=now() "
+                "WHERE policy_id=%s", (policy_id,),
+            )
+        return monitor_policy_from_json(self._monitor_policy_payload(target[0]))
+
+    def save_monitor_snapshot(
+        self, policy_id: str, manifest: CohortManifest, comparison: MonitorComparison
+    ) -> None:
+        payload = monitor_snapshot_to_json(manifest, comparison)
+        if not 2 <= len(payload.encode("utf-8")) <= 4_194_304:
+            raise ValueError("monitor snapshot exceeds the 4 MiB storage contract")
+        digest = hashlib.sha256(payload.encode()).hexdigest()
+        with self._pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
+            cur.execute(
+                "SELECT payload_json FROM monitor_policies WHERE policy_id=%s", (policy_id,),
+            )
+            policy_row = cur.fetchone()
+            if policy_row is None:
+                raise ValueError("unknown policy")
+            stored_policy = monitor_policy_from_json(
+                self._monitor_policy_payload(policy_row[0])
+            )
+            if stored_policy.fingerprint != manifest.policy_fingerprint:
+                raise ValueError("monitor snapshot does not match policy")
+            cur.execute(
+                "INSERT INTO monitor_snapshots "
+                "(snapshot_id,policy_id,cutoff,content_hash,payload_json) "
+                "VALUES (%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING",
+                (manifest.snapshot_id, policy_id, manifest.cutoff, digest, payload),
+            )
+            cur.execute(
+                "SELECT content_hash FROM monitor_snapshots WHERE snapshot_id=%s",
+                (manifest.snapshot_id,),
+            )
+            if cur.fetchone()[0] != digest:
+                raise ValueError("monitor snapshot identity has different content")
+
+    def get_latest_monitor_snapshot(
+        self, policy_id: str
+    ) -> tuple[CohortManifest, MonitorComparison] | None:
+        row = self._fetchone(
+            "SELECT payload_json FROM monitor_snapshots WHERE policy_id=%s "
+            "ORDER BY created_at DESC,snapshot_id DESC LIMIT 1", (policy_id,),
+        )
+        return monitor_snapshot_from_json(self._monitor_policy_payload(row[0])) if row else None
+
+    def get_latest_monitor_alert(
+        self, policy_id: str
+    ) -> tuple[CohortManifest, MonitorComparison] | None:
+        row = self._fetchone(
+            "SELECT payload_json FROM monitor_snapshots WHERE policy_id=%s "
+            "AND payload_json LIKE '%\"status\":\"alert\"%' "
+            "ORDER BY created_at DESC,snapshot_id DESC LIMIT 1",
+            (policy_id,),
+        )
+        return monitor_snapshot_from_json(row[0]) if row else None
+
     def get_trace(self, trace_id: str) -> Trace | None:
         row = self._fetchone(
             # Fixed column list; trace_id remains parameterized.
@@ -776,6 +1183,18 @@ class PostgresStorage:
             tuple(params),
         )
         return [self._row_to_judgment(r) for r in rows]
+
+    def list_judgments_for_trace(
+        self, trace_id: str, *, limit: int = 100,
+    ) -> list[Judgment]:
+        if not isinstance(trace_id, str) or not trace_id or not 1 <= limit <= 10_000:
+            raise ValueError("invalid trace judgment query")
+        rows = self._fetchall(
+            f"SELECT {self._JUDGMENT_COLUMNS} FROM judgments j "  # nosec B608
+            "WHERE j.trace_id=%s ORDER BY j.created_at DESC, j.judgment_id DESC LIMIT %s",
+            (trace_id, limit),
+        )
+        return [self._row_to_judgment(row) for row in rows]
 
     # -- Evaluator health ------------------------------------------------
 
@@ -1801,8 +2220,6 @@ class PostgresStorage:
         limit: int,
         missing_version_id: str | None = None,
     ) -> list[ClusterTraceCandidate]:
-        if authorized_tenant == "__verdict_local__":
-            raise ValueError("PostgreSQL clustering requires an explicit tenant")
         where = """tenant_id=%s AND ended_at IS NOT NULL
           AND analysis_started_at_state='valid'
           AND analysis_started_at_us>=%s AND analysis_started_at_us<%s"""
@@ -1844,8 +2261,6 @@ class PostgresStorage:
         authorized_tenant: str,
         trace_ids: list[str],
     ) -> dict[str, list[dict] | None]:
-        if authorized_tenant == "__verdict_local__":
-            raise ValueError("PostgreSQL clustering requires an explicit tenant")
         if not trace_ids:
             return {}
         rows = self._fetchall(
@@ -1857,8 +2272,6 @@ class PostgresStorage:
         return {row[0]: row[1] for row in rows}
 
     def count_pending_analysis_rows(self, authorized_tenant: str) -> int:
-        if authorized_tenant == "__verdict_local__":
-            raise ValueError("PostgreSQL clustering requires an explicit tenant")
         return self._fetchone(
             """SELECT COUNT(*) FROM traces WHERE tenant_id=%s AND
               (analysis_started_at_state='pending' OR
@@ -1879,8 +2292,6 @@ class PostgresStorage:
     def normalize_cluster_trace_analysis(
         self, authorized_tenant: str, *, limit: int = 10_000
     ) -> int:
-        if authorized_tenant == "__verdict_local__":
-            raise ValueError("PostgreSQL clustering requires an explicit tenant")
         if not 1 <= limit <= 10_000:
             raise ValueError("normalization limit must be in [1,10000]")
         with self._pool.connection() as conn, conn.transaction(), conn.cursor() as cur:

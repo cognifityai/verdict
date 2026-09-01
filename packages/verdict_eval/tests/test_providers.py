@@ -90,6 +90,32 @@ def test_completion_request_constructs() -> None:
     assert req.max_tokens == 1024
 
 
+def test_anthropic_adapter_omits_unsupported_temperature() -> None:
+    from verdict_eval.providers import AnthropicAdapter, CompletionRequest
+
+    captured = {}
+    adapter = object.__new__(AnthropicAdapter)
+    adapter.supports_temperature = False
+    adapter._client = SimpleNamespace(messages=SimpleNamespace(
+        create=lambda **kwargs: (
+            captured.update(kwargs)
+            or SimpleNamespace(
+                content=[SimpleNamespace(text="ok")],
+                usage=SimpleNamespace(input_tokens=2, output_tokens=1),
+                stop_reason="end_turn",
+            )
+        )
+    ))
+
+    response = adapter._complete_once(CompletionRequest(
+        model="claude-test", messages=[{"role": "user", "content": "q"}], temperature=0.0,
+    ))
+
+    assert "temperature" not in captured
+    assert captured["model"] == "claude-test"
+    assert response.text == "ok"
+
+
 def test_google_adapter_handles_empty_optional_response_fields(monkeypatch) -> None:
     from verdict_eval.providers import CompletionRequest, GoogleAdapter
 

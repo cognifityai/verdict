@@ -32,11 +32,24 @@ and clearer to detect structurally than with an LLM judge.
 
 from __future__ import annotations
 
-import json
-import re
 from dataclasses import dataclass, field
 
 import numpy as np
+from verdict.structural import (
+    APOLOGY_STARTERS as APOLOGY_STARTERS,
+)
+from verdict.structural import (
+    HEDGE_PATTERNS as HEDGE_PATTERNS,
+)
+from verdict.structural import (
+    REFUSAL_SIGNATURES as REFUSAL_SIGNATURES,
+)
+from verdict.structural import (
+    count_hedges,
+    is_apology_start,
+    is_refusal,
+    is_valid_json,
+)
 
 # --------------------------------------------------------------------------- #
 # Pattern libraries
@@ -44,35 +57,6 @@ import numpy as np
 
 # Hedge markers — word-boundary regex so "i think" doesn't match "rethinking".
 # Case-insensitive at apply time (we lowercase the text first).
-HEDGE_PATTERNS: tuple[str, ...] = (
-    r"\bi think\b", r"\bi believe\b", r"\bperhaps\b", r"\bmaybe\b",
-    r"\bmight\b", r"\bcould\b", r"\bpossibly\b", r"\bseems like\b",
-    r"\bappears (?:to|that)\b", r"\bi'?m not sure\b", r"\bnot certain\b",
-    r"\bpotentially\b", r"\bit depends\b", r"\bwould say\b",
-    r"\bin some sense\b",
-)
-
-# Refusal signatures — require the surrounding context, not just the verb.
-# "i won't" alone false-positives on "I won't recommend that approach."
-# Each pattern is a *signature* of an actual refusal.
-REFUSAL_SIGNATURES: tuple[str, ...] = (
-    r"\bi can'?t (?:help|assist|do that|do this|provide|create|generate|write)\b",
-    r"\bi won'?t (?:help|assist|provide|create|write|do|generate)\b",
-    r"\bi'?m (?:not able|unable) to (?:help|assist|do|provide|comply|fulfill|generate)\b",
-    r"\bi (?:must|have to) decline\b",
-    r"\bi (?:cannot|can'?t) comply\b",
-    r"\bnot (?:something|able) i (?:can|will) (?:help|do|assist)\b",
-    r"\bi'?m sorry,? but (?:i can'?t|i won'?t|i'?m unable|i can not)\b",
-)
-
-# Apology starters — anchored to start-of-text to avoid mid-response apologies
-# (those are often conversational rather than refusal-signaling).
-APOLOGY_STARTERS: tuple[str, ...] = (
-    r"^\s*i apologi[sz]e\b",
-    r"^\s*i'?m sorry\b",
-    r"^\s*sorry,?\s",
-    r"^\s*my apologies\b",
-)
 
 
 # --------------------------------------------------------------------------- #
@@ -107,45 +91,6 @@ def _word_count(text: str) -> int:
     whitespace_tokens = len(text.split())
     cjk_chars = sum(1 for ch in text if _is_cjk_char(ch))
     return whitespace_tokens + cjk_chars
-
-
-def count_hedges(text: str) -> int:
-    """Total hedge-marker occurrences in `text` (case-insensitive)."""
-    lower = text.lower()
-    return sum(len(re.findall(p, lower)) for p in HEDGE_PATTERNS)
-
-
-def is_refusal(text: str) -> bool:
-    """True if `text` matches any refusal signature.
-
-    The signatures are constructed to require enough context that normal
-    conversational uses of "I can't" or "I won't" don't trigger.
-    """
-    lower = text.lower()
-    return any(re.search(p, lower) for p in REFUSAL_SIGNATURES)
-
-
-def is_apology_start(text: str) -> bool:
-    """True if the response begins with an apology."""
-    lower = text.lower()
-    return any(re.search(p, lower) for p in APOLOGY_STARTERS)
-
-
-def is_valid_json(text: str) -> bool:
-    """True if `text` parses as JSON. Trims fenced code blocks first since
-    LLMs frequently wrap JSON in ```json fences."""
-    s = text.strip()
-    if s.startswith("```"):
-        # Strip ```json ... ``` fence
-        s = re.sub(r"^```(?:json)?\s*", "", s)
-        s = re.sub(r"```\s*$", "", s)
-    if not s:
-        return False
-    try:
-        json.loads(s)
-        return True
-    except (json.JSONDecodeError, ValueError):
-        return False
 
 
 # --------------------------------------------------------------------------- #

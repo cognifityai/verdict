@@ -64,6 +64,12 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+from verdict.analysis_records import (
+    DeterministicAnalysisRun,
+    NotificationDeliveryAttempt,
+)
+from verdict.evidence import AgentRunBundle
+from verdict.monitoring import CohortManifest, MonitorComparison, MonitorPolicy
 from verdict.schema import (
     DriftRun,
     DriftSignal,
@@ -360,12 +366,100 @@ class BufferedStorage:
     def insert_user_signal(self, sig: UserSignalRecord) -> None:
         self._enqueue(self._inner.insert_user_signal, sig)
 
+    def replace_agent_run_bundle(self, bundle: AgentRunBundle) -> None:
+        # A normalized run is one replacement snapshot; never queue fragments.
+        self._maintenance(self._inner.replace_agent_run_bundle, bundle)
+
+    def save_deterministic_analysis_run(self, run: DeterministicAnalysisRun) -> None:
+        # Terminal immutable snapshots are rare control-plane writes. Persist
+        # synchronously so callers never announce analysis that is only queued.
+        self._maintenance(self._inner.save_deterministic_analysis_run, run)
+
+    def save_notification_delivery_attempt(
+        self, attempt: NotificationDeliveryAttempt,
+    ) -> None:
+        # The durable terminal outcome is part of retry ownership, not capture
+        # telemetry, so it must be visible before the caller attempts a retry.
+        self._maintenance(self._inner.save_notification_delivery_attempt, attempt)
+
     # ======================================================================
     # Storage Protocol — READ methods (flush-then-delegate)
     # ======================================================================
 
     def get_trace(self, trace_id: str) -> Trace | None:
         return self._read(self._inner.get_trace, trace_id)
+
+    def get_agent_run_bundle(
+        self,
+        tenant_id: str,
+        run_id: str,
+    ) -> AgentRunBundle | None:
+        return self._read(self._inner.get_agent_run_bundle, tenant_id, run_id)
+
+    def list_agent_run_bundles(
+        self,
+        tenant_id: str,
+        *,
+        limit: int = 100,
+    ) -> list[AgentRunBundle]:
+        return self._read(
+            self._inner.list_agent_run_bundles,
+            tenant_id,
+            limit=limit,
+        )
+
+    def get_latest_deterministic_analysis_run(
+        self, tenant_id: str, scope_key: str,
+    ) -> DeterministicAnalysisRun | None:
+        return self._read(
+            self._inner.get_latest_deterministic_analysis_run, tenant_id, scope_key,
+        )
+
+    def list_notification_delivery_attempts(
+        self,
+        notification_id: str,
+        destination_fingerprint: str,
+        *,
+        limit: int = 100,
+    ) -> list[NotificationDeliveryAttempt]:
+        return self._read(
+            self._inner.list_notification_delivery_attempts,
+            notification_id,
+            destination_fingerprint,
+            limit=limit,
+        )
+
+    def notification_was_delivered(
+        self, notification_id: str, destination_fingerprint: str,
+    ) -> bool:
+        return self._read(
+            self._inner.notification_was_delivered,
+            notification_id,
+            destination_fingerprint,
+        )
+
+    def list_notification_delivery_attempts_for_tenant(
+        self, tenant_id: str, *, limit: int = 100,
+    ) -> list[NotificationDeliveryAttempt]:
+        return self._read(
+            self._inner.list_notification_delivery_attempts_for_tenant,
+            tenant_id,
+            limit=limit,
+        )
+
+    def get_monitor_policy(self, policy_id: str) -> tuple[MonitorPolicy, str] | None:
+        return self._read(self._inner.get_monitor_policy, policy_id)
+
+    def get_active_monitor_policy(self, scope_key: str) -> MonitorPolicy | None:
+        return self._read(self._inner.get_active_monitor_policy, scope_key)
+
+    def get_latest_monitor_snapshot(
+        self, policy_id: str
+    ) -> tuple[CohortManifest, MonitorComparison] | None:
+        return self._read(self._inner.get_latest_monitor_snapshot, policy_id)
+
+    def get_latest_monitor_alert(self, policy_id: str):
+        return self._read(self._inner.get_latest_monitor_alert, policy_id)
 
     def trace_exists(self, trace_id: str) -> bool:
         """Check durable inner state without flushing unrelated queued writes."""
@@ -404,6 +498,11 @@ class BufferedStorage:
             since_iso=since_iso,
             limit=limit,
         )
+
+    def list_judgments_for_trace(
+        self, trace_id: str, *, limit: int = 100,
+    ) -> list[Judgment]:
+        return self._read(self._inner.list_judgments_for_trace, trace_id, limit=limit)
 
     def list_drift_signals(self, *, limit: int = 100) -> list[DriftSignal]:
         return self._read(self._inner.list_drift_signals, limit=limit)
@@ -478,6 +577,26 @@ class BufferedStorage:
 
     def save_cluster_registry(self, version: str, payload_json: str) -> None:
         self._maintenance(self._inner.save_cluster_registry, version, payload_json)
+
+    def save_monitor_policy(self, policy: MonitorPolicy) -> None:
+        self._maintenance(self._inner.save_monitor_policy, policy)
+
+    def activate_monitor_policy(
+        self, scope_key: str, policy_id: str, *, expected_active_policy_id: str | None
+    ) -> MonitorPolicy:
+        return self._maintenance(
+            self._inner.activate_monitor_policy,
+            scope_key,
+            policy_id,
+            expected_active_policy_id=expected_active_policy_id,
+        )
+
+    def save_monitor_snapshot(
+        self, policy_id: str, manifest: CohortManifest, comparison: MonitorComparison
+    ) -> None:
+        self._maintenance(
+            self._inner.save_monitor_snapshot, policy_id, manifest, comparison,
+        )
 
     # ======================================================================
     # Lifecycle

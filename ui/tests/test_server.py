@@ -1171,6 +1171,7 @@ def test_bundle_requires_one_evaluator_identity_instead_of_mixing_rows(tmp_path)
     assert len(bundle["evaluation"]["availableIdentities"]) == 2
     assert bundle["dimensionOverall"] == []
     assert "judgment" not in bundle["samples"][0]
+    assert bundle["samples"][0]["judgeStatus"] == "not_judged"
 
     old_identity = next(
         identity for identity in bundle["evaluation"]["availableIdentities"]
@@ -1303,8 +1304,16 @@ def test_bundle_excludes_unclear_from_every_pass_rate_denominator(tmp_path):
         "missing": 0, "error": 0, "evaluable": 2,
     }
     sample_by_id = {sample["trace_id"]: sample for sample in bundle["samples"]}
+    assert sample_by_id["trace-0"]["providerStatus"] == "provider_succeeded"
+    assert sample_by_id["trace-0"]["judgeStatus"] == "unclear"
     assert sample_by_id["trace-1"]["judgment"]["summary"]["status"] == "fail"
+    assert sample_by_id["trace-1"]["judgeStatus"] == "fail"
     assert sample_by_id["trace-2"]["judgment"]["summary"]["status"] == "unclear"
+    assert sample_by_id["trace-2"]["judgeStatus"] == "unclear"
+    fail_only = build_bundle(path, trace_judge_status="fail")
+    assert [sample["trace_id"] for sample in fail_only["samples"]] == ["trace-1"]
+    exact = build_bundle(path, trace_id="trace-0")
+    assert [sample["trace_id"] for sample in exact["samples"]] == ["trace-0"]
 
 
 def test_bundle_uses_latest_duplicate_independent_of_insertion_order(tmp_path):
@@ -2111,7 +2120,7 @@ def test_basic_auth_gates_dashboard_shells_and_data_but_not_health(monkeypatch):
 
     async def requests():
         transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
             token = base64.b64encode(b"reviewer:secret").decode()
             return (
                 await client.get("/"),
@@ -2154,7 +2163,7 @@ def test_basic_auth_compares_both_credentials_without_username_short_circuit(mon
 
     async def request():
         transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
             token = base64.b64encode(b"wrong:also-wrong").decode()
             return await client.get(
                 "/dashboard", headers={"Authorization": f"Basic {token}"}

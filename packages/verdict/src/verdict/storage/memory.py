@@ -13,7 +13,36 @@ import threading
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 
-from verdict.redaction import sanitize_judgment, sanitize_span, sanitize_trace
+from verdict.analysis_records import (
+    DeliveryOutcome,
+    DeterministicAnalysisRun,
+    NotificationDeliveryAttempt,
+    analysis_run_from_json,
+    analysis_run_to_json,
+    notification_attempt_from_json,
+    notification_attempt_to_json,
+    validate_delivery_query,
+)
+from verdict.evidence import (
+    AgentRunBundle,
+    agent_run_bundle_from_json,
+    agent_run_bundle_to_json,
+)
+from verdict.monitoring import (
+    CohortManifest,
+    MonitorComparison,
+    MonitorPolicy,
+    monitor_policy_from_json,
+    monitor_policy_to_json,
+    monitor_snapshot_from_json,
+    monitor_snapshot_to_json,
+)
+from verdict.redaction import (
+    sanitize_agent_run_bundle,
+    sanitize_judgment,
+    sanitize_span,
+    sanitize_trace,
+)
 from verdict.schema import (
     ActiveClusterRegistry,
     ClusterIdentity,
@@ -33,7 +62,11 @@ from verdict.schema import (
     datetime_to_utc_us,
     populate_trace_analysis_fields,
 )
-from verdict.storage.base import _validate_drift_run_snapshot
+from verdict.storage.base import (
+    _validate_agent_bundle_query,
+    _validate_agent_bundle_run_id,
+    _validate_drift_run_snapshot,
+)
 
 
 class InMemoryStorage:
@@ -41,6 +74,16 @@ class InMemoryStorage:
 
     def __init__(self) -> None:
         self._traces: dict[str, Trace] = {}
+        self._agent_run_bundles: dict[tuple[str, str], str] = {}
+        self._agent_evidence_lock = threading.RLock()
+        self._analysis_runs: dict[str, str] = {}
+        self._analysis_inputs: dict[tuple[str, str, str, str, str], str] = {}
+        self._notification_attempts: dict[str, str] = {}
+        self._analysis_lock = threading.RLock()
+        self._monitor_policies: dict[str, tuple[str, str]] = {}
+        self._active_monitor_policies: dict[str, str] = {}
+        self._monitor_snapshots: dict[tuple[str, str], str] = {}
+        self._monitor_lock = threading.RLock()
         self._judgments: dict[str, Judgment] = {}
         self._evaluator_health: dict[str, EvaluatorHealthRecord] = {}
         self._drift_runs: dict[str, DriftRun] = {}
@@ -92,6 +135,203 @@ class InMemoryStorage:
                 trace.parent_span_id = existing.parent_span_id
         with self._cluster_v2_lock:
             self._traces[trace.trace_id] = trace
+
+    def replace_agent_run_bundle(self, bundle: AgentRunBundle) -> None:
+        sanitized = sanitize_agent_run_bundle(bundle)
+        payload = agent_run_bundle_to_json(sanitized)
+        with self._agent_evidence_lock:
+            self._agent_run_bundles[(sanitized.run.tenant_id, sanitized.run.run_id)] = payload
+
+    def get_agent_run_bundle(
+        self,
+        tenant_id: str,
+        run_id: str,
+    ) -> AgentRunBundle | None:
+        _validate_agent_bundle_query(tenant_id, 1)
+        _validate_agent_bundle_run_id(run_id)
+        with self._agent_evidence_lock:
+            payload = self._agent_run_bundles.get((tenant_id, run_id))
+        return agent_run_bundle_from_json(payload) if payload is not None else None
+
+    def list_agent_run_bundles(
+        self,
+        tenant_id: str,
+        *,
+        limit: int = 100,
+    ) -> list[AgentRunBundle]:
+        _validate_agent_bundle_query(tenant_id, limit)
+        with self._agent_evidence_lock:
+            bundles = [
+                agent_run_bundle_from_json(payload)
+                for (scope, _run_id), payload in self._agent_run_bundles.items()
+                if scope == tenant_id
+            ]
+        bundles.sort(key=lambda bundle: (bundle.run.started_at, bundle.run.run_id), reverse=True)
+        return bundles[:limit]
+
+    def save_deterministic_analysis_run(self, run: DeterministicAnalysisRun) -> None:
+        payload = analysis_run_to_json(run)
+        input_key = (
+            run.tenant_id,
+            run.scope_key,
+            run.analyzer_version,
+            run.input_fingerprint,
+            run.status.value,
+        )
+        with self._analysis_lock:
+            existing = self._analysis_runs.get(run.analysis_id)
+            if existing is not None and existing != payload:
+                raise ValueError("analysis identity has different content")
+            prior_id = self._analysis_inputs.get(input_key)
+            if prior_id is not None:
+                prior = analysis_run_from_json(self._analysis_runs[prior_id])
+                if prior.result != run.result or prior.cutoff != run.cutoff:
+                    raise ValueError("analysis input produced different content")
+                return
+            self._analysis_runs[run.analysis_id] = payload
+            self._analysis_inputs[input_key] = run.analysis_id
+
+    def get_latest_deterministic_analysis_run(
+        self, tenant_id: str, scope_key: str,
+    ) -> DeterministicAnalysisRun | None:
+        with self._analysis_lock:
+            matches = []
+            for payload in self._analysis_runs.values():
+                parsed = analysis_run_from_json(payload)
+                if parsed.tenant_id == tenant_id and parsed.scope_key == scope_key:
+                    matches.append(parsed)
+        return max(matches, key=lambda value: (value.completed_at, value.analysis_id)) if matches else None
+
+    def save_notification_delivery_attempt(
+        self, attempt: NotificationDeliveryAttempt,
+    ) -> None:
+        payload = notification_attempt_to_json(attempt)
+        with self._analysis_lock:
+            existing = self._notification_attempts.get(attempt.attempt_id)
+            if existing is not None and existing != payload:
+                raise ValueError("notification attempt identity has different content")
+            self._notification_attempts.setdefault(attempt.attempt_id, payload)
+
+    def list_notification_delivery_attempts(
+        self,
+        notification_id: str,
+        destination_fingerprint: str,
+        *,
+        limit: int = 100,
+    ) -> list[NotificationDeliveryAttempt]:
+        validate_delivery_query(notification_id, destination_fingerprint, limit)
+        with self._analysis_lock:
+            attempts = [
+                notification_attempt_from_json(payload)
+                for payload in self._notification_attempts.values()
+            ]
+        attempts = [
+            value for value in attempts
+            if value.notification_id == notification_id
+            and value.destination_fingerprint == destination_fingerprint
+        ]
+        attempts.sort(key=lambda value: (value.attempted_at, value.attempt_id), reverse=True)
+        return attempts[:limit]
+
+    def notification_was_delivered(
+        self, notification_id: str, destination_fingerprint: str,
+    ) -> bool:
+        return any(
+            attempt.outcome is DeliveryOutcome.DELIVERED
+            for attempt in self.list_notification_delivery_attempts(
+                notification_id, destination_fingerprint, limit=1000,
+            )
+        )
+
+    def list_notification_delivery_attempts_for_tenant(
+        self, tenant_id: str, *, limit: int = 100,
+    ) -> list[NotificationDeliveryAttempt]:
+        _validate_agent_bundle_query(tenant_id, limit)
+        with self._analysis_lock:
+            attempts = [
+                notification_attempt_from_json(payload)
+                for payload in self._notification_attempts.values()
+            ]
+        attempts = [attempt for attempt in attempts if attempt.tenant_id == tenant_id]
+        attempts.sort(key=lambda value: (value.attempted_at, value.attempt_id), reverse=True)
+        return attempts[:limit]
+
+    def save_monitor_policy(self, policy: MonitorPolicy) -> None:
+        payload = monitor_policy_to_json(policy)
+        with self._monitor_lock:
+            existing = self._monitor_policies.get(policy.policy_id)
+            if existing is not None and existing[0] != payload:
+                raise ValueError("monitor policy identity has a different definition")
+            self._monitor_policies.setdefault(policy.policy_id, (payload, "candidate"))
+
+    def get_monitor_policy(self, policy_id: str) -> tuple[MonitorPolicy, str] | None:
+        with self._monitor_lock:
+            stored = self._monitor_policies.get(policy_id)
+        return (monitor_policy_from_json(stored[0]), stored[1]) if stored else None
+
+    def get_active_monitor_policy(self, scope_key: str) -> MonitorPolicy | None:
+        with self._monitor_lock:
+            policy_id = self._active_monitor_policies.get(scope_key)
+            stored = self._monitor_policies.get(policy_id) if policy_id else None
+        return monitor_policy_from_json(stored[0]) if stored else None
+
+    def activate_monitor_policy(
+        self, scope_key: str, policy_id: str, *, expected_active_policy_id: str | None
+    ) -> MonitorPolicy:
+        with self._monitor_lock:
+            current = self._active_monitor_policies.get(scope_key)
+            if current != expected_active_policy_id:
+                raise ValueError("active policy changed")
+            stored = self._monitor_policies.get(policy_id)
+            if stored is None or monitor_policy_from_json(stored[0]).scope_key != scope_key:
+                raise ValueError("unknown monitor policy")
+            if current:
+                payload, _state = self._monitor_policies[current]
+                self._monitor_policies[current] = (payload, "retired")
+            self._monitor_policies[policy_id] = (stored[0], "active")
+            self._active_monitor_policies[scope_key] = policy_id
+            return monitor_policy_from_json(stored[0])
+
+    def save_monitor_snapshot(
+        self, policy_id: str, manifest: CohortManifest, comparison: MonitorComparison
+    ) -> None:
+        payload = monitor_snapshot_to_json(manifest, comparison)
+        with self._monitor_lock:
+            stored_policy = self._monitor_policies.get(policy_id)
+            if stored_policy is None:
+                raise ValueError("unknown policy")
+            if monitor_policy_from_json(stored_policy[0]).fingerprint != manifest.policy_fingerprint:
+                raise ValueError("monitor snapshot does not match policy")
+            key = (policy_id, manifest.snapshot_id)
+            existing = self._monitor_snapshots.get(key)
+            if existing is not None and existing != payload:
+                raise ValueError("monitor snapshot identity has different content")
+            self._monitor_snapshots.setdefault(key, payload)
+
+    def get_latest_monitor_snapshot(
+        self, policy_id: str
+    ) -> tuple[CohortManifest, MonitorComparison] | None:
+        with self._monitor_lock:
+            rows = [
+                payload for (stored_policy, _snapshot), payload in self._monitor_snapshots.items()
+                if stored_policy == policy_id
+            ]
+        return monitor_snapshot_from_json(rows[-1]) if rows else None
+
+    def get_latest_monitor_alert(
+        self, policy_id: str
+    ) -> tuple[CohortManifest, MonitorComparison] | None:
+        with self._monitor_lock:
+            rows = [
+                payload
+                for (stored_policy, _snapshot), payload in self._monitor_snapshots.items()
+                if stored_policy == policy_id
+            ]
+        for payload in reversed(rows):
+            snapshot = monitor_snapshot_from_json(payload)
+            if snapshot[1].status.value == "alert":
+                return snapshot
+        return None
 
     def get_trace(self, trace_id: str) -> Trace | None:
         return self._traces.get(trace_id)
@@ -205,6 +445,17 @@ class InMemoryStorage:
             if len(out) >= limit:
                 break
         return out
+
+    def list_judgments_for_trace(
+        self, trace_id: str, *, limit: int = 100,
+    ) -> list[Judgment]:
+        if not isinstance(trace_id, str) or not trace_id or not 1 <= limit <= 10_000:
+            raise ValueError("invalid trace judgment query")
+        return sorted(
+            (item for item in self._judgments.values() if item.trace_id == trace_id),
+            key=lambda item: (item.created_at, item.judgment_id),
+            reverse=True,
+        )[:limit]
 
     def insert_evaluator_health(self, record: EvaluatorHealthRecord) -> None:
         self._evaluator_health[record.health_id] = record
@@ -883,6 +1134,9 @@ class InMemoryStorage:
         self._evaluator_health.clear()
         self._signals.clear()
         self._drift_runs.clear()
+        self._analysis_runs.clear()
+        self._analysis_inputs.clear()
+        self._notification_attempts.clear()
         self._cluster_registries.clear()
         self._cluster_identities.clear()
         self._cluster_versions.clear()
