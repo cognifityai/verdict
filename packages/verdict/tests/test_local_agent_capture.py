@@ -106,7 +106,7 @@ def _claude_records() -> list[dict[str, object]]:
             "sessionId": "claude-session-1",
             "message": {
                 "id": "msg-1",
-                "model": "claude-sonnet-4",
+                "model": "claude-sonnet-4-5",
                 "stop_reason": "tool_use",
                 "usage": {"input_tokens": 12, "output_tokens": 3},
                 "content": [
@@ -143,7 +143,7 @@ def _claude_records() -> list[dict[str, object]]:
             "sessionId": "claude-session-1",
             "message": {
                 "id": "msg-2",
-                "model": "claude-sonnet-4",
+                "model": "claude-sonnet-4-5",
                 "stop_reason": "end_turn",
                 "usage": {"input_tokens": 18, "output_tokens": 5},
                 "content": [{"type": "text", "text": "The build passes."}],
@@ -238,6 +238,7 @@ def test_claude_capture_preserves_typed_evidence_without_thinking(tmp_path: Path
     assert all(trace.tags["verdict.source"] == "claude-code" for trace in traces)
     assert all(trace.tags["verdict.workload"] == "agent" for trace in traces)
     assert all(trace.tags["verdict.agent_run_id"] == bundle.run.run_id for trace in traces)
+    assert all(trace.cost_usd is None for trace in traces)
     assert all(trace.prompt_redacted == "diagnose build" for trace in traces)
     assert {trace.response_redacted for trace in traces} == {None, "The build passes."}
     assert all(trace.raw_messages[0] == {"role": "user", "content": "diagnose build"} for trace in traces)

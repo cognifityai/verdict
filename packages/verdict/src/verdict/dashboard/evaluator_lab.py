@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 import os
 import re
+import threading
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -20,6 +23,8 @@ _PROVIDER_KEYS = {
     "openai": "OPENAI_API_KEY",
     "google": "GOOGLE_API_KEY",
 }
+_MAX_EVALUATION_TRACES = 10_000
+_EVALUATION_LOCK = threading.Lock()
 
 
 def evaluator_environment() -> dict[str, Any]:
@@ -53,10 +58,18 @@ def _validated_config(config: dict[str, Any]):
         raise ValueError("unsupported judge provider")
     if not isinstance(model, str) or not model or len(model.encode("utf-8")) > 256:
         raise ValueError("invalid judge model")
-    max_calls = config.get("maxCalls", 10)
+    max_calls_value = config.get("maxCalls", "all")
+    max_calls = None if max_calls_value == "all" else max_calls_value
     max_output = config.get("maxOutputTokens", 512)
     if (
-        isinstance(max_calls, bool) or not isinstance(max_calls, int) or not 1 <= max_calls <= 500
+        (
+            max_calls is not None
+            and (
+                isinstance(max_calls, bool)
+                or not isinstance(max_calls, int)
+                or not 1 <= max_calls <= _MAX_EVALUATION_TRACES
+            )
+        )
         or isinstance(max_output, bool) or not isinstance(max_output, int)
         or not 64 <= max_output <= 4096
     ):
@@ -109,8 +122,8 @@ def _eligibility(trace: Trace) -> str | None:
     return None
 
 
-def _selected(storage: Storage, tenant_id: str, max_calls: int):
-    traces = storage.list_traces(tenant_id=tenant_id, limit=10_000)
+def _selected(storage: Storage, tenant_id: str):
+    traces = storage.list_traces(tenant_id=tenant_id, limit=_MAX_EVALUATION_TRACES)
     reasons: Counter[str] = Counter()
     eligible = []
     for trace in traces:
@@ -123,12 +136,119 @@ def _selected(storage: Storage, tenant_id: str, max_calls: int):
     return traces, eligible, reasons
 
 
+class _IdentityOnlyProvider:
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.supports_temperature = name != "anthropic"
+
+
+def _judge(provider, model, rubric, max_output):
+    from verdict_eval.judge import Judge
+
+    return Judge(
+        provider=provider,
+        model=model,
+        rubric=rubric,
+        skip_context_dependent_when_missing=True,
+        max_tokens=max_output,
+    )
+
+
+def _pending(
+    storage, eligible, identity, max_calls, approved_trace_ids=None
+):
+    selected = []
+    already_judged = 0
+    for trace in eligible:
+        if storage.has_completed_judgment(
+            trace.trace_id, identity["evaluator_fingerprint"]
+        ):
+            already_judged += 1
+            continue
+        if approved_trace_ids is not None and trace.trace_id not in approved_trace_ids:
+            continue
+        if max_calls is None or len(selected) < max_calls:
+            selected.append(trace)
+    return selected, already_judged
+
+
+def _planned_trace(trace: Trace) -> dict[str, str]:
+    evidence = json.dumps(
+        [trace.trace_id, trace.prompt_redacted, trace.response_redacted],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return {
+        "traceId": trace.trace_id,
+        "evidenceFingerprint": hashlib.sha256(evidence.encode("utf-8")).hexdigest(),
+    }
+
+
+def _plan_fingerprint(evaluator_fingerprint, max_calls, planned_traces):
+    encoded = json.dumps(
+        [
+            evaluator_fingerprint,
+            "all" if max_calls is None else max_calls,
+            planned_traces,
+        ],
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _approved_trace_ids(config, evaluator_fingerprint, max_calls, eligible):
+    fingerprint = config.get("planFingerprint")
+    planned_traces = config.get("plannedTraces")
+    if (
+        not isinstance(fingerprint, str)
+        or len(fingerprint) != 64
+        or any(character not in "0123456789abcdef" for character in fingerprint)
+        or not isinstance(planned_traces, list)
+        or len(planned_traces) > _MAX_EVALUATION_TRACES
+        or (max_calls is not None and len(planned_traces) > max_calls)
+    ):
+        raise ValueError("evaluator execution requires an approved preview")
+    trace_ids = []
+    for item in planned_traces:
+        if (
+            not isinstance(item, dict)
+            or set(item) != {"traceId", "evidenceFingerprint"}
+            or not isinstance(item["traceId"], str)
+            or not item["traceId"]
+            or len(item["traceId"].encode("utf-8")) > 256
+            or not isinstance(item["evidenceFingerprint"], str)
+            or len(item["evidenceFingerprint"]) != 64
+        ):
+            raise ValueError("invalid evaluator preview plan")
+        trace_ids.append(item["traceId"])
+    if len(set(trace_ids)) != len(trace_ids):
+        raise ValueError("invalid evaluator preview plan")
+    expected = _plan_fingerprint(evaluator_fingerprint, max_calls, planned_traces)
+    if fingerprint != expected:
+        raise ValueError("evaluator plan does not match the approved preview")
+    eligible_by_id = {trace.trace_id: trace for trace in eligible}
+    if any(
+        item != _planned_trace(eligible_by_id[item["traceId"]])
+        for item in planned_traces
+        if item["traceId"] in eligible_by_id
+    ) or any(item["traceId"] not in eligible_by_id for item in planned_traces):
+        raise ValueError("evaluator preview plan is no longer current")
+    return set(trace_ids)
+
+
 def preview_evaluation(
     storage: Storage, *, tenant_id: str, config: dict[str, Any]
 ) -> dict[str, Any]:
     provider, model, max_calls, max_output, rubric = _validated_config(config)
-    traces, eligible, reasons = _selected(storage, tenant_id, max_calls)
-    selected = eligible[:max_calls]
+    traces, eligible, reasons = _selected(storage, tenant_id)
+    identity = _judge(
+        _IdentityOnlyProvider(provider), model, rubric, max_output
+    ).evaluator_identity(context=None)
+    selected, already_judged = _pending(
+        storage, eligible, identity, max_calls
+    )
+    planned_traces = [_planned_trace(trace) for trace in selected]
     input_estimate = 0
     for trace in selected:
         rubric_chars = sum(len(d.name) + len(d.description) for d in rubric.dimensions)
@@ -147,7 +267,12 @@ def preview_evaluation(
         "notEvaluable": sum(reasons.values()),
         "notEvaluableReasons": dict(sorted(reasons.items())),
         "plannedCalls": len(selected),
-        "maximumCalls": max_calls,
+        "plannedTraces": planned_traces,
+        "planFingerprint": _plan_fingerprint(
+            identity["evaluator_fingerprint"], max_calls, planned_traces
+        ),
+        "alreadyJudged": already_judged,
+        "maximumCalls": "all" if max_calls is None else max_calls,
         "estimatedInputTokens": input_estimate,
         "maximumOutputTokens": output_maximum,
         "estimatedMaximumCostUsd": compute_cost_usd(model, input_estimate, output_maximum),
@@ -177,33 +302,56 @@ def execute_evaluation(
     confirm_external_egress: bool,
     provider=None,
 ) -> dict[str, Any]:
+    with _EVALUATION_LOCK:
+        return _execute_evaluation(
+            storage,
+            tenant_id=tenant_id,
+            config=config,
+            confirm_external_egress=confirm_external_egress,
+            provider=provider,
+        )
+
+
+def _execute_evaluation(
+    storage: Storage,
+    *,
+    tenant_id: str,
+    config: dict[str, Any],
+    confirm_external_egress: bool,
+    provider=None,
+) -> dict[str, Any]:
     if confirm_external_egress is not True:
         raise ValueError("external judge egress was not confirmed")
     provider_name, model, max_calls, _max_output, rubric = _validated_config(config)
-    traces, eligible, reasons = _selected(storage, tenant_id, max_calls)
-    from verdict_eval.judge import Judge
-
-    judge = Judge(
-        provider=provider or _provider(provider_name),
-        model=model,
-        rubric=rubric,
-        skip_context_dependent_when_missing=True,
-        max_tokens=_max_output,
+    traces, eligible, reasons = _selected(storage, tenant_id)
+    preview_identity = _judge(
+        _IdentityOnlyProvider(provider_name), model, rubric, _max_output
+    ).evaluator_identity(context=None)
+    approved_trace_ids = _approved_trace_ids(
+        config, preview_identity["evaluator_fingerprint"], max_calls, eligible
     )
+    judge = _judge(provider or _provider(provider_name), model, rubric, _max_output)
     identity = judge.evaluator_identity(context=None)
-    selected = []
-    already_judged = 0
-    for trace in eligible:
-        if any(
-            judgment.status is JudgmentStatus.COMPLETED
-            and judgment.evaluator_fingerprint == identity["evaluator_fingerprint"]
-            for judgment in storage.list_judgments_for_trace(trace.trace_id, limit=100)
-        ):
-            already_judged += 1
-            continue
-        selected.append(trace)
-        if len(selected) >= max_calls:
-            break
+    if identity["evaluator_fingerprint"] != preview_identity["evaluator_fingerprint"]:
+        raise ValueError("judge provider behavior changed after preview")
+    from verdict.dashboard.app import evaluator_identity
+
+    dashboard_identity = evaluator_identity({
+        "evaluator_provider": identity["evaluator_provider"],
+        "evaluator_config": identity["evaluator_config"],
+        "evaluator_fingerprint": identity["evaluator_fingerprint"],
+        "expected_dimensions": identity["expected_dimensions"],
+        "rubric_name": identity["rubric_name"],
+        "rubric_version": identity["rubric_version"],
+        "judge_models": identity["judge_models"],
+    })
+    selected, already_judged = _pending(
+        storage,
+        eligible,
+        identity,
+        max_calls,
+        approved_trace_ids,
+    )
     completed = 0
     errors = 0
     for trace in selected:
@@ -224,6 +372,7 @@ def execute_evaluation(
             errors += 1
     return {
         "availableTraces": len(traces),
+        "eligible": len(eligible),
         "plannedCalls": len(selected),
         "alreadyJudged": already_judged,
         "completed": completed,
@@ -231,6 +380,7 @@ def execute_evaluation(
         "notEvaluable": sum(reasons.values()),
         "notEvaluableReasons": dict(sorted(reasons.items())),
         "evaluatorFingerprint": identity["evaluator_fingerprint"],
+        "evaluatorId": dashboard_identity["id"],
         "rubric": {"name": rubric.name, "version": rubric.version,
                    "dimensions": identity["expected_dimensions"]},
     }

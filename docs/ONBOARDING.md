@@ -83,6 +83,10 @@ what cannot be evaluated. Local sources that do not expose a genuine provider
 call do not create fake `Trace` rows, so the LLM-call Monitor may truthfully be
 empty while agent evidence is useful.
 
+Local-history token counts are usage evidence, not billing evidence. Verdict
+therefore leaves cost unavailable for Claude Code and Codex history instead of
+applying API list prices to desktop or subscription activity.
+
 Opted-in content remains bounded and recursively redacted. If a content-heavy
 session cannot fit the atomic evidence-row limit, Verdict preserves that
 session as metadata-only rather than failing the entire capture; the UI then
@@ -338,8 +342,11 @@ bucket against the frozen reference.
 
 Evaluator Lab shows NOT_EVALUABLE reasons before any model call, reads provider
 keys only from environment variables, and requires an explicit egress approval.
-Treat its PASS/FAIL output as exploratory until it clears a customer-labelled
-calibration set. Verdict does not run a hidden fake judge.
+The default selection is every eligible, not-yet-evaluated trace in the bounded
+10,000-trace scan; an optional numeric cap remains available. Preview shows the
+exact planned calls and maximum static-price estimate before approval. Treat
+PASS/FAIL output as exploratory until it clears a customer-labelled calibration
+set. Verdict does not run a hidden fake judge.
 
 The Control page stores versioned schedule, alert, settings, review, and
 change-request decision documents. Recording approval on a generic decision
@@ -432,8 +439,8 @@ derived from IDs in that confirmed snapshot.
 
 Trace Explorer pages newest-first through every stored non-judge application
 trace in deterministic 30-row pages, breaking equal timestamps by trace ID.
-Evaluator-aware filters include judged, not judged, judge error, pass, fail,
-and unclear; the selected evaluator and exact Trace link survive refresh and
+Evaluator-aware filters include evaluated, not evaluated, judge error, pass,
+fail, and unclear; the selected evaluator and exact Trace link survive refresh and
 pagination. Provider and `Content captured` or `Metadata only` filters apply to
 the current page. Judge telemetry remains in aggregate cost and store totals
 but does not displace application traces from this view.
@@ -602,9 +609,10 @@ the other captured workloads.
   session/run/turn/event projections. It is not an authoritative agent-runtime
   graph: task success, artifact state, deployments, subagents, and genuine LLM
   `Trace` links remain unavailable unless an approved source exposes them.
-- Judge calls run sequentially. Judge usage/budget controls, cache-token
-  accounting, human-readable cluster naming, and automatic cluster fusion are
-  not implemented; see `docs/v1-roadmap.md` for the scoped follow-ups.
+- Judge calls run sequentially. Previewed all-eligible or numeric call caps are
+  supported; cache-token accounting, human-readable cluster naming, and
+  automatic cluster fusion are not implemented. See `docs/v1-roadmap.md` for
+  the scoped follow-ups.
 - Reproduce the validation checks yourself with the scripts here; don't take
   calibration on faith.
 

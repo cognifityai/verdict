@@ -1196,6 +1196,15 @@ class PostgresStorage:
         )
         return [self._row_to_judgment(row) for row in rows]
 
+    def has_completed_judgment(
+        self, trace_id: str, evaluator_fingerprint: str,
+    ) -> bool:
+        return self._fetchone(
+            "SELECT 1 FROM judgments WHERE trace_id=%s "
+            "AND evaluator_fingerprint=%s AND status=%s LIMIT 1",
+            (trace_id, evaluator_fingerprint, JudgmentStatus.COMPLETED.value),
+        ) is not None
+
     # -- Evaluator health ------------------------------------------------
 
     def insert_evaluator_health(self, record: EvaluatorHealthRecord) -> None:

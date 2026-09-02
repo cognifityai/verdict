@@ -7,7 +7,7 @@ import {
   Activity, AlertTriangle, ArrowRight, ArrowLeft, BarChart3, Boxes, CheckCircle2,
   Clock, Code2, Database, GitBranch, Layers, Scale, Search, Shield, Signal,
   TrendingDown, TrendingUp, Zap, Github, Terminal, Gauge, FlaskConical, Cpu, DollarSign,
-  Filter, X, Sparkles, ChevronRight, Eye, Network, RefreshCw,
+  Filter, X, Sparkles, ChevronRight, Eye, Network, RefreshCw, Info,
 } from "lucide-react";
 import { dimensionAxisLabel, dimensionLabel } from "./dimension-labels.js";
 import { providerPresentation } from "./provider-presentation.js";
@@ -627,6 +627,11 @@ const TRUNCATION_LABELS = {
   hourlyPoints: "quality points",
   traceSamples: "trace samples",
 };
+const TAB_HELP = {
+  reliability: "Reliability shows deterministic execution outcomes, tool errors, and command failures found in captured evidence. It does not require a judge.",
+  performance: "Performance shows trace-backed token, latency, and cost coverage. Missing source measurements stay unavailable rather than being inferred.",
+  behavior: "Behavior shows structural response indicators such as refusal, apology, hedging, and JSON signatures. These are not semantic quality judgments.",
+};
 
 function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluatorChange, onTracePageChange, onTraceFilterChange, traceOffset = 0, reloading, loadError, operationsUrl = null }) {
   const DATA = data;
@@ -755,7 +760,7 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
         <div className="mb-5 flex flex-col sm:flex-row sm:items-end justify-between gap-3">
           <div>
             <div className="text-xs font-mono" style={{ color: C.accent }}>{workloadLabel}</div>
-            <h1 className="font-semibold mt-1" style={{ fontSize: 22, letterSpacing: 0 }}>{nav.find((n) => n.id === tab).label}</h1>
+            <div className="flex items-center gap-2 mt-1"><h1 className="font-semibold" style={{ fontSize: 22, letterSpacing: 0 }}>{nav.find((n) => n.id === tab).label}</h1>{TAB_HELP[tab] && <button aria-label={`About ${nav.find((n) => n.id === tab).label}`} title={TAB_HELP[tab]} className="inline-flex" style={{ color: C.faint }}><Info size={15} /></button>}</div>
           </div>
           {source === "sample" && (
             <div className="max-w-full flex items-start gap-2 text-xs px-3 py-2 border" style={{ borderColor: "#6b5529", background: C.amberBg, color: C.amber, borderRadius: 3 }}>
@@ -850,7 +855,7 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
           })}
           onSelectTrace={(traceId) => commitRoute({ ...route, tab: "traces", traceId })} />}
         {tab === "judge" && <Judge data={DATA} onOpenOperations={operationsUrl ? () => setTab("operations") : null} />}
-        {tab === "evaluators" && <EvaluatorLab configUrl={mountedConfigUrl()} />}
+        {tab === "evaluators" && <EvaluatorLab configUrl={mountedConfigUrl()} onOpenEvaluated={(evaluatorId) => { onEvaluatorChange?.(evaluatorId); commitRoute({ ...route, tab: "traces", evaluatorId, traceJudgeStatus: "judged", traceId: null }); }} />}
         {tab === "control" && <ControlCenter configUrl={mountedConfigUrl()} onNavigate={(target) => target?.tab === "drift" ? commitRoute({ ...route, tab: "drift", driftSection: target.section || "overview" }) : setTab(target?.tab || "control")} />}
         {tab === "compare" && <Compare data={DATA} source={source} />}
         {tab === "operations" && operationsUrl && <Operations url={operationsUrl} costBreakdown={DATA.meta.costBreakdown} />}
@@ -1300,8 +1305,8 @@ function Traces({ data = SEED, source = "sample", traceOffset = 0, reloading = f
               </button>
             ))}
           </div>
-          <select aria-label="Judge status" value={judgeStatus} onChange={(event) => onJudgeStatus?.(event.target.value)} className="border px-3 py-2 text-xs" style={{ borderColor: C.border, background: C.panel }}>
-            <option value="all">All judge states</option><option value="judged">Judged only</option><option value="not_judged">Not judged</option><option value="judge_error">Judge error</option><option value="pass">Pass</option><option value="fail">Fail</option><option value="unclear">Unclear</option>
+          <select aria-label="Evaluation status" value={judgeStatus} onChange={(event) => onJudgeStatus?.(event.target.value)} className="border px-3 py-2 text-xs" style={{ borderColor: C.border, background: C.panel }}>
+            <option value="all">All evaluation states</option><option value="judged">Evaluated only</option><option value="not_judged">Not evaluated</option><option value="judge_error">Judge error</option><option value="pass">Pass</option><option value="fail">Fail</option><option value="unclear">Unclear</option>
           </select>
           <div className="flex items-center gap-1 px-1 py-1 border" style={{ borderColor: C.border, background: C.panel, borderRadius: 3 }}>
             {[
@@ -1318,9 +1323,9 @@ function Traces({ data = SEED, source = "sample", traceOffset = 0, reloading = f
         </div>
 
         <Panel className="overflow-x-auto">
-          <div style={{ minWidth: 840 }}>
-          <div className="grid text-xs px-4 py-2.5 border-b" style={{ borderColor: C.border, color: C.sub, gridTemplateColumns: "150px 1fr 88px 96px 70px 64px" }}>
-            <span>Recorded</span><span>Prompt</span><span>Cluster</span><span>Tokens</span><span>Latency</span><span>Status</span>
+          <div style={{ minWidth: 1020 }}>
+          <div className="grid text-xs px-4 py-2.5 border-b" style={{ borderColor: C.border, color: C.sub, gridTemplateColumns: "150px 1fr 88px 96px 70px 110px 110px" }}>
+            <span>Recorded</span><span>Prompt</span><span>Cluster</span><span>Tokens</span><span>Latency</span><span>Execution</span><span>Evaluation</span>
           </div>
           <div style={{ maxHeight: 520, overflowY: "auto" }}>
             {rows.map((s) => {
@@ -1331,7 +1336,7 @@ function Traces({ data = SEED, source = "sample", traceOffset = 0, reloading = f
               return (
                 <button key={s.trace_id} onClick={() => { setSelectedTraceId(s.trace_id); onSelectTrace?.(s.trace_id); }}
                   className="w-full grid items-center text-left px-4 py-2.5 border-b text-sm"
-                  style={{ borderColor: C.grid, gridTemplateColumns: "150px 1fr 88px 96px 70px 64px", background: on ? C.raised : "transparent" }}>
+                  style={{ borderColor: C.grid, gridTemplateColumns: "150px 1fr 88px 96px 70px 110px 110px", background: on ? C.raised : "transparent" }}>
                   <span className="text-xs" style={{ color: C.faint }}>
                     <span className="block font-mono">{recorded.absolute}</span>
                     {recorded.relative && <span className="block mt-0.5">{recorded.relative}</span>}
@@ -1345,14 +1350,8 @@ function Traces({ data = SEED, source = "sample", traceOffset = 0, reloading = f
                   <span><Pill color={C.sub}>{s.cluster_label || s.cluster_id || "Unassigned"}</Pill></span>
                   <span className="text-xs" style={{ color: C.sub }}>{s.input_tokens ?? "—"}/{s.output_tokens ?? "—"}</span>
                   <span className="text-xs" style={{ color: C.sub }}>{s.latency_ms ? `${(s.latency_ms / 1000).toFixed(1)}s` : "—"}</span>
-                  <span>
-                    {s.providerStatus === "provider_error" ? <Pill color={C.red} bg={C.redBg}>provider error</Pill>
-                      : judgmentStatus === "judge_error" ? <Pill color={C.red} bg={C.redBg}>judge error</Pill>
-                      : judgmentStatus === "fail" ? <Pill color={C.red} bg={C.redBg}>fail</Pill>
-                        : judgmentStatus === "unclear" ? <Pill color={C.amber} bg={C.amberBg}>unclear</Pill>
-                          : judgmentStatus === "pass" ? <Pill color={C.green} bg={C.greenBg}>pass</Pill>
-                          : <Pill color={C.faint}>not judged</Pill>}
-                  </span>
+                  <span>{s.providerStatus === "provider_error" ? <Pill color={C.red} bg={C.redBg}>provider error</Pill> : <Pill color={C.green} bg={C.greenBg}>provider succeeded</Pill>}</span>
+                  <span>{judgmentStatus === "judge_error" ? <Pill color={C.red} bg={C.redBg}>judge error</Pill> : judgmentStatus === "fail" ? <Pill color={C.red} bg={C.redBg}>fail</Pill> : judgmentStatus === "unclear" ? <Pill color={C.amber} bg={C.amberBg}>unclear</Pill> : judgmentStatus === "pass" ? <Pill color={C.green} bg={C.greenBg}>pass</Pill> : <Pill color={C.faint}>not evaluated</Pill>}</span>
                 </button>
               );
             })}
@@ -1406,7 +1405,7 @@ function TraceDetail({ s, onClose }) {
       : "Historical metadata-only trace";
   const judgeStatus = s.judgeStatus || "not_judged";
   const judgeLabel = judgeStatus === "judge_error" ? "Judge error"
-    : judgeStatus === "not_judged" ? "Not judged"
+    : judgeStatus === "not_judged" ? "Not evaluated"
       : `Judge ${judgeStatus}`;
   return (
     <Panel className="overflow-hidden sticky top-20">
@@ -1477,7 +1476,7 @@ function TraceDetail({ s, onClose }) {
         )}
         {!s.judgment && (
           <div className="text-sm p-2.5" style={{ background: C.panel2, color: C.sub, border: `1px solid ${C.border}`, borderRadius: 3 }}>
-            {judgeStatus === "judge_error" ? "Judge error: the selected evaluator attempted this trace but failed; no PASS/FAIL result is inferred." : "No judge results: this trace has not been judged by the selected evaluator."}
+            {judgeStatus === "judge_error" ? "Judge error: the selected evaluator attempted this trace but failed; no PASS/FAIL result is inferred." : "No evaluation result: this trace has not been evaluated by the selected evaluator."}
           </div>
         )}
         <div className="text-xs font-mono pt-1" style={{ color: C.faint }}>trace {s.trace_id.slice(0, 12)}</div>
@@ -1647,6 +1646,7 @@ function Judge({ data = SEED, onOpenOperations = null }) {
 /* --------------------------------------------------------------- COMPARE */
 function Compare({ data = SEED, source = "sample" }) {
   const DATA = data;
+  const codexRuns = (DATA.meta.agentRunSources || []).find((item) => item.sourceKind === "codex")?.runs || 0;
   const provs = DATA.providers.map((provider) => ({
     ...provider,
     presentation: providerPresentation(
@@ -1670,6 +1670,7 @@ function Compare({ data = SEED, source = "sample" }) {
           ? "Bundled synthetic sample: the same prompt set is shown across three providers to demonstrate comparison views. Connect live data before drawing provider conclusions."
           : "Live provider metrics from captured traces. A regression badge appears only when the latest completed drift run attributes a regression to that provider."}
       </div>
+      {source === "live" && codexRuns > 0 && <Panel className="p-4"><div className="text-sm" style={{ color: C.sub }}><span style={{ color: C.text }}>{codexRuns.toLocaleString()} Codex agent runs were captured.</span> Local Codex history does not expose genuine LLM request/response boundaries, so those runs are analyzed in Agent runs and are not included in LLM trace comparisons. Verdict does not invent model calls.</div></Panel>}
 
       <div className="grid md:grid-cols-3 gap-4">
         {provs.map((p) => {

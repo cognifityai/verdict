@@ -71,6 +71,7 @@ async function loadUiModule() {
             "TrendingUp", "Zap", "Github", "Terminal", "Gauge", "FlaskConical",
             "Cpu", "DollarSign", "Filter", "X", "Sparkles", "ChevronRight",
             "Eye", "Network", "RefreshCw",
+            "Info",
           ]), loader: "js" };
         });
       },
@@ -211,6 +212,58 @@ test("drift lifecycle is one top-level workspace", async () => {
   assert.doesNotMatch(labels, /Monitor/);
 });
 
+test("Trace Explorer renders execution and evaluation as separate states", async () => {
+  const ui = await loadUiModule();
+  const sample = {
+    trace_id: "trace-1", provider: "anthropic", request_model: "model-a",
+    providerStatus: "provider_succeeded", judgeStatus: "not_judged",
+    prompt_redacted: "Question", response_redacted: "Answer",
+    input_tokens: 2, output_tokens: 3, started_at: "2026-09-01T00:00:00Z",
+  };
+
+  const tree = render(ui.Traces, createHooks(), {
+    data: bundle(null, [sample]), source: "live",
+  });
+  const text = textOf(tree);
+
+  assert.match(text, /Execution/);
+  assert.match(text, /Evaluation/);
+  assert.match(text, /provider succeeded/i);
+  assert.match(text, /not evaluated/i);
+});
+
+test("Compare explains why captured Codex runs may not be LLM traces", async () => {
+  const ui = await loadUiModule();
+  const data = bundle(null);
+  data.meta.agentRunSources = [{ sourceKind: "codex", runs: 9 }];
+  data.providers = [{
+    key: "anthropic", rawProvider: "anthropic", label: "Anthropic",
+    model: "claude", n: 2, errors: 0, errorRate: 0, avgLatency: 0,
+    inTok: 2, outTok: 3, cost: 0, passRate: null, judged: 0,
+  }];
+
+  const tree = render(ui.Compare, createHooks(), { data, source: "live" });
+
+  assert.match(textOf(tree), /9\s+Codex agent runs were captured/i);
+  assert.match(textOf(tree), /not included in LLM trace comparisons/i);
+});
+
+test("Reliability heading exposes an evidence explanation", async () => {
+  const ui = await loadUiModule();
+  globalThis.window = {
+    location: { hash: "#tab=reliability", pathname: "/dashboard" },
+    history: { pushState() {}, replaceState() {} },
+    addEventListener() {}, removeEventListener() {},
+  };
+  try {
+    const tree = render(ui.Dashboard, createHooks(), { data: bundle(null) });
+    const help = findAll(tree, (node) => node.props?.title?.includes("execution outcomes"));
+    assert.equal(help.length, 1);
+  } finally {
+    delete globalThis.window;
+  }
+});
+
 test("Trace filters preserve the routed evaluator identity", async () => {
   const ui = await loadUiModule();
   let pushed = null;
@@ -233,6 +286,37 @@ test("Trace filters preserve the routed evaluator identity", async () => {
     assert.match(
       pushed, /^#tab=traces&judge=judged&evaluator=evaluator-a$/,
     );
+  } finally {
+    delete globalThis.window;
+  }
+});
+
+test("Evaluator result navigation selects the evaluator that just ran", async () => {
+  const ui = await loadUiModule();
+  let pushed = null;
+  let selected = null;
+  globalThis.window = {
+    location: {
+      hash: "#tab=evaluators&evaluator=old-evaluator", pathname: "/dashboard",
+    },
+    history: { pushState: (_state, _title, url) => { pushed = url; } },
+    addEventListener() {}, removeEventListener() {},
+  };
+  try {
+    const tree = render(ui.Dashboard, createHooks(), {
+      data: bundle("old-evaluator"),
+      source: "live",
+      onEvaluatorChange: (evaluatorId) => { selected = evaluatorId; },
+    });
+    const lab = findAll(
+      tree,
+      (node) => typeof node.type === "function" && node.type.name === "EvaluatorLab",
+    )[0];
+
+    lab.props.onOpenEvaluated("new-evaluator");
+
+    assert.equal(selected, "new-evaluator");
+    assert.equal(pushed, "#tab=traces&judge=judged&evaluator=new-evaluator");
   } finally {
     delete globalThis.window;
   }
@@ -569,7 +653,7 @@ test("metadata-only traces describe historical capture without claiming capture 
   const detail = render(ui.TraceDetail, createHooks(), { s: sample, onClose() {} });
   assert.match(textOf(detail), /Historical metadata-only trace/);
   assert.match(textOf(detail), /Prompt and response content were not captured when this trace was recorded/);
-  assert.match(textOf(detail), /No judge results/);
+  assert.match(textOf(detail), /No evaluation result/);
 });
 
 test("captured empty content remains distinct from capture being off", async () => {
@@ -676,7 +760,7 @@ test("trace detail distinguishes content, provider failure, and judge availabili
 
   assert.match(rendered, /Content partially captured/);
   assert.match(rendered, /Failed trace/);
-  assert.match(rendered, /No judge results/);
+  assert.match(rendered, /No evaluation result/);
   assert.match(rendered, /Aug 23, 22:20 UTC/);
   assert.match(rendered, /Response was not captured for this trace/);
   assert.doesNotMatch(rendered, /response.*historical metadata-only trace/i);

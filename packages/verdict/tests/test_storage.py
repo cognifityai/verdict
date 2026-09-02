@@ -20,6 +20,7 @@ from verdict.schema import (
     EvaluatorHealthRecord,
     EvaluatorHealthStatus,
     Judgment,
+    JudgmentStatus,
     Operation,
     SpanRecord,
     Trace,
@@ -295,6 +296,24 @@ def test_storage_sanitizes_judge_reasoning_and_manual_span_content(storage):
     assert canary not in repr(fetched_span)
     assert canary not in repr(judgment)
     assert canary not in repr(span)
+
+
+def test_completed_judgment_lookup_is_exact_beyond_presentation_page(storage):
+    trace = _trace()
+    storage.insert_trace(trace)
+    storage.insert_judgment(Judgment(
+        trace_id=trace.trace_id,
+        evaluator_fingerprint="target",
+        status=JudgmentStatus.COMPLETED,
+    ))
+    for index in range(101):
+        storage.insert_judgment(Judgment(
+            trace_id=trace.trace_id,
+            evaluator_fingerprint=f"other-{index}",
+        ))
+
+    assert storage.has_completed_judgment(trace.trace_id, "target") is True
+    assert storage.has_completed_judgment(trace.trace_id, "missing") is False
 
 
 def test_sqlite_serialized_judgment_and_span_contain_no_content_canary(tmp_path):

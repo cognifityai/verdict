@@ -43,8 +43,8 @@ present those states without treating missing evidence as success or failure.
 - Overview reports evidence and evaluator coverage without manufacturing a
   combined run verdict.
 - Findings link to their affected Agent Runs, traces, and bounded evidence.
-- Trace Explorer distinguishes provider error, not judged, judge error, pass,
-  fail, and unclear.
+- Trace Explorer presents provider execution separately from evaluation states:
+  not evaluated, judge error, pass, fail, and unclear.
 - Agent Runs show source outcome, evidence coverage, deterministic findings,
   and selected-evaluator coverage separately.
 - One Drift workspace contains Overview, Explore, Monitor, Signals, and
