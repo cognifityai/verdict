@@ -12,6 +12,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+from verdict.dashboard.trace_facts import trace_evidence_reason
 from verdict.pricing import PRICING_LAST_VERIFIED, compute_cost_usd
 from verdict.redaction import redact
 from verdict.schema import Judgment, JudgmentStatus, Trace
@@ -113,13 +114,11 @@ def _validated_config(config: dict[str, Any]):
 
 
 def _eligibility(trace: Trace) -> str | None:
-    if trace.error:
-        return "provider_call_failed"
-    if not (trace.prompt_redacted or "").strip():
-        return "prompt_not_captured"
-    if not (trace.response_redacted or "").strip():
-        return "response_not_captured"
-    return None
+    return trace_evidence_reason(
+        error=trace.error,
+        prompt=trace.prompt_redacted,
+        response=trace.response_redacted,
+    )
 
 
 def _selected(storage: Storage, tenant_id: str):

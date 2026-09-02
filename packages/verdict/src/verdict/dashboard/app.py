@@ -43,6 +43,7 @@ from verdict.dashboard.registry import (
 from verdict.dashboard.registry import (
     build_registry_bundle as _build_registry_bundle,
 )
+from verdict.dashboard.trace_facts import text_is_present, trace_evidence_reason
 from verdict.evidence import agent_run_bundle_from_json
 from verdict.metrics import ScoreCounts, verdict_label
 from verdict.redaction import redact, redact_structure
@@ -874,6 +875,11 @@ def build_agent_insights_bundle(
         trace_tokens = Counter()
         trace_latency_values: list[float] = []
         trace_cost_values: list[float] = []
+        trace_outcomes: Counter[str] = Counter()
+        trace_evidence: Counter[str] = Counter()
+        trace_not_evaluable: Counter[str] = Counter()
+        trace_operations: Counter[str] = Counter()
+        trace_finish_reasons: Counter[str] = Counter()
         if session.table_exists("traces"):
             trace_tenant_predicate = (
                 "(tenant_id=? OR tenant_id IS NULL OR tenant_id='')"
@@ -891,8 +897,9 @@ def build_agent_insights_bundle(
             ).fetchone()
             trace_available = int(trace_count_row["count"] if trace_count_row else 0)
             trace_rows = list(session.execute(
-                "SELECT provider, request_model, input_tokens, output_tokens, latency_ms, "
-                f"cost_usd, error, response_redacted, {trace_tags} AS trace_tags "  # nosec B608 -- schema-selected identifier
+                "SELECT provider, request_model, operation, finish_reason, input_tokens, "
+                "output_tokens, latency_ms, cost_usd, error, prompt_redacted, "
+                f"response_redacted, {trace_tags} AS trace_tags "  # nosec B608 -- schema-selected identifier
                 f"FROM traces WHERE {trace_tenant_predicate} "  # nosec B608 -- fixed predicate
                 "ORDER BY started_at ASC, trace_id ASC LIMIT ?",
                 (tenant, scan_limit),
@@ -912,6 +919,8 @@ def build_agent_insights_bundle(
                 model = trace["request_model"] or "unknown"
                 metrics = trace_metrics[(provider, model)]
                 metrics["traces"] += 1
+                trace_operations[str(trace["operation"] or "unknown")] += 1
+                trace_finish_reasons[str(trace["finish_reason"] or "unknown")] += 1
                 tags = _json_value(trace["trace_tags"], {})
                 run_id = tags.get("verdict.agent_run_id") if isinstance(tags, dict) else None
                 run_metrics = (
@@ -929,8 +938,11 @@ def build_agent_insights_bundle(
                             run_metrics[name] += value
                 if trace["error"]:
                     metrics["errors"] += 1
+                    trace_outcomes["failed"] += 1
                     if run_metrics is not None:
                         run_metrics["errors"] += 1
+                else:
+                    trace_outcomes["succeeded"] += 1
                 latency = trace["latency_ms"]
                 if isinstance(latency, (int, float)) and not isinstance(latency, bool):
                     trace_latency_values.append(float(latency))
@@ -947,8 +959,18 @@ def build_agent_insights_bundle(
                     if run_metrics is not None:
                         run_metrics["cost_known"] += 1
                         run_metrics["cost_microusd"] += round(float(cost) * 1_000_000)
+                prompt = trace["prompt_redacted"]
                 response = trace["response_redacted"]
-                if isinstance(response, str) and response:
+                trace_evidence["prompt_present"] += int(text_is_present(prompt))
+                trace_evidence["response_present"] += int(text_is_present(response))
+                evidence_reason = trace_evidence_reason(
+                    error=trace["error"], prompt=prompt, response=response,
+                )
+                if evidence_reason:
+                    trace_not_evaluable[evidence_reason] += 1
+                else:
+                    trace_evidence["judge_eligible"] += 1
+                if text_is_present(response):
                     behavior["captured_responses"] += 1
                     behavior["response_characters"] += len(response)
                     behavior["refusals"] += int(is_refusal(response))
@@ -1101,15 +1123,25 @@ def build_agent_insights_bundle(
                     "linked": totals["linked_model_calls"],
                     "unlinked": model_calls - totals["linked_model_calls"],
                 },
+                "traceEvidence": {
+                    "promptPresent": trace_evidence["prompt_present"],
+                    "responsePresent": trace_evidence["response_present"],
+                    "judgeEligible": trace_evidence["judge_eligible"],
+                    "notEvaluable": sum(trace_not_evaluable.values()),
+                    "notEvaluableReasons": dict(sorted(trace_not_evaluable.items())),
+                },
+                "traceOperations": dict(sorted(trace_operations.items())),
+                "traceFinishReasons": dict(sorted(trace_finish_reasons.items())),
             },
             "reliability": {
                 "runOutcomes": dict(sorted(run_outcomes.items())),
                 "turnOutcomes": dict(sorted(turn_outcomes.items())),
+                "traceOutcomes": dict(sorted(trace_outcomes.items())),
                 "toolErrors": totals["tool_errors"],
                 "commandFailures": totals["command_failures"],
             },
             "performance": {
-                "modelCalls": model_calls,
+                "modelCalls": trace_scope["analyzed"] or model_calls,
                 "toolCalls": totals["tool_calls"],
                 "inputTokens": input_tokens,
                 "outputTokens": output_tokens,
@@ -1178,8 +1210,16 @@ def _empty_agent_insights() -> dict:
             "counts": {"runs": 0, "turns": 0, "events": 0},
             "eventTypes": {}, "eventStatuses": {}, "promptStates": {}, "responseStates": {},
             "traceLinks": {"modelCalls": 0, "linked": 0, "unlinked": 0},
+            "traceEvidence": {
+                "promptPresent": 0, "responsePresent": 0, "judgeEligible": 0,
+                "notEvaluable": 0, "notEvaluableReasons": {},
+            },
+            "traceOperations": {}, "traceFinishReasons": {},
         },
-        "reliability": {"runOutcomes": {}, "turnOutcomes": {}, "toolErrors": 0, "commandFailures": 0},
+        "reliability": {
+            "runOutcomes": {}, "turnOutcomes": {}, "traceOutcomes": {},
+            "toolErrors": 0, "commandFailures": 0,
+        },
         "performance": {
             "modelCalls": 0, "toolCalls": 0, "inputTokens": 0, "outputTokens": 0,
             "averageModelLatencyMs": None, "latencyKnownCalls": 0,

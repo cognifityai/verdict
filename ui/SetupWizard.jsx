@@ -4,7 +4,7 @@ import { setupFailureMessage } from "./source-state.mjs";
 const panel = "border p-5";
 const style = { borderColor: "#26332e", background: "#111715" };
 
-export function SetupWizard({ configUrl, onComplete, onNavigate, agentSummary = {} }) {
+export function SetupWizard({ configUrl, onComplete, onNavigate, onRefresh, agentSummary = {} }) {
   const [token, setToken] = useState(null);
   const [source, setSource] = useState("local");
   const [busy, setBusy] = useState(false);
@@ -95,7 +95,7 @@ export function SetupWizard({ configUrl, onComplete, onNavigate, agentSummary = 
         <p className="text-sm mt-4" style={{ color: "#94a39d" }}>Verdict retains bounded, recursively redacted request, response, tool, command, and test evidence for local agent analysis. Local setup uses content capture by default so the resulting run is actually evaluable.</p>
         <div className="flex gap-2 mt-4">
           <button disabled={!token || busy} onClick={async () => { const data = await post(`${root}/api/setup/preview`, { claudeRoot, codexRoot }); if (data) setPreviewedLocal(localKey); }} className="border px-4 py-2 text-sm">Preview sources</button>
-          <button disabled={!token || busy || previewedLocal !== localKey} onClick={() => post(`${root}/api/setup/capture`, { claudeRoot, codexRoot, captureContent: true })} className="px-4 py-2 text-sm" style={{ background: "#4ee1aa", color: "#0b0e0d" }}>Approve and capture</button>
+          <button disabled={!token || busy || previewedLocal !== localKey} onClick={async () => { const data = await post(`${root}/api/setup/capture`, { claudeRoot, codexRoot, captureContent: true }); if (data) onComplete("local"); }} className="px-4 py-2 text-sm" style={{ background: "#4ee1aa", color: "#0b0e0d" }}>Approve and capture</button>
         </div>
       </section>}
 
@@ -108,7 +108,7 @@ export function SetupWizard({ configUrl, onComplete, onNavigate, agentSummary = 
         </select>
         <div className="flex gap-2 mt-4">
           <button disabled={!token || !filePath || busy} onClick={async () => { const data = await post(`${root}/api/setup/import/preview`, { path: filePath, format: fileFormat }); if (data) setPreviewedImport(importKey); }} className="border px-4 py-2 text-sm">Preview import</button>
-          <button disabled={!token || !filePath || busy || previewedImport !== importKey} onClick={() => post(`${root}/api/setup/import`, { path: filePath, format: fileFormat })} className="px-4 py-2 text-sm" style={{ background: "#4ee1aa", color: "#0b0e0d" }}>Approve and import</button>
+          <button disabled={!token || !filePath || busy || previewedImport !== importKey} onClick={async () => { const data = await post(`${root}/api/setup/import`, { path: filePath, format: fileFormat }); if (data) onRefresh?.(); }} className="px-4 py-2 text-sm" style={{ background: "#4ee1aa", color: "#0b0e0d" }}>Approve and import</button>
         </div>
       </section>}
 

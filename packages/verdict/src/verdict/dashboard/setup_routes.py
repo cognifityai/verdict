@@ -270,7 +270,9 @@ class SetupRoutes:
                     reasons: Counter[str] = Counter()
                     for candidate in candidates:
                         context = ImportContext(
-                            adapter="file", source_scope=str(candidate.resolve())
+                            adapter="file",
+                            source_scope=str(candidate.resolve()),
+                            tenant_id=LOCAL_SCOPE,
                         )
                         summary = import_into_storage(
                             iter_telemetry_file(

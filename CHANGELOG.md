@@ -30,6 +30,9 @@ the customer POC profile is refined.
   delivery attempts on SQLite, PostgreSQL, memory, and buffered storage.
 - Evaluator-aware Trace status filters, dataset analysis/judge coverage, and
   finding links that preserve affected run and evidence-event identity.
+- Judge-free LLM Trace outcomes, prompt/response coverage, operation and
+  finish-reason summaries, including explicit unavailability when no Agent Run
+  hierarchy was captured.
 
 ### Changed
 
@@ -52,6 +55,9 @@ the customer POC profile is refined.
 - Dashboard setup, monitor, control, evaluator, query, and analysis lifecycles
   are separated into capability modules; the application factory now wires
   those contracts instead of implementing each workflow inline.
+- Local setup imports now enter the dashboard's local analysis workspace, OTLP
+  typed text parts are retained as bounded response evidence, and Evaluator Lab
+  distinguishes all-trace selection from an explicit numeric call limit.
 
 ### Security
 

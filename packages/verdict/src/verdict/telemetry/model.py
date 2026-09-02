@@ -44,7 +44,11 @@ class ImportContext:
             or scope_size > 512
         ):
             raise ValueError("source_scope must be a non-empty UTF-8 value of at most 512 bytes")
-        if self.tenant_id is not None and safe_routing_id(self.tenant_id) is None:
+        if (
+            self.tenant_id is not None
+            and self.tenant_id != "__verdict_local__"
+            and safe_routing_id(self.tenant_id) is None
+        ):
             raise ValueError("tenant_id must be a non-sensitive bounded routing identifier")
 
     @property

@@ -22,7 +22,7 @@ from verdict.evidence import (
     PrivacyClassification,
     SourceSession,
 )
-from verdict.schema import Trace
+from verdict.schema import Operation, Trace
 from verdict.storage import SQLiteStorage
 
 
@@ -148,6 +148,14 @@ def test_agent_insights_reports_dataset_wide_evidence_and_findings(tmp_path):
         output_tokens=11, prompt_redacted="prompt-evidence",
         response_redacted="I'm sorry, maybe.", tenant_id="local", cost_usd=0.001,
         tags={"verdict.agent_run_id": "r-local"},
+        operation=Operation.CHAT, finish_reason="stop",
+    ))
+    storage.insert_trace(Trace(
+        trace_id="trace-failed", started_at=now, ended_at=now, provider="openai",
+        request_model="gpt-test", response_model="gpt-test",
+        prompt_redacted="prompt", response_redacted=None, tenant_id="local",
+        operation=Operation.TEXT_COMPLETION, error="provider unavailable",
+        finish_reason="error",
     ))
     storage.close()
 
@@ -175,7 +183,7 @@ def test_agent_insights_reports_dataset_wide_evidence_and_findings(tmp_path):
     assert report["schema"] == "agent-insights-v1"
     assert report["scope"] == {
         "availableRuns": 1, "analyzedRuns": 1, "complete": True,
-        "traces": {"available": 1, "analyzed": 1, "complete": True},
+        "traces": {"available": 2, "analyzed": 2, "complete": True},
     }
     assert report["dataHealth"]["counts"] == {"runs": 1, "turns": 1, "events": 2}
     assert report["dataHealth"]["eventTypes"] == {"command": 1, "model_call": 1}
@@ -183,6 +191,19 @@ def test_agent_insights_reports_dataset_wide_evidence_and_findings(tmp_path):
         "modelCalls": 1, "linked": 1, "unlinked": 0
     }
     assert report["reliability"]["commandFailures"] == 1
+    assert report["reliability"]["traceOutcomes"] == {"failed": 1, "succeeded": 1}
+    assert report["dataHealth"]["traceEvidence"] == {
+        "promptPresent": 2,
+        "responsePresent": 1,
+        "judgeEligible": 1,
+        "notEvaluable": 1,
+        "notEvaluableReasons": {"provider_call_failed": 1},
+    }
+    assert report["dataHealth"]["traceOperations"] == {
+        "chat": 1, "text_completion": 1,
+    }
+    assert report["dataHealth"]["traceFinishReasons"] == {"error": 1, "stop": 1}
+    assert report["performance"]["modelCalls"] == 2
     assert report["performance"]["inputTokens"] == 7
     assert report["performance"]["outputTokens"] == 11
     assert report["behavior"]["capturedResponses"] == 1

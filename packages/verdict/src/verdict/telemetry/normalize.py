@@ -219,7 +219,7 @@ def _text_content(value: object) -> str | None:
 def _message_from_mapping(value: dict[str, Any], default_role: str) -> dict[str, str] | None:
     role_value = first(value, "role", "type", "speaker", "author")
     role = _ROLE_ALIASES.get(str(role_value or default_role).lower(), default_role)
-    content = _text_content(first(value, "content", "text", "value", "message"))
+    content = _text_content(first(value, "content", "text", "value", "message", "parts"))
     if content is None:
         return None
     return {"role": role, "content": content}

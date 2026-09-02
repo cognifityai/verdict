@@ -342,11 +342,13 @@ bucket against the frozen reference.
 
 Evaluator Lab shows NOT_EVALUABLE reasons before any model call, reads provider
 keys only from environment variables, and requires an explicit egress approval.
-The default selection is every eligible, not-yet-evaluated trace in the bounded
+The default selection is every evidence-complete, not-yet-evaluated trace in the bounded
 10,000-trace scan; an optional numeric cap remains available. Preview shows the
 exact planned calls and maximum static-price estimate before approval. Treat
 PASS/FAIL output as exploratory until it clears a customer-labelled calibration
-set. Verdict does not run a hidden fake judge.
+set. Prompt and response presence does not establish that an imported span is
+the final visible agent answer, so use a rubric appropriate for the source
+operation. Verdict does not run a hidden fake judge.
 
 The Control page stores versioned schedule, alert, settings, review, and
 change-request decision documents. Recording approval on a generic decision
