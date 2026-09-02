@@ -169,6 +169,10 @@ class Storage(Protocol):
         self, trace_id: str, *, limit: int = 100,
     ) -> list[Judgment]: ...
 
+    def has_completed_judgment(
+        self, trace_id: str, evaluator_fingerprint: str,
+    ) -> bool: ...
+
     def list_judgments_for_cluster(
         self,
         cluster_id: str,

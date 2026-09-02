@@ -1261,6 +1261,17 @@ class SQLiteStorage:
             ).fetchall()
         return [self._row_to_judgment(row) for row in rows]
 
+    def has_completed_judgment(
+        self, trace_id: str, evaluator_fingerprint: str,
+    ) -> bool:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT 1 FROM judgments WHERE trace_id=? "
+                "AND evaluator_fingerprint=? AND status=? LIMIT 1",
+                (trace_id, evaluator_fingerprint, JudgmentStatus.COMPLETED.value),
+            ).fetchone()
+        return row is not None
+
     # -- Evaluator health -------------------------------------------------
 
     def insert_evaluator_health(self, record: EvaluatorHealthRecord) -> None:

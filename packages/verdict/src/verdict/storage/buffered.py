@@ -504,6 +504,13 @@ class BufferedStorage:
     ) -> list[Judgment]:
         return self._read(self._inner.list_judgments_for_trace, trace_id, limit=limit)
 
+    def has_completed_judgment(
+        self, trace_id: str, evaluator_fingerprint: str,
+    ) -> bool:
+        return self._read(
+            self._inner.has_completed_judgment, trace_id, evaluator_fingerprint
+        )
+
     def list_drift_signals(self, *, limit: int = 100) -> list[DriftSignal]:
         return self._read(self._inner.list_drift_signals, limit=limit)
 

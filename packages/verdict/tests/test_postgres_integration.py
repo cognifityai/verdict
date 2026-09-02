@@ -565,6 +565,8 @@ def test_live_postgres_round_trip_and_mutation_contracts():
         )
         storage.insert_judgment(judgment)
         [persisted_judgment] = storage.list_judgments_for_cluster(trace.cluster_id)
+        assert storage.has_completed_judgment(trace_id, fingerprint) is True
+        assert storage.has_completed_judgment(trace_id, "missing") is False
         assert persisted_judgment.judgment_id == judgment.judgment_id
         assert persisted_judgment.position_swap_consistent is True
         assert persisted_judgment.evaluator_config == {"temperature": 0}

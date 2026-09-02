@@ -76,9 +76,10 @@ Reliability, Performance, Behavior, ordered run/turn/event exploration,
 evidence-aware judging, review queues, schedules, alerts, and a single Drift
 workspace for cohort design, monitoring, completed signals, and optional
 clusters. Cluster and monitor activation are explicit transitions; previews
-never silently replace active state. A Trace explicitly reports provider
-success/error and `not judged`, `judge error`, `pass`, `fail`, or `unclear` as
-separate facts. No drift conclusion is shown until a comparison is persisted.
+never silently replace active state. A Trace reports execution success/error
+separately from evaluation states: `not evaluated`, `judge error`, `pass`,
+`fail`, or `unclear`. No drift conclusion is shown until a comparison is
+persisted.
 
 The equivalent non-interactive local import is:
 
@@ -447,7 +448,11 @@ Hexagonal / ports-and-adapters, ≥2 adapters per port (one real + in-memory for
   formats; it does not yet claim authoritative artifact state, deployment
   success, or subagent correctness. If opted-in content would exceed the
   atomic evidence-row limit, Verdict keeps the metadata-only run rather than
-  dropping the session.
+  dropping the session. Local-history token counts remain observable, but
+  Verdict does not convert them into API-list-price spend because desktop or
+  subscription billing is not established by those files. Codex runs remain
+  outside LLM Trace comparisons when the source does not expose genuine model
+  request/response boundaries.
 - A supported instrumented provider call made inside a manual span now stores
   that span's ID in `Trace.parent_span_id`. This is the sole automatic link
   direction: one manual span can contain many distinct provider calls, so no

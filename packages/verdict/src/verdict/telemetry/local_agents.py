@@ -30,7 +30,6 @@ from verdict.evidence import (
     agent_run_bundle_to_json,
     stable_evidence_id,
 )
-from verdict.pricing import compute_cost_usd
 from verdict.redaction import redact, redact_structure
 from verdict.schema import Operation, Trace
 from verdict.storage.base import Storage
@@ -844,7 +843,6 @@ def _linked_traces(
             raw_messages=messages or None,
             tenant_id=bundle.run.tenant_id,
             session_id=bundle.session.source_session_id,
-            cost_usd=compute_cost_usd(response_model or request_model, input_tokens, output_tokens),
             tags={
                 "verdict.source": source_kind,
                 "verdict.workload": "agent",

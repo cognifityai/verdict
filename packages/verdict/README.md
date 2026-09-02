@@ -43,9 +43,9 @@ is a one-shot idempotent runner. `verdict-service` executes the dashboard's
 saved schedule once or continuously.
 
 The dashboard reads key-free findings from immutable analysis snapshots rather
-than recomputing them on every page load. It reports provider outcome, judge
-status, finding severity, and drift comparison independently. `not judged` and
-`judge error` are explicit Trace states, and a prospective monitor says
+than recomputing them on every page load. It reports provider outcome,
+evaluation status, finding severity, and drift comparison independently.
+`not evaluated` and `judge error` are explicit Trace states, and a prospective monitor says
 `collecting n/target` until a comparison can actually complete. One Drift
 workspace contains Overview, Explore, Monitor, Signals, and Clusters.
 

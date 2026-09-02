@@ -176,7 +176,7 @@ def _json_column(row: Mapping[str, Any], name: str, default):
     return _json_value(raw, default)
 
 
-def _evaluator_identity(row: Mapping[str, Any]) -> dict:
+def evaluator_identity(row: Mapping[str, Any]) -> dict:
     """Build a stable evaluator discriminator, including legacy rows.
 
     The August dashboard blocker can already separate model/rubric definitions.
@@ -1829,7 +1829,7 @@ def _build(
         else ()
     )
     for row in judgment_rows:
-        identity = _evaluator_identity(row)
+        identity = evaluator_identity(row)
         identity_by_id.setdefault(identity["id"], identity)
         identity_rows.append((identity, row))
     known_fingerprints = {
@@ -1857,7 +1857,7 @@ def _build(
             )
         )
     for fingerprint in sorted(retained_fingerprints - known_fingerprints):
-        identity = _evaluator_identity({"evaluator_fingerprint": fingerprint})
+        identity = evaluator_identity({"evaluator_fingerprint": fingerprint})
         identity_by_id[identity["id"]] = identity
     all_available_identities = sorted(
         identity_by_id.values(), key=lambda identity: (identity["label"], identity["id"])

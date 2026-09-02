@@ -54,6 +54,7 @@ from verdict.schema import (
     DriftSignal,
     EvaluatorHealthRecord,
     Judgment,
+    JudgmentStatus,
     SpanRecord,
     Trace,
     TraceClusterAssignment,
@@ -456,6 +457,16 @@ class InMemoryStorage:
             key=lambda item: (item.created_at, item.judgment_id),
             reverse=True,
         )[:limit]
+
+    def has_completed_judgment(
+        self, trace_id: str, evaluator_fingerprint: str,
+    ) -> bool:
+        return any(
+            item.trace_id == trace_id
+            and item.evaluator_fingerprint == evaluator_fingerprint
+            and item.status is JudgmentStatus.COMPLETED
+            for item in self._judgments.values()
+        )
 
     def insert_evaluator_health(self, record: EvaluatorHealthRecord) -> None:
         self._evaluator_health[record.health_id] = record
