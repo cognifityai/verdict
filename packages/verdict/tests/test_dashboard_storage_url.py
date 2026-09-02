@@ -1,5 +1,8 @@
 import pytest
-from verdict.dashboard.storage_url import is_postgres_storage
+from verdict.dashboard.storage_url import (
+    _looks_like_libpq_conninfo,
+    is_postgres_storage,
+)
 
 
 @pytest.mark.parametrize(
@@ -20,3 +23,15 @@ from verdict.dashboard.storage_url import is_postgres_storage
 )
 def test_dashboard_storage_classification(value, expected):
     assert is_postgres_storage(value) is expected
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("dbname=verdict.db", True),
+        ("unknown=value", False),
+        ("/tmp/verdict=a15.db", False),
+    ],
+)
+def test_dashboard_storage_classification_without_optional_driver(value, expected):
+    assert _looks_like_libpq_conninfo(value) is expected

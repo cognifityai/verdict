@@ -172,7 +172,7 @@ jobs:
       - name: Install Postgres test dependencies
         run: |
           python -m pip install --disable-pip-version-check \
-            pytest "psycopg[binary,pool]"
+            httpx pytest "psycopg[binary,pool]"
           python -m pip install --disable-pip-version-check \
             -e "packages/verdict[dashboard,postgres]" \
             -e packages/verdict_eval
