@@ -93,7 +93,7 @@ def test_a7_environment_requires_synchronized_upgrade(
 
 @pytest.mark.parametrize(
     "version",
-    ["0.1.0a8", "0.1.0a9", "0.1.0a10", "0.1.0a11", "0.1.0a12"],
+    ["0.1.0a8", "0.1.0a9", "0.1.0a10", "0.1.0a11", "0.1.0a12", "0.1.0a13"],
 )
 def test_recent_alpha_environment_requires_synchronized_upgrade(
     monkeypatch: pytest.MonkeyPatch,
@@ -105,15 +105,15 @@ def test_recent_alpha_environment_requires_synchronized_upgrade(
     assert report["action"] == "upgrade"
 
 
-def test_a13_environment_is_current(monkeypatch: pytest.MonkeyPatch) -> None:
-    report = inspect(monkeypatch, synchronized("0.1.0a13"))
+def test_a14_environment_is_current(monkeypatch: pytest.MonkeyPatch) -> None:
+    report = inspect(monkeypatch, synchronized("0.1.0a14"))
 
     assert report["state"] == "current"
     assert report["action"] == "none"
 
 
 def test_mixed_versions_fail_closed_to_repair(monkeypatch: pytest.MonkeyPatch) -> None:
-    versions = synchronized("0.1.0a13")
+    versions = synchronized("0.1.0a14")
     versions["cognifity-verdict-eval"] = Distribution("0.1.0a5")
 
     report = inspect(monkeypatch, versions)
@@ -125,7 +125,7 @@ def test_mixed_versions_fail_closed_to_repair(monkeypatch: pytest.MonkeyPatch) -
 def test_unrelated_verdict_distribution_is_a_conflict(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    versions = synchronized("0.1.0a13")
+    versions = synchronized("0.1.0a14")
     versions["verdict"] = Distribution("1.0.0")
 
     report = inspect(monkeypatch, versions)
@@ -148,7 +148,7 @@ def test_storage_report_exposes_backend_but_never_secret(
     storage: str,
     backend: str,
 ) -> None:
-    report = inspect(monkeypatch, synchronized("0.1.0a13"), storage=storage)
+    report = inspect(monkeypatch, synchronized("0.1.0a14"), storage=storage)
 
     assert report["storage_backend"] == backend
     assert "secret" not in json.dumps(report)

@@ -239,11 +239,11 @@ jobs:
           /tmp/verdict-wheel-venv/bin/python -m pip install --disable-pip-version-check dist/eval/*.whl
           /tmp/verdict-wheel-venv/bin/python -m pip install --disable-pip-version-check dist/inspect/*.whl
           /tmp/verdict-wheel-venv/bin/python -m pip install --disable-pip-version-check \
-            "dist/core/cognifity_verdict-0.1.0a13-py3-none-any.whl[dashboard,postgres,telemetry]"
+            "dist/core/cognifity_verdict-0.1.0a14-py3-none-any.whl[dashboard,postgres,telemetry]"
           /tmp/verdict-wheel-venv/bin/python -m pip check
           cd /tmp
           /tmp/verdict-wheel-venv/bin/python -c \
-            "import verdict, verdict_eval, verdict_inspect; assert {verdict.__version__, verdict_eval.__version__, verdict_inspect.__version__} == {'0.1.0a13'}"
+            "import verdict, verdict_eval, verdict_inspect; assert {verdict.__version__, verdict_eval.__version__, verdict_inspect.__version__} == {'0.1.0a14'}"
           /tmp/verdict-wheel-venv/bin/python -c \
             "from importlib import metadata, util; import verdict_eval; removed=set('ProbeRunner ProbeSuite Probe ProbeExpectation ProbeResult ProbeRun default_suite load_suite_yaml'.split()); assert util.find_spec('verdict_eval.probes') is None; assert removed.isdisjoint(verdict_eval.__all__); assert all(not hasattr(verdict_eval, name) for name in removed); assert not any(req.lower().startswith('pyyaml') for req in metadata.requires('cognifity-verdict-eval') or ())"
           /tmp/verdict-wheel-venv/bin/verdict-inspect --help
@@ -268,15 +268,15 @@ jobs:
                 --format "$source_name" \
                 --source-scope "release-$source_name" \
                 --tenant-id release-e2e \
-                --storage sqlite:////tmp/verdict-a13-telemetry.db
+                --storage sqlite:////tmp/verdict-a14-telemetry.db
             done
           done
           /tmp/verdict-wheel-venv/bin/verdict-pipeline \
-            --storage sqlite:////tmp/verdict-a13-telemetry.db \
+            --storage sqlite:////tmp/verdict-a14-telemetry.db \
             --judge-provider fake \
             --judge-model fake-judge \
             --embedder deterministic \
-            --clustering-version telemetry-release-a13 \
+            --clustering-version telemetry-release-a14 \
             --cluster-threshold 0.1 \
             --as-of 2026-08-26T12:00:00Z \
             --sampling stratified \
@@ -284,12 +284,12 @@ jobs:
             --min-sample-size 30 \
             --limit 1000
           /tmp/verdict-wheel-venv/bin/verdict-dashboard \
-            --storage sqlite:////tmp/verdict-a13-telemetry.db \
+            --storage sqlite:////tmp/verdict-a14-telemetry.db \
             --host 127.0.0.1 \
             --port 18773 \
-            >/tmp/verdict-a13-dashboard.log 2>&1 &
+            >/tmp/verdict-a14-dashboard.log 2>&1 &
           dashboard_pid=$!
-          trap 'kill "$dashboard_pid" 2>/dev/null || true; cat /tmp/verdict-a13-dashboard.log' EXIT
+          trap 'kill "$dashboard_pid" 2>/dev/null || true; cat /tmp/verdict-a14-dashboard.log' EXIT
           cd /tmp
           DASHBOARD_URL=http://127.0.0.1:18773 \
           /tmp/verdict-wheel-venv/bin/python - <<'PY'
@@ -301,7 +301,7 @@ jobs:
 
           from verdict.storage.sqlite import SQLiteStorage
 
-          database = "/tmp/verdict-a13-telemetry.db"
+          database = "/tmp/verdict-a14-telemetry.db"
           storage = SQLiteStorage(database)
           traces = storage.list_traces(tenant_id="release-e2e", limit=1000)
           assert len(traces) == 80
@@ -350,11 +350,11 @@ jobs:
           /tmp/verdict-sdist-venv/bin/python -m pip install --disable-pip-version-check dist/eval/*.tar.gz
           /tmp/verdict-sdist-venv/bin/python -m pip install --disable-pip-version-check dist/inspect/*.tar.gz
           /tmp/verdict-sdist-venv/bin/python -m pip install --disable-pip-version-check \
-            "dist/core/cognifity_verdict-0.1.0a13.tar.gz[dashboard,postgres,telemetry]"
+            "dist/core/cognifity_verdict-0.1.0a14.tar.gz[dashboard,postgres,telemetry]"
           /tmp/verdict-sdist-venv/bin/python -m pip check
           cd /tmp
           /tmp/verdict-sdist-venv/bin/python -c \
-            "import verdict, verdict_eval, verdict_inspect; assert {verdict.__version__, verdict_eval.__version__, verdict_inspect.__version__} == {'0.1.0a13'}"
+            "import verdict, verdict_eval, verdict_inspect; assert {verdict.__version__, verdict_eval.__version__, verdict_inspect.__version__} == {'0.1.0a14'}"
           /tmp/verdict-sdist-venv/bin/python -c \
             "from importlib import metadata, util; import verdict_eval; removed=set('ProbeRunner ProbeSuite Probe ProbeExpectation ProbeResult ProbeRun default_suite load_suite_yaml'.split()); assert util.find_spec('verdict_eval.probes') is None; assert removed.isdisjoint(verdict_eval.__all__); assert all(not hasattr(verdict_eval, name) for name in removed); assert not any(req.lower().startswith('pyyaml') for req in metadata.requires('cognifity-verdict-eval') or ())"
           /tmp/verdict-sdist-venv/bin/verdict-inspect --help
@@ -366,13 +366,13 @@ jobs:
           /tmp/verdict-sdist-venv/bin/python -c \
             "from importlib.resources import files; root = files('verdict.dashboard').joinpath('static'); assert root.joinpath('dashboard.html').is_file(); assert root.joinpath('assets/dashboard.js').is_file()"
 
-      - name: Upgrade a published 0.1.0a12 SQLite store in place
+      - name: Upgrade a published 0.1.0a13 SQLite store in place
         run: |
           python -m venv /tmp/verdict-upgrade-venv
           /tmp/verdict-upgrade-venv/bin/python -m pip install --disable-pip-version-check \
-            "cognifity-verdict==0.1.0a12" \
-            "cognifity-verdict-eval==0.1.0a12" \
-            "cognifity-verdict-inspect==0.1.0a12"
+            "cognifity-verdict==0.1.0a13" \
+            "cognifity-verdict-eval==0.1.0a13" \
+            "cognifity-verdict-inspect==0.1.0a13"
           test -e /tmp/verdict-upgrade-venv/bin/verdict-probes
           /tmp/verdict-upgrade-venv/bin/python -c \
             "from importlib import util; assert util.find_spec('verdict_eval.probes') is not None"
@@ -382,10 +382,10 @@ jobs:
           from verdict.storage.sqlite import SQLiteStorage
 
           instant = datetime.now(timezone.utc)
-          storage = SQLiteStorage("/tmp/verdict-a12-upgrade.db")
+          storage = SQLiteStorage("/tmp/verdict-a13-upgrade.db")
           storage.insert_trace(
               Trace(
-                  trace_id="published-a12-trace",
+                  trace_id="published-a13-trace",
                   started_at=instant,
                   ended_at=instant,
                   tenant_id=None,
@@ -399,7 +399,7 @@ jobs:
           /tmp/verdict-upgrade-venv/bin/python -m pip check
           test ! -e /tmp/verdict-upgrade-venv/bin/verdict-probes
           /tmp/verdict-upgrade-venv/bin/verdict-cluster \
-            --storage sqlite:////tmp/verdict-a12-upgrade.db \
+            --storage sqlite:////tmp/verdict-a13-upgrade.db \
             --tenant __verdict_local__ --actor release normalize --limit 100
           /tmp/verdict-upgrade-venv/bin/python - <<'PY'
           from importlib import metadata, util
@@ -413,7 +413,7 @@ jobs:
               verdict.__version__,
               verdict_eval.__version__,
               verdict_inspect.__version__,
-          } == {"0.1.0a13"}
+          } == {"0.1.0a14"}
           removed = set(
               "ProbeRunner ProbeSuite Probe ProbeExpectation ProbeResult "
               "ProbeRun default_suite load_suite_yaml".split()
@@ -425,8 +425,8 @@ jobs:
               requirement.lower().startswith("pyyaml")
               for requirement in metadata.requires("cognifity-verdict-eval") or ()
           )
-          storage = SQLiteStorage("/tmp/verdict-a12-upgrade.db")
-          trace = storage.get_trace("published-a12-trace")
+          storage = SQLiteStorage("/tmp/verdict-a13-upgrade.db")
+          trace = storage.get_trace("published-a13-trace")
           assert trace is not None
           assert trace.tags["verdict.intent_key"] == "billing.v1"
           assert trace.analysis_started_at_state == "valid"
