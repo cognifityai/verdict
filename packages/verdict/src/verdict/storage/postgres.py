@@ -722,6 +722,16 @@ class PostgresStorage:
         )
         return [self._row_to_agent_run_bundle(row) for row in rows]
 
+    def has_agent_run_source_kind(self, tenant_id: str, source_kind: str) -> bool:
+        _validate_agent_bundle_query(tenant_id, 1)
+        if not isinstance(source_kind, str) or not source_kind or len(source_kind) > 64:
+            raise ValueError("invalid source kind")
+        return self._fetchone(
+            """SELECT 1 FROM agent_run_bundles WHERE tenant_id=%s
+               AND (payload_json::jsonb)->'session'->>'source_kind'=%s LIMIT 1""",
+            (tenant_id, source_kind),
+        ) is not None
+
     def save_deterministic_analysis_run(self, run: DeterministicAnalysisRun) -> None:
         payload = analysis_run_to_json(run)
         with self._pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
@@ -944,16 +954,25 @@ class PostgresStorage:
         )
         return monitor_snapshot_from_json(self._monitor_policy_payload(row[0])) if row else None
 
+    def get_initial_monitor_snapshot(
+        self, policy_id: str
+    ) -> tuple[CohortManifest, MonitorComparison] | None:
+        row = self._fetchone(
+            "SELECT payload_json FROM monitor_snapshots WHERE policy_id=%s "
+            "ORDER BY created_at ASC,snapshot_id ASC LIMIT 1", (policy_id,),
+        )
+        return monitor_snapshot_from_json(self._monitor_policy_payload(row[0])) if row else None
+
     def get_latest_monitor_alert(
         self, policy_id: str
     ) -> tuple[CohortManifest, MonitorComparison] | None:
         row = self._fetchone(
             "SELECT payload_json FROM monitor_snapshots WHERE policy_id=%s "
-            "AND payload_json LIKE '%\"status\":\"alert\"%' "
+            "AND payload_json LIKE '%%\"status\":\"alert\"%%' "
             "ORDER BY created_at DESC,snapshot_id DESC LIMIT 1",
             (policy_id,),
         )
-        return monitor_snapshot_from_json(row[0]) if row else None
+        return monitor_snapshot_from_json(self._monitor_policy_payload(row[0])) if row else None
 
     def get_trace(self, trace_id: str) -> Trace | None:
         row = self._fetchone(

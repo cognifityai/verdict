@@ -42,6 +42,9 @@ def evaluator_environment() -> dict[str, Any]:
                 "provider": provider,
                 "secretReference": key,
                 "configured": bool(os.environ.get(key)),
+                "customEndpointConfigured": (
+                    provider == "openai" and bool(os.environ.get("OPENAI_BASE_URL"))
+                ),
             }
             for provider, key in _PROVIDER_KEYS.items()
         ],

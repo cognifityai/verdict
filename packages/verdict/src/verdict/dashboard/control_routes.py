@@ -39,6 +39,17 @@ class ControlRoutes:
                     TENANT, limit=100
                 )
                 traces = writable.list_traces(tenant_id=TENANT, limit=501)
+                local_sources = sorted(
+                    source_kind
+                    for source_kind in ("claude-code", "codex")
+                    if writable.has_agent_run_source_kind(TENANT, source_kind)
+                )
+                has_local_schedule = any(
+                    item["kind"] == "schedule"
+                    and item["state"] == "active"
+                    and any(item["payload"].get(name) for name in ("claudeRoot", "codexRoot"))
+                    for item in documents
+                )
                 return {
                     "schema": "product-control-v1",
                     "documents": documents,
@@ -62,6 +73,14 @@ class ControlRoutes:
                         }
                         for item in attempts
                     ],
+                    "dailyOperations": {
+                        "mode": (
+                            "local_agent"
+                            if local_sources or has_local_schedule
+                            else "telemetry"
+                        ),
+                        "localAgentSources": local_sources,
+                    },
                     "defaults": {
                         "captureContent": True,
                         "retentionDays": None,

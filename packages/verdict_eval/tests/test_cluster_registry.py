@@ -154,11 +154,10 @@ def test_semantic_capture_off_is_persisted_as_ineligible() -> None:
         config=FitConfig(strategy="semantic", min_cluster_size=5),
     )
 
-    assert storage.list_trace_cluster_assignments("tenant-a", version.version_id) == []
-    service.assign("tenant-a", version.version_id, through_cutoff=cutoff)
     [assignment] = storage.list_trace_cluster_assignments("tenant-a", version.version_id)
     assert assignment.status == "ineligible"
     assert assignment.reason == "content_not_captured"
+    assert service.assign("tenant-a", version.version_id, through_cutoff=cutoff) == 0
 
 
 def test_incremental_semantic_assignment_commits_byte_bounded_prefixes() -> None:

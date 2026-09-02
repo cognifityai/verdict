@@ -2,7 +2,7 @@
 # Override VERDICT_VERSION only with another published, tested release.
 FROM python:3.12-slim
 
-ARG VERDICT_VERSION=0.1.0a14
+ARG VERDICT_VERSION=0.1.0a15
 ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     PORT=8080 \

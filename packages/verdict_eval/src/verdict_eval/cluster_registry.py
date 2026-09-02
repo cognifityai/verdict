@@ -389,7 +389,11 @@ class ClusterRegistryService:
             include_semantic = trace_id in selected and (
                 not evidence_only or selected[trace_id][0] is not None
             )
-            if evidence_only and not (include_explicit or include_semantic):
+            if (
+                evidence_only
+                and not (include_explicit or include_semantic)
+                and candidate_reason is None
+            ):
                 continue
             inputs.append(
                 ClusterInput(
@@ -412,7 +416,9 @@ class ClusterRegistryService:
                     },
                     "ineligible_count": sum(reasons.values()),
                     "ineligible_reasons": dict(sorted(reasons.items())),
-                    "fit_evidence_count": len(inputs),
+                    "fit_evidence_count": sum(
+                        item.ineligible_reason is None for item in inputs
+                    ),
                 }
             )
         return inputs

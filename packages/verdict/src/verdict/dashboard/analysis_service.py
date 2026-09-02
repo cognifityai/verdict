@@ -13,13 +13,14 @@ from verdict.analysis_records import (
     AnalysisRunStatus,
     DeterministicAnalysisRun,
 )
+from verdict.dashboard.storage_url import is_postgres_storage
 
 ANALYZER_VERSION = "agent-insights-v1"
 SCOPE_KEY = "agent-and-trace"
 
 
 def _storage(storage_url: str):
-    if storage_url.startswith(("postgres://", "postgresql://")):
+    if is_postgres_storage(storage_url):
         from verdict.storage.postgres import PostgresStorage
 
         return PostgresStorage(storage_url)

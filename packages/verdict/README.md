@@ -75,7 +75,7 @@ content capture when its documented coverage is insufficient.
 Import existing telemetry without instrumenting the application:
 
 ```bash
-pip install "cognifity-verdict[telemetry]==0.1.0a14"  # extra is for OTLP protobuf
+pip install "cognifity-verdict[telemetry]==0.1.0a15"  # extra is for OTLP protobuf
 verdict-import file traces.jsonl --format auto --storage sqlite:///./verdict.db
 verdict-import receive-otlp --storage sqlite:///./verdict.db
 ```
@@ -97,7 +97,7 @@ deprecated trace-list endpoint, so Verdict receives one record per actual
 generation or embedding rather than a trace aggregate.
 
 For a customer proof of concept, follow the versioned
-[`0.1.0a14 POC release profile`](https://github.com/cognifityai/verdict/blob/v0.1.0a14/docs/POC_RELEASE_PROFILE.md).
+[`0.1.0a15 POC release profile`](https://github.com/cognifityai/verdict/blob/v0.1.0a15/docs/POC_RELEASE_PROFILE.md).
 It pins the package set, provider entry points, persistence mode, and privacy
 boundary used for release verification.
 
@@ -127,7 +127,7 @@ each ended span is persisted once independently of provider success. `flush()` i
 a FIFO point-in-time barrier and accepts an optional timeout. `close()` rejects
 new reads/writes, drains every accepted FIFO write, stops and joins the worker,
 then closes the inner adapter; post-close `flush()` is an idempotent no-op.
-The `0.1.0a14` POC profile uses `buffered_writes=False`. Buffered mode requires
+The `0.1.0a15` POC profile uses `buffered_writes=False`. Buffered mode requires
 an explicit `shutdown()` imported from `verdict.client` before process exit.
 Completed drift analyses use atomic `DriftRun` snapshots, including explicit
 zero-signal runs. Storage readers select a run marker and its exact signals from
@@ -166,7 +166,7 @@ client = Anthropic()
 Install and run the version-matched dashboard without a source checkout:
 
 ```bash
-python -m pip install "cognifity-verdict[dashboard]==0.1.0a14"
+python -m pip install "cognifity-verdict[dashboard]==0.1.0a15"
 verdict-dashboard --storage sqlite:///./verdict.db
 ```
 
@@ -212,7 +212,7 @@ responsible for cloud credentials, authorization, CSRF protection, collection,
 and job execution. Without `operations_url`, no Operations tab or extra request
 is present.
 
-The dashboard's **Drift → Clusters** workspace is a bounded, read-only view of the Task 5
+The dashboard's **Drift → Clusters** workspace is a bounded view of the Task 5
 tenant/version registry. It shows active and preview versions, stable display
 names, frozen algorithm/selector/model configuration, representative redacted
 prompts, bounded provider/model distributions, membership explanations,
@@ -222,17 +222,17 @@ NUL-free session IDs of at most 256 bytes. Their time-to-readiness value is a
 diagnostic estimate at the documented default windows/floor, not activation
 or drift decisions; fragmentation/dominant-cluster warnings likewise require
 operator inspection. The full 250-cluster list remains visible while nested
-evidence is limited to the 20 highest-volume clusters. Standalone use selects the reserved local scope by
-default and may select an explicit tenant with `?tenant=`. A mounted host can
+evidence is limited to the 20 highest-volume clusters. Standalone use selects the reserved local scope and
+uses its same-origin setup capability for mutations. A mounted host can
 instead set `request.state.verdict_registry_tenant`; that authorization-owned
-value wins over query input. Mutation buttons appear only with the same-origin
+value wins over query input. Mounted mutation buttons use the same-origin
 Operations adapter. Semantic and hybrid fallback retain their experimental
 disclosure. When a mounted host supplies that authorized tenant, Overview,
 Trace Explorer, cluster pass-rate charts, and drift rows project assignments
 and stable labels from the same active registry. Standalone and legacy stores
 without an authorized active registry continue to use `Trace.cluster_id`.
 
-For published release `0.1.0a14`, the bounded POC entry points include Anthropic
+For published release `0.1.0a15`, the bounded POC entry points include Anthropic
 `messages.create(...)` (including `stream=True`), OpenAI
 `chat.completions.create(...)` and its stream helper, and Google
 `models.generate_content(...)` / `generate_content_stream(...)`, plus the

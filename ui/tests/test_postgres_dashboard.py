@@ -8,9 +8,11 @@ from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
+import httpx
 import pytest
 from verdict.dashboard import build_bundle
-from verdict.dashboard.app import build_registry_bundle
+from verdict.dashboard.app import build_registry_bundle, create_app
+from verdict.dashboard.control_plane import ControlStore
 from verdict.evidence import AgentRun, AgentRunBundle, ExecutionStatus, SourceSession
 from verdict.schema import (
     ClusterIdentity,
@@ -32,6 +34,61 @@ from verdict.storage.postgres import PostgresStorage
 DSN = os.environ.get("VERDICT_TEST_POSTGRES_DSN")
 
 pytestmark = pytest.mark.skipif(not DSN, reason="no disposable live Postgres DSN")
+
+
+def test_live_postgres_control_center_and_analysis_use_conninfo() -> None:
+    import asyncio
+
+    import psycopg
+    from psycopg import sql
+    from psycopg.conninfo import make_conninfo
+
+    schema = f"verdict_control_{uuid4().hex}"
+    with psycopg.connect(DSN, autocommit=True) as admin:
+        admin.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+    try:
+        scoped_dsn = make_conninfo(DSN, options=f"-csearch_path={schema}")
+        assert ControlStore(scoped_dsn).postgres is True
+
+        async def request_control():
+            transport = httpx.ASGITransport(app=create_app(storage=scoped_dsn))
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://testserver"
+            ) as client:
+                token = (await client.get("/api/setup/token")).json()["setupToken"]
+                saved = await client.post(
+                    "/api/control/settings/default",
+                    headers={"X-Verdict-Setup": token},
+                    json={
+                        "state": "active",
+                        "payload": {"captureContent": True},
+                        "expectedRevision": None,
+                    },
+                )
+                analysis = await client.post(
+                    "/api/insights/run", headers={"X-Verdict-Setup": token}
+                )
+                return saved, analysis, await client.get("/api/control")
+
+        saved, analysis, response = asyncio.run(request_control())
+        assert saved.status_code == 200, saved.text
+        assert analysis.status_code == 200, analysis.text
+        assert response.status_code == 200
+        assert response.json()["dailyOperations"]["mode"] == "telemetry"
+        with psycopg.connect(scoped_dsn) as verification:
+            assert verification.execute(
+                "SELECT count(*) FROM product_control_documents"
+            ).fetchone()[0] == 1
+            assert verification.execute(
+                "SELECT count(*) FROM deterministic_analysis_runs"
+            ).fetchone()[0] == 1
+    finally:
+        with psycopg.connect(DSN, autocommit=True) as admin:
+            admin.execute(
+                sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(
+                    sql.Identifier(schema)
+                )
+            )
 
 
 def test_live_postgres_and_sqlite_produce_the_same_dashboard_bundle(
