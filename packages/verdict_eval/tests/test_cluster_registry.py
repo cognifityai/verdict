@@ -77,7 +77,7 @@ def test_explicit_preview_assign_validate_activate_and_new_key_outlier() -> None
         cutoff=cutoff,
         config=FitConfig(strategy="explicit", target_workload="agent"),
     )
-    service.assign("tenant-a", version.version_id, through_cutoff=cutoff)
+    assert service.assign("tenant-a", version.version_id, through_cutoff=cutoff) == 0
     report = service.validate("tenant-a", version.version_id, actor="admin@example.test")
     active = service.activate(
         "tenant-a",
@@ -553,7 +553,7 @@ def test_corrupt_active_identity_count_fails_before_model_work() -> None:
 
 
 @pytest.mark.parametrize("adapter", ["memory", "sqlite"])
-def test_activation_rechecks_candidate_coverage_inside_pointer_transaction(
+def test_activation_uses_reviewed_fit_membership_when_historical_trace_arrives_late(
     adapter: str,
     tmp_path,
     monkeypatch,
@@ -583,14 +583,25 @@ def test_activation_rechecks_candidate_coverage_inside_pointer_transaction(
 
     monkeypatch.setattr(storage, "activate_cluster_registry", insert_late_candidate)
     try:
-        with pytest.raises(ValueError, match="coverage changed"):
-            service.activate(
-                "tenant-a",
-                version.version_id,
-                expected_generation=0,
-                actor="admin",
+        active = service.activate(
+            "tenant-a",
+            version.version_id,
+            expected_generation=0,
+            actor="admin",
+        )
+        assert active.version_id == version.version_id
+        assert service.assign(
+            "tenant-a", version.version_id, through_cutoff=cutoff
+        ) == 1
+        late = next(
+            item
+            for item in storage.list_trace_cluster_assignments(
+                "tenant-a", version.version_id
             )
-        assert storage.get_active_cluster_registry("tenant-a").version_id is None
+            if item.trace_id == "billing-late"
+        )
+        assert late.origin == "incremental"
+        assert late.status == "assigned"
     finally:
         storage.close()
 

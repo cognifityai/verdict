@@ -500,12 +500,18 @@ Hexagonal / ports-and-adapters, ≥2 adapters per port (one real + in-memory for
   quality and stability gates passed. Do not claim general validated semantic
   quality or silently enable it in customer deployments.
   **Drift → Clusters** exposes first-fit controls even when the registry is
-  empty. An explicit preview counts traces without `verdict.intent_key` as
-  ineligible and shows the reason; it never invents a label. Semantic and
-  hybrid previews remain opt-in and require an approved local model directory.
-  The supported exact-key path uses `verdict.intent_context("billing.v1")`,
-  followed by the bounded `normalize` (for upgraded stores), `fit --strategy
-  explicit`, `assign`, `validate`, and `activate` workflow documented in
+  empty. Its default semantic action remains labeled experimental. The
+  dashboard anchors the 90-day fit range to the latest
+  eligible event, uses a cached pinned MiniLM snapshot, or downloads that exact
+  snapshot on first use when the semantic extra is installed. An explicit
+  preview counts traces without `verdict.intent_key` as ineligible and shows
+  the reason; it never invents a label.
+  The dashboard's primary path is **Analyze historical traces**, review the
+  exemplars and warnings, then **Use these clusters**. Validation and complete
+  fit-window assignment run before activation. Later traces, including traces
+  imported with older event times, are assigned incrementally without changing
+  the reviewed fit membership. The supported exact-key CLI path uses
+  `verdict.intent_context("billing.v1")` and is documented in
   `packages/verdict_eval/README.md`. Active analysis follows the tenant pointer;
   tenantless Memory/SQLite uses the reserved `__verdict_local__` scope. Shadow
   analysis is disabled pending the tenant-isolation correction tracked in issue

@@ -50,6 +50,7 @@ from verdict.schema import (
     UserSignalRecord,
     Verdict,
     cluster_candidate_digest,
+    datetime_to_utc_us,
 )
 from verdict.storage import BufferedStorage
 from verdict.storage.postgres import PostgresStorage
@@ -164,6 +165,9 @@ def test_live_postgres_versioned_registry_and_analysis_normalization():
         )
         assert storage.normalize_cluster_trace_analysis(tenant, limit=1) == 1
         assert storage.count_pending_analysis_rows(tenant) == 0
+        assert storage.cluster_trace_time_bounds(
+            tenant, target_workload="agent"
+        ) == (1, datetime_to_utc_us(now), datetime_to_utc_us(now))
 
         identity = ClusterIdentity(
             tenant_id=tenant, cluster_id=cluster_id, kind="explicit",
@@ -192,7 +196,7 @@ def test_live_postgres_versioned_registry_and_analysis_normalization():
             expected_generation=0,
             actor="admin",
             action="activated",
-            expected_candidate_digest=cluster_candidate_digest([]),
+            expected_candidate_digest=cluster_candidate_digest([trace_id]),
         )
         assert pointer.version_id == version_id
         storage.rename_cluster_identity(tenant,cluster_id,"Billing support",actor="admin")

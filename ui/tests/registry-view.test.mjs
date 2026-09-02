@@ -30,14 +30,14 @@ async function renderRegistry(data) {
   return module.exports.default;
 }
 
-test("an empty registry still exposes the first-fit workflow", async () => {
+test("an empty registry starts with the historical semantic analysis workflow", async () => {
   const html = await renderRegistry({
     schema: "cluster-registry-dashboard-v1",
     status: "empty",
     tenant: "__verdict_local__",
   });
 
-  assert.match(html, /No registry versions yet/);
-  assert.match(html, /Fit preview/);
-  assert.match(html, /Explicit \(supported\)/);
+  assert.match(html, /Create clusters from historical traces/);
+  assert.match(html, /Analyze historical traces/);
+  assert.match(html, /Semantic clusters/);
 });

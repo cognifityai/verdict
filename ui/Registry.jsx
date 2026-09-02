@@ -83,6 +83,8 @@ export function useRegistry(url, operationsUrl, configUrl) {
         expectedGeneration: parameters.expected_generation,
         clusterId: parameters.cluster_id,
         displayName: parameters.display_name,
+        cutoff: parameters.cutoff || undefined,
+        lookbackDays: parameters.lookback_days,
       };
       setDirect((current) => ({ ...current, running: kind, error: null }));
       try {
@@ -93,8 +95,9 @@ export function useRegistry(url, operationsUrl, configUrl) {
         });
         result = await response.json();
         if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
-      } catch (_failure) {
-        setDirect((current) => ({ ...current, error: "Cluster action failed; no registry state was changed." }));
+      } catch (failure) {
+        setDirect((current) => ({ ...current, error: failure.message || "Cluster action could not be completed." }));
+        await load(state.version, 0);
         return false;
       } finally {
         setDirect((current) => ({ ...current, running: null }));
@@ -127,17 +130,27 @@ function ActionButton({ children, disabled, onClick, running }) {
 }
 
 function FitPreviewForm({ operations, running, strategy, setStrategy, targetWorkload, setTargetWorkload, modelPath, setModelPath, onRun }) {
+  const [lookbackDays, setLookbackDays] = useState(90);
+  const [cutoff, setCutoff] = useState("");
   return (
     <div className="p-3" style={{ background: COLOR.panel2 }}>
-      <div className="text-xs font-mono" style={{ color: COLOR.faint }}>NEW PREVIEW</div>
+      <div className="text-xs font-mono" style={{ color: COLOR.faint }}>ANALYZE HISTORICAL TRACES</div>
+      <div className="text-xs mt-2" style={{ color: COLOR.sub }}>Verdict ends the range at your latest eligible trace and analyzes the preceding 90 days.</div>
       <div className="flex flex-wrap gap-2 mt-2">
         <select aria-label="Fit strategy" value={strategy} onChange={(event) => setStrategy(event.target.value)} className="px-2 py-2 border text-xs" style={{ color: COLOR.text, background: COLOR.panel, borderColor: COLOR.border }}>
-          <option value="explicit">Explicit (supported)</option><option value="semantic">Semantic (experimental)</option><option value="hybrid">Hybrid (experimental fallback)</option>
+          <option value="semantic">Semantic clusters (experimental)</option><option value="explicit">Captured intent labels</option><option value="hybrid">Intent labels with semantic fallback (experimental)</option>
         </select>
         <input aria-label="Optional workload filter" value={targetWorkload} onChange={(event) => setTargetWorkload(event.target.value)} placeholder="All eligible traces" maxLength={64} className="px-2 py-2 border text-xs min-w-40" style={{ color: COLOR.text, background: COLOR.panel, borderColor: COLOR.border }} />
-        <ActionButton disabled={!operations?.available || (strategy !== "explicit" && !modelPath)} running={running === "cluster_fit"} onClick={() => onRun("cluster_fit", { strategy, target_workload: targetWorkload || null, model_path: modelPath || null })}>Fit preview</ActionButton>
+        <ActionButton disabled={!operations?.available} running={running === "cluster_fit"} onClick={() => onRun("cluster_fit", { strategy, target_workload: targetWorkload || null, model_path: modelPath || null, cutoff: cutoff ? new Date(cutoff).toISOString() : null, lookback_days: lookbackDays })}>Analyze historical traces</ActionButton>
       </div>
-      {strategy !== "explicit" && <label className="block text-xs mt-3" style={{ color: COLOR.sub }}>Approved local frozen MiniLM directory<input aria-label="Semantic model path" value={modelPath} onChange={(event) => setModelPath(event.target.value)} placeholder="/path/to/all-MiniLM-L6-v2" className="block w-full mt-1 px-2 py-2 border" style={{ color: COLOR.text, background: COLOR.panel, borderColor: COLOR.border }} /></label>}
+      <details className="mt-3 text-xs" style={{ color: COLOR.sub }}>
+        <summary className="cursor-pointer">Advanced range and model settings</summary>
+        <div className="grid sm:grid-cols-2 gap-2 mt-3">
+          <label>Lookback days<input aria-label="Cluster lookback days" type="number" min="1" value={lookbackDays} onChange={(event) => setLookbackDays(Number(event.target.value))} className="block w-full mt-1 px-2 py-2 border" style={{ color: COLOR.text, background: COLOR.panel, borderColor: COLOR.border }} /></label>
+          <label>Optional range end<input aria-label="Cluster range end" type="datetime-local" value={cutoff} onChange={(event) => setCutoff(event.target.value)} className="block w-full mt-1 px-2 py-2 border" style={{ color: COLOR.text, background: COLOR.panel, borderColor: COLOR.border }} /></label>
+        </div>
+        {strategy !== "explicit" && <label className="block mt-3">Optional MiniLM directory override<input aria-label="Semantic model path" value={modelPath} onChange={(event) => setModelPath(event.target.value)} placeholder="Server auto-detects the pinned model" className="block w-full mt-1 px-2 py-2 border" style={{ color: COLOR.text, background: COLOR.panel, borderColor: COLOR.border }} /></label>}
+      </details>
     </div>
   );
 }
@@ -172,7 +185,7 @@ function ReadinessEstimate({ readiness }) {
 }
 
 export function RegistryView({ data, operations, onRun, onVersion, onPage, onRefresh }) {
-  const [strategy, setStrategy] = useState("explicit");
+  const [strategy, setStrategy] = useState("semantic");
   const [targetWorkload, setTargetWorkload] = useState("");
   const [modelPath, setModelPath] = useState("");
   const [renameCluster, setRenameCluster] = useState("");
@@ -189,7 +202,7 @@ export function RegistryView({ data, operations, onRun, onVersion, onPage, onRef
     );
   }
   if (data.status === "empty") {
-    return <Panel className="p-6"><div className="font-semibold">No registry versions yet</div><div className="text-sm mt-1 mb-4" style={{ color: COLOR.sub }}>Fit a deliberate explicit, semantic, or hybrid preview before activation. Explicit grouping requires a captured <code>verdict.intent_key</code>; semantic grouping requires an approved local model directory.</div><FitPreviewForm operations={operations} running={operations?.running} strategy={strategy} setStrategy={setStrategy} targetWorkload={targetWorkload} setTargetWorkload={setTargetWorkload} modelPath={modelPath} setModelPath={setModelPath} onRun={onRun} /></Panel>;
+    return <Panel className="p-6"><div className="font-semibold">Create clusters from historical traces</div><div className="text-sm mt-1 mb-4" style={{ color: COLOR.sub }}>Start with semantic clusters when prompt evidence is available. Review the resulting examples before using them for monitoring.</div><FitPreviewForm operations={operations} running={operations?.running} strategy={strategy} setStrategy={setStrategy} targetWorkload={targetWorkload} setTargetWorkload={setTargetWorkload} modelPath={modelPath} setModelPath={setModelPath} onRun={onRun} /></Panel>;
   }
 
   const selected = data.selectedVersion;
@@ -234,6 +247,12 @@ export function RegistryView({ data, operations, onRun, onVersion, onPage, onRef
         <Panel className="p-4"><div className="text-xs font-mono" style={{ color: COLOR.faint }}>ACTIVATION CHECKS</div><div className="text-lg font-semibold mt-2" style={{ color: data.readiness.passed ? COLOR.green : COLOR.amber }}>{data.readiness.passed ? "Mechanically passed" : data.readiness.status.replaceAll("_", " ")}</div></Panel>
       </div>
 
+      <Panel className="p-4">
+        <div className="font-semibold text-sm">Analyzed range</div>
+        <div className="text-sm mt-2" style={{ color: COLOR.sub }}>{selected.preview.candidateCount || 0} eligible traces in the {selected.lookbackDays}-day range ending {selected.cutoff || "at the latest eligible trace"}.</div>
+        {!active && <div className="mt-3"><ActionButton disabled={!operations?.available} running={running === "cluster_activate"} onClick={() => onRun("cluster_activate", { version: selected.versionId, expected_generation: data.active.generation, ...(modelPath ? { model_path: modelPath } : {}) })}>Use these clusters</ActionButton></div>}
+      </Panel>
+
       {data.counts.assigned === 0 && data.counts.ineligible > 0 && <div role="status" className="p-4 border flex items-start gap-3" style={{ borderColor: "#6b5529", background: COLOR.amberBg }}><AlertTriangle size={16} style={{ color: COLOR.amber, flexShrink: 0 }} /><div className="text-sm"><span className="font-semibold" style={{ color: COLOR.amber }}>No traces were assigned.</span> This version left {data.counts.ineligible.toLocaleString()} trace(s) ineligible. Explicit grouping only uses a captured <code>verdict.intent_key</code>; choose semantic grouping with an approved local model only when prompt evidence is available, or inspect the member explanations below.</div></div>}
 
       <Panel className="p-4">
@@ -271,21 +290,19 @@ export function RegistryView({ data, operations, onRun, onVersion, onPage, onRef
       {(data.healthWarnings.length > 0 || selected.preview.warnings?.length > 0) && <Panel className="p-4" style={{ borderColor: "#6b5529" }}><div className="font-semibold text-sm flex items-center gap-2"><AlertTriangle size={15} style={{ color: COLOR.amber }} />Cluster health warnings</div><div className="space-y-2 mt-3 text-xs" style={{ color: COLOR.sub }}>{[...data.healthWarnings, ...(selected.preview.warnings || [])].map((warning, index) => <div key={`${warning}-${index}`}>{warningText(warning)}</div>)}</div></Panel>}
 
       <Panel className="p-4">
-        <div className="flex items-center gap-2 font-semibold text-sm"><GitBranch size={15} style={{ color: COLOR.blue }} />Registry controls</div>
+        <div className="flex items-center gap-2 font-semibold text-sm"><GitBranch size={15} style={{ color: COLOR.blue }} />Run another analysis</div>
         {!operations?.available && <div className="text-xs mt-2" style={{ color: COLOR.faint }}>Read-only dashboard. An authenticated host operations adapter is required for mutations.</div>}
         <div className="grid lg:grid-cols-2 gap-4 mt-3">
           <FitPreviewForm operations={operations} running={running} strategy={strategy} setStrategy={setStrategy} targetWorkload={targetWorkload} setTargetWorkload={setTargetWorkload} modelPath={modelPath} setModelPath={setModelPath} onRun={onRun} />
-          <div className="p-3" style={{ background: COLOR.panel2 }}>
-            <div className="text-xs font-mono" style={{ color: COLOR.faint }}>VERSION LIFECYCLE</div>
+          <details className="p-3" style={{ background: COLOR.panel2 }}>
+            <summary className="text-xs font-mono cursor-pointer" style={{ color: COLOR.faint }}>ADVANCED VERSION CONTROLS</summary>
             <div className="flex flex-wrap gap-2 mt-2">
-              <ActionButton disabled={!operations?.available || !activeVersion || (activeVersion.strategy !== "explicit" && !modelPath)} running={running === "cluster_refit"} onClick={() => onRun("cluster_refit", activeVersion.strategy === "explicit" ? {} : { model_path: modelPath })}>Refit active</ActionButton>
-              <ActionButton disabled={!operations?.available || !selected || (selected.strategy !== "explicit" && !modelPath)} running={running === "cluster_validate"} onClick={() => onRun("cluster_validate", { version: selected.versionId, ...(modelPath ? { model_path: modelPath } : {}) })}>Validate version</ActionButton>
-              <ActionButton disabled={!operations?.available || !selected || (selected.strategy !== "explicit" && !modelPath)} running={running === "cluster_replay"} onClick={() => onRun("cluster_replay", { version: selected.versionId, ...(modelPath ? { model_path: modelPath } : {}) })}>Replay assignments</ActionButton>
-              <ActionButton disabled={!operations?.available || active || !data.readiness.passed || (selected.strategy !== "explicit" && !modelPath)} running={running === "cluster_activate"} onClick={() => onRun("cluster_activate", { version: selected.versionId, expected_generation: data.active.generation, ...(modelPath ? { model_path: modelPath } : {}) })}>Activate version</ActionButton>
-              <ActionButton disabled={!operations?.available || active || !activatedBefore || (selected.strategy !== "explicit" && !modelPath)} running={running === "cluster_rollback"} onClick={() => onRun("cluster_rollback", { version: selected.versionId, expected_generation: data.active.generation, ...(modelPath ? { model_path: modelPath } : {}) })}>Rollback to version</ActionButton>
+              <ActionButton disabled={!operations?.available || !activeVersion} running={running === "cluster_refit"} onClick={() => onRun("cluster_refit", activeVersion.strategy === "explicit" ? {} : { model_path: modelPath || null })}>Refit active</ActionButton>
+              <ActionButton disabled={!operations?.available || !selected} running={running === "cluster_validate"} onClick={() => onRun("cluster_validate", { version: selected.versionId, ...(modelPath ? { model_path: modelPath } : {}) })}>Validate version</ActionButton>
+              <ActionButton disabled={!operations?.available || !selected} running={running === "cluster_replay"} onClick={() => onRun("cluster_replay", { version: selected.versionId, ...(modelPath ? { model_path: modelPath } : {}) })}>Replay assignments</ActionButton>
+              <ActionButton disabled={!operations?.available || active || !activatedBefore} running={running === "cluster_rollback"} onClick={() => onRun("cluster_rollback", { version: selected.versionId, expected_generation: data.active.generation, ...(modelPath ? { model_path: modelPath } : {}) })}>Rollback to version</ActionButton>
             </div>
-            {(strategy !== "explicit" || selected.strategy !== "explicit") && <label className="block text-xs mt-3" style={{ color: COLOR.sub }}>Approved local frozen MiniLM directory<input aria-label="Semantic model path" value={modelPath} onChange={(event) => setModelPath(event.target.value)} placeholder="/path/to/all-MiniLM-L6-v2" className="block w-full mt-1 px-2 py-2 border" style={{ color: COLOR.text, background: COLOR.panel, borderColor: COLOR.border }} /></label>}
-          </div>
+          </details>
         </div>
         <div className="p-3 mt-3" style={{ background: COLOR.panel2 }}>
           <div className="text-xs font-mono" style={{ color: COLOR.faint }}>DISPLAY LABEL</div>

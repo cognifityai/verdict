@@ -157,7 +157,7 @@ def test_validation_and_activation_use_one_generation_cas(registry_storage) -> N
         expected_generation=0,
         actor="admin@example.test",
         action="activated",
-        expected_candidate_digest=cluster_candidate_digest([]),
+        expected_candidate_digest=cluster_candidate_digest(["trace-1"]),
     )
 
     assert active.version_id == "version-1"
@@ -173,7 +173,7 @@ def test_validation_and_activation_use_one_generation_cas(registry_storage) -> N
             expected_generation=0,
             actor="admin@example.test",
             action="activated",
-            expected_candidate_digest=cluster_candidate_digest([]),
+            expected_candidate_digest=cluster_candidate_digest(["trace-1"]),
         )
 
 
@@ -197,7 +197,7 @@ def test_activation_rejects_a_stale_parent_and_rename_is_audited(
         expected_generation=0,
         actor="admin@example.test",
         action="activated",
-        expected_candidate_digest=cluster_candidate_digest([]),
+        expected_candidate_digest=cluster_candidate_digest(["trace-1"]),
     )
 
     stale_version, _, stale_clusters, stale_assignments = _preview(version_id="version-stale")
@@ -219,7 +219,7 @@ def test_activation_rejects_a_stale_parent_and_rename_is_audited(
             expected_generation=1,
             actor="admin@example.test",
             action="activated",
-            expected_candidate_digest=cluster_candidate_digest([]),
+            expected_candidate_digest=cluster_candidate_digest(["trace-1"]),
         )
 
     registry_storage.rename_cluster_identity(
@@ -248,7 +248,7 @@ def test_activation_enforces_active_identity_cap_atomically(registry_storage) ->
         expected_generation=0,
         actor="admin",
         action="activated",
-        expected_candidate_digest=cluster_candidate_digest([]),
+        expected_candidate_digest=cluster_candidate_digest(["trace-1"]),
     )
 
     version, identities, clusters, assignments = _preview(version_id="version-2")
@@ -287,7 +287,7 @@ def test_activation_enforces_active_identity_cap_atomically(registry_storage) ->
             expected_generation=1,
             actor="admin",
             action="activated",
-            expected_candidate_digest=cluster_candidate_digest([]),
+            expected_candidate_digest=cluster_candidate_digest(["trace-2"]),
         )
     assert registry_storage.get_active_cluster_registry("tenant-a").version_id == "version-1"
 
@@ -324,6 +324,9 @@ def test_trace_writer_persists_normalized_analysis_fields_across_adapters(
     assert stored.analysis_started_at_us == 1_787_353_200_000_000
     assert stored.analysis_raw_messages_state == "valid"
     assert stored.analysis_raw_messages_utf8_bytes == len(b'[{"content":"billing","role":"user"}]')
+    assert registry_storage.cluster_trace_time_bounds(
+        "tenant-a", target_workload="agent"
+    ) == (1, 1_787_353_200_000_000, 1_787_353_200_000_000)
 
 
 def test_candidate_projection_preserves_json_type_and_bounds_routing_bodies(

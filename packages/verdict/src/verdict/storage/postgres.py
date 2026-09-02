@@ -20,7 +20,7 @@ import threading
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import asdict
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from verdict.analysis_records import (
     DeliveryOutcome,
@@ -74,7 +74,6 @@ from verdict.schema import (
     UserSignalRecord,
     Verdict,
     cluster_candidate_digest,
-    datetime_to_utc_us,
     populate_trace_analysis_fields,
 )
 from verdict.storage.base import (
@@ -2072,30 +2071,15 @@ class PostgresStorage:
             if validation is None or validation[0] != "validated":
                 raise ValueError("cluster registry version is not validated")
             config = version[2] or {}
-            cur.execute("LOCK TABLE traces IN SHARE MODE")
-            token = self._cluster_snapshot_connection.set(conn)
-            try:
-                rows = self.list_cluster_trace_candidates(
-                    authorized_tenant,
-                    datetime_to_utc_us(version[3] - timedelta(days=version[4])),
-                    datetime_to_utc_us(version[3]),
-                    target_workload=config.get("target_workload"),
-                    limit=config.get("max_fit_candidates", 50_000) + 1,
-                )
-                candidate_ids = [row.trace_id for row in rows if row.trace_id is not None]
-                assigned_ids = {
-                    item.trace_id
-                    for item in self.list_trace_cluster_assignments(authorized_tenant, version_id)
-                }
-                pending = self.count_pending_analysis_rows(authorized_tenant)
-            finally:
-                self._cluster_snapshot_connection.reset(token)
+            cur.execute(
+                "SELECT trace_id FROM trace_cluster_assignments "
+                "WHERE tenant_id=%s AND version_id=%s AND origin='fit'",
+                (authorized_tenant, version_id),
+            )
+            candidate_ids = [row[0] for row in cur.fetchall()]
             if (
-                pending
-                or len(rows) > config.get("max_fit_candidates", 50_000)
-                or len(candidate_ids) != len(rows)
+                len(candidate_ids) > config.get("max_fit_candidates", 50_000)
                 or cluster_candidate_digest(candidate_ids) != expected_candidate_digest
-                or not set(candidate_ids) <= assigned_ids
             ):
                 raise ValueError("cluster registry coverage changed")
             cur.execute(
@@ -2283,6 +2267,28 @@ class PostgresStorage:
             (*params, limit),
         )
         return [ClusterTraceCandidate(*row) for row in rows]
+
+    def cluster_trace_time_bounds(
+        self,
+        authorized_tenant: str,
+        *,
+        target_workload: str | None,
+    ) -> tuple[int, int | None, int | None]:
+        where = """tenant_id=%s AND ended_at IS NOT NULL
+          AND analysis_started_at_state='valid'"""
+        params: tuple[object, ...] = (authorized_tenant,)
+        if target_workload is None:
+            where += f" AND COALESCE(({self._WORKLOAD_VALUE_SQL}),'') NOT IN (%s,%s)"
+            params += ("judge", "paired_replay")
+        else:
+            where += f" AND ({self._WORKLOAD_VALUE_SQL})=%s"
+            params += (target_workload,)
+        row = self._fetchone(
+            f"SELECT COUNT(*),MIN(analysis_started_at_us),MAX(analysis_started_at_us) "
+            f"FROM traces WHERE {where}",  # nosec B608
+            params,
+        )
+        return int(row[0]), row[1], row[2]
 
     def get_cluster_trace_messages(
         self,

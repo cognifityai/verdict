@@ -387,11 +387,11 @@ test("registry view discloses experimental status, readiness, explanations, and 
   assert.match(rendered, /split across many small clusters/);
   assert.match(rendered, /ward-best-k-v2/);
   assert.match(rendered, /No explicit intent key was captured/);
-  assert.match(rendered, /Activate version/);
+  assert.match(rendered, /Use these clusters/);
   assert.match(rendered, /Refit active/);
   assert.match(rendered, /Rollback to version/);
 
-  for (const label of ["Refit active", "Activate version", "Rollback to version"]) {
+  for (const label of ["Refit active", "Use these clusters", "Rollback to version"]) {
     findAll(
       tree,
       (node) => node.type?.name === "ActionButton" && textOf(node) === label,

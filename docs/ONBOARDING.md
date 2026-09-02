@@ -536,7 +536,13 @@ the other captured workloads.
   strategy status. The frozen semantic evaluation missed its 30% dominant-
   cluster limit by one example, so do not present it as generally validated or
   enable it silently for customers.
-  The supported explicit workflow stamps calls with
+  The dashboard defaults the fit end to the latest eligible event and analyzes
+  the preceding 90 days. Select **Analyze historical traces**, review examples
+  and warnings, then select **Use these clusters**. The pinned MiniLM snapshot
+  is reused from the local cache or downloaded on first use when the semantic
+  extra is installed. Traces imported after the fit are assigned incrementally
+  and do not change the reviewed fit membership during activation.
+  The supported explicit CLI workflow stamps calls with
   `verdict.intent_context("billing.v1")`, normalizes upgraded stores in bounded
   pages, then runs fit, assign, validate, and activate. Active mode follows the
   tenant pointer. Shadow analysis is disabled pending the tenant-isolation fix
