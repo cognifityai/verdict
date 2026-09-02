@@ -99,6 +99,8 @@ def test_replace_and_read_bundle_is_idempotent_and_tenant_scoped(evidence_storag
     assert evidence_storage.get_agent_run_bundle("tenant-a", "run_1") == original
     assert evidence_storage.get_agent_run_bundle("tenant-b", "run_1") is None
     assert evidence_storage.list_agent_run_bundles("tenant-a", limit=10) == [original]
+    assert evidence_storage.has_agent_run_source_kind("tenant-a", "custom-agent") is True
+    assert evidence_storage.has_agent_run_source_kind("tenant-a", "codex") is False
 
 
 def test_replace_bundle_atomically_publishes_one_complete_revision(evidence_storage) -> None:

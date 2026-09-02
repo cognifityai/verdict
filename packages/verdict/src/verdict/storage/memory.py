@@ -170,6 +170,17 @@ class InMemoryStorage:
         bundles.sort(key=lambda bundle: (bundle.run.started_at, bundle.run.run_id), reverse=True)
         return bundles[:limit]
 
+    def has_agent_run_source_kind(self, tenant_id: str, source_kind: str) -> bool:
+        _validate_agent_bundle_query(tenant_id, 1)
+        if not isinstance(source_kind, str) or not source_kind or len(source_kind) > 64:
+            raise ValueError("invalid source kind")
+        with self._agent_evidence_lock:
+            return any(
+                scope == tenant_id
+                and agent_run_bundle_from_json(payload).session.source_kind == source_kind
+                for (scope, _run_id), payload in self._agent_run_bundles.items()
+            )
+
     def save_deterministic_analysis_run(self, run: DeterministicAnalysisRun) -> None:
         payload = analysis_run_to_json(run)
         input_key = (
@@ -318,6 +329,16 @@ class InMemoryStorage:
                 if stored_policy == policy_id
             ]
         return monitor_snapshot_from_json(rows[-1]) if rows else None
+
+    def get_initial_monitor_snapshot(
+        self, policy_id: str
+    ) -> tuple[CohortManifest, MonitorComparison] | None:
+        with self._monitor_lock:
+            rows = [
+                payload for (stored_policy, _snapshot), payload in self._monitor_snapshots.items()
+                if stored_policy == policy_id
+            ]
+        return monitor_snapshot_from_json(rows[0]) if rows else None
 
     def get_latest_monitor_alert(
         self, policy_id: str

@@ -75,7 +75,7 @@ export function Monitor({ configUrl }) {
     {error && <div role="alert" className="border p-4" style={{ ...box, color: "#ff6b6b" }}>{error}</div>}
     {snapshot && <section className="border p-5" style={box}>
       <div className="flex flex-wrap gap-3 items-center justify-between">
-        <div><div className="text-xs font-mono" style={{ color: candidate ? "#f2b84b" : "#4ee1aa" }}>{candidate ? "EXPLORATORY CANDIDATE" : "ACTIVE MONITOR"}</div><div className="font-semibold mt-1">{comparisonLabel}</div></div>
+        <div><div className="text-xs font-mono" style={{ color: candidate ? "#f2b84b" : "#4ee1aa" }}>{candidate ? "EXPLORATORY HISTORICAL COMPARISON" : "ACTIVE PROSPECTIVE MONITOR"}</div><div className="font-semibold mt-1">{comparisonLabel}</div></div>
         <div className="text-sm" style={{ color: "#94a39d" }}>{manifest.reference_unit_ids.length} reference → {manifest.current_unit_ids.length} current</div>
       </div>
       <div className="mt-4 h-8 flex overflow-hidden border" style={{ borderColor: "#26332e" }}><div style={{ width: `${100 * manifest.reference_unit_ids.length / Math.max(1, manifest.reference_unit_ids.length + manifest.current_unit_ids.length)}%`, background: "#1f5f4b" }} /><div className="flex-1" style={{ background: "#295a78" }} /></div>
@@ -85,6 +85,12 @@ export function Monitor({ configUrl }) {
       <div className="mt-4 space-y-2">{comparison.metrics.map((metric) => <div key={metric.metric} className="border p-3 text-sm" style={{ borderColor: "#26332e" }}><span className="font-mono">{metric.metric}</span><span className="ml-3" style={{ color: metric.alert ? "#ff6b6b" : "#94a39d" }}>{(100 * metric.reference_value).toFixed(1)}% → {(100 * metric.current_value).toFixed(1)}% · effect {(100 * metric.effect).toFixed(1)}pp · adjusted p {metric.p_adjusted.toPrecision(3)} · eligible n {metric.reference_n} → {metric.current_n}</span></div>)}</div>
       {comparison.status === "insufficient" && <p className="text-sm mt-4" style={{ color: "#f2b84b" }}>{collecting ? "No statistical test was run because the prospective bucket is still collecting." : "The bucket closed, but no metric met its configured eligible-unit minimums; no alert/no-alert conclusion was produced."}</p>}
       {comparison.status === "reference_stale" && <p className="text-sm mt-4" style={{ color: "#f2b84b" }}>Comparison suspended: {(100 * comparison.unseen_group_share).toFixed(1)}% of current traces use provider/model groups absent from the frozen reference. Review the policy before creating a new candidate; Verdict did not silently rebase it.</p>}
+    </section>}
+    {!candidate && active?.approvedHistoricalSnapshot && <section className="border p-5" style={box}>
+      <div className="text-xs font-mono" style={{ color: "#f2b84b" }}>APPROVED HISTORICAL PREVIEW</div>
+      <div className="font-semibold mt-1">{active.approvedHistoricalSnapshot.comparison.status.replaceAll("_", " ")}</div>
+      <p className="text-sm mt-2" style={{ color: "#94a39d" }}>This is the historical comparison used to approve the policy. Activation froze its reference cohort and opened a new prospective bucket; it did not reuse the historical current cohort as new traffic.</p>
+      <div className="text-sm mt-3">{active.approvedHistoricalSnapshot.manifest.reference_unit_ids.length} historical reference → {active.approvedHistoricalSnapshot.manifest.current_unit_ids.length} historical current</div>
     </section>}
   </div>;
 }

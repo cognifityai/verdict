@@ -1,9 +1,13 @@
 import asyncio
+from datetime import datetime, timedelta, timezone
 
 import httpx
 import pytest
 from verdict.dashboard.app import create_app
 from verdict.dashboard.control_plane import ControlStore
+from verdict.evidence import AgentRun, AgentRunBundle, ExecutionStatus, SourceSession
+from verdict.schema import Trace
+from verdict.storage import SQLiteStorage
 
 
 def test_control_documents_are_versioned_conflict_checked_and_rollbackable(tmp_path):
@@ -97,3 +101,63 @@ def test_cluster_actions_are_capability_gated_and_reject_unapproved_semantic_mod
     assert denied.status_code == 403
     assert invalid.status_code == 400
     assert "path" not in invalid.text.lower()
+
+
+def test_control_api_reports_source_appropriate_daily_operations(tmp_path):
+    database = tmp_path / "verdict.db"
+    storage = SQLiteStorage(str(database))
+    now = datetime(2026, 9, 2, tzinfo=timezone.utc)
+    storage.insert_trace(Trace(
+        trace_id="telemetry-trace", tenant_id="__verdict_local__", started_at=now,
+        provider="openai", request_model="model", response_redacted="response",
+    ))
+    storage.close()
+
+    async def get_state():
+        transport = httpx.ASGITransport(
+            app=create_app(storage=f"sqlite:///{database}")
+        )
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
+            return (await client.get("/api/control")).json()
+
+    telemetry = asyncio.run(get_state())
+    assert telemetry["dailyOperations"] == {
+        "mode": "telemetry",
+        "localAgentSources": [],
+    }
+
+    storage = SQLiteStorage(str(database))
+    storage.replace_agent_run_bundle(AgentRunBundle(
+        SourceSession("session", "__verdict_local__", "codex", "a" * 64, now, now),
+        AgentRun("run", "session", "__verdict_local__", now, ExecutionStatus.UNKNOWN),
+    ))
+    storage.close()
+
+    local = asyncio.run(get_state())
+    assert local["dailyOperations"] == {
+        "mode": "local_agent",
+        "localAgentSources": ["codex"],
+    }
+
+    storage = SQLiteStorage(str(database))
+    for index in range(101):
+        observed = now + timedelta(seconds=index + 1)
+        storage.replace_agent_run_bundle(AgentRunBundle(
+            SourceSession(
+                f"other-session-{index}", "__verdict_local__", "unknown-agent",
+                f"{index + 1:064x}", observed, observed,
+            ),
+            AgentRun(
+                f"other-run-{index}", f"other-session-{index}",
+                "__verdict_local__", observed, ExecutionStatus.UNKNOWN,
+            ),
+        ))
+    storage.close()
+
+    mixed = asyncio.run(get_state())
+    assert mixed["dailyOperations"] == {
+        "mode": "local_agent",
+        "localAgentSources": ["codex"],
+    }

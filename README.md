@@ -143,12 +143,12 @@ you use:
 
 ```bash
 python -m pip install \
-  "cognifity-verdict[anthropic,openai,google,dashboard]==0.1.0a14" \
-  "cognifity-verdict-eval[semantic]==0.1.0a14" \
-  "cognifity-verdict-inspect==0.1.0a14"
+  "cognifity-verdict[anthropic,openai,google,dashboard]==0.1.0a15" \
+  "cognifity-verdict-eval[semantic]==0.1.0a15" \
+  "cognifity-verdict-inspect==0.1.0a15"
 ```
 
-For a customer proof of concept on `0.1.0a14`, follow the bounded
+For a customer proof of concept on `0.1.0a15`, follow the bounded
 [`POC release profile`](docs/POC_RELEASE_PROFILE.md). It names the provider
 entry points exercised for this release, keeps persistence synchronous, and
 separates a workflow demonstration from a production-readiness claim.
@@ -167,9 +167,9 @@ PostgreSQL store:
 
 ```bash
 python -m pip install \
-  "cognifity-verdict[dashboard,postgres]==0.1.0a14" \
-  "cognifity-verdict-eval==0.1.0a14" \
-  "cognifity-verdict-inspect==0.1.0a14"
+  "cognifity-verdict[dashboard,postgres]==0.1.0a15" \
+  "cognifity-verdict-eval==0.1.0a15" \
+  "cognifity-verdict-inspect==0.1.0a15"
 ```
 
 The `all` extra preserves its existing provider-and-storage dependency set; it
@@ -183,9 +183,9 @@ do not delete or reclone it:
 
 ```bash
 python -m pip install --upgrade \
-  "cognifity-verdict[anthropic,openai,google,dashboard]==0.1.0a14" \
-  "cognifity-verdict-eval[semantic]==0.1.0a14" \
-  "cognifity-verdict-inspect==0.1.0a14"
+  "cognifity-verdict[anthropic,openai,google,dashboard]==0.1.0a15" \
+  "cognifity-verdict-eval[semantic]==0.1.0a15" \
+  "cognifity-verdict-inspect==0.1.0a15"
 
 python -m pip check
 python -c "import verdict, verdict_eval, verdict_inspect; print(verdict.__version__, verdict_eval.__version__, verdict_inspect.__version__)"
@@ -210,7 +210,7 @@ API remains `import verdict`.
 Minimal install without the local semantic model:
 
 ```bash
-python -m pip install "cognifity-verdict-eval==0.1.0a14"  # lexical hash fallback
+python -m pip install "cognifity-verdict-eval==0.1.0a15"  # lexical hash fallback
 ```
 
 The full test suite also needs pytest and the dashboard's HTTP test dependency:
@@ -237,7 +237,7 @@ Install the `telemetry` extra when accepting OTLP protobuf; it is optional for
 JSON files and API readers:
 
 ```bash
-python -m pip install "cognifity-verdict[telemetry,postgres]==0.1.0a14"
+python -m pip install "cognifity-verdict[telemetry,postgres]==0.1.0a15"
 
 # JSON, JSONL, or NDJSON; use --format auto or name the source explicitly.
 verdict-import file ./langsmith-runs.jsonl --format langsmith \
@@ -339,7 +339,7 @@ to be found. Set `capture_content=False` when that residual risk is
 unacceptable. IPv6 validation preserves trailing text that is not part of the
 validated address; clock values such as `12:34:56` are not treated as IPv6. Use
 non-sensitive tenant/session/cluster IDs. `sample_rate`
-controls what fraction of supported calls is retained. The `0.1.0a14` POC
+controls what fraction of supported calls is retained. The `0.1.0a15` POC
 profile keeps `buffered_writes=False`, so a normal process exit cannot strand
 queued telemetry. `buffered_writes=True` moves writes to a background batched
 writer but requires an explicit `shutdown()` imported from `verdict.client`
@@ -428,7 +428,7 @@ Hexagonal / ports-and-adapters, ≥2 adapters per port (one real + in-memory for
   row keeps that bounded page visible and opens provider outcome, evidence
   coverage, response structure, tokens, latency, and supplied cost for the
   individual trace. These judge-free facts do not establish semantic quality.
-- **Published capture coverage in `0.1.0a14`:** the bounded POC profile names
+- **Published capture coverage in `0.1.0a15`:** the bounded POC profile names
   Anthropic
   `messages.create(...)` (including `stream=True`), OpenAI
   `chat.completions.create(...)` and its stream helper, and Google
@@ -499,6 +499,10 @@ Hexagonal / ports-and-adapters, ≥2 adapters per port (one real + in-memory for
   nonoutlier cluster `30.1047%` versus the `30%` maximum), although its other
   quality and stability gates passed. Do not claim general validated semantic
   quality or silently enable it in customer deployments.
+  **Drift → Clusters** exposes first-fit controls even when the registry is
+  empty. An explicit preview counts traces without `verdict.intent_key` as
+  ineligible and shows the reason; it never invents a label. Semantic and
+  hybrid previews remain opt-in and require an approved local model directory.
   The supported exact-key path uses `verdict.intent_context("billing.v1")`,
   followed by the bounded `normalize` (for upgraded stores), `fit --strategy
   explicit`, `assign`, `validate`, and `activate` workflow documented in
@@ -516,10 +520,10 @@ Hexagonal / ports-and-adapters, ≥2 adapters per port (one real + in-memory for
   not activation or drift results. Fragmentation and dominant semantic-cluster
   warnings prompt inspection/refit without changing immutable membership. All
   250 allowed clusters remain visible; nested evidence is limited to the 20
-  highest-volume clusters so the final redaction sink stays bounded. It is
-  read-only unless an authenticated host
-  supplies the existing same-origin Operations adapter; the host owns tenant
-  authorization and every mutation. That host-authorized active registry also
+  highest-volume clusters so the final redaction sink stays bounded. Standalone
+  mode uses its same-origin setup capability for mutations; an authenticated
+  host can instead supply the Operations adapter and owns tenant authorization.
+  The active registry also
   drives cluster labels and assignments in Overview, Trace Explorer, pass-rate
   charts, and drift rows. Semantic/hybrid rows keep the experimental disclosure
   above.
@@ -552,7 +556,7 @@ Hexagonal / ports-and-adapters, ≥2 adapters per port (one real + in-memory for
   prevents a `healthy` status: too few usable examples remain
   `insufficient_data`; otherwise the result is `degraded`.
   Signals retain up to five current-window trace IDs as review evidence.
-- The `0.1.0a14` POC drift demonstration assumes independently sampled calls.
+- The `0.1.0a15` POC drift demonstration assumes independently sampled calls.
   Do not treat repeated turns from the same conversation as independent
   evidence or use that profile for a production decision.
 - The v0 drift runner supports one tenant scope per store and rejects mixed-

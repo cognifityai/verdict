@@ -97,6 +97,8 @@ class Storage(Protocol):
         limit: int = 100,
     ) -> list[AgentRunBundle]: ...
 
+    def has_agent_run_source_kind(self, tenant_id: str, source_kind: str) -> bool: ...
+
     def save_deterministic_analysis_run(
         self, run: DeterministicAnalysisRun,
     ) -> None: ...
@@ -140,6 +142,10 @@ class Storage(Protocol):
     ) -> None: ...
 
     def get_latest_monitor_snapshot(
+        self, policy_id: str
+    ) -> tuple[CohortManifest, MonitorComparison] | None: ...
+
+    def get_initial_monitor_snapshot(
         self, policy_id: str
     ) -> tuple[CohortManifest, MonitorComparison] | None: ...
 

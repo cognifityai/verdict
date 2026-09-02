@@ -783,6 +783,19 @@ class SQLiteStorage:
             ).fetchall()
         return [self._row_to_agent_run_bundle(row) for row in rows]
 
+    def has_agent_run_source_kind(self, tenant_id: str, source_kind: str) -> bool:
+        _validate_agent_bundle_query(tenant_id, 1)
+        if not isinstance(source_kind, str) or not source_kind or len(source_kind) > 64:
+            raise ValueError("invalid source kind")
+        with self._lock:
+            row = self._conn.execute(
+                """SELECT 1 FROM agent_run_bundles WHERE tenant_id=?
+                   AND json_valid(payload_json)
+                   AND json_extract(payload_json,'$.session.source_kind')=? LIMIT 1""",
+                (tenant_id, source_kind),
+            ).fetchone()
+        return row is not None
+
     def save_deterministic_analysis_run(self, run: DeterministicAnalysisRun) -> None:
         payload = analysis_run_to_json(run)
         with self._lock:
@@ -1010,6 +1023,16 @@ class SQLiteStorage:
             row = self._conn.execute(
                 "SELECT payload_json FROM monitor_snapshots WHERE policy_id=? "
                 "ORDER BY rowid DESC LIMIT 1", (policy_id,),
+            ).fetchone()
+        return monitor_snapshot_from_json(row["payload_json"]) if row else None
+
+    def get_initial_monitor_snapshot(
+        self, policy_id: str
+    ) -> tuple[CohortManifest, MonitorComparison] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT payload_json FROM monitor_snapshots WHERE policy_id=? "
+                "ORDER BY rowid ASC LIMIT 1", (policy_id,),
             ).fetchone()
         return monitor_snapshot_from_json(row["payload_json"]) if row else None
 

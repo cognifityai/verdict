@@ -3,6 +3,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 from verdict.dashboard.evaluator_lab import (
+    evaluator_environment,
     execute_calibration,
     execute_evaluation,
     preview_calibration,
@@ -11,6 +12,23 @@ from verdict.dashboard.evaluator_lab import (
 from verdict.schema import Judgment, Trace
 from verdict.storage import InMemoryStorage
 from verdict_eval.providers import CompletionResponse
+
+
+def test_evaluator_environment_reports_openai_compatible_endpoint_without_value(
+    monkeypatch,
+):
+    endpoint = "http://127.0.0.1:11434/v1"
+    monkeypatch.setenv("OPENAI_BASE_URL", endpoint)
+    monkeypatch.setenv("OPENAI_API_KEY", "ollama")
+
+    environment = evaluator_environment()
+    openai = next(
+        item for item in environment["providers"] if item["provider"] == "openai"
+    )
+
+    assert openai["configured"] is True
+    assert openai["customEndpointConfigured"] is True
+    assert endpoint not in str(environment)
 
 
 class CountingProvider:

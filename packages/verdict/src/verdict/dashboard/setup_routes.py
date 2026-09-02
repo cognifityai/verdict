@@ -16,6 +16,7 @@ from fastapi import Request
 from fastapi.responses import JSONResponse
 
 from verdict.dashboard.analysis_service import run_analysis
+from verdict.dashboard.storage_url import is_postgres_storage
 from verdict.telemetry.files import SUPPORTED_FORMATS, iter_telemetry_file
 from verdict.telemetry.local_agents import capture_local_agents
 from verdict.telemetry.model import ImportContext
@@ -26,7 +27,7 @@ LOCAL_SCOPE = "__verdict_local__"
 
 
 def _is_postgres(storage_url: str) -> bool:
-    return storage_url.startswith(("postgres://", "postgresql://"))
+    return is_postgres_storage(storage_url)
 
 
 def _sqlite_path(storage_url: str) -> Path:

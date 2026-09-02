@@ -9,7 +9,9 @@ from __future__ import annotations
 import os
 import threading
 import time
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from hashlib import sha256
 from uuid import uuid4
 
 import pytest
@@ -25,6 +27,7 @@ from verdict.instrumentors.base import apply_routing_context, persist_trace
 from verdict.monitoring import (
     AnalysisUnitRecord,
     MonitorPolicy,
+    MonitorStatus,
     compare_manifest,
     plan_historical_manifest,
     plan_prospective_manifest,
@@ -275,6 +278,8 @@ def test_live_postgres_agent_run_bundle_is_atomic_redacted_and_tenant_scoped():
         assert loaded.turns[0].user_request_redacted == "email <EMAIL>"
         assert storage.get_agent_run_bundle(f"other-{tenant}", bundle.run.run_id) is None
         assert storage.list_agent_run_bundles(tenant, limit=10) == [loaded]
+        assert storage.has_agent_run_source_kind(tenant, "unknown-agent") is True
+        assert storage.has_agent_run_source_kind(tenant, "codex") is False
     finally:
         storage._exec("DELETE FROM agent_run_bundles WHERE tenant_id = %s", (tenant,))
         storage.close()
@@ -305,6 +310,17 @@ def test_live_postgres_monitor_policy_activation_and_snapshot():
         storage.save_monitor_snapshot(first.policy_id, manifest, comparison)
         storage.save_monitor_snapshot(first.policy_id, manifest, comparison)
         assert storage.get_latest_monitor_snapshot(first.policy_id) == (manifest, comparison)
+        alert = replace(comparison, status=MonitorStatus.ALERT)
+        alert_manifest = replace(
+            manifest, snapshot_id=sha256(f"alert-{suffix}".encode()).hexdigest()
+        )
+        storage.save_monitor_snapshot(first.policy_id, alert_manifest, alert)
+        assert storage.get_latest_monitor_alert(first.policy_id) == (
+            alert_manifest, alert,
+        )
+        assert storage.get_initial_monitor_snapshot(first.policy_id) == (
+            manifest, comparison,
+        )
         with pytest.raises(ValueError, match="does not match policy"):
             storage.save_monitor_snapshot(second.policy_id, manifest, comparison)
         collecting = plan_prospective_manifest(manifest, (), first)

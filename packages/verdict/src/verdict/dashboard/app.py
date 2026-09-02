@@ -43,6 +43,7 @@ from verdict.dashboard.registry import (
 from verdict.dashboard.registry import (
     build_registry_bundle as _build_registry_bundle,
 )
+from verdict.dashboard.storage_url import is_postgres_storage
 from verdict.dashboard.trace_facts import deterministic_trace_facts
 from verdict.evidence import agent_run_bundle_from_json
 from verdict.metrics import ScoreCounts, verdict_label
@@ -351,9 +352,7 @@ def _sqlite_path(storage: str) -> Path:
 
 
 def _is_postgres(storage: str) -> bool:
-    return storage.startswith(("postgres://", "postgresql://")) or (
-        "=" in storage and "://" not in storage
-    )
+    return is_postgres_storage(storage)
 
 
 # --------------------------------------------------------------------------- #

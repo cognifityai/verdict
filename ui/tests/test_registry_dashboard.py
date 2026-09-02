@@ -65,6 +65,57 @@ def _active_explicit_registry(
     return service, version.version_id
 
 
+def test_empty_dashboard_can_fit_review_validate_and_activate_first_registry(tmp_path):
+    path = tmp_path / "first-registry.db"
+    storage = SQLiteStorage(str(path))
+    cutoff = datetime(2026, 9, 2, tzinfo=timezone.utc)
+    storage.insert_trace(_trace("__verdict_local__", "eligible", cutoff, "billing"))
+    storage.insert_trace(_trace("__verdict_local__", "missing", cutoff, None))
+    storage.close()
+
+    async def lifecycle():
+        app = create_app(storage=f"sqlite:///{path}")
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            headers = {"X-Verdict-Setup": token}
+            empty = await client.get("/api/registry")
+            fitted = await client.post(
+                "/api/clusters/fit", headers=headers, json={"strategy": "explicit"}
+            )
+            candidate = await client.get("/api/registry")
+            version_id = fitted.json()["versionId"]
+            validated = await client.post(
+                "/api/clusters/validate",
+                headers=headers,
+                json={"versionId": version_id},
+            )
+            activation = await client.post(
+                "/api/clusters/activate",
+                headers=headers,
+                json={"versionId": version_id, "expectedGeneration": 0},
+            )
+            active = await client.get("/api/registry")
+            return empty, fitted, candidate, validated, activation, active
+
+    empty, fitted, candidate, validated, activation, active = asyncio.run(lifecycle())
+    assert empty.json()["status"] == "empty"
+    assert fitted.status_code == 200
+    assert candidate.json()["counts"] == {
+        "assigned": 1, "outlier": 0, "ineligible": 1, "total": 2,
+    }
+    missing = next(
+        item for item in candidate.json()["assignments"]
+        if item["traceId"] == "missing"
+    )
+    assert missing["reason"] == "missing_intent_key"
+    assert validated.json()["report"]["passed"] is True
+    assert activation.status_code == 200
+    assert active.json()["selectedVersion"]["active"] is True
+
+
 def test_registry_api_uses_host_authorized_tenant_and_explains_terminal_membership(
     tmp_path,
 ) -> None:

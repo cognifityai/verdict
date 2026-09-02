@@ -61,19 +61,23 @@ export function ControlCenter({ configUrl, onNavigate = null }) {
   const reviews = new Set(documents.filter((item) => item.kind === "review" && item.state === "resolved").map((item) => item.documentId));
   const openReviews = (data?.reviewQueue || []).filter((item) => !reviews.has(reviewId(item)));
   const signalText = Object.entries(data?.userSignals?.counts || {}).map(([name, count]) => `${name}: ${count}`).join(" · ") || "No user signals captured";
+  const localAgentOperations = data?.dailyOperations?.mode === "local_agent";
 
   return <div className="max-w-6xl space-y-5">
     {error && <div role="alert" className="border p-4" style={{ ...panel, color: color.red }}><AlertTriangle size={15} className="inline mr-2" />{error}</div>}
     <section className="border p-5" style={panel}>
       <div className="flex justify-between gap-3"><div><div className="text-xs font-mono" style={{ color: color.green }}>DAILY OPERATIONS</div><h2 className="text-lg font-semibold mt-1">Rescan, analyze and notify</h2></div><button onClick={load} className="border p-2" style={{ borderColor: color.border }}><RefreshCw size={14} /></button></div>
-      <div className="grid sm:grid-cols-3 gap-3 mt-4">
-        <Field label="Interval hours"><input type="number" min="1" max="168" value={schedule.intervalHours} onChange={(event) => setSchedule({ ...schedule, intervalHours: Number(event.target.value) })} /></Field>
-        <Field label="Claude history"><input value={schedule.claudeRoot} onChange={(event) => setSchedule({ ...schedule, claudeRoot: event.target.value })} /></Field>
-        <Field label="Codex history"><input value={schedule.codexRoot} onChange={(event) => setSchedule({ ...schedule, codexRoot: event.target.value })} /></Field>
-      </div>
-      <label className="flex gap-2 text-sm mt-3"><input type="checkbox" checked={schedule.runMonitor} onChange={(event) => setSchedule({ ...schedule, runMonitor: event.target.checked })} />Run the active monitor after each content-on rescan</label>
-      <div className="flex flex-wrap gap-2 mt-4"><Button busy={busy === "schedule:daily"} onClick={() => save("schedule", "daily", "active", schedule)}>Save schedule</Button><Button busy={busy === "run"} onClick={() => post("/api/control/actions/run-schedule", schedule, "run")}><ArrowRight size={13} />Run cycle now</Button></div>
-      <p className="text-xs mt-3" style={{ color: color.sub }}>Unlike one-time manual preview approval, the saved daily schedule intentionally retains these local source paths as durable configuration. Use <code>verdict-service</code> for a continuously running worker; this button executes the same capture → persisted analysis → optional monitor cycle once.</p>
+      {data && (localAgentOperations ? <>
+        <div className="text-xs mt-3" style={{ color: color.sub }}>Local sources: {(data.dailyOperations.localAgentSources || []).join(" · ") || "saved schedule"}</div>
+        <div className="grid sm:grid-cols-3 gap-3 mt-4">
+          <Field label="Interval hours"><input type="number" min="1" max="168" value={schedule.intervalHours} onChange={(event) => setSchedule({ ...schedule, intervalHours: Number(event.target.value) })} /></Field>
+          <Field label="Claude history"><input value={schedule.claudeRoot || ""} onChange={(event) => setSchedule({ ...schedule, claudeRoot: event.target.value })} /></Field>
+          <Field label="Codex history"><input value={schedule.codexRoot || ""} onChange={(event) => setSchedule({ ...schedule, codexRoot: event.target.value })} /></Field>
+        </div>
+        <label className="flex gap-2 text-sm mt-3"><input type="checkbox" checked={schedule.runMonitor === true} onChange={(event) => setSchedule({ ...schedule, runMonitor: event.target.checked })} />Run the active monitor after each content-on rescan</label>
+        <div className="flex flex-wrap gap-2 mt-4"><Button busy={busy === "schedule:daily"} onClick={() => save("schedule", "daily", "active", schedule)}>Save schedule</Button><Button busy={busy === "run"} onClick={() => post("/api/control/actions/run-schedule", schedule, "run")}><ArrowRight size={13} />Run cycle now</Button></div>
+        <p className="text-xs mt-3" style={{ color: color.sub }}>The saved daily schedule retains these local source paths as durable configuration. Use <code>verdict-service</code> for a continuously running worker; this button executes the same capture → persisted analysis → optional monitor cycle once.</p>
+      </> : <div className="border p-4 mt-4 text-sm" style={{ borderColor: color.border, color: color.sub }}>This workspace contains imported or instrumented telemetry, not a local Claude Code or Codex history source. Re-import telemetry from Data sources or keep sending instrumented traces; local history paths are intentionally hidden.</div>)}
     </section>
 
     <div className="grid lg:grid-cols-2 gap-5">

@@ -122,6 +122,9 @@ def test_latest_snapshot_is_the_last_saved_when_event_cutoff_does_not_advance(st
     assert storage.get_latest_monitor_snapshot(policy.policy_id) == (
         collecting, collecting_result,
     )
+    assert storage.get_initial_monitor_snapshot(policy.policy_id) == (
+        manifest, comparison,
+    )
 
 
 def test_prior_alert_remains_queryable_after_later_insufficient_snapshot(storage) -> None:

@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from verdict.dashboard.storage_url import is_postgres_storage
+
 KINDS = {"settings", "schedule", "alert", "proposal", "review"}
 STATES = {
     "settings": {"active"},
@@ -103,7 +105,7 @@ class ControlStore:
 
     def __init__(self, storage: str) -> None:
         self.storage = storage
-        self.postgres = storage.startswith("postgresql://") or storage.startswith("postgres://")
+        self.postgres = is_postgres_storage(storage)
 
     def _connect(self):
         if self.postgres:

@@ -126,6 +126,22 @@ function ActionButton({ children, disabled, onClick, running }) {
   );
 }
 
+function FitPreviewForm({ operations, running, strategy, setStrategy, targetWorkload, setTargetWorkload, modelPath, setModelPath, onRun }) {
+  return (
+    <div className="p-3" style={{ background: COLOR.panel2 }}>
+      <div className="text-xs font-mono" style={{ color: COLOR.faint }}>NEW PREVIEW</div>
+      <div className="flex flex-wrap gap-2 mt-2">
+        <select aria-label="Fit strategy" value={strategy} onChange={(event) => setStrategy(event.target.value)} className="px-2 py-2 border text-xs" style={{ color: COLOR.text, background: COLOR.panel, borderColor: COLOR.border }}>
+          <option value="explicit">Explicit (supported)</option><option value="semantic">Semantic (experimental)</option><option value="hybrid">Hybrid (experimental fallback)</option>
+        </select>
+        <input aria-label="Optional workload filter" value={targetWorkload} onChange={(event) => setTargetWorkload(event.target.value)} placeholder="All eligible traces" maxLength={64} className="px-2 py-2 border text-xs min-w-40" style={{ color: COLOR.text, background: COLOR.panel, borderColor: COLOR.border }} />
+        <ActionButton disabled={!operations?.available || (strategy !== "explicit" && !modelPath)} running={running === "cluster_fit"} onClick={() => onRun("cluster_fit", { strategy, target_workload: targetWorkload || null, model_path: modelPath || null })}>Fit preview</ActionButton>
+      </div>
+      {strategy !== "explicit" && <label className="block text-xs mt-3" style={{ color: COLOR.sub }}>Approved local frozen MiniLM directory<input aria-label="Semantic model path" value={modelPath} onChange={(event) => setModelPath(event.target.value)} placeholder="/path/to/all-MiniLM-L6-v2" className="block w-full mt-1 px-2 py-2 border" style={{ color: COLOR.text, background: COLOR.panel, borderColor: COLOR.border }} /></label>}
+    </div>
+  );
+}
+
 function ReadinessTerm({ label, value }) {
   const known = typeof value === "boolean";
   const color = value === true ? COLOR.green : value === false ? COLOR.red : COLOR.faint;
@@ -173,7 +189,7 @@ export function RegistryView({ data, operations, onRun, onVersion, onPage, onRef
     );
   }
   if (data.status === "empty") {
-    return <Panel className="p-6"><div className="font-semibold">No registry versions yet</div><div className="text-sm mt-1" style={{ color: COLOR.sub }}>Fit a deliberate explicit, semantic, or hybrid preview before activation.</div></Panel>;
+    return <Panel className="p-6"><div className="font-semibold">No registry versions yet</div><div className="text-sm mt-1 mb-4" style={{ color: COLOR.sub }}>Fit a deliberate explicit, semantic, or hybrid preview before activation. Explicit grouping requires a captured <code>verdict.intent_key</code>; semantic grouping requires an approved local model directory.</div><FitPreviewForm operations={operations} running={operations?.running} strategy={strategy} setStrategy={setStrategy} targetWorkload={targetWorkload} setTargetWorkload={setTargetWorkload} modelPath={modelPath} setModelPath={setModelPath} onRun={onRun} /></Panel>;
   }
 
   const selected = data.selectedVersion;
@@ -218,6 +234,8 @@ export function RegistryView({ data, operations, onRun, onVersion, onPage, onRef
         <Panel className="p-4"><div className="text-xs font-mono" style={{ color: COLOR.faint }}>ACTIVATION CHECKS</div><div className="text-lg font-semibold mt-2" style={{ color: data.readiness.passed ? COLOR.green : COLOR.amber }}>{data.readiness.passed ? "Mechanically passed" : data.readiness.status.replaceAll("_", " ")}</div></Panel>
       </div>
 
+      {data.counts.assigned === 0 && data.counts.ineligible > 0 && <div role="status" className="p-4 border flex items-start gap-3" style={{ borderColor: "#6b5529", background: COLOR.amberBg }}><AlertTriangle size={16} style={{ color: COLOR.amber, flexShrink: 0 }} /><div className="text-sm"><span className="font-semibold" style={{ color: COLOR.amber }}>No traces were assigned.</span> This version left {data.counts.ineligible.toLocaleString()} trace(s) ineligible. Explicit grouping only uses a captured <code>verdict.intent_key</code>; choose semantic grouping with an approved local model only when prompt evidence is available, or inspect the member explanations below.</div></div>}
+
       <Panel className="p-4">
         <div className="font-semibold text-sm flex items-center gap-2"><CheckCircle2 size={15} style={{ color: data.readiness.passed ? COLOR.green : COLOR.amber }} />Mechanical activation checks</div>
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-2 mt-3">
@@ -256,16 +274,7 @@ export function RegistryView({ data, operations, onRun, onVersion, onPage, onRef
         <div className="flex items-center gap-2 font-semibold text-sm"><GitBranch size={15} style={{ color: COLOR.blue }} />Registry controls</div>
         {!operations?.available && <div className="text-xs mt-2" style={{ color: COLOR.faint }}>Read-only dashboard. An authenticated host operations adapter is required for mutations.</div>}
         <div className="grid lg:grid-cols-2 gap-4 mt-3">
-          <div className="p-3" style={{ background: COLOR.panel2 }}>
-            <div className="text-xs font-mono" style={{ color: COLOR.faint }}>NEW PREVIEW</div>
-            <div className="flex flex-wrap gap-2 mt-2">
-              <select aria-label="Fit strategy" value={strategy} onChange={(event) => setStrategy(event.target.value)} className="px-2 py-2 border text-xs" style={{ color: COLOR.text, background: COLOR.panel, borderColor: COLOR.border }}>
-                <option value="explicit">Explicit (supported)</option><option value="semantic">Semantic (experimental)</option><option value="hybrid">Hybrid (experimental fallback)</option>
-              </select>
-              <input aria-label="Optional workload filter" value={targetWorkload} onChange={(event) => setTargetWorkload(event.target.value)} placeholder="All eligible traces" maxLength={64} className="px-2 py-2 border text-xs min-w-40" style={{ color: COLOR.text, background: COLOR.panel, borderColor: COLOR.border }} />
-              <ActionButton disabled={!operations?.available || (strategy !== "explicit" && !modelPath)} running={running === "cluster_fit"} onClick={() => onRun("cluster_fit", { strategy, target_workload: targetWorkload || null, model_path: modelPath || null })}>Fit preview</ActionButton>
-            </div>
-          </div>
+          <FitPreviewForm operations={operations} running={running} strategy={strategy} setStrategy={setStrategy} targetWorkload={targetWorkload} setTargetWorkload={setTargetWorkload} modelPath={modelPath} setModelPath={setModelPath} onRun={onRun} />
           <div className="p-3" style={{ background: COLOR.panel2 }}>
             <div className="text-xs font-mono" style={{ color: COLOR.faint }}>VERSION LIFECYCLE</div>
             <div className="flex flex-wrap gap-2 mt-2">

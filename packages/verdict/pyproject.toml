@@ -1,6 +1,6 @@
 [project]
 name = "cognifity-verdict"
-version = "0.1.0a14"
+version = "0.1.0a15"
 description = "Verdict — open-source LLM observability & drift detection SDK"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -34,7 +34,7 @@ telemetry = [
     "opentelemetry-proto>=1.30,<2",
     "protobuf>=5,<7",
 ]
-eval = ["cognifity-verdict-eval==0.1.0a14"]
+eval = ["cognifity-verdict-eval==0.1.0a15"]
 
 # NOTE: Redaction is built in (pattern scanners + Luhn; see redaction.py) and
 # needs no extra dependencies. Presidio-based redaction is a planned option,

@@ -68,12 +68,19 @@ class MonitorRoutes:
         return MonitorPolicy(**values)
 
     @staticmethod
-    def response(policy, state, manifest, comparison) -> dict[str, object]:
-        return {
+    def response(
+        policy, state, manifest, comparison, *, approved_historical=None,
+    ) -> dict[str, object]:
+        result = {
             "policy": json.loads(monitor_policy_to_json(policy)),
             "state": state,
             "snapshot": json.loads(monitor_snapshot_to_json(manifest, comparison)),
         }
+        if approved_historical is not None:
+            result["approvedHistoricalSnapshot"] = json.loads(
+                monitor_snapshot_to_json(*approved_historical)
+            )
+        return result
 
     @staticmethod
     def bounded_units(writable, policy):
@@ -164,7 +171,10 @@ class MonitorRoutes:
                     writable, policy, historical[0]
                 )
                 writable.save_monitor_snapshot(policy_id, manifest, comparison)
-                return self.response(policy, "active", manifest, comparison)
+                return self.response(
+                    policy, "active", manifest, comparison,
+                    approved_historical=historical,
+                )
             except (OSError, TypeError, UnicodeError, ValueError):
                 return JSONResponse(
                     {"error": "invalid monitor activation"}, status_code=400
@@ -192,7 +202,12 @@ class MonitorRoutes:
                     raise ValueError("active monitor has no snapshot")
                 manifest, comparison = self.prospective(writable, policy, previous[0])
                 writable.save_monitor_snapshot(policy.policy_id, manifest, comparison)
-                return self.response(policy, "active", manifest, comparison)
+                return self.response(
+                    policy, "active", manifest, comparison,
+                    approved_historical=writable.get_initial_monitor_snapshot(
+                        policy.policy_id
+                    ),
+                )
             except (OSError, TypeError, UnicodeError, ValueError):
                 return JSONResponse({"error": "monitor run unavailable"}, status_code=400)
             finally:
@@ -211,7 +226,12 @@ class MonitorRoutes:
                     return {"state": "not_configured"}
                 snapshot = writable.get_latest_monitor_snapshot(policy.policy_id)
                 return (
-                    self.response(policy, "active", *snapshot)
+                    self.response(
+                        policy, "active", *snapshot,
+                        approved_historical=writable.get_initial_monitor_snapshot(
+                            policy.policy_id
+                        ),
+                    )
                     if snapshot
                     else {"state": "active_without_snapshot"}
                 )

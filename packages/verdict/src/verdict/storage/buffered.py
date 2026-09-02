@@ -408,6 +408,11 @@ class BufferedStorage:
             limit=limit,
         )
 
+    def has_agent_run_source_kind(self, tenant_id: str, source_kind: str) -> bool:
+        return self._read(
+            self._inner.has_agent_run_source_kind, tenant_id, source_kind,
+        )
+
     def get_latest_deterministic_analysis_run(
         self, tenant_id: str, scope_key: str,
     ) -> DeterministicAnalysisRun | None:
@@ -457,6 +462,11 @@ class BufferedStorage:
         self, policy_id: str
     ) -> tuple[CohortManifest, MonitorComparison] | None:
         return self._read(self._inner.get_latest_monitor_snapshot, policy_id)
+
+    def get_initial_monitor_snapshot(
+        self, policy_id: str
+    ) -> tuple[CohortManifest, MonitorComparison] | None:
+        return self._read(self._inner.get_initial_monitor_snapshot, policy_id)
 
     def get_latest_monitor_alert(self, policy_id: str):
         return self._read(self._inner.get_latest_monitor_alert, policy_id)

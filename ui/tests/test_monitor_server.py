@@ -54,6 +54,7 @@ def test_monitor_preview_activation_and_prospective_run(tmp_path):
     assert activate.json()["snapshot"]["manifest"]["comparison_index"] == 1
     assert state.json()["state"] == "active"
     assert state.json()["snapshot"]["comparison"]["status"] == "insufficient"
+    assert state.json()["approvedHistoricalSnapshot"] == preview.json()["snapshot"]
 
     _insert_traces(database, 3, start=50)
 
@@ -92,6 +93,7 @@ def test_monitor_preview_activation_and_prospective_run(tmp_path):
     assert completed_snapshot["manifest"]["current_unit_ids"] == [
         "trace-050", "trace-051", "trace-052", "trace-053", "trace-054",
     ]
+    assert completed.json()["approvedHistoricalSnapshot"] == preview.json()["snapshot"]
 
 
 def test_monitor_rejects_outcome_seeking_or_invalid_window_parameters(tmp_path):
@@ -109,6 +111,28 @@ def test_monitor_rejects_outcome_seeking_or_invalid_window_parameters(tmp_path):
             )
 
     assert asyncio.run(invalid_preview()).status_code == 400
+
+
+def test_cluster_grouping_without_active_registry_is_a_bounded_request_error(tmp_path):
+    database = tmp_path / "verdict.db"
+    _insert_traces(database, 5)
+
+    async def preview_without_registry():
+        app = create_app(storage=f"sqlite:///{database}")
+        transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            return await client.post(
+                "/api/monitor/preview",
+                headers={"X-Verdict-Setup": token},
+                json={"groupingMode": "cluster"},
+            )
+
+    response = asyncio.run(preview_without_registry())
+    assert response.status_code == 400
+    assert response.json() == {"error": "invalid monitor request"}
 
 
 def test_monitor_accepts_ordered_explicit_event_time_windows(tmp_path):
