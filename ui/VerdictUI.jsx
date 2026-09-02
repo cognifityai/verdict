@@ -824,7 +824,7 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
             </span>
           </div>
         )}
-        {tab === "setup" && <SetupWizard configUrl={mountedConfigUrl()} agentSummary={DATA.meta} onNavigate={(destination) => destination === "explore" ? commitRoute({ ...route, tab: "drift", driftSection: "explore" }) : setTab(destination)} onComplete={(setupSource) => { onReload(); setTab(setupSource === "local" ? "runs" : "overview"); }} />}
+        {tab === "setup" && <SetupWizard configUrl={mountedConfigUrl()} agentSummary={DATA.meta} onRefresh={onReload} onNavigate={(destination) => destination === "explore" ? commitRoute({ ...route, tab: "drift", driftSection: "explore" }) : setTab(destination)} onComplete={(setupSource) => { onReload(); setTab(setupSource === "local" ? "runs" : "overview"); }} />}
         {tab === "insights" && <Insights url={mountedInsightsUrl()} onOpenRuns={openFindingRun} />}
         {tab === "reliability" && <Insights url={mountedInsightsUrl()} onOpenRuns={openFindingRun} mode="reliability" />}
         {tab === "performance" && <Insights url={mountedInsightsUrl()} onOpenRuns={openFindingRun} mode="performance" />}

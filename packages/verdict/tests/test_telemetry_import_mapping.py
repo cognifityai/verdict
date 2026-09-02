@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 
 import pytest
@@ -172,6 +173,42 @@ def test_otlp_maps_genai_and_openinference_spans_without_copying_unknown_metadat
     assert second.output_tokens == 4
     assert second.prompt_redacted == "Cancel order 8"
     assert second.response_redacted == "Cancelled."
+
+
+def test_otlp_maps_text_from_message_parts_without_inventing_tool_content() -> None:
+    payload = {
+        "resourceSpans": [{"scopeSpans": [{"spans": [{
+            "traceId": "c" * 32,
+            "spanId": "3" * 16,
+            "name": "chat model",
+            "startTimeUnixNano": "1788264000000000000",
+            "attributes": _otel_attributes({
+                "gen_ai.operation.name": "chat",
+                "gen_ai.request.model": "model",
+                "gen_ai.input.messages": json.dumps([{
+                    "role": "user",
+                    "parts": [{"type": "text", "content": "Use the evidence."}],
+                }]),
+                "gen_ai.output.messages": json.dumps([{
+                    "role": "assistant",
+                    "parts": [
+                        {"type": "text", "content": "First line."},
+                        {"type": "tool_call", "content": "must-not-become-response"},
+                        {"type": "output_text", "text": "Second line."},
+                    ],
+                }]),
+            }),
+        }]}]}],
+    }
+
+    mapped = map_otlp_payload(payload, _context("otlp"))
+
+    assert len(mapped) == 1
+    trace = mapped[0].trace
+    assert trace is not None
+    assert trace.prompt_redacted == "Use the evidence."
+    assert trace.response_redacted == "First line.\nSecond line."
+    assert "must-not-become-response" not in repr(trace)
 
 
 def test_otlp_skips_non_llm_and_missing_identity_instead_of_inventing_records() -> None:

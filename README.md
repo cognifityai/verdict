@@ -81,6 +81,13 @@ separately from evaluation states: `not evaluated`, `judge error`, `pass`,
 `fail`, or `unclear`. No drift conclusion is shown until a comparison is
 persisted.
 
+Historical imports performed by the local setup UI enter the same local
+workspace used by analysis and Evaluator Lab. Judge-free trace analysis reports
+provider success/failure, evidence coverage, operation and finish-reason
+counts, tokens, latency, supplied cost, and structural response signatures.
+Agent Run outcomes remain unavailable when the imported source contains LLM
+traces but no run/turn/event hierarchy.
+
 The equivalent non-interactive local import is:
 
 ```bash

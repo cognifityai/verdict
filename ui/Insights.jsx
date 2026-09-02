@@ -37,9 +37,14 @@ export function Insights({ url, onOpenRuns, mode = "findings" }) {
   const data = state.data;
   const analysisState = data.analysisState || { status: "never_run" };
   const counts = data.dataHealth.counts;
+  const traceEvidence = data.dataHealth.traceEvidence || { judgeEligible: 0, notEvaluable: 0 };
   if (mode === "reliability") return <ProductView title="Reliability" intro="Deterministic execution outcomes from captured evidence; no judge is required." rows={[
-    ["Run outcomes", displayCounts(data.reliability.runOutcomes)], ["Turn outcomes", displayCounts(data.reliability.turnOutcomes)],
+    ["LLM trace outcomes", displayCounts(data.reliability.traceOutcomes)],
+    ["Agent Run outcomes", counts.runs ? displayCounts(data.reliability.runOutcomes) : "Not available — no Agent Runs captured"],
+    ["Agent turn outcomes", counts.turns ? displayCounts(data.reliability.turnOutcomes) : "Not available — no Agent Runs captured"],
     ["Tool errors", data.reliability.toolErrors], ["Command failures", data.reliability.commandFailures],
+    ["Judge-eligible traces", traceEvidence.judgeEligible],
+    ["Traces without judge evidence", traceEvidence.notEvaluable],
   ]} comparisons={data.modelComparisons} />;
   if (mode === "performance") return <ProductView title="Performance" intro="Token, latency and priced-cost coverage for genuine model-call traces." rows={[
     ["Model calls", data.performance.modelCalls], ["Input tokens", data.performance.inputTokens],
@@ -62,7 +67,7 @@ export function Insights({ url, onOpenRuns, mode = "findings" }) {
     {!data.scope.complete && <Notice icon={AlertTriangle} color={C.amber}>This view is partial: {data.scope.analyzedRuns} of {data.scope.availableRuns} runs were analyzed.</Notice>}
     <section className="border p-5" style={{ borderColor: C.border, background: C.panel }}>
       <div className="flex flex-wrap items-start justify-between gap-3">
-        <div><div className="text-xs font-mono" style={{ color: C.green }}>WHAT NEEDS ATTENTION</div><h2 className="text-lg font-semibold mt-1">Findings across captured agent runs</h2></div>
+        <div><div className="text-xs font-mono" style={{ color: C.green }}>WHAT NEEDS ATTENTION</div><h2 className="text-lg font-semibold mt-1">Findings across captured evidence</h2></div>
         <div className="flex gap-2"><button onClick={load} className="border px-3 py-2 text-xs" style={{ borderColor: C.border }}><RefreshCw size={13} className="inline mr-2" />Refresh view</button><button disabled={running} onClick={runAnalysis} className="border px-3 py-2 text-xs" style={{ borderColor: C.green, color: C.green }}>{running ? "Analyzing…" : "Analyze latest evidence"}</button></div>
       </div>
       <div className="mt-4 space-y-2">

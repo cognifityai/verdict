@@ -88,6 +88,10 @@ or imputes missing token, latency, cost, model, session, or content fields. See
 the repository's `examples/telemetry/README.md` for exact source contracts and
 privacy limits; ADR-006 records only the architectural boundary.
 
+OTLP message objects may provide text in `content`, `text`, or typed text
+`parts`. Verdict joins genuine text parts in order and ignores unsupported
+tool-only parts rather than presenting them as an assistant response.
+
 The Langfuse reader targets the supported v4 Observations API v2, not the
 deprecated trace-list endpoint, so Verdict receives one record per actual
 generation or embedding rather than a trace aggregate.

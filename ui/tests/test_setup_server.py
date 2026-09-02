@@ -171,16 +171,37 @@ def test_setup_uses_canonical_historical_file_import(tmp_path):
                 "/api/setup/import", headers={"X-Verdict-Setup": token},
                 json={"path": str(export), "format": "voice"},
             )
+            evaluator_preview = await client.post(
+                "/api/evaluators/preview",
+                headers={"X-Verdict-Setup": token},
+                json={
+                    "provider": "anthropic", "model": "claude-haiku-4-5",
+                    "maxCalls": "all", "maxOutputTokens": 256,
+                    "rubric": {
+                        "name": "poc", "version": "1",
+                        "dimensions": [{
+                            "name": "relevance",
+                            "description": "Directly answers the request.",
+                        }],
+                    },
+                },
+            )
             dashboard = await client.get("/api/data")
-            return imported, dashboard
+            return imported, evaluator_preview, dashboard
 
-    response, dashboard = asyncio.run(setup())
+    response, evaluator_preview, dashboard = asyncio.run(setup())
     assert response.status_code == 200
     assert response.json()["summary"]["stored"] == 1
     assert dashboard.json()["meta"]["totalTraces"] == 1
     assert dashboard.json()["meta"]["totalAgentRuns"] == 0
+    assert evaluator_preview.status_code == 200
+    assert evaluator_preview.json()["availableTraces"] == 1
+    assert evaluator_preview.json()["eligible"] == 1
+    assert evaluator_preview.json()["plannedCalls"] == 1
     storage = SQLiteStorage(str(database))
-    assert len(storage.list_traces(limit=10)) == 1
+    traces = storage.list_traces(limit=10)
+    assert len(traces) == 1
+    assert traces[0].tenant_id == "__verdict_local__"
     storage.close()
 
 
