@@ -59,6 +59,15 @@ the customer POC profile is refined.
   typed text parts are retained as bounded response evidence, and Evaluator Lab
   distinguishes all-trace selection from an explicit numeric call limit.
 
+### Fixed
+
+- Dashboard section help now opens as a visible mouse, keyboard, and click
+  tooltip instead of relying on a browser title attribute.
+- Selecting a Trace Explorer row keeps the bounded trace page visible while
+  opening its detail. Trace detail now reports the same judge-free evidence and
+  structural facts used by dataset-wide Reliability, Performance, and Behavior
+  analysis.
+
 ### Security
 
 - Setup writes require a process-local same-origin token, local source paths

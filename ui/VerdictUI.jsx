@@ -633,6 +633,38 @@ const TAB_HELP = {
   behavior: "Behavior shows structural response indicators such as refusal, apology, hedging, and JSON signatures. These are not semantic quality judgments.",
 };
 
+function TabHelp({ tab, label, text }) {
+  const [open, setOpen] = useState(false);
+  const tooltipId = `tab-help-${tab}`;
+  return <span className="relative inline-flex" onMouseEnter={() => setOpen(true)} onMouseLeave={() => setOpen(false)}>
+    <button
+      type="button"
+      aria-label={`About ${label}`}
+      aria-describedby={tooltipId}
+      aria-expanded={open}
+      onFocus={() => setOpen(true)}
+      onBlur={() => setOpen(false)}
+      onClick={() => setOpen(true)}
+      onKeyDown={(event) => { if (event.key === "Escape") setOpen(false); }}
+      className="inline-flex p-1"
+      style={{ color: open ? C.accent2 : C.faint }}
+    >
+      <Info size={15} />
+    </button>
+    {open && <span
+      id={tooltipId}
+      role="tooltip"
+      className="absolute text-xs p-3"
+      style={{
+        top: "calc(100% + 6px)", left: 0, zIndex: 40,
+        width: "min(320px, calc(100vw - 48px))", color: C.text,
+        background: C.panel2, border: `1px solid ${C.border}`,
+        borderRadius: 3, boxShadow: "0 12px 32px rgba(0,0,0,.45)",
+      }}
+    >{text}</span>}
+  </span>;
+}
+
 function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluatorChange, onTracePageChange, onTraceFilterChange, traceOffset = 0, reloading, loadError, operationsUrl = null }) {
   const DATA = data;
   const initialRoute = useRef(parseDashboardRoute(
@@ -760,7 +792,7 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
         <div className="mb-5 flex flex-col sm:flex-row sm:items-end justify-between gap-3">
           <div>
             <div className="text-xs font-mono" style={{ color: C.accent }}>{workloadLabel}</div>
-            <div className="flex items-center gap-2 mt-1"><h1 className="font-semibold" style={{ fontSize: 22, letterSpacing: 0 }}>{nav.find((n) => n.id === tab).label}</h1>{TAB_HELP[tab] && <button aria-label={`About ${nav.find((n) => n.id === tab).label}`} title={TAB_HELP[tab]} className="inline-flex" style={{ color: C.faint }}><Info size={15} /></button>}</div>
+            <div className="flex items-center gap-2 mt-1"><h1 className="font-semibold" style={{ fontSize: 22, letterSpacing: 0 }}>{nav.find((n) => n.id === tab).label}</h1>{TAB_HELP[tab] && <TabHelp tab={tab} label={nav.find((n) => n.id === tab).label} text={TAB_HELP[tab]} />}</div>
           </div>
           {source === "sample" && (
             <div className="max-w-full flex items-start gap-2 text-xs px-3 py-2 border" style={{ borderColor: "#6b5529", background: C.amberBg, color: C.amber, borderRadius: 3 }}>
@@ -1407,6 +1439,12 @@ function TraceDetail({ s, onClose }) {
   const judgeLabel = judgeStatus === "judge_error" ? "Judge error"
     : judgeStatus === "not_judged" ? "Not evaluated"
       : `Judge ${judgeStatus}`;
+  const facts = s.deterministicFacts || null;
+  const evidenceReason = {
+    provider_call_failed: "Provider call failed",
+    prompt_not_captured: "Prompt evidence missing",
+    response_not_captured: "Response evidence missing",
+  }[facts?.notEvaluableReason] || facts?.notEvaluableReason;
   return (
     <Panel className="overflow-hidden sticky top-20">
       <div className="flex items-center justify-between px-4 py-3 border-b" style={{ borderColor: C.border }}>
@@ -1450,6 +1488,26 @@ function TraceDetail({ s, onClose }) {
             Provider failure: {s.error}
           </div>
         )}
+        <div className="p-3" style={{ background: C.panel2, border: `1px solid ${C.border}`, borderRadius: 3 }}>
+          <div className="text-xs font-mono" style={{ color: C.accent2 }}>JUDGE-FREE TRACE FACTS</div>
+          <div className="text-xs mt-1" style={{ color: C.faint }}>Literal evidence and structural checks only; these do not determine correctness, sentiment, or response quality.</div>
+          {facts ? <div className="grid grid-cols-2 gap-x-3 gap-y-2 mt-3">
+            <TraceFact label="Provider outcome" value={facts.providerOutcome} />
+            <TraceFact label="Judge evidence" value={facts.judgeEligible ? "Eligible" : evidenceReason || "Not evaluable"} />
+            <TraceFact label="Prompt evidence" value={facts.promptPresent ? "Present" : "Missing"} />
+            <TraceFact label="Response evidence" value={facts.responsePresent ? "Present" : "Missing"} />
+            <TraceFact label="Response length" value={facts.responseCharacters == null ? "Unavailable" : `${facts.responseCharacters} characters`} />
+            <TraceFact label="Valid JSON" value={factFlag(facts.validJson)} />
+            <TraceFact label="Refusal signature" value={factFlag(facts.refusalSignature, "Detected", "Not detected")} />
+            <TraceFact label="Apology start" value={factFlag(facts.apologyStart, "Detected", "Not detected")} />
+            <TraceFact label="Hedge phrases" value={facts.hedgePhrases == null ? "Unavailable" : facts.hedgePhrases} />
+            <TraceFact label="Operation" value={s.operation || "Unavailable"} />
+            <TraceFact label="Finish reason" value={s.finish_reason || "Unavailable"} />
+            <TraceFact label="Tokens" value={`${s.input_tokens ?? "—"} in / ${s.output_tokens ?? "—"} out`} />
+            <TraceFact label="Latency" value={s.latency_ms == null ? "Unavailable" : `${s.latency_ms} ms`} />
+            <TraceFact label="Supplied cost" value={s.cost_usd == null ? "Unavailable" : usd(s.cost_usd)} />
+          </div> : <div className="text-xs mt-3" style={{ color: C.amber }}>Deterministic facts were not included by this Verdict server. Refresh after upgrading the server.</div>}
+        </div>
         {s.judgment && (
           <div>
             <div className="text-xs mb-1.5 flex items-center justify-between">
@@ -1483,6 +1541,14 @@ function TraceDetail({ s, onClose }) {
       </div>
     </Panel>
   );
+}
+
+function factFlag(value, yes = "Yes", no = "No") {
+  return value == null ? "Unavailable" : value ? yes : no;
+}
+
+function TraceFact({ label, value }) {
+  return <div className="min-w-0"><div className="text-xs" style={{ color: C.faint }}>{label}</div><div className="text-xs mt-0.5 break-words" style={{ color: C.text }}>{value}</div></div>;
 }
 
 /* ----------------------------------------------------------------- JUDGE */

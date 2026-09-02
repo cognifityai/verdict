@@ -443,9 +443,15 @@ Trace Explorer pages newest-first through every stored non-judge application
 trace in deterministic 30-row pages, breaking equal timestamps by trace ID.
 Evaluator-aware filters include evaluated, not evaluated, judge error, pass,
 fail, and unclear; the selected evaluator and exact Trace link survive refresh and
-pagination. Provider and `Content captured` or `Metadata only` filters apply to
-the current page. Judge telemetry remains in aggregate cost and store totals
-but does not displace application traces from this view.
+pagination without replacing the trace page with one row. Provider and
+`Content captured` or `Metadata only` filters apply to the current page. Judge
+telemetry remains in aggregate cost and store totals but does not displace
+application traces from this view. Selecting a row opens judge-free per-trace
+facts for provider outcome, prompt/response coverage, response length, JSON,
+refusal/apology/hedging signatures, operation, finish reason, tokens, latency,
+and supplied cost. Reliability, Performance, and Behavior summarize the same
+categories across the stored dataset; none of these literal checks establishes
+correctness, sentiment, or response quality.
 Each row uses its recorded UTC time plus relative age. A metadata-only row is
 described as a **historical metadata-only trace**: this means prompt and response
 were not captured when that trace was recorded, not that capture is currently
