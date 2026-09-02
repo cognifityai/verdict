@@ -26,7 +26,7 @@ they go through a supported provider SDK.
   Observability, Phoenix, Opik, MLflow, and bounded voice transcript records
   without storing a second raw vendor envelope.
 - Supports non-streaming and streaming responses for the supported SDK paths.
-  The versioned [`0.1.0a13 POC release profile`](POC_RELEASE_PROFILE.md) names
+  The versioned [`0.1.0a14 POC release profile`](POC_RELEASE_PROFILE.md) names
   the released entry points explicitly, including Anthropic
   `messages.stream(...)` and OpenAI Responses create, parse, and helper paths.
 - Stores traces in SQLite by default, with Postgres support for deployments that
@@ -51,7 +51,7 @@ they go through a supported provider SDK.
 2. **Store**: traces are written through a storage interface. SQLite is the
    default local store; Postgres is available for shared environments. Optional
    buffered writes move persistence to a background batched writer and require
-   explicit client shutdown. The `0.1.0a13` POC profile uses synchronous writes.
+   explicit client shutdown. The `0.1.0a14` POC profile uses synchronous writes.
 3. **Group**: on a pipeline run, prompt embeddings are assigned against a
    persisted cluster registry so existing cluster IDs remain stable. Registry
    strategy selection is deliberate: exact-key `explicit` is supported, while

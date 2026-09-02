@@ -1,7 +1,7 @@
-# Verdict 0.1.0a13 target
+# Verdict 0.1.0a14 target
 
 This Python public alpha uses the bounded
-[`0.1.0a13` POC release profile](https://github.com/cognifityai/verdict/blob/v0.1.0a13/docs/POC_RELEASE_PROFILE.md).
+[`0.1.0a14` POC release profile](https://github.com/cognifityai/verdict/blob/v0.1.0a14/docs/POC_RELEASE_PROFILE.md).
 It is not a production-readiness claim.
 
 ## Install one synchronized set
@@ -11,9 +11,9 @@ provider and storage extras it needs:
 
 ```bash
 python -m pip install \
-  "cognifity-verdict[anthropic,dashboard]==0.1.0a13" \
-  "cognifity-verdict-eval[semantic]==0.1.0a13" \
-  "cognifity-verdict-inspect==0.1.0a13"
+  "cognifity-verdict[anthropic,dashboard]==0.1.0a14" \
+  "cognifity-verdict-eval[semantic]==0.1.0a14" \
+  "cognifity-verdict-inspect==0.1.0a14"
 ```
 
 Replace `anthropic` with `openai` or `google` when appropriate. Add `postgres`

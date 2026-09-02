@@ -6,6 +6,8 @@ the customer POC profile is refined.
 
 ## [Unreleased]
 
+## [0.1.0a14] - 2026-09-01
+
 ### Added
 
 - `verdict` now launches a loopback setup UI after the base package install;
@@ -311,7 +313,8 @@ the customer POC profile is refined.
   retain content must explicitly select metadata-only capture. Redaction remains
   best-effort rather than a compliance control.
 
-[Unreleased]: https://github.com/cognifityai/verdict/compare/v0.1.0a13...HEAD
+[Unreleased]: https://github.com/cognifityai/verdict/compare/v0.1.0a14...HEAD
+[0.1.0a14]: https://github.com/cognifityai/verdict/compare/v0.1.0a13...v0.1.0a14
 [0.1.0a13]: https://github.com/cognifityai/verdict/compare/v0.1.0a12...v0.1.0a13
 [0.1.0a12]: https://github.com/cognifityai/verdict/compare/v0.1.0a11...v0.1.0a12
 [0.1.0a11]: https://github.com/cognifityai/verdict/compare/v0.1.0a10...v0.1.0a11
