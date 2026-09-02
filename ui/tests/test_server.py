@@ -199,10 +199,12 @@ def test_dashboard_api_paginates_application_traces_with_deterministic_ties(tmp_
                 await client.get("/api/data"),
                 await client.get("/api/data?trace_offset=30"),
                 await client.get("/api/data?trace_offset=60"),
+                await client.get("/api/data?trace_id=trace-000"),
+                await client.get("/api/data?trace_id=unknown-trace"),
                 await client.get("/api/data?trace_offset=-1"),
             )
 
-    first, second, third, invalid = asyncio.run(request_pages())
+    first, second, third, off_page, unknown, invalid = asyncio.run(request_pages())
 
     assert first.status_code == second.status_code == third.status_code == 200
     assert invalid.status_code == 422
@@ -215,9 +217,14 @@ def test_dashboard_api_paginates_application_traces_with_deterministic_ties(tmp_
     assert [sample["trace_id"] for sample in third.json()["samples"]] == [
         f"trace-{index:03d}" for index in range(4, -1, -1)
     ]
+    assert len(off_page.json()["samples"]) == 30
+    assert off_page.json()["samples"][-1]["trace_id"] == "trace-000"
+    assert [sample["trace_id"] for sample in unknown.json()["samples"]] == [
+        f"trace-{index:03d}" for index in range(64, 34, -1)
+    ]
     assert all(
         page.json()["truncation"]["resources"]["traceSamples"]["available"] == 65
-        for page in (first, second, third)
+        for page in (first, second, third, off_page, unknown)
     )
     for field in (
         "meta",
@@ -969,7 +976,8 @@ def test_composite_presentation_limits_stay_below_redaction_budget(tmp_path):
     assert len(bundle["haikuDim"]) == 100
     assert len(bundle["driftSignals"]) == 40
     assert len(bundle["samples"]) == 30
-    assert count_nodes(bundle) < 9000
+    # The bounded page now includes ten scalar deterministic facts per sample.
+    assert count_nodes(bundle) < 9300
 
 
 def test_bundle_filters_drift_by_selected_evaluator_and_excludes_historical_rows(tmp_path):
@@ -1313,7 +1321,21 @@ def test_bundle_excludes_unclear_from_every_pass_rate_denominator(tmp_path):
     fail_only = build_bundle(path, trace_judge_status="fail")
     assert [sample["trace_id"] for sample in fail_only["samples"]] == ["trace-1"]
     exact = build_bundle(path, trace_id="trace-0")
-    assert [sample["trace_id"] for sample in exact["samples"]] == ["trace-0"]
+    assert [sample["trace_id"] for sample in exact["samples"]] == [
+        "trace-2", "trace-1", "trace-0",
+    ]
+    assert exact["samples"][-1]["deterministicFacts"] == {
+        "providerOutcome": "succeeded",
+        "promptPresent": True,
+        "responsePresent": True,
+        "judgeEligible": True,
+        "notEvaluableReason": None,
+        "responseCharacters": 10,
+        "validJson": False,
+        "refusalSignature": False,
+        "apologyStart": False,
+        "hedgePhrases": 0,
+    }
 
 
 def test_bundle_uses_latest_duplicate_independent_of_insertion_order(tmp_path):

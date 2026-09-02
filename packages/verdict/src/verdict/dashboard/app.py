@@ -43,11 +43,10 @@ from verdict.dashboard.registry import (
 from verdict.dashboard.registry import (
     build_registry_bundle as _build_registry_bundle,
 )
-from verdict.dashboard.trace_facts import text_is_present, trace_evidence_reason
+from verdict.dashboard.trace_facts import deterministic_trace_facts
 from verdict.evidence import agent_run_bundle_from_json
 from verdict.metrics import ScoreCounts, verdict_label
 from verdict.redaction import redact, redact_structure
-from verdict.structural import count_hedges, is_apology_start, is_refusal, is_valid_json
 
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
@@ -961,22 +960,25 @@ def build_agent_insights_bundle(
                         run_metrics["cost_microusd"] += round(float(cost) * 1_000_000)
                 prompt = trace["prompt_redacted"]
                 response = trace["response_redacted"]
-                trace_evidence["prompt_present"] += int(text_is_present(prompt))
-                trace_evidence["response_present"] += int(text_is_present(response))
-                evidence_reason = trace_evidence_reason(
+                facts = deterministic_trace_facts(
                     error=trace["error"], prompt=prompt, response=response,
                 )
+                trace_evidence["prompt_present"] += int(facts["prompt_present"])
+                trace_evidence["response_present"] += int(facts["response_present"])
+                evidence_reason = facts["not_evaluable_reason"]
                 if evidence_reason:
                     trace_not_evaluable[evidence_reason] += 1
                 else:
                     trace_evidence["judge_eligible"] += 1
-                if text_is_present(response):
+                if facts["response_present"]:
                     behavior["captured_responses"] += 1
-                    behavior["response_characters"] += len(response)
-                    behavior["refusals"] += int(is_refusal(response))
-                    behavior["apology_starts"] += int(is_apology_start(response))
-                    behavior["hedges"] += count_hedges(response)
-                    behavior["valid_json"] += int(is_valid_json(response))
+                    behavior["response_characters"] += int(
+                        facts["response_characters"] or 0
+                    )
+                    behavior["refusals"] += int(facts["refusal_signature"])
+                    behavior["apology_starts"] += int(facts["apology_start"])
+                    behavior["hedges"] += int(facts["hedge_phrases"] or 0)
+                    behavior["valid_json"] += int(facts["valid_json"])
         analyzed = 0
         for row in rows:
             raw = row["payload_json"]
@@ -1477,18 +1479,13 @@ def _trace_samples(
     tcluster: dict[str, str | None],
     cluster_labels: dict[str, str],
     cluster_select: str,
+    operation_select: str,
     judg_by_trace: dict[str, dict[str, Any]],
     t0: datetime,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """Build one evaluator-aware, bounded Trace Explorer page."""
     filtered_trace_ids = explorer_trace_ids
-    if requested_trace_id is not None:
-        filtered_trace_ids = [
-            candidate
-            for candidate in filtered_trace_ids
-            if candidate == requested_trace_id
-        ]
-    elif trace_judge_status != "all":
+    if trace_judge_status != "all":
         def matches_judge_status(candidate: str) -> bool:
             status = judgment_status_by_trace.get(candidate, "not_judged")
             if trace_judge_status == "judged":
@@ -1499,16 +1496,27 @@ def _trace_samples(
             candidate for candidate in filtered_trace_ids
             if matches_judge_status(candidate)
         ]
-    sample_trace_ids = sorted(
+    ordered_trace_ids = sorted(
         filtered_trace_ids,
         key=lambda candidate: (_dt(ttime[candidate]), candidate),
         reverse=True,
-    )[trace_offset:trace_offset + MAX_TRACE_SAMPLES]
+    )
+    sample_trace_ids = ordered_trace_ids[
+        trace_offset:trace_offset + MAX_TRACE_SAMPLES
+    ]
+    if (
+        requested_trace_id in filtered_trace_ids
+        and requested_trace_id not in sample_trace_ids
+    ):
+        sample_trace_ids = [
+            *sample_trace_ids[:MAX_TRACE_SAMPLES - 1], requested_trace_id,
+        ]
     placeholders = ",".join("?" for _ in sample_trace_ids) or "NULL"
     sample_rows = [dict(row) for row in cur.execute(
-        # ``cluster_select`` is a closed-set schema compatibility expression.
+        # The select expressions are closed-set schema compatibility values.
         "SELECT trace_id, provider, request_model, "
-        f"{cluster_select}, input_tokens, output_tokens, "  # nosec B608
+        f"{cluster_select}, {operation_select}, "  # nosec B608
+        "input_tokens, output_tokens, "
         "latency_ms, cost_usd, finish_reason, error, started_at, "
         f"prompt_redacted, response_redacted FROM traces WHERE trace_id IN ({placeholders})",
         tuple(sample_trace_ids),
@@ -1543,6 +1551,23 @@ def _trace_samples(
         sample["judgeStatus"] = judgment_status_by_trace.get(
             row["trace_id"], "not_judged"
         )
+        facts = deterministic_trace_facts(
+            error=row["error"],
+            prompt=row["prompt_redacted"],
+            response=row["response_redacted"],
+        )
+        sample["deterministicFacts"] = {
+            "providerOutcome": facts["provider_outcome"],
+            "promptPresent": facts["prompt_present"],
+            "responsePresent": facts["response_present"],
+            "judgeEligible": facts["judge_eligible"],
+            "notEvaluableReason": facts["not_evaluable_reason"],
+            "responseCharacters": facts["response_characters"],
+            "validJson": facts["valid_json"],
+            "refusalSignature": facts["refusal_signature"],
+            "apologyStart": facts["apology_start"],
+            "hedgePhrases": facts["hedge_phrases"],
+        }
         samples.append(sample)
     return samples, filtered_trace_ids
 
@@ -1759,6 +1784,9 @@ def _build(
     trace_columns = cur.columns("traces")
     cluster_select = (
         "cluster_id" if "cluster_id" in trace_columns else "NULL AS cluster_id"
+    )
+    operation_select = (
+        "operation" if "operation" in trace_columns else "NULL AS operation"
     )
 
     tags_column = "tags_json" if "tags_json" in trace_columns else (
@@ -2324,6 +2352,7 @@ def _build(
         tcluster=tcluster,
         cluster_labels=cluster_labels,
         cluster_select=cluster_select,
+        operation_select=operation_select,
         judg_by_trace=judg_by_trace,
         t0=t0,
     )

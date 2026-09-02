@@ -424,7 +424,10 @@ Hexagonal / ports-and-adapters, ≥2 adapters per port (one real + in-memory for
   documented generic schema before relying on it.
 - Trace Explorer pages through every stored non-judge application trace in
   30-row pages. Search and provider/content-state filters apply to the current
-  page; dashboard aggregates continue to use the complete store.
+  page; dashboard aggregates continue to use the complete store. Selecting a
+  row keeps that bounded page visible and opens provider outcome, evidence
+  coverage, response structure, tokens, latency, and supplied cost for the
+  individual trace. These judge-free facts do not establish semantic quality.
 - **Published capture coverage in `0.1.0a13`:** the bounded POC profile names
   Anthropic
   `messages.create(...)` (including `stream=True`), OpenAI

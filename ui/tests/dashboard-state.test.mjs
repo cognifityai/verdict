@@ -28,7 +28,7 @@ function componentStub(names) {
 }
 
 async function loadUiModule() {
-  const source = `${await readFile(UI_SOURCE, "utf8")}\nexport { Dashboard, Overview, Traces, TraceDetail, Drift, Judge, Compare, mountedApiUrl };\nexport { useOperations } from "./Operations.jsx";\nexport { RegistryView } from "./Registry.jsx";`;
+  const source = `${await readFile(UI_SOURCE, "utf8")}\nexport { Dashboard, Overview, Traces, TraceDetail, TabHelp, Drift, Judge, Compare, mountedApiUrl };\nexport { useOperations } from "./Operations.jsx";\nexport { RegistryView } from "./Registry.jsx";`;
   const result = await build({
     stdin: {
       contents: source,
@@ -248,20 +248,33 @@ test("Compare explains why captured Codex runs may not be LLM traces", async () 
   assert.match(textOf(tree), /not included in LLM trace comparisons/i);
 });
 
-test("Reliability heading exposes an evidence explanation", async () => {
+test("Reliability heading exposes a visible, accessible evidence explanation", async () => {
   const ui = await loadUiModule();
-  globalThis.window = {
-    location: { hash: "#tab=reliability", pathname: "/dashboard" },
-    history: { pushState() {}, replaceState() {} },
-    addEventListener() {}, removeEventListener() {},
-  };
-  try {
-    const tree = render(ui.Dashboard, createHooks(), { data: bundle(null) });
-    const help = findAll(tree, (node) => node.props?.title?.includes("execution outcomes"));
-    assert.equal(help.length, 1);
-  } finally {
-    delete globalThis.window;
-  }
+  const hooks = createHooks();
+  let tree = render(ui.TabHelp, hooks, {
+    tab: "reliability", label: "Reliability",
+    text: "Reliability shows execution outcomes.",
+  });
+  const wrapper = findAll(tree, (node) => node.type === "span")[0];
+  const button = findAll(tree, (node) => node.type === "button")[0];
+  assert.equal(button.props["aria-label"], "About Reliability");
+  assert.equal(findAll(tree, (node) => node.props?.role === "tooltip").length, 0);
+
+  wrapper.props.onMouseEnter();
+  tree = render(ui.TabHelp, hooks, {
+    tab: "reliability", label: "Reliability",
+    text: "Reliability shows execution outcomes.",
+  });
+  const [tooltip] = findAll(tree, (node) => node.props?.role === "tooltip");
+  assert.match(textOf(tooltip), /execution outcomes/);
+  assert.equal(findAll(tree, (node) => node.type === "button")[0].props["aria-expanded"], true);
+
+  findAll(tree, (node) => node.type === "span")[0].props.onMouseLeave();
+  tree = render(ui.TabHelp, hooks, {
+    tab: "reliability", label: "Reliability",
+    text: "Reliability shows execution outcomes.",
+  });
+  assert.equal(findAll(tree, (node) => node.props?.role === "tooltip").length, 0);
 });
 
 test("Trace filters preserve the routed evaluator identity", async () => {
@@ -764,6 +777,36 @@ test("trace detail distinguishes content, provider failure, and judge availabili
   assert.match(rendered, /Aug 23, 22:20 UTC/);
   assert.match(rendered, /Response was not captured for this trace/);
   assert.doesNotMatch(rendered, /response.*historical metadata-only trace/i);
+});
+
+test("trace detail exposes bounded judge-free facts without claiming quality", async () => {
+  const ui = await loadUiModule();
+  const sample = {
+    trace_id: "facts-trace", provider: "openai", request_model: "gpt-test",
+    operation: "chat", prompt_redacted: "return json",
+    response_redacted: "{\"ok\":true}", finish_reason: "stop",
+    input_tokens: 10, output_tokens: 4, latency_ms: 120, cost_usd: 0.001,
+    deterministicFacts: {
+      providerOutcome: "succeeded", promptPresent: true, responsePresent: true,
+      judgeEligible: true, notEvaluableReason: null, responseCharacters: 11,
+      validJson: true, refusalSignature: false, apologyStart: false,
+      hedgePhrases: 0,
+    },
+  };
+
+  const tree = render(ui.TraceDetail, createHooks(), { s: sample, onClose() {} });
+  const rendered = textOf(tree).replace(/\s+/g, " ");
+  const factValues = Object.fromEntries(findAll(
+    tree, (node) => node.type?.name === "TraceFact",
+  ).map((node) => [node.props.label, node.props.value]));
+
+  assert.match(rendered, /JUDGE-FREE TRACE FACTS/);
+  assert.equal(factValues["Provider outcome"], "succeeded");
+  assert.equal(factValues["Judge evidence"], "Eligible");
+  assert.equal(factValues["Valid JSON"], "Yes");
+  assert.equal(factValues["Refusal signature"], "Not detected");
+  assert.equal(factValues.Tokens, "10 in / 4 out");
+  assert.match(rendered, /do not determine correctness, sentiment, or response quality/);
 });
 
 test("drift empty state treats global trace totals as availability and opens Operations", async () => {
