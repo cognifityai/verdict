@@ -51,7 +51,10 @@ quality evaluation missed one preregistered fragmentation gate (largest
 nonoutlier cluster `30.1047%`, maximum `30%`) and must not be described as
 generally validated. `verdict-cluster inspect` reports the strategy and this
 experimental status. Local semantic work uses the frozen
-`sentence-transformers/all-MiniLM-L6-v2` model; runtime download is forbidden.
+`sentence-transformers/all-MiniLM-L6-v2` model. CLI commands require an explicit
+local `--model-path`. The dashboard can reuse its pinned cached revision or
+download that exact revision on first semantic use when the semantic extra is
+installed.
 The legacy trace clustering pipeline remains a separate methodology.
 
 ### Supported explicit registry workflow

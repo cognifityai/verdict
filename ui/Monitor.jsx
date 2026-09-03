@@ -3,8 +3,45 @@ import { monitorRequest } from "./monitor-form.mjs";
 
 const box = { borderColor: "#26332e", background: "#111715" };
 
-export function Monitor({ configUrl }) {
+const metricLabel = (metric) => {
+  if (metric.startsWith("judge.") && metric.endsWith(".pass")) {
+    return `${metric.slice(6, -5).replaceAll("_", " ")} pass rate`;
+  }
+  return ({
+    provider_error: "Provider error rate",
+    response_empty: "Empty-response rate",
+    refusal_signature: "Refusal-language rate",
+  })[metric] || metric.replaceAll("_", " ");
+};
+
+export function MonitorComparisonMetrics({ comparison }) {
+  const coverage = new Map(
+    (comparison?.metric_coverage || []).map((item) => [item.metric, item]),
+  );
+  const metrics = new Map((comparison?.metrics || []).map((item) => [item.metric, item]));
+  const names = [...new Set([...metrics.keys(), ...coverage.keys()])];
+  return <div className="mt-4 space-y-2">{names.map((name) => {
+    const metric = metrics.get(name);
+    const evidence = coverage.get(name);
+    return <div key={name} className="border p-3 text-sm" style={{ borderColor: "#26332e" }}>
+      <span className="font-mono">{metricLabel(name)}</span>
+      {metric
+        ? <span className="ml-3" style={{ color: metric.alert ? "#ff6b6b" : "#94a39d" }}>{(100 * metric.reference_value).toFixed(1)}% → {(100 * metric.current_value).toFixed(1)}% · effect {(100 * metric.effect).toFixed(1)}pp · adjusted p {metric.p_adjusted.toPrecision(3)} · eligible n {metric.reference_n} → {metric.current_n}</span>
+        : <span className="ml-3" style={{ color: "#f2b84b" }}>No PASS/FAIL comparison yet</span>}
+      {evidence && <div className="text-xs mt-2" style={{ color: "#94a39d" }}>Evidence: {evidence.reference_evaluable} → {evidence.current_evaluable} evaluable · {evidence.reference_unclear} → {evidence.current_unclear} unclear · {evidence.reference_missing} → {evidence.current_missing} not judged · {evidence.reference_error} → {evidence.current_error} judge errors</div>}
+    </div>;
+  })}</div>;
+}
+
+export function Monitor({ configUrl, evaluation = {} }) {
   const root = configUrl.replace(/\/api\/config$/, "");
+  const evaluators = (evaluation.availableIdentities || []).filter(
+    (identity, index, rows) => identity.complete && identity.fingerprint
+      && rows.findIndex((other) => other.fingerprint === identity.fingerprint) === index,
+  );
+  const defaultEvaluator = evaluation.selectedIdentity?.complete
+    && evaluation.selectedIdentity.fingerprint
+    ? evaluation.selectedIdentity.fingerprint : "";
   const [token, setToken] = useState(null);
   const [active, setActive] = useState(null);
   const [candidate, setCandidate] = useState(null);
@@ -14,6 +51,7 @@ export function Monitor({ configUrl }) {
     windowMode: "count", referenceRatio: 0.8, minimumReference: 30,
     minimumCurrent: 30, prospectiveTarget: 30, minimumEffect: 0.1,
     analysisUnit: "trace", groupingMode: "none",
+    evaluatorFingerprint: defaultEvaluator,
     referenceStart: "", referenceEnd: "", currentStart: "", currentEnd: "",
   });
   useEffect(() => {
@@ -39,10 +77,17 @@ export function Monitor({ configUrl }) {
     finally { setBusy(false); }
   }
 
-  const update = (name, value) => setForm((current) => ({ ...current, [name]: value }));
+  const update = (name, value) => {
+    setCandidate(null);
+    setForm((current) => ({ ...current, [name]: value }));
+  };
   const snapshot = candidate?.snapshot || active?.snapshot;
   const manifest = snapshot?.manifest;
   const comparison = snapshot?.comparison;
+  const displayedPolicy = candidate?.policy || active?.policy;
+  const selectedMeasurement = evaluators.find(
+    (identity) => identity.fingerprint === displayedPolicy?.evaluator_fingerprint,
+  );
   const collecting = manifest?.prospective_open === true;
   const comparisonLabel = collecting
     ? `Collecting ${manifest.current_unit_ids.length}/${active?.policy?.prospective_target || candidate?.policy?.prospective_target || form.prospectiveTarget}`
@@ -57,16 +102,17 @@ export function Monitor({ configUrl }) {
         <label className="text-sm">Window mode<select value={form.windowMode} onChange={(event) => update("windowMode", event.target.value)} className="block w-full mt-1 border p-2 bg-transparent"><option value="count">Count cohorts</option><option value="explicit">Explicit date ranges</option></select></label>
         {form.windowMode === "count" && <label className="text-sm">Reference share<input type="number" min="0.5" max="0.95" step="0.05" value={form.referenceRatio} onChange={(event) => update("referenceRatio", Number(event.target.value))} className="block w-full mt-1 border p-2 bg-transparent" /></label>}
         <label className="text-sm">Analysis unit<select value={form.analysisUnit} onChange={(event) => update("analysisUnit", event.target.value)} className="block w-full mt-1 border p-2 bg-transparent"><option value="trace">Genuine model call</option></select></label>
+        <label className="text-sm">Measurement<select value={form.evaluatorFingerprint} onChange={(event) => update("evaluatorFingerprint", event.target.value)} className="block w-full mt-1 border p-2 bg-transparent"><option value="">Deterministic trace checks only</option>{evaluators.map((identity) => <option key={identity.fingerprint} value={identity.fingerprint}>{identity.label}</option>)}</select><span className="block text-xs mt-1" style={{ color: "#94a39d" }}>{form.evaluatorFingerprint ? "Compares existing stored judgments; this monitor makes no judge calls." : "Compares provider errors, empty responses, and refusal-like language."}</span></label>
         <label className="text-sm">Comparison facet<select value={form.groupingMode} onChange={(event) => update("groupingMode", event.target.value)} className="block w-full mt-1 border p-2 bg-transparent"><option value="none">All eligible calls (recommended)</option><option value="provider_model">Provider and model</option><option value="cluster">Active reviewed cluster</option></select></label>
         {form.windowMode === "explicit" && ["referenceStart", "referenceEnd", "currentStart", "currentEnd"].map((name) => <label key={name} className="text-sm">{name.replace(/([A-Z])/g, " $1")}<input type="datetime-local" value={form[name]} onChange={(event) => update(name, event.target.value)} className="block w-full mt-1 border p-2 bg-transparent" /></label>)}
         {["minimumReference", "minimumCurrent", "prospectiveTarget"].map((name) => <label key={name} className="text-sm">{name.replace(/([A-Z])/g, " $1")}<input type="number" min="1" value={form[name]} onChange={(event) => update(name, Number(event.target.value))} className="block w-full mt-1 border p-2 bg-transparent" /></label>)}
       </div>
       <div className="flex flex-wrap gap-2 mt-5">
-        <button disabled={!token || busy} onClick={async () => setCandidate(await post("/api/monitor/preview", monitorRequest(form)))} className="border px-4 py-2 text-sm">Preview candidate</button>
+        <button disabled={!token || busy} onClick={async () => setCandidate(await post("/api/monitor/preview", monitorRequest(form)))} className="border px-4 py-2 text-sm">Preview comparison</button>
         {candidate && <button disabled={busy} onClick={async () => {
           const activated = await post("/api/monitor/activate", { policyId: candidate.policy.policy_id, expectedActivePolicyId: active?.policy?.policy_id || null });
           if (activated) { setActive(activated); setCandidate(null); }
-        }} className="px-4 py-2 text-sm" style={{ background: "#4ee1aa", color: "#0b0e0d" }}>Activate candidate</button>}
+        }} className="px-4 py-2 text-sm" style={{ background: "#4ee1aa", color: "#0b0e0d" }}>Activate monitor</button>}
         {active?.state === "active" && <button disabled={busy} onClick={async () => {
           const result = await post("/api/monitor/run"); if (result) setActive(result);
         }} className="border px-4 py-2 text-sm">Run next cohort now</button>}
@@ -82,7 +128,8 @@ export function Monitor({ configUrl }) {
       <div className="mt-3 text-xs" style={{ color: "#94a39d" }}>
         {collecting ? `Prospective bucket ${manifest.current_unit_ids.length}/${active?.policy?.prospective_target || candidate?.policy?.prospective_target || form.prospectiveTarget}; no comparison or alert decision has run.` : `Completed comparison look ${manifest.comparison_index} · alert threshold ${comparison.alpha_threshold.toPrecision(3)} · ${active?.policy?.sequential_method || candidate?.policy?.sequential_method}`}
       </div>
-      <div className="mt-4 space-y-2">{comparison.metrics.map((metric) => <div key={metric.metric} className="border p-3 text-sm" style={{ borderColor: "#26332e" }}><span className="font-mono">{metric.metric}</span><span className="ml-3" style={{ color: metric.alert ? "#ff6b6b" : "#94a39d" }}>{(100 * metric.reference_value).toFixed(1)}% → {(100 * metric.current_value).toFixed(1)}% · effect {(100 * metric.effect).toFixed(1)}pp · adjusted p {metric.p_adjusted.toPrecision(3)} · eligible n {metric.reference_n} → {metric.current_n}</span></div>)}</div>
+      <div className="mt-2 text-xs" style={{ color: "#94a39d" }}>Measurement: {displayedPolicy?.evaluator_fingerprint ? (selectedMeasurement?.label || `stored evaluator ${displayedPolicy.evaluator_fingerprint.slice(0, 8)}`) : "deterministic trace checks only"}</div>
+      <MonitorComparisonMetrics comparison={comparison} />
       {comparison.status === "insufficient" && <p className="text-sm mt-4" style={{ color: "#f2b84b" }}>{collecting ? "No statistical test was run because the prospective bucket is still collecting." : "The bucket closed, but no metric met its configured eligible-unit minimums; no alert/no-alert conclusion was produced."}</p>}
       {comparison.status === "reference_stale" && <p className="text-sm mt-4" style={{ color: "#f2b84b" }}>Comparison suspended: {(100 * comparison.unseen_group_share).toFixed(1)}% of current traces use provider/model groups absent from the frozen reference. Review the policy before creating a new candidate; Verdict did not silently rebase it.</p>}
     </section>}

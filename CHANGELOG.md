@@ -2,9 +2,24 @@
 
 All notable changes to Verdict are documented here. This project follows
 [Semantic Versioning](https://semver.org/); alpha releases can still change as
-the customer POC profile is refined.
+the product is refined.
 
 ## [Unreleased]
+
+### Changed
+
+- Monitor can bind one existing complete evaluator identity and compare stored
+  per-dimension PASS/FAIL rates alongside deterministic trace metrics without
+  making judge calls. Its fingerprint and dimensions are frozen in the policy;
+  UNCLEAR, missing, and judge-error coverage remains visible and outside the
+  statistical denominator.
+- The dashboard cluster workflow anchors its default 90-day range to the latest
+  eligible trace. The primary workflow is Analyze, Review, and Use; validation,
+  replay, model overrides, and rollback remain under Advanced.
+- A semantic analysis uses the pinned local MiniLM snapshot when available and
+  downloads that exact revision on first use when the semantic extra is
+  installed. Later imports are assigned incrementally without changing the
+  reviewed fit membership during activation.
 
 ## [0.1.0a15] - 2026-09-02
 

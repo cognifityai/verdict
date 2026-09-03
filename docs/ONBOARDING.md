@@ -190,10 +190,15 @@ like the source telemetry store.
 
 After import, open **Monitor**. Preview either count cohorts (older 80% versus
 newer 20% by default) or explicit event-time ranges. Verdict freezes exact
-membership before computing outcomes. If each metric does not have enough
+membership before computing outcomes. Under **Measurement**, keep the
+deterministic trace checks or select one existing complete evaluator. Selecting
+an evaluator compares its already-stored per-dimension PASS/FAIL results; it
+does not invoke the judge. UNCLEAR, missing, and error results are shown as
+coverage and excluded from the PASS/FAIL denominator. The activated policy
+freezes that evaluator fingerprint and its expected dimensions. If each metric does not have enough
 eligible independent LLM calls, it reports `insufficient`; if new provider/model
 groups exceed the configured support threshold, it reports `reference_stale`.
-Previewed policies are candidates until explicitly activated. Activation does
+Previewed comparisons remain exploratory until explicitly activated. Activation does
 not promote the historical preview result: it freezes the reference and opens
 an empty prospective current bucket.
 
@@ -536,7 +541,13 @@ the other captured workloads.
   strategy status. The frozen semantic evaluation missed its 30% dominant-
   cluster limit by one example, so do not present it as generally validated or
   enable it silently for customers.
-  The supported explicit workflow stamps calls with
+  The dashboard defaults the fit end to the latest eligible event and analyzes
+  the preceding 90 days. Select **Analyze historical traces**, review examples
+  and warnings, then select **Use these clusters**. The pinned MiniLM snapshot
+  is reused from the local cache or downloaded on first use when the semantic
+  extra is installed. Traces imported after the fit are assigned incrementally
+  and do not change the reviewed fit membership during activation.
+  The supported explicit CLI workflow stamps calls with
   `verdict.intent_context("billing.v1")`, normalizes upgraded stores in bounded
   pages, then runs fit, assign, validate, and activate. Active mode follows the
   tenant pointer. Shadow analysis is disabled pending the tenant-isolation fix

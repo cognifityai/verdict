@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass, fields
 from datetime import datetime
@@ -38,6 +39,7 @@ class AnalysisUnitRecord:
     event_time: datetime
     metrics: Mapping[str, bool]
     group_id: str | None = None
+    metric_states: Mapping[str, str] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.unit_id, str) or not self.unit_id:
@@ -53,6 +55,15 @@ class AnalysisUnitRecord:
                     "monitor metrics must be boolean; continuous values require "
                     "an explicitly versioned statistical contract"
                 )
+        if self.metric_states is None:
+            object.__setattr__(self, "metric_states", {})
+        elif not isinstance(self.metric_states, Mapping):
+            raise ValueError("metric_states must be a mapping")
+        for name, value in self.metric_states.items():
+            if not isinstance(name, str) or not name:
+                raise ValueError("metric state names must be non-empty strings")
+            if value not in {"pass", "fail", "unclear", "missing", "error"}:
+                raise ValueError("metric state is unsupported")
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,6 +85,8 @@ class MonitorPolicy:
     analysis_unit: str = "trace"
     grouping_mode: str = "none"
     sequential_method: str = "quadratic_alpha_spending_v1"
+    evaluator_fingerprint: str | None = None
+    evaluator_dimensions: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         for name, maximum in (("policy_id", 256), ("scope_key", 512)):
@@ -99,6 +112,31 @@ class MonitorPolicy:
             raise ValueError("grouping_mode is unsupported")
         if self.sequential_method != "quadratic_alpha_spending_v1":
             raise ValueError("sequential_method is unsupported")
+        if self.evaluator_fingerprint is None:
+            if self.evaluator_dimensions:
+                raise ValueError("evaluator dimensions require an evaluator fingerprint")
+        else:
+            fingerprint = self.evaluator_fingerprint
+            if (
+                not isinstance(fingerprint, str)
+                or len(fingerprint) != 64
+                or any(character not in "0123456789abcdef" for character in fingerprint)
+            ):
+                raise ValueError("evaluator_fingerprint must be a SHA-256 digest")
+            if not isinstance(self.evaluator_dimensions, tuple):
+                object.__setattr__(self, "evaluator_dimensions", tuple(self.evaluator_dimensions))
+            if not 1 <= len(self.evaluator_dimensions) <= 12:
+                raise ValueError("evaluator_dimensions must contain 1-12 names")
+            if len(set(self.evaluator_dimensions)) != len(self.evaluator_dimensions):
+                raise ValueError("evaluator_dimensions must be unique")
+            for dimension in self.evaluator_dimensions:
+                if (
+                    not isinstance(dimension, str)
+                    or not dimension
+                    or "\x00" in dimension
+                    or len(dimension.encode("utf-8")) > 80
+                ):
+                    raise ValueError("evaluator dimension must be bounded text")
         ranges = (
             self.reference_start, self.reference_end, self.current_start, self.current_end,
         )
@@ -120,6 +158,10 @@ class MonitorPolicy:
             key: value.isoformat() if isinstance(value, datetime)
             else value.value if isinstance(value, Enum) else value
             for item in fields(self)
+            if not (
+                self.evaluator_fingerprint is None
+                and item.name in {"evaluator_fingerprint", "evaluator_dimensions"}
+            )
             for key, value in ((item.name, getattr(self, item.name)),)
         }
         return hashlib.sha256(
@@ -195,11 +237,35 @@ class MetricComparison:
 
 
 @dataclass(frozen=True, slots=True)
+class MetricEvidenceCoverage:
+    metric: str
+    reference_evaluable: int
+    reference_unclear: int
+    reference_missing: int
+    reference_error: int
+    current_evaluable: int
+    current_unclear: int
+    current_missing: int
+    current_error: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.metric, str) or not self.metric:
+            raise ValueError("metric coverage identity is required")
+        for item in fields(self):
+            if item.name == "metric":
+                continue
+            value = getattr(self, item.name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError("metric coverage counts must be non-negative integers")
+
+
+@dataclass(frozen=True, slots=True)
 class MonitorComparison:
     status: MonitorStatus
     metrics: tuple[MetricComparison, ...]
     unseen_group_share: float
     alpha_threshold: float
+    metric_coverage: tuple[MetricEvidenceCoverage, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.status, MonitorStatus):
@@ -208,6 +274,10 @@ class MonitorComparison:
             raise ValueError("unseen_group_share must be between zero and one")
         if not 0 < self.alpha_threshold <= 1:
             raise ValueError("alpha_threshold must be between zero and one")
+        if not isinstance(self.metric_coverage, tuple):
+            object.__setattr__(self, "metric_coverage", tuple(self.metric_coverage))
+        if len({item.metric for item in self.metric_coverage}) != len(self.metric_coverage):
+            raise ValueError("metric coverage identities must be unique")
 
 
 def _ordered(units) -> list[AnalysisUnitRecord]:
@@ -328,9 +398,10 @@ def compare_manifest(
     if (len(reference) != len(manifest.reference_unit_ids)
             or len(current) != len(manifest.current_unit_ids)):
         raise ValueError("manifest evidence is missing")
+    metric_coverage = _metric_evidence_coverage(reference, current)
     if len(reference) < policy.minimum_reference or len(current) < policy.minimum_current:
         return MonitorComparison(
-            MonitorStatus.INSUFFICIENT, (), 0.0, alpha_threshold
+            MonitorStatus.INSUFFICIENT, (), 0.0, alpha_threshold, metric_coverage
         )
     reference_groups = {unit.group_id for unit in reference if unit.group_id is not None}
     grouped_current = [unit for unit in current if unit.group_id is not None]
@@ -338,7 +409,8 @@ def compare_manifest(
     unseen_share = unseen / len(grouped_current) if grouped_current else 0.0
     if unseen_share > policy.maximum_unseen_group_share:
         return MonitorComparison(
-            MonitorStatus.REFERENCE_STALE, (), unseen_share, alpha_threshold
+            MonitorStatus.REFERENCE_STALE, (), unseen_share, alpha_threshold,
+            metric_coverage,
         )
     metric_names = sorted(set().union(*(set(unit.metrics) for unit in (*reference, *current))))
     raw = []
@@ -378,10 +450,44 @@ def compare_manifest(
     )
     if not metrics:
         return MonitorComparison(
-            MonitorStatus.INSUFFICIENT, (), unseen_share, alpha_threshold
+            MonitorStatus.INSUFFICIENT, (), unseen_share, alpha_threshold,
+            metric_coverage,
         )
     status = MonitorStatus.ALERT if any(metric.alert for metric in metrics) else MonitorStatus.NO_ALERT
-    return MonitorComparison(status, metrics, unseen_share, alpha_threshold)
+    return MonitorComparison(status, metrics, unseen_share, alpha_threshold, metric_coverage)
+
+
+def _metric_evidence_coverage(
+    reference: list[AnalysisUnitRecord],
+    current: list[AnalysisUnitRecord],
+) -> tuple[MetricEvidenceCoverage, ...]:
+    names = sorted(set().union(*(
+        set(unit.metric_states or {}) for unit in (*reference, *current)
+    )))
+    result = []
+    for name in names:
+        reference_counts = Counter(
+            unit.metric_states[name]
+            for unit in reference
+            if name in (unit.metric_states or {})
+        )
+        current_counts = Counter(
+            unit.metric_states[name]
+            for unit in current
+            if name in (unit.metric_states or {})
+        )
+        result.append(MetricEvidenceCoverage(
+            metric=name,
+            reference_evaluable=reference_counts["pass"] + reference_counts["fail"],
+            reference_unclear=reference_counts["unclear"],
+            reference_missing=reference_counts["missing"],
+            reference_error=reference_counts["error"],
+            current_evaluable=current_counts["pass"] + current_counts["fail"],
+            current_unclear=current_counts["unclear"],
+            current_missing=current_counts["missing"],
+            current_error=current_counts["error"],
+        ))
+    return tuple(result)
 
 
 def _alpha_threshold(policy: MonitorPolicy, comparison_index: int) -> float:
@@ -401,8 +507,10 @@ def trace_monitor_units(
     *,
     grouping_mode: str = "none",
     cluster_assignments: Mapping[str, str] | None = None,
+    judgments_by_trace: Mapping[str, object] | None = None,
+    evaluator_dimensions: tuple[str, ...] = (),
 ) -> tuple[AnalysisUnitRecord, ...]:
-    """Project genuine LLM calls into deterministic trace-level monitor units."""
+    """Project genuine LLM calls and one frozen evaluator into monitor units."""
     from verdict.structural import is_refusal
 
     units = []
@@ -415,6 +523,17 @@ def trace_monitor_units(
                 "response_empty": not bool(trace.response_redacted.strip()),
                 "refusal_signature": is_refusal(trace.response_redacted),
             })
+        metric_states = {}
+        if evaluator_dimensions:
+            states = judgment_metric_states(
+                (judgments_by_trace or {}).get(trace.trace_id),
+                evaluator_dimensions,
+            )
+            for dimension, state in states.items():
+                metric = f"judge.{dimension}.pass"
+                metric_states[metric] = state
+                if state in {"pass", "fail"}:
+                    metrics[metric] = state == "pass"
         if grouping_mode == "none":
             group_id = None
         elif grouping_mode == "provider_model":
@@ -427,9 +546,36 @@ def trace_monitor_units(
         else:
             raise ValueError("grouping_mode is unsupported")
         units.append(AnalysisUnitRecord(
-            trace.trace_id, trace.started_at, metrics, group_id,
+            trace.trace_id, trace.started_at, metrics, group_id, metric_states,
         ))
     return tuple(units)
+
+
+def judgment_metric_states(
+    judgment: object | None,
+    expected_dimensions: tuple[str, ...],
+) -> dict[str, str]:
+    """Classify one evaluator result without coercing absent evidence to FAIL."""
+    from verdict.metrics import verdict_label
+    from verdict.schema import JudgmentStatus
+
+    if judgment is None:
+        return {dimension: "missing" for dimension in expected_dimensions}
+    if getattr(judgment, "status", None) is not JudgmentStatus.COMPLETED:
+        return {dimension: "error" for dimension in expected_dimensions}
+    by_name: dict[str, list[object]] = {}
+    for score in getattr(judgment, "dimensions", ()):
+        by_name.setdefault(getattr(score, "name", ""), []).append(score)
+    states = {}
+    for dimension in expected_dimensions:
+        matches = by_name.get(dimension, [])
+        if not matches:
+            states[dimension] = "missing"
+        elif len(matches) != 1:
+            states[dimension] = "unclear"
+        else:
+            states[dimension] = verdict_label(getattr(matches[0], "verdict", None)).lower()
+    return states
 
 
 def _fisher_two_sided(a: int, b: int, c: int, d: int) -> float:
@@ -497,6 +643,8 @@ def monitor_policy_from_json(payload_json: str) -> MonitorPolicy:
         for name in ("reference_start", "reference_end", "current_start", "current_end"):
             if payload.get(name) is not None:
                 payload[name] = datetime.fromisoformat(payload[name])
+        if "evaluator_dimensions" in payload:
+            payload["evaluator_dimensions"] = tuple(payload["evaluator_dimensions"])
         return MonitorPolicy(**payload)
     except (TypeError, ValueError, json.JSONDecodeError) as exc:
         raise ValueError("invalid monitor policy JSON") from exc
@@ -525,6 +673,10 @@ def monitor_snapshot_to_json(
                 {item.name: getattr(metric, item.name) for item in fields(metric)}
                 for metric in comparison.metrics
             ],
+            "metric_coverage": [
+                {item.name: getattr(coverage, item.name) for item in fields(coverage)}
+                for coverage in comparison.metric_coverage
+            ],
         },
     }
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
@@ -552,6 +704,10 @@ def monitor_snapshot_from_json(
             tuple(MetricComparison(**metric) for metric in comparison_data["metrics"]),
             comparison_data["unseen_group_share"],
             comparison_data.get("alpha_threshold", 0.05),
+            tuple(
+                MetricEvidenceCoverage(**coverage)
+                for coverage in comparison_data.get("metric_coverage", [])
+            ),
         )
         return manifest, comparison
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:

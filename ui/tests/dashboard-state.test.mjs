@@ -28,7 +28,7 @@ function componentStub(names) {
 }
 
 async function loadUiModule() {
-  const source = `${await readFile(UI_SOURCE, "utf8")}\nexport { Dashboard, Overview, Traces, TraceDetail, TabHelp, Drift, Judge, Compare, mountedApiUrl };\nexport { useOperations } from "./Operations.jsx";\nexport { RegistryView } from "./Registry.jsx";`;
+  const source = `${await readFile(UI_SOURCE, "utf8")}\nexport { Dashboard, Overview, Traces, TraceDetail, TabHelp, Drift, Judge, Compare, mountedApiUrl };\nexport { useOperations } from "./Operations.jsx";\nexport { RegistryView } from "./Registry.jsx";\nexport { EvaluatorLab } from "./EvaluatorLab.jsx";`;
   const result = await build({
     stdin: {
       contents: source,
@@ -80,6 +80,17 @@ async function loadUiModule() {
   const encoded = Buffer.from(result.outputFiles[0].text).toString("base64");
   return import(`data:text/javascript;base64,${encoded}#${Math.random()}`);
 }
+
+test("Evaluator Lab starts with a neutral response-quality rubric name", async () => {
+  const ui = await loadUiModule();
+  const tree = render(ui.EvaluatorLab, createHooks(), { configUrl: "/api/config" });
+  const label = findAll(
+    tree,
+    (node) => node.type === "label" && textOf(node).includes("Rubric name"),
+  )[0];
+  const input = findAll(label, (node) => node.type === "input")[0];
+  assert.equal(input.props.value, "response_quality");
+});
 
 function createHooks() {
   const states = [];
@@ -387,11 +398,11 @@ test("registry view discloses experimental status, readiness, explanations, and 
   assert.match(rendered, /split across many small clusters/);
   assert.match(rendered, /ward-best-k-v2/);
   assert.match(rendered, /No explicit intent key was captured/);
-  assert.match(rendered, /Activate version/);
+  assert.match(rendered, /Use these clusters/);
   assert.match(rendered, /Refit active/);
   assert.match(rendered, /Rollback to version/);
 
-  for (const label of ["Refit active", "Activate version", "Rollback to version"]) {
+  for (const label of ["Refit active", "Use these clusters", "Rollback to version"]) {
     findAll(
       tree,
       (node) => node.type?.name === "ActionButton" && textOf(node) === label,

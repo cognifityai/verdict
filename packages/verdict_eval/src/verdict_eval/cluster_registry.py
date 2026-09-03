@@ -82,6 +82,7 @@ _REQUIRED_STORAGE_METHODS = (
     "list_cluster_identities",
     "list_cluster_registry_clusters",
     "list_cluster_registry_events",
+    "cluster_trace_time_bounds",
     "list_cluster_trace_candidates",
     "list_trace_cluster_assignments",
     "normalize_cluster_trace_analysis",
@@ -546,6 +547,25 @@ class ClusterRegistryService:
         result, identities = self._stable_result(
             tenant, result, config, model_fingerprint, existing, actor
         )
+        assigned_ids = {item.trace_id for item in result.assignments}
+        missing_rows = [row for row in rows if row.trace_id not in assigned_ids]
+        if missing_rows:
+            with self.storage.cluster_analysis_snapshot() as source:
+                assignment_inputs = self._inputs(
+                    tenant,
+                    missing_rows,
+                    strategy,
+                    config,
+                    evidence_only=False,
+                    source=source,
+                )
+            extra_assignments = self._strategy(strategy).assign(
+                RegistryDefinition(strategy, result.clusters), assignment_inputs
+            )
+            result = replace(
+                result,
+                assignments=(*result.assignments, *extra_assignments),
+            )
         statuses = {
             status: sum(item.status.value == status for item in result.assignments)
             for status in ("assigned", "outlier", "ineligible")
@@ -751,29 +771,6 @@ class ClusterRegistryService:
                 for cluster in definition.clusters
             )
         )
-        with self.storage.cluster_analysis_snapshot() as source:
-            rows = self._candidates(
-                tenant,
-                version.cutoff - timedelta(days=version.lookback_days),
-                version.cutoff,
-                config,
-                source=source,
-            )
-            candidate_summary: dict[str, Any] = {}
-            self._inputs(
-                tenant,
-                rows,
-                version.strategy,
-                config,
-                evidence_only=True,
-                source=source,
-                candidate_summary=candidate_summary,
-            )
-        candidate_ids = {row.trace_id for row in rows}
-        assigned_candidate_ids = {
-            item.trace_id for item in assignments if item.trace_id in candidate_ids
-        }
-        coverage = assigned_candidate_ids == candidate_ids
         stored_definition = _json(json.loads(version.fit_definition_json))
         current_definition, current_fingerprint, _ = self._definition(version.strategy, config)
         try:
@@ -781,6 +778,7 @@ class ClusterRegistryService:
         except (TypeError, ValueError):
             preview = {}
         fit_assignments = [item for item in assignments if item.origin == "fit"]
+        candidate_ids = [item.trace_id for item in fit_assignments]
         expected_statuses = {
             status: sum(item.status == status for item in fit_assignments)
             for status in ("assigned", "outlier", "ineligible")
@@ -802,7 +800,7 @@ class ClusterRegistryService:
                 "candidate_summary",
             }
             and preview.get("schema") == "preview-report-v1"
-            and preview.get("candidate_count") == len(rows)
+            and preview.get("candidate_count") == len(fit_assignments)
             and preview.get("fit_assignment_count") == len(fit_assignments)
             and preview.get("cluster_count") == len(definition.clusters)
             and preview.get("explicit_cluster_count") == explicit_count
@@ -811,7 +809,12 @@ class ClusterRegistryService:
             and isinstance(preview.get("metrics"), dict)
             and isinstance(preview.get("warnings"), list)
             and isinstance(preview.get("candidate_summary"), dict)
-            and preview["candidate_summary"] == candidate_summary
+            and preview["candidate_summary"].get("candidate_count")
+            == len(fit_assignments)
+        )
+        coverage = (
+            len(candidate_ids) == len(set(candidate_ids))
+            and preview_ok
         )
         definition_ok = (
             _fingerprint(stored_definition) == version.fit_definition_fingerprint
@@ -833,9 +836,9 @@ class ClusterRegistryService:
             "fit_counts": fit_counts,
             "coverage": coverage,
             "assignment_count": len(assignments),
-            "candidate_count": len(rows),
+            "candidate_count": len(fit_assignments),
             "candidate_digest": cluster_candidate_digest(
-                [row.trace_id for row in rows if row.trace_id is not None]
+                candidate_ids
             ),
             "definition": definition_ok,
             "model": model_ok,
@@ -861,6 +864,10 @@ class ClusterRegistryService:
     ) -> ActiveClusterRegistry:
         _valid_tenant(tenant)
         _valid_actor(actor)
+        version = self.storage.get_cluster_registry_version(tenant, version_id)
+        if version is None:
+            raise ValueError("unknown cluster registry version")
+        self.assign(tenant, version_id, through_cutoff=version.cutoff)
         report = self.validate(tenant, version_id, actor=actor)
         if not report["passed"]:
             raise ValueError("cluster registry version is not validated")

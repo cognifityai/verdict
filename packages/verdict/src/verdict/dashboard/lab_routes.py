@@ -128,9 +128,31 @@ def register_lab_routes(app, setup: SetupRoutes) -> None:
 
             writable = setup.writable_storage()
             return execute_cluster_action(writable, action=action, payload=payload)
-        except (ImportError, OSError, TypeError, UnicodeError, ValueError):
+        except ValueError as exc:
             _log.exception("cluster action failed")
-            return JSONResponse({"error": "cluster action unavailable"}, status_code=400)
+            known = {
+                "model_unavailable": (
+                    "Semantic clustering needs local MiniLM support. Install the "
+                    "semantic extra and retry."
+                ),
+                "semantic_fit_too_small": (
+                    "Not enough eligible prompt evidence was found in the selected range."
+                ),
+                "no eligible traces are available for clustering": (
+                    "No completed eligible traces are available for clustering."
+                ),
+                "cluster registry version is not validated": (
+                    "These clusters did not pass activation checks. Refresh the analysis "
+                    "and review the reported warnings."
+                ),
+            }
+            return JSONResponse(
+                {"error": known.get(str(exc), "Cluster action could not be completed.")},
+                status_code=400,
+            )
+        except (ImportError, OSError, TypeError, UnicodeError):
+            _log.exception("cluster action failed")
+            return JSONResponse({"error": "Cluster action could not be completed."}, status_code=400)
         finally:
             if writable is not None:
                 writable.close()

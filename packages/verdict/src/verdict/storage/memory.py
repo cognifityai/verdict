@@ -11,7 +11,7 @@ import copy
 import json
 import threading
 from contextlib import contextmanager
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from verdict.analysis_records import (
     DeliveryOutcome,
@@ -60,13 +60,13 @@ from verdict.schema import (
     TraceClusterAssignment,
     UserSignalRecord,
     cluster_candidate_digest,
-    datetime_to_utc_us,
     populate_trace_analysis_fields,
 )
 from verdict.storage.base import (
     _validate_agent_bundle_query,
     _validate_agent_bundle_run_id,
     _validate_drift_run_snapshot,
+    _validate_evaluator_judgment_query,
 )
 
 
@@ -479,6 +479,35 @@ class InMemoryStorage:
             reverse=True,
         )[:limit]
 
+    def list_latest_judgments_for_evaluator(
+        self,
+        tenant_id: str,
+        evaluator_fingerprint: str,
+        *,
+        limit: int = 100_000,
+    ) -> list[Judgment]:
+        _validate_evaluator_judgment_query(tenant_id, evaluator_fingerprint, limit)
+        latest: dict[str, Judgment] = {}
+        for judgment in self._judgments.values():
+            trace = self._traces.get(judgment.trace_id)
+            if (
+                trace is None
+                or trace.tenant_id != tenant_id
+                or judgment.evaluator_fingerprint != evaluator_fingerprint
+            ):
+                continue
+            previous = latest.get(judgment.trace_id)
+            if previous is None or (judgment.created_at, judgment.judgment_id) > (
+                previous.created_at,
+                previous.judgment_id,
+            ):
+                latest[judgment.trace_id] = judgment
+        return sorted(
+            latest.values(),
+            key=lambda item: (item.created_at, item.judgment_id),
+            reverse=True,
+        )[:limit]
+
     def has_completed_judgment(
         self, trace_id: str, evaluator_fingerprint: str,
     ) -> bool:
@@ -884,25 +913,17 @@ class InMemoryStorage:
                 raise ValueError("cluster registry version is not validated")
             clusters = self.list_cluster_registry_clusters(authorized_tenant, version_id)
             config = json.loads(version.fit_definition_json).get("config", {})
-            rows = self.list_cluster_trace_candidates(
-                authorized_tenant,
-                datetime_to_utc_us(version.cutoff - timedelta(days=version.lookback_days)),
-                datetime_to_utc_us(version.cutoff),
-                target_workload=config.get("target_workload"),
-                limit=config.get("max_fit_candidates", 50_000) + 1,
-            )
-            candidate_ids = [row.trace_id for row in rows if row.trace_id is not None]
-            assigned_ids = {
-                trace_id
-                for tenant, candidate_version, trace_id in self._trace_cluster_assignments
-                if tenant == authorized_tenant and candidate_version == version_id
-            }
+            candidate_ids = [
+                assignment.trace_id
+                for (tenant, candidate_version, _), assignment
+                in self._trace_cluster_assignments.items()
+                if tenant == authorized_tenant
+                and candidate_version == version_id
+                and assignment.origin == "fit"
+            ]
             if (
-                self.count_pending_analysis_rows(authorized_tenant)
-                or len(rows) > config.get("max_fit_candidates", 50_000)
-                or len(candidate_ids) != len(rows)
+                len(candidate_ids) > config.get("max_fit_candidates", 50_000)
                 or cluster_candidate_digest(candidate_ids) != expected_candidate_digest
-                or not set(candidate_ids) <= assigned_ids
             ):
                 raise ValueError("cluster registry coverage changed")
             model_fingerprint = (
@@ -1092,6 +1113,36 @@ class InMemoryStorage:
             )
         rows.sort(key=lambda row: (row.started_at_us, row.trace_id or ""))
         return rows[:limit]
+
+    def cluster_trace_time_bounds(
+        self,
+        authorized_tenant: str,
+        *,
+        target_workload: str | None,
+    ) -> tuple[int, int | None, int | None]:
+        traces = getattr(self._cluster_snapshot, "traces", self._traces)
+        times: list[int] = []
+        for trace in traces.values():
+            if (
+                not (
+                    trace.tenant_id == authorized_tenant
+                    or (authorized_tenant == "__verdict_local__" and trace.tenant_id is None)
+                )
+                or trace.ended_at is None
+                or trace.analysis_started_at_state != "valid"
+                or trace.analysis_started_at_us is None
+            ):
+                continue
+            workload = self._routing_projection(
+                trace.tags.get("verdict.workload"),
+                present="verdict.workload" in trace.tags,
+            )[2]
+            if target_workload is not None and workload != target_workload:
+                continue
+            if target_workload is None and workload in {"judge", "paired_replay"}:
+                continue
+            times.append(trace.analysis_started_at_us)
+        return (len(times), min(times) if times else None, max(times) if times else None)
 
     def get_cluster_trace_messages(
         self,

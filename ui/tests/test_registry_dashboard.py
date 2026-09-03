@@ -116,6 +116,40 @@ def test_empty_dashboard_can_fit_review_validate_and_activate_first_registry(tmp
     assert active.json()["selectedVersion"]["active"] is True
 
 
+def test_fit_without_cutoff_anchors_to_latest_historical_trace(tmp_path):
+    path = tmp_path / "historical-registry.db"
+    storage = SQLiteStorage(str(path))
+    latest = datetime(2026, 4, 15, 9, 11, 17, 501776, tzinfo=timezone.utc)
+    storage.insert_trace(
+        _trace("__verdict_local__", "older", latest - timedelta(days=60), "billing")
+    )
+    storage.insert_trace(_trace("__verdict_local__", "latest", latest, "shipping"))
+    storage.close()
+
+    async def fit_historical():
+        app = create_app(storage=f"sqlite:///{path}")
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            response = await client.post(
+                "/api/clusters/fit",
+                headers={"X-Verdict-Setup": token},
+                json={"strategy": "explicit"},
+            )
+            return response, await client.get("/api/registry")
+
+    response, registry = asyncio.run(fit_historical())
+    assert response.status_code == 200
+    payload = registry.json()
+    assert payload["counts"]["total"] == 2
+    assert datetime.fromisoformat(payload["selectedVersion"]["cutoff"]) == (
+        latest + timedelta(microseconds=1)
+    )
+    assert payload["selectedVersion"]["preview"]["candidateCount"] == 2
+
+
 def test_registry_api_uses_host_authorized_tenant_and_explains_terminal_membership(
     tmp_path,
 ) -> None:

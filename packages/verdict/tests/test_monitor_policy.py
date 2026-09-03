@@ -256,6 +256,72 @@ def test_policy_and_snapshot_canonical_round_trip() -> None:
     ) == (manifest, comparison)
 
 
+def test_legacy_policy_fingerprint_is_stable_without_an_evaluator() -> None:
+    policy = MonitorPolicy(
+        "legacy", "tenant:app", reference_ratio=0.5,
+        minimum_reference=2, minimum_current=2,
+    )
+
+    assert policy.fingerprint == (
+        "aef3bd9257aaf53cc54a97f03fb25f04f"
+        "b3522b140e1b46a16b1ce904ab6a286"
+    )
+
+
+def test_trace_projection_uses_only_pass_fail_from_one_frozen_evaluator() -> None:
+    from verdict.monitoring import trace_monitor_units
+    from verdict.schema import (
+        DimensionScore,
+        Judgment,
+        JudgmentStatus,
+        Trace,
+        Verdict,
+    )
+
+    traces = [
+        Trace(trace_id=name, started_at=NOW + timedelta(minutes=index))
+        for index, name in enumerate(("pass", "fail", "unclear", "missing", "error"))
+    ]
+    judgments = {
+        "pass": Judgment(
+            trace_id="pass", evaluator_fingerprint="a" * 64,
+            expected_dimensions=["quality"],
+            dimensions=[DimensionScore("quality", Verdict.PASS)],
+        ),
+        "fail": Judgment(
+            trace_id="fail", evaluator_fingerprint="a" * 64,
+            expected_dimensions=["quality"],
+            dimensions=[DimensionScore("quality", Verdict.FAIL)],
+        ),
+        "unclear": Judgment(
+            trace_id="unclear", evaluator_fingerprint="a" * 64,
+            expected_dimensions=["quality"],
+            dimensions=[DimensionScore("quality", Verdict.UNCLEAR)],
+        ),
+        "missing": Judgment(
+            trace_id="missing", evaluator_fingerprint="a" * 64,
+            expected_dimensions=["quality"], dimensions=[],
+        ),
+        "error": Judgment(
+            trace_id="error", evaluator_fingerprint="a" * 64,
+            expected_dimensions=["quality"], status=JudgmentStatus.ERROR,
+            error="provider unavailable",
+        ),
+    }
+
+    units = trace_monitor_units(
+        traces,
+        judgments_by_trace=judgments,
+        evaluator_dimensions=("quality",),
+    )
+
+    metric = "judge.quality.pass"
+    assert [unit.metrics.get(metric) for unit in units] == [True, False, None, None, None]
+    assert [unit.metric_states.get(metric) for unit in units] == [
+        "pass", "fail", "unclear", "missing", "error",
+    ]
+
+
 def test_trace_projection_is_ungrouped_by_default_and_grouping_is_explicit() -> None:
     from verdict.monitoring import trace_monitor_units
     from verdict.schema import Trace
