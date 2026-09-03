@@ -80,6 +80,7 @@ from verdict.storage.base import (
     _validate_agent_bundle_query,
     _validate_agent_bundle_run_id,
     _validate_drift_run_snapshot,
+    _validate_evaluator_judgment_query,
 )
 
 _SCHEMA = """
@@ -1211,6 +1212,26 @@ class PostgresStorage:
             f"SELECT {self._JUDGMENT_COLUMNS} FROM judgments j "  # nosec B608
             "WHERE j.trace_id=%s ORDER BY j.created_at DESC, j.judgment_id DESC LIMIT %s",
             (trace_id, limit),
+        )
+        return [self._row_to_judgment(row) for row in rows]
+
+    def list_latest_judgments_for_evaluator(
+        self,
+        tenant_id: str,
+        evaluator_fingerprint: str,
+        *,
+        limit: int = 100_000,
+    ) -> list[Judgment]:
+        _validate_evaluator_judgment_query(tenant_id, evaluator_fingerprint, limit)
+        rows = self._fetchall(
+            f"""SELECT * FROM (
+                    SELECT DISTINCT ON (j.trace_id) {self._JUDGMENT_COLUMNS}
+                    FROM judgments j JOIN traces t ON t.trace_id=j.trace_id
+                    WHERE t.tenant_id=%s AND j.evaluator_fingerprint=%s
+                    ORDER BY j.trace_id,j.created_at DESC,j.judgment_id DESC
+                ) latest
+                ORDER BY created_at DESC,judgment_id DESC LIMIT %s""",  # nosec B608
+            (tenant_id, evaluator_fingerprint, limit),
         )
         return [self._row_to_judgment(row) for row in rows]
 

@@ -34,7 +34,11 @@ verdict-service --storage sqlite:///./verdict.db --once
 The Monitor UI previews an immutable count-based (older 80% / newer 20% by
 default) or explicit-date policy before activation. Each metric has its own
 eligible denominator, Fisher's exact p-value, Benjamini-Hochberg adjustment,
-and effect-size gate. Ongoing cohorts are prospective and non-overlapping;
+and effect-size gate. The Measurement selector can add stored PASS/FAIL results
+from one complete evaluator identity without running or paying for a judge.
+That evaluator fingerprint and its expected dimensions become immutable policy
+inputs. UNCLEAR, missing, and error states remain outside the PASS/FAIL
+denominator and are shown as coverage. Ongoing cohorts are prospective and non-overlapping;
 late arrivals are counted and included in the next open cohort rather than
 silently discarded. An activated policy starts with an empty prospective
 bucket, and repeated looks use a summable quadratic alpha-spending rule.

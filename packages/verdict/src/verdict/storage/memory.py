@@ -66,6 +66,7 @@ from verdict.storage.base import (
     _validate_agent_bundle_query,
     _validate_agent_bundle_run_id,
     _validate_drift_run_snapshot,
+    _validate_evaluator_judgment_query,
 )
 
 
@@ -474,6 +475,35 @@ class InMemoryStorage:
             raise ValueError("invalid trace judgment query")
         return sorted(
             (item for item in self._judgments.values() if item.trace_id == trace_id),
+            key=lambda item: (item.created_at, item.judgment_id),
+            reverse=True,
+        )[:limit]
+
+    def list_latest_judgments_for_evaluator(
+        self,
+        tenant_id: str,
+        evaluator_fingerprint: str,
+        *,
+        limit: int = 100_000,
+    ) -> list[Judgment]:
+        _validate_evaluator_judgment_query(tenant_id, evaluator_fingerprint, limit)
+        latest: dict[str, Judgment] = {}
+        for judgment in self._judgments.values():
+            trace = self._traces.get(judgment.trace_id)
+            if (
+                trace is None
+                or trace.tenant_id != tenant_id
+                or judgment.evaluator_fingerprint != evaluator_fingerprint
+            ):
+                continue
+            previous = latest.get(judgment.trace_id)
+            if previous is None or (judgment.created_at, judgment.judgment_id) > (
+                previous.created_at,
+                previous.judgment_id,
+            ):
+                latest[judgment.trace_id] = judgment
+        return sorted(
+            latest.values(),
             key=lambda item: (item.created_at, item.judgment_id),
             reverse=True,
         )[:limit]

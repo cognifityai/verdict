@@ -44,6 +44,7 @@ from verdict.schema import (
     EvaluatorHealthRecord,
     EvaluatorHealthStatus,
     Judgment,
+    JudgmentStatus,
     SpanRecord,
     Trace,
     TraceClusterAssignment,
@@ -341,6 +342,47 @@ def test_live_postgres_monitor_policy_activation_and_snapshot():
         storage._exec("DELETE FROM monitor_snapshots WHERE policy_id IN (%s,%s)",
                       (first.policy_id, second.policy_id))
         storage._exec("DELETE FROM monitor_policies WHERE scope_key=%s", (scope,))
+        storage.close()
+
+
+def test_live_postgres_latest_evaluator_judgments_are_scoped_and_latest_wins():
+    suffix = uuid4().hex
+    tenant = f"monitor-evaluator-{suffix}"
+    fingerprint = sha256(f"evaluator-{suffix}".encode()).hexdigest()
+    now = datetime.now(timezone.utc)
+    storage = PostgresStorage(DSN, min_pool=1, max_pool=2)
+    trace_ids = [f"trace-{suffix}-{index}" for index in range(3)]
+    try:
+        for index, trace_id in enumerate(trace_ids):
+            storage.insert_trace(Trace(
+                trace_id=trace_id, tenant_id=tenant,
+                started_at=now + timedelta(seconds=index),
+            ))
+        storage.insert_judgment(Judgment(
+            judgment_id=f"old-{suffix}", trace_id=trace_ids[0], created_at=now,
+            evaluator_provider="openai", judge_models=["judge"],
+            evaluator_fingerprint=fingerprint, expected_dimensions=["quality"],
+            dimensions=[DimensionScore("quality", Verdict.PASS)],
+        ))
+        storage.insert_judgment(Judgment(
+            judgment_id=f"new-{suffix}", trace_id=trace_ids[0],
+            created_at=now + timedelta(seconds=1),
+            evaluator_provider="openai", judge_models=["judge"],
+            evaluator_fingerprint=fingerprint, expected_dimensions=["quality"],
+            status=JudgmentStatus.ERROR, error="judge unavailable",
+        ))
+        storage.insert_judgment(Judgment(
+            judgment_id=f"other-{suffix}", trace_id=trace_ids[1], created_at=now,
+            evaluator_provider="openai", judge_models=["other"],
+            evaluator_fingerprint="b" * 64, expected_dimensions=["quality"],
+            dimensions=[DimensionScore("quality", Verdict.FAIL)],
+        ))
+        rows = storage.list_latest_judgments_for_evaluator(tenant, fingerprint)
+        assert [row.judgment_id for row in rows] == [f"new-{suffix}"]
+        assert rows[0].status is JudgmentStatus.ERROR
+    finally:
+        storage._exec("DELETE FROM judgments WHERE trace_id = ANY(%s)", (trace_ids,))
+        storage._exec("DELETE FROM traces WHERE trace_id = ANY(%s)", (trace_ids,))
         storage.close()
 
 

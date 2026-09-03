@@ -8,6 +8,11 @@ the product is refined.
 
 ### Changed
 
+- Monitor can bind one existing complete evaluator identity and compare stored
+  per-dimension PASS/FAIL rates alongside deterministic trace metrics without
+  making judge calls. Its fingerprint and dimensions are frozen in the policy;
+  UNCLEAR, missing, and judge-error coverage remains visible and outside the
+  statistical denominator.
 - The dashboard cluster workflow anchors its default 90-day range to the latest
   eligible trace. The primary workflow is Analyze, Review, and Use; validation,
   replay, model overrides, and rollback remain under Advanced.

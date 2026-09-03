@@ -33,7 +33,13 @@ class MonitorRoutes:
         self.setup = setup
 
     @staticmethod
-    def policy(payload: dict[str, Any], policy_id: str) -> MonitorPolicy:
+    def policy(
+        payload: dict[str, Any],
+        policy_id: str,
+        *,
+        evaluator_fingerprint: str | None = None,
+        evaluator_dimensions: tuple[str, ...] = (),
+    ) -> MonitorPolicy:
         mode = WindowMode(payload.get("windowMode", "count"))
         values: dict[str, Any] = {
             "policy_id": policy_id,
@@ -48,6 +54,8 @@ class MonitorRoutes:
             "maximum_unseen_group_share": float(payload.get("maximumUnseenShare", 0.2)),
             "analysis_unit": payload.get("analysisUnit", "trace"),
             "grouping_mode": payload.get("groupingMode", "none"),
+            "evaluator_fingerprint": evaluator_fingerprint,
+            "evaluator_dimensions": evaluator_dimensions,
         }
         if mode is WindowMode.EXPLICIT:
             for source, target in (
@@ -68,6 +76,27 @@ class MonitorRoutes:
         return MonitorPolicy(**values)
 
     @staticmethod
+    def evaluator_selection(writable, payload: dict[str, Any]):
+        fingerprint = payload.get("evaluatorFingerprint")
+        if fingerprint in (None, ""):
+            return None, ()
+        rows = writable.list_latest_judgments_for_evaluator(
+            TENANT, fingerprint, limit=100_001,
+        )
+        if not rows or len(rows) > 100_000:
+            raise ValueError("selected evaluator is unavailable")
+        if any(
+            not row.evaluator_identity_complete
+            or row.evaluator_fingerprint != fingerprint
+            for row in rows
+        ):
+            raise ValueError("selected evaluator identity is incomplete")
+        dimensions = {tuple(row.expected_dimensions) for row in rows}
+        if len(dimensions) != 1:
+            raise ValueError("selected evaluator dimensions are inconsistent")
+        return fingerprint, dimensions.pop()
+
+    @staticmethod
     def response(
         policy, state, manifest, comparison, *, approved_historical=None,
     ) -> dict[str, object]:
@@ -84,9 +113,24 @@ class MonitorRoutes:
 
     @staticmethod
     def bounded_units(writable, policy):
-        traces = writable.list_traces(limit=100_001)
+        traces = writable.list_traces(tenant_id=TENANT, limit=100_001)
         if len(traces) > 100_000:
             raise ValueError("monitor exceeds bounded trace limit")
+        judgments_by_trace = None
+        if policy.evaluator_fingerprint is not None:
+            judgments = writable.list_latest_judgments_for_evaluator(
+                TENANT, policy.evaluator_fingerprint, limit=100_001,
+            )
+            if len(judgments) > 100_000:
+                raise ValueError("monitor exceeds bounded judgment limit")
+            if any(
+                not row.evaluator_identity_complete
+                or row.evaluator_fingerprint != policy.evaluator_fingerprint
+                or tuple(row.expected_dimensions) != policy.evaluator_dimensions
+                for row in judgments
+            ):
+                raise ValueError("selected evaluator identity changed")
+            judgments_by_trace = {row.trace_id: row for row in judgments}
         assignments = None
         if policy.grouping_mode == "cluster":
             pointer = writable.get_active_cluster_registry(TENANT)
@@ -106,6 +150,8 @@ class MonitorRoutes:
             traces,
             grouping_mode=policy.grouping_mode,
             cluster_assignments=assignments,
+            judgments_by_trace=judgments_by_trace,
+            evaluator_dimensions=policy.evaluator_dimensions,
         )
 
     def prospective(self, writable, policy, previous_manifest):
@@ -121,8 +167,14 @@ class MonitorRoutes:
                 )
             writable = None
             try:
-                policy = self.policy(payload, f"policy-{secrets.token_hex(12)}")
                 writable = self.setup.writable_storage()
+                fingerprint, dimensions = self.evaluator_selection(writable, payload)
+                policy = self.policy(
+                    payload,
+                    f"policy-{secrets.token_hex(12)}",
+                    evaluator_fingerprint=fingerprint,
+                    evaluator_dimensions=dimensions,
+                )
                 units = self.bounded_units(writable, policy)
                 cutoff = max(
                     (unit.event_time for unit in units),

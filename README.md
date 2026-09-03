@@ -99,7 +99,11 @@ An initial monitor proposal uses exact event-time membership. The count-mode
 default is an older 80% reference and newer 20% current cohort; explicit date
 ranges are also supported. Membership is frozen before metrics are compared,
 and insufficient data is reported as `insufficient`, never as “no drift.” No
-clustering or judge is required. Activating a reviewed preview freezes its
+clustering or judge is required. A comparison can optionally bind one complete
+existing evaluator identity and add its stored per-dimension PASS rate to the
+deterministic metrics. It does not make judge calls. FAIL is included in that
+rate; UNCLEAR, missing judgments, and judge errors are excluded from the
+PASS/FAIL denominator and reported as coverage. Activating a reviewed preview freezes its
 reference but starts an empty prospective current bucket; the preview itself
 can never become an authoritative alert. Scheduled looks use a summable
 quadratic alpha-spending rule in addition to within-look Benjamini-Hochberg

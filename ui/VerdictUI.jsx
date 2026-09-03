@@ -906,8 +906,8 @@ function DriftWorkspace({ section, onSection, data, configUrl, registryUrl, oper
       {sections.map(([id, label]) => <button key={id} onClick={() => onSection(id)} className="px-4 py-3 text-sm border-b-2 shrink-0" style={{ color: section === id ? C.text : C.sub, borderColor: section === id ? C.accent : "transparent" }}>{label}</button>)}
     </div>
     {section === "overview" && <Drift data={data} onOpenOperations={onOpenOperations} />}
-    {section === "explore" && <Explore configUrl={configUrl} registryUrl={registryUrl} operationsUrl={operationsUrl} />}
-    {section === "monitor" && <Monitor configUrl={configUrl} />}
+    {section === "explore" && <Explore key={data.evaluation?.selectedId || "none"} configUrl={configUrl} registryUrl={registryUrl} operationsUrl={operationsUrl} evaluation={data.evaluation} />}
+    {section === "monitor" && <Monitor key={data.evaluation?.selectedId || "none"} configUrl={configUrl} evaluation={data.evaluation} />}
     {section === "signals" && <Drift data={data} onOpenOperations={onOpenOperations} />}
     {section === "clusters" && <Registry url={registryUrl} operationsUrl={operationsUrl} configUrl={configUrl} />}
   </div>;

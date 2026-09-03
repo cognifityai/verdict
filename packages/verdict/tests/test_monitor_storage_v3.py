@@ -10,6 +10,7 @@ from verdict.monitoring import (
     plan_historical_manifest,
     plan_prospective_manifest,
 )
+from verdict.schema import DimensionScore, Judgment, JudgmentStatus, Trace, Verdict
 from verdict.storage import BufferedStorage, InMemoryStorage, SQLiteStorage
 
 NOW = datetime(2026, 8, 31, tzinfo=timezone.utc)
@@ -162,3 +163,42 @@ def test_sqlite_snapshot_size_violation_is_loud_and_preserves_previous_row(
         manifest, comparison,
     )
     storage.close()
+
+
+def test_latest_evaluator_judgments_are_tenant_scoped_and_latest_wins(storage) -> None:
+    fingerprint = "a" * 64
+    for trace_id, tenant in (("local", "tenant-a"), ("foreign", "tenant-b")):
+        storage.insert_trace(Trace(trace_id=trace_id, tenant_id=tenant, started_at=NOW))
+    storage.insert_judgment(Judgment(
+        judgment_id="old", trace_id="local", created_at=NOW,
+        evaluator_provider="anthropic", judge_models=["judge"],
+        evaluator_fingerprint=fingerprint, expected_dimensions=["quality"],
+        dimensions=[DimensionScore("quality", Verdict.PASS)],
+    ))
+    storage.insert_judgment(Judgment(
+        judgment_id="new", trace_id="local", created_at=NOW + timedelta(seconds=1),
+        evaluator_provider="anthropic", judge_models=["judge"],
+        evaluator_fingerprint=fingerprint, expected_dimensions=["quality"],
+        status=JudgmentStatus.ERROR, error="latest attempt failed",
+    ))
+    storage.insert_judgment(Judgment(
+        judgment_id="other-evaluator", trace_id="local",
+        created_at=NOW + timedelta(seconds=2), evaluator_provider="anthropic",
+        judge_models=["other"], evaluator_fingerprint="b" * 64,
+        expected_dimensions=["quality"],
+        dimensions=[DimensionScore("quality", Verdict.FAIL)],
+    ))
+    storage.insert_judgment(Judgment(
+        judgment_id="foreign-tenant", trace_id="foreign",
+        created_at=NOW + timedelta(seconds=3), evaluator_provider="anthropic",
+        judge_models=["judge"], evaluator_fingerprint=fingerprint,
+        expected_dimensions=["quality"],
+        dimensions=[DimensionScore("quality", Verdict.FAIL)],
+    ))
+
+    rows = storage.list_latest_judgments_for_evaluator(
+        "tenant-a", fingerprint, limit=10,
+    )
+
+    assert [row.judgment_id for row in rows] == ["new"]
+    assert rows[0].status is JudgmentStatus.ERROR

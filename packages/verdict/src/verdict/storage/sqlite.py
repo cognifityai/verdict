@@ -73,6 +73,7 @@ from verdict.storage.base import (
     _validate_agent_bundle_query,
     _validate_agent_bundle_run_id,
     _validate_drift_run_snapshot,
+    _validate_evaluator_judgment_query,
 )
 
 _SCHEMA = """
@@ -1280,6 +1281,30 @@ class SQLiteStorage:
                 "SELECT * FROM judgments WHERE trace_id=? "
                 "ORDER BY created_at DESC, judgment_id DESC LIMIT ?",
                 (trace_id, limit),
+            ).fetchall()
+        return [self._row_to_judgment(row) for row in rows]
+
+    def list_latest_judgments_for_evaluator(
+        self,
+        tenant_id: str,
+        evaluator_fingerprint: str,
+        *,
+        limit: int = 100_000,
+    ) -> list[Judgment]:
+        _validate_evaluator_judgment_query(tenant_id, evaluator_fingerprint, limit)
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT * FROM (
+                       SELECT j.*, ROW_NUMBER() OVER (
+                           PARTITION BY j.trace_id
+                           ORDER BY j.created_at DESC,j.judgment_id DESC
+                       ) AS evaluator_rank
+                       FROM judgments j JOIN traces t ON t.trace_id=j.trace_id
+                       WHERE t.tenant_id=? AND j.evaluator_fingerprint=?
+                   ) latest
+                   WHERE evaluator_rank=1
+                   ORDER BY created_at DESC,judgment_id DESC LIMIT ?""",
+                (tenant_id, evaluator_fingerprint, limit),
             ).fetchall()
         return [self._row_to_judgment(row) for row in rows]
 

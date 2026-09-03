@@ -73,6 +73,28 @@ def _validate_agent_bundle_run_id(run_id: str) -> None:
         raise ValueError("run_id must be bounded text")
 
 
+def _validate_evaluator_judgment_query(
+    tenant_id: str,
+    evaluator_fingerprint: str,
+    limit: int,
+) -> None:
+    if (
+        not isinstance(tenant_id, str)
+        or not tenant_id
+        or "\x00" in tenant_id
+        or len(tenant_id.encode("utf-8")) > 256
+    ):
+        raise ValueError("tenant_id must be bounded text")
+    if (
+        not isinstance(evaluator_fingerprint, str)
+        or len(evaluator_fingerprint) != 64
+        or any(character not in "0123456789abcdef" for character in evaluator_fingerprint)
+    ):
+        raise ValueError("evaluator_fingerprint must be a SHA-256 digest")
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100_001:
+        raise ValueError("limit must be between 1 and 100001")
+
+
 @runtime_checkable
 class Storage(Protocol):
     """Persistent backing store for Traces, Judgments, and DriftSignals.
@@ -173,6 +195,14 @@ class Storage(Protocol):
 
     def list_judgments_for_trace(
         self, trace_id: str, *, limit: int = 100,
+    ) -> list[Judgment]: ...
+
+    def list_latest_judgments_for_evaluator(
+        self,
+        tenant_id: str,
+        evaluator_fingerprint: str,
+        *,
+        limit: int = 100_000,
     ) -> list[Judgment]: ...
 
     def has_completed_judgment(

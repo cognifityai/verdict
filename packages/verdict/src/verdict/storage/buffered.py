@@ -514,6 +514,20 @@ class BufferedStorage:
     ) -> list[Judgment]:
         return self._read(self._inner.list_judgments_for_trace, trace_id, limit=limit)
 
+    def list_latest_judgments_for_evaluator(
+        self,
+        tenant_id: str,
+        evaluator_fingerprint: str,
+        *,
+        limit: int = 100_000,
+    ) -> list[Judgment]:
+        return self._read(
+            self._inner.list_latest_judgments_for_evaluator,
+            tenant_id,
+            evaluator_fingerprint,
+            limit=limit,
+        )
+
     def has_completed_judgment(
         self, trace_id: str, evaluator_fingerprint: str,
     ) -> bool:
