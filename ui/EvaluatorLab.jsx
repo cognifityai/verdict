@@ -15,7 +15,7 @@ export function EvaluatorLab({ configUrl, onOpenEvaluated }) {
   const [environment, setEnvironment] = useState(null);
   const [provider, setProvider] = useState("anthropic");
   const [model, setModel] = useState("claude-haiku-4-5");
-  const [rubricName, setRubricName] = useState("poc_quality");
+  const [rubricName, setRubricName] = useState("response_quality");
   const [rubricVersion, setRubricVersion] = useState("1");
   const [dimensions, setDimensions] = useState(DEFAULT_DIMENSIONS);
   const [judgeAll, setJudgeAll] = useState(true);
