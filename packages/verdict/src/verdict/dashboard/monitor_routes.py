@@ -11,6 +11,12 @@ from fastapi import Request
 from fastapi.responses import JSONResponse
 
 from verdict.dashboard.setup_routes import SetupRoutes
+from verdict.monitor_inputs import (
+    LOCAL_TENANT,
+    LOCAL_TRACE_SCOPE,
+    load_monitor_units,
+    select_monitor_evaluator,
+)
 from verdict.monitoring import (
     MonitorPolicy,
     WindowMode,
@@ -19,11 +25,10 @@ from verdict.monitoring import (
     monitor_snapshot_to_json,
     plan_historical_manifest,
     plan_prospective_manifest,
-    trace_monitor_units,
 )
 
-TENANT = "__verdict_local__"
-SCOPE = "__verdict_local__:application:trace"
+TENANT = LOCAL_TENANT
+SCOPE = LOCAL_TRACE_SCOPE
 
 
 class MonitorRoutes:
@@ -39,6 +44,7 @@ class MonitorRoutes:
         *,
         evaluator_fingerprint: str | None = None,
         evaluator_dimensions: tuple[str, ...] = (),
+        cluster_registry_version_id: str | None = None,
     ) -> MonitorPolicy:
         mode = WindowMode(payload.get("windowMode", "count"))
         values: dict[str, Any] = {
@@ -56,6 +62,7 @@ class MonitorRoutes:
             "grouping_mode": payload.get("groupingMode", "none"),
             "evaluator_fingerprint": evaluator_fingerprint,
             "evaluator_dimensions": evaluator_dimensions,
+            "cluster_registry_version_id": cluster_registry_version_id,
         }
         if mode is WindowMode.EXPLICIT:
             for source, target in (
@@ -76,25 +83,13 @@ class MonitorRoutes:
         return MonitorPolicy(**values)
 
     @staticmethod
-    def evaluator_selection(writable, payload: dict[str, Any]):
-        fingerprint = payload.get("evaluatorFingerprint")
-        if fingerprint in (None, ""):
-            return None, ()
-        rows = writable.list_latest_judgments_for_evaluator(
-            TENANT, fingerprint, limit=100_001,
-        )
-        if not rows or len(rows) > 100_000:
-            raise ValueError("selected evaluator is unavailable")
-        if any(
-            not row.evaluator_identity_complete
-            or row.evaluator_fingerprint != fingerprint
-            for row in rows
-        ):
-            raise ValueError("selected evaluator identity is incomplete")
-        dimensions = {tuple(row.expected_dimensions) for row in rows}
-        if len(dimensions) != 1:
-            raise ValueError("selected evaluator dimensions are inconsistent")
-        return fingerprint, dimensions.pop()
+    def cluster_registry_selection(writable, payload: dict[str, Any]):
+        if payload.get("groupingMode", "none") != "cluster":
+            return None
+        active = writable.get_active_cluster_registry(TENANT)
+        if active.version_id is None:
+            raise ValueError("cluster grouping requires an active registry")
+        return active.version_id
 
     @staticmethod
     def response(
@@ -113,46 +108,7 @@ class MonitorRoutes:
 
     @staticmethod
     def bounded_units(writable, policy):
-        traces = writable.list_traces(tenant_id=TENANT, limit=100_001)
-        if len(traces) > 100_000:
-            raise ValueError("monitor exceeds bounded trace limit")
-        judgments_by_trace = None
-        if policy.evaluator_fingerprint is not None:
-            judgments = writable.list_latest_judgments_for_evaluator(
-                TENANT, policy.evaluator_fingerprint, limit=100_001,
-            )
-            if len(judgments) > 100_000:
-                raise ValueError("monitor exceeds bounded judgment limit")
-            if any(
-                not row.evaluator_identity_complete
-                or row.evaluator_fingerprint != policy.evaluator_fingerprint
-                or tuple(row.expected_dimensions) != policy.evaluator_dimensions
-                for row in judgments
-            ):
-                raise ValueError("selected evaluator identity changed")
-            judgments_by_trace = {row.trace_id: row for row in judgments}
-        assignments = None
-        if policy.grouping_mode == "cluster":
-            pointer = writable.get_active_cluster_registry(TENANT)
-            if pointer.version_id is None:
-                raise ValueError("cluster grouping requires an active registry")
-            rows = writable.list_trace_cluster_assignments(
-                TENANT, pointer.version_id, limit=100_001
-            )
-            if len(rows) > 100_000:
-                raise ValueError("cluster assignment limit exceeded")
-            assignments = {
-                row.trace_id: row.cluster_id
-                for row in rows
-                if row.status == "assigned" and row.cluster_id is not None
-            }
-        return trace_monitor_units(
-            traces,
-            grouping_mode=policy.grouping_mode,
-            cluster_assignments=assignments,
-            judgments_by_trace=judgments_by_trace,
-            evaluator_dimensions=policy.evaluator_dimensions,
-        )
+        return load_monitor_units(writable, policy, tenant_id=TENANT)
 
     def prospective(self, writable, policy, previous_manifest):
         units = self.bounded_units(writable, policy)
@@ -168,12 +124,18 @@ class MonitorRoutes:
             writable = None
             try:
                 writable = self.setup.writable_storage()
-                fingerprint, dimensions = self.evaluator_selection(writable, payload)
+                fingerprint, dimensions = select_monitor_evaluator(
+                    writable,
+                    tenant_id=TENANT,
+                    evaluator_fingerprint=payload.get("evaluatorFingerprint"),
+                )
+                cluster_version = self.cluster_registry_selection(writable, payload)
                 policy = self.policy(
                     payload,
                     f"policy-{secrets.token_hex(12)}",
                     evaluator_fingerprint=fingerprint,
                     evaluator_dimensions=dimensions,
+                    cluster_registry_version_id=cluster_version,
                 )
                 units = self.bounded_units(writable, policy)
                 cutoff = max(

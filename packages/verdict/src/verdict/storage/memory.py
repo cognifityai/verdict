@@ -496,7 +496,7 @@ class InMemoryStorage:
             trace = self._traces.get(judgment.trace_id)
             if (
                 trace is None
-                or trace.tenant_id != tenant_id
+                or not _trace_tenant_matches(trace.tenant_id, tenant_id)
                 or judgment.evaluator_fingerprint != evaluator_fingerprint
             ):
                 continue

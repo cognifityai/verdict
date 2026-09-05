@@ -74,7 +74,11 @@ the later time when the judge happened to score it. Its defaults are a 24-hour
 current window and a 7-day baseline ending 24 hours before the analysis time.
 The reviewed Monitor UI is a separate policy lifecycle: it freezes either
 count-based or explicit event-time membership before comparing per-metric
-eligible samples and then collects prospective non-overlapping cohorts.
+eligible samples and then collects prospective non-overlapping cohorts. With a
+provider/model or reviewed-cluster facet, the tested family contains each
+eligible `(group, metric)` cell. Minimum sample counts apply inside each cell,
+and Benjamini-Hochberg correction covers the complete family for that look.
+Unassigned or new groups are coverage evidence, not pooled observations.
 
 ---
 

@@ -77,11 +77,11 @@ from verdict.storage.base import (
 )
 
 
-def _trace_tenant_clause(requested: str) -> str:
+def _trace_tenant_clause(requested: str, column: str = "tenant_id") -> str:
     return (
-        "(tenant_id IS NULL OR tenant_id=?)"
+        f"({column} IS NULL OR {column}=?)"
         if requested == "__verdict_local__"
-        else "tenant_id=?"
+        else f"{column}=?"
     )
 
 
@@ -1303,16 +1303,17 @@ class SQLiteStorage:
         _validate_evaluator_judgment_query(tenant_id, evaluator_fingerprint, limit)
         with self._lock:
             rows = self._conn.execute(
-                """SELECT * FROM (
+                f"""SELECT * FROM (
                        SELECT j.*, ROW_NUMBER() OVER (
                            PARTITION BY j.trace_id
                            ORDER BY j.created_at DESC,j.judgment_id DESC
                        ) AS evaluator_rank
                        FROM judgments j JOIN traces t ON t.trace_id=j.trace_id
-                       WHERE t.tenant_id=? AND j.evaluator_fingerprint=?
+                       WHERE {_trace_tenant_clause(tenant_id, "t.tenant_id")}
+                         AND j.evaluator_fingerprint=?
                    ) latest
                    WHERE evaluator_rank=1
-                   ORDER BY created_at DESC,judgment_id DESC LIMIT ?""",
+                   ORDER BY created_at DESC,judgment_id DESC LIMIT ?""",  # nosec B608
                 (tenant_id, evaluator_fingerprint, limit),
             ).fetchall()
         return [self._row_to_judgment(row) for row in rows]

@@ -3,7 +3,19 @@ from datetime import datetime, timedelta, timezone
 
 import httpx
 from verdict.dashboard.app import create_app
-from verdict.schema import DimensionScore, Judgment, JudgmentStatus, Trace, Verdict
+from verdict.schema import (
+    ClusterIdentity,
+    ClusterRegistryCluster,
+    ClusterRegistryEvent,
+    ClusterRegistryVersion,
+    DimensionScore,
+    Judgment,
+    JudgmentStatus,
+    Trace,
+    TraceClusterAssignment,
+    Verdict,
+    cluster_candidate_digest,
+)
 from verdict.storage import SQLiteStorage
 
 NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -167,6 +179,77 @@ def test_cluster_grouping_without_active_registry_is_a_bounded_request_error(tmp
     assert response.json() == {"error": "invalid monitor request"}
 
 
+def test_cluster_monitor_pins_the_reviewed_registry_version(tmp_path):
+    database = tmp_path / "verdict.db"
+    _insert_traces(database, 20)
+    tenant = "__verdict_local__"
+    storage = SQLiteStorage(str(database))
+
+    def insert_version(version_id, cluster_id, *, parent=None):
+        identity = ClusterIdentity(
+            tenant_id=tenant, cluster_id=cluster_id, kind="explicit",
+            explicit_key=cluster_id, display_name=cluster_id,
+        )
+        trace_ids = [f"trace-{index:03d}" for index in range(20)]
+        storage.insert_cluster_preview(
+            ClusterRegistryVersion(
+                tenant_id=tenant, version_id=version_id,
+                parent_version_id=parent, strategy="explicit", cutoff=NOW,
+            ),
+            [identity],
+            [ClusterRegistryCluster(
+                tenant_id=tenant, version_id=version_id,
+                cluster_id=cluster_id, kind="explicit", member_count=20,
+            )],
+            [
+                TraceClusterAssignment(
+                    tenant_id=tenant, version_id=version_id, trace_id=trace_id,
+                    origin="fit", status="assigned", cluster_id=cluster_id,
+                    cluster_kind="explicit",
+                )
+                for trace_id in trace_ids
+            ],
+        )
+        storage.insert_cluster_registry_event(ClusterRegistryEvent(
+            tenant_id=tenant, action="validated", to_version_id=version_id,
+            actor="test", details_json='{"passed":true}',
+        ))
+        return trace_ids
+
+    first_ids = insert_version("registry-1", "cluster-old")
+    storage.activate_cluster_registry(
+        tenant, "registry-1", expected_generation=0, actor="test",
+        action="activated", expected_candidate_digest=cluster_candidate_digest(first_ids),
+    )
+    storage.close()
+
+    async def preview():
+        app = create_app(storage=f"sqlite:///{database}")
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver",
+        ) as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            return await client.post(
+                "/api/monitor/preview",
+                headers={"X-Verdict-Setup": token},
+                json={
+                    "groupingMode": "cluster", "referenceRatio": 0.5,
+                    "minimumReference": 5, "minimumCurrent": 5,
+                },
+            )
+
+    response = asyncio.run(preview())
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["policy"]["cluster_registry_version_id"] == "registry-1"
+    assert {
+        metric["group_id"]
+        for metric in body["snapshot"]["comparison"]["metrics"]
+    } == {"cluster-old"}
+
+
 def test_monitor_accepts_ordered_explicit_event_time_windows(tmp_path):
     database = tmp_path / "verdict.db"
     _insert_traces(database, 50)
@@ -200,7 +283,7 @@ def test_monitor_compares_existing_judgments_without_mixing_evaluators_or_tenant
     tmp_path,
 ):
     database = tmp_path / "verdict.db"
-    _insert_traces(database, 20)
+    _insert_traces(database, 20, tenant=None)
     selected = "a" * 64
     storage = SQLiteStorage(str(database))
     for index in range(20):

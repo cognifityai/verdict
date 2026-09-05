@@ -64,6 +64,7 @@ class AnalysisUnitRecord:
                 raise ValueError("metric state names must be non-empty strings")
             if value not in {"pass", "fail", "unclear", "missing", "error"}:
                 raise ValueError("metric state is unsupported")
+        _validate_group_id(self.group_id)
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,6 +88,7 @@ class MonitorPolicy:
     sequential_method: str = "quadratic_alpha_spending_v1"
     evaluator_fingerprint: str | None = None
     evaluator_dimensions: tuple[str, ...] = ()
+    cluster_registry_version_id: str | None = None
 
     def __post_init__(self) -> None:
         for name, maximum in (("policy_id", 256), ("scope_key", 512)):
@@ -110,6 +112,16 @@ class MonitorPolicy:
             raise ValueError("analysis_unit is unsupported")
         if self.grouping_mode not in {"none", "provider_model", "cluster"}:
             raise ValueError("grouping_mode is unsupported")
+        if self.cluster_registry_version_id is not None:
+            version_id = self.cluster_registry_version_id
+            if (
+                self.grouping_mode != "cluster"
+                or not isinstance(version_id, str)
+                or not version_id
+                or "\x00" in version_id
+                or len(version_id.encode("utf-8")) > 64
+            ):
+                raise ValueError("cluster registry version is invalid")
         if self.sequential_method != "quadratic_alpha_spending_v1":
             raise ValueError("sequential_method is unsupported")
         if self.evaluator_fingerprint is None:
@@ -159,8 +171,14 @@ class MonitorPolicy:
             else value.value if isinstance(value, Enum) else value
             for item in fields(self)
             if not (
-                self.evaluator_fingerprint is None
-                and item.name in {"evaluator_fingerprint", "evaluator_dimensions"}
+                (
+                    self.evaluator_fingerprint is None
+                    and item.name in {"evaluator_fingerprint", "evaluator_dimensions"}
+                )
+                or (
+                    self.cluster_registry_version_id is None
+                    and item.name == "cluster_registry_version_id"
+                )
             )
             for key, value in ((item.name, getattr(self, item.name)),)
         }
@@ -220,6 +238,7 @@ class MetricComparison:
     p_value: float
     p_adjusted: float
     alert: bool
+    group_id: str | None = None
 
     def __post_init__(self) -> None:
         if not self.metric or min(self.reference_n, self.current_n) < 0:
@@ -234,6 +253,7 @@ class MetricComparison:
             raise ValueError("metric p-values must be between zero and one")
         if not isinstance(self.alert, bool):
             raise ValueError("metric alert must be boolean")
+        _validate_group_id(self.group_id)
 
 
 @dataclass(frozen=True, slots=True)
@@ -247,16 +267,18 @@ class MetricEvidenceCoverage:
     current_unclear: int
     current_missing: int
     current_error: int
+    group_id: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.metric, str) or not self.metric:
             raise ValueError("metric coverage identity is required")
         for item in fields(self):
-            if item.name == "metric":
+            if item.name in {"metric", "group_id"}:
                 continue
             value = getattr(self, item.name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ValueError("metric coverage counts must be non-negative integers")
+        _validate_group_id(self.group_id)
 
 
 @dataclass(frozen=True, slots=True)
@@ -266,6 +288,7 @@ class MonitorComparison:
     unseen_group_share: float
     alpha_threshold: float
     metric_coverage: tuple[MetricEvidenceCoverage, ...] = ()
+    unassigned_group_share: float = 0.0
 
     def __post_init__(self) -> None:
         if not isinstance(self.status, MonitorStatus):
@@ -274,10 +297,30 @@ class MonitorComparison:
             raise ValueError("unseen_group_share must be between zero and one")
         if not 0 < self.alpha_threshold <= 1:
             raise ValueError("alpha_threshold must be between zero and one")
+        if not 0 <= self.unassigned_group_share <= self.unseen_group_share:
+            raise ValueError("unassigned_group_share must be within unseen_group_share")
         if not isinstance(self.metric_coverage, tuple):
             object.__setattr__(self, "metric_coverage", tuple(self.metric_coverage))
-        if len({item.metric for item in self.metric_coverage}) != len(self.metric_coverage):
+        if len({(item.group_id, item.metric) for item in self.metrics}) != len(
+            self.metrics
+        ):
+            raise ValueError("metric comparison identities must be unique")
+        if len({(item.group_id, item.metric) for item in self.metric_coverage}) != len(
+            self.metric_coverage
+        ):
             raise ValueError("metric coverage identities must be unique")
+
+
+def _validate_group_id(group_id: str | None) -> None:
+    if group_id is None:
+        return
+    if (
+        not isinstance(group_id, str)
+        or not group_id
+        or "\x00" in group_id
+        or len(group_id.encode("utf-8")) > 256
+    ):
+        raise ValueError("metric group identity must be bounded text")
 
 
 def _ordered(units) -> list[AnalysisUnitRecord]:
@@ -398,68 +441,130 @@ def compare_manifest(
     if (len(reference) != len(manifest.reference_unit_ids)
             or len(current) != len(manifest.current_unit_ids)):
         raise ValueError("manifest evidence is missing")
-    metric_coverage = _metric_evidence_coverage(reference, current)
+    grouped = policy.grouping_mode != "none"
+    reference_by_group: dict[str, list[AnalysisUnitRecord]] = {}
+    current_by_group: dict[str, list[AnalysisUnitRecord]] = {}
+    if grouped:
+        for unit in reference:
+            if unit.group_id is not None:
+                reference_by_group.setdefault(unit.group_id, []).append(unit)
+        for unit in current:
+            if unit.group_id is not None:
+                current_by_group.setdefault(unit.group_id, []).append(unit)
+    reference_groups = set(reference_by_group)
+    current_groups = set(current_by_group)
+    coverage_groups = (
+        [
+            (
+                group_id,
+                reference_by_group.get(group_id, []),
+                current_by_group.get(group_id, []),
+            )
+            for group_id in sorted(reference_groups | current_groups)
+        ]
+        if grouped
+        else [(None, reference, current)]
+    )
+    metric_coverage = tuple(
+        coverage
+        for group_id, group_reference, group_current in coverage_groups
+        for coverage in _metric_evidence_coverage(
+            group_reference, group_current, group_id=group_id,
+        )
+    )
     if len(reference) < policy.minimum_reference or len(current) < policy.minimum_current:
         return MonitorComparison(
             MonitorStatus.INSUFFICIENT, (), 0.0, alpha_threshold, metric_coverage
         )
-    reference_groups = {unit.group_id for unit in reference if unit.group_id is not None}
-    grouped_current = [unit for unit in current if unit.group_id is not None]
-    unseen = sum(unit.group_id not in reference_groups for unit in grouped_current)
-    unseen_share = unseen / len(grouped_current) if grouped_current else 0.0
+    unassigned = sum(unit.group_id is None for unit in current) if grouped else 0
+    unseen = (
+        sum(
+            unit.group_id is None or unit.group_id not in reference_groups
+            for unit in current
+        )
+        if grouped
+        else 0
+    )
+    unseen_share = unseen / len(current) if current else 0.0
+    unassigned_share = unassigned / len(current) if current else 0.0
     if unseen_share > policy.maximum_unseen_group_share:
         return MonitorComparison(
             MonitorStatus.REFERENCE_STALE, (), unseen_share, alpha_threshold,
-            metric_coverage,
+            metric_coverage, unassigned_share,
         )
-    metric_names = sorted(set().union(*(set(unit.metrics) for unit in (*reference, *current))))
+    comparison_groups = (
+        [
+            (
+                group_id,
+                reference_by_group[group_id],
+                current_by_group[group_id],
+            )
+            for group_id in sorted(reference_groups & current_groups)
+        ]
+        if grouped
+        else [(None, reference, current)]
+    )
     raw = []
-    for name in metric_names:
-        reference_values = [
-            unit.metrics[name] for unit in reference
-            if isinstance(unit.metrics.get(name), bool)
-        ]
-        current_values = [
-            unit.metrics[name] for unit in current
-            if isinstance(unit.metrics.get(name), bool)
-        ]
-        if (len(reference_values) < policy.minimum_reference
-                or len(current_values) < policy.minimum_current):
-            continue
-        reference_true = sum(reference_values)
-        current_true = sum(current_values)
-        p_value = _fisher_two_sided(
-            reference_true, len(reference_values) - reference_true,
-            current_true, len(current_values) - current_true,
-        )
-        reference_rate = reference_true / len(reference_values)
-        current_rate = current_true / len(current_values)
-        raw.append((
-            name, len(reference_values), len(current_values), reference_rate,
-            current_rate, current_rate - reference_rate, p_value,
-        ))
+    for group_id, group_reference, group_current in comparison_groups:
+        metric_names = sorted(set().union(*(
+            set(unit.metrics) for unit in (*group_reference, *group_current)
+        )))
+        for name in metric_names:
+            reference_values = [
+                unit.metrics[name] for unit in group_reference
+                if isinstance(unit.metrics.get(name), bool)
+            ]
+            current_values = [
+                unit.metrics[name] for unit in group_current
+                if isinstance(unit.metrics.get(name), bool)
+            ]
+            if (len(reference_values) < policy.minimum_reference
+                    or len(current_values) < policy.minimum_current):
+                continue
+            reference_true = sum(reference_values)
+            current_true = sum(current_values)
+            p_value = _fisher_two_sided(
+                reference_true, len(reference_values) - reference_true,
+                current_true, len(current_values) - current_true,
+            )
+            reference_rate = reference_true / len(reference_values)
+            current_rate = current_true / len(current_values)
+            raw.append((
+                group_id, name, len(reference_values), len(current_values),
+                reference_rate, current_rate, current_rate - reference_rate,
+                p_value,
+            ))
     adjusted = _benjamini_hochberg([item[-1] for item in raw])
     metrics = tuple(
         MetricComparison(
             name, reference_n, current_n, reference_value, current_value,
             effect, p_value, p_adjusted,
             p_adjusted <= alpha_threshold and abs(effect) >= policy.minimum_effect,
+            group_id,
         )
-        for (name, reference_n, current_n, reference_value, current_value, effect, p_value), p_adjusted
+        for (
+            group_id, name, reference_n, current_n, reference_value,
+            current_value, effect, p_value,
+        ), p_adjusted
         in zip(raw, adjusted, strict=True)
     )
     if not metrics:
         return MonitorComparison(
             MonitorStatus.INSUFFICIENT, (), unseen_share, alpha_threshold,
-            metric_coverage,
+            metric_coverage, unassigned_share,
         )
     status = MonitorStatus.ALERT if any(metric.alert for metric in metrics) else MonitorStatus.NO_ALERT
-    return MonitorComparison(status, metrics, unseen_share, alpha_threshold, metric_coverage)
+    return MonitorComparison(
+        status, metrics, unseen_share, alpha_threshold, metric_coverage,
+        unassigned_share,
+    )
 
 
 def _metric_evidence_coverage(
     reference: list[AnalysisUnitRecord],
     current: list[AnalysisUnitRecord],
+    *,
+    group_id: str | None = None,
 ) -> tuple[MetricEvidenceCoverage, ...]:
     names = sorted(set().union(*(
         set(unit.metric_states or {}) for unit in (*reference, *current)
@@ -486,6 +591,7 @@ def _metric_evidence_coverage(
             current_unclear=current_counts["unclear"],
             current_missing=current_counts["missing"],
             current_error=current_counts["error"],
+            group_id=group_id,
         ))
     return tuple(result)
 
@@ -633,6 +739,7 @@ def monitor_policy_to_json(policy: MonitorPolicy) -> str:
         )
         for item in fields(policy)
         for value in (getattr(policy, item.name),)
+        if not (item.name == "cluster_registry_version_id" and value is None)
     }
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
@@ -668,13 +775,26 @@ def monitor_snapshot_to_json(
         "comparison": {
             "status": comparison.status.value,
             "unseen_group_share": comparison.unseen_group_share,
+            "unassigned_group_share": comparison.unassigned_group_share,
             "alpha_threshold": comparison.alpha_threshold,
             "metrics": [
-                {item.name: getattr(metric, item.name) for item in fields(metric)}
+                {
+                    item.name: getattr(metric, item.name)
+                    for item in fields(metric)
+                    if not (
+                        item.name == "group_id" and getattr(metric, item.name) is None
+                    )
+                }
                 for metric in comparison.metrics
             ],
             "metric_coverage": [
-                {item.name: getattr(coverage, item.name) for item in fields(coverage)}
+                {
+                    item.name: getattr(coverage, item.name)
+                    for item in fields(coverage)
+                    if not (
+                        item.name == "group_id" and getattr(coverage, item.name) is None
+                    )
+                }
                 for coverage in comparison.metric_coverage
             ],
         },
@@ -708,6 +828,7 @@ def monitor_snapshot_from_json(
                 MetricEvidenceCoverage(**coverage)
                 for coverage in comparison_data.get("metric_coverage", [])
             ),
+            comparison_data.get("unassigned_group_share", 0.0),
         )
         return manifest, comparison
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:

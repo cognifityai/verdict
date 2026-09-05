@@ -2,9 +2,18 @@ from __future__ import annotations
 
 import json
 import urllib.error
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from verdict.dashboard.control_plane import ControlStore
+from verdict.monitoring import (
+    MonitorPolicy,
+    compare_manifest,
+    plan_historical_manifest,
+    plan_prospective_manifest,
+    trace_monitor_units,
+)
+from verdict.schema import DimensionScore, Judgment, Trace, Verdict
 from verdict.service import TENANT, _finding_source_id, _notify, _schedule, run_cycle
 from verdict.storage import SQLiteStorage
 
@@ -143,6 +152,90 @@ def test_finding_identity_is_independent_of_analysis_execution() -> None:
 
     assert _finding_source_id(finding) == _finding_source_id(dict(finding))
     assert _finding_source_id(finding) != _finding_source_id(finding | {"runs": 3})
+
+
+def test_scheduled_monitor_uses_the_frozen_evaluator_and_dimensions(tmp_path) -> None:
+    storage_url = f"sqlite:///{tmp_path / 'verdict.db'}"
+    selected = "a" * 64
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    storage = SQLiteStorage(str(tmp_path / "verdict.db"))
+    for index in range(20):
+        trace_id = f"historical-{index:03d}"
+        storage.insert_trace(Trace(
+            trace_id=trace_id, tenant_id=TENANT,
+            started_at=now + timedelta(minutes=index), response_redacted="ok",
+        ))
+        storage.insert_judgment(Judgment(
+            judgment_id=f"judgment-{trace_id}", trace_id=trace_id,
+            evaluator_provider="anthropic", judge_models=["judge"],
+            evaluator_fingerprint=selected, expected_dimensions=["quality"],
+            rubric_name="quality", rubric_version="1",
+            dimensions=[DimensionScore("quality", Verdict.PASS)],
+        ))
+    policy = MonitorPolicy(
+        "policy", "__verdict_local__:application:trace",
+        reference_ratio=0.5, minimum_reference=5, minimum_current=5,
+        prospective_target=10, minimum_effect=0.5,
+        evaluator_fingerprint=selected, evaluator_dimensions=("quality",),
+    )
+    judgments = {
+        row.trace_id: row
+        for row in storage.list_latest_judgments_for_evaluator(
+            TENANT, selected, limit=100,
+        )
+    }
+    historical_units = trace_monitor_units(
+        storage.list_traces(tenant_id=TENANT, limit=100),
+        judgments_by_trace=judgments, evaluator_dimensions=("quality",),
+    )
+    historical = plan_historical_manifest(
+        historical_units, policy, cutoff=now + timedelta(hours=1),
+    )
+    storage.save_monitor_policy(policy)
+    storage.save_monitor_snapshot(
+        policy.policy_id, historical,
+        compare_manifest(historical_units, historical, policy),
+    )
+    storage.activate_monitor_policy(
+        policy.scope_key, policy.policy_id, expected_active_policy_id=None,
+    )
+    collecting = plan_prospective_manifest(historical, historical_units, policy)
+    storage.save_monitor_snapshot(
+        policy.policy_id, collecting,
+        compare_manifest(historical_units, collecting, policy),
+    )
+    for index in range(10):
+        trace_id = f"current-{index:03d}"
+        storage.insert_trace(Trace(
+            trace_id=trace_id, tenant_id=TENANT,
+            started_at=now + timedelta(hours=2, minutes=index),
+            response_redacted="ok",
+        ))
+        storage.insert_judgment(Judgment(
+            judgment_id=f"judgment-{trace_id}", trace_id=trace_id,
+            evaluator_provider="anthropic", judge_models=["judge"],
+            evaluator_fingerprint=selected, expected_dimensions=["quality"],
+            rubric_name="quality", rubric_version="1",
+            dimensions=[DimensionScore("quality", Verdict.FAIL)],
+        ))
+    storage.close()
+
+    result = run_cycle(storage_url, {"runMonitor": True})
+
+    assert result["monitor"]["status"] == "alert"
+    storage = SQLiteStorage(str(tmp_path / "verdict.db"))
+    try:
+        snapshot = storage.get_latest_monitor_snapshot(policy.policy_id)
+    finally:
+        storage.close()
+    assert snapshot is not None
+    quality = next(
+        metric for metric in snapshot[1].metrics
+        if metric.metric == "judge.quality.pass"
+    )
+    assert quality.reference_value == 1.0
+    assert quality.current_value == 0.0
+    assert quality.alert is True
 
 
 def test_webhook_failure_is_recorded_then_retried_without_duplicate_success(

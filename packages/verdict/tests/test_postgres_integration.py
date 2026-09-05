@@ -26,6 +26,7 @@ from verdict.analysis_records import (
     NotificationDeliveryAttempt,
 )
 from verdict.instrumentors.base import apply_routing_context, persist_trace
+from verdict.monitor_inputs import load_monitor_units
 from verdict.monitoring import (
     AnalysisUnitRecord,
     MonitorPolicy,
@@ -358,15 +359,20 @@ def test_live_postgres_agent_run_bundle_is_atomic_redacted_and_tenant_scoped():
 def test_live_postgres_monitor_policy_activation_and_snapshot():
     suffix = uuid4().hex
     scope = f"monitor-{suffix}"
-    first = MonitorPolicy(f"policy-a-{suffix}", scope, reference_ratio=0.5,
-                          minimum_reference=2, minimum_current=2)
+    first = MonitorPolicy(
+        f"policy-a-{suffix}", scope, reference_ratio=0.5,
+        minimum_reference=2, minimum_current=2, grouping_mode="cluster",
+        cluster_registry_version_id=f"registry-{suffix}",
+    )
     second = MonitorPolicy(f"policy-b-{suffix}", scope, reference_ratio=0.5,
                            minimum_reference=2, minimum_current=2)
     now = datetime.now(timezone.utc)
     units = tuple(
-        AnalysisUnitRecord(f"unit-{suffix}-{index}", now + timedelta(minutes=index),
-                           {"failed": index >= 3})
-        for index in range(6)
+        AnalysisUnitRecord(
+            f"unit-{suffix}-{index}", now + timedelta(minutes=index),
+            {"failed": index >= 4}, group_id=f"cluster-{index % 2}",
+        )
+        for index in range(8)
     )
     manifest = plan_historical_manifest(units, first, cutoff=now + timedelta(hours=1))
     comparison = compare_manifest(units, manifest, first)
@@ -412,7 +418,7 @@ def test_live_postgres_monitor_policy_activation_and_snapshot():
 
 def test_live_postgres_latest_evaluator_judgments_are_scoped_and_latest_wins():
     suffix = uuid4().hex
-    tenant = f"monitor-evaluator-{suffix}"
+    tenant = "__verdict_local__"
     fingerprint = sha256(f"evaluator-{suffix}".encode()).hexdigest()
     now = datetime.now(timezone.utc)
     storage = PostgresStorage(DSN, min_pool=1, max_pool=2)
@@ -420,7 +426,10 @@ def test_live_postgres_latest_evaluator_judgments_are_scoped_and_latest_wins():
     try:
         for index, trace_id in enumerate(trace_ids):
             storage.insert_trace(Trace(
-                trace_id=trace_id, tenant_id=tenant,
+                trace_id=trace_id,
+                tenant_id=(None if index == 0 else (
+                    tenant if index == 1 else f"other-{suffix}"
+                )),
                 started_at=now + timedelta(seconds=index),
             ))
         storage.insert_judgment(Judgment(
@@ -442,9 +451,26 @@ def test_live_postgres_latest_evaluator_judgments_are_scoped_and_latest_wins():
             evaluator_fingerprint="b" * 64, expected_dimensions=["quality"],
             dimensions=[DimensionScore("quality", Verdict.FAIL)],
         ))
+        storage.insert_judgment(Judgment(
+            judgment_id=f"foreign-{suffix}", trace_id=trace_ids[2], created_at=now,
+            evaluator_provider="openai", judge_models=["judge"],
+            evaluator_fingerprint=fingerprint, expected_dimensions=["quality"],
+            dimensions=[DimensionScore("quality", Verdict.FAIL)],
+        ))
         rows = storage.list_latest_judgments_for_evaluator(tenant, fingerprint)
         assert [row.judgment_id for row in rows] == [f"new-{suffix}"]
         assert rows[0].status is JudgmentStatus.ERROR
+        policy = MonitorPolicy(
+            f"evaluator-policy-{suffix}", f"scope-{suffix}",
+            evaluator_fingerprint=fingerprint, evaluator_dimensions=("quality",),
+        )
+        projected = {
+            unit.unit_id: unit
+            for unit in load_monitor_units(storage, policy, tenant_id=tenant)
+        }
+        assert projected[trace_ids[0]].metric_states == {
+            "judge.quality.pass": "error"
+        }
     finally:
         storage._exec("DELETE FROM judgments WHERE trace_id = ANY(%s)", (trace_ids,))
         storage._exec("DELETE FROM traces WHERE trace_id = ANY(%s)", (trace_ids,))

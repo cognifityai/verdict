@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -149,7 +150,8 @@ def test_unseen_group_share_suspends_comparison_as_reference_stale() -> None:
     units = baseline + current
     policy = MonitorPolicy("p", "scope", reference_ratio=2 / 3,
                            minimum_reference=10, minimum_current=5,
-                           maximum_unseen_group_share=0.2)
+                           maximum_unseen_group_share=0.2,
+                           grouping_mode="provider_model")
     manifest = plan_historical_manifest(units, policy, cutoff=NOW + timedelta(days=40))
 
     result = compare_manifest(units, manifest, policy)
@@ -157,6 +159,145 @@ def test_unseen_group_share_suspends_comparison_as_reference_stale() -> None:
     assert result.status is MonitorStatus.REFERENCE_STALE
     assert result.unseen_group_share == 1.0
     assert result.metrics == ()
+
+
+def test_grouped_comparison_does_not_pool_a_simpsons_paradox_workload() -> None:
+    reference = []
+    current = []
+    for group, count, failures in (("a", 180, 18), ("b", 20, 18)):
+        reference.extend(
+            AnalysisUnitRecord(
+                f"reference-{group}-{index:03d}",
+                NOW + timedelta(seconds=len(reference)),
+                {"failed": index < failures},
+                group,
+            )
+            for index in range(count)
+        )
+    for group, count, failures in (("a", 20, 0), ("b", 180, 144)):
+        current.extend(
+            AnalysisUnitRecord(
+                f"current-{group}-{index:03d}",
+                NOW + timedelta(days=1, seconds=len(current)),
+                {"failed": index < failures},
+                group,
+            )
+            for index in range(count)
+        )
+    units = tuple((*reference, *current))
+    policy = MonitorPolicy(
+        "p", "scope", reference_ratio=0.5,
+        minimum_reference=10, minimum_current=10,
+        minimum_effect=0.05, grouping_mode="provider_model",
+    )
+    manifest = plan_historical_manifest(
+        units, policy, cutoff=NOW + timedelta(days=2),
+    )
+
+    result = compare_manifest(units, manifest, policy)
+
+    # Pooled failures increase from 18% to 72%, even though each provider/model
+    # group improves by 10 percentage points. Grouped monitoring must expose the
+    # two within-group comparisons instead of emitting the pooled false alert.
+    assert result.status is MonitorStatus.NO_ALERT
+    assert {
+        (metric.group_id, metric.reference_value, metric.current_value)
+        for metric in result.metrics
+    } == {("a", 0.1, 0.0), ("b", 0.9, 0.8)}
+
+
+def test_grouped_comparison_reports_unassigned_current_evidence_as_stale() -> None:
+    reference = tuple(
+        AnalysisUnitRecord(
+            f"reference-{index}", NOW + timedelta(seconds=index),
+            {"failed": False}, "known",
+        )
+        for index in range(10)
+    )
+    current = tuple(
+        AnalysisUnitRecord(
+            f"current-{index}", NOW + timedelta(days=1, seconds=index),
+            {"failed": False}, None,
+        )
+        for index in range(10)
+    )
+    units = (*reference, *current)
+    policy = MonitorPolicy(
+        "p", "scope", reference_ratio=0.5,
+        minimum_reference=5, minimum_current=5,
+        grouping_mode="cluster", maximum_unseen_group_share=0.2,
+    )
+    manifest = plan_historical_manifest(
+        units, policy, cutoff=NOW + timedelta(days=2),
+    )
+
+    result = compare_manifest(units, manifest, policy)
+
+    assert result.status is MonitorStatus.REFERENCE_STALE
+    assert result.unseen_group_share == 1.0
+    assert result.unassigned_group_share == 1.0
+
+
+def test_grouped_correction_uses_the_full_group_by_metric_family() -> None:
+    units = []
+    for cohort, day in (("reference", 0), ("current", 1)):
+        for group, failures in (("a", 0 if cohort == "reference" else 8),
+                                ("b", 0 if cohort == "reference" else 5)):
+            units.extend(
+                AnalysisUnitRecord(
+                    f"{cohort}-{group}-{index}",
+                    NOW + timedelta(days=day, seconds=len(units)),
+                    {"failed": index < failures}, group,
+                )
+                for index in range(10)
+            )
+    policy = MonitorPolicy(
+        "p", "scope", reference_ratio=0.5,
+        minimum_reference=5, minimum_current=5,
+        minimum_effect=0.1, grouping_mode="provider_model",
+    )
+    manifest = plan_historical_manifest(
+        units, policy, cutoff=NOW + timedelta(days=2),
+    )
+
+    result = compare_manifest(units, manifest, policy)
+
+    by_group = {metric.group_id: metric for metric in result.metrics}
+    assert set(by_group) == {"a", "b"}
+    assert by_group["a"].p_adjusted == pytest.approx(by_group["a"].p_value * 2)
+    assert by_group["b"].p_adjusted == pytest.approx(by_group["b"].p_value)
+
+
+def test_grouped_evidence_coverage_keeps_group_denominators_separate() -> None:
+    units = tuple(
+        AnalysisUnitRecord(
+            f"{cohort}-{group}-{index}",
+            NOW + timedelta(days=day, seconds=index),
+            ({"judge.quality.pass": state == "pass"}
+             if state in {"pass", "fail"} else {}),
+            group,
+            {"judge.quality.pass": state},
+        )
+        for cohort, day in (("reference", 0), ("current", 1))
+        for group, states in (("a", ("pass", "missing")), ("b", ("fail", "error")))
+        for index, state in enumerate(states)
+    )
+    policy = MonitorPolicy(
+        "p", "scope", reference_ratio=0.5,
+        minimum_reference=1, minimum_current=1,
+        grouping_mode="provider_model",
+    )
+    manifest = plan_historical_manifest(
+        units, policy, cutoff=NOW + timedelta(days=2),
+    )
+
+    result = compare_manifest(units, manifest, policy)
+
+    coverage = {(item.group_id, item.metric): item for item in result.metric_coverage}
+    assert coverage[("a", "judge.quality.pass")].reference_evaluable == 1
+    assert coverage[("a", "judge.quality.pass")].current_missing == 1
+    assert coverage[("b", "judge.quality.pass")].reference_evaluable == 1
+    assert coverage[("b", "judge.quality.pass")].current_error == 1
 
 
 def test_prospective_cohorts_never_reuse_units_and_count_late_arrivals() -> None:
@@ -254,6 +395,51 @@ def test_policy_and_snapshot_canonical_round_trip() -> None:
     assert monitor_snapshot_from_json(
         monitor_snapshot_to_json(manifest, comparison)
     ) == (manifest, comparison)
+
+
+def test_cluster_policy_pins_one_registry_version_in_identity_and_json() -> None:
+    first = MonitorPolicy(
+        "p", "scope", grouping_mode="cluster",
+        cluster_registry_version_id="registry-1",
+    )
+    second = MonitorPolicy(
+        "p", "scope", grouping_mode="cluster",
+        cluster_registry_version_id="registry-2",
+    )
+
+    assert first.fingerprint != second.fingerprint
+    assert monitor_policy_from_json(monitor_policy_to_json(first)) == first
+    with pytest.raises(ValueError, match="cluster registry version"):
+        MonitorPolicy(
+            "p", "scope", grouping_mode="none",
+            cluster_registry_version_id="registry-1",
+        )
+
+
+def test_legacy_snapshot_without_group_fields_remains_readable() -> None:
+    units = _units(20, failures_from=15)
+    policy = MonitorPolicy(
+        "p", "scope", reference_ratio=0.5,
+        minimum_reference=5, minimum_current=5,
+    )
+    manifest = plan_historical_manifest(
+        units, policy, cutoff=NOW + timedelta(days=30),
+    )
+    comparison = compare_manifest(units, manifest, policy)
+    payload = json.loads(monitor_snapshot_to_json(manifest, comparison))
+    payload["comparison"].pop("unassigned_group_share")
+    for item in payload["comparison"]["metrics"]:
+        item.pop("group_id", None)
+    for item in payload["comparison"]["metric_coverage"]:
+        item.pop("group_id", None)
+
+    loaded_manifest, loaded_comparison = monitor_snapshot_from_json(
+        json.dumps(payload),
+    )
+
+    assert loaded_manifest == manifest
+    assert loaded_comparison.unassigned_group_share == 0.0
+    assert all(metric.group_id is None for metric in loaded_comparison.metrics)
 
 
 def test_legacy_policy_fingerprint_is_stable_without_an_evaluator() -> None:

@@ -34,17 +34,23 @@ verdict-service --storage sqlite:///./verdict.db --once
 The Monitor UI previews an immutable count-based (older 80% / newer 20% by
 default) or explicit-date policy before activation. Each metric has its own
 eligible denominator, Fisher's exact p-value, Benjamini-Hochberg adjustment,
-and effect-size gate. The Measurement selector can add stored PASS/FAIL results
-from one complete evaluator identity without running or paying for a judge.
-That evaluator fingerprint and its expected dimensions become immutable policy
-inputs. UNCLEAR, missing, and error states remain outside the PASS/FAIL
-denominator and are shown as coverage. Ongoing cohorts are prospective and non-overlapping;
-late arrivals are counted and included in the next open cohort rather than
-silently discarded. An activated policy starts with an empty prospective
-bucket, and repeated looks use a summable quadratic alpha-spending rule.
-`insufficient` and `reference_stale` are first-class results. `verdict-monitor`
-is a one-shot idempotent runner. `verdict-service` executes the dashboard's
-saved schedule once or continuously.
+and effect-size gate. With provider/model or reviewed-cluster grouping, Verdict
+computes separate group-by-metric comparisons and adjusts across the complete
+tested family; it does not pool the selected groups. The Measurement selector
+can add stored PASS/FAIL results from one complete evaluator identity without
+running or paying for a judge. That evaluator fingerprint and its expected
+dimensions become immutable policy
+inputs. A reviewed-cluster policy also pins its registry version. UNCLEAR,
+missing, and error states remain outside the PASS/FAIL denominator and are
+shown as coverage. Ongoing cohorts are prospective and non-overlapping; late
+arrivals are counted and included in the next open cohort rather than silently
+discarded. An activated policy starts with an empty prospective bucket, and
+repeated looks use a summable quadratic alpha-spending rule.
+`insufficient` and `reference_stale` are first-class results; unassigned or new
+groups are reported rather than pooled into a comparison. `verdict-monitor` is
+a one-shot idempotent runner. It and `verdict-service` use the same stored
+evaluator, dimensions, grouping version, and trace selection as the dashboard.
+`verdict-service` executes the dashboard's saved schedule once or continuously.
 
 The dashboard reads key-free findings from immutable analysis snapshots rather
 than recomputing them on every page load. It reports provider outcome,

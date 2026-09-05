@@ -21,16 +21,13 @@ from verdict.analysis_records import (
 from verdict.client import _resolve_storage
 from verdict.dashboard.analysis_service import run_analysis
 from verdict.dashboard.control_plane import ControlStore
-from verdict.monitoring import (
-    compare_manifest,
-    plan_prospective_manifest,
-    trace_monitor_units,
-)
+from verdict.monitor_inputs import LOCAL_TENANT, LOCAL_TRACE_SCOPE, load_monitor_units
+from verdict.monitoring import compare_manifest, plan_prospective_manifest
 from verdict.telemetry.local_agents import capture_local_agents
 
 _log = logging.getLogger("verdict.service")
-TENANT = "__verdict_local__"
-SCOPE = "__verdict_local__:application:trace"
+TENANT = LOCAL_TENANT
+SCOPE = LOCAL_TRACE_SCOPE
 
 
 def _schedule(storage_url: str) -> dict[str, object]:
@@ -161,25 +158,7 @@ def run_cycle(storage_url: str, schedule: dict[str, object]) -> dict[str, object
         if schedule.get("runMonitor") is True and policy is not None:
             previous = storage.get_latest_monitor_snapshot(policy.policy_id)
             if previous is not None:
-                traces = storage.list_traces(tenant_id=TENANT, limit=100_001)
-                if len(traces) > 100_000:
-                    raise ValueError("monitor exceeds bounded trace limit")
-                assignments = None
-                if policy.grouping_mode == "cluster":
-                    pointer = storage.get_active_cluster_registry(TENANT)
-                    if pointer.version_id is None:
-                        raise ValueError("cluster monitor has no active registry")
-                    rows = storage.list_trace_cluster_assignments(
-                        TENANT, pointer.version_id, limit=100_001
-                    )
-                    assignments = {
-                        row.trace_id: row.cluster_id for row in rows
-                        if row.status == "assigned" and row.cluster_id is not None
-                    }
-                units = trace_monitor_units(
-                    traces, grouping_mode=policy.grouping_mode,
-                    cluster_assignments=assignments,
-                )
+                units = load_monitor_units(storage, policy, tenant_id=TENANT)
                 manifest = plan_prospective_manifest(previous[0], units, policy)
                 comparison = compare_manifest(units, manifest, policy)
                 storage.save_monitor_snapshot(policy.policy_id, manifest, comparison)

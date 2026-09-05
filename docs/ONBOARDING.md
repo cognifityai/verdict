@@ -195,12 +195,16 @@ deterministic trace checks or select one existing complete evaluator. Selecting
 an evaluator compares its already-stored per-dimension PASS/FAIL results; it
 does not invoke the judge. UNCLEAR, missing, and error results are shown as
 coverage and excluded from the PASS/FAIL denominator. The activated policy
-freezes that evaluator fingerprint and its expected dimensions. If each metric does not have enough
-eligible independent LLM calls, it reports `insufficient`; if new provider/model
-groups exceed the configured support threshold, it reports `reference_stale`.
-Previewed comparisons remain exploratory until explicitly activated. Activation does
-not promote the historical preview result: it freezes the reference and opens
-an empty prospective current bucket.
+freezes that evaluator fingerprint and its expected dimensions. Provider/model
+and reviewed-cluster facets produce separate comparisons for every eligible
+group and metric; Verdict corrects across that complete family instead of
+pooling groups. Reviewed-cluster policies pin the registry version used by the
+preview. If no group/metric cell has enough eligible LLM calls, Verdict reports
+`insufficient`; if unassigned or new groups exceed the configured
+support threshold, it reports `reference_stale`.
+Previewed comparisons remain exploratory until explicitly activated.
+Activation does not promote the historical preview result: it freezes the
+reference and opens an empty prospective current bucket.
 
 To run the active policy from cron, systemd, Kubernetes, or another scheduler:
 
@@ -212,7 +216,9 @@ Each invocation consumes at most one new prospective non-overlapping cohort.
 Late-arriving units remain eligible for the next open cohort rather than being
 dropped. Across repeated looks, Verdict spends the configured alpha with the
 summable `6 / (pi² × look²)` schedule after applying Benjamini-Hochberg within
-each look.
+each look. The dashboard, `verdict-monitor`, manual scheduled action, and
+`verdict-service` share the same trace, stored-judgment, evaluator-dimension,
+and frozen-group input construction; none of these monitor paths calls a judge.
 Repeating the command without new eligible traffic returns the same snapshot
 identity instead of duplicating work. The reference does not silently move or
 recluster; create and review a new candidate when the comparison contract must
@@ -341,7 +347,8 @@ and the ordered event explorer are key-free. The first deterministic analysis
 is stored as an immutable terminal snapshot; dashboard reads do not silently
 recompute it. In **Drift > Explore**, preview an older 80% versus newer 20%
 count cohort or explicit event-time ranges. No grouping is the default;
-provider/model facets and reviewed clusters are optional. A preview cannot
+provider/model facets and reviewed clusters are optional and are compared
+within each selected group rather than pooled. A preview cannot
 become an authoritative alert: activation starts a new empty prospective
 bucket against the frozen reference.
 
