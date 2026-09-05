@@ -76,6 +76,15 @@ from verdict.storage.base import (
     _validate_evaluator_judgment_query,
 )
 
+
+def _trace_tenant_clause(requested: str) -> str:
+    return (
+        "(tenant_id IS NULL OR tenant_id=?)"
+        if requested == "__verdict_local__"
+        else "tenant_id=?"
+    )
+
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS traces (
     trace_id TEXT PRIMARY KEY,
@@ -1071,7 +1080,7 @@ class SQLiteStorage:
         clauses = []
         params: list[object] = []
         if tenant_id is not None:
-            clauses.append("tenant_id = ?")
+            clauses.append(_trace_tenant_clause(tenant_id))
             params.append(tenant_id)
         if cluster_id is not None:
             clauses.append("cluster_id = ?")
@@ -2372,10 +2381,7 @@ class SQLiteStorage:
             f"'text' AND {length_sql(path)} BETWEEN 1 AND 64 THEN "
             f"json_extract(tags_json,'$.\"{path}\"') END"
         )
-        tenant_clause = (
-            "(tenant_id IS NULL OR tenant_id=?)"
-            if authorized_tenant == "__verdict_local__" else "tenant_id=?"
-        )
+        tenant_clause = _trace_tenant_clause(authorized_tenant)
         where = f"""{tenant_clause} AND ended_at IS NOT NULL
             AND analysis_started_at_state='valid'
             AND analysis_started_at_us>=? AND analysis_started_at_us<?"""
@@ -2428,10 +2434,7 @@ class SQLiteStorage:
         *,
         target_workload: str | None,
     ) -> tuple[int, int | None, int | None]:
-        tenant_clause = (
-            "(tenant_id IS NULL OR tenant_id=?)"
-            if authorized_tenant == "__verdict_local__" else "tenant_id=?"
-        )
+        tenant_clause = _trace_tenant_clause(authorized_tenant)
         where = (
             f"{tenant_clause} AND ended_at IS NOT NULL "
             "AND analysis_started_at_state='valid'"
@@ -2459,10 +2462,7 @@ class SQLiteStorage:
         if not trace_ids:
             return {}
         placeholders = ",".join("?" for _ in trace_ids)
-        tenant_clause = (
-            "(tenant_id IS NULL OR tenant_id=?)"
-            if authorized_tenant == "__verdict_local__" else "tenant_id=?"
-        )
+        tenant_clause = _trace_tenant_clause(authorized_tenant)
         params: list[object] = [authorized_tenant]
         with self._lock:
             rows = self._conn.execute(
@@ -2475,10 +2475,7 @@ class SQLiteStorage:
         return {row[0]: json.loads(row[1]) if row[1] else None for row in rows}
 
     def count_pending_analysis_rows(self, authorized_tenant: str) -> int:
-        tenant_clause = (
-            "(tenant_id IS NULL OR tenant_id=?)"
-            if authorized_tenant == "__verdict_local__" else "tenant_id=?"
-        )
+        tenant_clause = _trace_tenant_clause(authorized_tenant)
         params = (authorized_tenant,)
         with self._lock:
             return self._conn.execute(
@@ -2502,10 +2499,7 @@ class SQLiteStorage:
     ) -> int:
         if not 1 <= limit <= 10_000:
             raise ValueError("normalization limit must be in [1,10000]")
-        tenant_clause = (
-            "(tenant_id IS NULL OR tenant_id=?)"
-            if authorized_tenant == "__verdict_local__" else "tenant_id=?"
-        )
+        tenant_clause = _trace_tenant_clause(authorized_tenant)
         params: list[object] = [authorized_tenant]
         params.append(limit)
         with self._lock:

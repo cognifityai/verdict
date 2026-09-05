@@ -83,6 +83,15 @@ from verdict.storage.base import (
     _validate_evaluator_judgment_query,
 )
 
+
+def _trace_tenant_clause(requested: str) -> str:
+    return (
+        "(tenant_id IS NULL OR tenant_id=%s)"
+        if requested == "__verdict_local__"
+        else "tenant_id=%s"
+    )
+
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS traces (
     trace_id          TEXT PRIMARY KEY,
@@ -1000,7 +1009,7 @@ class PostgresStorage:
     ) -> list[Trace]:
         clauses, params = [], []
         if tenant_id is not None:
-            clauses.append("tenant_id = %s")
+            clauses.append(_trace_tenant_clause(tenant_id))
             params.append(tenant_id)
         if cluster_id is not None:
             clauses.append("cluster_id = %s")
@@ -2253,7 +2262,7 @@ class PostgresStorage:
         limit: int,
         missing_version_id: str | None = None,
     ) -> list[ClusterTraceCandidate]:
-        where = """tenant_id=%s AND ended_at IS NOT NULL
+        where = f"""{_trace_tenant_clause(authorized_tenant)} AND ended_at IS NOT NULL
           AND analysis_started_at_state='valid'
           AND analysis_started_at_us>=%s AND analysis_started_at_us<%s"""
         params: tuple = (authorized_tenant, start_us, cutoff_us)
@@ -2295,7 +2304,7 @@ class PostgresStorage:
         *,
         target_workload: str | None,
     ) -> tuple[int, int | None, int | None]:
-        where = """tenant_id=%s AND ended_at IS NOT NULL
+        where = f"""{_trace_tenant_clause(authorized_tenant)} AND ended_at IS NOT NULL
           AND analysis_started_at_state='valid'"""
         params: tuple[object, ...] = (authorized_tenant,)
         if target_workload is None:
@@ -2319,18 +2328,19 @@ class PostgresStorage:
         if not trace_ids:
             return {}
         rows = self._fetchall(
-            """SELECT trace_id,CASE WHEN analysis_raw_messages_state='valid'
+            f"""SELECT trace_id,CASE WHEN analysis_raw_messages_state='valid'
               AND analysis_raw_messages_utf8_bytes<=67108864 THEN raw_messages END
-              FROM traces WHERE tenant_id=%s AND trace_id=ANY(%s)""",
+              FROM traces WHERE {_trace_tenant_clause(authorized_tenant)}
+              AND trace_id=ANY(%s)""",  # nosec B608
             (authorized_tenant, trace_ids),
         )
         return {row[0]: row[1] for row in rows}
 
     def count_pending_analysis_rows(self, authorized_tenant: str) -> int:
         return self._fetchone(
-            """SELECT COUNT(*) FROM traces WHERE tenant_id=%s AND
+            f"""SELECT COUNT(*) FROM traces WHERE {_trace_tenant_clause(authorized_tenant)} AND
               (analysis_started_at_state='pending' OR
-               analysis_raw_messages_state='pending')""",
+               analysis_raw_messages_state='pending')""",  # nosec B608
             (authorized_tenant,),
         )[0]
 
@@ -2351,13 +2361,13 @@ class PostgresStorage:
             raise ValueError("normalization limit must be in [1,10000]")
         with self._pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
             cur.execute(
-                """SELECT trace_id,started_at,octet_length(raw_messages::text),
+                f"""SELECT trace_id,started_at,octet_length(raw_messages::text),
                   CASE WHEN octet_length(raw_messages::text)<=67108864
                        THEN raw_messages END
-                  FROM traces WHERE tenant_id=%s AND
+                  FROM traces WHERE {_trace_tenant_clause(authorized_tenant)} AND
                    (analysis_started_at_state='pending' OR
                     analysis_raw_messages_state='pending')
-                  ORDER BY trace_id LIMIT %s FOR UPDATE""",
+                  ORDER BY trace_id LIMIT %s FOR UPDATE""",  # nosec B608
                 (authorized_tenant, limit),
             )
             rows = cur.fetchall()

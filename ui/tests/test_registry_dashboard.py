@@ -20,7 +20,7 @@ from verdict_eval.cluster_registry import ClusterRegistryService
 from verdict_eval.clustering_strategies import FitConfig
 
 
-def _trace(tenant: str, trace_id: str, when: datetime, intent: str | None) -> Trace:
+def _trace(tenant: str | None, trace_id: str, when: datetime, intent: str | None) -> Trace:
     tags: dict[str, str] = {"verdict.workload": "agent"}
     if intent is not None:
         tags["verdict.intent_key"] = intent
@@ -69,8 +69,9 @@ def test_empty_dashboard_can_fit_review_validate_and_activate_first_registry(tmp
     path = tmp_path / "first-registry.db"
     storage = SQLiteStorage(str(path))
     cutoff = datetime(2026, 9, 2, tzinfo=timezone.utc)
-    storage.insert_trace(_trace("__verdict_local__", "eligible", cutoff, "billing"))
-    storage.insert_trace(_trace("__verdict_local__", "missing", cutoff, None))
+    storage.insert_trace(_trace(None, "eligible", cutoff, "billing"))
+    storage.insert_trace(_trace(None, "missing", cutoff, None))
+    storage.insert_trace(_trace("other", "unrelated", cutoff, "other"))
     storage.close()
 
     async def lifecycle():

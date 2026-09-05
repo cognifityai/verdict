@@ -10,7 +10,10 @@ from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import numpy as np
+import psycopg
 import pytest
+from psycopg import sql
+from psycopg.conninfo import conninfo_to_dict, make_conninfo
 from verdict.schema import (
     ClusterIdentity,
     ClusterRegistryEvent,
@@ -25,6 +28,20 @@ from verdict_eval.cli.cluster import _safe_error_code
 from verdict_eval.cli.cluster import main as cluster_main
 from verdict_eval.cluster_registry import ClusterRegistryService, clustering_strategy_status
 from verdict_eval.clustering_strategies import FitConfig
+
+
+def _safe_test_dsn() -> str | None:
+    dsn = os.environ.get("VERDICT_TEST_POSTGRES_DSN")
+    try:
+        database = conninfo_to_dict(dsn).get("dbname", "") if dsn else ""
+    except Exception:
+        return None
+    if (
+        os.environ.get("VERDICT_TEST_POSTGRES_ALLOW_ANY_DB") == "1"
+        or "test" in database.lower()
+    ):
+        return dsn
+    return None
 
 
 class _SemanticEmbedder:
@@ -606,14 +623,17 @@ def test_activation_uses_reviewed_fit_membership_when_historical_trace_arrives_l
         storage.close()
 
 
-@pytest.mark.skipif(
-    not os.environ.get("VERDICT_TEST_POSTGRES_DSN"),
-    reason="no disposable live Postgres DSN",
-)
 def test_live_postgres_service_fit_validate_and_activate() -> None:
+    dsn = _safe_test_dsn()
+    if dsn is None:
+        pytest.skip("no explicitly disposable live PostgreSQL database")
     tenant = f"registry-service-{uuid4().hex}"
     cutoff = datetime.now(timezone.utc)
-    storage = PostgresStorage(os.environ["VERDICT_TEST_POSTGRES_DSN"])
+    schema = f"verdict_test_{uuid4().hex}"
+    with psycopg.connect(dsn, autocommit=True) as admin:
+        admin.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+    scoped_dsn = make_conninfo(dsn, options=f"-csearch_path={schema}")
+    storage = PostgresStorage(scoped_dsn)
     try:
         storage.insert_trace(
             Trace(
@@ -653,3 +673,7 @@ def test_live_postgres_service_fit_validate_and_activate() -> None:
         assert len(inspected["events"]) == 1
     finally:
         storage.close()
+        with psycopg.connect(dsn, autocommit=True) as admin:
+            admin.execute(
+                sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema))
+            )

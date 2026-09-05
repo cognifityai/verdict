@@ -130,14 +130,14 @@ def test_anthropic_family_catchalls_cannot_price_unknown_versions():
 
 def test_pricing_table_has_a_visible_verification_date():
     assert PRICING_LAST_VERIFIED.isoformat() >= "2026-08-01"
-    assert PRICING_REVIEW_AFTER >= PRICING_LAST_VERIFIED
+    assert (PRICING_REVIEW_AFTER - PRICING_LAST_VERIFIED).days >= 60
 
 
 def test_stale_pricing_snapshot_warns(monkeypatch, caplog):
     class FutureDate(date):
         @classmethod
         def today(cls):
-            return cls(2026, 9, 1)
+            return cls(2026, 11, 16)
 
     monkeypatch.setattr(pricing, "date", FutureDate)
     monkeypatch.setattr(pricing, "_warned_stale", False)
@@ -148,9 +148,9 @@ def test_stale_pricing_snapshot_warns(monkeypatch, caplog):
 
 def test_current_model_entries_use_base_text_rates():
     assert PRICE_PER_1K["claude-opus-5"] == (0.005, 0.025)
-    assert PRICE_PER_1K["gpt-5.6-sol"] == (0.005, 0.030)
-    assert PRICE_PER_1K["gpt-5.6-terra"] == (0.0025, 0.015)
-    assert PRICE_PER_1K["gpt-5.6-luna"] == (0.001, 0.006)
+    assert PRICE_PER_1K["gpt-5.6-sol"] == (0.004, 0.020)
+    assert PRICE_PER_1K["gpt-5.6-terra"] == (0.002, 0.012)
+    assert PRICE_PER_1K["gpt-5.6-luna"] == (0.0002, 0.0012)
     assert PRICE_PER_1K["gpt-5.5-pro"] == (0.030, 0.180)
     assert PRICE_PER_1K["gpt-5.4"] == (0.0025, 0.015)
     assert PRICE_PER_1K["gemini-3.5-flash"] == (0.0015, 0.009)

@@ -1422,7 +1422,7 @@ def _empty_bundle(*, agent_runs: dict[str, Any] | None = None) -> dict:
                 name: _cost_summary(0, 0, 0.0)
                 for name in ("agent", "judge", "unclassified")
             },
-            "regressionHour": 0,
+            "regressionHour": None,
             "providers": 0,
             "clusters": 0,
             "workload": None,
@@ -2441,7 +2441,7 @@ def _build(
                 )
                 for name, values in cost_counts.items()
             },
-            "regressionHour": int(os.environ.get("VERDICT_REGRESSION_HOUR", "4")),
+            "regressionHour": None,
             "providers": len(all_keys),
             "clusters": cluster_health["nClusters"],
             "workload": (

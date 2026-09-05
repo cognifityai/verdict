@@ -529,6 +529,37 @@ def test_init_accepts_boundary_sample_rates():
         client_mod.shutdown()
 
 
+def test_init_skips_optional_sdk_when_availability_check_raises(monkeypatch, caplog):
+    import logging
+
+    import verdict.client as client_mod
+    from verdict.instrumentors.anthropic import AnthropicInstrumentor
+
+    def broken_availability(_instrumentor):
+        raise RuntimeError("private dependency detail")
+
+    client_mod.shutdown()
+    monkeypatch.setattr(AnthropicInstrumentor, "available", broken_availability)
+    try:
+        with caplog.at_level(logging.WARNING, logger="verdict"):
+            for _ in range(2):
+                client = client_mod.init(
+                    storage="memory://", instrumentors=["anthropic"]
+                )
+                client_mod.shutdown()
+
+        assert client._instrumentors == []
+        matching = [
+            record for record in caplog.records
+            if "anthropic" in record.getMessage().lower()
+        ]
+        assert len(matching) == 1
+        assert "private dependency detail" not in matching[0].getMessage()
+    finally:
+        client_mod.shutdown()
+        client_mod._warned_availability_failures.clear()
+
+
 # ---------------------------------------------------------------------------
 # Routing context: tenant_id / session_id / user_id_hash on a built trace
 # (fix #6). Exercised through the shared apply_routing_context helper so we

@@ -317,21 +317,10 @@ def _run(args) -> int:
     if args.registry_mode != "off" and not args.tenant_id:
         print("ERROR: --tenant-id is required for registry modes")
         return 2
-    if args.registry_mode != "off" and args.tenant_id == "__verdict_local__":
-        if storage.list_traces(tenant_id="__verdict_local__", limit=1):
-            print("ERROR: reserved local registry scope is used as a tenant ID")
-            return 2
-    if args.registry_mode == "off" or args.tenant_id == "__verdict_local__":
+    if args.registry_mode == "off":
         traces = storage.list_traces(limit=args.limit)
     else:
         traces = storage.list_traces(tenant_id=args.tenant_id, limit=args.limit)
-    if (
-        args.registry_mode != "off"
-        and args.tenant_id == "__verdict_local__"
-        and any(trace.tenant_id is not None for trace in traces)
-    ):
-        print("ERROR: reserved local registry scope collides with tenant-owned traces")
-        return 2
     print(f"Loaded {len(traces)} traces.")
     traces, excluded_internal = _exclude_internal_workloads(traces)
     if excluded_internal:

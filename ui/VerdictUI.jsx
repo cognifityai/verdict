@@ -40,7 +40,7 @@ const SEED = (() => {
   return {
     meta: {
       runStart: 'sample-data', durationHours: 8, totalTraces: 96, totalJudged: 48,
-      totalCost: 0.42, totalCostStatus: 'complete', regressionHour: 4,
+      totalCost: 0.42, totalCostStatus: 'complete', regressionHour: null,
       providers: 3, clusters: 4, workload: 'sample-service',
     },
     driftAnalysis: {
@@ -1051,7 +1051,9 @@ function Overview({ data = SEED }) {
               <XAxis dataKey="hour" tick={{ fill: C.sub, fontSize: 12 }} stroke={C.border} tickFormatter={(h) => `${h}h`} />
               <YAxis domain={[0, 100]} tick={{ fill: C.sub, fontSize: 12 }} stroke={C.border} tickFormatter={(v) => `${v}%`} />
               <Tooltip content={<ChartTooltip unit="%" />} />
-              <ReferenceLine x={m.regressionHour} stroke={C.red} strokeDasharray="4 4" label={{ value: "change point", fill: C.red, fontSize: 11, position: "top" }} />
+              {Number.isFinite(m.regressionHour) && (
+                <ReferenceLine x={m.regressionHour} stroke={C.red} strokeDasharray="4 4" label={{ value: "change point", fill: C.red, fontSize: 11, position: "top" }} />
+              )}
               {qualitySeries.map((series) => (
                 <Line key={series.key} type="monotone" dataKey={series.key} name={series.label} stroke={series.color} strokeWidth={2.4} dot={{ r: 2.5 }} connectNulls isAnimationActive={false} />
               ))}
@@ -1262,8 +1264,10 @@ function Drift({ data = SEED, onOpenOperations = null }) {
             <XAxis dataKey="hour" tick={{ fill: C.sub, fontSize: 12 }} stroke={C.border} tickFormatter={(h) => `${h}h`} />
             <YAxis domain={[0, 100]} tick={{ fill: C.sub, fontSize: 12 }} stroke={C.border} tickFormatter={(v) => `${v}%`} />
             <Tooltip content={<ChartTooltip unit="%" />} />
-            <ReferenceArea x1={DATA.meta.regressionHour} x2={DATA.meta.regressionHour + 3} fill={C.red} fillOpacity={0.06} />
-            <ReferenceLine x={DATA.meta.regressionHour} stroke={C.red} strokeDasharray="4 4" />
+            {Number.isFinite(DATA.meta.regressionHour) && <>
+              <ReferenceArea x1={DATA.meta.regressionHour} x2={DATA.meta.regressionHour + 3} fill={C.red} fillOpacity={0.06} />
+              <ReferenceLine x={DATA.meta.regressionHour} stroke={C.red} strokeDasharray="4 4" />
+            </>}
             {dimensionSeries.map((dimension) => (
               <Line key={dimension.key} type="monotone" dataKey={dimension.key} name={dimension.label} stroke={dimension.color} strokeWidth={2} dot={false} connectNulls isAnimationActive={false} />
             ))}
