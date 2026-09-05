@@ -313,10 +313,12 @@ def test_active_registry_pipeline_uses_versioned_assignments_without_trace_write
     check.close()
 
 
-def test_tenantless_sqlite_uses_the_canonical_local_registry_scope(
+@pytest.mark.parametrize("persisted_tenant", [None, "__verdict_local__"])
+def test_sqlite_local_traces_use_the_canonical_local_registry_scope(
     tmp_path,
     monkeypatch,
     capsys,
+    persisted_tenant,
 ) -> None:
     db_path = tmp_path / "registry-local-active.db"
     analysis_time = datetime(2026, 8, 11, 12, tzinfo=timezone.utc)
@@ -324,6 +326,7 @@ def test_tenantless_sqlite_uses_the_canonical_local_registry_scope(
     storage.insert_trace(
         Trace(
             trace_id="local-trace",
+            tenant_id=persisted_tenant,
             started_at=analysis_time - timedelta(hours=1),
             ended_at=analysis_time,
             prompt_redacted="Billing question",
@@ -375,40 +378,6 @@ def test_tenantless_sqlite_uses_the_canonical_local_registry_scope(
     )
     assert main() == 0
     assert "versioned registry unavailable" not in capsys.readouterr().out
-
-
-def test_local_registry_scope_rejects_literal_tenant_collision(
-    tmp_path,
-    monkeypatch,
-    capsys,
-) -> None:
-    db_path = tmp_path / "registry-local-collision.db"
-    storage = SQLiteStorage(str(db_path))
-    storage.insert_trace(
-        Trace(
-            trace_id="collision",
-            tenant_id="__verdict_local__",
-            prompt_redacted="Prompt",
-            response_redacted="Response",
-        )
-    )
-    storage.close()
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "verdict-pipeline",
-            "--storage",
-            f"sqlite:///{db_path}",
-            "--registry-mode",
-            "active",
-            "--tenant-id",
-            "__verdict_local__",
-        ],
-    )
-
-    assert main() == 2
-    assert "reserved local registry scope" in capsys.readouterr().out
 
 
 def test_pipeline_rejects_metadata_only_capture(tmp_path, monkeypatch, capsys):

@@ -70,6 +70,10 @@ from verdict.storage.base import (
 )
 
 
+def _trace_tenant_matches(stored: str | None, requested: str) -> bool:
+    return stored == requested or (requested == "__verdict_local__" and stored is None)
+
+
 class InMemoryStorage:
     """Process-local, non-persistent storage. Loses everything on close()."""
 
@@ -370,7 +374,7 @@ class InMemoryStorage:
     ) -> list[Trace]:
         out = []
         for t in self._traces.values():
-            if tenant_id is not None and t.tenant_id != tenant_id:
+            if tenant_id is not None and not _trace_tenant_matches(t.tenant_id, tenant_id):
                 continue
             if cluster_id is not None and t.cluster_id != cluster_id:
                 continue
@@ -1062,10 +1066,7 @@ class InMemoryStorage:
         traces = getattr(self._cluster_snapshot, "traces", self._traces)
         for trace in traces.values():
             if (
-                not (
-                    trace.tenant_id == authorized_tenant
-                    or (authorized_tenant == "__verdict_local__" and trace.tenant_id is None)
-                )
+                not _trace_tenant_matches(trace.tenant_id, authorized_tenant)
                 or trace.ended_at is None
                 or trace.analysis_started_at_state != "valid"
                 or trace.analysis_started_at_us is None
@@ -1124,10 +1125,7 @@ class InMemoryStorage:
         times: list[int] = []
         for trace in traces.values():
             if (
-                not (
-                    trace.tenant_id == authorized_tenant
-                    or (authorized_tenant == "__verdict_local__" and trace.tenant_id is None)
-                )
+                not _trace_tenant_matches(trace.tenant_id, authorized_tenant)
                 or trace.ended_at is None
                 or trace.analysis_started_at_state != "valid"
                 or trace.analysis_started_at_us is None
@@ -1154,10 +1152,7 @@ class InMemoryStorage:
             trace_id: copy.deepcopy(trace.raw_messages)
             for trace_id in trace_ids
             if (trace := traces.get(trace_id)) is not None
-            and (
-                trace.tenant_id == authorized_tenant
-                or (authorized_tenant == "__verdict_local__" and trace.tenant_id is None)
-            )
+            and _trace_tenant_matches(trace.tenant_id, authorized_tenant)
             and trace.analysis_raw_messages_state == "valid"
         }
 
@@ -1166,10 +1161,7 @@ class InMemoryStorage:
         return sum(
             1
             for trace in traces.values()
-            if (
-                trace.tenant_id == authorized_tenant
-                or (authorized_tenant == "__verdict_local__" and trace.tenant_id is None)
-            )
+            if _trace_tenant_matches(trace.tenant_id, authorized_tenant)
             and (
                 trace.analysis_started_at_state == "pending"
                 or trace.analysis_raw_messages_state == "pending"
@@ -1197,10 +1189,7 @@ class InMemoryStorage:
         pending = [
             trace
             for trace in self._traces.values()
-            if (
-                trace.tenant_id == authorized_tenant
-                or (authorized_tenant == "__verdict_local__" and trace.tenant_id is None)
-            )
+            if _trace_tenant_matches(trace.tenant_id, authorized_tenant)
             and (
                 trace.analysis_started_at_state == "pending"
                 or trace.analysis_raw_messages_state == "pending"

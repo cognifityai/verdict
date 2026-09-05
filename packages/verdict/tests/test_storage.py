@@ -419,6 +419,21 @@ def test_list_traces_filters_by_tenant_and_cluster(storage):
     assert a_c1[0].trace_id == t1.trace_id
 
 
+def test_local_tenant_list_includes_legacy_tenantless_traces_only(storage):
+    tenantless = _trace(tenant_id=None, cluster_id="local")
+    explicit_local = _trace(tenant_id="__verdict_local__", cluster_id="local")
+    unrelated = _trace(tenant_id="other", cluster_id="local")
+    for trace in (tenantless, explicit_local, unrelated):
+        storage.insert_trace(trace)
+
+    rows = storage.list_traces(tenant_id="__verdict_local__")
+
+    assert {trace.trace_id for trace in rows} == {
+        tenantless.trace_id,
+        explicit_local.trace_id,
+    }
+
+
 def test_list_traces_returns_newest_first(storage):
     older = _trace(started_at=datetime(2026, 1, 1, tzinfo=timezone.utc))
     newer = _trace(started_at=datetime(2026, 1, 2, tzinfo=timezone.utc))
