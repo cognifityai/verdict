@@ -10,15 +10,19 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+from _postgres_test_safety import validate_test_dsn
 from verdict.storage.postgres import PostgresStorage
 from verdict.telemetry.files import iter_telemetry_file
 from verdict.telemetry.model import ImportContext
 from verdict.telemetry.runner import import_into_storage
 
-DSN = os.environ.get("VERDICT_TEST_POSTGRES_DSN")
+DSN, POSTGRES_SKIP_REASON = validate_test_dsn(
+    os.environ.get("VERDICT_TEST_POSTGRES_DSN"),
+    allow_any_database=os.environ.get("VERDICT_TEST_POSTGRES_ALLOW_ANY_DB") == "1",
+)
 ROOT = Path(__file__).parents[3]
 
-pytestmark = pytest.mark.skipif(not DSN, reason="VERDICT_TEST_POSTGRES_DSN not set")
+pytestmark = pytest.mark.skipif(DSN is None, reason=POSTGRES_SKIP_REASON)
 
 
 def test_live_postgres_imports_existing_telemetry_through_storage_port() -> None:
