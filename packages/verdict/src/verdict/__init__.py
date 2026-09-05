@@ -39,7 +39,7 @@ from verdict.trace import (
     workload_context,
 )
 
-__version__ = "0.1.0a15"
+__version__ = "0.1.0a16"
 
 __all__ = [
     "AgentEvent",

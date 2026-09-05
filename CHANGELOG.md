@@ -6,6 +6,31 @@ the product is refined.
 
 ## [Unreleased]
 
+## [0.1.0a16] - 2026-09-05
+
+### Fixed
+
+- Standalone dashboards now include historical traces stored without a tenant
+  in local trace, cluster, analysis, and monitor queries while continuing to
+  exclude explicitly different tenants.
+- Semantic clustering resolves the pinned MiniLM snapshot from
+  `HF_HUB_CACHE`, `HF_HOME`, or the default Hugging Face cache and reports a
+  bounded error when first-use download fails.
+- Tool-call-only OTLP assistant messages no longer turn the `"(no content)"`
+  placeholder into response evidence; text-bearing assistant messages are
+  unchanged.
+- OpenAI chat instrumentation no longer consumes arbitrary message iterables
+  before the provider SDK sends them.
+- A broken optional provider SDK availability check no longer prevents
+  `verdict.init()` from initializing the remaining instrumentation.
+- The dashboard no longer displays an uncomputed change-point marker.
+- Bundled model rates and their review date were reverified against current
+  provider pricing pages.
+- Live PostgreSQL tests require an explicitly disposable database and isolate
+  registry fixtures from other test data.
+
+## [0.1.0a15] - 2026-09-02
+
 ### Changed
 
 - Monitor can bind one existing complete evaluator identity and compare stored
@@ -20,8 +45,6 @@ the product is refined.
   downloads that exact revision on first use when the semantic extra is
   installed. Later imports are assigned incrementally without changing the
   reviewed fit membership during activation.
-
-## [0.1.0a15] - 2026-09-02
 
 ### Fixed
 
@@ -344,7 +367,8 @@ the product is refined.
   retain content must explicitly select metadata-only capture. Redaction remains
   best-effort rather than a compliance control.
 
-[Unreleased]: https://github.com/cognifityai/verdict/compare/v0.1.0a15...HEAD
+[Unreleased]: https://github.com/cognifityai/verdict/compare/v0.1.0a16...HEAD
+[0.1.0a16]: https://github.com/cognifityai/verdict/compare/v0.1.0a15...v0.1.0a16
 [0.1.0a15]: https://github.com/cognifityai/verdict/compare/v0.1.0a14...v0.1.0a15
 [0.1.0a14]: https://github.com/cognifityai/verdict/compare/v0.1.0a13...v0.1.0a14
 [0.1.0a13]: https://github.com/cognifityai/verdict/compare/v0.1.0a12...v0.1.0a13
