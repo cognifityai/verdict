@@ -72,6 +72,7 @@ class VerdictClient:
 
 _client: VerdictClient | None = None
 _lock = threading.Lock()
+_warned_availability_failures: set[str] = set()
 
 
 def init(
@@ -214,7 +215,18 @@ def _install_instrumentors(client: VerdictClient) -> None:
         instr = cls(client)
         if requested and instr.name not in requested:
             continue
-        if not instr.available():
+        try:
+            available = instr.available()
+        except Exception as exc:
+            if instr.name not in _warned_availability_failures:
+                _warned_availability_failures.add(instr.name)
+                log.warning(
+                    "Skipping %s instrumentor after optional SDK check failed (%s)",
+                    instr.name,
+                    type(exc).__name__,
+                )
+            continue
+        if not available:
             log.debug("Skipping instrumentor %s (SDK not installed)", instr.name)
             continue
         try:

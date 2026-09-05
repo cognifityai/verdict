@@ -20,9 +20,13 @@ def _model_path(value: object, *, allow_download: bool) -> Path | None:
     candidates: list[Path] = []
     if configured is not None:
         candidates.append(Path(_bounded_text(configured, "model path", 4096)).expanduser())
+    hub_cache = os.environ.get("HF_HUB_CACHE")
+    if hub_cache is None:
+        hf_home = os.environ.get("HF_HOME")
+        hub_cache = str(Path(hf_home) / "hub") if hf_home else None
+    cache_root = Path(hub_cache).expanduser() if hub_cache else Path.home() / ".cache/huggingface/hub"
     candidates.append(
-        Path.home()
-        / ".cache/huggingface/hub"
+        cache_root
         / "models--sentence-transformers--all-MiniLM-L6-v2"
         / "snapshots"
         / _MINILM_REVISION
@@ -35,7 +39,6 @@ def _model_path(value: object, *, allow_download: bool) -> Path | None:
     if allow_download:
         try:
             from huggingface_hub import snapshot_download
-            from huggingface_hub.utils import HfHubError
         except ImportError as exc:
             raise ValueError("model_unavailable") from exc
 
@@ -46,7 +49,7 @@ def _model_path(value: object, *, allow_download: bool) -> Path | None:
                     revision=_MINILM_REVISION,
                 )
             )
-        except (OSError, HfHubError) as exc:
+        except Exception as exc:
             raise ValueError("model_unavailable") from exc
         if not downloaded.is_symlink() and downloaded.is_dir():
             return downloaded

@@ -79,7 +79,7 @@ content capture when its documented coverage is insufficient.
 Import existing telemetry without instrumenting the application:
 
 ```bash
-pip install "cognifity-verdict[telemetry]==0.1.0a15"  # extra is for OTLP protobuf
+pip install "cognifity-verdict[telemetry]==0.1.0a16"  # extra is for OTLP protobuf
 verdict-import file traces.jsonl --format auto --storage sqlite:///./verdict.db
 verdict-import receive-otlp --storage sqlite:///./verdict.db
 ```
@@ -101,7 +101,7 @@ deprecated trace-list endpoint, so Verdict receives one record per actual
 generation or embedding rather than a trace aggregate.
 
 For a customer proof of concept, follow the versioned
-[`0.1.0a15 POC release profile`](https://github.com/cognifityai/verdict/blob/v0.1.0a15/docs/POC_RELEASE_PROFILE.md).
+[`0.1.0a16 POC release profile`](https://github.com/cognifityai/verdict/blob/v0.1.0a16/docs/POC_RELEASE_PROFILE.md).
 It pins the package set, provider entry points, persistence mode, and privacy
 boundary used for release verification.
 
@@ -131,7 +131,7 @@ each ended span is persisted once independently of provider success. `flush()` i
 a FIFO point-in-time barrier and accepts an optional timeout. `close()` rejects
 new reads/writes, drains every accepted FIFO write, stops and joins the worker,
 then closes the inner adapter; post-close `flush()` is an idempotent no-op.
-The `0.1.0a15` POC profile uses `buffered_writes=False`. Buffered mode requires
+The `0.1.0a16` POC profile uses `buffered_writes=False`. Buffered mode requires
 an explicit `shutdown()` imported from `verdict.client` before process exit.
 Completed drift analyses use atomic `DriftRun` snapshots, including explicit
 zero-signal runs. Storage readers select a run marker and its exact signals from
@@ -170,7 +170,7 @@ client = Anthropic()
 Install and run the version-matched dashboard without a source checkout:
 
 ```bash
-python -m pip install "cognifity-verdict[dashboard]==0.1.0a15"
+python -m pip install "cognifity-verdict[dashboard]==0.1.0a16"
 verdict-dashboard --storage sqlite:///./verdict.db
 ```
 
@@ -236,7 +236,7 @@ Trace Explorer, cluster pass-rate charts, and drift rows project assignments
 and stable labels from the same active registry. Standalone and legacy stores
 without an authorized active registry continue to use `Trace.cluster_id`.
 
-For published release `0.1.0a15`, the bounded POC entry points include Anthropic
+For published release `0.1.0a16`, the bounded POC entry points include Anthropic
 `messages.create(...)` (including `stream=True`), OpenAI
 `chat.completions.create(...)` and its stream helper, and Google
 `models.generate_content(...)` / `generate_content_stream(...)`, plus the

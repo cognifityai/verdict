@@ -669,6 +669,7 @@ def test_large_store_api_returns_a_bounded_truthful_bundle(monkeypatch, tmp_path
 
     assert response.status_code == 200
     assert payload["meta"]["totalTraces"] == 1000
+    assert payload["meta"]["regressionHour"] is None
     assert payload["truncation"]["applied"] is True
     assert payload["truncation"]["resources"]["latencyPoints"] == {
         "available": 1000,

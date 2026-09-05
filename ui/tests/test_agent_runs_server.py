@@ -246,6 +246,42 @@ def test_local_insights_include_tenantless_historical_imports(tmp_path):
     }
 
 
+def test_insights_marks_missing_responses_not_evaluable(tmp_path):
+    path = tmp_path / "missing-response.db"
+    storage = SQLiteStorage(str(path))
+    now = datetime(2026, 8, 31, tzinfo=timezone.utc)
+    storage.insert_trace(
+        Trace(
+            trace_id="tool-call-only",
+            started_at=now,
+            ended_at=now,
+            provider="imported",
+            prompt_redacted="use the tool",
+            response_redacted=None,
+            tenant_id="local",
+        )
+    )
+    storage.close()
+
+    async def request_insights():
+        transport = httpx.ASGITransport(
+            app=create_app(storage=f"sqlite:///{path}")
+        )
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            return await client.post(
+                "/api/insights/run?tenant=local",
+                headers={"X-Verdict-Setup": token},
+            )
+
+    evidence = asyncio.run(request_insights()).json()["dataHealth"]["traceEvidence"]
+
+    assert evidence["judgeEligible"] == 0
+    assert evidence["notEvaluableReasons"] == {"response_not_captured": 1}
+
+
 def test_analysis_failure_is_persisted_and_returned_as_an_explicit_state(tmp_path):
     storage_url = f"sqlite:///{tmp_path / 'analysis-error.db'}"
 

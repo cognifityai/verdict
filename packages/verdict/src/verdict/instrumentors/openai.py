@@ -807,23 +807,32 @@ class OpenAIInstrumentor(BaseInstrumentor):
         )
         apply_routing_context(self.client, trace)
         if self.client.capture_content:
-            messages = kwargs.get("messages") or []
-            try:
-                joined = "\n".join(
-                    _flatten_content(m.get("content", "")) for m in messages if isinstance(m, dict)
+            source_messages = kwargs.get("messages")
+            if isinstance(source_messages, list):
+                messages = source_messages.copy()
+            elif isinstance(source_messages, tuple):
+                messages = list(source_messages)
+            else:
+                messages = None
+            if messages is not None:
+                try:
+                    joined = "\n".join(
+                        _flatten_content(m.get("content", ""))
+                        for m in messages
+                        if isinstance(m, dict)
+                    )
+                except Exception:
+                    joined = ""
+                trace.prompt_redacted = redact(
+                    joined,
+                    mode=self.client.redaction_mode,  # type: ignore[arg-type]
+                    secret=self.client.redaction_secret,
                 )
-            except Exception:
-                joined = ""
-            trace.prompt_redacted = redact(
-                joined,
-                mode=self.client.redaction_mode,  # type: ignore[arg-type]
-                secret=self.client.redaction_secret,
-            )
-            trace.raw_messages = redact_messages(
-                messages,
-                mode=self.client.redaction_mode,
-                secret=self.client.redaction_secret,
-            )
+                trace.raw_messages = redact_messages(
+                    messages,
+                    mode=self.client.redaction_mode,
+                    secret=self.client.redaction_secret,
+                )
         return trace
 
     def _fill_output(self, trace: Trace, resp: Any) -> None:

@@ -54,7 +54,8 @@ experimental status. Local semantic work uses the frozen
 `sentence-transformers/all-MiniLM-L6-v2` model. CLI commands require an explicit
 local `--model-path`. The dashboard can reuse its pinned cached revision or
 download that exact revision on first semantic use when the semantic extra is
-installed.
+installed. Cache lookup follows `HF_HUB_CACHE`, then `HF_HOME`, then the
+default Hugging Face cache.
 The legacy trace clustering pipeline remains a separate methodology.
 
 ### Supported explicit registry workflow

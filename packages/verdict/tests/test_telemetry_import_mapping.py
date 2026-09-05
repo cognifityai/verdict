@@ -211,6 +211,63 @@ def test_otlp_maps_text_from_message_parts_without_inventing_tool_content() -> N
     assert "must-not-become-response" not in repr(trace)
 
 
+def test_otlp_does_not_treat_tool_call_placeholder_as_a_response() -> None:
+    payload = {
+        "resourceSpans": [{"scopeSpans": [{"spans": [{
+            "traceId": "d" * 32,
+            "spanId": "4" * 16,
+            "name": "chat model",
+            "startTimeUnixNano": "1788264000000000000",
+            "attributes": _otel_attributes({
+                "gen_ai.operation.name": "chat",
+                "gen_ai.request.model": "model",
+                "gen_ai.input.messages": json.dumps([{
+                    "role": "user", "content": "Find the order.",
+                }]),
+                "gen_ai.output.messages": json.dumps([{
+                    "role": "assistant",
+                    "parts": [
+                        {"type": "text", "content": " (no content) "},
+                        {"type": "tool_call", "name": "lookup_order"},
+                    ],
+                }]),
+            }),
+        }]}]}],
+    }
+
+    [mapped] = map_otlp_payload(payload, _context("otlp"))
+
+    assert mapped.trace is not None
+    assert mapped.trace.response_redacted is None
+
+
+def test_otlp_keeps_real_response_text_beside_a_tool_call() -> None:
+    payload = {
+        "resourceSpans": [{"scopeSpans": [{"spans": [{
+            "traceId": "e" * 32,
+            "spanId": "5" * 16,
+            "name": "chat model",
+            "startTimeUnixNano": "1788264000000000000",
+            "attributes": _otel_attributes({
+                "gen_ai.operation.name": "chat",
+                "gen_ai.request.model": "model",
+                "gen_ai.output.messages": json.dumps([{
+                    "role": "assistant",
+                    "parts": [
+                        {"type": "text", "content": "I will look that up."},
+                        {"type": "tool_call", "name": "lookup_order"},
+                    ],
+                }]),
+            }),
+        }]}]}],
+    }
+
+    [mapped] = map_otlp_payload(payload, _context("otlp"))
+
+    assert mapped.trace is not None
+    assert mapped.trace.response_redacted == "I will look that up."
+
+
 def test_otlp_skips_non_llm_and_missing_identity_instead_of_inventing_records() -> None:
     payload = {
         "resourceSpans": [

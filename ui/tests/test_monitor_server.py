@@ -9,17 +9,48 @@ from verdict.storage import SQLiteStorage
 NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
 
-def _insert_traces(path, count, *, start=0, errors_from=10_000):
+def _insert_traces(path, count, *, start=0, errors_from=10_000, tenant="__verdict_local__"):
     storage = SQLiteStorage(str(path))
     for index in range(start, start + count):
         storage.insert_trace(Trace(
             trace_id=f"trace-{index:03d}", started_at=NOW + timedelta(days=index),
             ended_at=NOW + timedelta(days=index, seconds=1), provider="openai",
             request_model="model", response_redacted="ok",
-            tenant_id="__verdict_local__",
+            tenant_id=tenant,
             error="provider failed" if index >= errors_from else None,
         ))
     storage.close()
+
+
+def test_monitor_preview_includes_default_tenantless_sdk_traces(tmp_path):
+    database = tmp_path / "verdict.db"
+    _insert_traces(database, 20, tenant=None)
+    _insert_traces(database, 1, start=100, tenant="other")
+
+    async def preview():
+        app = create_app(storage=f"sqlite:///{database}")
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            return await client.post(
+                "/api/monitor/preview",
+                headers={"X-Verdict-Setup": token},
+                json={
+                    "windowMode": "count",
+                    "referenceRatio": 0.5,
+                    "minimumReference": 5,
+                    "minimumCurrent": 5,
+                },
+            )
+
+    response = asyncio.run(preview())
+
+    assert response.status_code == 200
+    manifest = response.json()["snapshot"]["manifest"]
+    assert len(manifest["reference_unit_ids"]) == 10
+    assert len(manifest["current_unit_ids"]) == 10
 
 
 def test_monitor_preview_activation_and_prospective_run(tmp_path):

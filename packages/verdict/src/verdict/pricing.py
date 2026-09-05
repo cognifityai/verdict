@@ -20,8 +20,8 @@ log = logging.getLogger("verdict.pricing")
 
 # This is deliberately visible to callers and tests. Static pricing without an
 # audit date looks authoritative long after it has become stale.
-PRICING_LAST_VERIFIED = date(2026, 8, 17)
-PRICING_REVIEW_AFTER = date(2026, 8, 31)
+PRICING_LAST_VERIFIED = date(2026, 9, 5)
+PRICING_REVIEW_AFTER = date(2026, 11, 15)
 PRICING_SOURCE_URLS = (
     "https://platform.claude.com/docs/en/about-claude/pricing",
     "https://developers.openai.com/api/docs/pricing",
@@ -58,9 +58,9 @@ PRICE_PER_1K: dict[str, tuple[float, float]] = {
     "claude-3-haiku": (0.00025, 0.00125),
     "claude-3-sonnet": (0.003, 0.015),
     # OpenAI (USD per 1K tokens)
-    "gpt-5.6-sol": (0.005, 0.030),
-    "gpt-5.6-terra": (0.0025, 0.015),
-    "gpt-5.6-luna": (0.001, 0.006),
+    "gpt-5.6-sol": (0.004, 0.020),
+    "gpt-5.6-terra": (0.002, 0.012),
+    "gpt-5.6-luna": (0.0002, 0.0012),
     "gpt-5.5-pro": (0.030, 0.180),
     "gpt-5.5": (0.005, 0.030),
     "gpt-5.4-pro": (0.030, 0.180),

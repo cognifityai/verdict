@@ -487,6 +487,34 @@ def test_openai_minimum_default_client_constructor():
     provider.close()
 
 
+def test_real_openai_chat_does_not_consume_one_shot_messages_before_send(tmp_path):
+    request_bodies = []
+
+    def responder(request):
+        request_bodies.append(json.loads(request.content))
+        return _provider_response(request)
+
+    messages = _SinglePassMessages("one-shot@example.com")
+    with _real_openai_client(
+        tmp_path,
+        "openai-chat-one-shot-messages",
+        responder=responder,
+        capture_content=True,
+    ) as (_, provider, storage):
+        provider.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=messages,
+        )
+
+        assert request_bodies[0]["messages"] == [
+            {"role": "user", "content": "one-shot@example.com"}
+        ]
+        assert messages.iterations == 1
+        [trace] = storage.list_traces()
+        assert trace.prompt_redacted is None
+        assert trace.response_redacted == "OK"
+
+
 @contextmanager
 def _real_openai_client(
     tmp_path,

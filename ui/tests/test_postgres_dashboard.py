@@ -32,8 +32,23 @@ from verdict.storage import SQLiteStorage
 from verdict.storage.postgres import PostgresStorage
 
 DSN = os.environ.get("VERDICT_TEST_POSTGRES_DSN")
+try:
+    if DSN:
+        from psycopg.conninfo import conninfo_to_dict
 
-pytestmark = pytest.mark.skipif(not DSN, reason="no disposable live Postgres DSN")
+        TEST_DATABASE = conninfo_to_dict(DSN).get("dbname", "")
+    else:
+        TEST_DATABASE = ""
+except Exception:
+    TEST_DATABASE = ""
+if not (
+    os.environ.get("VERDICT_TEST_POSTGRES_ALLOW_ANY_DB") == "1"
+    or "test" in TEST_DATABASE.lower()
+):
+    DSN = None
+POSTGRES_SKIP_REASON = "no explicitly disposable live PostgreSQL database"
+
+pytestmark = pytest.mark.skipif(DSN is None, reason=POSTGRES_SKIP_REASON)
 
 
 def test_live_postgres_control_center_and_analysis_use_conninfo() -> None:

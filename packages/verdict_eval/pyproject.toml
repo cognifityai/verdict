@@ -1,6 +1,6 @@
 [project]
 name = "cognifity-verdict-eval"
-version = "0.1.0a15"
+version = "0.1.0a16"
 description = "Verdict eval engine: judge, drift detection, Bradley-Terry comparator, regression injector"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -19,7 +19,7 @@ classifiers = [
 ]
 
 dependencies = [
-    "cognifity-verdict>=0.1.0a15,<0.2",
+    "cognifity-verdict>=0.1.0a16,<0.2",
     "scikit-learn>=1.4",
     "scipy>=1.11",
     "numpy>=1.26",

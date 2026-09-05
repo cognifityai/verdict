@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
@@ -17,6 +18,7 @@ from uuid import uuid4
 import pytest
 import verdict
 import verdict.client as client_module
+from _postgres_test_safety import isolated_test_dsn, validate_test_dsn
 from verdict.analysis_records import (
     AnalysisRunStatus,
     DeliveryOutcome,
@@ -57,17 +59,83 @@ from verdict.storage import BufferedStorage
 from verdict.storage.postgres import PostgresStorage
 from verdict.trace import span
 
-DSN = os.environ.get("VERDICT_TEST_POSTGRES_DSN")
-if os.environ.get("VERDICT_REQUIRE_POSTGRES_TESTS") == "1" and not DSN:
+DSN, POSTGRES_SKIP_REASON = validate_test_dsn(
+    os.environ.get("VERDICT_TEST_POSTGRES_DSN"),
+    allow_any_database=os.environ.get("VERDICT_TEST_POSTGRES_ALLOW_ANY_DB") == "1",
+)
+if os.environ.get("VERDICT_REQUIRE_POSTGRES_TESTS") == "1" and DSN is None:
     raise RuntimeError(
-        "VERDICT_REQUIRE_POSTGRES_TESTS=1 requires VERDICT_TEST_POSTGRES_DSN; "
-        "refusing to silently skip the live PostgreSQL contract tests"
+        "VERDICT_REQUIRE_POSTGRES_TESTS=1 but live PostgreSQL tests are unsafe: "
+        f"{POSTGRES_SKIP_REASON}"
     )
 
 pytestmark = [
-    pytest.mark.skipif(not DSN, reason="no disposable live Postgres DSN"),
+    pytest.mark.skipif(DSN is None, reason=POSTGRES_SKIP_REASON),
     pytest.mark.filterwarnings("error::DeprecationWarning:psycopg_pool.*"),
 ]
+
+
+@contextmanager
+def _isolated_postgres_storage():
+    with isolated_test_dsn(DSN) as scoped_dsn:
+        storage = PostgresStorage(scoped_dsn, min_pool=1, max_pool=2)
+        try:
+            yield storage
+        finally:
+            storage.close()
+
+
+def test_live_postgres_local_scope_includes_only_tenantless_and_local_traces():
+    now = datetime(2026, 9, 5, 12, tzinfo=timezone.utc)
+    traces = [
+        Trace(
+            trace_id=trace_id,
+            tenant_id=tenant_id,
+            started_at=now,
+            ended_at=now + timedelta(seconds=1),
+            raw_messages=[{"role": "user", "content": trace_id}],
+            tags={"verdict.workload": "agent"},
+        )
+        for trace_id, tenant_id in (
+            ("tenantless", None),
+            ("explicit-local", "__verdict_local__"),
+            ("unrelated", "other"),
+        )
+    ]
+    with _isolated_postgres_storage() as storage:
+        for trace in traces:
+            storage.insert_trace(trace)
+        storage._exec(
+            "UPDATE traces SET analysis_started_at_state='pending', "
+            "analysis_raw_messages_state='pending'",
+            (),
+        )
+
+        assert storage.count_pending_analysis_rows("__verdict_local__") == 2
+        assert storage.normalize_cluster_trace_analysis("__verdict_local__") == 2
+        assert {
+            trace.trace_id
+            for trace in storage.list_traces(tenant_id="__verdict_local__")
+        } == {"tenantless", "explicit-local"}
+        assert storage.cluster_trace_time_bounds(
+            "__verdict_local__", target_workload="agent"
+        )[0] == 2
+        candidates = storage.list_cluster_trace_candidates(
+            "__verdict_local__",
+            datetime_to_utc_us(now - timedelta(seconds=1)),
+            datetime_to_utc_us(now + timedelta(seconds=2)),
+            target_workload="agent",
+            limit=10,
+        )
+        assert {candidate.trace_id for candidate in candidates} == {
+            "tenantless",
+            "explicit-local",
+        }
+        assert set(
+            storage.get_cluster_trace_messages(
+                "__verdict_local__", [trace.trace_id for trace in traces]
+            )
+        ) == {"tenantless", "explicit-local"}
 
 
 def test_live_postgres_analysis_and_delivery_contracts():
@@ -150,8 +218,7 @@ def test_live_postgres_versioned_registry_and_analysis_normalization():
     cluster_id = f"cluster-{suffix}"
     trace_id = f"trace-{suffix}"
     now = datetime.now(timezone.utc)
-    storage = PostgresStorage(DSN, min_pool=1, max_pool=2)
-    try:
+    with _isolated_postgres_storage() as storage:
         storage.insert_trace(
             Trace(
                 trace_id=trace_id, tenant_id=tenant, started_at=now, ended_at=now,
@@ -232,8 +299,6 @@ def test_live_postgres_versioned_registry_and_analysis_normalization():
         assert preserved.tenant_id == tenant
         assert preserved.tags["verdict.intent_key"] == "billing"
         assert preserved.analysis_started_at_us == int(now.timestamp() * 1_000_000)
-    finally:
-        storage.close()
 
 
 def test_live_postgres_agent_run_bundle_is_atomic_redacted_and_tenant_scoped():
