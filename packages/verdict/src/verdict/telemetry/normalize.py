@@ -26,6 +26,7 @@ _ROLE_ALIASES = {
     "tool": "tool",
     "user": "user",
 }
+_TOOL_CALL_PART_TYPES = {"function_call", "tool_call", "tool_use"}
 
 
 def as_mapping(value: object) -> dict[str, Any]:
@@ -216,11 +217,35 @@ def _text_content(value: object) -> str | None:
     return None
 
 
+def _has_tool_call_part(value: object, depth: int = 0) -> bool:
+    if depth > 16:
+        return False
+    value = parse_json_value(value)
+    if isinstance(value, list):
+        return any(_has_tool_call_part(item, depth + 1) for item in value[:_MAX_MESSAGES])
+    if not isinstance(value, dict):
+        return False
+    if str(value.get("type") or "").lower() in _TOOL_CALL_PART_TYPES:
+        return True
+    return any(
+        _has_tool_call_part(value[key], depth + 1)
+        for key in ("content", "parts", "tool_calls", "function_call")
+        if key in value
+    )
+
+
 def _message_from_mapping(value: dict[str, Any], default_role: str) -> dict[str, str] | None:
     role_value = first(value, "role", "type", "speaker", "author")
     role = _ROLE_ALIASES.get(str(role_value or default_role).lower(), default_role)
-    content = _text_content(first(value, "content", "text", "value", "message", "parts"))
+    content_value = first(value, "content", "text", "value", "message", "parts")
+    content = _text_content(content_value)
     if content is None:
+        return None
+    if (
+        role == "assistant"
+        and content.strip().lower() == "(no content)"
+        and _has_tool_call_part(value)
+    ):
         return None
     return {"role": role, "content": content}
 
