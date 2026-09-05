@@ -559,6 +559,21 @@ test("drift chart renders custom dimensions and the runtime regression marker", 
   assert.ok(areas.some((area) => area.props.x1 === 17));
 });
 
+test("drift chart omits a change marker when no change point was computed", async () => {
+  const ui = await loadUiModule();
+  const hooks = createHooks();
+  const data = bundle("evaluator-a");
+  data.meta.regressionHour = null;
+  data.driftAnalysis.runStatus = "completed_no_signals";
+
+  const tree = render(ui.Drift, hooks, { data });
+  const lines = findAll(tree, (node) => node.type?.name === "ReferenceLine");
+  const areas = findAll(tree, (node) => node.type?.name === "ReferenceArea");
+
+  assert.equal(lines.filter((line) => "x" in line.props).length, 0);
+  assert.equal(areas.length, 0);
+});
+
 test("judge view renders the server's executable coverage snapshot", async () => {
   const ui = await loadUiModule();
   const hooks = createHooks();
