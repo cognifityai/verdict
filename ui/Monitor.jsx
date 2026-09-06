@@ -15,16 +15,25 @@ const metricLabel = (metric) => {
 };
 
 export function MonitorComparisonMetrics({ comparison }) {
+  const keyFor = (item) => JSON.stringify([item.group_id || null, item.metric]);
   const coverage = new Map(
-    (comparison?.metric_coverage || []).map((item) => [item.metric, item]),
+    (comparison?.metric_coverage || []).map((item) => [keyFor(item), item]),
   );
-  const metrics = new Map((comparison?.metrics || []).map((item) => [item.metric, item]));
-  const names = [...new Set([...metrics.keys(), ...coverage.keys()])];
-  return <div className="mt-4 space-y-2">{names.map((name) => {
-    const metric = metrics.get(name);
-    const evidence = coverage.get(name);
-    return <div key={name} className="border p-3 text-sm" style={{ borderColor: "#26332e" }}>
-      <span className="font-mono">{metricLabel(name)}</span>
+  const metrics = new Map(
+    (comparison?.metrics || []).map((item) => [keyFor(item), item]),
+  );
+  const groups = new Map(
+    (comparison?.groups || []).map((item) => [item.group_id, item]),
+  );
+  const cells = [...new Set([...metrics.keys(), ...coverage.keys()])];
+  return <div className="mt-4 space-y-2">{cells.map((key) => {
+    const metric = metrics.get(key);
+    const evidence = coverage.get(key);
+    const row = metric || evidence;
+    const group = groups.get(row.group_id);
+    return <div key={key} className="border p-3 text-sm" style={{ borderColor: "#26332e" }}>
+      {row.group_id && <div className="text-xs mb-2" style={{ color: "#94a39d" }}>Group: <span title={row.group_id}>{group?.label || row.group_id}</span></div>}
+      <span className="font-mono">{metricLabel(row.metric)}</span>
       {metric
         ? <span className="ml-3" style={{ color: metric.alert ? "#ff6b6b" : "#94a39d" }}>{(100 * metric.reference_value).toFixed(1)}% → {(100 * metric.current_value).toFixed(1)}% · effect {(100 * metric.effect).toFixed(1)}pp · adjusted p {metric.p_adjusted.toPrecision(3)} · eligible n {metric.reference_n} → {metric.current_n}</span>
         : <span className="ml-3" style={{ color: "#f2b84b" }}>No PASS/FAIL comparison yet</span>}
@@ -89,7 +98,8 @@ export function Monitor({ configUrl, evaluation = {} }) {
     (identity) => identity.fingerprint === displayedPolicy?.evaluator_fingerprint,
   );
   const collecting = manifest?.prospective_open === true;
-  const comparisonLabel = collecting
+  const requiresRebootstrap = active?.state === "requires_rebootstrap";
+  const comparisonLabel = requiresRebootstrap ? "Re-bootstrap required" : collecting
     ? `Collecting ${manifest.current_unit_ids.length}/${active?.policy?.prospective_target || candidate?.policy?.prospective_target || form.prospectiveTarget}`
     : comparison?.status === "insufficient" ? "Insufficient evidence"
       : comparison?.status?.replaceAll("_", " ");
@@ -119,6 +129,7 @@ export function Monitor({ configUrl, evaluation = {} }) {
       </div>
     </section>
     {error && <div role="alert" className="border p-4" style={{ ...box, color: "#ff6b6b" }}>{error}</div>}
+    {requiresRebootstrap && <div role="alert" className="border p-4" style={{ ...box, color: "#f2b84b" }}>{active.rebootstrapReason} Configure the replacement above and select Preview comparison.</div>}
     {snapshot && <section className="border p-5" style={box}>
       <div className="flex flex-wrap gap-3 items-center justify-between">
         <div><div className="text-xs font-mono" style={{ color: candidate ? "#f2b84b" : "#4ee1aa" }}>{candidate ? "EXPLORATORY HISTORICAL COMPARISON" : "ACTIVE PROSPECTIVE MONITOR"}</div><div className="font-semibold mt-1">{comparisonLabel}</div></div>
@@ -129,15 +140,17 @@ export function Monitor({ configUrl, evaluation = {} }) {
         {collecting ? `Prospective bucket ${manifest.current_unit_ids.length}/${active?.policy?.prospective_target || candidate?.policy?.prospective_target || form.prospectiveTarget}; no comparison or alert decision has run.` : `Completed comparison look ${manifest.comparison_index} · alert threshold ${comparison.alpha_threshold.toPrecision(3)} · ${active?.policy?.sequential_method || candidate?.policy?.sequential_method}`}
       </div>
       <div className="mt-2 text-xs" style={{ color: "#94a39d" }}>Measurement: {displayedPolicy?.evaluator_fingerprint ? (selectedMeasurement?.label || `stored evaluator ${displayedPolicy.evaluator_fingerprint.slice(0, 8)}`) : "deterministic trace checks only"}</div>
+      <div className="mt-1 text-xs" style={{ color: "#94a39d" }}>Facet: {displayedPolicy?.grouping_mode === "cluster" ? `frozen clusters · ${displayedPolicy.cluster_registry_version_id || "registry unavailable"}` : displayedPolicy?.grouping_mode === "provider_model" ? "provider and model" : "all eligible calls"}</div>
       <MonitorComparisonMetrics comparison={comparison} />
       {comparison.status === "insufficient" && <p className="text-sm mt-4" style={{ color: "#f2b84b" }}>{collecting ? "No statistical test was run because the prospective bucket is still collecting." : "The bucket closed, but no metric met its configured eligible-unit minimums; no alert/no-alert conclusion was produced."}</p>}
-      {comparison.status === "reference_stale" && <p className="text-sm mt-4" style={{ color: "#f2b84b" }}>Comparison suspended: {(100 * comparison.unseen_group_share).toFixed(1)}% of current traces use provider/model groups absent from the frozen reference. Review the policy before creating a new candidate; Verdict did not silently rebase it.</p>}
+      {comparison.unseen_group_share > 0 && <p className="text-sm mt-4" style={{ color: "#f2b84b" }}>{comparison.status === "reference_stale" ? "Comparison suspended" : "Coverage note"}: {(100 * comparison.unseen_group_share).toFixed(1)}% of current traces are outside the frozen {displayedPolicy?.grouping_mode === "cluster" ? "cluster" : "provider/model"} reference{comparison.unassigned_group_share > 0 ? ` (${(100 * comparison.unassigned_group_share).toFixed(1)}% are unassigned)` : ""}.{comparison.status === "reference_stale" ? " Review the policy before creating a new candidate; Verdict did not silently rebase it." : " These traces were excluded from like-for-like metric tests."}</p>}
     </section>}
     {!candidate && active?.approvedHistoricalSnapshot && <section className="border p-5" style={box}>
       <div className="text-xs font-mono" style={{ color: "#f2b84b" }}>APPROVED HISTORICAL PREVIEW</div>
       <div className="font-semibold mt-1">{active.approvedHistoricalSnapshot.comparison.status.replaceAll("_", " ")}</div>
       <p className="text-sm mt-2" style={{ color: "#94a39d" }}>This is the historical comparison used to approve the policy. Activation froze its reference cohort and opened a new prospective bucket; it did not reuse the historical current cohort as new traffic.</p>
       <div className="text-sm mt-3">{active.approvedHistoricalSnapshot.manifest.reference_unit_ids.length} historical reference → {active.approvedHistoricalSnapshot.manifest.current_unit_ids.length} historical current</div>
+      <MonitorComparisonMetrics comparison={active.approvedHistoricalSnapshot.comparison} />
     </section>}
   </div>;
 }

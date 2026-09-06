@@ -28,6 +28,12 @@ the product is refined.
   provider pricing pages.
 - Live PostgreSQL tests require an explicitly disposable database and isolate
   registry fixtures from other test data.
+- Monitor facets now compare metrics within each provider/model or frozen
+  reviewed cluster, apply one correction across the complete tested family,
+  and report unassigned or new-group coverage instead of pooling it.
+- Dashboard, command-line, manual, and scheduled monitor runs now resolve the
+  same stored evaluator results, dimensions, trace scope, and frozen cluster
+  version.
 
 ## [0.1.0a15] - 2026-09-02
 

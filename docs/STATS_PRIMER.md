@@ -73,8 +73,14 @@ these windows using the associated captured trace's `started_at` timestamp, not
 the later time when the judge happened to score it. Its defaults are a 24-hour
 current window and a 7-day baseline ending 24 hours before the analysis time.
 The reviewed Monitor UI is a separate policy lifecycle: it freezes either
-count-based or explicit event-time membership before comparing per-metric
-eligible samples and then collects prospective non-overlapping cohorts.
+count-based or explicit event-time membership and the normalized counts used by
+the tests, then collects prospective non-overlapping cohorts. Later source-row
+changes do not rewrite approved evidence. With a
+provider/model or reviewed-cluster facet, the tested family contains each
+eligible `(group, metric)` cell. Minimum sample counts apply inside each cell,
+and Benjamini-Hochberg correction covers the complete family for that look.
+New traffic is projected through the pinned cluster version without refitting.
+Unassigned or new groups are coverage evidence, not pooled observations.
 
 ---
 

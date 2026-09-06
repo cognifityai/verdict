@@ -2,58 +2,17 @@
 
 from __future__ import annotations
 
-import os
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import Any
+
+from verdict.cluster_runtime import (
+    cluster_model_path_for_version,
+    cluster_registry_service,
+)
 
 TENANT = "__verdict_local__"
 ACTOR = "dashboard-user"
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
-_MINILM_REVISION = "1110a243fdf4706b3f48f1d95db1a4f5529b4d41"
-
-
-def _model_path(value: object, *, allow_download: bool) -> Path | None:
-    configured = value
-    if configured is None:
-        configured = os.environ.get("VERDICT_CLUSTER_MODEL_PATH")
-    candidates: list[Path] = []
-    if configured is not None:
-        candidates.append(Path(_bounded_text(configured, "model path", 4096)).expanduser())
-    hub_cache = os.environ.get("HF_HUB_CACHE")
-    if hub_cache is None:
-        hf_home = os.environ.get("HF_HOME")
-        hub_cache = str(Path(hf_home) / "hub") if hf_home else None
-    cache_root = Path(hub_cache).expanduser() if hub_cache else Path.home() / ".cache/huggingface/hub"
-    candidates.append(
-        cache_root
-        / "models--sentence-transformers--all-MiniLM-L6-v2"
-        / "snapshots"
-        / _MINILM_REVISION
-    )
-    for path in candidates:
-        if not path.is_symlink() and path.is_dir():
-            return path
-    if configured is not None:
-        raise ValueError("configured semantic model directory is unavailable")
-    if allow_download:
-        try:
-            from huggingface_hub import snapshot_download
-        except ImportError as exc:
-            raise ValueError("model_unavailable") from exc
-
-        try:
-            downloaded = Path(
-                snapshot_download(
-                    "sentence-transformers/all-MiniLM-L6-v2",
-                    revision=_MINILM_REVISION,
-                )
-            )
-        except Exception as exc:
-            raise ValueError("model_unavailable") from exc
-        if not downloaded.is_symlink() and downloaded.is_dir():
-            return downloaded
-    return None
 
 
 def _instant(value: object, *, default_now: bool = False) -> datetime:
@@ -75,18 +34,32 @@ def _bounded_text(value: object, name: str, maximum: int = 256) -> str:
     return value
 
 
-def _service(storage: object, payload: dict[str, Any], *, allow_download: bool = False):
-    from verdict_eval.cluster_registry import ClusterRegistryService
-
-    path = _model_path(payload.get("modelPath"), allow_download=allow_download)
-    if path is None:
-        return ClusterRegistryService(storage)
-
-    def factory():
-        from verdict_eval.clustering import FrozenMiniLMEmbedder
-        return FrozenMiniLMEmbedder(path)
-
-    return ClusterRegistryService(storage, embedder_factory=factory)
+def _service(
+    storage: object,
+    payload: dict[str, Any],
+    *,
+    version_id: str | None = None,
+    strategy: str | None = None,
+    allow_download: bool = False,
+):
+    model_path = payload.get("modelPath")
+    version = (
+        storage.get_cluster_registry_version(TENANT, version_id)
+        if version_id is not None
+        else None
+    )
+    if version is not None and strategy is None:
+        strategy = version.strategy
+    if strategy == "explicit":
+        model_path = None
+    elif model_path is None and version is not None:
+        model_path = cluster_model_path_for_version(version)
+    return cluster_registry_service(
+        storage,
+        model_path=model_path,
+        allow_download=allow_download,
+        strategy=strategy,
+    )
 
 
 def execute_cluster_action(
@@ -103,7 +76,12 @@ def execute_cluster_action(
             raise ValueError("invalid cluster strategy")
         if strategy == "explicit" and payload.get("modelPath") is not None:
             raise ValueError("explicit clustering does not use a model")
-        service = _service(storage, payload, allow_download=strategy != "explicit")
+        service = _service(
+            storage,
+            payload,
+            strategy=strategy,
+            allow_download=strategy != "explicit",
+        )
         workload = payload.get("targetWorkload")
         if workload is not None:
             workload = _bounded_text(workload, "target workload", 64)
@@ -129,8 +107,13 @@ def execute_cluster_action(
             ),
         )
         return {"action": action, "versionId": version.version_id, "status": "candidate"}
-    service = _service(storage, payload)
     if action == "refit":
+        active = storage.get_active_cluster_registry(TENANT)
+        service = _service(
+            storage,
+            payload,
+            version_id=active.version_id if active is not None else None,
+        )
         version = service.refit(
             TENANT, actor=ACTOR,
             cutoff=_instant(payload.get("cutoff"), default_now=True),
@@ -140,10 +123,12 @@ def execute_cluster_action(
     if action == "rename":
         cluster_id = _bounded_text(payload.get("clusterId"), "cluster id")
         display_name = _bounded_text(payload.get("displayName"), "display name", 80)
+        service = cluster_registry_service(storage, strategy="explicit")
         service.rename(TENANT, cluster_id, display_name, actor=ACTOR)
         return {"action": action, "clusterId": cluster_id}
 
     version_id = _bounded_text(payload.get("versionId"), "version id")
+    service = _service(storage, payload, version_id=version_id)
     if action == "validate":
         report = service.validate(TENANT, version_id, actor=ACTOR)
         return {"action": action, "versionId": version_id, "report": report}

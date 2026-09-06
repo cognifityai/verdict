@@ -58,3 +58,37 @@ test("judge comparison renders evaluable and unavailable coverage", async () => 
   assert.match(html, /3 → 4 not judged/);
   assert.match(html, /5 → 6 judge errors/);
 });
+
+test("grouped comparison renders the same metric once per group", async () => {
+  const html = await render(`React.createElement(MonitorComparisonMetrics, {
+    comparison: {
+      metrics: [
+        { group_id: "openai:model-a", metric: "provider_error", alert: false,
+          reference_value: 0, current_value: 0.1, effect: 0.1,
+          p_adjusted: 0.2, reference_n: 10, current_n: 10 },
+        { group_id: "anthropic:model-b", metric: "provider_error", alert: true,
+          reference_value: 0.1, current_value: 0.8, effect: 0.7,
+          p_adjusted: 0.01, reference_n: 10, current_n: 10 },
+      ],
+      metric_coverage: [],
+    },
+  })`);
+  assert.match(html, /Group:.*openai:model-a/);
+  assert.match(html, /Group:.*anthropic:model-b/);
+  assert.equal((html.match(/Provider error rate/g) || []).length, 2);
+});
+
+test("grouped comparison renders reviewed labels instead of opaque identities", async () => {
+  const html = await render(`React.createElement(MonitorComparisonMetrics, {
+    comparison: {
+      groups: [{ group_id: "clu_internal", label: "Billing questions",
+        reference_units: 10, current_units: 10 }],
+      metrics: [{ group_id: "clu_internal", metric: "provider_error", alert: false,
+        reference_value: 0, current_value: 0, effect: 0,
+        p_adjusted: 1, reference_n: 10, current_n: 10 }],
+      metric_coverage: [],
+    },
+  })`);
+  assert.match(html, /Group:.*Billing questions/);
+  assert.doesNotMatch(html, />clu_internal</);
+});

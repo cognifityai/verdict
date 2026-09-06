@@ -84,11 +84,11 @@ from verdict.storage.base import (
 )
 
 
-def _trace_tenant_clause(requested: str) -> str:
+def _trace_tenant_clause(requested: str, column: str = "tenant_id") -> str:
     return (
-        "(tenant_id IS NULL OR tenant_id=%s)"
+        f"({column} IS NULL OR {column}=%s)"
         if requested == "__verdict_local__"
-        else "tenant_id=%s"
+        else f"{column}=%s"
     )
 
 
@@ -1236,7 +1236,8 @@ class PostgresStorage:
             f"""SELECT * FROM (
                     SELECT DISTINCT ON (j.trace_id) {self._JUDGMENT_COLUMNS}
                     FROM judgments j JOIN traces t ON t.trace_id=j.trace_id
-                    WHERE t.tenant_id=%s AND j.evaluator_fingerprint=%s
+                    WHERE {_trace_tenant_clause(tenant_id, "t.tenant_id")}
+                      AND j.evaluator_fingerprint=%s
                     ORDER BY j.trace_id,j.created_at DESC,j.judgment_id DESC
                 ) latest
                 ORDER BY created_at DESC,judgment_id DESC LIMIT %s""",  # nosec B608

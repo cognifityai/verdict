@@ -149,7 +149,7 @@ function FitPreviewForm({ operations, running, strategy, setStrategy, targetWork
           <label>Lookback days<input aria-label="Cluster lookback days" type="number" min="1" value={lookbackDays} onChange={(event) => setLookbackDays(Number(event.target.value))} className="block w-full mt-1 px-2 py-2 border" style={{ color: COLOR.text, background: COLOR.panel, borderColor: COLOR.border }} /></label>
           <label>Optional range end<input aria-label="Cluster range end" type="datetime-local" value={cutoff} onChange={(event) => setCutoff(event.target.value)} className="block w-full mt-1 px-2 py-2 border" style={{ color: COLOR.text, background: COLOR.panel, borderColor: COLOR.border }} /></label>
         </div>
-        {strategy !== "explicit" && <label className="block mt-3">Optional MiniLM directory override<input aria-label="Semantic model path" value={modelPath} onChange={(event) => setModelPath(event.target.value)} placeholder="Server auto-detects the pinned model" className="block w-full mt-1 px-2 py-2 border" style={{ color: COLOR.text, background: COLOR.panel, borderColor: COLOR.border }} /></label>}
+        {strategy !== "explicit" && <label className="block mt-3">Optional MiniLM directory override<input aria-label="Semantic model path" value={modelPath} onChange={(event) => setModelPath(event.target.value)} placeholder="Server auto-detects the pinned model" className="block w-full mt-1 px-2 py-2 border" style={{ color: COLOR.text, background: COLOR.panel, borderColor: COLOR.border }} /><span className="block mt-1" style={{ color: COLOR.faint }}>An approved override is retained for later assignment by this cluster version.</span></label>}
       </details>
     </div>
   );

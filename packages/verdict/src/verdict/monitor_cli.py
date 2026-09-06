@@ -7,29 +7,20 @@ import json
 import sys
 
 from verdict.client import _resolve_storage
-from verdict.monitoring import (
-    compare_manifest,
-    plan_prospective_manifest,
-    trace_monitor_units,
-)
+from verdict.monitor_inputs import LOCAL_TENANT, LOCAL_TRACE_SCOPE, advance_monitor
 
-_LOCAL_TRACE_SCOPE = "__verdict_local__:application:trace"
+_LOCAL_TRACE_SCOPE = LOCAL_TRACE_SCOPE
 
 
 def run_active_monitor(storage) -> dict[str, object]:
     policy = storage.get_active_monitor_policy(_LOCAL_TRACE_SCOPE)
     if policy is None:
         raise ValueError("no active monitor")
-    previous = storage.get_latest_monitor_snapshot(policy.policy_id)
-    if previous is None:
-        raise ValueError("active monitor has no snapshot")
-    traces = storage.list_traces(limit=100_001)
-    if len(traces) > 100_000:
-        raise ValueError("monitor exceeds bounded trace limit")
-    units = trace_monitor_units(traces)
-    manifest = plan_prospective_manifest(previous[0], units, policy)
-    comparison = compare_manifest(units, manifest, policy)
-    storage.save_monitor_snapshot(policy.policy_id, manifest, comparison)
+    manifest, comparison = advance_monitor(
+        storage,
+        policy,
+        tenant_id=LOCAL_TENANT,
+    )
     return {
         "policy_id": policy.policy_id,
         "snapshot_id": manifest.snapshot_id,

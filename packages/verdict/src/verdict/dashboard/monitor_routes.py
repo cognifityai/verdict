@@ -11,19 +11,59 @@ from fastapi import Request
 from fastapi.responses import JSONResponse
 
 from verdict.dashboard.setup_routes import SetupRoutes
+from verdict.monitor_inputs import (
+    LOCAL_TENANT,
+    LOCAL_TRACE_SCOPE,
+    advance_monitor,
+    load_monitor_units,
+    select_monitor_evaluator,
+)
 from verdict.monitoring import (
     MonitorPolicy,
     WindowMode,
     compare_manifest,
     monitor_policy_to_json,
+    monitor_requires_rebootstrap,
     monitor_snapshot_to_json,
     plan_historical_manifest,
-    plan_prospective_manifest,
-    trace_monitor_units,
 )
 
-TENANT = "__verdict_local__"
-SCOPE = "__verdict_local__:application:trace"
+TENANT = LOCAL_TENANT
+SCOPE = LOCAL_TRACE_SCOPE
+
+_BOUNDED_MONITOR_ERRORS = {
+    "monitor grouping exceeds 250 groups": (
+        "Monitor supports at most 250 groups. Choose no grouping or reduce the "
+        "number of provider/model or cluster groups."
+    ),
+    "monitor grouping produces too many metric cells": (
+        "This monitor has too many group and metric combinations. Reduce its "
+        "groups or evaluator dimensions."
+    ),
+}
+
+
+def _error_response(exc: Exception, fallback: str) -> JSONResponse:
+    message = _BOUNDED_MONITOR_ERRORS.get(str(exc), fallback)
+    return JSONResponse({"error": message}, status_code=400)
+
+
+def _prepared_activation_snapshot(historical, latest):
+    """Return a safe prior preparation, or None when preparation is still needed."""
+    approved = historical[0]
+    prepared = latest[0]
+    if prepared.snapshot_id == approved.snapshot_id:
+        return None
+    if (
+        prepared.policy_fingerprint != approved.policy_fingerprint
+        or prepared.comparison_index != approved.comparison_index + 1
+        or prepared.reference_unit_ids != approved.reference_unit_ids
+        or prepared.reference_summary != approved.reference_summary
+        or prepared.consumed_unit_ids
+        != (*approved.consumed_unit_ids, *prepared.current_unit_ids)
+    ):
+        raise ValueError("candidate has an invalid prepared snapshot")
+    return latest
 
 
 class MonitorRoutes:
@@ -39,6 +79,7 @@ class MonitorRoutes:
         *,
         evaluator_fingerprint: str | None = None,
         evaluator_dimensions: tuple[str, ...] = (),
+        cluster_registry_version_id: str | None = None,
     ) -> MonitorPolicy:
         mode = WindowMode(payload.get("windowMode", "count"))
         values: dict[str, Any] = {
@@ -56,6 +97,7 @@ class MonitorRoutes:
             "grouping_mode": payload.get("groupingMode", "none"),
             "evaluator_fingerprint": evaluator_fingerprint,
             "evaluator_dimensions": evaluator_dimensions,
+            "cluster_registry_version_id": cluster_registry_version_id,
         }
         if mode is WindowMode.EXPLICIT:
             for source, target in (
@@ -76,25 +118,13 @@ class MonitorRoutes:
         return MonitorPolicy(**values)
 
     @staticmethod
-    def evaluator_selection(writable, payload: dict[str, Any]):
-        fingerprint = payload.get("evaluatorFingerprint")
-        if fingerprint in (None, ""):
-            return None, ()
-        rows = writable.list_latest_judgments_for_evaluator(
-            TENANT, fingerprint, limit=100_001,
-        )
-        if not rows or len(rows) > 100_000:
-            raise ValueError("selected evaluator is unavailable")
-        if any(
-            not row.evaluator_identity_complete
-            or row.evaluator_fingerprint != fingerprint
-            for row in rows
-        ):
-            raise ValueError("selected evaluator identity is incomplete")
-        dimensions = {tuple(row.expected_dimensions) for row in rows}
-        if len(dimensions) != 1:
-            raise ValueError("selected evaluator dimensions are inconsistent")
-        return fingerprint, dimensions.pop()
+    def cluster_registry_selection(writable, payload: dict[str, Any]):
+        if payload.get("groupingMode", "none") != "cluster":
+            return None
+        active = writable.get_active_cluster_registry(TENANT)
+        if active is None or active.version_id is None:
+            raise ValueError("cluster grouping requires an active registry")
+        return active.version_id
 
     @staticmethod
     def response(
@@ -109,55 +139,21 @@ class MonitorRoutes:
             result["approvedHistoricalSnapshot"] = json.loads(
                 monitor_snapshot_to_json(*approved_historical)
             )
+        if state == "requires_rebootstrap":
+            result["rebootstrapRequired"] = True
+            result["rebootstrapReason"] = (
+                "This monitor predates immutable cohort evidence. Preview and "
+                "activate a replacement before running it again."
+            )
         return result
 
     @staticmethod
     def bounded_units(writable, policy):
-        traces = writable.list_traces(tenant_id=TENANT, limit=100_001)
-        if len(traces) > 100_000:
-            raise ValueError("monitor exceeds bounded trace limit")
-        judgments_by_trace = None
-        if policy.evaluator_fingerprint is not None:
-            judgments = writable.list_latest_judgments_for_evaluator(
-                TENANT, policy.evaluator_fingerprint, limit=100_001,
-            )
-            if len(judgments) > 100_000:
-                raise ValueError("monitor exceeds bounded judgment limit")
-            if any(
-                not row.evaluator_identity_complete
-                or row.evaluator_fingerprint != policy.evaluator_fingerprint
-                or tuple(row.expected_dimensions) != policy.evaluator_dimensions
-                for row in judgments
-            ):
-                raise ValueError("selected evaluator identity changed")
-            judgments_by_trace = {row.trace_id: row for row in judgments}
-        assignments = None
-        if policy.grouping_mode == "cluster":
-            pointer = writable.get_active_cluster_registry(TENANT)
-            if pointer.version_id is None:
-                raise ValueError("cluster grouping requires an active registry")
-            rows = writable.list_trace_cluster_assignments(
-                TENANT, pointer.version_id, limit=100_001
-            )
-            if len(rows) > 100_000:
-                raise ValueError("cluster assignment limit exceeded")
-            assignments = {
-                row.trace_id: row.cluster_id
-                for row in rows
-                if row.status == "assigned" and row.cluster_id is not None
-            }
-        return trace_monitor_units(
-            traces,
-            grouping_mode=policy.grouping_mode,
-            cluster_assignments=assignments,
-            judgments_by_trace=judgments_by_trace,
-            evaluator_dimensions=policy.evaluator_dimensions,
-        )
+        return load_monitor_units(writable, policy, tenant_id=TENANT)
 
-    def prospective(self, writable, policy, previous_manifest):
-        units = self.bounded_units(writable, policy)
-        manifest = plan_prospective_manifest(previous_manifest, units, policy)
-        return manifest, compare_manifest(units, manifest, policy)
+    @staticmethod
+    def prospective(writable, policy):
+        return advance_monitor(writable, policy, tenant_id=TENANT)
 
     def register(self, app) -> None:
         def monitor_preview(request, payload: dict[str, Any]):
@@ -168,12 +164,18 @@ class MonitorRoutes:
             writable = None
             try:
                 writable = self.setup.writable_storage()
-                fingerprint, dimensions = self.evaluator_selection(writable, payload)
+                fingerprint, dimensions = select_monitor_evaluator(
+                    writable,
+                    tenant_id=TENANT,
+                    evaluator_fingerprint=payload.get("evaluatorFingerprint"),
+                )
+                cluster_version = self.cluster_registry_selection(writable, payload)
                 policy = self.policy(
                     payload,
                     f"policy-{secrets.token_hex(12)}",
                     evaluator_fingerprint=fingerprint,
                     evaluator_dimensions=dimensions,
+                    cluster_registry_version_id=cluster_version,
                 )
                 units = self.bounded_units(writable, policy)
                 cutoff = max(
@@ -185,8 +187,8 @@ class MonitorRoutes:
                 writable.save_monitor_policy(policy)
                 writable.save_monitor_snapshot(policy.policy_id, manifest, comparison)
                 return self.response(policy, "candidate", manifest, comparison)
-            except (KeyError, OSError, TypeError, UnicodeError, ValueError):
-                return JSONResponse({"error": "invalid monitor request"}, status_code=400)
+            except (KeyError, OSError, TypeError, UnicodeError, ValueError) as exc:
+                return _error_response(exc, "invalid monitor request")
             finally:
                 if writable is not None:
                     writable.close()
@@ -211,26 +213,32 @@ class MonitorRoutes:
                 stored = writable.get_monitor_policy(policy_id)
                 if stored is None or stored[1] != "candidate":
                     raise ValueError("unknown policy")
-                historical = writable.get_latest_monitor_snapshot(policy_id)
+                historical = writable.get_initial_monitor_snapshot(policy_id)
                 if historical is None:
                     raise ValueError("candidate has no snapshot")
+                if monitor_requires_rebootstrap(stored[0], historical[0]):
+                    return JSONResponse(
+                        {"error": "monitor requires re-bootstrap"},
+                        status_code=409,
+                    )
+                latest = writable.get_latest_monitor_snapshot(policy_id)
+                if latest is None:
+                    raise ValueError("candidate has no snapshot")
+                prepared = _prepared_activation_snapshot(historical, latest)
+                if prepared is None:
+                    prepared = self.prospective(writable, stored[0])
                 policy = writable.activate_monitor_policy(
                     stored[0].scope_key,
                     policy_id,
                     expected_active_policy_id=expected,
                 )
-                manifest, comparison = self.prospective(
-                    writable, policy, historical[0]
-                )
-                writable.save_monitor_snapshot(policy_id, manifest, comparison)
+                manifest, comparison = prepared
                 return self.response(
                     policy, "active", manifest, comparison,
                     approved_historical=historical,
                 )
-            except (OSError, TypeError, UnicodeError, ValueError):
-                return JSONResponse(
-                    {"error": "invalid monitor activation"}, status_code=400
-                )
+            except (OSError, TypeError, UnicodeError, ValueError) as exc:
+                return _error_response(exc, "invalid monitor activation")
             finally:
                 if writable is not None:
                     writable.close()
@@ -252,16 +260,20 @@ class MonitorRoutes:
                 previous = writable.get_latest_monitor_snapshot(policy.policy_id)
                 if previous is None:
                     raise ValueError("active monitor has no snapshot")
-                manifest, comparison = self.prospective(writable, policy, previous[0])
-                writable.save_monitor_snapshot(policy.policy_id, manifest, comparison)
+                if monitor_requires_rebootstrap(policy, previous[0]):
+                    return JSONResponse(
+                        {"error": "monitor requires re-bootstrap"},
+                        status_code=409,
+                    )
+                manifest, comparison = self.prospective(writable, policy)
                 return self.response(
                     policy, "active", manifest, comparison,
                     approved_historical=writable.get_initial_monitor_snapshot(
                         policy.policy_id
                     ),
                 )
-            except (OSError, TypeError, UnicodeError, ValueError):
-                return JSONResponse({"error": "monitor run unavailable"}, status_code=400)
+            except (OSError, TypeError, UnicodeError, ValueError) as exc:
+                return _error_response(exc, "monitor run unavailable")
             finally:
                 if writable is not None:
                     writable.close()
@@ -277,6 +289,13 @@ class MonitorRoutes:
                 if policy is None:
                     return {"state": "not_configured"}
                 snapshot = writable.get_latest_monitor_snapshot(policy.policy_id)
+                if snapshot and monitor_requires_rebootstrap(policy, snapshot[0]):
+                    return self.response(
+                        policy,
+                        "requires_rebootstrap",
+                        *snapshot,
+                        approved_historical=writable.get_initial_monitor_snapshot(policy.policy_id),
+                    )
                 return (
                     self.response(
                         policy, "active", *snapshot,

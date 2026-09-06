@@ -25,10 +25,11 @@ records, not complete vendor envelopes or unrelated telemetry. Deterministic,
 source-scoped trace IDs make bounded retries idempotent. Missing optional fields
 remain missing rather than being inferred.
 
-The existing pipeline remains the only path for clustering, sampling, judging,
-and drift calculations. Import does not create another schema, statistical
-implementation, or dashboard data source. Supported formats, limits, field
-mapping, privacy behavior, and commands are maintained in
+Import does not create another schema, statistical implementation, or dashboard
+data source. Stored traces can be analyzed by the evaluation pipeline or by the
+dashboard's reviewed Monitor policies; importing itself does not cluster, judge,
+or calculate drift. Supported formats, limits, field mapping, privacy behavior,
+and commands are maintained in
 [`examples/telemetry/README.md`](../../examples/telemetry/README.md) and the
 [`verdict-import` documentation](../../README.md#import-telemetry-you-already-have).
 

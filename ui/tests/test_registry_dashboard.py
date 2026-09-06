@@ -424,7 +424,10 @@ def test_registry_read_model_bounds_representatives_and_reports_semantic_health(
             {
                 "selector": "latest-user-v1",
                 "algorithm": "ward-best-k-v2",
-                "model": {"name": "MiniLM", "revision": "frozen"},
+                "model": {
+                    "name": "MiniLM", "revision": "frozen",
+                    "local_path": "/private/server/model",
+                },
                 "config": {"target_workload": "agent"},
             }
         ),
@@ -447,6 +450,7 @@ def test_registry_read_model_bounds_representatives_and_reports_semantic_health(
 
     bundle = build_registry_bundle(f"sqlite:///{path}", tenant=tenant)
 
+    assert "local_path" not in bundle["selectedVersion"]["model"]
     assert bundle["healthWarnings"] == [
         "fragmented_semantic_space",
         "oversized_semantic_cluster",
