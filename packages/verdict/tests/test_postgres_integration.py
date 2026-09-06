@@ -423,10 +423,18 @@ def test_live_postgres_monitor_policy_activation_and_snapshot():
             storage.save_monitor_snapshot(second.policy_id, manifest, comparison)
         collecting = plan_prospective_manifest(manifest, (), first)
         collecting_result = compare_manifest((), collecting, first)
-        storage.save_monitor_snapshot(first.policy_id, collecting, collecting_result)
+        storage.save_monitor_successor(
+            first.policy_id, alert_manifest.snapshot_id,
+            collecting, collecting_result, expected_state="active",
+        )
         assert storage.get_latest_monitor_snapshot(first.policy_id) == (
             collecting, collecting_result,
         )
+        with pytest.raises(ValueError, match="snapshot changed"):
+            storage.save_monitor_successor(
+                first.policy_id, alert_manifest.snapshot_id,
+                collecting, collecting_result, expected_state="active",
+            )
         assert storage.activate_monitor_policy(
             scope, second.policy_id, expected_active_policy_id=first.policy_id,
         ) == second
@@ -440,6 +448,164 @@ def test_live_postgres_monitor_policy_activation_and_snapshot():
             (scope, f"{scope}:incomplete"),
         )
         storage.close()
+
+
+def test_live_postgres_concurrent_monitor_successors_have_one_winner():
+    suffix = uuid4().hex
+    scope = f"monitor-concurrent-{suffix}"
+    policy = MonitorPolicy(
+        f"policy-{suffix}", scope, reference_ratio=0.5,
+        minimum_reference=2, minimum_current=2,
+    )
+    now = datetime.now(timezone.utc)
+    units = tuple(
+        AnalysisUnitRecord(
+            f"unit-{suffix}-{index}", now + timedelta(minutes=index),
+            {"failed": index >= 3},
+        )
+        for index in range(6)
+    )
+    manifest = plan_historical_manifest(
+        units, policy, cutoff=now + timedelta(hours=1),
+    )
+    comparison = compare_manifest(units, manifest, policy)
+    successor = plan_prospective_manifest(manifest, (), policy)
+    successor_result = compare_manifest((), successor, policy)
+    setup = PostgresStorage(DSN, min_pool=1, max_pool=2)
+    setup.save_monitor_candidate(policy, manifest, comparison)
+    setup.activate_monitor_policy(
+        scope, policy.policy_id, expected_active_policy_id=None,
+    )
+    setup.close()
+    barrier = threading.Barrier(2)
+    outcomes = []
+
+    def save() -> None:
+        storage = PostgresStorage(DSN, min_pool=1, max_pool=2)
+        try:
+            barrier.wait()
+            storage.save_monitor_successor(
+                policy.policy_id, manifest.snapshot_id,
+                successor, successor_result, expected_state="active",
+            )
+        except ValueError:
+            outcomes.append("conflict")
+        else:
+            outcomes.append("saved")
+        finally:
+            storage.close()
+
+    threads = [threading.Thread(target=save) for _ in range(2)]
+    try:
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        assert sorted(outcomes) == ["conflict", "saved"]
+        verifier = PostgresStorage(DSN, min_pool=1, max_pool=2)
+        try:
+            assert verifier.get_latest_monitor_snapshot(policy.policy_id) == (
+                successor, successor_result,
+            )
+        finally:
+            verifier.close()
+    finally:
+        setup = PostgresStorage(DSN, min_pool=1, max_pool=2)
+        setup._exec(
+            "DELETE FROM monitor_snapshots WHERE policy_id=%s", (policy.policy_id,),
+        )
+        setup._exec(
+            "DELETE FROM monitor_policies WHERE policy_id=%s", (policy.policy_id,),
+        )
+        setup.close()
+
+
+def test_live_postgres_monitor_order_does_not_depend_on_timestamp_or_hash():
+    suffix = uuid4().hex
+    policy = MonitorPolicy(
+        f"policy-{suffix}", f"scope-{suffix}", reference_ratio=0.5,
+        minimum_reference=1, minimum_current=1, prospective_target=1,
+    )
+    now = datetime.now(timezone.utc)
+    units = tuple(
+        AnalysisUnitRecord(
+            f"unit-{index}", now + timedelta(seconds=index), {"failed": False},
+        )
+        for index in range(2)
+    )
+
+    with _isolated_postgres_storage() as storage:
+        initial = plan_historical_manifest(
+            units, policy, cutoff=now + timedelta(minutes=1),
+        )
+        initial_result = compare_manifest(units, initial, policy)
+        storage.save_monitor_candidate(policy, initial, initial_result)
+        storage.activate_monitor_policy(
+            policy.scope_key, policy.policy_id, expected_active_policy_id=None,
+        )
+        successor = plan_prospective_manifest(initial, units, policy)
+        successor_result = compare_manifest(units, successor, policy)
+        storage.save_monitor_successor(
+            policy.policy_id, initial.snapshot_id, successor, successor_result,
+            expected_state="active",
+        )
+        storage._exec(
+            "UPDATE monitor_snapshots SET created_at=%s WHERE policy_id=%s",
+            (now, policy.policy_id),
+        )
+
+        assert storage.get_initial_monitor_snapshot(policy.policy_id) == (
+            initial, initial_result,
+        )
+        assert storage.get_latest_monitor_snapshot(policy.policy_id) == (
+            successor, successor_result,
+        )
+
+
+def test_live_postgres_backfills_monitor_write_order_on_upgrade():
+    suffix = uuid4().hex
+    policy = MonitorPolicy(
+        f"policy-{suffix}", f"scope-{suffix}", reference_ratio=0.5,
+        minimum_reference=1, minimum_current=1, prospective_target=1,
+    )
+    now = datetime.now(timezone.utc)
+    units = tuple(
+        AnalysisUnitRecord(
+            f"unit-{index}", now + timedelta(seconds=index), {"failed": False},
+        )
+        for index in range(2)
+    )
+
+    with isolated_test_dsn(DSN) as scoped_dsn:
+        storage = PostgresStorage(scoped_dsn, min_pool=1, max_pool=2)
+        initial = plan_historical_manifest(
+            units, policy, cutoff=now + timedelta(minutes=1),
+        )
+        initial_result = compare_manifest(units, initial, policy)
+        successor = plan_prospective_manifest(initial, units, policy)
+        successor_result = compare_manifest(units, successor, policy)
+        storage.save_monitor_candidate(policy, initial, initial_result)
+        storage.save_monitor_snapshot(policy.policy_id, successor, successor_result)
+        storage._exec(
+            "ALTER TABLE monitor_snapshots DROP COLUMN write_sequence CASCADE", (),
+        )
+        storage.close()
+
+        upgraded = PostgresStorage(scoped_dsn, min_pool=1, max_pool=2)
+        try:
+            sequences = upgraded._fetchall(
+                "SELECT write_sequence FROM monitor_snapshots "
+                "WHERE policy_id=%s ORDER BY write_sequence",
+                (policy.policy_id,),
+            )
+            assert len(sequences) == 2
+            assert all(isinstance(row[0], int) for row in sequences)
+            assert upgraded.get_latest_monitor_snapshot(policy.policy_id) == (
+                successor, successor_result,
+            )
+        finally:
+            upgraded.close()
 
 
 def test_live_postgres_projects_new_traces_through_pinned_explicit_clusters():
@@ -504,6 +670,8 @@ def test_live_postgres_latest_evaluator_judgments_are_scoped_and_latest_wins():
                     tenant if index == 1 else f"other-{suffix}"
                 )),
                 started_at=now + timedelta(seconds=index),
+                ended_at=now + timedelta(seconds=index + 1),
+                prompt_redacted="request", response_redacted="response",
             ))
         storage.insert_judgment(Judgment(
             judgment_id=f"old-{suffix}", trace_id=trace_ids[0], created_at=now,
@@ -531,8 +699,8 @@ def test_live_postgres_latest_evaluator_judgments_are_scoped_and_latest_wins():
             dimensions=[DimensionScore("quality", Verdict.FAIL)],
         ))
         rows = storage.list_latest_judgments_for_evaluator(tenant, fingerprint)
-        assert [row.judgment_id for row in rows] == [f"new-{suffix}"]
-        assert rows[0].status is JudgmentStatus.ERROR
+        assert [row.judgment_id for row in rows] == [f"old-{suffix}"]
+        assert rows[0].status is JudgmentStatus.COMPLETED
         policy = MonitorPolicy(
             f"evaluator-policy-{suffix}", f"scope-{suffix}",
             evaluator_fingerprint=fingerprint, evaluator_dimensions=("quality",),
@@ -542,7 +710,7 @@ def test_live_postgres_latest_evaluator_judgments_are_scoped_and_latest_wins():
             for unit in load_monitor_units(storage, policy, tenant_id=tenant)
         }
         assert projected[trace_ids[0]].metric_states == {
-            "judge.quality.pass": "error"
+            "judge.quality.pass": "pass"
         }
     finally:
         storage._exec("DELETE FROM judgments WHERE trace_id = ANY(%s)", (trace_ids,))

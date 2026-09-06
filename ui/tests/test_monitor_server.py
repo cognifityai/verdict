@@ -32,9 +32,21 @@ def _insert_traces(path, count, *, start=0, errors_from=10_000, tenant="__verdic
         storage.insert_trace(Trace(
             trace_id=f"trace-{index:03d}", started_at=NOW + timedelta(days=index),
             ended_at=NOW + timedelta(days=index, seconds=1), provider="openai",
-            request_model="model", response_redacted="ok",
+            request_model="model", prompt_redacted="request", response_redacted="ok",
             tenant_id=tenant,
             error="provider failed" if index >= errors_from else None,
+        ))
+    storage.close()
+
+
+def _insert_quality_judgments(path, trace_ids, fingerprint, verdict):
+    storage = SQLiteStorage(str(path))
+    for trace_id in trace_ids:
+        storage.insert_judgment(Judgment(
+            judgment_id=f"judgment-{trace_id}-{verdict.value}", trace_id=trace_id,
+            evaluator_provider="openai", judge_models=["judge"],
+            evaluator_fingerprint=fingerprint, expected_dimensions=["quality"],
+            dimensions=[DimensionScore("quality", verdict)],
         ))
     storage.close()
 
@@ -143,6 +155,157 @@ def test_monitor_preview_activation_and_prospective_run(tmp_path):
         "trace-050", "trace-051", "trace-052", "trace-053", "trace-054",
     ]
     assert completed.json()["approvedHistoricalSnapshot"] == preview.json()["snapshot"]
+
+
+def test_monitor_waits_for_late_judgments_then_alerts_on_same_members(tmp_path):
+    database = tmp_path / "late-judgments.db"
+    fingerprint = "a" * 64
+    _insert_traces(database, 20)
+    _insert_quality_judgments(
+        database, [f"trace-{index:03d}" for index in range(20)],
+        fingerprint, Verdict.PASS,
+    )
+
+    async def request(path, *, json=None):
+        app = create_app(storage=f"sqlite:///{database}")
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver",
+        ) as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            return await client.post(
+                path, headers={"X-Verdict-Setup": token}, json=json,
+            )
+
+    preview = asyncio.run(request("/api/monitor/preview", json={
+        "windowMode": "count", "referenceRatio": 0.8,
+        "minimumReference": 5, "minimumCurrent": 5,
+        "prospectiveTarget": 10, "minimumEffect": 0.5,
+        "evaluatorFingerprint": fingerprint,
+    }))
+    assert preview.status_code == 200
+    activated = asyncio.run(request("/api/monitor/activate", json={
+        "policyId": preview.json()["policy"]["policy_id"],
+        "expectedActivePolicyId": None,
+    }))
+    assert activated.status_code == 200
+    _insert_traces(database, 10, start=20)
+
+    waiting = asyncio.run(request("/api/monitor/run"))
+
+    assert waiting.status_code == 200
+    waiting_manifest = waiting.json()["snapshot"]["manifest"]
+    assert waiting_manifest["current_unit_ids"] == [
+        f"trace-{index:03d}" for index in range(20, 30)
+    ]
+    assert len(waiting_manifest["pending_evaluator_units"]) == 10
+    assert waiting_manifest["prospective_open"] is True
+    assert waiting.json()["snapshot"]["comparison"]["status"] == "insufficient"
+
+    _insert_quality_judgments(
+        database, [f"trace-{index:03d}" for index in range(20, 30)],
+        fingerprint, Verdict.FAIL,
+    )
+    completed = asyncio.run(request("/api/monitor/run"))
+
+    completed_snapshot = completed.json()["snapshot"]
+    assert completed.status_code == 200
+    assert completed_snapshot["manifest"]["current_unit_ids"] == (
+        waiting_manifest["current_unit_ids"]
+    )
+    assert completed_snapshot["manifest"]["pending_evaluator_units"] == []
+    assert completed_snapshot["comparison"]["status"] == "alert"
+    [quality] = [
+        metric for metric in completed_snapshot["comparison"]["metrics"]
+        if metric["metric"] == "judge.quality.pass"
+    ]
+    assert quality["reference_value"] == 1.0
+    assert quality["current_value"] == 0.0
+
+
+def test_monitor_run_names_rebootstrap_when_pending_evidence_disappears(tmp_path):
+    database = tmp_path / "missing-pending.db"
+    fingerprint = "a" * 64
+    _insert_traces(database, 2)
+    _insert_quality_judgments(
+        database, ["trace-000", "trace-001"], fingerprint, Verdict.PASS,
+    )
+
+    async def request(path, *, json=None):
+        app = create_app(storage=f"sqlite:///{database}")
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver",
+        ) as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            return await client.post(
+                path, headers={"X-Verdict-Setup": token}, json=json,
+            )
+
+    preview = asyncio.run(request("/api/monitor/preview", json={
+        "referenceRatio": 0.5,
+        "minimumReference": 1,
+        "minimumCurrent": 1,
+        "prospectiveTarget": 1,
+        "evaluatorFingerprint": fingerprint,
+    }))
+    activated = asyncio.run(request("/api/monitor/activate", json={
+        "policyId": preview.json()["policy"]["policy_id"],
+        "expectedActivePolicyId": None,
+    }))
+    assert preview.status_code == activated.status_code == 200
+
+    _insert_traces(database, 1, start=2)
+    waiting = asyncio.run(request("/api/monitor/run"))
+    assert waiting.status_code == 200
+    assert waiting.json()["snapshot"]["manifest"]["pending_evaluator_units"]
+
+    storage = SQLiteStorage(str(database))
+    storage.delete_trace("trace-002")
+    storage.close()
+
+    response = asyncio.run(request("/api/monitor/run"))
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "error": "pending evaluator evidence is unavailable or changed; "
+        "re-bootstrap the monitor",
+        "state": "requires_rebootstrap",
+    }
+
+
+def test_monitor_preview_names_pending_selected_evaluator_work(tmp_path):
+    database = tmp_path / "pending-preview.db"
+    fingerprint = "a" * 64
+    _insert_traces(database, 2)
+    _insert_quality_judgments(database, ["trace-000"], fingerprint, Verdict.PASS)
+
+    async def preview():
+        app = create_app(storage=f"sqlite:///{database}")
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver",
+        ) as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            return await client.post(
+                "/api/monitor/preview",
+                headers={"X-Verdict-Setup": token},
+                json={
+                    "referenceRatio": 0.5,
+                    "minimumReference": 1,
+                    "minimumCurrent": 1,
+                    "evaluatorFingerprint": fingerprint,
+                },
+            )
+
+    response = asyncio.run(preview())
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "error": "Run the selected evaluator for 1 eligible trace, then preview "
+        "this monitor again.",
+        "state": "evaluator_pending",
+    }
 
 
 def test_monitor_candidate_survives_reload_and_matches_dashboard_status(tmp_path):
@@ -482,8 +645,7 @@ def test_monitor_compares_existing_judgments_without_mixing_evaluators_or_tenant
                         Verdict.UNCLEAR if index in {16, 17} else Verdict.FAIL
                     ),
                 )]),
-                status=(JudgmentStatus.ERROR if index == 18 else JudgmentStatus.COMPLETED),
-                error=("judge unavailable" if index == 18 else None),
+                status=JudgmentStatus.COMPLETED,
             ))
         storage.insert_judgment(Judgment(
             judgment_id=f"other-{index:03d}", trace_id=trace_id,
@@ -494,6 +656,12 @@ def test_monitor_compares_existing_judgments_without_mixing_evaluators_or_tenant
                 "quality", Verdict.FAIL if index < 10 else Verdict.PASS,
             )],
         ))
+    storage.insert_trace(Trace(
+        trace_id="trace-019", tenant_id=None,
+        started_at=NOW + timedelta(days=19),
+        ended_at=NOW + timedelta(days=19, seconds=1),
+        prompt_redacted="request", response_redacted=None,
+    ))
     for index in range(20):
         storage.insert_trace(Trace(
             trace_id=f"foreign-{index:03d}", tenant_id="foreign",
@@ -541,7 +709,7 @@ def test_monitor_compares_existing_judgments_without_mixing_evaluators_or_tenant
         "reference_evaluable": 10, "reference_unclear": 0,
         "reference_missing": 0, "reference_error": 0,
         "current_evaluable": 6, "current_unclear": 2,
-        "current_missing": 1, "current_error": 1,
+        "current_missing": 2, "current_error": 0,
     }]
     assert body["snapshot"]["comparison"]["status"] == "alert"
     assert body["policy"]["evaluator_fingerprint"] == selected
@@ -630,7 +798,7 @@ def test_active_monitor_uses_approved_judgment_facts_after_rejudge_and_delete(tm
                 tenant_id=None,
                 started_at=NOW + timedelta(minutes=index),
                 ended_at=NOW + timedelta(minutes=index, seconds=1),
-                response_redacted="ok",
+                prompt_redacted="request", response_redacted="ok",
             )
         )
         storage.insert_judgment(
@@ -700,7 +868,7 @@ def test_active_monitor_uses_approved_judgment_facts_after_rejudge_and_delete(tm
                 tenant_id=None,
                 started_at=NOW + timedelta(days=2, minutes=index),
                 ended_at=NOW + timedelta(days=2, minutes=index, seconds=1),
-                response_redacted="ok",
+                prompt_redacted="request", response_redacted="ok",
             )
         )
         storage.insert_judgment(

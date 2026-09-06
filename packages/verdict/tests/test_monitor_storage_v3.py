@@ -1,5 +1,6 @@
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from threading import Barrier, Thread
 
 import pytest
 from verdict.monitoring import (
@@ -124,6 +125,88 @@ def test_monitor_snapshot_is_idempotent_and_bound_to_policy(storage) -> None:
         storage.save_monitor_snapshot("missing", manifest, comparison)
 
 
+def test_successor_write_rejects_stale_parent_and_retired_policy(storage) -> None:
+    first, replacement = _policy(), _policy("replacement")
+    manifest, comparison = _snapshot(first)
+    storage.save_monitor_candidate(first, manifest, comparison)
+    storage.activate_monitor_policy(
+        first.scope_key, first.policy_id, expected_active_policy_id=None,
+    )
+    successor = plan_prospective_manifest(manifest, (), first)
+    successor_result = compare_manifest((), successor, first)
+
+    storage.save_monitor_successor(
+        first.policy_id, manifest.snapshot_id, successor, successor_result,
+        expected_state="active",
+    )
+    with pytest.raises(ValueError, match="snapshot changed"):
+        storage.save_monitor_successor(
+            first.policy_id, manifest.snapshot_id, successor, successor_result,
+            expected_state="active",
+        )
+
+    replacement_manifest, replacement_comparison = _snapshot(replacement)
+    storage.save_monitor_candidate(
+        replacement, replacement_manifest, replacement_comparison,
+    )
+    storage.activate_monitor_policy(
+        replacement.scope_key, replacement.policy_id,
+        expected_active_policy_id=first.policy_id,
+    )
+    with pytest.raises(ValueError, match="policy is not active"):
+        storage.save_monitor_successor(
+            first.policy_id, successor.snapshot_id,
+            plan_prospective_manifest(successor, (), first), successor_result,
+            expected_state="active",
+        )
+
+
+def test_sqlite_concurrent_successors_have_one_winner(tmp_path) -> None:
+    path = tmp_path / "concurrent-monitor.db"
+    initial = SQLiteStorage(str(path))
+    policy = _policy()
+    manifest, comparison = _snapshot(policy)
+    initial.save_monitor_candidate(policy, manifest, comparison)
+    initial.activate_monitor_policy(
+        policy.scope_key, policy.policy_id, expected_active_policy_id=None,
+    )
+    initial.close()
+    successor = plan_prospective_manifest(manifest, (), policy)
+    successor_result = compare_manifest((), successor, policy)
+    barrier = Barrier(2)
+    outcomes = []
+
+    def save() -> None:
+        storage = SQLiteStorage(str(path))
+        try:
+            barrier.wait()
+            storage.save_monitor_successor(
+                policy.policy_id, manifest.snapshot_id, successor, successor_result,
+                expected_state="active",
+            )
+        except ValueError:
+            outcomes.append("conflict")
+        else:
+            outcomes.append("saved")
+        finally:
+            storage.close()
+
+    threads = [Thread(target=save) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert sorted(outcomes) == ["conflict", "saved"]
+    verifier = SQLiteStorage(str(path))
+    try:
+        assert verifier.get_latest_monitor_snapshot(policy.policy_id) == (
+            successor, successor_result,
+        )
+    finally:
+        verifier.close()
+
+
 def test_snapshot_content_cannot_change_under_same_identity(storage) -> None:
     policy = _policy()
     storage.save_monitor_policy(policy)
@@ -201,7 +284,30 @@ def test_sqlite_snapshot_size_violation_is_loud_and_preserves_previous_row(
     storage.close()
 
 
-def test_latest_evaluator_judgments_are_tenant_scoped_and_latest_wins(storage) -> None:
+def test_oversized_candidate_is_rejected_before_any_policy_mutation(storage) -> None:
+    policy = _policy()
+    units = tuple(
+        AnalysisUnitRecord(
+            f"unit-{index:05d}-" + "x" * 240,
+            NOW + timedelta(microseconds=index),
+            {"failed": False},
+        )
+        for index in range(8_500)
+    )
+    manifest = plan_historical_manifest(
+        units, policy, cutoff=NOW + timedelta(hours=1),
+    )
+    comparison = compare_manifest(units, manifest, policy)
+
+    with pytest.raises(ValueError, match="4 MiB"):
+        storage.save_monitor_candidate(policy, manifest, comparison)
+
+    assert storage.get_monitor_policy(policy.policy_id) is None
+
+
+def test_latest_evaluator_judgments_are_tenant_scoped_and_completion_is_absorbing(
+    storage,
+) -> None:
     fingerprint = "a" * 64
     for trace_id, tenant in (("local", "tenant-a"), ("foreign", "tenant-b")):
         storage.insert_trace(Trace(trace_id=trace_id, tenant_id=tenant, started_at=NOW))
@@ -236,5 +342,5 @@ def test_latest_evaluator_judgments_are_tenant_scoped_and_latest_wins(storage) -
         "tenant-a", fingerprint, limit=10,
     )
 
-    assert [row.judgment_id for row in rows] == ["new"]
-    assert rows[0].status is JudgmentStatus.ERROR
+    assert [row.judgment_id for row in rows] == ["old"]
+    assert rows[0].status is JudgmentStatus.COMPLETED

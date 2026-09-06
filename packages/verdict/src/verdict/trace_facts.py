@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+
 from verdict.structural import (
     count_hedges,
     is_apology_start,
     is_refusal,
     is_valid_json,
 )
+
+_JUDGE_EVIDENCE_DIGEST_VERSION = "judge-evidence-v1"
 
 
 def text_is_present(value: object) -> bool:
@@ -24,6 +29,14 @@ def trace_evidence_reason(*, error: object, prompt: object, response: object) ->
     if not text_is_present(response):
         return "response_not_captured"
     return None
+
+
+def trace_judge_evidence_digest(*, error: object, prompt: object, response: object) -> str:
+    """Identify the exact response-judge evidence without retaining its content."""
+    payload = [_JUDGE_EVIDENCE_DIGEST_VERSION, error, prompt, response]
+    return hashlib.sha256(
+        json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode()
+    ).hexdigest()
 
 
 def deterministic_trace_facts(

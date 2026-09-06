@@ -11,6 +11,8 @@ from verdict.cluster_runtime import (
 from verdict.monitoring import (
     MAX_MONITOR_GROUPS,
     MonitorPolicy,
+    MonitorRebootstrapRequired,
+    MonitorStateConflict,
     compare_manifest,
     monitor_requires_rebootstrap,
     plan_prospective_manifest,
@@ -20,10 +22,11 @@ from verdict.monitoring import (
 LOCAL_TENANT = "__verdict_local__"
 LOCAL_TRACE_SCOPE = "__verdict_local__:application:trace"
 MAX_MONITOR_INPUTS = 100_000
+MAX_CLUSTER_PROJECTION_PASSES = 128
 
 
-class MonitorRebootstrapRequired(ValueError):
-    pass
+class MonitorProjectionPending(ValueError):
+    """Bounded cluster projection made progress but has not completed yet."""
 
 
 def select_monitor_evaluator(
@@ -59,7 +62,7 @@ def _evaluator_judgments(
         evaluator_fingerprint,
         limit=MAX_MONITOR_INPUTS + 1,
     )
-    if not judgments:
+    if not judgments and expected_dimensions is None:
         raise ValueError("selected evaluator is unavailable")
     if len(judgments) > MAX_MONITOR_INPUTS:
         raise ValueError("monitor exceeds bounded judgment limit")
@@ -109,26 +112,37 @@ def load_monitor_units(storage, policy: MonitorPolicy, *, tenant_id: str):
         if len(rows) > MAX_MONITOR_INPUTS:
             raise ValueError("cluster assignment limit exceeded")
         projected_trace_ids = {row.trace_id for row in rows}
-        eligible_trace_ids = {
+        possibly_assignable = {
             trace.trace_id
             for trace in traces
-            if trace.ended_at is not None and trace.tags.get("verdict.workload") != "judge"
+            if trace.ended_at is not None
+            and trace.tags.get("verdict.workload") not in {"judge", "paired_replay"}
         }
-        if eligible_trace_ids - projected_trace_ids:
-            cluster_registry_service(
+        if possibly_assignable - projected_trace_ids:
+            service = cluster_registry_service(
                 storage,
                 strategy=version.strategy,
                 model_path=cluster_model_path_for_version(version),
-            ).assign(
-                tenant_id,
-                version_id,
-                through_cutoff=max(trace.started_at for trace in traces)
-                + timedelta(microseconds=1),
             )
+            projection_cutoff = max(trace.started_at for trace in traces) + timedelta(
+                microseconds=1
+            )
+            projected = 0
+            for _ in range(MAX_CLUSTER_PROJECTION_PASSES):
+                assigned = service.assign(
+                    tenant_id, version_id, through_cutoff=projection_cutoff,
+                )
+                if assigned == 0:
+                    break
+                projected += assigned
+                if projected > MAX_MONITOR_INPUTS:
+                    raise ValueError("cluster assignment limit exceeded")
+            else:
+                raise MonitorProjectionPending(
+                    "cluster projection is still processing; run the monitor again"
+                )
             rows = storage.list_trace_cluster_assignments(
-                tenant_id,
-                version_id,
-                limit=MAX_MONITOR_INPUTS + 1,
+                tenant_id, version_id, limit=MAX_MONITOR_INPUTS + 1,
             )
             if len(rows) > MAX_MONITOR_INPUTS:
                 raise ValueError("cluster assignment limit exceeded")
@@ -157,15 +171,44 @@ def load_monitor_units(storage, policy: MonitorPolicy, *, tenant_id: str):
     )
 
 
-def advance_monitor(storage, policy: MonitorPolicy, *, tenant_id: str):
+def advance_monitor(
+    storage,
+    policy: MonitorPolicy,
+    *,
+    tenant_id: str,
+    expected_state: str = "active",
+):
     """Advance one active policy through the canonical persisted lifecycle."""
+    if expected_state not in {"active", "candidate"}:
+        raise ValueError("monitor expected state is invalid")
     previous = storage.get_latest_monitor_snapshot(policy.policy_id)
     if previous is None:
-        raise ValueError("active monitor has no snapshot")
+        raise ValueError("monitor policy has no snapshot")
     if monitor_requires_rebootstrap(policy, previous[0]):
         raise MonitorRebootstrapRequired("monitor requires re-bootstrap")
     units = load_monitor_units(storage, policy, tenant_id=tenant_id)
     manifest = plan_prospective_manifest(previous[0], units, policy)
     comparison = compare_manifest(units, manifest, policy)
-    storage.save_monitor_snapshot(policy.policy_id, manifest, comparison)
+    try:
+        storage.save_monitor_successor(
+            policy.policy_id,
+            previous[0].snapshot_id,
+            manifest,
+            comparison,
+            expected_state=expected_state,
+        )
+    except MonitorStateConflict:
+        stored = storage.get_monitor_policy(policy.policy_id)
+        if stored is None or stored[1] != expected_state:
+            raise
+        if (
+            expected_state == "active"
+            and getattr(storage.get_active_monitor_policy(policy.scope_key), "policy_id", None)
+            != policy.policy_id
+        ):
+            raise
+        winner = storage.get_latest_monitor_snapshot(policy.policy_id)
+        if winner is None or winner[0].snapshot_id == previous[0].snapshot_id:
+            raise
+        return winner
     return manifest, comparison

@@ -59,9 +59,14 @@ shared PostgreSQL store. SQLite remains the local default.
   from durable policy state.
 - Historical previews remain exploratory. Activation freezes their reference
   membership and normalized metric counts, then starts an empty prospective
-  current cohort whose facts are frozen as each trace is admitted.
+  current cohort. Current membership and deterministic facts freeze as each
+  completed trace is admitted. When an evaluator is selected, the cohort stays
+  open until its stored evaluator results are terminal; monitor execution never
+  invokes the evaluator.
 - Cluster monitors project new traffic through the pinned reviewed registry;
-  they never fit, rename, or activate clusters during a monitor run.
+  they never fit, rename, or activate clusters during a monitor run. Membership
+  is not saved until bounded projection completes; an unfinished run reports a
+  retryable projection state.
 - Repeated looks use bounded alpha spending; Benjamini-Hochberg correction
   remains within each look.
 - Late-arriving units enter the next open cohort rather than being discarded.

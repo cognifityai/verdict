@@ -642,6 +642,24 @@ class BufferedStorage:
             self._inner.save_monitor_snapshot, policy_id, manifest, comparison,
         )
 
+    def save_monitor_successor(
+        self,
+        policy_id: str,
+        expected_snapshot_id: str,
+        manifest: CohortManifest,
+        comparison: MonitorComparison,
+        *,
+        expected_state: str,
+    ) -> None:
+        self._maintenance(
+            self._inner.save_monitor_successor,
+            policy_id,
+            expected_snapshot_id,
+            manifest,
+            comparison,
+            expected_state=expected_state,
+        )
+
     # ======================================================================
     # Lifecycle
     # ======================================================================

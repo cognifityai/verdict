@@ -32,6 +32,7 @@ from verdict.monitoring import (
     CohortManifest,
     MonitorComparison,
     MonitorPolicy,
+    MonitorStateConflict,
     monitor_policy_from_json,
     monitor_policy_to_json,
     monitor_snapshot_from_json,
@@ -361,6 +362,36 @@ class InMemoryStorage:
                 raise ValueError("monitor snapshot identity has different content")
             self._monitor_snapshots.setdefault(key, payload)
 
+    def save_monitor_successor(
+        self,
+        policy_id: str,
+        expected_snapshot_id: str,
+        manifest: CohortManifest,
+        comparison: MonitorComparison,
+        *,
+        expected_state: str,
+    ) -> None:
+        if expected_state not in {"active", "candidate"}:
+            raise ValueError("monitor expected state is invalid")
+        with self._monitor_lock:
+            stored = self._monitor_policies.get(policy_id)
+            if stored is None or stored[1] != expected_state:
+                raise MonitorStateConflict(f"monitor policy is not {expected_state}")
+            policy = monitor_policy_from_json(stored[0])
+            if (
+                expected_state == "active"
+                and self._active_monitor_policies.get(policy.scope_key) != policy_id
+            ):
+                raise MonitorStateConflict("monitor policy is not active")
+            heads = [
+                snapshot_id
+                for stored_policy, snapshot_id in self._monitor_snapshots
+                if stored_policy == policy_id
+            ]
+            if not heads or heads[-1] != expected_snapshot_id:
+                raise MonitorStateConflict("monitor snapshot changed")
+            self.save_monitor_snapshot(policy_id, manifest, comparison)
+
     def get_latest_monitor_snapshot(
         self, policy_id: str
     ) -> tuple[CohortManifest, MonitorComparison] | None:
@@ -538,7 +569,12 @@ class InMemoryStorage:
             ):
                 continue
             previous = latest.get(judgment.trace_id)
-            if previous is None or (judgment.created_at, judgment.judgment_id) > (
+            if previous is None or (
+                judgment.status is JudgmentStatus.COMPLETED,
+                judgment.created_at,
+                judgment.judgment_id,
+            ) > (
+                previous.status is JudgmentStatus.COMPLETED,
                 previous.created_at,
                 previous.judgment_id,
             ):
