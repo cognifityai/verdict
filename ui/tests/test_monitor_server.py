@@ -1,8 +1,10 @@
 import asyncio
+import sqlite3
 from datetime import datetime, timedelta, timezone
 
 import httpx
 from verdict.dashboard.app import create_app
+from verdict.dashboard.monitor_routes import MonitorRoutes
 from verdict.monitoring import CohortManifest, MonitorComparison, MonitorPolicy, MonitorStatus
 from verdict.schema import (
     ClusterIdentity,
@@ -141,6 +143,83 @@ def test_monitor_preview_activation_and_prospective_run(tmp_path):
         "trace-050", "trace-051", "trace-052", "trace-053", "trace-054",
     ]
     assert completed.json()["approvedHistoricalSnapshot"] == preview.json()["snapshot"]
+
+
+def test_monitor_activation_prepares_before_cas_and_reuses_retry(tmp_path, monkeypatch):
+    database = tmp_path / "verdict.db"
+    _insert_traces(database, 20)
+
+    def fail_preparation(_storage, _policy):
+        raise ValueError("projection unavailable")
+
+    async def exercise():
+        app = create_app(storage=f"sqlite:///{database}")
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            headers = {"X-Verdict-Setup": token}
+            first = await client.post(
+                "/api/monitor/preview", headers=headers,
+                json={"referenceRatio": 0.5, "minimumReference": 5,
+                      "minimumCurrent": 5, "prospectiveTarget": 5},
+            )
+            first_id = first.json()["policy"]["policy_id"]
+            assert (await client.post(
+                "/api/monitor/activate", headers=headers,
+                json={"policyId": first_id, "expectedActivePolicyId": None},
+            )).status_code == 200
+            second = await client.post(
+                "/api/monitor/preview", headers=headers,
+                json={"referenceRatio": 0.5, "minimumReference": 5,
+                      "minimumCurrent": 5, "prospectiveTarget": 5},
+            )
+            second_id = second.json()["policy"]["policy_id"]
+            with monkeypatch.context() as patch:
+                patch.setattr(
+                    MonitorRoutes,
+                    "prospective",
+                    staticmethod(fail_preparation),
+                )
+                preparation_failure = await client.post(
+                    "/api/monitor/activate", headers=headers,
+                    json={"policyId": second_id, "expectedActivePolicyId": first_id},
+                )
+            active_after_failure = (await client.get("/api/monitor")).json()
+            cas_failure = await client.post(
+                "/api/monitor/activate", headers=headers,
+                json={"policyId": second_id, "expectedActivePolicyId": "stale"},
+            )
+            with sqlite3.connect(database) as connection:
+                prepared_count = connection.execute(
+                    "SELECT COUNT(*) FROM monitor_snapshots WHERE policy_id=?",
+                    (second_id,),
+                ).fetchone()[0]
+            retry = await client.post(
+                "/api/monitor/activate", headers=headers,
+                json={"policyId": second_id, "expectedActivePolicyId": first_id},
+            )
+            with sqlite3.connect(database) as connection:
+                final_count = connection.execute(
+                    "SELECT COUNT(*) FROM monitor_snapshots WHERE policy_id=?",
+                    (second_id,),
+                ).fetchone()[0]
+            return (
+                preparation_failure, active_after_failure, cas_failure,
+                prepared_count, retry, final_count, first_id, second_id,
+            )
+
+    (preparation_failure, active_after_failure, cas_failure, prepared_count,
+     retry, final_count, first_id, second_id) = asyncio.run(exercise())
+    assert preparation_failure.status_code == 400
+    assert active_after_failure["policy"]["policy_id"] == first_id
+    assert cas_failure.status_code == 400
+    assert prepared_count == 2
+    assert retry.status_code == 200
+    assert retry.json()["policy"]["policy_id"] == second_id
+    assert retry.json()["snapshot"]["manifest"]["comparison_index"] == 1
+    assert final_count == prepared_count
 
 
 def test_monitor_rejects_outcome_seeking_or_invalid_window_parameters(tmp_path):

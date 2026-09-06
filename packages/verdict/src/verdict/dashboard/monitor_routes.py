@@ -48,6 +48,24 @@ def _error_response(exc: Exception, fallback: str) -> JSONResponse:
     return JSONResponse({"error": message}, status_code=400)
 
 
+def _prepared_activation_snapshot(historical, latest):
+    """Return a safe prior preparation, or None when preparation is still needed."""
+    approved = historical[0]
+    prepared = latest[0]
+    if prepared.snapshot_id == approved.snapshot_id:
+        return None
+    if (
+        prepared.policy_fingerprint != approved.policy_fingerprint
+        or prepared.comparison_index != approved.comparison_index + 1
+        or prepared.reference_unit_ids != approved.reference_unit_ids
+        or prepared.reference_summary != approved.reference_summary
+        or prepared.consumed_unit_ids
+        != (*approved.consumed_unit_ids, *prepared.current_unit_ids)
+    ):
+        raise ValueError("candidate has an invalid prepared snapshot")
+    return latest
+
+
 class MonitorRoutes:
     """Own monitor policy parsing, bounded units, and lifecycle endpoints."""
 
@@ -195,7 +213,7 @@ class MonitorRoutes:
                 stored = writable.get_monitor_policy(policy_id)
                 if stored is None or stored[1] != "candidate":
                     raise ValueError("unknown policy")
-                historical = writable.get_latest_monitor_snapshot(policy_id)
+                historical = writable.get_initial_monitor_snapshot(policy_id)
                 if historical is None:
                     raise ValueError("candidate has no snapshot")
                 if monitor_requires_rebootstrap(stored[0], historical[0]):
@@ -203,12 +221,18 @@ class MonitorRoutes:
                         {"error": "monitor requires re-bootstrap"},
                         status_code=409,
                     )
+                latest = writable.get_latest_monitor_snapshot(policy_id)
+                if latest is None:
+                    raise ValueError("candidate has no snapshot")
+                prepared = _prepared_activation_snapshot(historical, latest)
+                if prepared is None:
+                    prepared = self.prospective(writable, stored[0])
                 policy = writable.activate_monitor_policy(
                     stored[0].scope_key,
                     policy_id,
                     expected_active_policy_id=expected,
                 )
-                manifest, comparison = self.prospective(writable, policy)
+                manifest, comparison = prepared
                 return self.response(
                     policy, "active", manifest, comparison,
                     approved_historical=historical,
