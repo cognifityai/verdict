@@ -29,10 +29,11 @@ def test_cluster_ids_are_not_reformatted_as_rubric_dimensions():
     assert "label: cluster.display_name || cluster.cluster_id" in source
 
 
-def test_overview_does_not_label_a_missing_effect_size_as_clear():
+def test_overview_uses_the_canonical_monitor_read_model():
     source = (build.HERE / "VerdictUI.jsx").read_text()
-    assert "leadSignal ? statValue(leadSignal.cliffsDelta) : \"clear\"" in source
-    assert "leadSignal?.cliffsDelta ?? \"clear\"" not in source
+    assert "MonitorOverview({ monitor: DATA.monitor })" in source
+    assert 'label="Comparison alerts"' in source
+    assert "LATEST COMPLETED RUN" not in source
 
 
 def test_landing_source_link_is_a_real_link():

@@ -63,23 +63,26 @@ not offer a metadata-only shortcut; SDK and programmatic capture can still set
 historical import remain disabled until the exact paths have been previewed in
 the current server process.
 
-After local capture, Verdict opens **Agent runs** and turns **Setup** into
-**Data sources**. The header reports Agent Runs and genuine/imported LLM Traces
-separately; a successful local capture can therefore show agent evidence while
-the LLM Trace count remains zero. A manual rescan requires fresh in-process path
+After local capture, Verdict opens **Overview**. **Explore → Agent Runs & Tools**
+shows local execution evidence, while **Explore → LLM Calls** shows only genuine
+or imported model calls. A successful local capture can therefore show Agent
+Runs while the LLM Call count remains zero. Source configuration remains under
+**Settings → Data Sources**. A manual rescan requires fresh in-process path
 approval. If the user explicitly saves a daily schedule, Verdict intentionally
 retains those source paths in the local control store so `verdict-service` can
 rescan them; that durable schedule is configuration, not captured evidence.
 
-The findings-first dashboard exposes persisted dataset-wide evidence health,
-Reliability, Performance, Behavior, ordered run/turn/event exploration,
-evidence-aware judging, review queues, schedules, alerts, and a single Drift
-workspace for cohort design, monitoring, completed signals, and optional
-clusters. Cluster and monitor activation are explicit transitions; previews
-never silently replace active state. A Trace reports execution success/error
+The findings-first dashboard has five top-level workspaces: **Overview**,
+**Explore**, **Evaluate**, **Monitor**, and **Settings**. Overview contains
+Summary, Reliability, Performance, and Behavior. Monitor contains current
+status, historical comparisons, optional segments, and schedules. Cluster and
+monitor activation are explicit transitions; a stored historical candidate is
+shown separately from the active prospective monitor and survives page reload.
+A Trace reports execution success/error
 separately from evaluation states: `not evaluated`, `judge error`, `pass`,
 `fail`, or `unclear`. No drift conclusion is shown until a comparison is
-persisted.
+persisted. Activating a monitor candidate retires other previews for the same
+scope so an abandoned comparison cannot hide the active result.
 
 Historical imports performed by the local setup UI enter the same local
 workspace used by analysis and Evaluator Lab. Judge-free trace analysis reports
@@ -518,7 +521,7 @@ Hexagonal / ports-and-adapters, ≥2 adapters per port (one real + in-memory for
   nonoutlier cluster `30.1047%` versus the `30%` maximum), although its other
   quality and stability gates passed. Do not claim general validated semantic
   quality or silently enable it in customer deployments.
-  **Drift → Clusters** exposes first-fit controls even when the registry is
+  **Monitor → Segments** exposes first-fit controls even when the registry is
   empty. Its default semantic action remains labeled experimental. The
   dashboard anchors the 90-day fit range to the latest
   eligible event, uses a cached pinned MiniLM snapshot, or downloads that exact
@@ -535,7 +538,7 @@ Hexagonal / ports-and-adapters, ≥2 adapters per port (one real + in-memory for
   tenantless Memory/SQLite uses the reserved `__verdict_local__` scope. Shadow
   analysis is disabled pending the tenant-isolation correction tracked in issue
   #24.
-  The packaged dashboard's **Drift → Clusters** workspace reads these immutable versions and
+  The packaged dashboard's **Monitor → Segments** workspace reads these immutable versions and
   shows stable labels, the frozen selector/algorithm/model definition,
   representative redacted prompts, provider/model mix, membership explanations,
   terminal reasons, coverage, and activation readiness. Per-cluster planning

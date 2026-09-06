@@ -151,9 +151,18 @@ class Storage(Protocol):
 
     def save_monitor_policy(self, policy: MonitorPolicy) -> None: ...
 
+    def save_monitor_candidate(
+        self,
+        policy: MonitorPolicy,
+        manifest: CohortManifest,
+        comparison: MonitorComparison,
+    ) -> None: ...
+
     def get_monitor_policy(self, policy_id: str) -> tuple[MonitorPolicy, str] | None: ...
 
     def get_active_monitor_policy(self, scope_key: str) -> MonitorPolicy | None: ...
+
+    def get_latest_monitor_candidate(self, scope_key: str) -> MonitorPolicy | None: ...
 
     def activate_monitor_policy(
         self, scope_key: str, policy_id: str, *, expected_active_policy_id: str | None

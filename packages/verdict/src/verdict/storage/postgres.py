@@ -857,22 +857,37 @@ class PostgresStorage:
         )
         return [notification_attempt_from_json(row[0]) for row in rows]
 
-    def save_monitor_policy(self, policy: MonitorPolicy) -> None:
+    def _save_monitor_policy(self, cur, policy: MonitorPolicy) -> None:
         payload = monitor_policy_to_json(policy)
         digest = hashlib.sha256(payload.encode()).hexdigest()
+        cur.execute(
+            "INSERT INTO monitor_policies "
+            "(policy_id,scope_key,state,content_hash,payload_json) "
+            "VALUES (%s,%s,'candidate',%s,%s) ON CONFLICT DO NOTHING",
+            (policy.policy_id, policy.scope_key, digest, payload),
+        )
+        cur.execute(
+            "SELECT content_hash FROM monitor_policies WHERE policy_id=%s",
+            (policy.policy_id,),
+        )
+        if cur.fetchone()[0] != digest:
+            raise ValueError("monitor policy identity has a different definition")
+
+    def save_monitor_policy(self, policy: MonitorPolicy) -> None:
         with self._pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
-            cur.execute(
-                "INSERT INTO monitor_policies "
-                "(policy_id,scope_key,state,content_hash,payload_json) "
-                "VALUES (%s,%s,'candidate',%s,%s) ON CONFLICT DO NOTHING",
-                (policy.policy_id, policy.scope_key, digest, payload),
+            self._save_monitor_policy(cur, policy)
+
+    def save_monitor_candidate(
+        self,
+        policy: MonitorPolicy,
+        manifest: CohortManifest,
+        comparison: MonitorComparison,
+    ) -> None:
+        with self._pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
+            self._save_monitor_policy(cur, policy)
+            self._save_monitor_snapshot(
+                cur, policy.policy_id, manifest, comparison
             )
-            cur.execute(
-                "SELECT content_hash FROM monitor_policies WHERE policy_id=%s",
-                (policy.policy_id,),
-            )
-            if cur.fetchone()[0] != digest:
-                raise ValueError("monitor policy identity has a different definition")
 
     @staticmethod
     def _monitor_policy_payload(value) -> str:
@@ -888,6 +903,17 @@ class PostgresStorage:
     def get_active_monitor_policy(self, scope_key: str) -> MonitorPolicy | None:
         row = self._fetchone(
             "SELECT payload_json FROM monitor_policies WHERE scope_key=%s AND state='active'",
+            (scope_key,),
+        )
+        return monitor_policy_from_json(self._monitor_policy_payload(row[0])) if row else None
+
+    def get_latest_monitor_candidate(self, scope_key: str) -> MonitorPolicy | None:
+        row = self._fetchone(
+            "SELECT p.payload_json FROM monitor_policies p "
+            "WHERE p.scope_key=%s AND p.state='candidate' "
+            "AND EXISTS (SELECT 1 FROM monitor_snapshots s "
+            "WHERE s.policy_id=p.policy_id) "
+            "ORDER BY p.created_at DESC, p.policy_id DESC LIMIT 1",
             (scope_key,),
         )
         return monitor_policy_from_json(self._monitor_policy_payload(row[0])) if row else None
@@ -914,7 +940,8 @@ class PostgresStorage:
                 raise ValueError("unknown monitor policy")
             cur.execute(
                 "UPDATE monitor_policies SET state='retired',updated_at=now() "
-                "WHERE scope_key=%s AND state='active'", (scope_key,),
+                "WHERE scope_key=%s AND state IN ('active','candidate') "
+                "AND policy_id<>%s", (scope_key, policy_id),
             )
             cur.execute(
                 "UPDATE monitor_policies SET state='active',updated_at=now() "
@@ -922,37 +949,43 @@ class PostgresStorage:
             )
         return monitor_policy_from_json(self._monitor_policy_payload(target[0]))
 
-    def save_monitor_snapshot(
-        self, policy_id: str, manifest: CohortManifest, comparison: MonitorComparison
+    def _save_monitor_snapshot(
+        self, cur, policy_id: str, manifest: CohortManifest,
+        comparison: MonitorComparison,
     ) -> None:
         payload = monitor_snapshot_to_json(manifest, comparison)
         if not 2 <= len(payload.encode("utf-8")) <= 4_194_304:
             raise ValueError("monitor snapshot exceeds the 4 MiB storage contract")
         digest = hashlib.sha256(payload.encode()).hexdigest()
+        cur.execute(
+            "SELECT payload_json FROM monitor_policies WHERE policy_id=%s", (policy_id,),
+        )
+        policy_row = cur.fetchone()
+        if policy_row is None:
+            raise ValueError("unknown policy")
+        stored_policy = monitor_policy_from_json(
+            self._monitor_policy_payload(policy_row[0])
+        )
+        if stored_policy.fingerprint != manifest.policy_fingerprint:
+            raise ValueError("monitor snapshot does not match policy")
+        cur.execute(
+            "INSERT INTO monitor_snapshots "
+            "(snapshot_id,policy_id,cutoff,content_hash,payload_json) "
+            "VALUES (%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING",
+            (manifest.snapshot_id, policy_id, manifest.cutoff, digest, payload),
+        )
+        cur.execute(
+            "SELECT content_hash FROM monitor_snapshots WHERE snapshot_id=%s",
+            (manifest.snapshot_id,),
+        )
+        if cur.fetchone()[0] != digest:
+            raise ValueError("monitor snapshot identity has different content")
+
+    def save_monitor_snapshot(
+        self, policy_id: str, manifest: CohortManifest, comparison: MonitorComparison
+    ) -> None:
         with self._pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
-            cur.execute(
-                "SELECT payload_json FROM monitor_policies WHERE policy_id=%s", (policy_id,),
-            )
-            policy_row = cur.fetchone()
-            if policy_row is None:
-                raise ValueError("unknown policy")
-            stored_policy = monitor_policy_from_json(
-                self._monitor_policy_payload(policy_row[0])
-            )
-            if stored_policy.fingerprint != manifest.policy_fingerprint:
-                raise ValueError("monitor snapshot does not match policy")
-            cur.execute(
-                "INSERT INTO monitor_snapshots "
-                "(snapshot_id,policy_id,cutoff,content_hash,payload_json) "
-                "VALUES (%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING",
-                (manifest.snapshot_id, policy_id, manifest.cutoff, digest, payload),
-            )
-            cur.execute(
-                "SELECT content_hash FROM monitor_snapshots WHERE snapshot_id=%s",
-                (manifest.snapshot_id,),
-            )
-            if cur.fetchone()[0] != digest:
-                raise ValueError("monitor snapshot identity has different content")
+            self._save_monitor_snapshot(cur, policy_id, manifest, comparison)
 
     def get_latest_monitor_snapshot(
         self, policy_id: str

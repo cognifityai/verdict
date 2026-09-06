@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { AlertTriangle, CheckCircle2, RefreshCw } from "lucide-react";
+import { agentEvidenceValue, datasetActivitySummary, datasetEvidenceRows } from "./insights-data.mjs";
 
 const C = { panel: "#111715", border: "#26332e", sub: "#94a39d", faint: "#68766f", green: "#4ee1aa", amber: "#f2b84b", red: "#ff6b6b" };
 
@@ -38,11 +39,13 @@ export function Insights({ url, onOpenRuns, mode = "findings" }) {
   const analysisState = data.analysisState || { status: "never_run" };
   const counts = data.dataHealth.counts;
   const traceEvidence = data.dataHealth.traceEvidence || { judgeEligible: 0, notEvaluable: 0 };
+  const activity = datasetActivitySummary(data.dataHealth, data.performance);
   if (mode === "reliability") return <ProductView title="Reliability" intro="Deterministic execution outcomes from captured evidence; no judge is required." rows={[
     ["LLM trace outcomes", displayCounts(data.reliability.traceOutcomes)],
     ["Agent Run outcomes", counts.runs ? displayCounts(data.reliability.runOutcomes) : "Not available — no Agent Runs captured"],
     ["Agent turn outcomes", counts.turns ? displayCounts(data.reliability.turnOutcomes) : "Not available — no Agent Runs captured"],
-    ["Tool errors", data.reliability.toolErrors], ["Command failures", data.reliability.commandFailures],
+    ["Tool errors", agentEvidenceValue(data.dataHealth, data.reliability.toolErrors)],
+    ["Command failures", agentEvidenceValue(data.dataHealth, data.reliability.commandFailures)],
     ["Judge-eligible traces", traceEvidence.judgeEligible],
     ["Traces without judge evidence", traceEvidence.notEvaluable],
   ]} comparisons={data.modelComparisons} />;
@@ -79,13 +82,15 @@ export function Insights({ url, onOpenRuns, mode = "findings" }) {
     </section>
     <section className="grid sm:grid-cols-3 gap-3">
       <Metric label="Agent runs" value={counts.runs} sub={`${counts.turns} turns`} />
-      <Metric label="Normalized events" value={counts.events} sub={`${data.performance.modelCalls} model · ${data.performance.toolCalls} tool calls`} />
-      <Metric label="Model-call trace links" value={`${data.dataHealth.traceLinks.linked}/${data.dataHealth.traceLinks.modelCalls}`} sub={`${data.dataHealth.traceLinks.unlinked} unlinked`} />
+      <Metric label={activity.activityLabel} value={activity.activityValue} sub={activity.activityDetail} />
+      <Metric label={activity.linkLabel} value={activity.linkValue} sub={activity.linkDetail} />
     </section>
     <div className="grid lg:grid-cols-3 gap-4">
       <Section title="Reliability" rows={[
-        ["Tool errors", data.reliability.toolErrors], ["Command failures", data.reliability.commandFailures],
-        ["Run outcomes", displayCounts(data.reliability.runOutcomes)], ["Turn outcomes", displayCounts(data.reliability.turnOutcomes)],
+        ["Tool errors", agentEvidenceValue(data.dataHealth, data.reliability.toolErrors)],
+        ["Command failures", agentEvidenceValue(data.dataHealth, data.reliability.commandFailures)],
+        ["Run outcomes", agentEvidenceValue(data.dataHealth, displayCounts(data.reliability.runOutcomes))],
+        ["Turn outcomes", agentEvidenceValue(data.dataHealth, displayCounts(data.reliability.turnOutcomes))],
       ]} />
       <Section title="Performance" rows={[
         ["Input tokens", data.performance.inputTokens], ["Output tokens", data.performance.outputTokens],
@@ -93,8 +98,9 @@ export function Insights({ url, onOpenRuns, mode = "findings" }) {
         ["Cost", data.performance.costState === "not_captured" ? "Not captured" : data.performance.costUsd],
       ]} />
       <Section title="Evidence health" rows={[
-        ["Prompt evidence", displayCounts(data.dataHealth.promptStates)], ["Response evidence", displayCounts(data.dataHealth.responseStates)],
-        ["Event statuses", displayCounts(data.dataHealth.eventStatuses)], ["Event types", Object.keys(data.dataHealth.eventTypes).length],
+        ...datasetEvidenceRows(data.dataHealth, data.scope),
+        ["Event statuses", agentEvidenceValue(data.dataHealth, displayCounts(data.dataHealth.eventStatuses))],
+        ["Event types", agentEvidenceValue(data.dataHealth, Object.keys(data.dataHealth.eventTypes).length)],
       ]} />
     </div>
     <section className="border p-5" style={{ borderColor: C.border, background: C.panel }}>

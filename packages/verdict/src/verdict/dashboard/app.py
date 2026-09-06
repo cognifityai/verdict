@@ -1409,6 +1409,7 @@ def _empty_bundle(*, agent_runs: dict[str, Any] | None = None) -> dict:
     return {
         "meta": {
             "runStart": None,
+            "runEnd": None,
             "durationHours": 0,
             "totalTraces": 0,
             "totalAgentRuns": run_metadata["available"],
@@ -1534,9 +1535,9 @@ def _trace_samples(
         sample["contentCaptured"] = (
             row["prompt_redacted"] is not None or row["response_redacted"] is not None
         )
-        sample["hour"] = round(
-            (_dt(row["started_at"]) - t0).total_seconds() / 3600, 2
-        )
+        started_at = _dt(row["started_at"])
+        sample["started_at"] = started_at.isoformat()
+        sample["hour"] = round((started_at - t0).total_seconds() / 3600, 2)
         latency = _round_or_none(row["latency_ms"], 0)
         sample["latency_ms"] = int(latency) if latency is not None else None
         if sample.get("response_redacted"):
@@ -1611,7 +1612,7 @@ def _time_series_read_model(
             cell = bins[provider].get(bucket)
             if cell and cell["n"]:
                 projected[f"{provider}_lat"] = (
-                    round(sum(cell["lat"]) / len(cell["lat"]) / 1000, 2)
+                    round(sum(cell["lat"]) / len(cell["lat"]) / 1000, 6)
                     if cell["lat"] else None
                 )
                 projected[f"{provider}_err"] = round(
@@ -2208,7 +2209,7 @@ def _build(
             )[:MAX_PROVIDER_MODELS],
             "n": trace_count, "errors": error_count,
             "errorRate": round(100 * error_count / trace_count, 1) if trace_count else 0.0,
-            "avgLatency": _round_or_none(float(r["lat"] or 0) / 1000, 2) or 0.0,
+            "avgLatency": _round_or_none(float(r["lat"] or 0) / 1000, 6) or 0.0,
             "inTok": int(r["it"] or 0), "outTok": int(r["ot"] or 0),
             "cost": _round_or_none(r["cost"], 4),
             "costUnknown": int(r["cost_unknown"] or 0),
@@ -2423,7 +2424,8 @@ def _build(
     )
     return {
         "meta": {
-            "runStart": t0row["m"],
+            "runStart": t0.isoformat(),
+            "runEnd": tmax.isoformat(),
             "durationHours": max(1, round((tmax - t0).total_seconds() / 3600)),
             "totalTraces": total_traces,
             "totalAgentRuns": agent_runs["available"],
@@ -2641,7 +2643,7 @@ def create_app(
             _log.warning("dashboard data unavailable: SQLite database not found")
             return JSONResponse({"error": "data unavailable"}, status_code=503)
         try:
-            return build_bundle(
+            bundle = build_bundle(
                 configured_storage,
                 evaluator_id=evaluator,
                 registry_tenant=getattr(
@@ -2653,6 +2655,8 @@ def create_app(
                 trace_judge_status=trace_judge_status,
                 trace_id=trace_id,
             )
+            bundle["monitor"] = monitor_routes.read_state()
+            return bundle
         except DashboardBundleLimitError:
             _log.exception("dashboard bundle exceeded its safety budget")
             return JSONResponse(

@@ -4,20 +4,16 @@ import test from "node:test";
 import {
   initialDashboardTab,
   setupFailureMessage,
-  sourceNavigationLabel,
 } from "../source-state.mjs";
 
-test("agent runs complete onboarding without being relabeled as LLM traces", () => {
+test("agent runs open the findings-first overview", () => {
   const meta = { totalTraces: 0, totalAgentRuns: 55 };
-  assert.equal(initialDashboardTab(meta), "insights");
-  assert.equal(sourceNavigationLabel(meta), "Data sources");
+  assert.equal(initialDashboardTab(meta), "overview");
 });
 
 test("trace-only and empty stores retain their distinct first destinations", () => {
   assert.equal(initialDashboardTab({ totalTraces: 1, totalAgentRuns: 0 }), "overview");
-  assert.equal(initialDashboardTab({ totalTraces: 0, totalAgentRuns: 0 }), "setup");
-  assert.equal(sourceNavigationLabel({ totalTraces: 1, totalAgentRuns: 0 }), "Data sources");
-  assert.equal(sourceNavigationLabel({ totalTraces: 0, totalAgentRuns: 0 }), "Setup");
+  assert.equal(initialDashboardTab({ totalTraces: 0, totalAgentRuns: 0 }), "settings");
 });
 
 test("setup network failures identify the unreachable Verdict origin", () => {

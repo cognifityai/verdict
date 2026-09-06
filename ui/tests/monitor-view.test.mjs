@@ -92,3 +92,37 @@ test("grouped comparison renders reviewed labels instead of opaque identities", 
   assert.match(html, /Group:.*Billing questions/);
   assert.doesNotMatch(html, />clu_internal</);
 });
+
+test("monitor status shows active authority beside a newer candidate", async () => {
+  const response = (state, metric) => ({
+    state,
+    policy: { prospective_target: 10, grouping_mode: "none" },
+    snapshot: {
+      manifest: {
+        reference_unit_ids: Array(8).fill("r"),
+        current_unit_ids: Array(2).fill("c"),
+        prospective_open: false,
+        comparison_index: 0,
+      },
+      comparison: {
+        status: state === "active" ? "alert" : "no_alert",
+        alpha_threshold: 0.05,
+        metrics: [{ metric, alert: state === "active",
+          reference_value: 0.9, current_value: 0.6, effect: -0.3,
+          p_adjusted: 0.01, reference_n: 8, current_n: 2 }],
+        metric_coverage: [], groups: [], unseen_group_share: 0,
+      },
+    },
+  });
+  const html = await render(`React.createElement(Monitor, {
+    configUrl: "/api/config", view: "status",
+    initialState: {
+      active: ${JSON.stringify(response("active", "provider_error"))},
+      candidate: ${JSON.stringify(response("candidate", "response_empty"))},
+    },
+  })`);
+  assert.match(html, /ACTIVE PROSPECTIVE MONITOR/);
+  assert.match(html, /Provider error rate/);
+  assert.match(html, /EXPLORATORY HISTORICAL COMPARISON/);
+  assert.match(html, /Empty-response rate/);
+});

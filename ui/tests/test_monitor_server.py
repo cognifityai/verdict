@@ -102,8 +102,8 @@ def test_monitor_preview_activation_and_prospective_run(tmp_path):
     assert activate.json()["snapshot"]["manifest"]["current_unit_ids"] == []
     assert activate.json()["snapshot"]["manifest"]["comparison_index"] == 1
     assert state.json()["state"] == "active"
-    assert state.json()["snapshot"]["comparison"]["status"] == "insufficient"
-    assert state.json()["approvedHistoricalSnapshot"] == preview.json()["snapshot"]
+    assert state.json()["active"]["snapshot"]["comparison"]["status"] == "insufficient"
+    assert state.json()["active"]["approvedHistoricalSnapshot"] == preview.json()["snapshot"]
 
     _insert_traces(database, 3, start=50)
 
@@ -143,6 +143,106 @@ def test_monitor_preview_activation_and_prospective_run(tmp_path):
         "trace-050", "trace-051", "trace-052", "trace-053", "trace-054",
     ]
     assert completed.json()["approvedHistoricalSnapshot"] == preview.json()["snapshot"]
+
+
+def test_monitor_candidate_survives_reload_and_matches_dashboard_status(tmp_path):
+    database = tmp_path / "verdict.db"
+    _insert_traces(database, 20, errors_from=16)
+
+    async def preview_and_reload():
+        app = create_app(storage=f"sqlite:///{database}")
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            preview = await client.post(
+                "/api/monitor/preview",
+                headers={"X-Verdict-Setup": token},
+                json={
+                    "windowMode": "count",
+                    "referenceRatio": 0.8,
+                    "minimumReference": 10,
+                    "minimumCurrent": 4,
+                    "prospectiveTarget": 4,
+                    "minimumEffect": 0.2,
+                },
+            )
+            monitor = await client.get("/api/monitor")
+            dashboard = await client.get("/api/data")
+            return preview, monitor, dashboard
+
+    preview, monitor, dashboard = asyncio.run(preview_and_reload())
+
+    assert preview.status_code == 200
+    expected = preview.json()
+    assert monitor.status_code == 200
+    assert monitor.json()["state"] == "candidate"
+    assert monitor.json()["candidate"] == expected
+    assert monitor.json()["active"] is None
+    assert dashboard.status_code == 200
+    assert dashboard.json()["monitor"] == monitor.json()
+
+
+def test_monitor_read_model_keeps_new_candidate_separate_from_active(tmp_path):
+    database = tmp_path / "verdict.db"
+    _insert_traces(database, 20, errors_from=16)
+
+    async def create_active_and_candidate():
+        app = create_app(storage=f"sqlite:///{database}")
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            headers = {"X-Verdict-Setup": token}
+            request = {
+                "windowMode": "count",
+                "referenceRatio": 0.8,
+                "minimumReference": 10,
+                "minimumCurrent": 4,
+                "prospectiveTarget": 4,
+                "minimumEffect": 0.2,
+            }
+            first = await client.post(
+                "/api/monitor/preview", headers=headers, json=request
+            )
+            activated = await client.post(
+                "/api/monitor/activate",
+                headers=headers,
+                json={
+                    "policyId": first.json()["policy"]["policy_id"],
+                    "expectedActivePolicyId": None,
+                },
+            )
+            second = await client.post(
+                "/api/monitor/preview", headers=headers, json=request
+            )
+            before = await client.get("/api/monitor")
+            replacement = await client.post(
+                "/api/monitor/activate",
+                headers=headers,
+                json={
+                    "policyId": second.json()["policy"]["policy_id"],
+                    "expectedActivePolicyId": activated.json()["policy"]["policy_id"],
+                },
+            )
+            after = await client.get("/api/monitor")
+            return (
+                activated.json(), second.json(), before.json(),
+                replacement.json(), after.json(),
+            )
+
+    activated, candidate, state, replacement, replaced_state = asyncio.run(
+        create_active_and_candidate()
+    )
+
+    assert state["state"] == "active"
+    assert state["active"]["policy"] == activated["policy"]
+    assert state["candidate"] == candidate
+    assert state["candidate"]["policy"]["policy_id"] != state["active"]["policy"]["policy_id"]
+    assert replaced_state["active"]["policy"] == replacement["policy"]
+    assert replaced_state["candidate"] is None
 
 
 def test_monitor_activation_prepares_before_cas_and_reuses_retry(tmp_path, monkeypatch):
@@ -213,7 +313,7 @@ def test_monitor_activation_prepares_before_cas_and_reuses_retry(tmp_path, monke
     (preparation_failure, active_after_failure, cas_failure, prepared_count,
      retry, final_count, first_id, second_id) = asyncio.run(exercise())
     assert preparation_failure.status_code == 400
-    assert active_after_failure["policy"]["policy_id"] == first_id
+    assert active_after_failure["active"]["policy"]["policy_id"] == first_id
     assert cas_failure.status_code == 400
     assert prepared_count == 2
     assert retry.status_code == 200
@@ -771,6 +871,6 @@ def test_legacy_monitor_requires_guided_rebootstrap(tmp_path):
     state, run = asyncio.run(inspect_and_run())
     assert state.status_code == 200
     assert state.json()["state"] == "requires_rebootstrap"
-    assert state.json()["rebootstrapRequired"] is True
+    assert state.json()["active"]["rebootstrapRequired"] is True
     assert run.status_code == 409
     assert run.json() == {"error": "monitor requires re-bootstrap"}

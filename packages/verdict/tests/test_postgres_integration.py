@@ -380,12 +380,27 @@ def test_live_postgres_monitor_policy_activation_and_snapshot():
     comparison = compare_manifest(units, manifest, first)
     storage = PostgresStorage(DSN, min_pool=1, max_pool=2)
     try:
-        storage.save_monitor_policy(first)
+        storage.save_monitor_candidate(first, manifest, comparison)
+        assert storage.get_initial_monitor_snapshot(first.policy_id) == (
+            manifest, comparison,
+        )
+        invalid = replace(second, policy_id=f"invalid-{suffix}", minimum_effect=0.4)
+        with pytest.raises(ValueError, match="does not match policy"):
+            storage.save_monitor_candidate(invalid, manifest, comparison)
+        assert storage.get_monitor_policy(invalid.policy_id) is None
+        incomplete = replace(
+            second,
+            policy_id=f"incomplete-{suffix}",
+            scope_key=f"{scope}:incomplete",
+        )
+        storage.save_monitor_policy(incomplete)
+        assert storage.get_latest_monitor_candidate(incomplete.scope_key) is None
         storage.save_monitor_policy(second)
         assert storage.activate_monitor_policy(
             scope, first.policy_id, expected_active_policy_id=None,
         ) == first
-        storage.save_monitor_snapshot(first.policy_id, manifest, comparison)
+        assert storage.get_latest_monitor_candidate(scope) is None
+        assert storage.get_monitor_policy(second.policy_id) == (second, "retired")
         storage.save_monitor_snapshot(first.policy_id, manifest, comparison)
         assert storage.get_latest_monitor_snapshot(first.policy_id) == (manifest, comparison)
         changed = tuple(
@@ -416,10 +431,14 @@ def test_live_postgres_monitor_policy_activation_and_snapshot():
             scope, second.policy_id, expected_active_policy_id=first.policy_id,
         ) == second
         assert storage.get_monitor_policy(first.policy_id) == (first, "retired")
+        assert storage.get_latest_monitor_candidate(scope) is None
     finally:
         storage._exec("DELETE FROM monitor_snapshots WHERE policy_id IN (%s,%s)",
                       (first.policy_id, second.policy_id))
-        storage._exec("DELETE FROM monitor_policies WHERE scope_key=%s", (scope,))
+        storage._exec(
+            "DELETE FROM monitor_policies WHERE scope_key IN (%s,%s)",
+            (scope, f"{scope}:incomplete"),
+        )
         storage.close()
 
 

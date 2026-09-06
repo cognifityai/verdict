@@ -27,6 +27,11 @@ present those states without treating missing evidence as success or failure.
    webhook delivery is not claimed.
 8. URL state owns workspace, subsection, evaluator, finding, run, and trace
    selection so navigation survives refresh and direct links.
+9. Activating a monitor candidate retires sibling candidates for that scope;
+   only previews created after activation may appear beside the active result.
+10. A monitor candidate policy and its initial comparison snapshot are persisted
+    in one storage transaction. Candidate reads require that initial snapshot,
+    so incomplete legacy records remain inert after a restart.
 
 ## Data ownership
 
@@ -40,15 +45,17 @@ present those states without treating missing evidence as success or failure.
 
 ## Dashboard workspaces
 
-- Overview reports evidence and evaluator coverage without manufacturing a
-  combined run verdict.
+- Overview presents the persisted monitor result, findings, evidence coverage,
+  and supporting Reliability, Performance, and Behavior views without
+  manufacturing a combined run verdict.
 - Findings link to their affected Agent Runs, traces, and bounded evidence.
 - Trace Explorer presents provider execution separately from evaluation states:
   not evaluated, judge error, pass, fail, and unclear.
 - Agent Runs show source outcome, evidence coverage, deterministic findings,
   and selected-evaluator coverage separately.
-- One Drift workspace contains Overview, Explore, Monitor, Signals, and
-  Clusters.
+- Five top-level workspaces separate concerns: Overview, Explore, Evaluate,
+  Monitor, and Settings. Monitor contains current status, historical
+  comparisons, optional segments, and schedules.
 - A prospective cohort reports collection progress until a persisted comparison
   completes.
 - Generic change records are a decision log; typed workflows perform actual

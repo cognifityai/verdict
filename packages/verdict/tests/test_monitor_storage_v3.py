@@ -56,11 +56,14 @@ def test_candidate_activation_is_atomic_and_optimistic(storage) -> None:
         "tenant:app", "p1", expected_active_policy_id=None
     ) == first
     assert storage.get_active_monitor_policy("tenant:app") == first
+    assert storage.get_latest_monitor_candidate("tenant:app") is None
+    assert storage.get_monitor_policy("p2") == (second, "retired")
     assert storage.activate_monitor_policy(
         "tenant:app", "p2", expected_active_policy_id="p1"
     ) == second
     assert storage.get_monitor_policy("p1") == (first, "retired")
     assert storage.get_monitor_policy("p2") == (second, "active")
+    assert storage.get_latest_monitor_candidate("tenant:app") is None
     with pytest.raises(ValueError, match="active policy changed"):
         storage.activate_monitor_policy(
             "tenant:app", "p1", expected_active_policy_id="missing"
@@ -73,6 +76,39 @@ def test_policy_identity_is_immutable(storage) -> None:
 
     with pytest.raises(ValueError, match="different definition"):
         storage.save_monitor_policy(_policy(effect=0.4))
+
+
+def test_policy_without_initial_snapshot_is_not_a_visible_candidate(storage) -> None:
+    policy = _policy()
+
+    storage.save_monitor_policy(policy)
+
+    assert storage.get_monitor_policy(policy.policy_id) == (policy, "candidate")
+    assert storage.get_latest_monitor_candidate(policy.scope_key) is None
+
+
+def test_candidate_policy_and_initial_snapshot_are_saved_together(storage) -> None:
+    policy = _policy()
+    manifest, comparison = _snapshot(policy)
+
+    storage.save_monitor_candidate(policy, manifest, comparison)
+
+    assert storage.get_latest_monitor_candidate(policy.scope_key) == policy
+    assert storage.get_initial_monitor_snapshot(policy.policy_id) == (
+        manifest, comparison,
+    )
+
+
+def test_invalid_candidate_does_not_leave_a_partial_policy(storage) -> None:
+    policy = _policy()
+    other = _policy("other", effect=0.4)
+    manifest, comparison = _snapshot(other)
+
+    with pytest.raises(ValueError, match="does not match policy"):
+        storage.save_monitor_candidate(policy, manifest, comparison)
+
+    assert storage.get_monitor_policy(policy.policy_id) is None
+    assert storage.get_latest_monitor_candidate(policy.scope_key) is None
 
 
 def test_monitor_snapshot_is_idempotent_and_bound_to_policy(storage) -> None:

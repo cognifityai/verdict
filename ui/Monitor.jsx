@@ -42,7 +42,38 @@ export function MonitorComparisonMetrics({ comparison }) {
   })}</div>;
 }
 
-export function Monitor({ configUrl, evaluation = {} }) {
+function MonitorSnapshot({ response, evaluators, fallbackTarget }) {
+  const snapshot = response.snapshot;
+  const manifest = snapshot.manifest;
+  const comparison = snapshot.comparison;
+  const policy = response.policy;
+  const candidate = response.state === "candidate";
+  const measurement = evaluators.find(
+    (identity) => identity.fingerprint === policy?.evaluator_fingerprint,
+  );
+  const collecting = manifest.prospective_open === true;
+  const label = response.state === "requires_rebootstrap" ? "Re-bootstrap required"
+    : collecting ? `Collecting ${manifest.current_unit_ids.length}/${policy?.prospective_target || fallbackTarget}`
+      : comparison.status === "insufficient" ? "Insufficient evidence"
+        : comparison.status.replaceAll("_", " ");
+  return <section className="border p-5" style={box}>
+    <div className="flex flex-wrap gap-3 items-center justify-between">
+      <div><div className="text-xs font-mono" style={{ color: candidate ? "#f2b84b" : "#4ee1aa" }}>{candidate ? "EXPLORATORY HISTORICAL COMPARISON" : "ACTIVE PROSPECTIVE MONITOR"}</div><div className="font-semibold mt-1">{label}</div></div>
+      <div className="text-sm" style={{ color: "#94a39d" }}>{manifest.reference_unit_ids.length} reference → {manifest.current_unit_ids.length} current</div>
+    </div>
+    <div className="mt-4 h-8 flex overflow-hidden border" style={{ borderColor: "#26332e" }}><div style={{ width: `${100 * manifest.reference_unit_ids.length / Math.max(1, manifest.reference_unit_ids.length + manifest.current_unit_ids.length)}%`, background: "#1f5f4b" }} /><div className="flex-1" style={{ background: "#295a78" }} /></div>
+    <div className="mt-3 text-xs" style={{ color: "#94a39d" }}>
+      {collecting ? `Prospective bucket ${manifest.current_unit_ids.length}/${policy?.prospective_target || fallbackTarget}; no comparison or alert decision has run.` : `Completed comparison look ${manifest.comparison_index} · alert threshold ${comparison.alpha_threshold.toPrecision(3)} · ${policy?.sequential_method || "configured sequential correction"}`}
+    </div>
+    <div className="mt-2 text-xs" style={{ color: "#94a39d" }}>Measurement: {policy?.evaluator_fingerprint ? (measurement?.label || `stored evaluator ${policy.evaluator_fingerprint.slice(0, 8)}`) : "deterministic trace checks only"}</div>
+    <div className="mt-1 text-xs" style={{ color: "#94a39d" }}>Facet: {policy?.grouping_mode === "cluster" ? `frozen clusters · ${policy.cluster_registry_version_id || "registry unavailable"}` : policy?.grouping_mode === "provider_model" ? "provider and model" : "all eligible calls"}</div>
+    <MonitorComparisonMetrics comparison={comparison} />
+    {comparison.status === "insufficient" && <p className="text-sm mt-4" style={{ color: "#f2b84b" }}>{collecting ? "No statistical test was run because the prospective bucket is still collecting." : "The bucket closed, but no metric met its configured eligible-unit minimums; no alert/no-alert conclusion was produced."}</p>}
+    {comparison.unseen_group_share > 0 && <p className="text-sm mt-4" style={{ color: "#f2b84b" }}>{comparison.status === "reference_stale" ? "Comparison suspended" : "Coverage note"}: {(100 * comparison.unseen_group_share).toFixed(1)}% of current traces are outside the frozen {policy?.grouping_mode === "cluster" ? "cluster" : "provider/model"} reference{comparison.unassigned_group_share > 0 ? ` (${(100 * comparison.unassigned_group_share).toFixed(1)}% are unassigned)` : ""}.{comparison.status === "reference_stale" ? " Review the policy before creating a new candidate; Verdict did not silently rebase it." : " These traces were excluded from like-for-like metric tests."}</p>}
+  </section>;
+}
+
+export function Monitor({ configUrl, evaluation = {}, initialState = null, view = "history", onChanged = null }) {
   const root = configUrl.replace(/\/api\/config$/, "");
   const evaluators = (evaluation.availableIdentities || []).filter(
     (identity, index, rows) => identity.complete && identity.fingerprint
@@ -52,8 +83,8 @@ export function Monitor({ configUrl, evaluation = {} }) {
     && evaluation.selectedIdentity.fingerprint
     ? evaluation.selectedIdentity.fingerprint : "";
   const [token, setToken] = useState(null);
-  const [active, setActive] = useState(null);
-  const [candidate, setCandidate] = useState(null);
+  const [active, setActive] = useState(initialState?.active || null);
+  const [candidate, setCandidate] = useState(initialState?.candidate || null);
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
   const [form, setForm] = useState({
@@ -67,7 +98,11 @@ export function Monitor({ configUrl, evaluation = {} }) {
     Promise.all([
       fetch(`${root}/api/setup/token`, { credentials: "same-origin" }).then((response) => response.json()),
       fetch(`${root}/api/monitor`, { credentials: "same-origin" }).then((response) => response.json()),
-    ]).then(([config, monitor]) => { setToken(config.setupToken); setActive(monitor); })
+    ]).then(([config, monitor]) => {
+      setToken(config.setupToken);
+      setActive(monitor.active || (["active", "requires_rebootstrap"].includes(monitor.state) ? monitor : null));
+      setCandidate(monitor.candidate || (monitor.state === "candidate" ? monitor : null));
+    })
       .catch((failure) => setError(String(failure)));
   }, [configUrl, root]);
 
@@ -90,21 +125,9 @@ export function Monitor({ configUrl, evaluation = {} }) {
     setCandidate(null);
     setForm((current) => ({ ...current, [name]: value }));
   };
-  const snapshot = candidate?.snapshot || active?.snapshot;
-  const manifest = snapshot?.manifest;
-  const comparison = snapshot?.comparison;
-  const displayedPolicy = candidate?.policy || active?.policy;
-  const selectedMeasurement = evaluators.find(
-    (identity) => identity.fingerprint === displayedPolicy?.evaluator_fingerprint,
-  );
-  const collecting = manifest?.prospective_open === true;
   const requiresRebootstrap = active?.state === "requires_rebootstrap";
-  const comparisonLabel = requiresRebootstrap ? "Re-bootstrap required" : collecting
-    ? `Collecting ${manifest.current_unit_ids.length}/${active?.policy?.prospective_target || candidate?.policy?.prospective_target || form.prospectiveTarget}`
-    : comparison?.status === "insufficient" ? "Insufficient evidence"
-      : comparison?.status?.replaceAll("_", " ");
   return <div className="max-w-5xl space-y-4">
-    <section className="border p-5" style={box}>
+    {view === "history" && <section className="border p-5" style={box}>
       <div className="text-xs font-mono" style={{ color: "#4ee1aa" }}>POLICY LIFECYCLE</div>
       <h2 className="text-lg font-semibold mt-1">Explore first, then activate one immutable monitor</h2>
       <p className="text-sm mt-2" style={{ color: "#94a39d" }}>Membership is chosen from event time before metric outcomes are compared. No clustering is required. Preview is exploratory; only an activated policy can become authoritative.</p>
@@ -118,34 +141,23 @@ export function Monitor({ configUrl, evaluation = {} }) {
         {["minimumReference", "minimumCurrent", "prospectiveTarget"].map((name) => <label key={name} className="text-sm">{name.replace(/([A-Z])/g, " $1")}<input type="number" min="1" value={form[name]} onChange={(event) => update(name, Number(event.target.value))} className="block w-full mt-1 border p-2 bg-transparent" /></label>)}
       </div>
       <div className="flex flex-wrap gap-2 mt-5">
-        <button disabled={!token || busy} onClick={async () => setCandidate(await post("/api/monitor/preview", monitorRequest(form)))} className="border px-4 py-2 text-sm">Preview comparison</button>
+        <button disabled={!token || busy} onClick={async () => { const result = await post("/api/monitor/preview", monitorRequest(form)); if (result) { setCandidate(result); onChanged?.(); } }} className="border px-4 py-2 text-sm">Preview comparison</button>
         {candidate && <button disabled={busy} onClick={async () => {
           const activated = await post("/api/monitor/activate", { policyId: candidate.policy.policy_id, expectedActivePolicyId: active?.policy?.policy_id || null });
-          if (activated) { setActive(activated); setCandidate(null); }
+          if (activated) { setActive(activated); setCandidate(null); onChanged?.(); }
         }} className="px-4 py-2 text-sm" style={{ background: "#4ee1aa", color: "#0b0e0d" }}>Activate monitor</button>}
         {active?.state === "active" && <button disabled={busy} onClick={async () => {
-          const result = await post("/api/monitor/run"); if (result) setActive(result);
+          const result = await post("/api/monitor/run"); if (result) { setActive(result); onChanged?.(); }
         }} className="border px-4 py-2 text-sm">Run next cohort now</button>}
       </div>
-    </section>
-    {error && <div role="alert" className="border p-4" style={{ ...box, color: "#ff6b6b" }}>{error}</div>}
-    {requiresRebootstrap && <div role="alert" className="border p-4" style={{ ...box, color: "#f2b84b" }}>{active.rebootstrapReason} Configure the replacement above and select Preview comparison.</div>}
-    {snapshot && <section className="border p-5" style={box}>
-      <div className="flex flex-wrap gap-3 items-center justify-between">
-        <div><div className="text-xs font-mono" style={{ color: candidate ? "#f2b84b" : "#4ee1aa" }}>{candidate ? "EXPLORATORY HISTORICAL COMPARISON" : "ACTIVE PROSPECTIVE MONITOR"}</div><div className="font-semibold mt-1">{comparisonLabel}</div></div>
-        <div className="text-sm" style={{ color: "#94a39d" }}>{manifest.reference_unit_ids.length} reference → {manifest.current_unit_ids.length} current</div>
-      </div>
-      <div className="mt-4 h-8 flex overflow-hidden border" style={{ borderColor: "#26332e" }}><div style={{ width: `${100 * manifest.reference_unit_ids.length / Math.max(1, manifest.reference_unit_ids.length + manifest.current_unit_ids.length)}%`, background: "#1f5f4b" }} /><div className="flex-1" style={{ background: "#295a78" }} /></div>
-      <div className="mt-3 text-xs" style={{ color: "#94a39d" }}>
-        {collecting ? `Prospective bucket ${manifest.current_unit_ids.length}/${active?.policy?.prospective_target || candidate?.policy?.prospective_target || form.prospectiveTarget}; no comparison or alert decision has run.` : `Completed comparison look ${manifest.comparison_index} · alert threshold ${comparison.alpha_threshold.toPrecision(3)} · ${active?.policy?.sequential_method || candidate?.policy?.sequential_method}`}
-      </div>
-      <div className="mt-2 text-xs" style={{ color: "#94a39d" }}>Measurement: {displayedPolicy?.evaluator_fingerprint ? (selectedMeasurement?.label || `stored evaluator ${displayedPolicy.evaluator_fingerprint.slice(0, 8)}`) : "deterministic trace checks only"}</div>
-      <div className="mt-1 text-xs" style={{ color: "#94a39d" }}>Facet: {displayedPolicy?.grouping_mode === "cluster" ? `frozen clusters · ${displayedPolicy.cluster_registry_version_id || "registry unavailable"}` : displayedPolicy?.grouping_mode === "provider_model" ? "provider and model" : "all eligible calls"}</div>
-      <MonitorComparisonMetrics comparison={comparison} />
-      {comparison.status === "insufficient" && <p className="text-sm mt-4" style={{ color: "#f2b84b" }}>{collecting ? "No statistical test was run because the prospective bucket is still collecting." : "The bucket closed, but no metric met its configured eligible-unit minimums; no alert/no-alert conclusion was produced."}</p>}
-      {comparison.unseen_group_share > 0 && <p className="text-sm mt-4" style={{ color: "#f2b84b" }}>{comparison.status === "reference_stale" ? "Comparison suspended" : "Coverage note"}: {(100 * comparison.unseen_group_share).toFixed(1)}% of current traces are outside the frozen {displayedPolicy?.grouping_mode === "cluster" ? "cluster" : "provider/model"} reference{comparison.unassigned_group_share > 0 ? ` (${(100 * comparison.unassigned_group_share).toFixed(1)}% are unassigned)` : ""}.{comparison.status === "reference_stale" ? " Review the policy before creating a new candidate; Verdict did not silently rebase it." : " These traces were excluded from like-for-like metric tests."}</p>}
     </section>}
-    {!candidate && active?.approvedHistoricalSnapshot && <section className="border p-5" style={box}>
+    {view === "status" && !active?.snapshot && !candidate?.snapshot && <section className="border p-5" style={box}><div className="text-xs font-mono" style={{ color: "#f2b84b" }}>MONITORING</div><h2 className="text-lg font-semibold mt-1">No comparison configured</h2><p className="text-sm mt-2" style={{ color: "#94a39d" }}>Open Compare History to create a historical comparison. Activate it only if new traffic will continue arriving.</p></section>}
+    {error && <div role="alert" className="border p-4" style={{ ...box, color: "#ff6b6b" }}>{error}</div>}
+    {candidate && active && <div role="status" className="border p-4 text-sm" style={{ ...box, color: "#f2b84b" }}>A newer historical candidate is shown below. The existing prospective monitor remains active until you explicitly activate the candidate.</div>}
+    {requiresRebootstrap && <div role="alert" className="border p-4" style={{ ...box, color: "#f2b84b" }}>{active.rebootstrapReason} Configure the replacement above and select Preview comparison.</div>}
+    {active?.snapshot && <MonitorSnapshot response={active} evaluators={evaluators} fallbackTarget={form.prospectiveTarget} />}
+    {candidate?.snapshot && <MonitorSnapshot response={candidate} evaluators={evaluators} fallbackTarget={form.prospectiveTarget} />}
+    {active?.approvedHistoricalSnapshot && <section className="border p-5" style={box}>
       <div className="text-xs font-mono" style={{ color: "#f2b84b" }}>APPROVED HISTORICAL PREVIEW</div>
       <div className="font-semibold mt-1">{active.approvedHistoricalSnapshot.comparison.status.replaceAll("_", " ")}</div>
       <p className="text-sm mt-2" style={{ color: "#94a39d" }}>This is the historical comparison used to approve the policy. Activation froze its reference cohort and opened a new prospective bucket; it did not reuse the historical current cohort as new traffic.</p>

@@ -59,9 +59,11 @@ frozen cohort facts require a new reviewed preview before execution.
 The dashboard reads key-free findings from immutable analysis snapshots rather
 than recomputing them on every page load. It reports provider outcome,
 evaluation status, finding severity, and drift comparison independently.
-`not evaluated` and `judge error` are explicit Trace states, and a prospective monitor says
-`collecting n/target` until a comparison can actually complete. One Drift
-workspace contains Overview, Explore, Monitor, Signals, and Clusters.
+`not evaluated` and `judge error` are explicit Trace states, and a prospective
+monitor says `collecting n/target` until a comparison can actually complete.
+The dashboard has five top-level workspaces: Overview, Explore, Evaluate,
+Monitor, and Settings. Monitor keeps stored historical candidates separate from
+the active prospective policy.
 
 The Verdict Python SDK. Auto-instruments your LLM calls via `wrapt` and
 captures them into a vendor-neutral `Trace` schema (attribute *names* follow
@@ -211,8 +213,8 @@ selected SQLite file or PostgreSQL tables in place. See the repository
 [upgrade instructions](https://github.com/cognifityai/verdict#upgrade-from-an-earlier-synchronized-alpha)
 for the synchronized three-package command and verification steps.
 
-An authenticated host may add the dashboard's Operations tab by passing a
-same-origin API path:
+An authenticated host may add infrastructure and job evidence under
+**Settings → Integrations** by passing a same-origin API path:
 
 ```python
 app.mount(
@@ -223,10 +225,10 @@ app.mount(
 
 Verdict renders the normalized metrics/jobs response, while the host remains
 responsible for cloud credentials, authorization, CSRF protection, collection,
-and job execution. Without `operations_url`, no Operations tab or extra request
-is present.
+and job execution. Without `operations_url`, no operations panel or extra
+request is present.
 
-The dashboard's **Drift → Clusters** workspace is a bounded view of the Task 5
+The dashboard's **Monitor → Segments** workspace is a bounded view of the Task 5
 tenant/version registry. It shows active and preview versions, stable display
 names, frozen algorithm/selector/model configuration, representative redacted
 prompts, bounded provider/model distributions, membership explanations,
