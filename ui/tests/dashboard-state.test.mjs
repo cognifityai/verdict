@@ -28,7 +28,7 @@ function componentStub(names) {
 }
 
 async function loadUiModule() {
-  const source = `${await readFile(UI_SOURCE, "utf8")}\nexport { Dashboard, Overview, Traces, TraceDetail, TabHelp, Drift, Judge, Compare, mountedApiUrl };\nexport { useOperations } from "./Operations.jsx";\nexport { RegistryView } from "./Registry.jsx";\nexport { EvaluatorLab } from "./EvaluatorLab.jsx";`;
+  const source = `${await readFile(UI_SOURCE, "utf8")}\nexport { Dashboard, Overview, Traces, TraceDetail, TabHelp, Judge, Compare, mountedApiUrl };\nexport { useOperations } from "./Operations.jsx";\nexport { RegistryView } from "./Registry.jsx";\nexport { EvaluatorLab } from "./EvaluatorLab.jsx";`;
   const result = await build({
     stdin: {
       contents: source,
@@ -61,14 +61,14 @@ async function loadUiModule() {
             return { contents: componentStub([
               "LineChart", "Line", "AreaChart", "Area", "BarChart", "Bar",
               "XAxis", "YAxis", "CartesianGrid", "Tooltip", "ResponsiveContainer",
-              "ReferenceLine", "ReferenceArea", "Cell",
+              "ReferenceLine", "Cell",
             ]), loader: "js" };
           }
           return { contents: componentStub([
             "Activity", "AlertTriangle", "ArrowRight", "ArrowLeft", "BarChart3",
             "Boxes", "CheckCircle2", "Clock", "Code2", "Database", "GitBranch",
             "Layers", "Scale", "Search", "Shield", "Signal", "TrendingDown",
-            "TrendingUp", "Zap", "Github", "Terminal", "Gauge", "FlaskConical",
+            "Github", "Terminal", "Gauge", "FlaskConical",
             "Cpu", "DollarSign", "Filter", "X", "Sparkles", "ChevronRight",
             "Eye", "Network", "RefreshCw",
             "Info",
@@ -193,34 +193,106 @@ test("a mounted dashboard derives its API path from the host prefix", async () =
   }
 });
 
-test("operations navigation is present only when the host configures an adapter", async () => {
+test("operations appears inside Settings only when the host configures an adapter", async () => {
   const ui = await loadUiModule();
-  const hooks = createHooks();
-
-  const withoutAdapter = render(ui.Dashboard, hooks, {
-    data: bundle("judge-a"),
-    operationsUrl: null,
-  });
-  assert.equal(textOf(withoutAdapter).includes("Operations"), false);
-
-  const withAdapter = render(ui.Dashboard, hooks, {
-    data: bundle("judge-a"),
-    operationsUrl: "/api/admin/operations",
-  });
-  assert.equal(textOf(withAdapter).includes("Operations"), true);
+  globalThis.window = {
+    location: { hash: "#tab=settings&section=integrations", pathname: "/dashboard" },
+    history: { pushState() {} }, addEventListener() {}, removeEventListener() {},
+  };
+  try {
+    const withoutAdapter = render(ui.Dashboard, createHooks(), { data: bundle("judge-a"), operationsUrl: null });
+    assert.match(textOf(withoutAdapter), /No operations adapter configured/);
+    const withAdapter = render(ui.Dashboard, createHooks(), { data: bundle("judge-a"), operationsUrl: "/api/admin/operations" });
+    assert.equal(findAll(withAdapter, (node) => typeof node.type === "function" && node.type.name === "Operations").length, 1);
+  } finally { delete globalThis.window; }
 });
 
-test("drift lifecycle is one top-level workspace", async () => {
+test("monitoring lifecycle is one top-level workspace", async () => {
   const ui = await loadUiModule();
   const tree = render(ui.Dashboard, createHooks(), { data: bundle("judge-a") });
   const navigation = findAll(tree, (node) => node.type === "nav")[0];
   const labels = textOf(navigation);
 
-  assert.match(labels, /Drift/);
+  assert.match(labels, /Monitor/);
+  assert.doesNotMatch(labels, /Drift/);
   assert.doesNotMatch(labels, /Drift signals/);
   assert.doesNotMatch(labels, /Registry/);
-  assert.doesNotMatch(labels, /Explore/);
-  assert.doesNotMatch(labels, /Monitor/);
+});
+
+test("dashboard exposes only the five product workspaces", async () => {
+  const ui = await loadUiModule();
+  const tree = render(ui.Dashboard, createHooks(), { data: bundle("judge-a") });
+  const navigation = findAll(tree, (node) => node.type === "nav")[0];
+  const labels = textOf(navigation);
+
+  for (const label of ["Overview", "Explore", "Evaluate", "Monitor", "Settings"]) {
+    assert.match(labels, new RegExp(label));
+  }
+  for (const oldLabel of ["Findings", "Reliability", "Performance", "Behavior", "Agent runs", "Trace explorer", "Judge scores", "Evaluators", "Compare LLMs"]) {
+    assert.doesNotMatch(labels, new RegExp(oldLabel));
+  }
+});
+
+test("overview prioritizes a stored historical monitor alert over absent legacy drift", async () => {
+  const ui = await loadUiModule();
+  const data = bundle("judge-a");
+  data.monitor = {
+    state: "candidate",
+    active: null,
+    candidate: {
+      state: "candidate",
+      policy: { evaluator_fingerprint: "judge-a", grouping_mode: "none" },
+      snapshot: {
+        manifest: { reference_unit_ids: Array(80).fill("r"), current_unit_ids: Array(20).fill("c") },
+        comparison: {
+          status: "alert", alpha_threshold: 0.05,
+          metrics: [{ metric: "judge.safety.pass", alert: true,
+            reference_value: 0.9, current_value: 0.6, effect: -0.3,
+            p_adjusted: 0.01, reference_n: 80, current_n: 20 }],
+          metric_coverage: [], groups: [],
+        },
+      },
+    },
+  };
+
+  const text = textOf(render(ui.Overview, createHooks(), { data }));
+  assert.match(text, /exploratory historical comparison/i);
+  assert.match(text, /safety pass rate/i);
+  assert.doesNotMatch(text, /No completed run/i);
+});
+
+test("overview shows the authoritative active monitor beside a newer preview", async () => {
+  const ui = await loadUiModule();
+  const data = bundle("judge-a");
+  const response = (state, status, metric) => ({
+    state,
+    policy: { evaluator_fingerprint: "judge-a", grouping_mode: "none" },
+    snapshot: {
+      manifest: {
+        reference_unit_ids: Array(8).fill("r"),
+        current_unit_ids: Array(2).fill("c"),
+        prospective_open: false,
+      },
+      comparison: {
+        status, alpha_threshold: 0.05,
+        metrics: [{ metric: `judge.${metric}.pass`, alert: status === "alert",
+          reference_value: 0.9, current_value: 0.6, effect: -0.3,
+          p_adjusted: 0.01, reference_n: 8, current_n: 2 }],
+        metric_coverage: [], groups: [],
+      },
+    },
+  });
+  data.monitor = {
+    state: "active",
+    active: response("active", "alert", "active_quality"),
+    candidate: response("candidate", "no_alert", "candidate_quality"),
+  };
+
+  const text = textOf(render(ui.Overview, createHooks(), { data }));
+  assert.match(text, /ACTIVE MONITOR/);
+  assert.match(text, /active quality pass rate/i);
+  assert.match(text, /EXPLORATORY HISTORICAL COMPARISON/);
+  assert.match(text, /candidate quality pass rate/i);
 });
 
 test("Trace Explorer renders execution and evaluation as separate states", async () => {
@@ -308,7 +380,7 @@ test("Trace filters preserve the routed evaluator identity", async () => {
     traces.props.onJudgeStatus("judged");
 
     assert.match(
-      pushed, /^#tab=traces&judge=judged&evaluator=evaluator-a$/,
+      pushed, /^#tab=explore&section=calls&judge=judged&evaluator=evaluator-a$/,
     );
   } finally {
     delete globalThis.window;
@@ -340,7 +412,7 @@ test("Evaluator result navigation selects the evaluator that just ran", async ()
     lab.props.onOpenEvaluated("new-evaluator");
 
     assert.equal(selected, "new-evaluator");
-    assert.equal(pushed, "#tab=traces&judge=judged&evaluator=new-evaluator");
+    assert.equal(pushed, "#tab=explore&section=calls&judge=judged&evaluator=new-evaluator");
   } finally {
     delete globalThis.window;
   }
@@ -524,56 +596,6 @@ test("trace detail is derived from the current snapshot instead of retaining an 
   assert.equal(findAll(tree, (node) => node.type?.name === "TraceDetail").length, 0);
 });
 
-test("only one same-dimension drift card opens because state is keyed by signal id", async () => {
-  const ui = await loadUiModule();
-  const rootHooks = createHooks();
-  const driftHooks = createHooks();
-  const requests = deferredFetches();
-  const data = bundle("evaluator-a", [], [
-    { id: "signal-a", clusterId: "clu-a", clusterLabel: "Billing support", dimension: "quality", direction: "regression", layers: [], providerLabel: "A" },
-    { id: "signal-b", clusterId: "clu-a", clusterLabel: "Billing support", dimension: "quality", direction: "regression", layers: [], providerLabel: "A" },
-  ]);
-  const dashboard = dashboardElement(render(ui.DashboardRoot, rootHooks));
-  dashboard.props.onEvaluatorChange("evaluator-a");
-  await resolveJson(requests[0], data);
-
-  const tree = render(ui.Drift, driftHooks, { data });
-
-  assert.equal((textOf(tree).match(/Recommended action/g) || []).length, 1);
-  assert.match(textOf(tree), /Billing support/);
-});
-
-test("drift chart renders custom dimensions and the runtime regression marker", async () => {
-  const ui = await loadUiModule();
-  const hooks = createHooks();
-  const data = bundle("evaluator-a");
-  data.dimensionOverall = [{ dim: "action_correctness", passRate: 80 }];
-  data.meta.regressionHour = 17;
-  data.driftAnalysis.runStatus = "completed_no_signals";
-
-  const tree = render(ui.Drift, hooks, { data });
-  const lines = findAll(tree, (node) => node.type?.name === "Line");
-  const areas = findAll(tree, (node) => node.type?.name === "ReferenceArea");
-
-  assert.ok(lines.some((line) => line.props.dataKey === "action_correctness"));
-  assert.ok(areas.some((area) => area.props.x1 === 17));
-});
-
-test("drift chart omits a change marker when no change point was computed", async () => {
-  const ui = await loadUiModule();
-  const hooks = createHooks();
-  const data = bundle("evaluator-a");
-  data.meta.regressionHour = null;
-  data.driftAnalysis.runStatus = "completed_no_signals";
-
-  const tree = render(ui.Drift, hooks, { data });
-  const lines = findAll(tree, (node) => node.type?.name === "ReferenceLine");
-  const areas = findAll(tree, (node) => node.type?.name === "ReferenceArea");
-
-  assert.equal(lines.filter((line) => "x" in line.props).length, 0);
-  assert.equal(areas.length, 0);
-});
-
 test("judge view renders the server's executable coverage snapshot", async () => {
   const ui = await loadUiModule();
   const hooks = createHooks();
@@ -651,7 +673,7 @@ test("live provider comparison never invents a regression badge", async () => {
   assert.doesNotMatch(rendered, /Bundled synthetic sample/);
 });
 
-test("live provider comparison shows only persisted provider regressions", async () => {
+test("live provider comparison does not attribute unmatched drift to a provider card", async () => {
   const ui = await loadUiModule();
   const data = bundle("evaluator-a", [], [
     { id: "signal-a", direction: "regression", provider: "anthropic" },
@@ -672,7 +694,8 @@ test("live provider comparison shows only persisted provider regressions", async
 
   const rendered = textOf(render(ui.Compare, createHooks(), { data, source: "live" }));
 
-  assert.equal((rendered.match(/regressed/g) || []).length, 1);
+  assert.equal((rendered.match(/regressed/g) || []).length, 0);
+  assert.match(rendered, /Unmatched traffic/);
 });
 
 test("metadata-only traces describe historical capture without claiming capture is off", async () => {
@@ -835,51 +858,7 @@ test("trace detail exposes bounded judge-free facts without claiming quality", a
   assert.match(rendered, /do not determine correctness, sentiment, or response quality/);
 });
 
-test("drift empty state treats global trace totals as availability and opens Operations", async () => {
-  const ui = await loadUiModule();
-  const data = bundle("evaluator-a");
-  data.driftAnalysis.current = 30;
-  data.driftAnalysis.baseline = 30;
-  data.driftAnalysis.readinessStatus = "global_minimum_met";
-  let opened = 0;
-
-  const tree = render(ui.Drift, createHooks(), {
-    data,
-    onOpenOperations: () => { opened += 1; },
-  });
-  const rendered = textOf(tree).replace(/\s+/g, " ");
-
-  assert.match(rendered, /No drift analysis has completed yet/);
-  assert.match(rendered, /Global trace minimum met/);
-  assert.match(rendered, /Current global content-bearing traces 30 \/ 30/);
-  assert.match(rendered, /Baseline global content-bearing traces 30 \/ 30/);
-  assert.match(rendered, /Default current window Latest 24 hours/);
-  assert.match(rendered, /Default baseline lag 24 hours/);
-  assert.match(rendered, /Default baseline window Previous 7 days/);
-  assert.match(rendered, /each cluster and rubric dimension has enough judged traces/);
-  assert.match(rendered, /Actual job flags may use different windows or sample floors/);
-  assert.match(rendered, /New traces cannot simultaneously be recent current data and historical baseline data/);
-  assert.doesNotMatch(rendered, /Ready to run/);
-  const operationsButton = findAll(
-    tree,
-    (node) => node.type === "button" && textOf(node) === "Open Operations",
-  )[0];
-  operationsButton.props.onClick();
-  assert.equal(opened, 1);
-});
-
-test("completed zero-signal drift is distinct from an analysis that never ran", async () => {
-  const ui = await loadUiModule();
-  const data = bundle("evaluator-a");
-  data.driftAnalysis.runStatus = "completed_no_signals";
-
-  const rendered = textOf(render(ui.Drift, createHooks(), { data }));
-
-  assert.match(rendered, /Completed with no signals/);
-  assert.doesNotMatch(rendered, /No drift analysis has completed yet/);
-});
-
-test("overview reports insufficient readiness without calling it zero drift", async () => {
+test("overview does not confuse legacy readiness with cohort monitor status", async () => {
   const ui = await loadUiModule();
   const data = bundle("evaluator-a");
   data.driftAnalysis.current = 16;
@@ -887,8 +866,8 @@ test("overview reports insufficient readiness without calling it zero drift", as
 
   const rendered = textOf(render(ui.Overview, createHooks(), { data }));
 
-  assert.match(rendered, /Collecting current traces/);
-  assert.match(rendered, /No completed run/);
+  assert.match(rendered, /monitoring/i);
+  assert.match(rendered, /Not configured/);
   assert.doesNotMatch(rendered, /No dimensions currently clear/);
 });
 
@@ -912,11 +891,9 @@ test("unresolved evaluator selection is not described as a missing run", async (
   data.driftAnalysis.runStatus = "selection_required";
 
   const overview = textOf(render(ui.Overview, createHooks(), { data }));
-  const drift = textOf(render(ui.Drift, createHooks(), { data }));
   const judge = textOf(render(ui.Judge, createHooks(), { data }));
 
-  assert.match(overview, /Select an evaluator/);
-  assert.match(drift, /Select an evaluator to view drift analysis/);
+  assert.doesNotMatch(overview, /Select an evaluator/);
   assert.match(judge, /Select an evaluator to view judge results/);
-  assert.doesNotMatch(`${overview} ${drift} ${judge}`, /No drift analysis has completed yet|No eligible evaluation pipeline run has completed yet/);
+  assert.doesNotMatch(judge, /No eligible evaluation pipeline run has completed yet/);
 });

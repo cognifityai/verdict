@@ -280,6 +280,29 @@ class InMemoryStorage:
                 raise ValueError("monitor policy identity has a different definition")
             self._monitor_policies.setdefault(policy.policy_id, (payload, "candidate"))
 
+    def save_monitor_candidate(
+        self,
+        policy: MonitorPolicy,
+        manifest: CohortManifest,
+        comparison: MonitorComparison,
+    ) -> None:
+        policy_payload = monitor_policy_to_json(policy)
+        snapshot_payload = monitor_snapshot_to_json(manifest, comparison)
+        snapshot_key = (policy.policy_id, manifest.snapshot_id)
+        with self._monitor_lock:
+            existing_policy = self._monitor_policies.get(policy.policy_id)
+            if existing_policy is not None and existing_policy[0] != policy_payload:
+                raise ValueError("monitor policy identity has a different definition")
+            if policy.fingerprint != manifest.policy_fingerprint:
+                raise ValueError("monitor snapshot does not match policy")
+            existing_snapshot = self._monitor_snapshots.get(snapshot_key)
+            if existing_snapshot is not None and existing_snapshot != snapshot_payload:
+                raise ValueError("monitor snapshot identity has different content")
+            self._monitor_policies.setdefault(
+                policy.policy_id, (policy_payload, "candidate")
+            )
+            self._monitor_snapshots.setdefault(snapshot_key, snapshot_payload)
+
     def get_monitor_policy(self, policy_id: str) -> tuple[MonitorPolicy, str] | None:
         with self._monitor_lock:
             stored = self._monitor_policies.get(policy_id)
@@ -291,6 +314,18 @@ class InMemoryStorage:
             stored = self._monitor_policies.get(policy_id) if policy_id else None
         return monitor_policy_from_json(stored[0]) if stored else None
 
+    def get_latest_monitor_candidate(self, scope_key: str) -> MonitorPolicy | None:
+        with self._monitor_lock:
+            policies_with_snapshots = {
+                policy_id for policy_id, _snapshot_id in self._monitor_snapshots
+            }
+            for payload, state in reversed(self._monitor_policies.values()):
+                policy = monitor_policy_from_json(payload)
+                if (state == "candidate" and policy.scope_key == scope_key
+                        and policy.policy_id in policies_with_snapshots):
+                    return policy
+        return None
+
     def activate_monitor_policy(
         self, scope_key: str, policy_id: str, *, expected_active_policy_id: str | None
     ) -> MonitorPolicy:
@@ -301,9 +336,11 @@ class InMemoryStorage:
             stored = self._monitor_policies.get(policy_id)
             if stored is None or monitor_policy_from_json(stored[0]).scope_key != scope_key:
                 raise ValueError("unknown monitor policy")
-            if current:
-                payload, _state = self._monitor_policies[current]
-                self._monitor_policies[current] = (payload, "retired")
+            for other_id, (payload, state) in list(self._monitor_policies.items()):
+                policy = monitor_policy_from_json(payload)
+                if (other_id != policy_id and policy.scope_key == scope_key
+                        and state in {"active", "candidate"}):
+                    self._monitor_policies[other_id] = (payload, "retired")
             self._monitor_policies[policy_id] = (stored[0], "active")
             self._active_monitor_policies[scope_key] = policy_id
             return monitor_policy_from_json(stored[0])

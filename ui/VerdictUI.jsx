@@ -1,13 +1,13 @@
 import React, { useState, useEffect, useRef } from "react";
 import {
   LineChart, Line, AreaChart, Area, BarChart, Bar, XAxis, YAxis, CartesianGrid,
-  Tooltip, ResponsiveContainer, ReferenceLine, ReferenceArea, Cell,
+  Tooltip, ResponsiveContainer, ReferenceLine, Cell,
 } from "recharts";
 import {
   Activity, AlertTriangle, ArrowRight, ArrowLeft, BarChart3, Boxes, CheckCircle2,
-  Clock, Code2, Database, GitBranch, Layers, Scale, Search, Shield, Signal,
-  TrendingDown, TrendingUp, Zap, Github, Terminal, Gauge, FlaskConical, Cpu, DollarSign,
-  Filter, X, Sparkles, ChevronRight, Eye, Network, RefreshCw, Info,
+  Code2, Database, GitBranch, Layers, Scale, Search, Shield, Signal,
+  TrendingDown, Github, Terminal, Gauge, FlaskConical, DollarSign,
+  Filter, X, Sparkles, Eye, Network, RefreshCw, Info,
 } from "lucide-react";
 import { dimensionAxisLabel, dimensionLabel } from "./dimension-labels.js";
 import { providerPresentation } from "./provider-presentation.js";
@@ -17,11 +17,13 @@ import { Runs } from "./Runs.jsx";
 import { Insights } from "./Insights.jsx";
 import { EvaluatorLab } from "./EvaluatorLab.jsx";
 import { ControlCenter } from "./ControlCenter.jsx";
-import { Explore } from "./Explore.jsx";
 import { SetupWizard } from "./SetupWizard.jsx";
-import { initialDashboardTab, sourceNavigationLabel } from "./source-state.mjs";
-import { Monitor } from "./Monitor.jsx";
-import { parseDashboardRoute, serializeDashboardRoute } from "./dashboard-route.mjs";
+import { initialDashboardTab } from "./source-state.mjs";
+import { Monitor, MonitorComparisonMetrics } from "./Monitor.jsx";
+import {
+  canonicalDashboardHash, parseDashboardRoute, serializeDashboardRoute,
+} from "./dashboard-route.mjs";
+import { formatCaptureRange, formatLatency, timelineTick } from "./presentation-format.mjs";
 
 // Embedded synthetic sample data. This keeps the static dashboard renderable when
 // no live API is reachable. It is not a benchmark, experiment result, or claim
@@ -628,9 +630,19 @@ const TRUNCATION_LABELS = {
   traceSamples: "trace samples",
 };
 const TAB_HELP = {
-  reliability: "Reliability shows deterministic execution outcomes, tool errors, and command failures found in captured evidence. It does not require a judge.",
-  performance: "Performance shows trace-backed token, latency, and cost coverage. Missing source measurements stay unavailable rather than being inferred.",
-  behavior: "Behavior shows structural response indicators such as refusal, apology, hedging, and JSON signatures. These are not semantic quality judgments.",
+  overview: "What changed, what needs attention, and what evidence Verdict has. Reliability, performance, and behavior are judge-free views of the same captured data.",
+  explore: "Inspect Agent Runs and genuine LLM calls, including their evidence and evaluation state. Provider comparison is descriptive unless traffic is matched.",
+  evaluate: "Configure evaluators, inspect stored judgments, and review labels. Missing evidence stays not evaluable rather than being scored as a failure.",
+  monitor: "Compare historical cohorts, activate prospective monitoring, and optionally review segments. Candidate and active results are shown separately.",
+  settings: "Configure data sources, schedules, alert destinations, integrations, and privacy controls.",
+};
+
+const WORKSPACE_SECTIONS = {
+  overview: [["summary", "Summary"], ["reliability", "Reliability"], ["performance", "Performance"], ["behavior", "Behavior"]],
+  explore: [["runs", "Agent Runs & Tools"], ["calls", "LLM Calls"], ["compare", "Compare"]],
+  evaluate: [["results", "Results"], ["lab", "Evaluator Lab"], ["review", "Review Queue"]],
+  monitor: [["status", "Status"], ["history", "Compare History"], ["segments", "Segments"], ["schedule", "Schedule"]],
+  settings: [["sources", "Data Sources"], ["alerts", "Alerts"], ["integrations", "Integrations"], ["privacy", "Privacy"]],
 };
 
 function TabHelp({ tab, label, text }) {
@@ -665,6 +677,48 @@ function TabHelp({ tab, label, text }) {
   </span>;
 }
 
+function WorkspaceNav({ tab, section, onSection }) {
+  return <nav aria-label={`${tab} sections`} className="mb-5 flex overflow-x-auto border-b" style={{ borderColor: C.border }}>
+    {WORKSPACE_SECTIONS[tab].map(([id, label]) => <button key={id} onClick={() => onSection(id)}
+      className="px-4 py-3 text-sm border-b-2 shrink-0"
+      style={{ color: section === id ? C.text : C.sub, borderColor: section === id ? C.accent : "transparent" }}>
+      {label}
+    </button>)}
+  </nav>;
+}
+
+function monitorAlertCount(monitor) {
+  return [monitor?.active, monitor?.candidate].reduce(
+    (total, response) => total
+      + (response?.snapshot?.comparison?.metrics || []).filter((metric) => metric.alert).length,
+    0,
+  );
+}
+
+function monitorAlertSummary(monitor) {
+  if (!monitor?.active && !monitor?.candidate) return "not configured";
+  const count = (response) => (response?.snapshot?.comparison?.metrics || [])
+    .filter((metric) => metric.alert).length;
+  return `${count(monitor.active)} active · ${count(monitor.candidate)} preview`;
+}
+
+function navigateWorkflow(commitRoute, route, target) {
+  if (WORKSPACE_SECTIONS[target?.tab]?.some(([section]) => section === target.section)) {
+    return commitRoute({ ...route, tab: target.tab, section: target.section });
+  }
+  if (target?.tab === "evaluators") return commitRoute({ ...route, tab: "evaluate", section: "lab" });
+  if (target?.tab === "drift" && target.section === "clusters") return commitRoute({ ...route, tab: "monitor", section: "segments" });
+  return commitRoute({ ...route, tab: "monitor", section: target?.section === "explore" ? "history" : "status" });
+}
+
+function navigateSetup(commitRoute, route, destination) {
+  const target = {
+    insights: ["overview", "summary"], evaluators: ["evaluate", "lab"],
+    explore: ["monitor", "history"], control: ["monitor", "schedule"],
+  }[destination] || ["overview", "summary"];
+  commitRoute({ ...route, tab: target[0], section: target[1] });
+}
+
 function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluatorChange, onTracePageChange, onTraceFilterChange, traceOffset = 0, reloading, loadError, operationsUrl = null }) {
   const DATA = data;
   const initialRoute = useRef(parseDashboardRoute(
@@ -691,13 +745,19 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
   const openFindingRun = React.useCallback((finding) => {
     const runIds = Array.isArray(finding?.runIds) ? finding.runIds : [];
     commitRoute({ ...route,
-      tab: "runs", findingCode: finding?.code || null, runIds,
+      tab: "explore", section: "runs", findingCode: finding?.code || null, runIds,
       selectedRunId: runIds[0] || null,
       runIdsTruncated: finding?.runIdsTruncated === true,
     });
   }, [commitRoute, route]);
   useEffect(() => {
-    const restore = () => setRoute(parseDashboardRoute(window.location.hash, initialDashboardTab(DATA.meta)));
+    const restore = () => {
+      const fallback = initialDashboardTab(DATA.meta);
+      const canonical = canonicalDashboardHash(window.location.hash, fallback);
+      setRoute(parseDashboardRoute(canonical || window.location.hash, fallback));
+      if (canonical) window.history.replaceState({}, "", canonical);
+    };
+    restore();
     window.addEventListener("popstate", restore);
     window.addEventListener("hashchange", restore);
     return () => { window.removeEventListener("popstate", restore); window.removeEventListener("hashchange", restore); };
@@ -705,10 +765,10 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
   const traceFilterCallback = useRef(onTraceFilterChange);
   useEffect(() => { traceFilterCallback.current = onTraceFilterChange; }, [onTraceFilterChange]);
   useEffect(() => {
-    if (source === "live" && route.tab === "traces" && traceFilterCallback.current) {
+    if (source === "live" && route.tab === "explore" && route.section === "calls" && traceFilterCallback.current) {
       traceFilterCallback.current(route.traceJudgeStatus, route.traceId);
     }
-  }, [route.tab, route.traceId, route.traceJudgeStatus, source]);
+  }, [route.section, route.tab, route.traceId, route.traceJudgeStatus, source]);
   const initialRouteResolved = useRef(source !== "loading" || initialRoute.current.explicit);
   useEffect(() => {
     if (source === "live" && !initialRouteResolved.current) {
@@ -725,6 +785,8 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
     }
   }, [evaluation.selectedId, route.evaluatorId, source]);
   const evaluatorSelectionNeeded = ["selection_required", "invalid_selection"].includes(evaluation.status);
+  const evaluatorRelevant = (tab === "evaluate" && route.section === "results")
+    || (tab === "explore" && route.section === "calls");
   const boundedResources = Object.entries(DATA.truncation?.resources || {})
     .filter(([name, resource]) => (source !== "live" || name !== "traceSamples") && resource.shown < resource.available);
   const sourceLabel = source === "live" ? "Live store" : source === "sample" ? "Synthetic sample" : "Waiting for live store";
@@ -735,20 +797,11 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
       ? `Workload: ${DATA.meta.workload}`
       : "Live Verdict store";
   const nav = [
-    { id: "setup", label: sourceNavigationLabel(DATA.meta), icon: Terminal },
-    { id: "insights", label: "Findings", icon: AlertTriangle },
     { id: "overview", label: "Overview", icon: Gauge },
-    { id: "reliability", label: "Reliability", icon: Shield },
-    { id: "performance", label: "Performance", icon: Zap },
-    { id: "behavior", label: "Behavior", icon: Eye },
-    { id: "runs", label: "Agent runs", icon: Boxes },
-    { id: "drift", label: "Drift", icon: Signal, badge: DATA.driftSignals.filter((signal) => signal.direction === "regression").length },
-    { id: "traces", label: "Trace explorer", icon: Activity },
-    { id: "judge", label: "Judge scores", icon: Scale },
-    { id: "evaluators", label: "Evaluators", icon: FlaskConical },
-    { id: "control", label: "Settings & alerts", icon: Gauge },
-    { id: "compare", label: "Compare LLMs", icon: GitBranch },
-    ...(operationsUrl ? [{ id: "operations", label: "Operations", icon: Cpu }] : []),
+    { id: "explore", label: "Explore", icon: Search },
+    { id: "evaluate", label: "Evaluate", icon: Scale },
+    { id: "monitor", label: "Monitor", icon: Signal, badge: monitorAlertCount(DATA.monitor) },
+    { id: "settings", label: "Settings", icon: Terminal },
   ];
   return (
     <div style={{ background: C.bg, color: C.text, minHeight: "100%" }}>
@@ -800,7 +853,8 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
             </div>
           )}
         </div>
-        {evaluation.availableIdentities.length > 0 && (
+        <WorkspaceNav tab={tab} section={route.section} onSection={(section) => commitRoute({ ...route, section })} />
+        {evaluatorRelevant && evaluation.availableIdentities.length > 0 && (
           <div className="mb-5 flex flex-col md:flex-row md:items-center gap-3 px-3 py-3 border"
             style={{ borderColor: evaluatorSelectionNeeded ? "#6b5529" : C.border, background: evaluatorSelectionNeeded ? C.amberBg : C.panel2, borderRadius: 3 }}>
             <div className="min-w-0 flex-1">
@@ -856,13 +910,15 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
             </span>
           </div>
         )}
-        {tab === "setup" && <SetupWizard configUrl={mountedConfigUrl()} agentSummary={DATA.meta} onRefresh={onReload} onNavigate={(destination) => destination === "explore" ? commitRoute({ ...route, tab: "drift", driftSection: "explore" }) : setTab(destination)} onComplete={(setupSource) => { onReload(); setTab(setupSource === "local" ? "runs" : "overview"); }} />}
-        {tab === "insights" && <Insights url={mountedInsightsUrl()} onOpenRuns={openFindingRun} />}
-        {tab === "reliability" && <Insights url={mountedInsightsUrl()} onOpenRuns={openFindingRun} mode="reliability" />}
-        {tab === "performance" && <Insights url={mountedInsightsUrl()} onOpenRuns={openFindingRun} mode="performance" />}
-        {tab === "behavior" && <Insights url={mountedInsightsUrl()} onOpenRuns={openFindingRun} mode="behavior" />}
-        {tab === "overview" && <Overview data={DATA} />}
-        {tab === "runs" && <Runs
+        {tab === "overview" && route.section === "summary" && <div className="space-y-5">
+          {MonitorOverview({ monitor: DATA.monitor })}
+          <Insights url={mountedInsightsUrl()} onOpenRuns={openFindingRun} />
+          <Overview data={DATA} includeMonitor={false} />
+        </div>}
+        {tab === "overview" && route.section === "reliability" && <Insights url={mountedInsightsUrl()} onOpenRuns={openFindingRun} mode="reliability" />}
+        {tab === "overview" && route.section === "performance" && <Insights url={mountedInsightsUrl()} onOpenRuns={openFindingRun} mode="performance" />}
+        {tab === "overview" && route.section === "behavior" && <Insights url={mountedInsightsUrl()} onOpenRuns={openFindingRun} mode="behavior" />}
+        {tab === "explore" && route.section === "runs" && <Runs
           url={mountedRunsUrl()}
           focusRunIds={route.runIds}
           selectedRunId={route.selectedRunId}
@@ -870,47 +926,30 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
           runIdsTruncated={route.runIdsTruncated}
           evaluatorFingerprint={evaluation.selectedIdentity?.fingerprint || null}
           onSelectRun={(runId) => commitRoute({ ...route, selectedRunId: runId })}
-          onShowAll={() => setTab("runs")}
+          onShowAll={() => commitRoute({ ...route, tab: "explore", section: "runs", findingCode: null, runIds: [], selectedRunId: null })}
         />}
-        {tab === "drift" && <DriftWorkspace
-          section={route.driftSection}
-          onSection={(driftSection) => commitRoute({ ...route, tab: "drift", driftSection })}
-          data={DATA} configUrl={mountedConfigUrl()} registryUrl={mountedRegistryUrl()}
-          operationsUrl={operationsUrl}
-          onOpenOperations={operationsUrl ? () => setTab("operations") : null}
-        />}
-        {tab === "traces" && <Traces key={evaluation.selectedId || "none"} data={DATA} source={source}
+        {tab === "explore" && route.section === "calls" && <Traces key={evaluation.selectedId || "none"} data={DATA} source={source}
           traceOffset={traceOffset} reloading={reloading} onTracePageChange={onTracePageChange}
           judgeStatus={route.traceJudgeStatus} selectedTraceId={route.traceId}
           onJudgeStatus={(traceJudgeStatus) => commitRoute({
-            ...route, tab: "traces", traceJudgeStatus, traceId: null,
+            ...route, tab: "explore", section: "calls", traceJudgeStatus, traceId: null,
           })}
-          onSelectTrace={(traceId) => commitRoute({ ...route, tab: "traces", traceId })} />}
-        {tab === "judge" && <Judge data={DATA} onOpenOperations={operationsUrl ? () => setTab("operations") : null} />}
-        {tab === "evaluators" && <EvaluatorLab configUrl={mountedConfigUrl()} onOpenEvaluated={(evaluatorId) => { onEvaluatorChange?.(evaluatorId); commitRoute({ ...route, tab: "traces", evaluatorId, traceJudgeStatus: "judged", traceId: null }); }} />}
-        {tab === "control" && <ControlCenter configUrl={mountedConfigUrl()} onNavigate={(target) => target?.tab === "drift" ? commitRoute({ ...route, tab: "drift", driftSection: target.section || "overview" }) : setTab(target?.tab || "control")} />}
-        {tab === "compare" && <Compare data={DATA} source={source} />}
-        {tab === "operations" && operationsUrl && <Operations url={operationsUrl} costBreakdown={DATA.meta.costBreakdown} />}
+          onSelectTrace={(traceId) => commitRoute({ ...route, tab: "explore", section: "calls", traceId })} />}
+        {tab === "explore" && route.section === "compare" && <Compare data={DATA} source={source} />}
+        {tab === "evaluate" && route.section === "results" && <Judge data={DATA} onOpenOperations={operationsUrl ? () => commitRoute({ ...route, tab: "settings", section: "integrations" }) : null} />}
+        {tab === "evaluate" && route.section === "lab" && <EvaluatorLab configUrl={mountedConfigUrl()} onOpenEvaluated={(evaluatorId) => { onEvaluatorChange?.(evaluatorId); commitRoute({ ...route, tab: "explore", section: "calls", evaluatorId, traceJudgeStatus: "judged", traceId: null }); }} />}
+        {tab === "evaluate" && route.section === "review" && <ControlCenter section="review" configUrl={mountedConfigUrl()} onNavigate={(target) => navigateWorkflow(commitRoute, route, target)} />}
+        {tab === "monitor" && route.section === "status" && <Monitor view="status" initialState={DATA.monitor} configUrl={mountedConfigUrl()} evaluation={data.evaluation} onChanged={onReload} />}
+        {tab === "monitor" && route.section === "history" && <Monitor view="history" initialState={DATA.monitor} configUrl={mountedConfigUrl()} evaluation={data.evaluation} onChanged={onReload} />}
+        {tab === "monitor" && route.section === "segments" && <Registry url={mountedRegistryUrl()} operationsUrl={operationsUrl} configUrl={mountedConfigUrl()} />}
+        {tab === "monitor" && route.section === "schedule" && <ControlCenter section="schedule" configUrl={mountedConfigUrl()} />}
+        {tab === "settings" && route.section === "sources" && <SetupWizard configUrl={mountedConfigUrl()} agentSummary={DATA.meta} onRefresh={onReload} onNavigate={(destination) => navigateSetup(commitRoute, route, destination)} onComplete={(setupSource) => { onReload(); commitRoute({ ...route, tab: setupSource === "local" ? "explore" : "overview", section: setupSource === "local" ? "runs" : "summary" }); }} />}
+        {tab === "settings" && route.section === "alerts" && <ControlCenter section="alerts" configUrl={mountedConfigUrl()} />}
+        {tab === "settings" && route.section === "privacy" && <ControlCenter section="privacy" configUrl={mountedConfigUrl()} />}
+        {tab === "settings" && route.section === "integrations" && (operationsUrl ? <Operations url={operationsUrl} costBreakdown={DATA.meta.costBreakdown} /> : <Panel className="p-5"><div className="font-semibold">No operations adapter configured</div><div className="text-sm mt-2" style={{ color: C.sub }}>Data ingestion and evaluation remain available. Configure an authenticated operations adapter to expose infrastructure metrics and backend jobs here.</div></Panel>)}
       </main>
     </div>
   );
-}
-
-function DriftWorkspace({ section, onSection, data, configUrl, registryUrl, operationsUrl, onOpenOperations }) {
-  const sections = [
-    ["overview", "Overview"], ["explore", "Explore"], ["monitor", "Monitor"],
-    ["signals", "Signals"], ["clusters", "Clusters"],
-  ];
-  return <div className="space-y-5">
-    <div className="flex overflow-x-auto border-b" style={{ borderColor: C.border }}>
-      {sections.map(([id, label]) => <button key={id} onClick={() => onSection(id)} className="px-4 py-3 text-sm border-b-2 shrink-0" style={{ color: section === id ? C.text : C.sub, borderColor: section === id ? C.accent : "transparent" }}>{label}</button>)}
-    </div>
-    {section === "overview" && <Drift data={data} onOpenOperations={onOpenOperations} />}
-    {section === "explore" && <Explore key={data.evaluation?.selectedId || "none"} configUrl={configUrl} registryUrl={registryUrl} operationsUrl={operationsUrl} evaluation={data.evaluation} />}
-    {section === "monitor" && <Monitor key={data.evaluation?.selectedId || "none"} configUrl={configUrl} evaluation={data.evaluation} />}
-    {section === "signals" && <Drift data={data} onOpenOperations={onOpenOperations} />}
-    {section === "clusters" && <Registry url={registryUrl} operationsUrl={operationsUrl} configUrl={configUrl} />}
-  </div>;
 }
 
 function MetricCell({ label, value, sub, icon: Icon, accent }) {
@@ -926,17 +965,52 @@ function MetricCell({ label, value, sub, icon: Icon, accent }) {
   );
 }
 
-function Overview({ data = SEED }) {
+function MonitorResult({ current }) {
+  const candidate = current.state === "candidate";
+  const snapshot = current.snapshot;
+  const manifest = snapshot?.manifest;
+  const comparison = snapshot?.comparison;
+  const collecting = manifest?.prospective_open === true;
+  const alerts = (comparison?.metrics || []).filter((metric) => metric.alert).length;
+  const title = current.state === "requires_rebootstrap" ? "Re-bootstrap required"
+    : collecting ? `Collecting ${manifest.current_unit_ids.length}/${current.policy?.prospective_target || 0} new traces`
+      : comparison?.status === "alert" ? `${alerts || 1} alert${alerts === 1 ? "" : "s"} detected`
+        : comparison?.status === "no_alert" ? "No alert in this comparison"
+          : "Insufficient evidence for a decision";
+  const color = comparison?.status === "alert" ? C.red : collecting || comparison?.status === "insufficient" ? C.amber : C.green;
+  return <Panel className="p-5" style={{ borderColor: color }}>
+    <div className="flex flex-wrap items-start justify-between gap-3">
+      <div>
+        <div className="text-xs font-mono" style={{ color }}>{candidate ? "EXPLORATORY HISTORICAL COMPARISON" : "ACTIVE MONITOR"}</div>
+        <div className="font-semibold mt-1">{title}</div>
+        <div className="text-sm mt-1" style={{ color: C.sub }}>
+          {candidate ? "Stored preview; not active." : collecting ? "The frozen reference is waiting for a complete prospective cohort." : "Latest completed prospective comparison."}
+        </div>
+      </div>
+      {manifest && <div className="text-sm" style={{ color: C.sub }}>{manifest.reference_unit_ids.length} reference → {manifest.current_unit_ids.length} current</div>}
+    </div>
+    {comparison && !collecting && MonitorComparisonMetrics({ comparison })}
+  </Panel>;
+}
+
+function MonitorOverview({ monitor }) {
+  if (!monitor?.active && !monitor?.candidate) return <Panel className="p-5">
+    <div className="text-xs font-mono" style={{ color: C.amber }}>MONITORING</div>
+    <div className="font-semibold mt-1">Not configured</div>
+    <div className="text-sm mt-2" style={{ color: C.sub }}>Compare historical cohorts in Monitor, then activate a policy if new traffic will continue arriving.</div>
+  </Panel>;
+  return <div className="space-y-3">
+    {monitor.active && MonitorResult({ current: monitor.active })}
+    {monitor.candidate && MonitorResult({ current: monitor.candidate })}
+  </div>;
+}
+
+function Overview({ data = SEED, includeMonitor = true }) {
   const DATA = data;
   const m = DATA.meta;
   const health = DATA.clusterHealth || { status: "empty", messages: [], minSampleSize: 30, clustersMeetingSampleFloor: 0, nClusters: 0 };
   const healthColor = health.status === "ready" ? C.green : health.status === "fragmented" ? C.red : C.amber;
   const healthLabel = health.status === "ready" ? "Ready" : health.status === "fragmented" ? "Fragmented" : "Needs volume";
-  const leadSignal = DATA.driftSignals[0];
-  const leadIsCoverage = leadSignal?.statName === "unclear_rate_increase";
-  const leadIsImprovement = leadSignal?.direction === "improvement";
-  const leadColor = leadIsImprovement ? C.green : C.red;
-  const leadBg = leadIsImprovement ? C.greenBg : C.redBg;
   const analysis = driftAnalysis(DATA);
   const coverage = DATA.coverage || {};
   const deterministic = coverage.deterministicAnalysis || {
@@ -949,11 +1023,6 @@ function Overview({ data = SEED }) {
     judgeErrors: 0, completedCalls: m.totalJudged || 0, errorCalls: 0,
   };
   const noCompletedRun = analysis.runStatus === "no_completed_run";
-  const evaluatorSelectionNeeded = ["selection_required", "invalid_selection"].includes(analysis.runStatus);
-  const analysisUnavailable = noCompletedRun || evaluatorSelectionNeeded;
-  const completedWithSignals = analysis.runStatus === "completed_with_signals";
-  const statusColor = analysisUnavailable ? C.amber : completedWithSignals ? leadColor : C.green;
-  const statusBg = analysisUnavailable ? C.amberBg : completedWithSignals ? leadBg : C.greenBg;
   const seriesColors = [C.accent, C.accent2, C.amber, C.green, C.blue, C.cyan];
   const providerSeries = DATA.providers.map((provider, index) => {
     const presentation = providerPresentation(
@@ -980,38 +1049,14 @@ function Overview({ data = SEED }) {
   const qualityRows = clusterMode ? DATA.clusterPassrate : DATA.passrate;
   return (
     <div className="space-y-5">
-      <div className="border-y flex flex-col lg:flex-row" style={{ borderColor: C.border, background: C.panel2 }}>
-        <div className="px-4 py-4 flex items-start gap-3 flex-1">
-          <div className="w-8 h-8 flex items-center justify-center shrink-0" style={{ background: statusBg, borderRadius: 3 }}>
-            {analysisUnavailable ? <Clock size={16} style={{ color: C.amber }} /> : completedWithSignals ? leadIsImprovement ? <TrendingUp size={16} style={{ color: leadColor }} /> : <AlertTriangle size={16} style={{ color: leadColor }} /> : <CheckCircle2 size={16} style={{ color: C.green }} />}
-          </div>
-          <div className="min-w-0">
-            <div className="text-xs font-mono" style={{ color: statusColor }}>{analysisUnavailable ? "DRIFT ANALYSIS" : `LATEST COMPLETED RUN${DATA.driftRun?.analysisTime ? ` · ${DATA.driftRun.analysisTime}` : ""}`}</div>
-            <div className="font-semibold mt-0.5">{analysisHeadline(analysis)}</div>
-            <div className="text-sm mt-0.5" style={{ color: C.sub }}>
-              {evaluatorSelectionNeeded
-                ? "Choose one evaluator identity to view its completed drift run."
-                : noCompletedRun
-                ? `No completed run · current ${analysis.current}/${analysis.minimum} · baseline ${analysis.baseline}/${analysis.minimum}.`
-                : completedWithSignals
-                  ? `${DATA.driftSignals.length} persisted signal${DATA.driftSignals.length === 1 ? "" : "s"}: ${DATA.driftSignals.map((s) => dimensionLabel(s.dimension)).join(" and ")}.`
-                  : "The latest completed run produced zero signals."}
-            </div>
-          </div>
-        </div>
-        <div className="grid grid-cols-3 border-t lg:border-t-0 lg:border-l" style={{ borderColor: C.border, minWidth: "min(100%, 430px)" }}>
-          <GateCell label="ADJUSTED P" value={analysisUnavailable ? "—" : leadIsCoverage ? "n/a" : leadSignal ? sci(leadSignal.pAdj) : "clear"} color={analysisUnavailable || leadIsCoverage ? C.amber : leadSignal ? C.red : C.green} />
-          <GateCell label="CLIFF'S DELTA" value={analysisUnavailable ? "—" : leadIsCoverage ? "n/a" : leadSignal ? statValue(leadSignal.cliffsDelta) : "clear"} color={analysisUnavailable || leadIsCoverage ? C.amber : leadSignal ? C.red : C.green} />
-          <GateCell label="CURRENT N" value={leadSignal?.nCur ?? "—"} color={C.text} />
-        </div>
-      </div>
+      {includeMonitor && MonitorOverview({ monitor: DATA.monitor })}
 
       <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-px border-y" style={{ borderColor: C.border, background: C.border }}>
         <MetricCell label="Agent runs" value={(m.totalAgentRuns || 0).toLocaleString()} sub={(m.agentRunSources || []).map((item) => `${item.sourceKind}: ${item.runs}`).join(" · ") || "No agent runs"} icon={Boxes} accent={C.green} />
         <MetricCell label="Traces captured" value={m.totalTraces.toLocaleString()} sub={`${m.providers} providers`} icon={Activity} accent={C.accent} />
         <MetricCell label="Responses judged" value={m.totalJudged} sub={`${DATA.dimensionOverall.length}-dimension rubric`} icon={Scale} accent={C.blue} />
-        <MetricCell label="Drift signals" value={evaluatorSelectionNeeded ? "Select evaluator" : noCompletedRun ? "Not run" : DATA.driftSignals.length} sub={analysisUnavailable ? analysisHeadline(analysis).toLowerCase() : "latest completed run"} icon={Signal} accent={analysisUnavailable ? C.amber : DATA.driftSignals.length ? C.red : C.green} />
-        <MetricCell label="Estimated spend" value={usd(m.totalCost)} sub={m.totalCostStatus === "partial" ? "partial pricing coverage" : m.totalCostStatus === "unavailable" ? "pricing unavailable" : `${m.durationHours} hour window`} icon={DollarSign} accent={m.totalCostStatus === "complete" ? C.green : C.amber} />
+        <MetricCell label="Comparison alerts" value={monitorAlertCount(DATA.monitor)} sub={monitorAlertSummary(DATA.monitor)} icon={Signal} accent={monitorAlertCount(DATA.monitor) ? C.red : C.green} />
+        <MetricCell label="Estimated spend" value={usd(m.totalCost)} sub={m.totalCostStatus === "partial" ? "partial pricing coverage" : m.totalCostStatus === "unavailable" ? "pricing unavailable" : formatCaptureRange(m.runStart, m.runEnd, m.durationHours)} icon={DollarSign} accent={m.totalCostStatus === "complete" ? C.green : C.amber} />
         <MetricCell label="Intent clusters" value={m.clusters} sub={`median ${health.medianClusterSize || 0} traces`} icon={Layers} accent={healthColor} />
         <MetricCell label="Cluster readiness" value={healthLabel} sub={`${health.clustersMeetingSampleFloor}/${health.nClusters} meet n=${health.minSampleSize}`} icon={Gauge} accent={healthColor} />
       </div>
@@ -1025,7 +1070,7 @@ function Overview({ data = SEED }) {
           <MetricCell label="Agent runs analyzed" value={`${deterministic.analyzedRuns}/${deterministic.availableRuns}`} sub={deterministic.complete ? "complete persisted snapshot" : "partial or not run"} />
           <MetricCell label="Traces analyzed" value={`${deterministic.analyzedTraces}/${deterministic.availableTraces}`} sub="deterministic, judge-free analysis" />
           <MetricCell label="Selected evaluator" value={`${evaluationCoverage.judged} judged`} sub={`${evaluationCoverage.notJudged} not judged · ${evaluationCoverage.judgeErrors} judge errors`} />
-          <MetricCell label="Drift comparison" value={noCompletedRun ? "Not run" : analysis.runStatus === "insufficient" ? "Insufficient" : "Completed"} sub={noCompletedRun ? "no persisted comparison" : `${DATA.driftSignals.length} persisted signals`} />
+          <MetricCell label="Legacy fixed-window run" value={noCompletedRun ? "Not run" : analysis.runStatus === "insufficient" ? "Insufficient" : "Completed"} sub={noCompletedRun ? "separate from cohort monitoring" : `${DATA.driftSignals.length} persisted signals`} />
         </div>
       </Panel>
 
@@ -1048,7 +1093,7 @@ function Overview({ data = SEED }) {
           <ResponsiveContainer width="100%" height={260}>
             <LineChart data={qualityRows} margin={{ top: 5, right: 8, left: -18, bottom: 0 }}>
               <CartesianGrid stroke={C.grid} vertical={false} />
-              <XAxis dataKey="hour" tick={{ fill: C.sub, fontSize: 12 }} stroke={C.border} tickFormatter={(h) => `${h}h`} />
+              <XAxis dataKey="hour" tick={{ fill: C.sub, fontSize: 12 }} stroke={C.border} tickFormatter={(hour) => timelineTick(m.runStart, hour)} />
               <YAxis domain={[0, 100]} tick={{ fill: C.sub, fontSize: 12 }} stroke={C.border} tickFormatter={(v) => `${v}%`} />
               <Tooltip content={<ChartTooltip unit="%" />} />
               {Number.isFinite(m.regressionHour) && (
@@ -1108,8 +1153,8 @@ function Overview({ data = SEED }) {
               ))}
             </defs>
             <CartesianGrid stroke={C.grid} vertical={false} />
-            <XAxis dataKey="hour" tick={{ fill: C.sub, fontSize: 12 }} stroke={C.border} tickFormatter={(h) => `${h}h`} />
-            <YAxis tick={{ fill: C.sub, fontSize: 12 }} stroke={C.border} tickFormatter={(v) => `${v}s`} />
+            <XAxis dataKey="hour" tick={{ fill: C.sub, fontSize: 12 }} stroke={C.border} tickFormatter={(hour) => timelineTick(m.runStart, hour)} />
+            <YAxis tick={{ fill: C.sub, fontSize: 12 }} stroke={C.border} tickFormatter={formatLatency} />
             <Tooltip content={<ChartTooltip unit="s" />} />
             {providerSeries.map((series) => (
               <Area key={series.key} type="monotone" dataKey={`${series.key}_lat`} name={series.label} stroke={series.color} strokeWidth={2} fill={`url(#g-${series.key})`} connectNulls isAnimationActive={false} />
@@ -1136,159 +1181,6 @@ function SeriesLegend({ series }) {
       {series.map((item) => (
         <span key={item.key} className="flex items-center gap-1.5"><Dot color={item.color} />{item.label}</span>
       ))}
-    </div>
-  );
-}
-
-/* ----------------------------------------------------------------- DRIFT */
-function Drift({ data = SEED, onOpenOperations = null }) {
-  const DATA = data;
-  const [open, setOpen] = useState(DATA.driftSignals[0]?.id);
-  const analysis = driftAnalysis(DATA);
-  const evaluatorSelectionNeeded = ["selection_required", "invalid_selection"].includes(analysis.runStatus);
-  const seriesColors = [C.accent, C.accent2, C.amber, C.green, C.blue, C.cyan];
-  const dimensionSeries = DATA.dimensionOverall.map((dimension, index) => ({
-    key: dimension.dim,
-    label: dimensionLabel(dimension.dim),
-    color: seriesColors[index % seriesColors.length],
-  }));
-  return (
-    <div className="space-y-4">
-      <div className="text-sm" style={{ color: C.sub }}>
-        PASS/FAIL signals clear both the BH-adjusted p-value and minimum absolute Cliff&apos;s δ gates.
-        UNCLEAR coverage signals instead use a deterministic 15-point increase and the configured sample floor. Signals come from the latest persisted pipeline run.
-      </div>
-      {(analysis.runStatus === "no_completed_run" || evaluatorSelectionNeeded) && (
-        <Panel className="p-5">
-          <div className="flex items-start gap-3">
-            <Clock size={18} style={{ color: C.amber, marginTop: 1 }} />
-            <div className="flex-1">
-              <div className="font-semibold">{evaluatorSelectionNeeded ? "Select an evaluator to view drift analysis" : "No drift analysis has completed yet"}</div>
-              <div className="text-sm mt-1" style={{ color: C.sub }}>
-                {evaluatorSelectionNeeded
-                  ? "Choose an evaluator identity above to load its completed runs and persisted signals."
-                  : `${analysisHeadline(analysis)}. Capturing new content-bearing traces advances the current window first; the same traces cannot also fill the historical baseline.`}
-              </div>
-              {ReadinessSummary({ analysis })}
-              {onOpenOperations && (
-                <button onClick={onOpenOperations} className="mt-4 inline-flex items-center gap-2 text-sm font-semibold px-3 py-2"
-                  style={{ background: C.accent, color: C.bg, borderRadius: 3 }}>
-                  Open Operations
-                </button>
-              )}
-            </div>
-          </div>
-        </Panel>
-      )}
-      {analysis.runStatus === "completed_no_signals" && (
-        <Panel className="p-4 flex items-start gap-3">
-          <CheckCircle2 size={18} style={{ color: C.green, marginTop: 1 }} />
-          <div>
-            <div className="font-semibold">Completed with no signals</div>
-            <div className="text-sm mt-1" style={{ color: C.sub }}>The latest completed run evaluated its eligible cells and none cleared the configured alert gates.</div>
-          </div>
-        </Panel>
-      )}
-      {DATA.driftSignals.map((s) => {
-        const isOpen = open === s.id;
-        const isCoverage = s.statName === "unclear_rate_increase";
-        const isImprovement = s.direction === "improvement";
-        const signalColor = isImprovement ? C.green : C.red;
-        const signalBg = isImprovement ? C.greenBg : C.redBg;
-        return (
-          <Panel key={s.id} className="overflow-hidden">
-            <button onClick={() => setOpen(isOpen ? null : s.id)} className="w-full flex items-center gap-4 p-4 text-left">
-              <div className="w-10 h-10 flex items-center justify-center shrink-0" style={{ background: signalBg, borderRadius: 3 }}>
-                {isImprovement ? <TrendingUp size={19} style={{ color: signalColor }} /> : <TrendingDown size={19} style={{ color: signalColor }} />}
-              </div>
-              <div className="min-w-0">
-                <div className="flex items-center gap-2 flex-wrap">
-                  <span className="font-semibold">{dimensionLabel(s.dimension)}</span>
-                  <Pill color={signalColor} bg={signalBg}>{isCoverage ? "evaluability regression" : s.direction}</Pill>
-                  <span className="text-xs" style={{ color: C.sub }}>in {s.clusterLabel || s.clusterId} · on {s.providerLabel}</span>
-                </div>
-                <div className="text-xs mt-0.5" style={{ color: C.sub }}>
-                  {isCoverage ? <>UNCLEAR rate = {coveragePct(s.stat)} · deterministic coverage gate</> : <>{s.statName === "fisher_exact" ? "Fisher's exact" : "Mann-Whitney U"} · p<sub>adj</sub> = {sci(s.pAdj)} · {s.cliffsDelta != null ? <>Cliff&apos;s δ = {s.cliffsDelta} · </> : null}Cohen&apos;s d = {statValue(s.cohensD)}</>}
-                </div>
-              </div>
-              <div className="ml-auto flex items-center gap-3">
-                <div className="text-right">
-                  <div className="font-semibold" style={{ color: signalColor, fontSize: 18 }}>{isCoverage ? coveragePct(s.stat) : statValue(s.cliffsDelta ?? s.cohensD)}</div>
-                  <div className="text-xs" style={{ color: C.faint }}>{isCoverage ? "UNCLEAR rate" : s.cliffsDelta != null ? "Cliff's δ" : "effect size"}</div>
-                </div>
-                <ChevronRight size={18} style={{ color: C.faint, transform: isOpen ? "rotate(90deg)" : "none", transition: "transform .15s" }} />
-              </div>
-            </button>
-            {isOpen && (
-              <div className="px-4 pb-4 border-t" style={{ borderColor: C.border }}>
-                <div className="grid sm:grid-cols-4 gap-3 mt-4">
-                  <Stat label="Statistic" value={isCoverage ? coveragePct(s.stat) : s.statName === "fisher_exact" ? `OR = ${statValue(s.stat)}` : `U = ${statValue(s.stat)}`} note={isCoverage ? "current UNCLEAR fraction" : s.statName === "fisher_exact" ? "Fisher's exact" : "Mann-Whitney"} />
-                  <Stat label="p-value" value={isCoverage ? "n/a" : sci(s.p)} note={isCoverage ? "deterministic threshold" : `adjusted ${sci(s.pAdj)} (BH)`} />
-                  <Stat label="Cliff's δ" value={isCoverage ? "n/a" : statValue(s.cliffsDelta)} note={isCoverage ? "not a PASS/FAIL test" : "primary effect-size gate"} />
-                  <Stat label="Samples" value={`${statValue(s.nCur)} vs ${statValue(s.nBase)}`} note="current vs baseline" />
-                </div>
-                <div className="mt-4 rounded-md p-3 flex items-start gap-2.5" style={{ background: C.panel2, border: `1px solid ${C.border}` }}>
-                  <Zap size={15} style={{ color: C.amber, marginTop: 1 }} />
-                  <div>
-                    <div className="text-xs font-medium" style={{ color: C.amber }}>Recommended action</div>
-                    <div className="text-sm" style={{ color: C.text }}>{s.action}</div>
-                  </div>
-                </div>
-                <div className="mt-3 flex items-center gap-2 text-xs" style={{ color: C.faint }}>
-                  <span>Contributing layer:</span>
-                  {s.layers.map((l) => <Pill key={l} color={C.sub}>{l}</Pill>)}
-                  <span className="ml-auto font-mono">signal {s.id.slice(0, 8)}</span>
-                </div>
-                {s.exampleTraceIds && s.exampleTraceIds.length > 0 && (
-                  <div className="mt-3 pt-3 border-t text-xs" style={{ borderColor: C.border }}>
-                    <span style={{ color: C.faint }}>Evidence traces</span>
-                    <div className="flex flex-wrap gap-1.5 mt-1.5">
-                      {s.exampleTraceIds.map((traceId) => <Pill key={traceId} color={C.accent}><span title={traceId}>{shortTraceId(traceId)}</span></Pill>)}
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
-          </Panel>
-        );
-      })}
-
-      {analysis.runStatus !== "no_completed_run" && <Panel className="p-5">
-        <div className="font-semibold text-sm mb-1">Focused provider pass rate by dimension</div>
-        <div className="text-xs mb-3" style={{ color: C.sub }}>
-          {DATA.focusProviderLabel ? `${DATA.focusProviderLabel} is shown. Mixed-provider lead signals fall back to the first available provider rather than an empty chart.` : "No provider series is available."}
-        </div>
-        <ResponsiveContainer width="100%" height={280}>
-          <LineChart data={DATA.haikuDim} margin={{ top: 5, right: 8, left: -18, bottom: 0 }}>
-            <CartesianGrid stroke={C.grid} vertical={false} />
-            <XAxis dataKey="hour" tick={{ fill: C.sub, fontSize: 12 }} stroke={C.border} tickFormatter={(h) => `${h}h`} />
-            <YAxis domain={[0, 100]} tick={{ fill: C.sub, fontSize: 12 }} stroke={C.border} tickFormatter={(v) => `${v}%`} />
-            <Tooltip content={<ChartTooltip unit="%" />} />
-            {Number.isFinite(DATA.meta.regressionHour) && <>
-              <ReferenceArea x1={DATA.meta.regressionHour} x2={DATA.meta.regressionHour + 3} fill={C.red} fillOpacity={0.06} />
-              <ReferenceLine x={DATA.meta.regressionHour} stroke={C.red} strokeDasharray="4 4" />
-            </>}
-            {dimensionSeries.map((dimension) => (
-              <Line key={dimension.key} type="monotone" dataKey={dimension.key} name={dimension.label} stroke={dimension.color} strokeWidth={2} dot={false} connectNulls isAnimationActive={false} />
-            ))}
-          </LineChart>
-        </ResponsiveContainer>
-        <div className="flex flex-wrap gap-x-4 gap-y-1 mt-3 text-xs" style={{ color: C.sub }}>
-          {dimensionSeries.map((dimension) => (
-            <span key={dimension.key} className="flex items-center gap-1.5"><Dot color={dimension.color} />{dimension.label}</span>
-          ))}
-        </div>
-      </Panel>}
-    </div>
-  );
-}
-
-function Stat({ label, value, note }) {
-  return (
-    <div className="rounded-md p-3" style={{ background: C.panel2, border: `1px solid ${C.border}` }}>
-      <div className="text-xs" style={{ color: C.sub }}>{label}</div>
-      <div className="font-semibold mt-0.5" style={{ fontSize: 17 }}>{value}</div>
-      {note && <div className="text-xs mt-0.5" style={{ color: C.faint }}>{note}</div>}
     </div>
   );
 }
@@ -1728,53 +1620,44 @@ function Compare({ data = SEED, source = "sample" }) {
   const costData = provs.map((p) => ({ name: p.presentation.short, v: p.cost, key: p.key, color: p.presentation.color }));
   const latData = provs.map((p) => ({ name: p.presentation.short, v: p.avgLatency, key: p.key, color: p.presentation.color }));
   const tokData = provs.map((p) => ({ name: p.presentation.short, v: p.outTok, key: p.key, color: p.presentation.color }));
-  const regressedProviders = new Set(
-    DATA.driftSignals
-      .filter((signal) => signal.direction === "regression" && signal.provider)
-      .map((signal) => signal.provider),
-  );
   return (
     <div className="space-y-5">
       <div className="text-sm" style={{ color: C.sub }}>
         {source === "sample"
           ? "Bundled synthetic sample: the same prompt set is shown across three providers to demonstrate comparison views. Connect live data before drawing provider conclusions."
-          : "Live provider metrics from captured traces. A regression badge appears only when the latest completed drift run attributes a regression to that provider."}
+          : "Unmatched traffic · descriptive only. These provider/model rows summarize the calls each provider actually received; they are not a controlled head-to-head comparison."}
       </div>
       {source === "live" && codexRuns > 0 && <Panel className="p-4"><div className="text-sm" style={{ color: C.sub }}><span style={{ color: C.text }}>{codexRuns.toLocaleString()} Codex agent runs were captured.</span> Local Codex history does not expose genuine LLM request/response boundaries, so those runs are analyzed in Agent runs and are not included in LLM trace comparisons. Verdict does not invent model calls.</div></Panel>}
 
       <div className="grid md:grid-cols-3 gap-4">
-        {provs.map((p) => {
-          const regressed = regressedProviders.has(p.key);
-          return (
-            <Panel key={p.key} className="p-5" style={{ borderColor: regressed ? "rgba(243,154,98,0.45)" : C.border }}>
+        {provs.map((p) => (
+            <Panel key={p.key} className="p-5">
               <div className="flex items-center gap-2 mb-3">
                 <Dot color={p.presentation.color} />
                 <span className="font-semibold">{p.label}</span>
-                {regressed && <Pill color={C.red} bg={C.redBg}>regressed</Pill>}
               </div>
               <div className="grid grid-cols-2 gap-y-3 gap-x-2 text-sm">
                 <Metric label="Pass rate" value={pct(p.passRate)} color={p.passRate != null && p.passRate >= 95 ? C.green : C.red} />
-                <Metric label="Avg latency" value={`${p.avgLatency}s`} />
+                <Metric label="Avg latency" value={formatLatency(p.avgLatency)} />
                 <Metric label="Error rate" value={`${p.errorRate}%`} color={p.errorRate > 5 ? C.amber : C.text} />
                 <Metric label="Output tokens" value={k(p.outTok)} />
                 <Metric label={p.costUnknown ? "Total cost (partial)" : "Total cost"} value={usd(p.cost)} color={p.costUnknown ? C.amber : C.green} />
                 <Metric label="Traces" value={p.n.toLocaleString()} />
               </div>
             </Panel>
-          );
-        })}
+        ))}
       </div>
 
       <div className="grid md:grid-cols-3 gap-5">
-        <MiniBar title="Total cost (8h)" data={costData} fmt={usd} />
-        <MiniBar title="Mean latency" data={latData} fmt={(v) => `${v}s`} />
+        <MiniBar title="Total captured cost" data={costData} fmt={usd} />
+        <MiniBar title="Mean latency" data={latData} fmt={formatLatency} />
         <MiniBar title="Output tokens (verbosity)" data={tokData} fmt={k} />
       </div>
 
       <Panel className="p-5">
         <div className="font-semibold text-sm mb-2 flex items-center gap-2"><BarChart3 size={16} style={{ color: C.accent2 }} /> How to read this view</div>
         <ul className="space-y-2 text-sm" style={{ color: C.sub }}>
-          <li className="flex gap-2"><span style={{ color: C.amber }}>•</span> <span><span style={{ color: C.text }}>Compare cost and latency on identical traffic</span> before changing providers or prompts.</span></li>
+          <li className="flex gap-2"><span style={{ color: C.amber }}>•</span> <span><span style={{ color: C.text }}>{source === "sample" ? "Compare cost and latency on identical traffic" : "Use these rows to find operational differences"}</span>{source === "sample" ? " before changing providers or prompts." : "; use a matched replay before attributing a difference to the provider."}</span></li>
           <li className="flex gap-2"><span style={{ color: C.amber }}>•</span> <span><span style={{ color: C.text }}>Check error rate and output tokens</span> alongside quality signals; drift is rarely one-dimensional.</span></li>
           <li className="flex gap-2"><span style={{ color: C.green }}>•</span> <span><span style={{ color: C.text }}>Use per-cluster views</span> to avoid averaging unlike workloads together.</span></li>
           <li className="flex gap-2"><span style={{ color: C.blue }}>•</span> <span>{source === "sample" ? <><span style={{ color: C.text }}>Treat bundled numbers as sample data</span>; your own traces are the only meaningful provider comparison.</> : <><span style={{ color: C.text }}>Do not treat unmatched traffic as a head-to-head benchmark</span>; compare matched workloads or controlled replays.</>}</span></li>

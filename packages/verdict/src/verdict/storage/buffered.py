@@ -458,6 +458,9 @@ class BufferedStorage:
     def get_active_monitor_policy(self, scope_key: str) -> MonitorPolicy | None:
         return self._read(self._inner.get_active_monitor_policy, scope_key)
 
+    def get_latest_monitor_candidate(self, scope_key: str) -> MonitorPolicy | None:
+        return self._read(self._inner.get_latest_monitor_candidate, scope_key)
+
     def get_latest_monitor_snapshot(
         self, policy_id: str
     ) -> tuple[CohortManifest, MonitorComparison] | None:
@@ -611,6 +614,16 @@ class BufferedStorage:
 
     def save_monitor_policy(self, policy: MonitorPolicy) -> None:
         self._maintenance(self._inner.save_monitor_policy, policy)
+
+    def save_monitor_candidate(
+        self,
+        policy: MonitorPolicy,
+        manifest: CohortManifest,
+        comparison: MonitorComparison,
+    ) -> None:
+        self._maintenance(
+            self._inner.save_monitor_candidate, policy, manifest, comparison,
+        )
 
     def activate_monitor_policy(
         self, scope_key: str, policy_id: str, *, expected_active_policy_id: str | None

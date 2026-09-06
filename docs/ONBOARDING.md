@@ -71,11 +71,11 @@ for an intentional metadata-only run. The server rejects capture when those
 exact paths were not previewed in the current process. Source files are
 read-only and repeated rescans are idempotent.
 
-Successful capture opens **Agent runs**. On later visits, **Setup** is replaced
-by **Data sources**, which reports run totals, source kinds, and the last index
-time. Verdict does not retain approved filesystem paths merely for display or
-background access; **Edit or rescan** asks you to approve them again. The header
-reports Agent Runs and LLM Traces separately.
+Successful capture opens **Overview**. Local execution evidence is under
+**Explore → Agent Runs & Tools** and genuine model calls are under
+**Explore → LLM Calls**. Source configuration remains under
+**Settings → Data Sources**, where **Edit or rescan** asks you to approve local
+paths again. The header reports Agent Runs and LLM Calls separately.
 
 The Agent runs view shows source sessions, typed turns and observable events,
 tool/command failures, completion evidence, possible repeated-tool loops, and
@@ -351,8 +351,8 @@ verdict --storage sqlite:///./verdict.db
 Reliability, Performance, Behavior, persisted evidence coverage, Agent Runs,
 and the ordered event explorer are key-free. The first deterministic analysis
 is stored as an immutable terminal snapshot; dashboard reads do not silently
-recompute it. In **Drift > Explore**, preview an older 80% versus newer 20%
-count cohort or explicit event-time ranges. No grouping is the default;
+recompute it. In **Monitor → Compare History**, preview an older 80% versus
+newer 20% count cohort or explicit event-time ranges. No grouping is the default;
 provider/model facets and reviewed clusters are optional and are compared
 within each selected group rather than pooled. A preview cannot
 become an authoritative alert: activation starts a new empty prospective
@@ -488,10 +488,10 @@ pass-rate charts, and drift rows use that tenant's active-registry assignments
 and stable labels. Browser query parameters cannot select that projection.
 Standalone and legacy stores keep using each trace's stored `cluster_id`.
 
-Before a drift or judge run exists, Overview, Drift, and Judge show the same live
-global content-bearing trace counts instead of rendering an empty chart as zero
-drift. The legacy pipeline's displayed default current window is the latest 24
-hours; its default baseline is the preceding 7 days after its 24-hour lag, with a global minimum of
+Before a judge run exists, Evaluate reports live global content-bearing trace
+counts instead of rendering an empty chart as zero evidence. The legacy
+pipeline's displayed default current window is the latest 24 hours; its default
+baseline is the preceding 7 days after its 24-hour lag, with a global minimum of
 30 traces in each. Meeting those totals means only that the global trace minimum
 is met. The pipeline still checks judged-sample sufficiency for every eligible
 cluster and rubric dimension, and actual job flags may use different windows or
@@ -567,7 +567,7 @@ the other captured workloads.
   tracked in Verdict issue #24. Tenantless Memory/SQLite uses the reserved
   `__verdict_local__` registry scope. See `packages/verdict_eval/README.md` for
   exact commands, safe error codes, inspect/rename, and rollback.
-  The dashboard's **Drift → Clusters** workspace is the bounded product view over those same
+  The dashboard's **Monitor → Segments** workspace is the bounded product view over those same
   tenant/version rows. It explains exact-key matches, semantic
   distance-versus-radius matches, outliers, ineligible traces, validation
   coverage, active/preview state, the frozen definition/model, representative

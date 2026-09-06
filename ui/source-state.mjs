@@ -1,13 +1,7 @@
 export function initialDashboardTab(meta = {}) {
-  if (Number(meta.totalAgentRuns) > 0) return "insights";
+  if (Number(meta.totalAgentRuns) > 0) return "overview";
   if (Number(meta.totalTraces) > 0) return "overview";
-  return "setup";
-}
-
-export function sourceNavigationLabel(meta = {}) {
-  return Number(meta.totalAgentRuns) > 0 || Number(meta.totalTraces) > 0
-    ? "Data sources"
-    : "Setup";
+  return "settings";
 }
 
 export function setupFailureMessage(failure, origin) {

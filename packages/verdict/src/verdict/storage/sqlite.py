@@ -939,6 +939,22 @@ class SQLiteStorage:
                 (policy.policy_id, policy.scope_key, digest, payload, now, now),
             )
 
+    def save_monitor_candidate(
+        self,
+        policy: MonitorPolicy,
+        manifest: CohortManifest,
+        comparison: MonitorComparison,
+    ) -> None:
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                self.save_monitor_policy(policy)
+                self.save_monitor_snapshot(policy.policy_id, manifest, comparison)
+                self._conn.execute("COMMIT")
+            except BaseException:
+                self._conn.execute("ROLLBACK")
+                raise
+
     def get_monitor_policy(self, policy_id: str) -> tuple[MonitorPolicy, str] | None:
         with self._lock:
             row = self._conn.execute(
@@ -951,6 +967,18 @@ class SQLiteStorage:
         with self._lock:
             row = self._conn.execute(
                 "SELECT payload_json FROM monitor_policies WHERE scope_key=? AND state='active'",
+                (scope_key,),
+            ).fetchone()
+        return monitor_policy_from_json(row["payload_json"]) if row else None
+
+    def get_latest_monitor_candidate(self, scope_key: str) -> MonitorPolicy | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT p.payload_json FROM monitor_policies p "
+                "WHERE p.scope_key=? AND p.state='candidate' "
+                "AND EXISTS (SELECT 1 FROM monitor_snapshots s "
+                "WHERE s.policy_id=p.policy_id) "
+                "ORDER BY p.created_at DESC, p.policy_id DESC LIMIT 1",
                 (scope_key,),
             ).fetchone()
         return monitor_policy_from_json(row["payload_json"]) if row else None
@@ -976,7 +1004,9 @@ class SQLiteStorage:
                     raise ValueError("unknown monitor policy")
                 self._conn.execute(
                     "UPDATE monitor_policies SET state='retired',updated_at=? "
-                    "WHERE scope_key=? AND state='active'", (_iso(datetime.now(timezone.utc)), scope_key),
+                    "WHERE scope_key=? AND state IN ('active','candidate') "
+                    "AND policy_id<>?",
+                    (_iso(datetime.now(timezone.utc)), scope_key, policy_id),
                 )
                 self._conn.execute(
                     "UPDATE monitor_policies SET state='active',updated_at=? WHERE policy_id=?",

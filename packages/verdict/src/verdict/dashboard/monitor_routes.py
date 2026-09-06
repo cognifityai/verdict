@@ -155,6 +155,44 @@ class MonitorRoutes:
     def prospective(writable, policy):
         return advance_monitor(writable, policy, tenant_id=TENANT)
 
+    def _stored_response(self, writable, policy, state):
+        snapshot = writable.get_latest_monitor_snapshot(policy.policy_id)
+        if snapshot is None:
+            return {"policy": json.loads(monitor_policy_to_json(policy)), "state": state}
+        if state == "active" and monitor_requires_rebootstrap(policy, snapshot[0]):
+            state = "requires_rebootstrap"
+        return self.response(
+            policy,
+            state,
+            *snapshot,
+            approved_historical=(
+                writable.get_initial_monitor_snapshot(policy.policy_id)
+                if state in {"active", "requires_rebootstrap"}
+                else None
+            ),
+        )
+
+    def read_state(self) -> dict[str, object]:
+        """Return the one durable read model used by every monitor surface."""
+        writable = self.setup.writable_storage()
+        try:
+            active_policy = writable.get_active_monitor_policy(SCOPE)
+            candidate_policy = writable.get_latest_monitor_candidate(SCOPE)
+            active = (
+                self._stored_response(writable, active_policy, "active")
+                if active_policy else None
+            )
+            candidate = (
+                self._stored_response(writable, candidate_policy, "candidate")
+                if candidate_policy else None
+            )
+            primary = active or candidate
+            if primary is None:
+                return {"state": "not_configured", "active": None, "candidate": None}
+            return {"state": primary["state"], "active": active, "candidate": candidate}
+        finally:
+            writable.close()
+
     def register(self, app) -> None:
         def monitor_preview(request, payload: dict[str, Any]):
             if not self.setup.authorized(request):
@@ -184,8 +222,7 @@ class MonitorRoutes:
                 )
                 manifest = plan_historical_manifest(units, policy, cutoff=cutoff)
                 comparison = compare_manifest(units, manifest, policy)
-                writable.save_monitor_policy(policy)
-                writable.save_monitor_snapshot(policy.policy_id, manifest, comparison)
+                writable.save_monitor_candidate(policy, manifest, comparison)
                 return self.response(policy, "candidate", manifest, comparison)
             except (KeyError, OSError, TypeError, UnicodeError, ValueError) as exc:
                 return _error_response(exc, "invalid monitor request")
@@ -283,28 +320,4 @@ class MonitorRoutes:
 
         @app.get("/api/monitor")
         def monitor_state():
-            writable = self.setup.writable_storage()
-            try:
-                policy = writable.get_active_monitor_policy(SCOPE)
-                if policy is None:
-                    return {"state": "not_configured"}
-                snapshot = writable.get_latest_monitor_snapshot(policy.policy_id)
-                if snapshot and monitor_requires_rebootstrap(policy, snapshot[0]):
-                    return self.response(
-                        policy,
-                        "requires_rebootstrap",
-                        *snapshot,
-                        approved_historical=writable.get_initial_monitor_snapshot(policy.policy_id),
-                    )
-                return (
-                    self.response(
-                        policy, "active", *snapshot,
-                        approved_historical=writable.get_initial_monitor_snapshot(
-                            policy.policy_id
-                        ),
-                    )
-                    if snapshot
-                    else {"state": "active_without_snapshot"}
-                )
-            finally:
-                writable.close()
+            return self.read_state()

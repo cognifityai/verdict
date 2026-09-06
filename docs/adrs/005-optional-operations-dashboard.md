@@ -16,7 +16,7 @@ no external system at all.
 
 | Finding | Governing contract | Last affected sink | Decision |
 | --- | --- | --- | --- |
-| Infrastructure and job data are absent | A configured host can add operations evidence without copying the dashboard | Browser Operations view | Add an optional same-origin JSON API URL |
+| Infrastructure and job data are absent | A configured host can add operations evidence without copying the dashboard | Settings integration view | Add an optional same-origin JSON API URL |
 | GCP metrics are host-specific | The core package stays vendor-neutral and capture-only installs gain no cloud dependency | Published wheel dependency graph | Keep every GCP query in the host |
 | Verdict overhead and adapter failures are not measurable | Measurements must come from the real capture boundary and must not raise into provider calls | Runtime snapshot and Operations charts | Add bounded, process-local runtime counters |
 | Buffered queue state is invisible | Disabled, queued, fallback, and failed writes must be distinguishable | Runtime snapshot and browser | Expose a read-only buffer snapshot; never imply disabled means healthy zero |
@@ -27,7 +27,7 @@ Compatibility is additive. Existing imports, `verdict.init`, dataclass
 constructors, SQLite/PostgreSQL schemas, stored rows, dashboard routes, and
 `create_app(storage=...)` calls retain their behavior. The new configuration is
 an optional keyword-only argument. A dashboard without an operations URL makes
-no external request and shows no Operations tab.
+no external request and shows no operations panel under Settings.
 
 Adjacent cases are an absent source, partial metrics, empty series, null and
 non-finite values, reordered responses, unknown metric groups/units/workload

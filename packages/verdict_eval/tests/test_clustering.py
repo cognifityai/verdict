@@ -369,6 +369,7 @@ def test_semantic_provisional_order_uses_canonical_rank_before_trace_id() -> Non
     )
 
     assert clusters[0].centroid == (1.0, 0.0)
+    assert clusters[0].display_name == "Unreviewed segment 1"
     [assignment] = strategy._assign_embedded(
         clusters,
         [_input("tie", text="billing one")],

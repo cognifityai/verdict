@@ -366,7 +366,7 @@ class SemanticClusteringStrategy:
             ClusterDefinition(
                 f"semantic:{index:04d}",
                 "semantic",
-                f"Semantic cluster {index + 1}",
+                f"Unreviewed segment {index + 1}",
                 centroid=tuple(float(value) for value in centroid),
                 radius=radius,
             )

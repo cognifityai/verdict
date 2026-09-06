@@ -1816,6 +1816,10 @@ def test_bundle_normalizes_mixed_naive_and_aware_historical_timestamps(tmp_path)
     bundle = build_bundle(path)
 
     assert bundle["meta"]["durationHours"] == 1
+    assert bundle["meta"]["runStart"] == "2026-01-01T00:00:00+00:00"
+    assert {
+        sample["trace_id"]: sample["started_at"] for sample in bundle["samples"]
+    }["legacy-naive"] == "2026-01-01T00:00:00+00:00"
     assert {sample["trace_id"] for sample in bundle["samples"]} == {
         "legacy-naive", "current-aware",
     }
@@ -1845,6 +1849,24 @@ def test_bundle_treats_malformed_historical_latency_as_unavailable(tmp_path):
 
     assert bundle["providers"][0]["avgLatency"] == 0.0
     assert bundle["samples"][0]["latency_ms"] is None
+
+
+def test_bundle_preserves_subsecond_latency_in_provider_and_series_views(tmp_path):
+    path = tmp_path / "subsecond-latency.db"
+    storage = SQLiteStorage(str(path))
+    storage.insert_trace(Trace(
+        trace_id="one-millisecond",
+        started_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        provider="openai",
+        prompt_redacted="Prompt",
+        latency_ms=1,
+    ))
+    storage.close()
+
+    bundle = build_bundle(path)
+
+    assert bundle["providers"][0]["avgLatency"] == 0.001
+    assert bundle["tsRows"][0]["openai_lat"] == 0.001
 
 
 def test_bundle_handles_sqlite_file_without_verdict_tables(tmp_path):
