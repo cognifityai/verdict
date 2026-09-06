@@ -5,7 +5,10 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from verdict.cluster_runtime import cluster_registry_service
+from verdict.cluster_runtime import (
+    cluster_model_path_for_version,
+    cluster_registry_service,
+)
 
 TENANT = "__verdict_local__"
 ACTOR = "dashboard-user"
@@ -32,9 +35,19 @@ def _bounded_text(value: object, name: str, maximum: int = 256) -> str:
 
 
 def _service(storage: object, payload: dict[str, Any], *, allow_download: bool = False):
+    model_path = payload.get("modelPath")
+    if model_path is None:
+        version_id = payload.get("versionId")
+        if version_id is None:
+            active = storage.get_active_cluster_registry(TENANT)
+            version_id = active.version_id if active is not None else None
+        if version_id is not None:
+            version = storage.get_cluster_registry_version(TENANT, version_id)
+            if version is not None:
+                model_path = cluster_model_path_for_version(version)
     return cluster_registry_service(
         storage,
-        model_path=payload.get("modelPath"),
+        model_path=model_path,
         allow_download=allow_download,
     )
 

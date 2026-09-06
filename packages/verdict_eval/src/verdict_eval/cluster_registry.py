@@ -144,6 +144,7 @@ class ClusterRegistryService:
         *,
         embedder: object | None = None,
         embedder_factory: Callable[[], object] | None = None,
+        model_locator: str | None = None,
     ) -> None:
         missing = [
             name for name in _REQUIRED_STORAGE_METHODS if not callable(getattr(storage, name, None))
@@ -155,6 +156,14 @@ class ClusterRegistryService:
         self.storage = storage
         self.embedder = embedder
         self._embedder_factory = embedder_factory
+        if model_locator is not None and (
+            not isinstance(model_locator, str)
+            or not model_locator
+            or "\x00" in model_locator
+            or len(model_locator.encode("utf-8")) > 4096
+        ):
+            raise ValueError("invalid model locator")
+        self.model_locator = model_locator
 
     def _require_embedder(self) -> object:
         if self.embedder is None and self._embedder_factory is not None:
@@ -191,6 +200,8 @@ class ClusterRegistryService:
                 except PackageNotFoundError:
                     runtime[package] = "missing"
         model_fingerprint = _fingerprint(_json(model)) if model is not None else ""
+        if model is not None and self.model_locator is not None:
+            model["local_path"] = self.model_locator
         definition = _json(
             {
                 "schema": "fit-definition-v1",

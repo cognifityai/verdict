@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 import sys
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 
 import pytest
 from verdict import cluster_runtime
+from verdict.storage import InMemoryStorage
 
 
 def _snapshot(cache_root):
@@ -82,3 +84,19 @@ def test_semantic_model_download_failure_is_bounded(monkeypatch, tmp_path):
 
     with pytest.raises(ValueError, match=r"^model_unavailable$"):
         cluster_runtime.resolve_cluster_model_path(None, allow_download=True)
+
+
+def test_cluster_version_retains_an_explicit_local_model_override(tmp_path):
+    model = tmp_path / "approved-model"
+    model.mkdir()
+    storage = InMemoryStorage()
+    service = cluster_runtime.cluster_registry_service(
+        storage, model_path=str(model), strategy="semantic",
+    )
+    version = SimpleNamespace(
+        fit_definition_json=json.dumps({"model": {"local_path": str(model)}})
+    )
+
+    assert service.model_locator == str(model.resolve())
+    assert cluster_runtime.cluster_model_path_for_version(version) == str(model)
+    storage.close()

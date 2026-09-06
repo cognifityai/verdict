@@ -1030,8 +1030,8 @@ def _bounded_group_text(value: object, *, maximum: int = 240) -> str:
 
 
 def _provider_model_group(provider: object, model: object) -> tuple[str, str, str, str]:
-    raw_provider = str(provider) if provider not in (None, "") else "unknown"
-    raw_model = str(model) if model not in (None, "") else "unknown"
+    raw_provider = None if provider is None else str(provider)
+    raw_model = None if model is None else str(model)
     identity = hashlib.sha256(
         json.dumps(
             [raw_provider, raw_model],

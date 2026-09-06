@@ -178,6 +178,48 @@ def test_semantic_capture_off_is_persisted_as_ineligible() -> None:
     assert service.assign("tenant-a", version.version_id, through_cutoff=cutoff) == 0
 
 
+def test_semantic_model_locator_is_reused_without_changing_model_identity() -> None:
+    storage = InMemoryStorage()
+    cutoff = datetime(2026, 8, 22, tzinfo=timezone.utc)
+    storage.insert_trace(
+        _trace("historical", cutoff - timedelta(minutes=1), content="historical request")
+    )
+    service = ClusterRegistryService(
+        storage, embedder=_SemanticEmbedder(), model_locator="/approved/minilm",
+    )
+    version = service.fit(
+        "tenant-a", actor="admin", strategy="semantic", cutoff=cutoff,
+        config=FitConfig(strategy="semantic", min_cluster_size=1),
+    )
+    definition = json.loads(version.fit_definition_json)
+    assert definition["model"]["local_path"] == "/approved/minilm"
+    stored_model_fingerprint = definition["model_fingerprint"]
+
+    storage.insert_trace(
+        _trace("later", cutoff + timedelta(minutes=1), content="later request")
+    )
+    resumed = ClusterRegistryService(
+        storage, embedder=_SemanticEmbedder(), model_locator="/approved/minilm",
+    )
+    assert resumed.assign(
+        "tenant-a", version.version_id,
+        through_cutoff=cutoff + timedelta(minutes=2),
+    ) == 1
+    assert json.loads(version.fit_definition_json)["model_fingerprint"] == (
+        stored_model_fingerprint
+    )
+
+    storage.insert_trace(
+        _trace("later-again", cutoff + timedelta(minutes=3), content="another request")
+    )
+    without_locator = ClusterRegistryService(storage, embedder=_SemanticEmbedder())
+    with pytest.raises(ValueError, match="model_unavailable"):
+        without_locator.assign(
+            "tenant-a", version.version_id,
+            through_cutoff=cutoff + timedelta(minutes=4),
+        )
+
+
 def test_incremental_semantic_assignment_commits_byte_bounded_prefixes() -> None:
     storage = InMemoryStorage()
     cutoff = datetime(2026, 8, 22, tzinfo=timezone.utc)

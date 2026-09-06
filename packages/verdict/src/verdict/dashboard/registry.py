@@ -211,6 +211,8 @@ def _version(
 ) -> dict[str, object]:
     strategy = str(row["strategy"])
     definition = _json_object(row["fit_definition_json"], "fit definition")
+    model = _bounded_object(definition.get("model"))
+    model.pop("local_path", None)
     return {
         "versionId": str(row["version_id"]),
         "parentVersionId": row.get("parent_version_id"),
@@ -224,7 +226,7 @@ def _version(
         "configuration": _bounded_object(definition.get("config")),
         "algorithm": _bounded_scalar(definition.get("algorithm")),
         "selector": _bounded_scalar(definition.get("selector")),
-        "model": _bounded_object(definition.get("model")),
+        "model": model,
         "preview": _preview(row["preview_report_json"]),
     }
 

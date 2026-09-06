@@ -464,6 +464,14 @@ def test_provider_model_group_identity_is_unambiguous_and_bounded() -> None:
             request_model="m" * 180,
             response_redacted="ok",
         ),
+        Trace(
+            trace_id="missing-model", started_at=NOW, provider="provider",
+            request_model="", response_redacted="ok",
+        ),
+        Trace(
+            trace_id="literal-unknown-model", started_at=NOW, provider="provider",
+            request_model="unknown", response_redacted="ok",
+        ),
     )
 
     units = trace_monitor_units(traces, grouping_mode="provider_model")
@@ -472,6 +480,8 @@ def test_provider_model_group_identity_is_unambiguous_and_bounded() -> None:
     assert all(len(unit.group_id.encode("utf-8")) <= 256 for unit in units)
     assert units[0].group_provider == "a:b"
     assert units[0].group_model == "c"
+    assert units[3].group_id != units[4].group_id
+    assert units[3].group_model == units[4].group_model == "unknown"
 
 
 def test_grouped_monitor_rejects_cardinality_before_result_expansion() -> None:

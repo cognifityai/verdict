@@ -161,3 +161,67 @@ def test_control_api_reports_source_appropriate_daily_operations(tmp_path):
         "mode": "local_agent",
         "localAgentSources": ["codex"],
     }
+
+
+def test_run_schedule_action_advances_active_monitor_once(tmp_path):
+    database = tmp_path / "verdict.db"
+    source = tmp_path / "claude"
+    source.mkdir()
+    storage = SQLiteStorage(str(database))
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    for index in range(4):
+        observed = now + timedelta(minutes=index)
+        storage.insert_trace(Trace(
+            trace_id=f"historical-{index}", tenant_id="__verdict_local__",
+            started_at=observed, ended_at=observed, response_redacted="ok",
+        ))
+    storage.close()
+
+    async def scenario():
+        transport = httpx.ASGITransport(
+            app=create_app(storage=f"sqlite:///{database}")
+        )
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            headers = {"X-Verdict-Setup": token}
+            preview = await client.post(
+                "/api/monitor/preview", headers=headers,
+                json={
+                    "windowMode": "count", "referenceRatio": 0.5,
+                    "minimumReference": 1, "minimumCurrent": 1,
+                    "prospectiveTarget": 1,
+                },
+            )
+            policy_id = preview.json()["policy"]["policy_id"]
+            activation = await client.post(
+                "/api/monitor/activate", headers=headers,
+                json={"policyId": policy_id, "expectedActivePolicyId": None},
+            )
+            storage = SQLiteStorage(str(database))
+            observed = datetime(2026, 1, 2, tzinfo=timezone.utc)
+            storage.insert_trace(Trace(
+                trace_id="new-trace", tenant_id="__verdict_local__",
+                started_at=observed, ended_at=observed, response_redacted="done",
+            ))
+            storage.close()
+            run = await client.post(
+                "/api/control/actions/run-schedule", headers=headers,
+                json={"claudeRoot": str(source), "runMonitor": True},
+            )
+            return preview, activation, run, policy_id
+
+    preview, activation, run, policy_id = asyncio.run(scenario())
+    assert preview.status_code == activation.status_code == run.status_code == 200
+    assert run.json()["capture"]["stored"] == 0
+    assert run.json()["monitor"]["snapshot"]["manifest"]["comparison_index"] == 1
+
+    storage = SQLiteStorage(str(database))
+    try:
+        snapshot_count = storage._conn.execute(
+            "SELECT COUNT(*) FROM monitor_snapshots WHERE policy_id=?", (policy_id,)
+        ).fetchone()[0]
+    finally:
+        storage.close()
+    assert snapshot_count == 3

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -78,4 +79,28 @@ def cluster_registry_service(
 
         return FrozenMiniLMEmbedder(path)
 
-    return ClusterRegistryService(storage, embedder_factory=factory)
+    return ClusterRegistryService(
+        storage,
+        embedder_factory=factory,
+        model_locator=str(path.resolve()) if model_path is not None else None,
+    )
+
+
+def cluster_model_path_for_version(version: object) -> str | None:
+    """Read a persisted local model override from immutable version metadata."""
+    try:
+        definition = json.loads(version.fit_definition_json)
+        model = definition.get("model")
+        value = model.get("local_path") if isinstance(model, dict) else None
+    except (AttributeError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError("invalid fit definition") from exc
+    if value is None:
+        return None
+    if (
+        not isinstance(value, str)
+        or not value
+        or "\x00" in value
+        or len(value.encode("utf-8")) > 4096
+    ):
+        raise ValueError("invalid model locator")
+    return value

@@ -113,7 +113,6 @@ class ControlRoutes:
                 )
 
         control_put.__annotations__["request"] = Request
-        app.post("/api/control/{kind}/{document_id}")(control_put)
 
         def control_rollback(
             request, kind: str, document_id: str, payload: dict[str, Any]
@@ -182,6 +181,9 @@ class ControlRoutes:
 
         schedule_run.__annotations__["request"] = Request
         app.post("/api/control/actions/run-schedule")(schedule_run)
+        # Starlette matches routes in registration order. Keep literal actions
+        # ahead of the parameterized document endpoint.
+        app.post("/api/control/{kind}/{document_id}")(control_put)
 
     @staticmethod
     def _user_signals(signals) -> dict[str, object]:
@@ -262,9 +264,8 @@ class ControlRoutes:
         policy = writable.get_active_monitor_policy(SCOPE)
         if policy is None:
             return None
-        previous = writable.get_latest_monitor_snapshot(policy.policy_id)
-        if previous is None:
-            return None
-        manifest, comparison = self.monitor.prospective(writable, policy, previous[0])
-        writable.save_monitor_snapshot(policy.policy_id, manifest, comparison)
-        return self.monitor.response(policy, "active", manifest, comparison)
+        manifest, comparison = self.monitor.prospective(writable, policy)
+        return self.monitor.response(
+            policy, "active", manifest, comparison,
+            approved_historical=writable.get_initial_monitor_snapshot(policy.policy_id),
+        )

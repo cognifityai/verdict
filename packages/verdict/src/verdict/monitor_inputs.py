@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from datetime import timedelta
 
-from verdict.cluster_runtime import cluster_registry_service
+from verdict.cluster_runtime import (
+    cluster_model_path_for_version,
+    cluster_registry_service,
+)
 from verdict.monitoring import (
     MAX_MONITOR_GROUPS,
     MonitorPolicy,
@@ -112,7 +115,11 @@ def load_monitor_units(storage, policy: MonitorPolicy, *, tenant_id: str):
             if trace.ended_at is not None and trace.tags.get("verdict.workload") != "judge"
         }
         if eligible_trace_ids - projected_trace_ids:
-            cluster_registry_service(storage, strategy=version.strategy).assign(
+            cluster_registry_service(
+                storage,
+                strategy=version.strategy,
+                model_path=cluster_model_path_for_version(version),
+            ).assign(
                 tenant_id,
                 version_id,
                 through_cutoff=max(trace.started_at for trace in traces)
