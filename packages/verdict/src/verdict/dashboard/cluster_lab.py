@@ -34,21 +34,31 @@ def _bounded_text(value: object, name: str, maximum: int = 256) -> str:
     return value
 
 
-def _service(storage: object, payload: dict[str, Any], *, allow_download: bool = False):
+def _service(
+    storage: object,
+    payload: dict[str, Any],
+    *,
+    version_id: str | None = None,
+    strategy: str | None = None,
+    allow_download: bool = False,
+):
     model_path = payload.get("modelPath")
-    if model_path is None:
-        version_id = payload.get("versionId")
-        if version_id is None:
-            active = storage.get_active_cluster_registry(TENANT)
-            version_id = active.version_id if active is not None else None
-        if version_id is not None:
-            version = storage.get_cluster_registry_version(TENANT, version_id)
-            if version is not None:
-                model_path = cluster_model_path_for_version(version)
+    version = (
+        storage.get_cluster_registry_version(TENANT, version_id)
+        if version_id is not None
+        else None
+    )
+    if version is not None and strategy is None:
+        strategy = version.strategy
+    if strategy == "explicit":
+        model_path = None
+    elif model_path is None and version is not None:
+        model_path = cluster_model_path_for_version(version)
     return cluster_registry_service(
         storage,
         model_path=model_path,
         allow_download=allow_download,
+        strategy=strategy,
     )
 
 
@@ -66,7 +76,12 @@ def execute_cluster_action(
             raise ValueError("invalid cluster strategy")
         if strategy == "explicit" and payload.get("modelPath") is not None:
             raise ValueError("explicit clustering does not use a model")
-        service = _service(storage, payload, allow_download=strategy != "explicit")
+        service = _service(
+            storage,
+            payload,
+            strategy=strategy,
+            allow_download=strategy != "explicit",
+        )
         workload = payload.get("targetWorkload")
         if workload is not None:
             workload = _bounded_text(workload, "target workload", 64)
@@ -92,8 +107,13 @@ def execute_cluster_action(
             ),
         )
         return {"action": action, "versionId": version.version_id, "status": "candidate"}
-    service = _service(storage, payload)
     if action == "refit":
+        active = storage.get_active_cluster_registry(TENANT)
+        service = _service(
+            storage,
+            payload,
+            version_id=active.version_id if active is not None else None,
+        )
         version = service.refit(
             TENANT, actor=ACTOR,
             cutoff=_instant(payload.get("cutoff"), default_now=True),
@@ -103,10 +123,12 @@ def execute_cluster_action(
     if action == "rename":
         cluster_id = _bounded_text(payload.get("clusterId"), "cluster id")
         display_name = _bounded_text(payload.get("displayName"), "display name", 80)
+        service = cluster_registry_service(storage, strategy="explicit")
         service.rename(TENANT, cluster_id, display_name, actor=ACTOR)
         return {"action": action, "clusterId": cluster_id}
 
     version_id = _bounded_text(payload.get("versionId"), "version id")
+    service = _service(storage, payload, version_id=version_id)
     if action == "validate":
         report = service.validate(TENANT, version_id, actor=ACTOR)
         return {"action": action, "versionId": version_id, "report": report}

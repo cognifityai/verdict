@@ -6,6 +6,7 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 from verdict import cluster_runtime
+from verdict.dashboard import cluster_lab
 from verdict.storage import InMemoryStorage
 
 
@@ -100,3 +101,46 @@ def test_cluster_version_retains_an_explicit_local_model_override(tmp_path):
     assert service.model_locator == str(model.resolve())
     assert cluster_runtime.cluster_model_path_for_version(version) == str(model)
     storage.close()
+
+
+def test_explicit_fit_and_rename_do_not_resolve_an_active_semantic_model(monkeypatch):
+    calls = []
+    storage = SimpleNamespace(
+        cluster_trace_time_bounds=lambda *_args, **_kwargs: (1, 0, 0),
+        get_active_cluster_registry=lambda *_args: SimpleNamespace(
+            version_id="retired-semantic-version"
+        ),
+        get_cluster_registry_version=lambda *_args: SimpleNamespace(
+            fit_definition_json="{}"
+        ),
+    )
+    service = SimpleNamespace(
+        fit=lambda *_args, **_kwargs: SimpleNamespace(version_id="explicit-candidate"),
+        rename=lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        cluster_lab,
+        "cluster_model_path_for_version",
+        lambda _version: pytest.fail("explicit actions resolved a semantic model"),
+    )
+    monkeypatch.setattr(
+        cluster_lab,
+        "cluster_registry_service",
+        lambda _storage, **kwargs: calls.append(kwargs) or service,
+    )
+
+    fitted = cluster_lab.execute_cluster_action(
+        storage, action="fit", payload={"strategy": "explicit"}
+    )
+    renamed = cluster_lab.execute_cluster_action(
+        storage,
+        action="rename",
+        payload={"clusterId": "billing", "displayName": "Billing"},
+    )
+
+    assert fitted["versionId"] == "explicit-candidate"
+    assert renamed["clusterId"] == "billing"
+    assert calls == [
+        {"model_path": None, "allow_download": False, "strategy": "explicit"},
+        {"strategy": "explicit"},
+    ]
