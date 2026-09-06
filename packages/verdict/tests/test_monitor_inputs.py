@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from verdict.monitor_inputs import load_monitor_units
@@ -14,6 +14,8 @@ from verdict.schema import (
     Verdict,
 )
 from verdict.storage import InMemoryStorage, SQLiteStorage
+from verdict_eval.cluster_registry import ClusterRegistryService
+from verdict_eval.clustering_strategies import FitConfig
 
 NOW = datetime(2026, 9, 5, tzinfo=timezone.utc)
 TENANT = "__verdict_local__"
@@ -118,3 +120,95 @@ def test_input_projection_fails_when_frozen_inputs_cannot_be_resolved(storage) -
         load_monitor_units(storage, cluster_policy, tenant_id=TENANT)
     with pytest.raises(ValueError, match="requires a frozen registry"):
         load_monitor_units(storage, legacy_cluster_policy, tenant_id=TENANT)
+
+
+def test_cluster_monitor_projects_new_traces_through_its_pinned_version(storage) -> None:
+    storage.insert_trace(
+        Trace(
+            trace_id="historical",
+            tenant_id=TENANT,
+            started_at=NOW - timedelta(hours=1),
+            ended_at=NOW - timedelta(minutes=59),
+            response_redacted="ok",
+            tags={"verdict.intent_key": "billing"},
+        )
+    )
+    service = ClusterRegistryService(storage)
+    version = service.fit(
+        TENANT,
+        actor="test",
+        strategy="explicit",
+        cutoff=NOW,
+        config=FitConfig(strategy="explicit"),
+    )
+    storage.insert_trace(
+        Trace(
+            trace_id="new",
+            tenant_id=TENANT,
+            started_at=NOW + timedelta(hours=1),
+            ended_at=NOW + timedelta(hours=1, seconds=1),
+            response_redacted="ok",
+            tags={"verdict.intent_key": "billing"},
+        )
+    )
+    policy = MonitorPolicy(
+        "policy",
+        "scope",
+        grouping_mode="cluster",
+        cluster_registry_version_id=version.version_id,
+    )
+
+    units = load_monitor_units(storage, policy, tenant_id=TENANT)
+
+    by_id = {unit.unit_id: unit for unit in units}
+    assert by_id["historical"].group_id is not None
+    assert by_id["new"].group_id == by_id["historical"].group_id
+    assert storage.list_trace_cluster_assignments(TENANT, version.version_id)[-1].origin in {
+        "fit",
+        "incremental",
+    }
+
+
+def test_explicit_cluster_projection_does_not_require_a_semantic_model(
+    storage,
+    monkeypatch,
+) -> None:
+    storage.insert_trace(
+        Trace(
+            trace_id="historical",
+            tenant_id=TENANT,
+            started_at=NOW - timedelta(hours=1),
+            ended_at=NOW - timedelta(minutes=59),
+            response_redacted="ok",
+            tags={"verdict.intent_key": "billing"},
+        )
+    )
+    service = ClusterRegistryService(storage)
+    version = service.fit(
+        TENANT,
+        actor="test",
+        strategy="explicit",
+        cutoff=NOW,
+        config=FitConfig(strategy="explicit"),
+    )
+    storage.insert_trace(
+        Trace(
+            trace_id="new",
+            tenant_id=TENANT,
+            started_at=NOW + timedelta(hours=1),
+            ended_at=NOW + timedelta(hours=1, seconds=1),
+            response_redacted="ok",
+            tags={"verdict.intent_key": "billing"},
+        )
+    )
+    monkeypatch.setenv("VERDICT_CLUSTER_MODEL_PATH", "/does/not/exist")
+    policy = MonitorPolicy(
+        "policy",
+        "scope",
+        grouping_mode="cluster",
+        cluster_registry_version_id=version.version_id,
+    )
+
+    units = load_monitor_units(storage, policy, tenant_id=TENANT)
+
+    assert {unit.group_id for unit in units} != {None}

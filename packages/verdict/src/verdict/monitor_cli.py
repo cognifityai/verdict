@@ -7,8 +7,7 @@ import json
 import sys
 
 from verdict.client import _resolve_storage
-from verdict.monitor_inputs import LOCAL_TENANT, LOCAL_TRACE_SCOPE, load_monitor_units
-from verdict.monitoring import compare_manifest, plan_prospective_manifest
+from verdict.monitor_inputs import LOCAL_TENANT, LOCAL_TRACE_SCOPE, advance_monitor
 
 _LOCAL_TRACE_SCOPE = LOCAL_TRACE_SCOPE
 
@@ -17,13 +16,11 @@ def run_active_monitor(storage) -> dict[str, object]:
     policy = storage.get_active_monitor_policy(_LOCAL_TRACE_SCOPE)
     if policy is None:
         raise ValueError("no active monitor")
-    previous = storage.get_latest_monitor_snapshot(policy.policy_id)
-    if previous is None:
-        raise ValueError("active monitor has no snapshot")
-    units = load_monitor_units(storage, policy, tenant_id=LOCAL_TENANT)
-    manifest = plan_prospective_manifest(previous[0], units, policy)
-    comparison = compare_manifest(units, manifest, policy)
-    storage.save_monitor_snapshot(policy.policy_id, manifest, comparison)
+    manifest, comparison = advance_monitor(
+        storage,
+        policy,
+        tenant_id=LOCAL_TENANT,
+    )
     return {
         "policy_id": policy.policy_id,
         "snapshot_id": manifest.snapshot_id,

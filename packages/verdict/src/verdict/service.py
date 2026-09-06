@@ -21,8 +21,12 @@ from verdict.analysis_records import (
 from verdict.client import _resolve_storage
 from verdict.dashboard.analysis_service import run_analysis
 from verdict.dashboard.control_plane import ControlStore
-from verdict.monitor_inputs import LOCAL_TENANT, LOCAL_TRACE_SCOPE, load_monitor_units
-from verdict.monitoring import compare_manifest, plan_prospective_manifest
+from verdict.monitor_inputs import (
+    LOCAL_TENANT,
+    LOCAL_TRACE_SCOPE,
+    MonitorRebootstrapRequired,
+    advance_monitor,
+)
 from verdict.telemetry.local_agents import capture_local_agents
 
 _log = logging.getLogger("verdict.service")
@@ -156,12 +160,19 @@ def run_cycle(storage_url: str, schedule: dict[str, object]) -> dict[str, object
         monitor = None
         policy = storage.get_active_monitor_policy(SCOPE)
         if schedule.get("runMonitor") is True and policy is not None:
-            previous = storage.get_latest_monitor_snapshot(policy.policy_id)
-            if previous is not None:
-                units = load_monitor_units(storage, policy, tenant_id=TENANT)
-                manifest = plan_prospective_manifest(previous[0], units, policy)
-                comparison = compare_manifest(units, manifest, policy)
-                storage.save_monitor_snapshot(policy.policy_id, manifest, comparison)
+            try:
+                manifest, comparison = advance_monitor(
+                    storage,
+                    policy,
+                    tenant_id=TENANT,
+                )
+            except MonitorRebootstrapRequired:
+                monitor = {
+                    "policyId": policy.policy_id,
+                    "status": "requires_rebootstrap",
+                    "alerts": 0,
+                }
+            else:
                 monitor = {
                     "policyId": policy.policy_id,
                     "status": comparison.status.value,

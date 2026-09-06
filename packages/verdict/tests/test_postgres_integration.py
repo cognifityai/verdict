@@ -59,6 +59,8 @@ from verdict.schema import (
 from verdict.storage import BufferedStorage
 from verdict.storage.postgres import PostgresStorage
 from verdict.trace import span
+from verdict_eval.cluster_registry import ClusterRegistryService
+from verdict_eval.clustering_strategies import FitConfig
 
 DSN, POSTGRES_SKIP_REASON = validate_test_dsn(
     os.environ.get("VERDICT_TEST_POSTGRES_DSN"),
@@ -386,6 +388,11 @@ def test_live_postgres_monitor_policy_activation_and_snapshot():
         storage.save_monitor_snapshot(first.policy_id, manifest, comparison)
         storage.save_monitor_snapshot(first.policy_id, manifest, comparison)
         assert storage.get_latest_monitor_snapshot(first.policy_id) == (manifest, comparison)
+        changed = tuple(
+            replace(unit, metrics={"failed": not unit.metrics["failed"]}) for unit in units
+        )
+        stored_manifest = storage.get_latest_monitor_snapshot(first.policy_id)[0]
+        assert compare_manifest(changed, stored_manifest, first) == comparison
         alert = replace(comparison, status=MonitorStatus.ALERT)
         alert_manifest = replace(
             manifest, snapshot_id=sha256(f"alert-{suffix}".encode()).hexdigest()
@@ -414,6 +421,53 @@ def test_live_postgres_monitor_policy_activation_and_snapshot():
                       (first.policy_id, second.policy_id))
         storage._exec("DELETE FROM monitor_policies WHERE scope_key=%s", (scope,))
         storage.close()
+
+
+def test_live_postgres_projects_new_traces_through_pinned_explicit_clusters():
+    suffix = uuid4().hex
+    tenant = f"monitor-cluster-{suffix}"
+    now = datetime.now(timezone.utc)
+    with _isolated_postgres_storage() as storage:
+        storage.insert_trace(
+            Trace(
+                trace_id=f"historical-{suffix}",
+                tenant_id=tenant,
+                started_at=now - timedelta(hours=1),
+                ended_at=now - timedelta(minutes=59),
+                response_redacted="ok",
+                tags={"verdict.intent_key": "billing"},
+            )
+        )
+        service = ClusterRegistryService(storage)
+        version = service.fit(
+            tenant,
+            actor="test",
+            strategy="explicit",
+            cutoff=now,
+            config=FitConfig(strategy="explicit"),
+        )
+        storage.insert_trace(
+            Trace(
+                trace_id=f"new-{suffix}",
+                tenant_id=tenant,
+                started_at=now + timedelta(hours=1),
+                ended_at=now + timedelta(hours=1, seconds=1),
+                response_redacted="ok",
+                tags={"verdict.intent_key": "billing"},
+            )
+        )
+        policy = MonitorPolicy(
+            f"policy-{suffix}",
+            f"scope-{suffix}",
+            grouping_mode="cluster",
+            cluster_registry_version_id=version.version_id,
+        )
+
+        units = load_monitor_units(storage, policy, tenant_id=tenant)
+
+        assert len(units) == 2
+        assert len({unit.group_id for unit in units}) == 1
+        assert units[0].group_id is not None
 
 
 def test_live_postgres_latest_evaluator_judgments_are_scoped_and_latest_wins():

@@ -14,6 +14,7 @@ from verdict.dashboard.setup_routes import SetupRoutes
 from verdict.monitor_inputs import (
     LOCAL_TENANT,
     LOCAL_TRACE_SCOPE,
+    advance_monitor,
     load_monitor_units,
     select_monitor_evaluator,
 )
@@ -22,13 +23,29 @@ from verdict.monitoring import (
     WindowMode,
     compare_manifest,
     monitor_policy_to_json,
+    monitor_requires_rebootstrap,
     monitor_snapshot_to_json,
     plan_historical_manifest,
-    plan_prospective_manifest,
 )
 
 TENANT = LOCAL_TENANT
 SCOPE = LOCAL_TRACE_SCOPE
+
+_BOUNDED_MONITOR_ERRORS = {
+    "monitor grouping exceeds 250 groups": (
+        "Monitor supports at most 250 groups. Choose no grouping or reduce the "
+        "number of provider/model or cluster groups."
+    ),
+    "monitor grouping produces too many metric cells": (
+        "This monitor has too many group and metric combinations. Reduce its "
+        "groups or evaluator dimensions."
+    ),
+}
+
+
+def _error_response(exc: Exception, fallback: str) -> JSONResponse:
+    message = _BOUNDED_MONITOR_ERRORS.get(str(exc), fallback)
+    return JSONResponse({"error": message}, status_code=400)
 
 
 class MonitorRoutes:
@@ -87,7 +104,7 @@ class MonitorRoutes:
         if payload.get("groupingMode", "none") != "cluster":
             return None
         active = writable.get_active_cluster_registry(TENANT)
-        if active.version_id is None:
+        if active is None or active.version_id is None:
             raise ValueError("cluster grouping requires an active registry")
         return active.version_id
 
@@ -104,16 +121,21 @@ class MonitorRoutes:
             result["approvedHistoricalSnapshot"] = json.loads(
                 monitor_snapshot_to_json(*approved_historical)
             )
+        if state == "requires_rebootstrap":
+            result["rebootstrapRequired"] = True
+            result["rebootstrapReason"] = (
+                "This monitor predates immutable cohort evidence. Preview and "
+                "activate a replacement before running it again."
+            )
         return result
 
     @staticmethod
     def bounded_units(writable, policy):
         return load_monitor_units(writable, policy, tenant_id=TENANT)
 
-    def prospective(self, writable, policy, previous_manifest):
-        units = self.bounded_units(writable, policy)
-        manifest = plan_prospective_manifest(previous_manifest, units, policy)
-        return manifest, compare_manifest(units, manifest, policy)
+    @staticmethod
+    def prospective(writable, policy):
+        return advance_monitor(writable, policy, tenant_id=TENANT)
 
     def register(self, app) -> None:
         def monitor_preview(request, payload: dict[str, Any]):
@@ -147,8 +169,8 @@ class MonitorRoutes:
                 writable.save_monitor_policy(policy)
                 writable.save_monitor_snapshot(policy.policy_id, manifest, comparison)
                 return self.response(policy, "candidate", manifest, comparison)
-            except (KeyError, OSError, TypeError, UnicodeError, ValueError):
-                return JSONResponse({"error": "invalid monitor request"}, status_code=400)
+            except (KeyError, OSError, TypeError, UnicodeError, ValueError) as exc:
+                return _error_response(exc, "invalid monitor request")
             finally:
                 if writable is not None:
                     writable.close()
@@ -176,23 +198,23 @@ class MonitorRoutes:
                 historical = writable.get_latest_monitor_snapshot(policy_id)
                 if historical is None:
                     raise ValueError("candidate has no snapshot")
+                if monitor_requires_rebootstrap(stored[0], historical[0]):
+                    return JSONResponse(
+                        {"error": "monitor requires re-bootstrap"},
+                        status_code=409,
+                    )
                 policy = writable.activate_monitor_policy(
                     stored[0].scope_key,
                     policy_id,
                     expected_active_policy_id=expected,
                 )
-                manifest, comparison = self.prospective(
-                    writable, policy, historical[0]
-                )
-                writable.save_monitor_snapshot(policy_id, manifest, comparison)
+                manifest, comparison = self.prospective(writable, policy)
                 return self.response(
                     policy, "active", manifest, comparison,
                     approved_historical=historical,
                 )
-            except (OSError, TypeError, UnicodeError, ValueError):
-                return JSONResponse(
-                    {"error": "invalid monitor activation"}, status_code=400
-                )
+            except (OSError, TypeError, UnicodeError, ValueError) as exc:
+                return _error_response(exc, "invalid monitor activation")
             finally:
                 if writable is not None:
                     writable.close()
@@ -214,16 +236,20 @@ class MonitorRoutes:
                 previous = writable.get_latest_monitor_snapshot(policy.policy_id)
                 if previous is None:
                     raise ValueError("active monitor has no snapshot")
-                manifest, comparison = self.prospective(writable, policy, previous[0])
-                writable.save_monitor_snapshot(policy.policy_id, manifest, comparison)
+                if monitor_requires_rebootstrap(policy, previous[0]):
+                    return JSONResponse(
+                        {"error": "monitor requires re-bootstrap"},
+                        status_code=409,
+                    )
+                manifest, comparison = self.prospective(writable, policy)
                 return self.response(
                     policy, "active", manifest, comparison,
                     approved_historical=writable.get_initial_monitor_snapshot(
                         policy.policy_id
                     ),
                 )
-            except (OSError, TypeError, UnicodeError, ValueError):
-                return JSONResponse({"error": "monitor run unavailable"}, status_code=400)
+            except (OSError, TypeError, UnicodeError, ValueError) as exc:
+                return _error_response(exc, "monitor run unavailable")
             finally:
                 if writable is not None:
                     writable.close()
@@ -239,6 +265,13 @@ class MonitorRoutes:
                 if policy is None:
                     return {"state": "not_configured"}
                 snapshot = writable.get_latest_monitor_snapshot(policy.policy_id)
+                if snapshot and monitor_requires_rebootstrap(policy, snapshot[0]):
+                    return self.response(
+                        policy,
+                        "requires_rebootstrap",
+                        *snapshot,
+                        approved_historical=writable.get_initial_monitor_snapshot(policy.policy_id),
+                    )
                 return (
                     self.response(
                         policy, "active", *snapshot,

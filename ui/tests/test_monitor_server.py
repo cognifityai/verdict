@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 
 import httpx
 from verdict.dashboard.app import create_app
+from verdict.monitoring import CohortManifest, MonitorComparison, MonitorPolicy, MonitorStatus
 from verdict.schema import (
     ClusterIdentity,
     ClusterRegistryCluster,
@@ -17,6 +18,8 @@ from verdict.schema import (
     cluster_candidate_digest,
 )
 from verdict.storage import SQLiteStorage
+from verdict_eval.cluster_registry import ClusterRegistryService
+from verdict_eval.clustering_strategies import FitConfig
 
 NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
@@ -387,3 +390,308 @@ def test_monitor_rejects_an_unknown_evaluator_fingerprint(tmp_path):
 
     assert response.status_code == 400
     assert response.json() == {"error": "invalid monitor request"}
+
+
+def test_monitor_explains_group_cardinality_limit(tmp_path):
+    database = tmp_path / "verdict.db"
+    storage = SQLiteStorage(str(database))
+    for index in range(251):
+        storage.insert_trace(
+            Trace(
+                trace_id=f"trace-{index}",
+                tenant_id="__verdict_local__",
+                started_at=NOW + timedelta(seconds=index),
+                ended_at=NOW + timedelta(seconds=index + 1),
+                provider=f"provider-{index}",
+                request_model="model",
+                response_redacted="ok",
+            )
+        )
+    storage.close()
+
+    async def preview():
+        app = create_app(storage=f"sqlite:///{database}")
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            return await client.post(
+                "/api/monitor/preview",
+                headers={"X-Verdict-Setup": token},
+                json={
+                    "groupingMode": "provider_model",
+                    "referenceRatio": 0.5,
+                    "minimumReference": 1,
+                    "minimumCurrent": 1,
+                },
+            )
+
+    response = asyncio.run(preview())
+
+    assert response.status_code == 400
+    assert response.json() == {
+        "error": (
+            "Monitor supports at most 250 groups. Choose no grouping or reduce "
+            "the number of provider/model or cluster groups."
+        ),
+    }
+
+
+def test_active_monitor_uses_approved_judgment_facts_after_rejudge_and_delete(tmp_path):
+    database = tmp_path / "verdict.db"
+    selected = "a" * 64
+    storage = SQLiteStorage(str(database))
+    for index in range(20):
+        trace_id = f"trace-{index:03d}"
+        storage.insert_trace(
+            Trace(
+                trace_id=trace_id,
+                tenant_id=None,
+                started_at=NOW + timedelta(minutes=index),
+                ended_at=NOW + timedelta(minutes=index, seconds=1),
+                response_redacted="ok",
+            )
+        )
+        storage.insert_judgment(
+            Judgment(
+                judgment_id=f"approved-{index}",
+                trace_id=trace_id,
+                evaluator_provider="anthropic",
+                judge_models=["judge"],
+                evaluator_fingerprint=selected,
+                expected_dimensions=["quality"],
+                dimensions=[DimensionScore("quality", Verdict.PASS)],
+            )
+        )
+    storage.close()
+
+    async def approve():
+        app = create_app(storage=f"sqlite:///{database}")
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            headers = {"X-Verdict-Setup": token}
+            preview = await client.post(
+                "/api/monitor/preview",
+                headers=headers,
+                json={
+                    "referenceRatio": 0.5,
+                    "minimumReference": 5,
+                    "minimumCurrent": 5,
+                    "prospectiveTarget": 5,
+                    "minimumEffect": 0.5,
+                    "evaluatorFingerprint": selected,
+                },
+            )
+            activation = await client.post(
+                "/api/monitor/activate",
+                headers=headers,
+                json={
+                    "policyId": preview.json()["policy"]["policy_id"],
+                    "expectedActivePolicyId": None,
+                },
+            )
+            return preview, activation
+
+    preview, activation = asyncio.run(approve())
+    assert preview.status_code == activation.status_code == 200
+
+    storage = SQLiteStorage(str(database))
+    storage.delete_trace("trace-000")
+    for index in range(1, 10):
+        storage.insert_judgment(
+            Judgment(
+                judgment_id=f"later-{index}",
+                trace_id=f"trace-{index:03d}",
+                created_at=NOW + timedelta(days=1),
+                evaluator_provider="anthropic",
+                judge_models=["judge"],
+                evaluator_fingerprint=selected,
+                expected_dimensions=["quality"],
+                dimensions=[DimensionScore("quality", Verdict.FAIL)],
+            )
+        )
+    for index in range(20, 25):
+        trace_id = f"trace-{index:03d}"
+        storage.insert_trace(
+            Trace(
+                trace_id=trace_id,
+                tenant_id=None,
+                started_at=NOW + timedelta(days=2, minutes=index),
+                ended_at=NOW + timedelta(days=2, minutes=index, seconds=1),
+                response_redacted="ok",
+            )
+        )
+        storage.insert_judgment(
+            Judgment(
+                judgment_id=f"current-{index}",
+                trace_id=trace_id,
+                evaluator_provider="anthropic",
+                judge_models=["judge"],
+                evaluator_fingerprint=selected,
+                expected_dimensions=["quality"],
+                dimensions=[DimensionScore("quality", Verdict.PASS)],
+            )
+        )
+    storage.close()
+
+    async def run():
+        app = create_app(storage=f"sqlite:///{database}")
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            return await client.post(
+                "/api/monitor/run",
+                headers={"X-Verdict-Setup": token},
+            )
+
+    response = asyncio.run(run())
+    assert response.status_code == 200
+    quality = next(
+        item
+        for item in response.json()["snapshot"]["comparison"]["metrics"]
+        if item["metric"] == "judge.quality.pass"
+    )
+    assert quality["reference_value"] == quality["current_value"] == 1.0
+    assert response.json()["snapshot"]["comparison"]["status"] == "no_alert"
+
+
+def test_cluster_monitor_projects_new_traffic_and_keeps_reviewed_label(tmp_path):
+    database = tmp_path / "verdict.db"
+    tenant = "__verdict_local__"
+    storage = SQLiteStorage(str(database))
+    for index in range(20):
+        storage.insert_trace(
+            Trace(
+                trace_id=f"historical-{index}",
+                tenant_id=tenant,
+                started_at=NOW + timedelta(minutes=index),
+                ended_at=NOW + timedelta(minutes=index, seconds=1),
+                response_redacted="ok",
+                tags={"verdict.intent_key": "billing"},
+            )
+        )
+    service = ClusterRegistryService(storage)
+    version = service.fit(
+        tenant,
+        actor="test",
+        strategy="explicit",
+        cutoff=NOW + timedelta(hours=1),
+        config=FitConfig(strategy="explicit"),
+    )
+    assert service.validate(tenant, version.version_id, actor="test")["passed"]
+    [identity] = storage.list_cluster_identities(tenant)
+    service.rename(tenant, identity.cluster_id, "Billing questions", actor="test")
+    service.activate(
+        tenant,
+        version.version_id,
+        expected_generation=0,
+        actor="test",
+    )
+    storage.close()
+
+    async def approve():
+        app = create_app(storage=f"sqlite:///{database}")
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            headers = {"X-Verdict-Setup": token}
+            preview = await client.post(
+                "/api/monitor/preview",
+                headers=headers,
+                json={
+                    "groupingMode": "cluster",
+                    "referenceRatio": 0.5,
+                    "minimumReference": 2,
+                    "minimumCurrent": 2,
+                    "prospectiveTarget": 2,
+                },
+            )
+            activation = await client.post(
+                "/api/monitor/activate",
+                headers=headers,
+                json={
+                    "policyId": preview.json()["policy"]["policy_id"],
+                    "expectedActivePolicyId": None,
+                },
+            )
+            return preview, activation
+
+    preview, activation = asyncio.run(approve())
+    assert preview.status_code == activation.status_code == 200
+    assert preview.json()["snapshot"]["comparison"]["groups"][0]["label"] == "Billing questions"
+
+    storage = SQLiteStorage(str(database))
+    for index in range(2):
+        storage.insert_trace(
+            Trace(
+                trace_id=f"new-{index}",
+                tenant_id=tenant,
+                started_at=NOW + timedelta(hours=2, minutes=index),
+                ended_at=NOW + timedelta(hours=2, minutes=index, seconds=1),
+                response_redacted="ok",
+                tags={"verdict.intent_key": "billing"},
+            )
+        )
+    storage.close()
+
+    async def run():
+        app = create_app(storage=f"sqlite:///{database}")
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            return await client.post(
+                "/api/monitor/run",
+                headers={"X-Verdict-Setup": token},
+            )
+
+    response = asyncio.run(run())
+    assert response.status_code == 200
+    comparison = response.json()["snapshot"]["comparison"]
+    assert comparison["status"] == "no_alert"
+    assert comparison["unassigned_group_share"] == 0.0
+    assert comparison["groups"][0]["label"] == "Billing questions"
+
+
+def test_legacy_monitor_requires_guided_rebootstrap(tmp_path):
+    database = tmp_path / "verdict.db"
+    storage = SQLiteStorage(str(database))
+    policy = MonitorPolicy("legacy", "__verdict_local__:application:trace")
+    manifest = CohortManifest(
+        "1" * 64,
+        policy.fingerprint,
+        NOW,
+        ("reference",),
+        ("current",),
+        ("reference", "current"),
+    )
+    comparison = MonitorComparison(MonitorStatus.NO_ALERT, (), 0.0, 0.05)
+    storage.save_monitor_policy(policy)
+    storage.save_monitor_snapshot(policy.policy_id, manifest, comparison)
+    storage.activate_monitor_policy(
+        policy.scope_key,
+        policy.policy_id,
+        expected_active_policy_id=None,
+    )
+    storage.close()
+
+    async def inspect_and_run():
+        app = create_app(storage=f"sqlite:///{database}")
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            state = await client.get("/api/monitor")
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            run = await client.post(
+                "/api/monitor/run",
+                headers={"X-Verdict-Setup": token},
+            )
+            return state, run
+
+    state, run = asyncio.run(inspect_and_run())
+    assert state.status_code == 200
+    assert state.json()["state"] == "requires_rebootstrap"
+    assert state.json()["rebootstrapRequired"] is True
+    assert run.status_code == 409
+    assert run.json() == {"error": "monitor requires re-bootstrap"}

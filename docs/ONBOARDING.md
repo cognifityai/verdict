@@ -199,7 +199,11 @@ freezes that evaluator fingerprint and its expected dimensions. Provider/model
 and reviewed-cluster facets produce separate comparisons for every eligible
 group and metric; Verdict corrects across that complete family instead of
 pooling groups. Reviewed-cluster policies pin the registry version used by the
-preview. If no group/metric cell has enough eligible LLM calls, Verdict reports
+preview, and each run projects newly eligible traces through that version
+without fitting or changing clusters. The approved membership and normalized
+metric counts are frozen together, so later source edits or re-judging do not
+rewrite the baseline. If no group/metric cell has enough eligible LLM calls,
+Verdict reports
 `insufficient`; if unassigned or new groups exceed the configured
 support threshold, it reports `reference_stale`.
 Previewed comparisons remain exploratory until explicitly activated.
@@ -222,7 +226,9 @@ and frozen-group input construction; none of these monitor paths calls a judge.
 Repeating the command without new eligible traffic returns the same snapshot
 identity instead of duplicating work. The reference does not silently move or
 recluster; create and review a new candidate when the comparison contract must
-change.
+change. A grouped monitor can contain at most 250 distinct groups. A stored
+monitor without frozen cohort facts remains readable but must be replaced from
+a new reviewed preview before it can execute.
 
 Safety limits are 64 MiB per JSON file or hosted API response, 16 MiB per
 NDJSON row, and 16 MiB per OTLP receiver request by default (including bounded

@@ -97,8 +97,10 @@ verdict-dashboard --storage sqlite:///./verdict.db
 
 An initial monitor proposal uses exact event-time membership. The count-mode
 default is an older 80% reference and newer 20% current cohort; explicit date
-ranges are also supported. Membership is frozen before metrics are compared,
-and insufficient data is reported as `insufficient`, never as “no drift.” No
+ranges are also supported. Membership and the normalized metric counts used by
+the comparison are frozen together, so later trace edits, deletions, or new
+judgments cannot rewrite an approved baseline. Insufficient data is reported
+as `insufficient`, never as “no drift.” No
 clustering or judge is required. A comparison can optionally bind one complete
 existing evaluator identity and add its stored per-dimension PASS rate to the
 deterministic metrics. It does not make judge calls. FAIL is included in that
@@ -106,7 +108,10 @@ rate; UNCLEAR, missing judgments, and judge errors are excluded from the
 PASS/FAIL denominator and reported as coverage. Provider/model and reviewed
 cluster facets are compared within each group, with correction across the full
 group-by-metric family. A reviewed-cluster policy pins the exact registry
-version; unassigned or new groups remain visible as reference-coverage risk.
+version and projects new traces into that version without fitting or changing
+clusters. Unassigned or new groups remain visible as reference-coverage risk.
+Grouped monitors support at most 250 distinct groups and reject larger
+comparisons before saving a snapshot.
 Activating a reviewed preview freezes its reference but starts an empty
 prospective current bucket; the preview itself can never become an
 authoritative alert. Scheduled looks use a summable
@@ -121,6 +126,8 @@ verdict-monitor run --storage sqlite:///./verdict.db
 The dashboard, one-shot monitor command, manual scheduled cycle, and continuous
 service all construct monitor inputs from the same frozen evaluator and grouping
 identity. They use stored judgments only and never invoke a judge implicitly.
+Stored monitors that predate frozen cohort facts remain readable but must be
+re-created from a reviewed preview before they can run again.
 
 ## Runs key-free; add a key for the judge (BYOK)
 

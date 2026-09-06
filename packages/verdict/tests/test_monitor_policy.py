@@ -14,7 +14,9 @@ from verdict.monitoring import (
     monitor_snapshot_to_json,
     plan_historical_manifest,
     plan_prospective_manifest,
+    trace_monitor_units,
 )
+from verdict.schema import Trace
 
 NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
@@ -362,6 +364,195 @@ def test_underfilled_prospective_bucket_accumulates_before_one_comparison() -> N
     assert unchanged == first
 
 
+def test_approved_reference_facts_do_not_change_when_source_rows_change() -> None:
+    policy = MonitorPolicy(
+        "p",
+        "scope",
+        reference_ratio=0.5,
+        minimum_reference=5,
+        minimum_current=5,
+        minimum_effect=0.2,
+    )
+    original = _units(20)
+    manifest = plan_historical_manifest(
+        original,
+        policy,
+        cutoff=NOW + timedelta(days=30),
+    )
+    changed_reference = tuple(
+        AnalysisUnitRecord(
+            unit.unit_id,
+            unit.event_time,
+            {"failed": True} if index < 10 else dict(unit.metrics),
+            unit.group_id,
+        )
+        for index, unit in enumerate(original)
+    )
+
+    before = compare_manifest(original, manifest, policy)
+    after = compare_manifest(changed_reference, manifest, policy)
+
+    assert after == before
+    assert after.metrics[0].reference_value == 0.0
+
+
+def test_open_prospective_cohort_freezes_facts_when_each_unit_is_admitted() -> None:
+    policy = MonitorPolicy(
+        "p",
+        "scope",
+        reference_ratio=0.8,
+        minimum_reference=5,
+        minimum_current=2,
+        prospective_target=4,
+    )
+    baseline = _units(10)
+    bootstrap = plan_historical_manifest(
+        baseline,
+        policy,
+        cutoff=NOW + timedelta(days=10),
+    )
+    first_new = tuple(
+        AnalysisUnitRecord(
+            f"new-{index}",
+            NOW + timedelta(days=11 + index),
+            {"failed": False},
+        )
+        for index in range(2)
+    )
+    collecting = plan_prospective_manifest(bootstrap, baseline + first_new, policy)
+    changed_and_new = tuple(
+        AnalysisUnitRecord(unit.unit_id, unit.event_time, {"failed": True}) for unit in first_new
+    ) + tuple(
+        AnalysisUnitRecord(
+            f"new-{index}",
+            NOW + timedelta(days=11 + index),
+            {"failed": False},
+        )
+        for index in range(2, 4)
+    )
+
+    completed = plan_prospective_manifest(
+        collecting,
+        baseline + changed_and_new,
+        policy,
+    )
+    result = compare_manifest(baseline + changed_and_new, completed, policy)
+
+    assert result.metrics[0].current_value == 0.0
+
+
+def test_provider_model_group_identity_is_unambiguous_and_bounded() -> None:
+    traces = (
+        Trace(
+            trace_id="one",
+            started_at=NOW,
+            provider="a:b",
+            request_model="c",
+            response_redacted="ok",
+        ),
+        Trace(
+            trace_id="two",
+            started_at=NOW,
+            provider="a",
+            request_model="b:c",
+            response_redacted="ok",
+        ),
+        Trace(
+            trace_id="long",
+            started_at=NOW,
+            provider="p" * 180,
+            request_model="m" * 180,
+            response_redacted="ok",
+        ),
+    )
+
+    units = trace_monitor_units(traces, grouping_mode="provider_model")
+
+    assert units[0].group_id != units[1].group_id
+    assert all(len(unit.group_id.encode("utf-8")) <= 256 for unit in units)
+    assert units[0].group_provider == "a:b"
+    assert units[0].group_model == "c"
+
+
+def test_grouped_monitor_rejects_cardinality_before_result_expansion() -> None:
+    units = tuple(
+        AnalysisUnitRecord(
+            f"unit-{index}",
+            NOW + timedelta(seconds=index),
+            {"failed": False},
+            f"group-{index}",
+        )
+        for index in range(251)
+    )
+    policy = MonitorPolicy(
+        "p",
+        "scope",
+        reference_ratio=0.5,
+        grouping_mode="provider_model",
+        minimum_reference=1,
+        minimum_current=1,
+    )
+
+    with pytest.raises(ValueError, match="250 groups"):
+        plan_historical_manifest(units, policy, cutoff=NOW + timedelta(days=1))
+
+
+def test_grouped_snapshot_stays_bounded_at_the_supported_cardinality() -> None:
+    units = tuple(
+        AnalysisUnitRecord(
+            f"{cohort}-{index}",
+            NOW + timedelta(days=day, seconds=index),
+            {f"metric-{metric}": False for metric in range(12)},
+            f"group-{index}",
+        )
+        for cohort, day in (("reference", 0), ("current", 1))
+        for index in range(250)
+    )
+    policy = MonitorPolicy(
+        "p",
+        "scope",
+        reference_ratio=0.5,
+        grouping_mode="provider_model",
+        minimum_reference=1,
+        minimum_current=1,
+    )
+
+    manifest = plan_historical_manifest(
+        units,
+        policy,
+        cutoff=NOW + timedelta(days=2),
+    )
+    comparison = compare_manifest(units, manifest, policy)
+    encoded = monitor_snapshot_to_json(manifest, comparison).encode()
+
+    assert len(comparison.metrics) == 3_000
+    assert len(encoded) < 4 * 1024 * 1024
+
+
+def test_grouped_monitor_bounds_the_combined_metric_family() -> None:
+    units = tuple(
+        AnalysisUnitRecord(
+            f"{cohort}-{index}",
+            NOW + timedelta(days=day, seconds=index),
+            {f"{cohort}-metric-{metric}": False for metric in range(16)},
+            f"group-{index}",
+        )
+        for cohort, day in (("reference", 0), ("current", 1))
+        for index in range(250)
+    )
+    policy = MonitorPolicy(
+        "p",
+        "scope",
+        reference_ratio=0.5,
+        grouping_mode="provider_model",
+        minimum_reference=1,
+        minimum_current=1,
+    )
+
+    with pytest.raises(ValueError, match="too many metric cells"):
+        plan_historical_manifest(units, policy, cutoff=NOW + timedelta(days=2))
+
+
 def test_units_sharing_the_event_time_frontier_are_not_discarded_as_late() -> None:
     policy = MonitorPolicy("p", "scope", reference_ratio=0.8,
                            minimum_reference=5, minimum_current=2,
@@ -517,9 +708,12 @@ def test_trace_projection_is_ungrouped_by_default_and_grouping_is_explicit() -> 
         Trace(trace_id="b", started_at=NOW, provider="openai", request_model="b"),
     ]
     assert [unit.group_id for unit in trace_monitor_units(traces)] == [None, None]
-    assert [unit.group_id for unit in trace_monitor_units(
-        traces, grouping_mode="provider_model"
-    )] == ["anthropic:a", "openai:b"]
+    grouped = trace_monitor_units(traces, grouping_mode="provider_model")
+    assert len({unit.group_id for unit in grouped}) == 2
+    assert [(unit.group_provider, unit.group_model) for unit in grouped] == [
+        ("anthropic", "a"),
+        ("openai", "b"),
+    ]
 
 
 def test_continuous_metric_cannot_be_silently_accepted_then_ignored() -> None:

@@ -75,10 +75,14 @@ def test_monitor_cli_runs_one_idempotent_durable_cycle(tmp_path, capsys) -> None
     assert second_output["status"] == "insufficient"
     assert second_output["current_units"] == 0
     assert third_output == second_output
-    quality = next(
-        item for item in comparison.metrics if item.metric == "judge.quality.pass"
+    quality = next(item for item in comparison.metrics if item.metric == "judge.quality.pass")
+    assert quality.group_id.startswith("provider_model:")
+    [group] = comparison.groups
+    assert (group.provider, group.model, group.label) == (
+        "openai",
+        "model",
+        "openai / model",
     )
-    assert quality.group_id == "openai:model"
     assert quality.current_value == 0.0
 
 

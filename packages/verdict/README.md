@@ -40,7 +40,8 @@ tested family; it does not pool the selected groups. The Measurement selector
 can add stored PASS/FAIL results from one complete evaluator identity without
 running or paying for a judge. That evaluator fingerprint and its expected
 dimensions become immutable policy
-inputs. A reviewed-cluster policy also pins its registry version. UNCLEAR,
+inputs. A reviewed-cluster policy also pins its registry version and projects
+new traces through that fixed version without refitting it. UNCLEAR,
 missing, and error states remain outside the PASS/FAIL denominator and are
 shown as coverage. Ongoing cohorts are prospective and non-overlapping; late
 arrivals are counted and included in the next open cohort rather than silently
@@ -51,6 +52,9 @@ groups are reported rather than pooled into a comparison. `verdict-monitor` is
 a one-shot idempotent runner. It and `verdict-service` use the same stored
 evaluator, dimensions, grouping version, and trace selection as the dashboard.
 `verdict-service` executes the dashboard's saved schedule once or continuously.
+The approved membership and normalized metric counts are immutable. Grouped
+monitors are limited to 250 distinct groups, and older stored monitors without
+frozen cohort facts require a new reviewed preview before execution.
 
 The dashboard reads key-free findings from immutable analysis snapshots rather
 than recomputing them on every page load. It reports provider outcome,

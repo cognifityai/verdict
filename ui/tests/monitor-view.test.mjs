@@ -77,3 +77,18 @@ test("grouped comparison renders the same metric once per group", async () => {
   assert.match(html, /Group:.*anthropic:model-b/);
   assert.equal((html.match(/Provider error rate/g) || []).length, 2);
 });
+
+test("grouped comparison renders reviewed labels instead of opaque identities", async () => {
+  const html = await render(`React.createElement(MonitorComparisonMetrics, {
+    comparison: {
+      groups: [{ group_id: "clu_internal", label: "Billing questions",
+        reference_units: 10, current_units: 10 }],
+      metrics: [{ group_id: "clu_internal", metric: "provider_error", alert: false,
+        reference_value: 0, current_value: 0, effect: 0,
+        p_adjusted: 1, reference_n: 10, current_n: 10 }],
+      metric_coverage: [],
+    },
+  })`);
+  assert.match(html, /Group:.*Billing questions/);
+  assert.doesNotMatch(html, />clu_internal</);
+});
