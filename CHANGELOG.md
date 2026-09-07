@@ -6,12 +6,16 @@ the product is refined.
 
 ## [Unreleased]
 
+## [0.1.0a17] - 2026-09-07
+
 ### Fixed
 
 - The dashboard again exposes persisted fixed-window evaluation drift under
   **Monitor → Signals**, including effect sizes, adjusted p-values, sample
   counts, recommended actions, and example-trace links. These signals are
-  labeled separately from prospective cohort-monitor alerts.
+  labeled separately from prospective cohort-monitor alerts. Signal totals
+  remain accurate when result cards are bounded, and unavailable evaluator or
+  inconsistent-run states no longer appear as zero drift.
 
 ## [0.1.0a16] - 2026-09-06
 
@@ -387,7 +391,8 @@ the product is refined.
   retain content must explicitly select metadata-only capture. Redaction remains
   best-effort rather than a compliance control.
 
-[Unreleased]: https://github.com/cognifityai/verdict/compare/v0.1.0a16...HEAD
+[Unreleased]: https://github.com/cognifityai/verdict/compare/v0.1.0a17...HEAD
+[0.1.0a17]: https://github.com/cognifityai/verdict/compare/v0.1.0a16...v0.1.0a17
 [0.1.0a16]: https://github.com/cognifityai/verdict/compare/v0.1.0a15...v0.1.0a16
 [0.1.0a15]: https://github.com/cognifityai/verdict/compare/v0.1.0a14...v0.1.0a15
 [0.1.0a14]: https://github.com/cognifityai/verdict/compare/v0.1.0a13...v0.1.0a14
