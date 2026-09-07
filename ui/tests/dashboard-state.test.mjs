@@ -298,6 +298,27 @@ test("fixed-window signal page distinguishes no run from a completed zero-signal
   assert.doesNotMatch(zero, /No fixed-window drift analysis has completed/i);
 });
 
+test("an inconsistent hidden drift run does not advertise its stale signal count", async () => {
+  const ui = await loadUiModule();
+  const data = bundle("judge-a");
+  data.driftRun = { id: "inconsistent-run", signalCount: 2 };
+  data.driftAnalysis.runStatus = "no_completed_run";
+  data.evaluation.driftStatus = "inconsistent_run";
+
+  const overview = render(ui.Overview, createHooks(), {
+    data, includeMonitor: false, onOpenSignals() {},
+  });
+  const signalMetric = findAll(overview,
+    (node) => typeof node.type === "function" && node.type.name === "MetricCell")
+    .find((node) => node.props.label === "Evaluation drift signals");
+  assert.equal(signalMetric.props.value, "Not run");
+
+  const dashboard = render(ui.Dashboard, createHooks(), { data });
+  const monitorButton = findAll(dashboard,
+    (node) => node.type === "button" && textOf(node).includes("Monitor"))[0];
+  assert.equal(textOf(monitorButton).trim(), "Monitor");
+});
+
 test("fixed-window signal totals remain truthful when cards are bounded", async () => {
   const ui = await loadUiModule();
   const shownSignals = Array.from({ length: 40 }, (_, index) => ({

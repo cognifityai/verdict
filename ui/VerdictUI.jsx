@@ -697,6 +697,8 @@ function monitorAlertCount(monitor) {
 
 function driftSignalCount(data) {
   const shown = Array.isArray(data?.driftSignals) ? data.driftSignals.length : 0;
+  const runStatus = driftAnalysis(data || {}).runStatus;
+  if (!["completed_with_signals", "completed_no_signals"].includes(runStatus)) return 0;
   const candidates = [
     data?.truncation?.resources?.driftSignals?.available,
     data?.driftRun?.signalCount,
