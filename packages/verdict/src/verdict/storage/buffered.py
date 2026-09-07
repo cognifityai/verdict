@@ -367,8 +367,13 @@ class BufferedStorage:
         self._enqueue(self._inner.insert_user_signal, sig)
 
     def replace_agent_run_bundle(self, bundle: AgentRunBundle) -> None:
-        # A normalized run is one replacement snapshot; never queue fragments.
-        self._maintenance(self._inner.replace_agent_run_bundle, bundle)
+        self.replace_agent_capture(bundle)
+
+    def replace_agent_capture(
+        self, bundle: AgentRunBundle, traces: tuple[Trace, ...] = (),
+    ) -> None:
+        # Trace links and their hierarchy share one inner adapter transaction.
+        self._maintenance(self._inner.replace_agent_capture, bundle, traces)
 
     def save_deterministic_analysis_run(self, run: DeterministicAnalysisRun) -> None:
         # Terminal immutable snapshots are rare control-plane writes. Persist

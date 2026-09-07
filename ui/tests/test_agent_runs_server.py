@@ -4,6 +4,8 @@ from dataclasses import replace
 from datetime import datetime, timezone
 
 import httpx
+from verdict.capture import AgentCaptureService
+from verdict.dashboard import agent_evidence_queries
 from verdict.dashboard.analysis_service import run_analysis
 from verdict.dashboard.app import (
     build_agent_insights_bundle,
@@ -26,7 +28,9 @@ from verdict.schema import Operation, Trace
 from verdict.storage import SQLiteStorage
 
 
-def _bundle(tenant: str, now: datetime, *, with_turn: bool = False) -> AgentRunBundle:
+def _bundle(
+    tenant: str, now: datetime, *, with_turn: bool = False, trace_link: bool = False,
+) -> AgentRunBundle:
     turns = (
         AgentTurn(
             "turn", f"r-{tenant}", 0, now, ExecutionStatus.COMPLETED, now,
@@ -38,7 +42,8 @@ def _bundle(tenant: str, now: datetime, *, with_turn: bool = False) -> AgentRunB
             "event-1", "turn", 0, now, AgentEventType.MODEL_CALL,
             ExecutionStatus.COMPLETED, "claude:assistant",
             {"provider": "anthropic", "request_model": "claude-test", "input_tokens": 7,
-             "output_tokens": 11}, PrivacyClassification.METADATA, trace_id="trace-1",
+             "output_tokens": 11}, PrivacyClassification.METADATA,
+            trace_id="trace-1" if trace_link else None,
         ),
         AgentEvent(
             "event-2", "turn", 1, now, AgentEventType.COMMAND,
@@ -81,13 +86,23 @@ def test_agent_run_detail_exposes_ordered_bounded_events_and_trace_links(tmp_pat
     path = tmp_path / "runs.db"
     storage = SQLiteStorage(str(path))
     now = datetime(2026, 8, 31, tzinfo=timezone.utc)
-    storage.replace_agent_run_bundle(_bundle("local", now, with_turn=True))
-    storage.insert_trace(Trace(
+    trace = Trace(
         trace_id="trace-1", started_at=now, ended_at=now, provider="anthropic",
         request_model="claude-test", response_model="claude-test", input_tokens=7,
         output_tokens=11, prompt_redacted="request", response_redacted="I'm sorry, maybe.",
         tenant_id="local",
-    ))
+    )
+    bundle = _bundle("local", now, with_turn=True, trace_link=True)
+    bundle = replace(
+        bundle,
+        events=(
+            replace(bundle.events[0], producer_id="agent", producer_sequence=0),
+            replace(bundle.events[1], producer_id="shell", producer_sequence=0),
+        ),
+    )
+    AgentCaptureService(storage).capture(
+        bundle, traces=(trace,),
+    )
     storage.close()
 
     direct = build_agent_run_detail(path, tenant="local", run_id="r-local")
@@ -107,6 +122,8 @@ def test_agent_run_detail_exposes_ordered_bounded_events_and_trace_links(tmp_pat
     assert [event["sequence"] for event in direct["events"]] == [0, 1]
     assert direct["turns"][0]["request"] == "request"
     assert direct["events"][0]["traceId"] == "trace-1"
+    assert direct["producerCount"] == 2
+    assert {event["producerId"] for event in direct["events"]} == {"agent", "shell"}
     assert direct["events"][1]["attributes"] == {
         "command": "pytest", "exit_code": 1, "stdout": "failed"
     }
@@ -118,6 +135,25 @@ def test_agent_run_detail_exposes_ordered_bounded_events_and_trace_links(tmp_pat
     assert focused.json()["focusEventId"] == "event-2"
     assert focused.json()["page"]["offset"] == 1
     assert "payload_json" not in response.text
+
+
+def test_agent_run_detail_does_not_reconstruct_a_whole_bundle(tmp_path, monkeypatch):
+    path = tmp_path / "runs.db"
+    storage = SQLiteStorage(str(path))
+    storage.replace_agent_run_bundle(
+        _bundle("local", datetime(2026, 8, 31, tzinfo=timezone.utc), with_turn=True)
+    )
+    storage.close()
+    monkeypatch.setattr(
+        agent_evidence_queries,
+        "bundle_from_normalized_rows",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("whole run read")),
+    )
+
+    detail = build_agent_run_detail(path, tenant="local", run_id="r-local", event_limit=1)
+
+    assert detail["page"]["shown"] == 1
+    assert detail["page"]["available"] == 2
 
 
 def test_agent_run_detail_is_tenant_scoped_and_returns_not_found(tmp_path):
@@ -141,15 +177,17 @@ def test_agent_insights_reports_dataset_wide_evidence_and_findings(tmp_path):
     path = tmp_path / "runs.db"
     storage = SQLiteStorage(str(path))
     now = datetime(2026, 8, 31, tzinfo=timezone.utc)
-    storage.replace_agent_run_bundle(_bundle("local", now, with_turn=True))
-    storage.insert_trace(Trace(
+    trace = Trace(
         trace_id="trace-1", started_at=now, ended_at=now, provider="anthropic",
         request_model="claude-test", response_model="claude-test", input_tokens=7,
         output_tokens=11, prompt_redacted="prompt-evidence",
         response_redacted="I'm sorry, maybe.", tenant_id="local", cost_usd=0.001,
         tags={"verdict.agent_run_id": "r-local"},
         operation=Operation.CHAT, finish_reason="stop",
-    ))
+    )
+    AgentCaptureService(storage).capture(
+        _bundle("local", now, with_turn=True, trace_link=True), traces=(trace,),
+    )
     storage.insert_trace(Trace(
         trace_id="trace-failed", started_at=now, ended_at=now, provider="openai",
         request_model="gpt-test", response_model="gpt-test",
@@ -322,7 +360,11 @@ def test_agent_runs_can_filter_multiple_affected_runs_beyond_default_page(tmp_pa
         tenant = f"local-{index}"
         bundle = _bundle(tenant, now)
         storage.replace_agent_run_bundle(AgentRunBundle(
-            replace(bundle.session, tenant_id="local"),
+            replace(
+                bundle.session,
+                tenant_id="local",
+                source_locator_hash=f"{index:064x}",
+            ),
             replace(bundle.run, tenant_id="local"),
             bundle.turns,
             bundle.events,

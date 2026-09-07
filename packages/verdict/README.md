@@ -13,6 +13,12 @@ The initial setup page can approve and rescan local Claude Code/Codex histories,
 import supported telemetry files, show the SDK snippet, or open an existing
 store. Local histories are persisted as typed `AgentRun`/`AgentTurn`/
 `AgentEvent` evidence; they are not converted into fake provider LLM traces.
+Those records use normalized source/run/turn/event storage. A model-call event
+links to the genuine `Trace`, which remains the only owner of LLM content and
+the complete provider-call record used for evaluation and drift. Events may
+retain bounded scalar summaries but never copy prompt, response, or raw-message
+content. Run timelines are read in bounded pages instead of from one growing
+serialized row.
 Bounded redacted content retention is on by default; metadata-only capture is
 an explicit SDK/programmatic override, not a shortcut in local setup. After capture, the same page becomes
 **Data sources**, reports the configured local evidence source, and requires

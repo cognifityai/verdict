@@ -74,7 +74,8 @@ receiver must honor the idempotency key for end-to-end deduplication.
 ## Compatibility
 
 - Schema initialization is additive for supported SQLite and PostgreSQL
-  installations.
+  installations. Legacy serialized agent bundles migrate transactionally into
+  normalized source/run/turn/event rows and remain available only for rollback.
 - Existing Trace, SpanRecord, Judgment, DriftSignal, and AgentRunBundle public
   constructors remain unchanged.
 - Existing dashboard response fields remain available while explicit status and

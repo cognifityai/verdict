@@ -483,8 +483,11 @@ Hexagonal / ports-and-adapters, ≥2 adapters per port (one real + in-memory for
   redaction uses a linear email scanner plus regex candidates, Luhn card checks,
   and standard-library IP validation. Presidio is not used.
 - **Agent-run evidence is source-bounded.** Local Claude Code/Codex capture now
-  persists session/run/turn/event projections atomically and separately from
-  genuine provider `Trace` rows. It currently normalizes model, tool,
+  persists source/run/turn/event rows atomically and separately from genuine
+  provider `Trace` rows. Model-call events link to the Trace that owns LLM
+  request/response content; Verdict does not duplicate that content in the
+  event. Run detail reads page the normalized event timeline instead of loading
+  one growing serialized run. It currently normalizes model, tool,
   tool-result, command, and context events exposed by the supported history
   formats; it does not yet claim authoritative artifact state, deployment
   success, or subagent correctness. If opted-in content would exceed the

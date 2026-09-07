@@ -1229,7 +1229,7 @@ def test_postgres_trace_columns_include_stable_parent_span_link():
     assert "parent_span_id" in pg._SCHEMA
     assert "parent_span_id" in pg.PostgresStorage._TRACE_COLUMNS
     assert len(pg.PostgresStorage._TRACE_COLUMNS.split(",")) == 28
-    insert_source = inspect.getsource(pg.PostgresStorage.insert_trace)
+    insert_source = inspect.getsource(pg.PostgresStorage._insert_trace_cursor)
     assert "INSERT INTO traces (" in insert_source
     assert "COALESCE(" in insert_source
     assert "INSERT INTO traces VALUES" not in insert_source

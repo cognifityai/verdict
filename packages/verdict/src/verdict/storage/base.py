@@ -104,6 +104,12 @@ class Storage(Protocol):
 
     def insert_trace(self, trace: Trace) -> None: ...
 
+    def replace_agent_capture(
+        self,
+        bundle: AgentRunBundle,
+        traces: tuple[Trace, ...] = (),
+    ) -> None: ...
+
     def replace_agent_run_bundle(self, bundle: AgentRunBundle) -> None: ...
 
     def get_agent_run_bundle(

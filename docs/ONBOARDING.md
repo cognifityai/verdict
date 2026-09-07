@@ -83,6 +83,13 @@ what cannot be evaluated. Local sources that do not expose a genuine provider
 call do not create fake `Trace` rows, so the LLM-call Monitor may truthfully be
 empty while agent evidence is useful.
 
+Agent timelines are stored as normalized source/run/turn/event rows. Genuine
+model calls link to existing `Trace` records rather than copying their content
+into event storage. When upgrading an existing SQLite or PostgreSQL store, stop
+older Verdict processes and take a backup before the first new process opens
+the store; that first open transactionally migrates legacy serialized agent
+bundles. Do not run old and new Verdict writers against the same store.
+
 Local-history token counts are usage evidence, not billing evidence. Verdict
 therefore leaves cost unavailable for Claude Code and Codex history instead of
 applying API list prices to desktop or subscription activity.
@@ -655,7 +662,7 @@ the other captured workloads.
 - Pairwise model rankings and PASS/FAIL drift scoring are different tasks; use
   the included alignment scripts to verify the mode you plan to rely on.
 - Local Claude Code/Codex agent evidence now ships as typed, bounded
-  session/run/turn/event projections. It is not an authoritative agent-runtime
+  source/run/turn/event rows. It is not an authoritative agent-runtime
   graph: task success, artifact state, deployments, subagents, and genuine LLM
   `Trace` links remain unavailable unless an approved source exposes them.
 - Judge calls run sequentially. Previewed all-eligible or numeric call caps are

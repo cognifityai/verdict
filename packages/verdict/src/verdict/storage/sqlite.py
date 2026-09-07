@@ -28,7 +28,6 @@ from verdict.analysis_records import (
 from verdict.evidence import (
     AgentRunBundle,
     agent_run_bundle_from_json,
-    agent_run_bundle_to_json,
 )
 from verdict.monitoring import (
     CohortManifest,
@@ -39,6 +38,20 @@ from verdict.monitoring import (
     monitor_policy_to_json,
     monitor_snapshot_from_json,
     monitor_snapshot_to_json,
+)
+from verdict.normalized_evidence import (
+    agent_event_from_row,
+    agent_run_from_row,
+    agent_turn_from_row,
+    bundle_from_normalized_rows,
+    detach_missing_trace_links,
+    merge_agent_event,
+    merge_agent_run,
+    merge_agent_turn,
+    merge_capture_trace,
+    merge_source_session,
+    normalize_bundle_timestamps,
+    source_session_from_row,
 )
 from verdict.redaction import (
     sanitize_agent_run_bundle,
@@ -80,9 +93,7 @@ from verdict.storage.base import (
 
 def _trace_tenant_clause(requested: str, column: str = "tenant_id") -> str:
     return (
-        f"({column} IS NULL OR {column}=?)"
-        if requested == "__verdict_local__"
-        else f"{column}=?"
+        f"({column} IS NULL OR {column}=?)" if requested == "__verdict_local__" else f"{column}=?"
     )
 
 
@@ -156,6 +167,114 @@ CREATE TABLE IF NOT EXISTS agent_run_bundles (
 );
 CREATE INDEX IF NOT EXISTS idx_agent_run_bundles_tenant_started
     ON agent_run_bundles(tenant_id, started_at DESC, run_id);
+
+CREATE TABLE IF NOT EXISTS import_sources (
+    tenant_id TEXT NOT NULL CHECK(length(CAST(tenant_id AS BLOB)) BETWEEN 1 AND 256),
+    source_session_id TEXT NOT NULL
+        CHECK(length(CAST(source_session_id AS BLOB)) BETWEEN 1 AND 256),
+    source_kind TEXT NOT NULL CHECK(length(CAST(source_kind AS BLOB)) BETWEEN 1 AND 256),
+    source_locator_hash TEXT NOT NULL CHECK(length(source_locator_hash)=64),
+    started_at TEXT NOT NULL,
+    observed_at TEXT NOT NULL,
+    ended_at TEXT,
+    PRIMARY KEY (tenant_id, source_session_id),
+    UNIQUE (tenant_id, source_kind, source_locator_hash)
+);
+
+CREATE TABLE IF NOT EXISTS agent_runs (
+    tenant_id TEXT NOT NULL CHECK(length(CAST(tenant_id AS BLOB)) BETWEEN 1 AND 256),
+    run_id TEXT NOT NULL CHECK(length(CAST(run_id AS BLOB)) BETWEEN 1 AND 256),
+    source_session_id TEXT NOT NULL
+        CHECK(length(CAST(source_session_id AS BLOB)) BETWEEN 1 AND 256),
+    started_at TEXT NOT NULL,
+    ended_at TEXT,
+    status TEXT NOT NULL CHECK(status IN (
+        'completed','failed','timed_out','cancelled','unknown')),
+    agent_name TEXT NOT NULL DEFAULT '',
+    agent_version TEXT NOT NULL DEFAULT '',
+    configuration_fingerprint TEXT NOT NULL DEFAULT '',
+    session_id TEXT,
+    parent_run_id TEXT,
+    service_name TEXT NOT NULL DEFAULT '',
+    environment TEXT NOT NULL DEFAULT '',
+    instance_id TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, run_id),
+    FOREIGN KEY (tenant_id, source_session_id)
+        REFERENCES import_sources(tenant_id, source_session_id)
+);
+CREATE INDEX IF NOT EXISTS idx_agent_runs_tenant_started
+    ON agent_runs(tenant_id, started_at DESC, run_id DESC);
+CREATE INDEX IF NOT EXISTS idx_agent_runs_tenant_agent_started
+    ON agent_runs(tenant_id, agent_name, agent_version, started_at DESC, run_id DESC);
+CREATE INDEX IF NOT EXISTS idx_agent_runs_tenant_session
+    ON agent_runs(tenant_id, session_id, started_at, run_id) WHERE session_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_agent_runs_tenant_parent
+    ON agent_runs(tenant_id, parent_run_id) WHERE parent_run_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS agent_turns (
+    tenant_id TEXT NOT NULL,
+    turn_id TEXT NOT NULL CHECK(length(CAST(turn_id AS BLOB)) BETWEEN 1 AND 256),
+    run_id TEXT NOT NULL CHECK(length(CAST(run_id AS BLOB)) BETWEEN 1 AND 256),
+    sequence INTEGER NOT NULL CHECK(sequence >= 0),
+    started_at TEXT NOT NULL,
+    ended_at TEXT,
+    status TEXT NOT NULL CHECK(status IN (
+        'completed','failed','timed_out','cancelled','unknown')),
+    user_request_redacted TEXT,
+    final_response_redacted TEXT,
+    request_state TEXT NOT NULL CHECK(request_state IN (
+        'present','missing','not_captured','not_applicable')),
+    response_state TEXT NOT NULL CHECK(response_state IN (
+        'present','missing','not_captured','not_applicable')),
+    PRIMARY KEY (tenant_id, run_id, turn_id),
+    UNIQUE (tenant_id, run_id, sequence),
+    FOREIGN KEY (tenant_id, run_id) REFERENCES agent_runs(tenant_id, run_id)
+        ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_agent_turns_run
+    ON agent_turns(tenant_id, run_id, sequence, turn_id);
+
+CREATE TABLE IF NOT EXISTS agent_events (
+    tenant_id TEXT NOT NULL,
+    event_id TEXT NOT NULL CHECK(length(CAST(event_id AS BLOB)) BETWEEN 1 AND 256),
+    run_id TEXT NOT NULL CHECK(length(CAST(run_id AS BLOB)) BETWEEN 1 AND 256),
+    turn_id TEXT NOT NULL CHECK(length(CAST(turn_id AS BLOB)) BETWEEN 1 AND 256),
+    sequence INTEGER NOT NULL CHECK(sequence >= 0),
+    occurred_at TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN (
+        'completed','failed','timed_out','cancelled','unknown')),
+    provenance TEXT NOT NULL,
+    attributes_json TEXT NOT NULL CHECK(length(CAST(attributes_json AS BLOB)) <= 16384),
+    privacy_classification TEXT NOT NULL CHECK(privacy_classification IN (
+        'metadata','redacted','omitted')),
+    omission_reason TEXT,
+    trace_id TEXT,
+    producer_id TEXT NOT NULL DEFAULT '',
+    producer_sequence INTEGER,
+    parent_event_id TEXT,
+    PRIMARY KEY (tenant_id, run_id, event_id),
+    UNIQUE (tenant_id, run_id, turn_id, sequence),
+    FOREIGN KEY (tenant_id, run_id, turn_id)
+        REFERENCES agent_turns(tenant_id, run_id, turn_id)
+        ON DELETE CASCADE,
+    FOREIGN KEY (trace_id) REFERENCES traces(trace_id) ON DELETE SET NULL
+);
+CREATE INDEX IF NOT EXISTS idx_agent_events_run_time
+    ON agent_events(tenant_id, run_id, occurred_at, event_id);
+CREATE INDEX IF NOT EXISTS idx_agent_events_turn
+    ON agent_events(tenant_id, run_id, turn_id, sequence, event_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_events_trace
+    ON agent_events(tenant_id, trace_id) WHERE trace_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_events_producer_sequence
+    ON agent_events(tenant_id, run_id, producer_id, producer_sequence)
+    WHERE producer_id<>'' AND producer_sequence IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS verdict_schema_migrations (
+    name TEXT PRIMARY KEY,
+    applied_at TEXT NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS deterministic_analysis_runs (
     analysis_id TEXT PRIMARY KEY CHECK(length(analysis_id)=64),
@@ -610,6 +729,299 @@ class SQLiteStorage:
                     self._conn.execute(f"ALTER TABLE evaluator_health ADD COLUMN {col} {ddl}")
                 except sqlite3.OperationalError:
                     pass
+            self._migrate_agent_run_bundles()
+
+    def _migrate_agent_run_bundles(self) -> None:
+        migration_name = "normalize_agent_evidence_v1"
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            applied = self._conn.execute(
+                "SELECT 1 FROM verdict_schema_migrations WHERE name=?",
+                (migration_name,),
+            ).fetchone()
+            if applied is not None:
+                self._conn.commit()
+                return
+            legacy_rows = self._conn.execute(
+                "SELECT payload_json, content_hash FROM agent_run_bundles "
+                "ORDER BY tenant_id, run_id"
+            ).fetchall()
+            for row in legacy_rows:
+                bundle = agent_run_bundle_from_json(row["payload_json"])
+                if bundle.content_hash != row["content_hash"]:
+                    raise RuntimeError("stored agent run bundle content hash is inconsistent")
+                linked_ids = tuple(
+                    event.trace_id for event in bundle.events if event.trace_id is not None
+                )
+                available_ids: set[str] = set()
+                if linked_ids:
+                    placeholders = ",".join("?" for _ in linked_ids)
+                    available_ids = {
+                        result["trace_id"]
+                        for result in self._conn.execute(
+                            "SELECT trace_id FROM traces WHERE trace_id IN ("
+                            + placeholders
+                            + ")",  # nosec B608 -- placeholders only
+                            linked_ids,
+                        )
+                    }
+                bundle = detach_missing_trace_links(bundle, available_ids)
+                self._write_normalized_bundle(bundle)
+            self._conn.execute(
+                "INSERT INTO verdict_schema_migrations(name,applied_at) VALUES (?,?)",
+                (migration_name, _iso(datetime.now(timezone.utc))),
+            )
+            self._conn.commit()
+        except BaseException:
+            self._conn.rollback()
+            raise
+
+    def _write_normalized_bundle(self, bundle: AgentRunBundle) -> None:
+        bundle = normalize_bundle_timestamps(bundle)
+        tenant_id = bundle.run.tenant_id
+        row = self._conn.execute(
+            "SELECT * FROM import_sources WHERE tenant_id=? AND source_session_id=?",
+            (tenant_id, bundle.session.source_session_id),
+        ).fetchone()
+        source = merge_source_session(
+            source_session_from_row(dict(row)) if row is not None else None,
+            bundle.session,
+        )
+        row = self._conn.execute(
+            "SELECT * FROM agent_runs WHERE tenant_id=? AND run_id=?",
+            (tenant_id, bundle.run.run_id),
+        ).fetchone()
+        run = merge_agent_run(
+            agent_run_from_row(dict(row)) if row is not None else None,
+            bundle.run,
+        )
+        turns = list(bundle.turns)
+        if turns:
+            placeholders = ",".join("?" for _ in turns)
+            rows = self._conn.execute(
+                f"SELECT * FROM agent_turns WHERE tenant_id=? AND run_id=? "
+                f"AND turn_id IN ({placeholders})",  # nosec B608
+                (tenant_id, bundle.run.run_id, *(turn.turn_id for turn in turns)),
+            ).fetchall()
+            current_turns = {
+                row["turn_id"]: agent_turn_from_row(dict(row)) for row in rows
+            }
+            turns = [
+                merge_agent_turn(current_turns.get(turn.turn_id), turn)
+                for turn in turns
+            ]
+        events = list(bundle.events)
+        if events:
+            placeholders = ",".join("?" for _ in events)
+            rows = self._conn.execute(
+                f"SELECT * FROM agent_events WHERE tenant_id=? AND run_id=? "
+                f"AND event_id IN ({placeholders})",  # nosec B608
+                (tenant_id, bundle.run.run_id, *(event.event_id for event in events)),
+            ).fetchall()
+            current_events = {
+                row["event_id"]: agent_event_from_row(dict(row)) for row in rows
+            }
+            events = [
+                merge_agent_event(current_events.get(event.event_id), event)
+                for event in events
+            ]
+        now = _iso(datetime.now(timezone.utc))
+        self._conn.execute(
+            """INSERT INTO import_sources (
+                tenant_id, source_session_id, source_kind, source_locator_hash,
+                started_at, observed_at, ended_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(tenant_id, source_session_id) DO UPDATE SET
+                source_kind=excluded.source_kind,
+                source_locator_hash=excluded.source_locator_hash,
+                started_at=excluded.started_at,
+                observed_at=excluded.observed_at,
+                ended_at=excluded.ended_at""",
+            (
+                source.tenant_id,
+                source.source_session_id,
+                source.source_kind,
+                source.source_locator_hash,
+                _iso(source.started_at),
+                _iso(source.observed_at),
+                _iso(source.ended_at),
+            ),
+        )
+        self._conn.execute(
+            """INSERT INTO agent_runs (
+                tenant_id, run_id, source_session_id, started_at, ended_at,
+                status, agent_name, agent_version, configuration_fingerprint,
+                session_id, parent_run_id, service_name, environment, instance_id,
+                updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(tenant_id, run_id) DO UPDATE SET
+                source_session_id=excluded.source_session_id,
+                started_at=excluded.started_at,
+                ended_at=excluded.ended_at,
+                status=excluded.status,
+                agent_name=excluded.agent_name,
+                agent_version=excluded.agent_version,
+                configuration_fingerprint=excluded.configuration_fingerprint,
+                session_id=excluded.session_id,
+                parent_run_id=excluded.parent_run_id,
+                service_name=excluded.service_name,
+                environment=excluded.environment,
+                instance_id=excluded.instance_id,
+                updated_at=excluded.updated_at""",
+            (
+                run.tenant_id,
+                run.run_id,
+                run.source_session_id,
+                _iso(run.started_at),
+                _iso(run.ended_at),
+                run.status.value,
+                run.agent_name,
+                run.agent_version,
+                run.configuration_fingerprint,
+                run.session_id,
+                run.parent_run_id,
+                run.service_name,
+                run.environment,
+                run.instance_id,
+                now,
+            ),
+        )
+        self._conn.executemany(
+            """INSERT INTO agent_turns (
+                tenant_id, turn_id, run_id, sequence, started_at, ended_at,
+                status, user_request_redacted, final_response_redacted,
+                request_state, response_state
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(tenant_id, run_id, turn_id) DO UPDATE SET
+                ended_at=excluded.ended_at,
+                status=excluded.status,
+                user_request_redacted=excluded.user_request_redacted,
+                final_response_redacted=excluded.final_response_redacted,
+                request_state=excluded.request_state,
+                response_state=excluded.response_state""",
+            [
+                (
+                    run.tenant_id,
+                    turn.turn_id,
+                    turn.run_id,
+                    turn.sequence,
+                    _iso(turn.started_at),
+                    _iso(turn.ended_at),
+                    turn.status.value,
+                    turn.user_request_redacted,
+                    turn.final_response_redacted,
+                    turn.request_state.value,
+                    turn.response_state.value,
+                )
+                for turn in turns
+            ],
+        )
+        turn_run_ids = {turn.turn_id: turn.run_id for turn in turns}
+        self._conn.executemany(
+            """INSERT INTO agent_events (
+                tenant_id, event_id, run_id, turn_id, sequence, occurred_at,
+                event_type, status, provenance, attributes_json,
+                privacy_classification, omission_reason, trace_id,
+                producer_id, producer_sequence, parent_event_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(tenant_id, run_id, event_id) DO UPDATE SET
+                status=excluded.status,
+                attributes_json=excluded.attributes_json,
+                privacy_classification=excluded.privacy_classification,
+                omission_reason=excluded.omission_reason,
+                trace_id=excluded.trace_id,
+                producer_id=excluded.producer_id,
+                producer_sequence=excluded.producer_sequence,
+                parent_event_id=excluded.parent_event_id""",
+            [
+                (
+                    run.tenant_id,
+                    event.event_id,
+                    turn_run_ids[event.turn_id],
+                    event.turn_id,
+                    event.sequence,
+                    _iso(event.occurred_at),
+                    event.event_type.value,
+                    event.status.value,
+                    event.provenance,
+                    json.dumps(
+                        event.attributes,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                    event.privacy_classification.value,
+                    event.omission_reason,
+                    event.trace_id,
+                    event.producer_id,
+                    event.producer_sequence,
+                    event.parent_event_id,
+                )
+                for event in events
+            ],
+        )
+
+    def _read_normalized_bundles(
+        self,
+        tenant_id: str,
+        run_ids: tuple[str, ...],
+    ) -> list[AgentRunBundle]:
+        if not run_ids:
+            return []
+        placeholders = ",".join("?" for _ in run_ids)
+        params = (tenant_id, *run_ids)
+        run_rows = self._conn.execute(
+            f"""SELECT r.*,
+                       s.source_kind AS source_kind,
+                       s.source_locator_hash AS source_locator_hash,
+                       s.started_at AS source_started_at,
+                       s.observed_at AS source_observed_at,
+                       s.ended_at AS source_ended_at
+                FROM agent_runs r
+                JOIN import_sources s
+                  ON s.tenant_id=r.tenant_id
+                 AND s.source_session_id=r.source_session_id
+                WHERE r.tenant_id=? AND r.run_id IN ({placeholders})""",
+            params,
+        ).fetchall()
+        turn_rows = self._conn.execute(
+            f"""SELECT * FROM agent_turns
+                WHERE tenant_id=? AND run_id IN ({placeholders})
+                ORDER BY run_id,sequence,turn_id""",
+            params,
+        ).fetchall()
+        event_rows = self._conn.execute(
+            f"""SELECT * FROM agent_events
+                WHERE tenant_id=? AND run_id IN ({placeholders})
+                ORDER BY run_id,turn_id,sequence,event_id""",
+            params,
+        ).fetchall()
+        turns_by_run: dict[str, list[dict[str, object]]] = {}
+        for row in turn_rows:
+            turns_by_run.setdefault(row["run_id"], []).append(dict(row))
+        events_by_run: dict[str, list[dict[str, object]]] = {}
+        for row in event_rows:
+            events_by_run.setdefault(row["run_id"], []).append(dict(row))
+        by_id: dict[str, AgentRunBundle] = {}
+        for row in run_rows:
+            run = dict(row)
+            source = {
+                "tenant_id": row["tenant_id"],
+                "source_session_id": row["source_session_id"],
+                "source_kind": row["source_kind"],
+                "source_locator_hash": row["source_locator_hash"],
+                "started_at": row["source_started_at"],
+                "observed_at": row["source_observed_at"],
+                "ended_at": row["source_ended_at"],
+            }
+            run_id = row["run_id"]
+            by_id[run_id] = bundle_from_normalized_rows(
+                source,
+                run,
+                turns_by_run.get(run_id, ()),
+                events_by_run.get(run_id, ()),
+            )
+        return [by_id[run_id] for run_id in run_ids if run_id in by_id]
 
     # -- Traces ------------------------------------------------------------
 
@@ -724,44 +1136,71 @@ class SQLiteStorage:
             analysis_raw_messages_state=row["analysis_raw_messages_state"],
         )
 
-    def replace_agent_run_bundle(self, bundle: AgentRunBundle) -> None:
+    def replace_agent_capture(
+        self,
+        bundle: AgentRunBundle,
+        traces: tuple[Trace, ...] = (),
+    ) -> None:
         sanitized = sanitize_agent_run_bundle(bundle)
-        payload = agent_run_bundle_to_json(sanitized)
         with self._lock:
-            self._conn.execute(
-                """INSERT INTO agent_run_bundles (
-                    tenant_id, run_id, source_session_id, source_kind,
-                    started_at, ended_at, status, content_hash, payload_json, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(tenant_id, run_id) DO UPDATE SET
-                    source_session_id=excluded.source_session_id,
-                    source_kind=excluded.source_kind,
-                    started_at=excluded.started_at,
-                    ended_at=excluded.ended_at,
-                    status=excluded.status,
-                    content_hash=excluded.content_hash,
-                    payload_json=excluded.payload_json,
-                    updated_at=excluded.updated_at""",
-                (
-                    sanitized.run.tenant_id,
-                    sanitized.run.run_id,
-                    sanitized.session.source_session_id,
-                    sanitized.session.source_kind,
-                    _iso(sanitized.run.started_at),
-                    _iso(sanitized.run.ended_at),
-                    sanitized.run.status.value,
-                    sanitized.content_hash,
-                    payload,
-                    _iso(datetime.now(timezone.utc)),
-                ),
-            )
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                prepared_traces = []
+                seen_trace_ids: set[str] = set()
+                linked_trace_ids = {
+                    event.trace_id for event in sanitized.events if event.trace_id is not None
+                }
+                for trace in traces:
+                    if trace.trace_id in seen_trace_ids:
+                        raise ValueError("agent capture contains duplicate trace_id")
+                    seen_trace_ids.add(trace.trace_id)
+                    if trace.tenant_id != sanitized.run.tenant_id:
+                        raise ValueError(
+                            "agent capture Trace tenant must match the Agent Run tenant"
+                        )
+                    if trace.trace_id not in linked_trace_ids:
+                        raise ValueError("agent capture contains an unlinked Trace")
+                    sanitize_trace(trace)
+                    populate_trace_analysis_fields(trace)
+                    row = self._conn.execute(
+                        "SELECT * FROM traces WHERE trace_id=?", (trace.trace_id,)
+                    ).fetchone()
+                    prepared_traces.append(
+                        merge_capture_trace(self._row_to_trace(row) if row else None, trace)
+                    )
+                for trace in prepared_traces:
+                    self.insert_trace(trace)
+                    if trace.raw_messages is not None:
+                        self._conn.execute(
+                            "UPDATE traces SET raw_messages_json=? "
+                            "WHERE trace_id=? AND raw_messages_json IS NULL",
+                            (json.dumps(trace.raw_messages), trace.trace_id),
+                        )
+                linked_ids = tuple(
+                    event.trace_id for event in sanitized.events if event.trace_id is not None
+                )
+                if linked_ids:
+                    placeholders = ",".join("?" for _ in linked_ids)
+                    rows = self._conn.execute(
+                        f"SELECT trace_id,tenant_id FROM traces WHERE trace_id IN ({placeholders})",
+                        linked_ids,
+                    ).fetchall()
+                    tenants = {row["trace_id"]: row["tenant_id"] for row in rows}
+                    if any(
+                        tenants.get(trace_id) != sanitized.run.tenant_id for trace_id in linked_ids
+                    ):
+                        raise ValueError("model-call event requires a same-tenant Trace")
+                self._write_normalized_bundle(sanitized)
+                self._conn.commit()
+            except sqlite3.IntegrityError as exc:
+                self._conn.rollback()
+                raise ValueError("agent capture conflicts with existing evidence") from exc
+            except BaseException:
+                self._conn.rollback()
+                raise
 
-    @staticmethod
-    def _row_to_agent_run_bundle(row: sqlite3.Row) -> AgentRunBundle:
-        bundle = agent_run_bundle_from_json(row["payload_json"])
-        if bundle.content_hash != row["content_hash"]:
-            raise RuntimeError("stored agent run bundle content hash is inconsistent")
-        return bundle
+    def replace_agent_run_bundle(self, bundle: AgentRunBundle) -> None:
+        self.replace_agent_capture(bundle)
 
     def get_agent_run_bundle(
         self,
@@ -771,12 +1210,8 @@ class SQLiteStorage:
         _validate_agent_bundle_query(tenant_id, 1)
         _validate_agent_bundle_run_id(run_id)
         with self._lock:
-            row = self._conn.execute(
-                """SELECT payload_json, content_hash FROM agent_run_bundles
-                   WHERE tenant_id=? AND run_id=?""",
-                (tenant_id, run_id),
-            ).fetchone()
-        return self._row_to_agent_run_bundle(row) if row is not None else None
+            bundles = self._read_normalized_bundles(tenant_id, (run_id,))
+        return bundles[0] if bundles else None
 
     def list_agent_run_bundles(
         self,
@@ -787,11 +1222,14 @@ class SQLiteStorage:
         _validate_agent_bundle_query(tenant_id, limit)
         with self._lock:
             rows = self._conn.execute(
-                """SELECT payload_json, content_hash FROM agent_run_bundles
+                """SELECT run_id FROM agent_runs
                    WHERE tenant_id=? ORDER BY started_at DESC, run_id DESC LIMIT ?""",
                 (tenant_id, limit),
             ).fetchall()
-        return [self._row_to_agent_run_bundle(row) for row in rows]
+            return self._read_normalized_bundles(
+                tenant_id,
+                tuple(row["run_id"] for row in rows),
+            )
 
     def has_agent_run_source_kind(self, tenant_id: str, source_kind: str) -> bool:
         _validate_agent_bundle_query(tenant_id, 1)
@@ -799,9 +1237,10 @@ class SQLiteStorage:
             raise ValueError("invalid source kind")
         with self._lock:
             row = self._conn.execute(
-                """SELECT 1 FROM agent_run_bundles WHERE tenant_id=?
-                   AND json_valid(payload_json)
-                   AND json_extract(payload_json,'$.session.source_kind')=? LIMIT 1""",
+                """SELECT 1 FROM agent_runs r JOIN import_sources s
+                   ON s.tenant_id=r.tenant_id
+                  AND s.source_session_id=r.source_session_id
+                   WHERE r.tenant_id=? AND s.source_kind=? LIMIT 1""",
                 (tenant_id, source_kind),
             ).fetchone()
         return row is not None
@@ -822,8 +1261,11 @@ class SQLiteStorage:
                    WHERE tenant_id=? AND scope_key=? AND analyzer_version=?
                      AND input_fingerprint=? AND status=?""",
                 (
-                    run.tenant_id, run.scope_key, run.analyzer_version,
-                    run.input_fingerprint, run.status.value,
+                    run.tenant_id,
+                    run.scope_key,
+                    run.analyzer_version,
+                    run.input_fingerprint,
+                    run.status.value,
                 ),
             ).fetchone()
             if prior is not None:
@@ -837,14 +1279,22 @@ class SQLiteStorage:
                        analyzer_version,input_fingerprint,payload_json
                    ) VALUES (?,?,?,?,?,?,?,?,?)""",
                 (
-                    run.analysis_id, run.tenant_id, run.scope_key, _iso(run.cutoff),
-                    _iso(run.completed_at), run.status.value, run.analyzer_version,
-                    run.input_fingerprint, payload,
+                    run.analysis_id,
+                    run.tenant_id,
+                    run.scope_key,
+                    _iso(run.cutoff),
+                    _iso(run.completed_at),
+                    run.status.value,
+                    run.analyzer_version,
+                    run.input_fingerprint,
+                    payload,
                 ),
             )
 
     def get_latest_deterministic_analysis_run(
-        self, tenant_id: str, scope_key: str,
+        self,
+        tenant_id: str,
+        scope_key: str,
     ) -> DeterministicAnalysisRun | None:
         with self._lock:
             row = self._conn.execute(
@@ -856,7 +1306,8 @@ class SQLiteStorage:
         return analysis_run_from_json(row["payload_json"]) if row is not None else None
 
     def save_notification_delivery_attempt(
-        self, attempt: NotificationDeliveryAttempt,
+        self,
+        attempt: NotificationDeliveryAttempt,
     ) -> None:
         payload = notification_attempt_to_json(attempt)
         with self._lock:
@@ -874,9 +1325,13 @@ class SQLiteStorage:
                        attempted_at,outcome,payload_json
                    ) VALUES (?,?,?,?,?,?,?)""",
                 (
-                    attempt.attempt_id, attempt.notification_id, attempt.tenant_id,
-                    attempt.destination_fingerprint, _iso(attempt.attempted_at),
-                    attempt.outcome.value, payload,
+                    attempt.attempt_id,
+                    attempt.notification_id,
+                    attempt.tenant_id,
+                    attempt.destination_fingerprint,
+                    _iso(attempt.attempted_at),
+                    attempt.outcome.value,
+                    payload,
                 ),
             )
 
@@ -898,7 +1353,9 @@ class SQLiteStorage:
         return [notification_attempt_from_json(row["payload_json"]) for row in rows]
 
     def notification_was_delivered(
-        self, notification_id: str, destination_fingerprint: str,
+        self,
+        notification_id: str,
+        destination_fingerprint: str,
     ) -> bool:
         validate_delivery_query(notification_id, destination_fingerprint, 1)
         with self._lock:
@@ -911,7 +1368,10 @@ class SQLiteStorage:
         return row is not None
 
     def list_notification_delivery_attempts_for_tenant(
-        self, tenant_id: str, *, limit: int = 100,
+        self,
+        tenant_id: str,
+        *,
+        limit: int = 100,
     ) -> list[NotificationDeliveryAttempt]:
         _validate_agent_bundle_query(tenant_id, limit)
         with self._lock:
@@ -992,15 +1452,15 @@ class SQLiteStorage:
             self._conn.execute("BEGIN IMMEDIATE")
             try:
                 current = self._conn.execute(
-                    "SELECT policy_id FROM monitor_policies "
-                    "WHERE scope_key=? AND state='active'", (scope_key,),
+                    "SELECT policy_id FROM monitor_policies WHERE scope_key=? AND state='active'",
+                    (scope_key,),
                 ).fetchone()
                 current_id = current["policy_id"] if current else None
                 if current_id != expected_active_policy_id:
                     raise ValueError("active policy changed")
                 target = self._conn.execute(
-                    "SELECT payload_json FROM monitor_policies "
-                    "WHERE scope_key=? AND policy_id=?", (scope_key, policy_id),
+                    "SELECT payload_json FROM monitor_policies WHERE scope_key=? AND policy_id=?",
+                    (scope_key, policy_id),
                 ).fetchone()
                 if target is None:
                     raise ValueError("unknown monitor policy")
@@ -1167,6 +1627,10 @@ class SQLiteStorage:
             try:
                 self._conn.execute("DELETE FROM judgments WHERE trace_id = ?", (trace_id,))
                 self._conn.execute("DELETE FROM user_signals WHERE trace_id = ?", (trace_id,))
+                self._conn.execute(
+                    "UPDATE agent_events SET trace_id = NULL WHERE trace_id = ?",
+                    (trace_id,),
+                )
                 self._conn.execute("DELETE FROM traces WHERE trace_id = ?", (trace_id,))
                 self._conn.execute(
                     """DELETE FROM spans
@@ -1204,6 +1668,10 @@ class SQLiteStorage:
                 for tid in ids:
                     self._conn.execute("DELETE FROM judgments WHERE trace_id = ?", (tid,))
                     self._conn.execute("DELETE FROM user_signals WHERE trace_id = ?", (tid,))
+                    self._conn.execute(
+                        "UPDATE agent_events SET trace_id = NULL WHERE trace_id = ?",
+                        (tid,),
+                    )
                 self._conn.execute("DELETE FROM traces WHERE started_at < ?", (cutoff_iso,))
                 for tid in ids:
                     self._conn.execute(

@@ -31,6 +31,7 @@ from urllib.parse import urlsplit
 from verdict.analysis import analyze_agent_run
 from verdict.analysis_records import analysis_run_from_json
 from verdict.cluster_health import UNCLUSTERED_ID, assess_cluster_health
+from verdict.dashboard import agent_evidence_queries
 from verdict.dashboard.analysis_service import read_latest_analysis, run_analysis
 from verdict.dashboard.query import PostgresSession as _PostgresSession
 from verdict.dashboard.query import QuerySession as _QuerySession
@@ -44,8 +45,8 @@ from verdict.dashboard.registry import (
     build_registry_bundle as _build_registry_bundle,
 )
 from verdict.dashboard.storage_url import is_postgres_storage
-from verdict.evidence import agent_run_bundle_from_json
 from verdict.metrics import ScoreCounts, verdict_label
+from verdict.normalized_evidence import normalized_bundle_digest
 from verdict.redaction import redact, redact_structure
 from verdict.trace_facts import deterministic_trace_facts
 
@@ -172,6 +173,12 @@ def _json_value(raw: object, default):
         return json.loads(raw) if isinstance(raw, str) else deepcopy(raw)
     except (TypeError, json.JSONDecodeError):
         return default
+
+
+def _dashboard_time(value: object) -> str | None:
+    if value is None:
+        return None
+    return value.isoformat() if isinstance(value, datetime) else str(value)
 
 
 def _json_column(row: Mapping[str, Any], name: str, default):
@@ -538,37 +545,25 @@ def build_agent_runs_bundle(
     configured = str(storage)
 
     def builder(session: _QuerySession) -> dict:
-        if not session.table_exists("agent_run_bundles"):
+        if not agent_evidence_queries.available(session):
             return {"summary": {"available": 0, "shown": 0}, "runs": []}
         selected_run_ids = run_ids or ((run_id,) if run_id is not None else None)
         if selected_run_ids is None:
-            count = session.execute(
-                "SELECT COUNT(*) AS count FROM agent_run_bundles WHERE tenant_id=?", (tenant,)
-            ).fetchone()
-            rows = session.execute(
-                "SELECT payload_json FROM agent_run_bundles WHERE tenant_id=? "
-                "ORDER BY started_at DESC, run_id DESC LIMIT ?", (tenant, limit),
-            )
+            available_runs = agent_evidence_queries.count_runs(session, tenant)
         else:
             placeholders = ",".join("?" for _ in selected_run_ids)
-            parameters = (tenant, *selected_run_ids)
             count = session.execute(
-                "SELECT COUNT(*) AS count FROM agent_run_bundles "
+                "SELECT COUNT(*) AS count FROM agent_runs "
                 f"WHERE tenant_id=? AND run_id IN ({placeholders})",  # nosec B608
-                parameters,
+                (tenant, *selected_run_ids),
             ).fetchone()
-            rows = session.execute(
-                "SELECT payload_json FROM agent_run_bundles "
-                f"WHERE tenant_id=? AND run_id IN ({placeholders}) "  # nosec B608
-                "ORDER BY started_at DESC, run_id DESC",
-                parameters,
-            )
+            available_runs = int(count["count"] if count else 0)
+        bundles = agent_evidence_queries.load_bundles(
+            session, tenant, limit=limit, run_ids=selected_run_ids,
+        )
         runs = []
-        for row in rows:
-            raw = row["payload_json"]
-            if isinstance(raw, dict):
-                raw = json.dumps(raw, sort_keys=True, separators=(",", ":"))
-            bundle = agent_run_bundle_from_json(raw)
+        linked_trace_ids: dict[str, set[str]] = defaultdict(set)
+        for bundle in bundles:
             analysis = analyze_agent_run(bundle)
             turn_outcomes = Counter(turn.status.value for turn in bundle.turns)
             finding_severity = Counter(finding.severity for finding in analysis.findings)
@@ -578,7 +573,13 @@ def build_agent_runs_bundle(
                 "startedAt": bundle.run.started_at.isoformat(),
                 "status": bundle.run.status.value,
                 "sourceOutcome": bundle.run.status.value,
+                "agentName": bundle.run.agent_name or None,
                 "agentVersion": bundle.run.agent_version or None,
+                "serviceName": bundle.run.service_name or None,
+                "environment": bundle.run.environment or None,
+                "instanceId": bundle.run.instance_id or None,
+                "sessionId": bundle.run.session_id,
+                "parentRunId": bundle.run.parent_run_id,
                 "turnCount": len(bundle.turns),
                 "eventCount": len(bundle.events),
                 "metrics": analysis.metrics,
@@ -592,35 +593,22 @@ def build_agent_runs_bundle(
                     "judgeUsed": finding.judge_used,
                 } for finding in analysis.findings],
             })
+            linked_trace_ids[bundle.run.run_id].update(
+                event.trace_id for event in bundle.events if event.trace_id is not None
+            )
         runs_by_id = {run["runId"]: run for run in runs}
-        linked_trace_ids: dict[str, set[str]] = defaultdict(set)
-        trace_scan_complete = True
-        trace_ids: set[str] = set()
-        if runs and session.table_exists("traces"):
-            columns = session.columns("traces")
-            tags_column = "tags_json" if "tags_json" in columns else "tags" if "tags" in columns else None
-            if tags_column is not None:
-                trace_rows = list(session.execute(
-                    f"SELECT trace_id,{tags_column} AS tags FROM traces "  # nosec B608
-                    "WHERE tenant_id=? ORDER BY trace_id LIMIT 100001",
-                    (tenant,),
-                ))
-                trace_scan_complete = len(trace_rows) <= 100_000
-                for trace in trace_rows[:100_000]:
-                    tags = _json_value(trace["tags"], {})
-                    linked_run_id = tags.get("verdict.agent_run_id") if isinstance(tags, dict) else None
-                    if linked_run_id in runs_by_id:
-                        linked_trace_ids[linked_run_id].add(trace["trace_id"])
-                        trace_ids.add(trace["trace_id"])
         latest_judgment_status: dict[str, tuple[tuple[str, str], str]] = {}
-        if evaluator_fingerprint is not None and trace_ids and session.table_exists("judgments"):
+        if evaluator_fingerprint is not None and runs and session.table_exists("judgments"):
+            placeholders = ",".join("?" for _ in runs_by_id)
             for judgment in session.execute(
-                """SELECT trace_id,status,created_at,judgment_id FROM judgments
-                   WHERE evaluator_fingerprint=? ORDER BY created_at,judgment_id""",
-                (evaluator_fingerprint,),
+                """SELECT j.trace_id,j.status,j.created_at,j.judgment_id
+                   FROM judgments j JOIN agent_events e ON e.trace_id=j.trace_id
+                   WHERE e.tenant_id=? AND e.run_id IN ("""
+                + placeholders
+                + ") AND j.evaluator_fingerprint=? "
+                "ORDER BY j.created_at,j.judgment_id",  # nosec B608
+                (tenant, *runs_by_id, evaluator_fingerprint),
             ):
-                if judgment["trace_id"] not in trace_ids:
-                    continue
                 key = (judgment["created_at"] or "", judgment["judgment_id"] or "")
                 current = latest_judgment_status.get(judgment["trace_id"])
                 if current is None or key > current[0]:
@@ -644,9 +632,9 @@ def build_agent_runs_bundle(
                 "judged": completed,
                 "judgeErrors": errors,
                 "notJudged": len(linked) - completed - errors,
-                "complete": trace_scan_complete,
+                "complete": True,
             }
-        result = {"summary": {"available": int(count["count"] if count else 0),
+        result = {"summary": {"available": available_runs,
                               "shown": len(runs)}, "runs": runs}
         if selected_run_ids is not None:
             result["filter"] = {
@@ -719,37 +707,26 @@ def build_agent_run_detail(
     configured = str(storage)
 
     def builder(session: _QuerySession) -> dict:
-        if not session.table_exists("agent_run_bundles"):
+        page = agent_evidence_queries.load_run_page(
+            session, tenant, run_id,
+            event_limit=event_limit, event_offset=event_offset,
+            turn_limit=turn_limit, turn_offset=turn_offset, event_id=event_id,
+        )
+        if page is None:
             raise KeyError(run_id)
-        row = session.execute(
-            "SELECT payload_json FROM agent_run_bundles WHERE tenant_id=? AND run_id=?",
-            (tenant, run_id),
-        ).fetchone()
-        if row is None:
-            raise KeyError(run_id)
-        raw = row["payload_json"]
-        if isinstance(raw, dict):
-            raw = json.dumps(raw, sort_keys=True, separators=(",", ":"))
-        bundle = agent_run_bundle_from_json(raw)
-        available = len(bundle.events)
-        resolved_event_offset = event_offset
-        if event_id is not None:
-            matching_index = next(
-                (index for index, event in enumerate(bundle.events) if event.event_id == event_id),
-                None,
-            )
-            if matching_index is None:
-                raise KeyError(event_id)
-            resolved_event_offset = (matching_index // event_limit) * event_limit
-        shown = bundle.events[resolved_event_offset:resolved_event_offset + event_limit]
-        shown_turns = bundle.turns[turn_offset:turn_offset + turn_limit]
+        run = page["run"]
+        shown = page["events"]
+        shown_turns = page["turns"]
+        available = page["eventCount"]
+        available_turns = page["turnCount"]
+        resolved_event_offset = page["eventOffset"]
         judgment_summaries: dict[str, dict[str, object]] = {}
         if session.table_exists("judgments"):
             columns = session.columns("judgments")
             dimensions_column = (
                 "dimensions_json" if "dimensions_json" in columns else "dimensions"
             )
-            for trace_id in {event.trace_id for event in shown if event.trace_id}:
+            for trace_id in {event["trace_id"] for event in shown if event["trace_id"]}:
                 judgment = session.execute(
                     f"SELECT judgment_id,evaluator_fingerprint,status,{dimensions_column} AS dimensions "  # nosec B608 -- schema-selected identifier
                     "FROM judgments WHERE trace_id=? ORDER BY created_at DESC,judgment_id DESC LIMIT 1",
@@ -778,39 +755,51 @@ def build_agent_run_detail(
                     "dimensions": safe_dimensions,
                 }
         return {
-            "runId": bundle.run.run_id,
+            "runId": run["run_id"],
             "focusEventId": event_id,
-            "sourceKind": bundle.session.source_kind,
-            "startedAt": bundle.run.started_at.isoformat(),
-            "endedAt": bundle.run.ended_at.isoformat() if bundle.run.ended_at else None,
-            "status": bundle.run.status.value,
+            "sourceKind": run["source_kind"],
+            "startedAt": _dashboard_time(run["started_at"]),
+            "endedAt": _dashboard_time(run["ended_at"]),
+            "status": run["status"],
+            "agentName": run["agent_name"] or None,
+            "agentVersion": run["agent_version"] or None,
+            "serviceName": run["service_name"] or None,
+            "environment": run["environment"] or None,
+            "instanceId": run["instance_id"] or None,
+            "sessionId": run["session_id"],
+            "parentRunId": run["parent_run_id"],
+            "producerCount": page["producerCount"],
             "turns": [{
-                "turnId": turn.turn_id, "sequence": turn.sequence,
-                "startedAt": turn.started_at.isoformat(), "status": turn.status.value,
-                "requestState": turn.request_state.value,
-                "responseState": turn.response_state.value,
-                "request": turn.user_request_redacted,
-                "response": turn.final_response_redacted,
+                "turnId": turn["turn_id"], "sequence": turn["sequence"],
+                "startedAt": _dashboard_time(turn["started_at"]),
+                "status": turn["status"],
+                "requestState": turn["request_state"],
+                "responseState": turn["response_state"],
+                "request": turn["user_request_redacted"],
+                "response": turn["final_response_redacted"],
             } for turn in shown_turns],
             "turnPage": {
-                "available": len(bundle.turns), "shown": len(shown_turns),
+                "available": available_turns, "shown": len(shown_turns),
                 "offset": turn_offset, "limit": turn_limit,
-                "truncated": turn_offset + len(shown_turns) < len(bundle.turns),
+                "truncated": turn_offset + len(shown_turns) < available_turns,
             },
             "events": [{
-                "eventId": event.event_id,
-                "turnId": event.turn_id,
-                "sequence": event.sequence,
+                "eventId": event["event_id"],
+                "turnId": event["turn_id"],
+                "sequence": event["sequence"],
                 "timelineIndex": resolved_event_offset + index,
-                "occurredAt": event.occurred_at.isoformat(),
-                "type": event.event_type.value,
-                "status": event.status.value,
-                "provenance": event.provenance,
-                "privacy": event.privacy_classification.value,
-                "omissionReason": event.omission_reason,
-                "traceId": event.trace_id,
-                "judgment": judgment_summaries.get(event.trace_id),
-                "attributes": event.attributes,
+                "occurredAt": _dashboard_time(event["occurred_at"]),
+                "type": event["event_type"],
+                "status": event["status"],
+                "provenance": event["provenance"],
+                "privacy": event["privacy_classification"],
+                "omissionReason": event["omission_reason"],
+                "traceId": event["trace_id"],
+                "producerId": event["producer_id"] or None,
+                "producerSequence": event["producer_sequence"],
+                "parentEventId": event["parent_event_id"],
+                "judgment": judgment_summaries.get(event["trace_id"]),
+                "attributes": _json_value(event["attributes_json"], {}),
             } for index, event in enumerate(shown)],
             "page": {
                 "available": available,
@@ -867,18 +856,11 @@ def build_agent_insights_bundle(
     configured = str(storage)
 
     def builder(session: _QuerySession) -> dict:
-        if not session.table_exists("agent_run_bundles"):
+        if not agent_evidence_queries.available(session):
             return _empty_agent_insights()
-        count_row = session.execute(
-            "SELECT COUNT(*) AS count FROM agent_run_bundles WHERE tenant_id=?", (tenant,)
-        ).fetchone()
-        available = int(count_row["count"] if count_row else 0)
+        available = agent_evidence_queries.count_runs(session, tenant)
         input_hasher = hashlib.sha256()
-        rows = session.execute(
-            "SELECT payload_json FROM agent_run_bundles WHERE tenant_id=? "
-            "ORDER BY started_at ASC, run_id ASC LIMIT ?",
-            (tenant, scan_limit),
-        )
+        bundles = agent_evidence_queries.iter_bundles(session, tenant, limit=scan_limit)
         event_types: Counter[str] = Counter()
         event_statuses: Counter[str] = Counter()
         run_outcomes: Counter[str] = Counter()
@@ -1005,12 +987,8 @@ def build_agent_insights_bundle(
                     behavior["hedges"] += int(facts["hedge_phrases"] or 0)
                     behavior["valid_json"] += int(facts["valid_json"])
         analyzed = 0
-        for row in rows:
-            raw = row["payload_json"]
-            if isinstance(raw, dict):
-                raw = json.dumps(raw, sort_keys=True, separators=(",", ":"))
-            input_hasher.update(raw.encode("utf-8"))
-            bundle = agent_run_bundle_from_json(raw)
+        for bundle in bundles:
+            input_hasher.update(normalized_bundle_digest(bundle).encode("ascii"))
             analyzed += 1
             analysis = analyze_agent_run(bundle)
             source = bundle.session.source_kind
@@ -1379,41 +1357,7 @@ def _cluster_health(cluster_ids: list[str | None], min_sample_size: int = 30) ->
 
 
 def _agent_run_metadata(cur: _QuerySession, tenant: str) -> dict[str, Any]:
-    if not cur.table_exists("agent_run_bundles"):
-        return {
-            "available": 0, "sources": [], "sourcesTruncated": False,
-            "lastCapturedAt": None,
-        }
-    count = cur.execute(
-        "SELECT COUNT(*) AS count FROM agent_run_bundles WHERE tenant_id=?", (tenant,)
-    ).fetchone()
-    rows = cur.execute(
-        "SELECT source_kind, COUNT(*) AS count FROM agent_run_bundles "
-        "WHERE tenant_id=? GROUP BY source_kind ORDER BY source_kind LIMIT 16",
-        (tenant,),
-    )
-    sources = [
-        {"sourceKind": row["source_kind"], "runs": int(row["count"])}
-        for row in rows
-    ]
-    source_count = cur.execute(
-        "SELECT COUNT(DISTINCT source_kind) AS count FROM agent_run_bundles "
-        "WHERE tenant_id=?", (tenant,),
-    ).fetchone()
-    last = cur.execute(
-        "SELECT MAX(started_at) AS newest_started_at FROM agent_run_bundles "
-        "WHERE tenant_id=?",
-        (tenant,),
-    ).fetchone()
-    newest_started_at = last["newest_started_at"] if last else None
-    if isinstance(newest_started_at, datetime):
-        newest_started_at = newest_started_at.isoformat()
-    return {
-        "available": int(count["count"] if count else 0),
-        "sources": sources,
-        "sourcesTruncated": int(source_count["count"] if source_count else 0) > len(sources),
-        "lastCapturedAt": newest_started_at,
-    }
+    return agent_evidence_queries.source_metadata(cur, tenant)
 
 
 def _empty_bundle(*, agent_runs: dict[str, Any] | None = None) -> dict:

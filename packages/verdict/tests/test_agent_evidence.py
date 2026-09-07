@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timezone
 
 import pytest
@@ -83,6 +84,40 @@ def test_bundle_round_trip_revalidates_canonical_storage_shape() -> None:
 
     assert loaded == original
     assert loaded.content_hash == original.content_hash
+
+
+def test_bundle_round_trip_preserves_distributed_agent_correlation() -> None:
+    original = _bundle()
+    enriched = replace(
+        original,
+        run=replace(
+            original.run,
+            session_id="conversation-1",
+            parent_run_id="parent-run",
+            service_name="support-service",
+            environment="production",
+            instance_id="worker-3",
+        ),
+        events=(
+            replace(
+                original.events[0],
+                producer_id="worker-3",
+                producer_sequence=9,
+                parent_event_id="parent-event",
+            ),
+        ),
+    )
+
+    assert agent_run_bundle_from_json(agent_run_bundle_to_json(enriched)) == enriched
+
+
+def test_agent_event_producer_sequence_is_storage_portable() -> None:
+    event = _bundle().events[0]
+
+    with pytest.raises(ValueError, match="producer_sequence"):
+        replace(event, producer_sequence=-1)
+    with pytest.raises(ValueError, match="producer_sequence"):
+        replace(event, producer_sequence=2**63)
 
 
 def test_bundle_reader_rejects_unknown_persisted_fields() -> None:

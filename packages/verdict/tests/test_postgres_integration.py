@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -353,9 +354,238 @@ def test_live_postgres_agent_run_bundle_is_atomic_redacted_and_tenant_scoped():
         assert storage.list_agent_run_bundles(tenant, limit=10) == [loaded]
         assert storage.has_agent_run_source_kind(tenant, "unknown-agent") is True
         assert storage.has_agent_run_source_kind(tenant, "codex") is False
+        assert storage._fetchone(
+            "SELECT 1 FROM agent_run_bundles WHERE tenant_id=%s", (tenant,)
+        ) is None
     finally:
-        storage._exec("DELETE FROM agent_run_bundles WHERE tenant_id = %s", (tenant,))
+        storage._exec("DELETE FROM agent_runs WHERE tenant_id = %s", (tenant,))
+        storage._exec("DELETE FROM import_sources WHERE tenant_id = %s", (tenant,))
         storage.close()
+
+
+def test_live_postgres_serializes_concurrent_fresh_schema_initialization():
+    with isolated_test_dsn(DSN) as scoped_dsn:
+        barrier = threading.Barrier(6)
+
+        def initialize(_index: int) -> None:
+            barrier.wait()
+            storage = PostgresStorage(scoped_dsn, min_pool=1, max_pool=1)
+            storage.close()
+
+        with ThreadPoolExecutor(max_workers=6) as executor:
+            list(executor.map(initialize, range(6)))
+
+
+def test_live_postgres_serializes_equivalent_agent_capture_replays():
+    suffix = uuid4().hex
+    tenant = f"capture-race-{suffix}"
+    now = datetime.now(timezone.utc)
+    bundle = verdict.AgentRunBundle(
+        verdict.SourceSession(
+            f"source-{suffix}", tenant, "unknown-agent", "b" * 64, now, now
+        ),
+        verdict.AgentRun(
+            f"run-{suffix}",
+            f"source-{suffix}",
+            tenant,
+            now,
+            verdict.ExecutionStatus.UNKNOWN,
+        ),
+    )
+    first = PostgresStorage(DSN, min_pool=1, max_pool=1)
+    second = PostgresStorage(DSN, min_pool=1, max_pool=1)
+    barrier = threading.Barrier(2)
+
+    def capture(storage: PostgresStorage) -> None:
+        barrier.wait()
+        storage.replace_agent_run_bundle(bundle)
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            list(executor.map(capture, (first, second)))
+        assert first.get_agent_run_bundle(tenant, bundle.run.run_id) == bundle
+        assert first._fetchone(
+            "SELECT COUNT(*) FROM agent_runs WHERE tenant_id=%s", (tenant,)
+        )[0] == 1
+    finally:
+        first._exec("DELETE FROM agent_runs WHERE tenant_id=%s", (tenant,))
+        first._exec("DELETE FROM import_sources WHERE tenant_id=%s", (tenant,))
+        first.close()
+        second.close()
+
+
+def test_live_postgres_agent_capture_rolls_back_trace_and_hierarchy(monkeypatch):
+    suffix = uuid4().hex
+    tenant = f"capture-rollback-{suffix}"
+    now = datetime.now(timezone.utc)
+    trace = verdict.Trace(
+        trace_id=f"trace-{suffix}",
+        tenant_id=tenant,
+        started_at=now,
+        ended_at=now,
+        provider="anthropic",
+        request_model="test-model",
+        response_model="test-model",
+    )
+    source = verdict.SourceSession(
+        f"source-{suffix}", tenant, "unknown-agent", "d" * 64, now, now
+    )
+    run = verdict.AgentRun(
+        f"run-{suffix}", source.source_session_id, tenant, now,
+        verdict.ExecutionStatus.UNKNOWN,
+    )
+    turn = verdict.AgentTurn(
+        f"turn-{suffix}", run.run_id, 0, now, verdict.ExecutionStatus.UNKNOWN
+    )
+    event = verdict.AgentEvent(
+        f"event-{suffix}", turn.turn_id, 0, now,
+        verdict.AgentEventType.MODEL_CALL, verdict.ExecutionStatus.UNKNOWN,
+        "unknown-agent:model", {"provider": "anthropic"},
+        trace_id=trace.trace_id,
+    )
+    bundle = verdict.AgentRunBundle(source, run, (turn,), (event,))
+    storage = PostgresStorage(DSN, min_pool=1, max_pool=1)
+    original = storage._write_normalized_bundle_cursor
+
+    def fail_after_hierarchy(cur, candidate):
+        original(cur, candidate)
+        raise RuntimeError("injected capture failure")
+
+    monkeypatch.setattr(storage, "_write_normalized_bundle_cursor", fail_after_hierarchy)
+    try:
+        with pytest.raises(RuntimeError, match="injected capture failure"):
+            storage.replace_agent_capture(bundle, (trace,))
+        assert storage.get_trace(trace.trace_id) is None
+        assert storage.get_agent_run_bundle(tenant, run.run_id) is None
+    finally:
+        storage._exec("DELETE FROM agent_runs WHERE tenant_id=%s", (tenant,))
+        storage._exec("DELETE FROM import_sources WHERE tenant_id=%s", (tenant,))
+        storage._exec("DELETE FROM traces WHERE trace_id=%s", (trace.trace_id,))
+        storage.close()
+
+
+def test_live_postgres_trace_retention_clears_agent_event_link():
+    suffix = uuid4().hex
+    tenant = f"capture-retention-{suffix}"
+    now = datetime.now(timezone.utc)
+    trace = verdict.Trace(
+        trace_id=f"trace-{suffix}", tenant_id=tenant, started_at=now, ended_at=now,
+    )
+    source = verdict.SourceSession(
+        f"source-{suffix}", tenant, "unknown-agent", "e" * 64, now, now
+    )
+    run = verdict.AgentRun(
+        f"run-{suffix}", source.source_session_id, tenant, now,
+        verdict.ExecutionStatus.UNKNOWN,
+    )
+    turn = verdict.AgentTurn(
+        f"turn-{suffix}", run.run_id, 0, now, verdict.ExecutionStatus.UNKNOWN
+    )
+    event = verdict.AgentEvent(
+        f"event-{suffix}", turn.turn_id, 0, now,
+        verdict.AgentEventType.MODEL_CALL, verdict.ExecutionStatus.UNKNOWN,
+        "unknown-agent:model", {}, trace_id=trace.trace_id,
+    )
+    bundle = verdict.AgentRunBundle(source, run, (turn,), (event,))
+    storage = PostgresStorage(DSN, min_pool=1, max_pool=1)
+    try:
+        storage.replace_agent_capture(bundle, (trace,))
+        storage.delete_trace(trace.trace_id)
+
+        retained = storage.get_agent_run_bundle(tenant, run.run_id)
+        assert retained is not None
+        assert retained.events[0].trace_id is None
+    finally:
+        storage._exec("DELETE FROM agent_runs WHERE tenant_id=%s", (tenant,))
+        storage._exec("DELETE FROM import_sources WHERE tenant_id=%s", (tenant,))
+        storage._exec("DELETE FROM traces WHERE trace_id=%s", (trace.trace_id,))
+        storage.close()
+
+
+def test_live_postgres_migrates_a16_agent_bundle_transactionally():
+    import psycopg
+
+    tenant = f"legacy-{uuid4().hex}"
+    now = datetime.now(timezone.utc)
+    def legacy_bundle(suffix: str) -> verdict.AgentRunBundle:
+        source_id = f"legacy-source-{suffix}"
+        run_id = f"legacy-run-{suffix}"
+        turn = verdict.AgentTurn(
+            "source-local-turn", run_id, 0, now, verdict.ExecutionStatus.UNKNOWN
+        )
+        event = verdict.AgentEvent(
+            "source-local-event", turn.turn_id, 0, now,
+            verdict.AgentEventType.MODEL_CALL if suffix == "c" else verdict.AgentEventType.COMMAND,
+            verdict.ExecutionStatus.UNKNOWN,
+            "codex:model" if suffix == "c" else "codex:command", {},
+            trace_id="already-deleted-trace" if suffix == "c" else None,
+        )
+        return verdict.AgentRunBundle(
+            verdict.SourceSession(
+                source_id, tenant, "codex", suffix * 64, now, now
+            ),
+            verdict.AgentRun(
+                run_id, source_id, tenant, now, verdict.ExecutionStatus.UNKNOWN
+            ),
+            (turn,),
+            (event,),
+        )
+
+    bundles = (legacy_bundle("c"), legacy_bundle("d"))
+    with isolated_test_dsn(DSN) as scoped_dsn:
+        with psycopg.connect(scoped_dsn, autocommit=True) as connection:
+            connection.execute(
+                """CREATE TABLE agent_run_bundles (
+                    tenant_id TEXT NOT NULL, run_id TEXT NOT NULL,
+                    source_session_id TEXT NOT NULL, source_kind TEXT NOT NULL,
+                    started_at TIMESTAMPTZ NOT NULL, ended_at TIMESTAMPTZ,
+                    status TEXT NOT NULL, content_hash TEXT NOT NULL,
+                    payload_json TEXT NOT NULL, updated_at TIMESTAMPTZ NOT NULL,
+                    PRIMARY KEY (tenant_id, run_id))"""
+            )
+            for values in [
+                    (
+                        tenant,
+                        bundle.run.run_id,
+                        bundle.session.source_session_id,
+                        bundle.session.source_kind,
+                        now,
+                        None,
+                        bundle.run.status.value,
+                        bundle.content_hash,
+                        verdict.agent_run_bundle_to_json(bundle),
+                        now,
+                    )
+                    for bundle in bundles
+            ]:
+                connection.execute(
+                    "INSERT INTO agent_run_bundles VALUES "
+                    "(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                    values,
+                )
+
+        storage = PostgresStorage(scoped_dsn, min_pool=1, max_pool=1)
+        try:
+            for bundle in bundles:
+                expected = replace(
+                    bundle,
+                    events=(replace(bundle.events[0], trace_id=None),),
+                )
+                assert storage.get_agent_run_bundle(tenant, bundle.run.run_id) == expected
+            assert storage._fetchone(
+                "SELECT COUNT(*) FROM agent_run_bundles WHERE tenant_id=%s", (tenant,)
+            )[0] == 2
+            assert storage._fetchone(
+                "SELECT COUNT(*) FROM agent_runs WHERE tenant_id=%s", (tenant,)
+            )[0] == 2
+            assert storage._fetchone(
+                "SELECT COUNT(*) FROM agent_turns WHERE tenant_id=%s", (tenant,)
+            )[0] == 2
+            assert storage._fetchone(
+                "SELECT COUNT(*) FROM agent_events WHERE tenant_id=%s", (tenant,)
+            )[0] == 2
+        finally:
+            storage.close()
 
 
 def test_live_postgres_monitor_policy_activation_and_snapshot():

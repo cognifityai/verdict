@@ -9,7 +9,7 @@ const color = {
 export function Runs({
   url, focusRunIds = [], selectedRunId: routedRunId = null,
   findingCode = null, runIdsTruncated = false, onSelectRun = null, onShowAll = null,
-  evaluatorFingerprint = null,
+  evaluatorFingerprint = null, onOpenTrace = null,
 }) {
   const [state, setState] = useState({ loading: true, error: null, data: null });
   const [selected, setSelected] = useState(null);
@@ -75,7 +75,7 @@ export function Runs({
           <div>
             <div className="font-semibold">Agent runs</div>
             <div className="text-xs mt-1" style={{ color: color.sub }}>
-              {state.data.summary.shown} of {state.data.summary.available} sessions
+              {state.data.summary.shown} of {state.data.summary.available} runs
             </div>
           </div>
           <button onClick={load} title="Refresh runs"><RefreshCw size={15} /></button>
@@ -89,9 +89,9 @@ export function Runs({
               style={{ borderColor: color.border, background: active ? "#18221e" : "transparent" }}>
               <ChevronRight size={15} style={{ marginTop: 2, color: active ? color.green : color.faint }} />
               <span className="min-w-0 flex-1">
-                <span className="block text-sm font-semibold">{run.sourceKind}</span>
+                <span className="block text-sm font-semibold">{run.agentName || run.sourceKind}</span>
                 <span className="block text-xs mt-1" style={{ color: color.sub }}>
-                  {run.turnCount} turns · {run.eventCount} events · {errors} observed errors
+                  {run.sourceKind} · {run.turnCount} turns · {run.eventCount} events · {errors} observed errors
                 </span>
                 <span className="block text-xs mt-1 font-mono truncate" style={{ color: color.faint }}>{run.startedAt}</span>
               </span>
@@ -99,20 +99,23 @@ export function Runs({
           );
         })}
       </section>
-      <RunDetail run={runs.find((run) => run.runId === selectedRunId)} detail={detail} onEventPage={(offset) => { setFocusEventId(null); setEventOffset(offset); }} onTurnPage={setTurnOffset} onFocusEvent={(eventId) => { setFocusEventId(eventId); setEventOffset(0); }} focusEventId={focusEventId} />
+      <RunDetail run={runs.find((run) => run.runId === selectedRunId)} detail={detail} onEventPage={(offset) => { setFocusEventId(null); setEventOffset(offset); }} onTurnPage={setTurnOffset} onFocusEvent={(eventId) => { setFocusEventId(eventId); setEventOffset(0); }} focusEventId={focusEventId} onOpenTrace={onOpenTrace} />
     </div>
   );
 }
 
-function RunDetail({ run, detail, onEventPage, onTurnPage, onFocusEvent, focusEventId }) {
+function RunDetail({ run, detail, onEventPage, onTurnPage, onFocusEvent, focusEventId, onOpenTrace }) {
   if (!run) return null;
   const metrics = run.metrics || {};
   return (
     <section className="border p-5 min-w-0" style={{ borderColor: color.border, background: color.panel }}>
       <div className="flex flex-wrap justify-between gap-3">
         <div>
-          <div className="text-xs font-mono" style={{ color: color.green }}>{run.sourceKind.toUpperCase()}</div>
-          <div className="font-semibold mt-1">{run.status === "unknown" ? "Session status unavailable" : run.status}</div>
+          <div className="text-xs font-mono" style={{ color: color.green }}>{(run.agentName || run.sourceKind).toUpperCase()}</div>
+          <div className="font-semibold mt-1">{run.status === "unknown" ? "Run status unavailable" : run.status}</div>
+          <div className="text-xs mt-1" style={{ color: color.sub }}>
+            {[run.serviceName, run.environment, run.agentVersion].filter(Boolean).join(" · ") || run.sourceKind}
+          </div>
         </div>
         <div className="text-xs" style={{ color: color.sub }}>
           {metrics.model_calls || 0} model calls · {metrics.tool_calls || 0} tool calls · {metrics.input_tokens || 0} input tokens
@@ -153,15 +156,16 @@ function RunDetail({ run, detail, onEventPage, onTurnPage, onFocusEvent, focusEv
             </div>
           </details>
         ))}
-        {detail.data?.turnPage && <div className="flex items-center justify-between gap-2 text-xs" style={{ color: color.sub }}><span>Showing {detail.data.turnPage.offset + 1}-{detail.data.turnPage.offset + detail.data.turnPage.shown} of {detail.data.turnPage.available} turns.</span><span className="flex gap-2"><button disabled={detail.data.turnPage.offset === 0} onClick={() => onTurnPage(Math.max(0, detail.data.turnPage.offset - detail.data.turnPage.limit))} className="border px-3 py-1">Previous</button><button disabled={!detail.data.turnPage.truncated} onClick={() => onTurnPage(detail.data.turnPage.offset + detail.data.turnPage.limit)} className="border px-3 py-1">Next</button></span></div>}
+        {detail.data?.turnPage && <div className="flex items-center justify-between gap-2 text-xs" style={{ color: color.sub }}><span>Showing {detail.data.turnPage.shown ? detail.data.turnPage.offset + 1 : 0}-{detail.data.turnPage.offset + detail.data.turnPage.shown} of {detail.data.turnPage.available} turns.</span><span className="flex gap-2"><button disabled={detail.data.turnPage.offset === 0} onClick={() => onTurnPage(Math.max(0, detail.data.turnPage.offset - detail.data.turnPage.limit))} className="border px-3 py-1">Previous</button><button disabled={!detail.data.turnPage.truncated} onClick={() => onTurnPage(detail.data.turnPage.offset + detail.data.turnPage.limit)} className="border px-3 py-1">Next</button></span></div>}
       </div>
       <h2 className="font-semibold mt-6">Execution timeline</h2>
+      {detail.data?.producerCount > 1 && <div className="text-xs mt-1" style={{ color: color.sub }}>Events are placed by timestamp. Sequence is authoritative only within each named producer.</div>}
       {detail.loading && <div className="text-sm mt-2" style={{ color: color.sub }}>Loading ordered evidence…</div>}
       {detail.error && <div role="alert" className="text-sm mt-2" style={{ color: color.red }}>{detail.error}</div>}
       {detail.data && <div className="mt-2 space-y-2">
-        {detail.data.events.map((event) => <EventRow key={event.eventId} event={event} focused={event.eventId === (detail.data.focusEventId || focusEventId)} />)}
+        {detail.data.events.map((event) => <EventRow key={event.eventId} event={event} focused={event.eventId === (detail.data.focusEventId || focusEventId)} onOpenTrace={onOpenTrace} />)}
         {!detail.data.events.length && <div className="text-sm" style={{ color: color.sub }}>No normalized events were captured for this run.</div>}
-        <div className="flex items-center justify-between gap-2 text-xs" style={{ color: color.sub }}><span>Showing {detail.data.page.offset + 1}-{detail.data.page.offset + detail.data.page.shown} of {detail.data.page.available} events.</span><span className="flex gap-2"><button disabled={detail.data.page.offset === 0} onClick={() => onEventPage(Math.max(0, detail.data.page.offset - detail.data.page.limit))} className="border px-3 py-1">Previous</button><button disabled={!detail.data.page.truncated} onClick={() => onEventPage(detail.data.page.offset + detail.data.page.limit)} className="border px-3 py-1">Next</button></span></div>
+        <div className="flex items-center justify-between gap-2 text-xs" style={{ color: color.sub }}><span>Showing {detail.data.page.shown ? detail.data.page.offset + 1 : 0}-{detail.data.page.offset + detail.data.page.shown} of {detail.data.page.available} events.</span><span className="flex gap-2"><button disabled={detail.data.page.offset === 0} onClick={() => onEventPage(Math.max(0, detail.data.page.offset - detail.data.page.limit))} className="border px-3 py-1">Previous</button><button disabled={!detail.data.page.truncated} onClick={() => onEventPage(detail.data.page.offset + detail.data.page.limit)} className="border px-3 py-1">Next</button></span></div>
       </div>}
     </section>
   );
@@ -175,7 +179,7 @@ function StatusFact({ label, value }) {
   return <div className="border p-3" style={{ borderColor: color.border }}><div className="text-xs" style={{ color: color.faint }}>{label}</div><div className="text-sm mt-1">{value}</div></div>;
 }
 
-function EventRow({ event, focused = false }) {
+function EventRow({ event, focused = false, onOpenTrace = null }) {
   const attributes = Object.entries(event.attributes || {});
   const failed = event.status === "failed";
   return (
@@ -184,12 +188,13 @@ function EventRow({ event, focused = false }) {
         <span className="font-mono" style={{ color: failed ? color.red : color.green }}>#{event.timelineIndex + 1}</span>
         <span>{event.type.replaceAll("_", " ")}</span>
         <span style={{ color: color.sub }}>{event.status}</span>
-        {event.traceId && <span className="font-mono" style={{ color: color.amber }}>Trace {event.traceId}</span>}
+        {event.traceId && <button className="font-mono underline" style={{ color: color.amber }} onClick={(click) => { click.preventDefault(); click.stopPropagation(); onOpenTrace?.(event.traceId); }}>Trace {event.traceId}</button>}
         {event.judgment?.dimensions?.map((dimension) => <span key={dimension.name} className="font-mono" style={{ color: dimension.verdict === "pass" ? color.green : dimension.verdict === "fail" ? color.red : color.amber }}>{dimension.name}: {dimension.verdict}</span>)}
         <span className="ml-auto text-xs font-mono" style={{ color: color.faint }}>{event.occurredAt}</span>
       </summary>
       <div className="mt-3 grid gap-2 text-xs">
         <div style={{ color: color.faint }}>Source: {event.provenance} · privacy: {event.privacy}</div>
+        {event.producerId && <div style={{ color: color.faint }}>Producer: {event.producerId}{event.producerSequence == null ? "" : ` · sequence ${event.producerSequence}`}</div>}
         {event.omissionReason && <div style={{ color: color.amber }}>Omitted: {event.omissionReason}</div>}
         {attributes.map(([name, value]) => <div key={name} className="grid sm:grid-cols-[140px_minmax(0,1fr)] gap-2">
           <span className="font-mono" style={{ color: color.sub }}>{name}</span>
