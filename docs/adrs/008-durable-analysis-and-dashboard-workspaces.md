@@ -54,8 +54,10 @@ present those states without treating missing evidence as success or failure.
 - Agent Runs show source outcome, evidence coverage, deterministic findings,
   and selected-evaluator coverage separately.
 - Five top-level workspaces separate concerns: Overview, Explore, Evaluate,
-  Monitor, and Settings. Monitor contains current status, historical
-  comparisons, optional segments, and schedules.
+  Monitor, and Settings. Monitor contains current cohort status, fixed-window
+  evaluation signals, historical comparisons, optional segments, and schedules.
+- Fixed-window evaluation signals and prospective cohort-monitor alerts have
+  separate counts and detail views; neither is presented as the other.
 - A prospective cohort distinguishes traffic collection from waiting for
   selected-evaluator results until a persisted comparison completes.
 - Generic change records are a decision log; typed workflows perform actual
