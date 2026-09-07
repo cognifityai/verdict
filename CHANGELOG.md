@@ -6,17 +6,7 @@ the product is refined.
 
 ## [Unreleased]
 
-### Fixed
-
-- Evaluator-backed monitors now keep a prospective cohort open until its fixed
-  members receive stored evaluator results, then compare those same members.
-- Cluster-grouped monitors finish bounded projection through the pinned
-  registry before saving cohort membership instead of treating queued traces
-  as unassigned.
-- Monitor writes reject stale policy or snapshot authority across concurrent
-  runners, and PostgreSQL resolves snapshot timestamp ties by write order.
-
-## [0.1.0a16] - 2026-09-05
+## [0.1.0a16] - 2026-09-06
 
 ### Fixed
 
@@ -44,6 +34,13 @@ the product is refined.
 - Dashboard, command-line, manual, and scheduled monitor runs now resolve the
   same stored evaluator results, dimensions, trace scope, and frozen cluster
   version.
+- Evaluator-backed monitors now keep a prospective cohort open until its fixed
+  members receive stored evaluator results, then compare those same members.
+- Cluster-grouped monitors finish bounded projection through the pinned
+  registry before saving cohort membership instead of treating queued traces
+  as unassigned.
+- Monitor writes reject stale policy or snapshot authority across concurrent
+  runners, and PostgreSQL resolves snapshot timestamp ties by write order.
 
 ## [0.1.0a15] - 2026-09-02
 
