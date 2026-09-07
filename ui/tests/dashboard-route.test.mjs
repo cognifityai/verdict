@@ -43,6 +43,20 @@ test("drift subsection survives refreshable direct links", () => {
   assert.equal(parseDashboardRoute("#tab=drift&drift=clusters").section, "segments");
 });
 
+test("fixed-window signals have a refreshable route and legacy drift links open it", () => {
+  const direct = parseDashboardRoute("#tab=monitor&section=signals&evaluator=evaluator-2");
+  assert.equal(direct.tab, "monitor");
+  assert.equal(direct.section, "signals");
+  assert.equal(direct.evaluatorId, "evaluator-2");
+  assert.equal(serializeDashboardRoute(direct), "#tab=monitor&section=signals&evaluator=evaluator-2");
+
+  const legacy = parseDashboardRoute("#tab=drift&evaluator=evaluator-2");
+  assert.equal(legacy.tab, "monitor");
+  assert.equal(legacy.section, "signals");
+  assert.equal(canonicalDashboardHash("#tab=drift&evaluator=evaluator-2"),
+    "#tab=monitor&section=signals&evaluator=evaluator-2");
+});
+
 test("legacy dashboard destinations redirect into five coherent workspaces", () => {
   const cases = [
     ["#tab=reliability", "overview", "reliability"],

@@ -6,6 +6,13 @@ the product is refined.
 
 ## [Unreleased]
 
+### Fixed
+
+- The dashboard again exposes persisted fixed-window evaluation drift under
+  **Monitor → Signals**, including effect sizes, adjusted p-values, sample
+  counts, recommended actions, and example-trace links. These signals are
+  labeled separately from prospective cohort-monitor alerts.
+
 ## [0.1.0a16] - 2026-09-06
 
 ### Fixed

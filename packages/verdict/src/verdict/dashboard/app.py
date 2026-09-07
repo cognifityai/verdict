@@ -97,6 +97,9 @@ MAX_DASHBOARD_CLUSTERS = 20
 MAX_DASHBOARD_DIMENSIONS = 12
 MAX_DASHBOARD_EVALUATORS = 20
 MAX_DASHBOARD_DRIFT_SIGNALS = 40
+MAX_DRIFT_SIGNAL_LAYERS = 12
+MAX_DRIFT_SIGNAL_EXAMPLE_TRACES = 5
+MAX_DRIFT_SIGNAL_ACTION_CHARS = 1000
 MAX_PROVIDER_MODELS = 20
 MAX_TRACE_SAMPLES = 30
 DRIFT_CURRENT_HOURS = 24
@@ -175,6 +178,29 @@ def _json_column(row: Mapping[str, Any], name: str, default):
     """Read one logical JSON field from either adapter's physical schema."""
     raw = _row_value(row, f"{name}_json", _row_value(row, name))
     return _json_value(raw, default)
+
+
+def _bounded_signal_strings(
+    value: object,
+    *,
+    limit: int,
+    max_chars: int,
+    truncate: bool,
+) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    result: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or not item:
+            continue
+        if len(item) > max_chars:
+            if not truncate:
+                continue
+            item = item[:max_chars]
+        result.append(item)
+        if len(result) == limit:
+            break
+    return result
 
 
 def evaluator_identity(row: Mapping[str, Any]) -> dict:
@@ -2277,9 +2303,24 @@ def _build(
             "cohensD": _round_or_none(s.get("effect_size_cohens_d"), 2),
             "nCur": s.get("sample_size_current"),
             "nBase": s.get("sample_size_baseline"),
-            "layers": _json_column(s, "contributing_layers", []),
-            "exampleTraceIds": _json_column(s, "example_trace_ids", []),
-            "action": s.get("recommended_action") or "Review the affected traces.",
+            "layers": _bounded_signal_strings(
+                _json_column(s, "contributing_layers", []),
+                limit=MAX_DRIFT_SIGNAL_LAYERS,
+                max_chars=64,
+                truncate=True,
+            ),
+            "exampleTraceIds": _bounded_signal_strings(
+                _json_column(s, "example_trace_ids", []),
+                limit=MAX_DRIFT_SIGNAL_EXAMPLE_TRACES,
+                max_chars=256,
+                truncate=False,
+            ),
+            "action": (
+                s["recommended_action"][:MAX_DRIFT_SIGNAL_ACTION_CHARS]
+                if isinstance(s.get("recommended_action"), str)
+                and s["recommended_action"]
+                else "Review the affected traces."
+            ),
             "detectedAt": s.get("detected_at"),
         })
     # Keep the largest effects under the cap for both regressions and

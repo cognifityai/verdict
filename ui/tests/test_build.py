@@ -32,7 +32,8 @@ def test_cluster_ids_are_not_reformatted_as_rubric_dimensions():
 def test_overview_uses_the_canonical_monitor_read_model():
     source = (build.HERE / "VerdictUI.jsx").read_text()
     assert "MonitorOverview({ monitor: DATA.monitor })" in source
-    assert 'label="Comparison alerts"' in source
+    assert 'label="Cohort monitor alerts"' in source
+    assert 'label="Evaluation drift signals"' in source
     assert "LATEST COMPLETED RUN" not in source
 
 

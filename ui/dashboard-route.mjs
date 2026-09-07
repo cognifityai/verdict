@@ -2,7 +2,7 @@ const SECTIONS = {
   overview: new Set(["summary", "reliability", "performance", "behavior"]),
   explore: new Set(["runs", "calls", "compare"]),
   evaluate: new Set(["results", "lab", "review"]),
-  monitor: new Set(["status", "history", "segments", "schedule"]),
+  monitor: new Set(["status", "signals", "history", "segments", "schedule"]),
   settings: new Set(["sources", "alerts", "integrations", "privacy"]),
 };
 
@@ -42,7 +42,7 @@ function normalizedDestination(params, fallbackTab) {
     const drift = params.get("drift");
     if (drift === "clusters") return ["monitor", "segments"];
     if (drift === "explore") return ["monitor", "history"];
-    return ["monitor", "status"];
+    return ["monitor", "signals"];
   }
   if (LEGACY_ROUTES[requested]) return LEGACY_ROUTES[requested];
   if (SECTIONS[fallbackTab]) return [fallbackTab, DEFAULT_SECTION[fallbackTab]];

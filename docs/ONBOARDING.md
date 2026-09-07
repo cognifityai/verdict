@@ -446,7 +446,8 @@ drift signals.
 
 The dashboard shows per-provider traffic (trace counts, error rate, latency,
 tokens, **estimated cost**), intent clusters, pass-rate by dimension, and the
-**drift signals** — each with its dimension, direction, effect size (Cliff's δ),
+**drift signals** under **Monitor → Signals** — each with its dimension,
+direction, effect size (Cliff's δ),
 BH-adjusted p-value, sample sizes, a recommended action, and up to five current-
 window evidence trace IDs. For regressions, those examples prioritize failed
 traces; improvements prioritize passing traces; evaluability regressions

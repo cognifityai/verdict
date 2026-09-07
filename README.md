@@ -75,7 +75,8 @@ rescan them; that durable schedule is configuration, not captured evidence.
 The findings-first dashboard has five top-level workspaces: **Overview**,
 **Explore**, **Evaluate**, **Monitor**, and **Settings**. Overview contains
 Summary, Reliability, Performance, and Behavior. Monitor contains current
-status, historical comparisons, optional segments, and schedules. Cluster and
+cohort status, persisted fixed-window evaluation signals, historical
+comparisons, optional segments, and schedules. Cluster and
 monitor activation are explicit transitions; a stored historical candidate is
 shown separately from the active prospective monitor and survives page reload.
 A Trace reports execution success/error

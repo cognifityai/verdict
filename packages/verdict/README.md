@@ -70,8 +70,9 @@ evaluation status, finding severity, and drift comparison independently.
 monitor distinguishes traffic collection from a full cohort awaiting selected
 evaluator results.
 The dashboard has five top-level workspaces: Overview, Explore, Evaluate,
-Monitor, and Settings. Monitor keeps stored historical candidates separate from
-the active prospective policy.
+Monitor, and Settings. **Monitor → Signals** shows the latest persisted
+fixed-window evaluation signals. Monitor keeps those signals, stored historical
+candidates, and the active prospective policy visibly separate.
 
 The Verdict Python SDK. Auto-instruments your LLM calls via `wrapt` and
 captures them into a vendor-neutral `Trace` schema (attribute *names* follow
