@@ -695,6 +695,16 @@ function monitorAlertCount(monitor) {
   );
 }
 
+function driftSignalCount(data) {
+  const shown = Array.isArray(data?.driftSignals) ? data.driftSignals.length : 0;
+  const candidates = [
+    data?.truncation?.resources?.driftSignals?.available,
+    data?.driftRun?.signalCount,
+    shown,
+  ].filter((value) => Number.isInteger(value) && value >= shown);
+  return Math.max(...candidates);
+}
+
 function monitorAlertSummary(monitor) {
   if (!monitor?.active && !monitor?.candidate) return "not configured";
   const count = (response) => (response?.snapshot?.comparison?.metrics || [])
@@ -801,7 +811,7 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
     { id: "overview", label: "Overview", icon: Gauge },
     { id: "explore", label: "Explore", icon: Search },
     { id: "evaluate", label: "Evaluate", icon: Scale },
-    { id: "monitor", label: "Monitor", icon: Signal, badge: monitorAlertCount(DATA.monitor) + DATA.driftSignals.filter((signal) => signal.direction === "regression").length },
+    { id: "monitor", label: "Monitor", icon: Signal, badge: monitorAlertCount(DATA.monitor) + driftSignalCount(DATA) },
     { id: "settings", label: "Settings", icon: Terminal },
   ];
   return (
@@ -1021,6 +1031,7 @@ function Overview({ data = SEED, includeMonitor = true, onOpenSignals = null }) 
   const healthColor = health.status === "ready" ? C.green : health.status === "fragmented" ? C.red : C.amber;
   const healthLabel = health.status === "ready" ? "Ready" : health.status === "fragmented" ? "Fragmented" : "Needs volume";
   const analysis = driftAnalysis(DATA);
+  const totalDriftSignals = driftSignalCount(DATA);
   const coverage = DATA.coverage || {};
   const deterministic = coverage.deterministicAnalysis || {
     status: "never_run", availableRuns: m.totalAgentRuns || 0, analyzedRuns: 0,
@@ -1031,6 +1042,7 @@ function Overview({ data = SEED, includeMonitor = true, onOpenSignals = null }) 
     notJudged: Math.max(0, (m.totalTraces || 0) - (m.totalJudged || 0)),
     judgeErrors: 0, completedCalls: m.totalJudged || 0, errorCalls: 0,
   };
+  const evaluatorSelectionNeeded = ["selection_required", "invalid_selection"].includes(analysis.runStatus);
   const noCompletedRun = analysis.runStatus === "no_completed_run";
   const seriesColors = [C.accent, C.accent2, C.amber, C.green, C.blue, C.cyan];
   const providerSeries = DATA.providers.map((provider, index) => {
@@ -1081,9 +1093,10 @@ function Overview({ data = SEED, includeMonitor = true, onOpenSignals = null }) 
           <MetricCell label="Selected evaluator" value={`${evaluationCoverage.judged} judged`} sub={`${evaluationCoverage.notJudged} not judged · ${evaluationCoverage.judgeErrors} judge errors`} />
           <button type="button" onClick={onOpenSignals || undefined} disabled={!onOpenSignals}
             aria-label="Open evaluation drift signals" className="text-left disabled:cursor-default">
-            <MetricCell label="Evaluation drift signals" value={noCompletedRun ? "Not run" : DATA.driftSignals.length}
-              sub={noCompletedRun ? "fixed-window analysis not run" : analysis.runStatus === "insufficient" ? "latest run was insufficient" : "latest persisted fixed-window run"}
-              icon={Signal} accent={DATA.driftSignals.length ? C.red : noCompletedRun ? C.amber : C.green} />
+            <MetricCell label="Evaluation drift signals"
+              value={evaluatorSelectionNeeded ? "Select evaluator" : noCompletedRun ? "Not run" : totalDriftSignals}
+              sub={evaluatorSelectionNeeded ? "choose one evaluator to attribute its run" : noCompletedRun ? "fixed-window analysis not run" : analysis.runStatus === "insufficient" ? "latest run was insufficient" : totalDriftSignals > DATA.driftSignals.length ? `latest run · showing ${DATA.driftSignals.length} of ${totalDriftSignals}` : "latest persisted fixed-window run"}
+              icon={Signal} accent={totalDriftSignals ? C.red : noCompletedRun || evaluatorSelectionNeeded ? C.amber : C.green} />
           </button>
         </div>
       </Panel>
@@ -1219,6 +1232,8 @@ function DriftSignals({ data = SEED, onOpenTrace = null, onOpenOperations = null
     inconsistent_run: "The latest run is incomplete or inconsistent. Its signals are hidden until the pipeline completes successfully.",
   }[evaluation.driftStatus];
   const noCompletedRun = analysis.runStatus === "no_completed_run" || evaluatorSelectionNeeded || unavailableReason;
+  const totalSignals = driftSignalCount(DATA);
+  const shownSignals = Array.isArray(DATA.driftSignals) ? DATA.driftSignals.length : 0;
 
   return <div className="space-y-4">
     <Panel className="p-5">
@@ -1230,8 +1245,8 @@ function DriftSignals({ data = SEED, onOpenTrace = null, onOpenOperations = null
             These signals compare the pipeline&apos;s historical baseline and current window using the selected evaluator. They are separate from cohort monitor previews and prospective alerts.
           </div>
         </div>
-        {!noCompletedRun && <Pill color={DATA.driftSignals.length ? C.red : C.green}>
-          {DATA.driftSignals.length} signal{DATA.driftSignals.length === 1 ? "" : "s"}
+        {!noCompletedRun && <Pill color={totalSignals ? C.red : C.green}>
+          {`${totalSignals} signal${totalSignals === 1 ? "" : "s"}${totalSignals > shownSignals ? ` · showing ${shownSignals}` : ""}`}
         </Pill>}
       </div>
     </Panel>
@@ -1270,8 +1285,15 @@ function DriftSignals({ data = SEED, onOpenTrace = null, onOpenOperations = null
       const improvement = signal.direction === "improvement";
       const color = improvement ? C.green : C.red;
       const background = improvement ? C.greenBg : C.redBg;
-      const layers = Array.isArray(signal.layers) ? signal.layers : [];
-      const traceIds = Array.isArray(signal.exampleTraceIds) ? signal.exampleTraceIds : [];
+      const layers = Array.isArray(signal.layers)
+        ? signal.layers.filter((layer) => typeof layer === "string" && layer).slice(0, 12)
+        : [];
+      const traceIds = Array.isArray(signal.exampleTraceIds)
+        ? signal.exampleTraceIds.filter((traceId) => typeof traceId === "string" && traceId).slice(0, 5)
+        : [];
+      const action = typeof signal.action === "string" && signal.action
+        ? signal.action.slice(0, 1000)
+        : "Review the affected traces.";
       return <Panel key={signal.id} className="p-5" style={{ borderColor: color }}>
         <div className="flex flex-col sm:flex-row sm:items-start gap-4">
           <div className="w-10 h-10 flex items-center justify-center shrink-0" style={{ background, borderRadius: 3 }}>
@@ -1300,7 +1322,7 @@ function DriftSignals({ data = SEED, onOpenTrace = null, onOpenOperations = null
 
         <div className="mt-4 p-3" style={{ background: C.panel2, border: `1px solid ${C.border}`, borderRadius: 3 }}>
           <div className="text-xs font-medium" style={{ color: C.amber }}>Recommended action</div>
-          <div className="text-sm mt-1">{signal.action || "Review the affected traces."}</div>
+          <div className="text-sm mt-1">{action}</div>
         </div>
 
         <div className="mt-3 flex flex-wrap items-center gap-2 text-xs" style={{ color: C.faint }}>

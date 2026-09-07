@@ -298,6 +298,49 @@ test("fixed-window signal page distinguishes no run from a completed zero-signal
   assert.doesNotMatch(zero, /No fixed-window drift analysis has completed/i);
 });
 
+test("fixed-window signal totals remain truthful when cards are bounded", async () => {
+  const ui = await loadUiModule();
+  const shownSignals = Array.from({ length: 40 }, (_, index) => ({
+    id: `signal-${index}`, dimension: "relevance", direction: "regression",
+  }));
+  const data = bundle("judge-a", [], shownSignals);
+  data.driftRun = { id: "run-bounded", signalCount: 60 };
+  data.driftAnalysis.runStatus = "completed_with_signals";
+  data.truncation = {
+    applied: true,
+    resources: { driftSignals: { available: 60, shown: 40, limit: 40 } },
+  };
+
+  const page = textOf(render(ui.DriftSignals, createHooks(), { data }));
+  assert.match(page, /60 signals/i);
+  assert.match(page, /showing 40/i);
+
+  const overview = render(ui.Overview, createHooks(), {
+    data, includeMonitor: false, onOpenSignals() {},
+  });
+  const signalMetric = findAll(overview,
+    (node) => typeof node.type === "function" && node.type.name === "MetricCell")
+    .find((node) => node.props.label === "Evaluation drift signals");
+  assert.equal(signalMetric.props.value, 60);
+});
+
+test("fixed-window signal cards reject malformed unbounded evidence lists", async () => {
+  const ui = await loadUiModule();
+  const data = bundle("judge-a", [], [{
+    id: "malformed", dimension: "custom_dimension", direction: "regression",
+    layers: [null, {}, "valid-layer", ...Array.from({ length: 30 }, (_, index) => `layer-${index}`)],
+    exampleTraceIds: [null, {}, "trace-1", ...Array.from({ length: 30 }, (_, index) => `trace-${index + 2}`)],
+    action: { unexpected: true },
+  }]);
+  data.driftRun = { id: "run-malformed", signalCount: 1 };
+  data.driftAnalysis.runStatus = "completed_with_signals";
+
+  const page = render(ui.DriftSignals, createHooks(), { data });
+  assert.match(textOf(page), /Review the affected traces/);
+  assert.equal(findAll(page,
+    (node) => node.type === "button" && node.props.title?.startsWith("trace-")).length, 5);
+});
+
 test("dashboard exposes only the five product workspaces", async () => {
   const ui = await loadUiModule();
   const tree = render(ui.Dashboard, createHooks(), { data: bundle("judge-a") });
@@ -988,16 +1031,21 @@ test("judge scores explains the empty state using shared readiness", async () =>
   assert.match(rendered, /Baseline global content-bearing traces 0 \/ 30/);
 });
 
-test("unresolved evaluator selection is not described as a missing run", async () => {
+test("unresolved evaluator selection is not described as zero drift or a missing run", async () => {
   const ui = await loadUiModule();
   const data = bundle(null);
   data.evaluation.status = "selection_required";
   data.driftAnalysis.runStatus = "selection_required";
 
-  const overview = textOf(render(ui.Overview, createHooks(), { data }));
+  const overviewTree = render(ui.Overview, createHooks(), { data });
+  const overview = textOf(overviewTree);
   const judge = textOf(render(ui.Judge, createHooks(), { data }));
+  const signalMetric = findAll(overviewTree,
+    (node) => typeof node.type === "function" && node.type.name === "MetricCell")
+    .find((node) => node.props.label === "Evaluation drift signals");
 
-  assert.doesNotMatch(overview, /Select an evaluator/);
+  assert.equal(signalMetric.props.value, "Select evaluator");
+  assert.doesNotMatch(overview, /Evaluation drift signals\s+0/);
   assert.match(judge, /Select an evaluator to view judge results/);
   assert.doesNotMatch(judge, /No eligible evaluation pipeline run has completed yet/);
 });

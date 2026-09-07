@@ -1581,6 +1581,63 @@ def test_bundle_preserves_nullable_historical_drift_statistics(tmp_path):
     assert signal["cohensD"] is None
 
 
+def test_dashboard_bounds_legacy_drift_signal_evidence_lists(tmp_path):
+    path = tmp_path / "bounded-signal-evidence.db"
+    storage = SQLiteStorage(str(path))
+    storage.insert_trace(Trace(
+        trace_id="trace-1",
+        provider="openai",
+        prompt_redacted="prompt",
+        response_redacted="response",
+    ))
+    storage.insert_judgment(Judgment(
+        trace_id="trace-1",
+        evaluator_provider="fake",
+        evaluator_fingerprint="bounded-evaluator",
+        expected_dimensions=["relevance"],
+        judge_models=["judge"],
+        dimensions=[DimensionScore(name="relevance", verdict=Verdict.FAIL)],
+    ))
+    _persist_drift_snapshot(storage, DriftSignal(
+        signal_id="bounded-signal",
+        cluster_id="support",
+        dimension="relevance",
+        evaluator_fingerprint="bounded-evaluator",
+    ))
+    storage.close()
+
+    connection = sqlite3.connect(path)
+    try:
+        connection.execute(
+            """UPDATE drift_signals
+                  SET contributing_layers_json=?, example_trace_ids_json=?,
+                      recommended_action=?
+                WHERE signal_id='bounded-signal'""",
+            (
+                json.dumps([None, {}, "valid", *[
+                    f"layer-{index}" for index in range(30)
+                ]]),
+                json.dumps([None, {}, "trace-1", *[
+                    f"trace-{index}" for index in range(30)
+                ]]),
+                "x" * 5000,
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    signal = build_bundle(path)["driftSignals"][0]
+
+    assert signal["layers"] == [
+        "valid", *[f"layer-{index}" for index in range(11)]
+    ]
+    assert signal["exampleTraceIds"] == [
+        "trace-1", *[f"trace-{index}" for index in range(4)]
+    ]
+    assert len(signal["action"]) == 1000
+
+
 def test_bundle_preserves_unclear_coverage_statistic_precision(tmp_path):
     path = tmp_path / "coverage-drift.db"
     storage = SQLiteStorage(str(path))
