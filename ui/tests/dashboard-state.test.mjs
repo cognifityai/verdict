@@ -295,6 +295,31 @@ test("overview shows the authoritative active monitor beside a newer preview", a
   assert.match(text, /candidate quality pass rate/i);
 });
 
+test("overview distinguishes evaluator waiting from traffic collection", async () => {
+  const ui = await loadUiModule();
+  const data = bundle("judge-a");
+  data.monitor = {
+    state: "active", candidate: null,
+    active: {
+      state: "active",
+      policy: { evaluator_fingerprint: "judge-a", grouping_mode: "none",
+        prospective_target: 2 },
+      snapshot: {
+        manifest: { reference_unit_ids: ["r1", "r2"],
+          current_unit_ids: ["c1", "c2"], prospective_open: true,
+          pending_evaluator_units: [{ unit_id: "c1" }, { unit_id: "c2" }] },
+        comparison: { status: "insufficient", alpha_threshold: 0.05,
+          metrics: [], metric_coverage: [], groups: [] },
+      },
+    },
+  };
+
+  const text = textOf(render(ui.Overview, createHooks(), { data }));
+  assert.match(text, /Awaiting 2 evaluator results/);
+  assert.match(text, /Run the selected evaluator/);
+  assert.doesNotMatch(text, /Collecting 2\/2/);
+});
+
 test("Trace Explorer renders execution and evaluation as separate states", async () => {
   const ui = await loadUiModule();
   const sample = {

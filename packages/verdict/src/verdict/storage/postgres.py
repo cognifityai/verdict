@@ -41,6 +41,7 @@ from verdict.monitoring import (
     CohortManifest,
     MonitorComparison,
     MonitorPolicy,
+    MonitorStateConflict,
     monitor_policy_from_json,
     monitor_policy_to_json,
     monitor_snapshot_from_json,
@@ -196,8 +197,11 @@ CREATE TABLE IF NOT EXISTS monitor_snapshots (
     payload_json TEXT NOT NULL CHECK(octet_length(payload_json)<=4194304),
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-CREATE INDEX IF NOT EXISTS idx_monitor_snapshots_latest
-    ON monitor_snapshots(policy_id, cutoff DESC, snapshot_id DESC);
+ALTER TABLE monitor_snapshots ADD COLUMN IF NOT EXISTS write_sequence
+    BIGINT GENERATED ALWAYS AS IDENTITY;
+DROP INDEX IF EXISTS idx_monitor_snapshots_latest;
+CREATE INDEX IF NOT EXISTS idx_monitor_snapshots_write_order
+    ON monitor_snapshots(policy_id, created_at DESC, write_sequence DESC);
 
 CREATE TABLE IF NOT EXISTS judgments (
     judgment_id              TEXT PRIMARY KEY,
@@ -883,6 +887,7 @@ class PostgresStorage:
         manifest: CohortManifest,
         comparison: MonitorComparison,
     ) -> None:
+        monitor_snapshot_to_json(manifest, comparison)
         with self._pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
             self._save_monitor_policy(cur, policy)
             self._save_monitor_snapshot(
@@ -987,12 +992,43 @@ class PostgresStorage:
         with self._pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
             self._save_monitor_snapshot(cur, policy_id, manifest, comparison)
 
+    def save_monitor_successor(
+        self,
+        policy_id: str,
+        expected_snapshot_id: str,
+        manifest: CohortManifest,
+        comparison: MonitorComparison,
+        *,
+        expected_state: str,
+    ) -> None:
+        if expected_state not in {"active", "candidate"}:
+            raise ValueError("monitor expected state is invalid")
+        monitor_snapshot_to_json(manifest, comparison)
+        with self._pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
+            cur.execute("LOCK TABLE monitor_policies IN SHARE ROW EXCLUSIVE MODE")
+            cur.execute(
+                "SELECT state FROM monitor_policies WHERE policy_id=%s",
+                (policy_id,),
+            )
+            policy = cur.fetchone()
+            if policy is None or policy[0] != expected_state:
+                raise MonitorStateConflict(f"monitor policy is not {expected_state}")
+            cur.execute(
+                "SELECT snapshot_id FROM monitor_snapshots WHERE policy_id=%s "
+                "ORDER BY created_at DESC,write_sequence DESC LIMIT 1",
+                (policy_id,),
+            )
+            head = cur.fetchone()
+            if head is None or head[0] != expected_snapshot_id:
+                raise MonitorStateConflict("monitor snapshot changed")
+            self._save_monitor_snapshot(cur, policy_id, manifest, comparison)
+
     def get_latest_monitor_snapshot(
         self, policy_id: str
     ) -> tuple[CohortManifest, MonitorComparison] | None:
         row = self._fetchone(
             "SELECT payload_json FROM monitor_snapshots WHERE policy_id=%s "
-            "ORDER BY created_at DESC,snapshot_id DESC LIMIT 1", (policy_id,),
+            "ORDER BY created_at DESC,write_sequence DESC LIMIT 1", (policy_id,),
         )
         return monitor_snapshot_from_json(self._monitor_policy_payload(row[0])) if row else None
 
@@ -1001,7 +1037,7 @@ class PostgresStorage:
     ) -> tuple[CohortManifest, MonitorComparison] | None:
         row = self._fetchone(
             "SELECT payload_json FROM monitor_snapshots WHERE policy_id=%s "
-            "ORDER BY created_at ASC,snapshot_id ASC LIMIT 1", (policy_id,),
+            "ORDER BY created_at ASC,write_sequence ASC LIMIT 1", (policy_id,),
         )
         return monitor_snapshot_from_json(self._monitor_policy_payload(row[0])) if row else None
 
@@ -1011,7 +1047,7 @@ class PostgresStorage:
         row = self._fetchone(
             "SELECT payload_json FROM monitor_snapshots WHERE policy_id=%s "
             "AND payload_json LIKE '%%\"status\":\"alert\"%%' "
-            "ORDER BY created_at DESC,snapshot_id DESC LIMIT 1",
+            "ORDER BY created_at DESC,write_sequence DESC LIMIT 1",
             (policy_id,),
         )
         return monitor_snapshot_from_json(self._monitor_policy_payload(row[0])) if row else None
@@ -1271,7 +1307,9 @@ class PostgresStorage:
                     FROM judgments j JOIN traces t ON t.trace_id=j.trace_id
                     WHERE {_trace_tenant_clause(tenant_id, "t.tenant_id")}
                       AND j.evaluator_fingerprint=%s
-                    ORDER BY j.trace_id,j.created_at DESC,j.judgment_id DESC
+                    ORDER BY j.trace_id,
+                      CASE WHEN j.status='completed' THEN 1 ELSE 0 END DESC,
+                      j.created_at DESC,j.judgment_id DESC
                 ) latest
                 ORDER BY created_at DESC,judgment_id DESC LIMIT %s""",  # nosec B608
             (tenant_id, evaluator_fingerprint, limit),

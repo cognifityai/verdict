@@ -1,4 +1,4 @@
-from verdict.dashboard.trace_facts import deterministic_trace_facts
+from verdict.trace_facts import deterministic_trace_facts, trace_judge_evidence_digest
 
 
 def test_deterministic_trace_facts_reports_captured_response_structure():
@@ -47,3 +47,12 @@ def test_deterministic_trace_facts_prioritizes_provider_failure():
     assert facts["not_evaluable_reason"] == "provider_call_failed"
     assert facts["judge_eligible"] is False
     assert facts["refusal_signature"] is True
+
+
+def test_judge_evidence_digest_is_deterministic_and_handles_unpaired_surrogates():
+    evidence = {"error": None, "prompt": "prompt\ud800", "response": "response"}
+
+    first = trace_judge_evidence_digest(**evidence)
+
+    assert first == trace_judge_evidence_digest(**evidence)
+    assert first != trace_judge_evidence_digest(**(evidence | {"response": "changed"}))

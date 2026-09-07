@@ -10,6 +10,7 @@ from verdict.monitoring import (
     compare_manifest,
     monitor_policy_from_json,
     monitor_policy_to_json,
+    monitor_requires_rebootstrap,
     monitor_snapshot_from_json,
     monitor_snapshot_to_json,
     plan_historical_manifest,
@@ -441,35 +442,429 @@ def test_open_prospective_cohort_freezes_facts_when_each_unit_is_admitted() -> N
     assert result.metrics[0].current_value == 0.0
 
 
+def test_prospective_membership_waits_for_late_evaluator_results() -> None:
+    fingerprint = "a" * 64
+    policy = MonitorPolicy(
+        "p", "scope", reference_ratio=0.5,
+        minimum_reference=5, minimum_current=5, prospective_target=10,
+        minimum_effect=0.5, evaluator_fingerprint=fingerprint,
+        evaluator_dimensions=("quality",),
+    )
+    baseline = tuple(
+        AnalysisUnitRecord(
+            f"baseline-{index}", NOW + timedelta(minutes=index),
+            {"judge.quality.pass": True},
+            metric_states={"judge.quality.pass": "pass"},
+            evaluator_state="completed",
+            evaluator_evidence_digest=f"{index:064x}",
+        )
+        for index in range(20)
+    )
+    historical = plan_historical_manifest(
+        baseline, policy, cutoff=NOW + timedelta(hours=1),
+    )
+    pending = tuple(
+        AnalysisUnitRecord(
+            f"current-{index}", NOW + timedelta(hours=2, minutes=index),
+            {}, metric_states={"judge.quality.pass": "missing"},
+            evaluator_state="pending",
+            evaluator_evidence_digest=f"{index + 100:064x}",
+        )
+        for index in range(10)
+    )
+
+    waiting = plan_prospective_manifest(historical, baseline + pending, policy)
+    waiting_result = compare_manifest(baseline + pending, waiting, policy)
+
+    assert waiting.current_unit_ids == tuple(f"current-{index}" for index in range(10))
+    assert waiting.prospective_open is True
+    assert len(waiting.pending_evaluator_units) == 10
+    assert waiting_result.status is MonitorStatus.INSUFFICIENT
+    assert waiting_result.metric_coverage[0].current_missing == 10
+
+    completed = tuple(
+        AnalysisUnitRecord(
+            unit.unit_id, unit.event_time,
+            {"judge.quality.pass": False},
+            metric_states={"judge.quality.pass": "fail"},
+            evaluator_state="completed",
+            evaluator_evidence_digest=unit.evaluator_evidence_digest,
+        )
+        for unit in pending
+    )
+    closed = plan_prospective_manifest(waiting, baseline + completed, policy)
+    result = compare_manifest(baseline + completed, closed, policy)
+
+    assert closed.current_unit_ids == waiting.current_unit_ids
+    assert closed.pending_evaluator_units == ()
+    assert closed.prospective_open is False
+    assert result.status is MonitorStatus.ALERT
+    assert result.metrics[0].reference_value == 1.0
+    assert result.metrics[0].current_value == 0.0
+
+
+def test_pending_evaluator_evidence_mutation_requires_rebootstrap() -> None:
+    fingerprint = "a" * 64
+    policy = MonitorPolicy(
+        "p", "scope", reference_ratio=0.5,
+        minimum_reference=1, minimum_current=1, prospective_target=1,
+        evaluator_fingerprint=fingerprint, evaluator_dimensions=("quality",),
+    )
+    baseline = tuple(
+        AnalysisUnitRecord(
+            f"baseline-{index}", NOW + timedelta(minutes=index),
+            {"judge.quality.pass": True},
+            metric_states={"judge.quality.pass": "pass"},
+            evaluator_state="completed", evaluator_evidence_digest=f"{index:064x}",
+        )
+        for index in range(2)
+    )
+    historical = plan_historical_manifest(
+        baseline, policy, cutoff=NOW + timedelta(hours=1),
+    )
+    pending = AnalysisUnitRecord(
+        "current", NOW + timedelta(hours=2), {},
+        metric_states={"judge.quality.pass": "missing"},
+        evaluator_state="pending", evaluator_evidence_digest="1" * 64,
+    )
+    waiting = plan_prospective_manifest(historical, (*baseline, pending), policy)
+    changed = AnalysisUnitRecord(
+        "current", pending.event_time, {},
+        metric_states={"judge.quality.pass": "missing"},
+        evaluator_state="pending", evaluator_evidence_digest="2" * 64,
+    )
+
+    with pytest.raises(ValueError, match="re-bootstrap"):
+        plan_prospective_manifest(waiting, (*baseline, changed), policy)
+
+
+def test_pending_evaluator_source_deletion_requires_rebootstrap() -> None:
+    policy = MonitorPolicy(
+        "p", "scope", reference_ratio=0.5,
+        minimum_reference=1, minimum_current=1, prospective_target=1,
+        evaluator_fingerprint="a" * 64, evaluator_dimensions=("quality",),
+    )
+    baseline = tuple(
+        AnalysisUnitRecord(
+            f"baseline-{index}", NOW + timedelta(minutes=index),
+            {"judge.quality.pass": True},
+            metric_states={"judge.quality.pass": "pass"},
+            evaluator_state="completed", evaluator_evidence_digest=f"{index:064x}",
+        )
+        for index in range(2)
+    )
+    historical = plan_historical_manifest(
+        baseline, policy, cutoff=NOW + timedelta(hours=1),
+    )
+    pending = AnalysisUnitRecord(
+        "current", NOW + timedelta(hours=2), {},
+        metric_states={"judge.quality.pass": "missing"},
+        evaluator_state="pending", evaluator_evidence_digest="1" * 64,
+    )
+    waiting = plan_prospective_manifest(historical, (*baseline, pending), policy)
+
+    with pytest.raises(ValueError, match="re-bootstrap"):
+        plan_prospective_manifest(waiting, baseline, policy)
+
+
+def test_unadmitted_late_trace_is_not_recounted_while_evaluator_is_pending() -> None:
+    policy = MonitorPolicy(
+        "p", "scope", reference_ratio=0.5,
+        minimum_reference=1, minimum_current=1, prospective_target=1,
+        evaluator_fingerprint="a" * 64, evaluator_dimensions=("quality",),
+    )
+    baseline = tuple(
+        AnalysisUnitRecord(
+            f"baseline-{index}", NOW + timedelta(minutes=index),
+            {"judge.quality.pass": True},
+            metric_states={"judge.quality.pass": "pass"},
+            evaluator_state="completed", evaluator_evidence_digest=f"{index:064x}",
+        )
+        for index in range(2)
+    )
+    historical = plan_historical_manifest(
+        baseline, policy, cutoff=NOW + timedelta(hours=1),
+    )
+    pending = AnalysisUnitRecord(
+        "pending", NOW + timedelta(hours=2), {},
+        metric_states={"judge.quality.pass": "missing"},
+        evaluator_state="pending", evaluator_evidence_digest="a" * 64,
+    )
+    waiting = plan_prospective_manifest(historical, (*baseline, pending), policy)
+    late = AnalysisUnitRecord(
+        "late", NOW + timedelta(minutes=30), {},
+        metric_states={"judge.quality.pass": "missing"},
+        evaluator_state="pending", evaluator_evidence_digest="b" * 64,
+    )
+
+    first_retry = plan_prospective_manifest(
+        waiting, (*baseline, late, pending), policy,
+    )
+    second_retry = plan_prospective_manifest(
+        first_retry, (*baseline, late, pending), policy,
+    )
+
+    assert first_retry == waiting
+    assert second_retry == waiting
+    assert waiting.late_unit_count == 0
+
+    completed = AnalysisUnitRecord(
+        pending.unit_id, pending.event_time,
+        {"judge.quality.pass": True},
+        metric_states={"judge.quality.pass": "pass"},
+        evaluator_state="completed",
+        evaluator_evidence_digest=pending.evaluator_evidence_digest,
+    )
+    closed = plan_prospective_manifest(
+        waiting, (*baseline, late, completed), policy,
+    )
+    next_cohort = plan_prospective_manifest(
+        closed, (*baseline, late, completed), policy,
+    )
+
+    assert closed.prospective_open is False
+    assert closed.late_unit_count == 0
+    assert next_cohort.current_unit_ids == ("late",)
+    assert next_cohort.late_unit_count == 1
+
+
+def test_evaluator_error_can_be_replaced_by_later_completion() -> None:
+    policy = MonitorPolicy(
+        "p", "scope", reference_ratio=0.5,
+        minimum_reference=1, minimum_current=1, prospective_target=1,
+        minimum_effect=0.5, evaluator_fingerprint="a" * 64,
+        evaluator_dimensions=("quality",),
+    )
+    baseline = tuple(
+        AnalysisUnitRecord(
+            f"baseline-{index}", NOW + timedelta(minutes=index),
+            {"judge.quality.pass": True},
+            metric_states={"judge.quality.pass": "pass"},
+            evaluator_state="completed", evaluator_evidence_digest=f"{index:064x}",
+        )
+        for index in range(2)
+    )
+    historical = plan_historical_manifest(
+        baseline, policy, cutoff=NOW + timedelta(hours=1),
+    )
+    failed_attempt = AnalysisUnitRecord(
+        "current", NOW + timedelta(hours=2), {},
+        metric_states={"judge.quality.pass": "error"},
+        evaluator_state="error", evaluator_evidence_digest="1" * 64,
+    )
+    waiting = plan_prospective_manifest(
+        historical, (*baseline, failed_attempt), policy,
+    )
+    completed = AnalysisUnitRecord(
+        "current", failed_attempt.event_time, {"judge.quality.pass": False},
+        metric_states={"judge.quality.pass": "fail"},
+        evaluator_state="completed", evaluator_evidence_digest="1" * 64,
+    )
+
+    closed = plan_prospective_manifest(waiting, (*baseline, completed), policy)
+    result = compare_manifest((*baseline, completed), closed, policy)
+
+    assert closed.pending_evaluator_units == ()
+    assert result.metric_coverage[0].current_error == 0
+    assert result.metrics[0].current_value == 0.0
+
+
+def test_pending_evaluator_outside_explicit_windows_does_not_block_preview() -> None:
+    policy = MonitorPolicy(
+        "p", "scope", window_mode=WindowMode.EXPLICIT,
+        reference_start=NOW, reference_end=NOW + timedelta(hours=1),
+        current_start=NOW + timedelta(hours=2),
+        current_end=NOW + timedelta(hours=3),
+        minimum_reference=1, minimum_current=1,
+        evaluator_fingerprint="a" * 64, evaluator_dimensions=("quality",),
+    )
+    completed = tuple(
+        AnalysisUnitRecord(
+            f"completed-{index}", NOW + timedelta(hours=index * 2, minutes=1),
+            {"judge.quality.pass": True},
+            metric_states={"judge.quality.pass": "pass"},
+            evaluator_state="completed", evaluator_evidence_digest=f"{index:064x}",
+        )
+        for index in range(2)
+    )
+    outside = AnalysisUnitRecord(
+        "outside", NOW + timedelta(hours=4), {},
+        metric_states={"judge.quality.pass": "missing"},
+        evaluator_state="pending", evaluator_evidence_digest="f" * 64,
+    )
+
+    manifest = plan_historical_manifest(
+        (*completed, outside), policy, cutoff=NOW + timedelta(hours=5),
+    )
+
+    assert manifest.reference_unit_ids == ("completed-0",)
+    assert manifest.current_unit_ids == ("completed-1",)
+
+
+def test_unassigned_cluster_member_does_not_require_an_unused_judgment() -> None:
+    policy = MonitorPolicy(
+        "p", "scope", reference_ratio=0.5,
+        minimum_reference=1, minimum_current=1,
+        grouping_mode="cluster", cluster_registry_version_id="registry",
+        evaluator_fingerprint="a" * 64, evaluator_dimensions=("quality",),
+    )
+    assigned = tuple(
+        AnalysisUnitRecord(
+            f"assigned-{index}", NOW + timedelta(minutes=index),
+            {"judge.quality.pass": True}, group_id="cluster",
+            metric_states={"judge.quality.pass": "pass"},
+            evaluator_state="completed", evaluator_evidence_digest=f"{index:064x}",
+        )
+        for index in range(2)
+    )
+    unassigned = AnalysisUnitRecord(
+        "unassigned", NOW + timedelta(minutes=2), {},
+        metric_states={"judge.quality.pass": "missing"},
+        evaluator_state="pending", evaluator_evidence_digest="f" * 64,
+    )
+
+    manifest = plan_historical_manifest(
+        (*assigned, unassigned), policy, cutoff=NOW + timedelta(hours=1),
+    )
+
+    assert manifest.pending_evaluator_units == ()
+    assert manifest.current_summary.unassigned_unit_count == 1
+    assert all(
+        item.group_id == "cluster" for item in manifest.current_summary.metrics
+    )
+
+
+def test_new_cluster_member_does_not_delay_reference_stale_signal() -> None:
+    policy = MonitorPolicy(
+        "p", "scope", reference_ratio=0.5,
+        minimum_reference=1, minimum_current=1, prospective_target=1,
+        grouping_mode="cluster", cluster_registry_version_id="registry",
+        evaluator_fingerprint="a" * 64, evaluator_dimensions=("quality",),
+    )
+    baseline = tuple(
+        AnalysisUnitRecord(
+            f"baseline-{index}", NOW + timedelta(minutes=index),
+            {"judge.quality.pass": True}, group_id="known",
+            metric_states={"judge.quality.pass": "pass"},
+            evaluator_state="completed", evaluator_evidence_digest=f"{index:064x}",
+        )
+        for index in range(2)
+    )
+    historical = plan_historical_manifest(
+        baseline, policy, cutoff=NOW + timedelta(hours=1),
+    )
+    new_group = AnalysisUnitRecord(
+        "new-group", NOW + timedelta(hours=2), {}, group_id="new",
+        metric_states={"judge.quality.pass": "missing"},
+        evaluator_state="pending", evaluator_evidence_digest="f" * 64,
+    )
+
+    current = plan_prospective_manifest(
+        historical, (*baseline, new_group), policy,
+    )
+    comparison = compare_manifest((*baseline, new_group), current, policy)
+
+    assert current.prospective_open is False
+    assert current.pending_evaluator_units == ()
+    assert comparison.status is MonitorStatus.REFERENCE_STALE
+    assert comparison.unseen_group_share == 1.0
+
+
+def test_reference_only_group_must_finalize_for_future_comparisons() -> None:
+    policy = MonitorPolicy(
+        "p", "scope", reference_ratio=0.5,
+        minimum_reference=1, minimum_current=1,
+        grouping_mode="provider_model",
+        evaluator_fingerprint="a" * 64, evaluator_dimensions=("quality",),
+    )
+    units = (
+        AnalysisUnitRecord(
+            "reference-pass", NOW, {"judge.quality.pass": True}, group_id="a",
+            metric_states={"judge.quality.pass": "pass"},
+            evaluator_state="completed", evaluator_evidence_digest="a" * 64,
+        ),
+        AnalysisUnitRecord(
+            "reference-pending", NOW + timedelta(minutes=1), {}, group_id="a",
+            metric_states={"judge.quality.pass": "missing"},
+            evaluator_state="pending", evaluator_evidence_digest="b" * 64,
+        ),
+        *(
+            AnalysisUnitRecord(
+                f"current-{index}", NOW + timedelta(minutes=2 + index),
+                {"judge.quality.pass": True}, group_id="b",
+                metric_states={"judge.quality.pass": "pass"},
+                evaluator_state="completed",
+                evaluator_evidence_digest=f"{index + 2:064x}",
+            )
+            for index in range(2)
+        ),
+    )
+
+    with pytest.raises(
+        ValueError, match="Run the selected evaluator for 1 eligible trace",
+    ):
+        plan_historical_manifest(
+            units, policy, cutoff=NOW + timedelta(hours=1),
+        )
+
+
+def test_legacy_evaluator_snapshot_requires_rebootstrap() -> None:
+    policy = MonitorPolicy(
+        "p", "scope", reference_ratio=0.5,
+        evaluator_fingerprint="a" * 64, evaluator_dimensions=("quality",),
+    )
+    units = tuple(
+        AnalysisUnitRecord(
+            f"unit-{index}", NOW + timedelta(minutes=index),
+            {"judge.quality.pass": True},
+            metric_states={"judge.quality.pass": "pass"},
+            evaluator_state="completed", evaluator_evidence_digest=f"{index:064x}",
+        )
+        for index in range(4)
+    )
+    manifest = plan_historical_manifest(units, policy, cutoff=NOW + timedelta(hours=1))
+    comparison = compare_manifest(units, manifest, policy)
+    payload = json.loads(monitor_snapshot_to_json(manifest, comparison))
+    payload["manifest"].pop("evidence_finalization_version")
+    loaded, _ = monitor_snapshot_from_json(json.dumps(payload))
+
+    assert monitor_requires_rebootstrap(policy, loaded) is True
+
+
 def test_provider_model_group_identity_is_unambiguous_and_bounded() -> None:
     traces = (
-        Trace(
-            trace_id="one",
-            started_at=NOW,
+            Trace(
+                trace_id="one",
+                started_at=NOW,
+                ended_at=NOW + timedelta(seconds=1),
             provider="a:b",
             request_model="c",
             response_redacted="ok",
         ),
         Trace(
-            trace_id="two",
-            started_at=NOW,
+                trace_id="two",
+                started_at=NOW,
+                ended_at=NOW + timedelta(seconds=1),
             provider="a",
             request_model="b:c",
             response_redacted="ok",
         ),
         Trace(
-            trace_id="long",
-            started_at=NOW,
+                trace_id="long",
+                started_at=NOW,
+                ended_at=NOW + timedelta(seconds=1),
             provider="p" * 180,
             request_model="m" * 180,
             response_redacted="ok",
         ),
         Trace(
-            trace_id="missing-model", started_at=NOW, provider="provider",
+                trace_id="missing-model", started_at=NOW,
+                ended_at=NOW + timedelta(seconds=1), provider="provider",
             request_model="", response_redacted="ok",
         ),
         Trace(
-            trace_id="literal-unknown-model", started_at=NOW, provider="provider",
+                trace_id="literal-unknown-model", started_at=NOW,
+                ended_at=NOW + timedelta(seconds=1), provider="provider",
             request_model="unknown", response_redacted="ok",
         ),
     )
@@ -666,7 +1061,11 @@ def test_trace_projection_uses_only_pass_fail_from_one_frozen_evaluator() -> Non
     )
 
     traces = [
-        Trace(trace_id=name, started_at=NOW + timedelta(minutes=index))
+            Trace(
+                trace_id=name, started_at=NOW + timedelta(minutes=index),
+                ended_at=NOW + timedelta(minutes=index, seconds=1),
+                prompt_redacted="request", response_redacted="response",
+            )
         for index, name in enumerate(("pass", "fail", "unclear", "missing", "error"))
     ]
     judgments = {
@@ -714,8 +1113,10 @@ def test_trace_projection_is_ungrouped_by_default_and_grouping_is_explicit() -> 
     from verdict.schema import Trace
 
     traces = [
-        Trace(trace_id="a", started_at=NOW, provider="anthropic", request_model="a"),
-        Trace(trace_id="b", started_at=NOW, provider="openai", request_model="b"),
+        Trace(trace_id="a", started_at=NOW, ended_at=NOW + timedelta(seconds=1),
+              provider="anthropic", request_model="a"),
+        Trace(trace_id="b", started_at=NOW, ended_at=NOW + timedelta(seconds=1),
+              provider="openai", request_model="b"),
     ]
     assert [unit.group_id for unit in trace_monitor_units(traces)] == [None, None]
     grouped = trace_monitor_units(traces, grouping_mode="provider_model")

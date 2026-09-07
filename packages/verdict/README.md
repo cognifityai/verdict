@@ -40,27 +40,35 @@ tested family; it does not pool the selected groups. The Measurement selector
 can add stored PASS/FAIL results from one complete evaluator identity without
 running or paying for a judge. That evaluator fingerprint and its expected
 dimensions become immutable policy
-inputs. A reviewed-cluster policy also pins its registry version and projects
-new traces through that fixed version without refitting it. UNCLEAR,
+inputs. A reviewed-cluster policy also pins its registry version and completes
+projection of eligible new traces through that fixed version before saving
+monitor membership, without refitting it. Unfinished bounded projection is
+reported as `projection_pending` and writes no monitor snapshot. UNCLEAR,
 missing, and error states remain outside the PASS/FAIL denominator and are
-shown as coverage. Ongoing cohorts are prospective and non-overlapping; late
-arrivals are counted and included in the next open cohort rather than silently
-discarded. An activated policy starts with an empty prospective bucket, and
-repeated looks use a summable quadratic alpha-spending rule.
+shown as coverage. Unassigned and new groups do not wait on judgments they
+cannot use in like-for-like tests. Ongoing cohorts are prospective and
+non-overlapping; late arrivals are counted and included in the next open cohort
+rather than silently discarded. An evaluator-backed cohort fixes membership
+and waits for stored results needed by its tested metric cells before
+comparing; changed or deleted pending evidence requires a new reviewed preview.
+An activated policy starts with an empty prospective bucket, and repeated looks
+use a summable quadratic alpha-spending rule.
 `insufficient` and `reference_stale` are first-class results; unassigned or new
 groups are reported rather than pooled into a comparison. `verdict-monitor` is
 a one-shot idempotent runner. It and `verdict-service` use the same stored
 evaluator, dimensions, grouping version, and trace selection as the dashboard.
 `verdict-service` executes the dashboard's saved schedule once or continuously.
-The approved membership and normalized metric counts are immutable. Grouped
-monitors are limited to 250 distinct groups, and older stored monitors without
-frozen cohort facts require a new reviewed preview before execution.
+The approved baseline membership and normalized metric counts are immutable.
+Grouped monitors are limited to 250 distinct groups. Older stored monitors
+without frozen cohort facts, or without evaluator-finalization state when an
+evaluator is selected, require a new reviewed preview before execution.
 
 The dashboard reads key-free findings from immutable analysis snapshots rather
 than recomputing them on every page load. It reports provider outcome,
 evaluation status, finding severity, and drift comparison independently.
-`not evaluated` and `judge error` are explicit Trace states, and a prospective
-monitor says `collecting n/target` until a comparison can actually complete.
+`not evaluated` and `judge error` are explicit Trace states. A prospective
+monitor distinguishes traffic collection from a full cohort awaiting selected
+evaluator results.
 The dashboard has five top-level workspaces: Overview, Explore, Evaluate,
 Monitor, and Settings. Monitor keeps stored historical candidates separate from
 the active prospective policy.

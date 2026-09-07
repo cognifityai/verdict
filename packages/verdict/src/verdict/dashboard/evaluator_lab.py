@@ -12,11 +12,11 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from verdict.dashboard.trace_facts import trace_evidence_reason
 from verdict.pricing import PRICING_LAST_VERIFIED, compute_cost_usd
 from verdict.redaction import redact
 from verdict.schema import Judgment, JudgmentStatus, Trace
 from verdict.storage.base import Storage
+from verdict.trace_facts import trace_evidence_reason
 
 _NAME = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _PROVIDER_KEYS = {

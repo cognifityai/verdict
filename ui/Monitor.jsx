@@ -3,6 +3,14 @@ import { monitorRequest } from "./monitor-form.mjs";
 
 const box = { borderColor: "#26332e", background: "#111715" };
 
+export function monitorStateParts(monitor) {
+  const legacy = monitor?.policy && monitor?.snapshot ? monitor : null;
+  return {
+    active: monitor?.active || (["active", "requires_rebootstrap"].includes(monitor?.state) ? legacy : null),
+    candidate: monitor?.candidate || (monitor?.state === "candidate" ? legacy : null),
+  };
+}
+
 const metricLabel = (metric) => {
   if (metric.startsWith("judge.") && metric.endsWith(".pass")) {
     return `${metric.slice(6, -5).replaceAll("_", " ")} pass rate`;
@@ -47,13 +55,18 @@ function MonitorSnapshot({ response, evaluators, fallbackTarget }) {
   const manifest = snapshot.manifest;
   const comparison = snapshot.comparison;
   const policy = response.policy;
-  const candidate = response.state === "candidate";
+  const candidate = response.policyState === "candidate" || response.state === "candidate";
   const measurement = evaluators.find(
     (identity) => identity.fingerprint === policy?.evaluator_fingerprint,
   );
   const collecting = manifest.prospective_open === true;
+  const pendingEvaluations = manifest.pending_evaluator_units?.length || 0;
+  const target = policy?.prospective_target || fallbackTarget;
+  const awaitingEvaluator = collecting
+    && manifest.current_unit_ids.length >= target && pendingEvaluations > 0;
   const label = response.state === "requires_rebootstrap" ? "Re-bootstrap required"
-    : collecting ? `Collecting ${manifest.current_unit_ids.length}/${policy?.prospective_target || fallbackTarget}`
+    : awaitingEvaluator ? `Awaiting ${pendingEvaluations} evaluator results`
+      : collecting ? `Collecting ${manifest.current_unit_ids.length}/${target}`
       : comparison.status === "insufficient" ? "Insufficient evidence"
         : comparison.status.replaceAll("_", " ");
   return <section className="border p-5" style={box}>
@@ -63,12 +76,14 @@ function MonitorSnapshot({ response, evaluators, fallbackTarget }) {
     </div>
     <div className="mt-4 h-8 flex overflow-hidden border" style={{ borderColor: "#26332e" }}><div style={{ width: `${100 * manifest.reference_unit_ids.length / Math.max(1, manifest.reference_unit_ids.length + manifest.current_unit_ids.length)}%`, background: "#1f5f4b" }} /><div className="flex-1" style={{ background: "#295a78" }} /></div>
     <div className="mt-3 text-xs" style={{ color: "#94a39d" }}>
-      {collecting ? `Prospective bucket ${manifest.current_unit_ids.length}/${policy?.prospective_target || fallbackTarget}; no comparison or alert decision has run.` : `Completed comparison look ${manifest.comparison_index} · alert threshold ${comparison.alpha_threshold.toPrecision(3)} · ${policy?.sequential_method || "configured sequential correction"}`}
+      {awaitingEvaluator
+        ? `Membership is fixed at ${manifest.current_unit_ids.length}/${target}; no comparison or alert decision will run until its evaluator evidence is complete.`
+        : collecting ? `Prospective bucket ${manifest.current_unit_ids.length}/${target}; no comparison or alert decision has run.` : `Completed comparison look ${manifest.comparison_index} · alert threshold ${comparison.alpha_threshold.toPrecision(3)} · ${policy?.sequential_method || "configured sequential correction"}`}
     </div>
     <div className="mt-2 text-xs" style={{ color: "#94a39d" }}>Measurement: {policy?.evaluator_fingerprint ? (measurement?.label || `stored evaluator ${policy.evaluator_fingerprint.slice(0, 8)}`) : "deterministic trace checks only"}</div>
     <div className="mt-1 text-xs" style={{ color: "#94a39d" }}>Facet: {policy?.grouping_mode === "cluster" ? `frozen clusters · ${policy.cluster_registry_version_id || "registry unavailable"}` : policy?.grouping_mode === "provider_model" ? "provider and model" : "all eligible calls"}</div>
     <MonitorComparisonMetrics comparison={comparison} />
-    {comparison.status === "insufficient" && <p className="text-sm mt-4" style={{ color: "#f2b84b" }}>{collecting ? "No statistical test was run because the prospective bucket is still collecting." : "The bucket closed, but no metric met its configured eligible-unit minimums; no alert/no-alert conclusion was produced."}</p>}
+    {comparison.status === "insufficient" && <p className="text-sm mt-4" style={{ color: "#f2b84b" }}>{awaitingEvaluator ? "Run the selected evaluator, then run this monitor again. To stop measuring that evaluator, preview and activate a replacement monitor." : collecting ? "No statistical test was run because the prospective bucket is still collecting." : "The bucket closed, but no metric met its configured eligible-unit minimums; no alert/no-alert conclusion was produced."}</p>}
     {comparison.unseen_group_share > 0 && <p className="text-sm mt-4" style={{ color: "#f2b84b" }}>{comparison.status === "reference_stale" ? "Comparison suspended" : "Coverage note"}: {(100 * comparison.unseen_group_share).toFixed(1)}% of current traces are outside the frozen {policy?.grouping_mode === "cluster" ? "cluster" : "provider/model"} reference{comparison.unassigned_group_share > 0 ? ` (${(100 * comparison.unassigned_group_share).toFixed(1)}% are unassigned)` : ""}.{comparison.status === "reference_stale" ? " Review the policy before creating a new candidate; Verdict did not silently rebase it." : " These traces were excluded from like-for-like metric tests."}</p>}
   </section>;
 }
@@ -99,9 +114,10 @@ export function Monitor({ configUrl, evaluation = {}, initialState = null, view 
       fetch(`${root}/api/setup/token`, { credentials: "same-origin" }).then((response) => response.json()),
       fetch(`${root}/api/monitor`, { credentials: "same-origin" }).then((response) => response.json()),
     ]).then(([config, monitor]) => {
+      const state = monitorStateParts(monitor);
       setToken(config.setupToken);
-      setActive(monitor.active || (["active", "requires_rebootstrap"].includes(monitor.state) ? monitor : null));
-      setCandidate(monitor.candidate || (monitor.state === "candidate" ? monitor : null));
+      setActive(state.active);
+      setCandidate(state.candidate);
     })
       .catch((failure) => setError(String(failure)));
   }, [configUrl, root]);

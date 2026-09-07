@@ -44,10 +44,10 @@ from verdict.dashboard.registry import (
     build_registry_bundle as _build_registry_bundle,
 )
 from verdict.dashboard.storage_url import is_postgres_storage
-from verdict.dashboard.trace_facts import deterministic_trace_facts
 from verdict.evidence import agent_run_bundle_from_json
 from verdict.metrics import ScoreCounts, verdict_label
 from verdict.redaction import redact, redact_structure
+from verdict.trace_facts import deterministic_trace_facts
 
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"

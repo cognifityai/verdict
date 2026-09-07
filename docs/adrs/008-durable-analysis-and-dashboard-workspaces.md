@@ -56,8 +56,8 @@ present those states without treating missing evidence as success or failure.
 - Five top-level workspaces separate concerns: Overview, Explore, Evaluate,
   Monitor, and Settings. Monitor contains current status, historical
   comparisons, optional segments, and schedules.
-- A prospective cohort reports collection progress until a persisted comparison
-  completes.
+- A prospective cohort distinguishes traffic collection from waiting for
+  selected-evaluator results until a persisted comparison completes.
 - Generic change records are a decision log; typed workflows perform actual
   evaluator, cluster, or monitor activation.
 
@@ -77,6 +77,11 @@ receiver must honor the idempotency key for end-to-end deduplication.
   constructors remain unchanged.
 - Existing dashboard response fields remain available while explicit status and
   coverage fields are added.
+- Monitor snapshot JSON adds evaluator-finalization state. PostgreSQL schema
+  initialization also adds a generated snapshot write sequence to resolve
+  timestamp ties deterministically; existing rows are backfilled automatically.
+  Older evaluator-backed monitors remain readable but require a new reviewed
+  preview before execution.
 - `/dashboard` remains the entry point; URL parameters provide deep links
   without adding a frontend router dependency.
 

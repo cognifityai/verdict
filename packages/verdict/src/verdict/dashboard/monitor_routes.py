@@ -14,12 +14,15 @@ from verdict.dashboard.setup_routes import SetupRoutes
 from verdict.monitor_inputs import (
     LOCAL_TENANT,
     LOCAL_TRACE_SCOPE,
+    MonitorProjectionPending,
     advance_monitor,
     load_monitor_units,
     select_monitor_evaluator,
 )
 from verdict.monitoring import (
+    MonitorEvaluatorPending,
     MonitorPolicy,
+    MonitorRebootstrapRequired,
     WindowMode,
     compare_manifest,
     monitor_policy_to_json,
@@ -129,10 +132,14 @@ class MonitorRoutes:
     @staticmethod
     def response(
         policy, state, manifest, comparison, *, approved_historical=None,
+        policy_state=None,
     ) -> dict[str, object]:
         result = {
             "policy": json.loads(monitor_policy_to_json(policy)),
             "state": state,
+            "policyState": policy_state or (
+                "candidate" if state == "candidate" else "active"
+            ),
             "snapshot": json.loads(monitor_snapshot_to_json(manifest, comparison)),
         }
         if approved_historical is not None:
@@ -152,19 +159,23 @@ class MonitorRoutes:
         return load_monitor_units(writable, policy, tenant_id=TENANT)
 
     @staticmethod
-    def prospective(writable, policy):
-        return advance_monitor(writable, policy, tenant_id=TENANT)
+    def prospective(writable, policy, *, expected_state="active"):
+        return advance_monitor(
+            writable, policy, tenant_id=TENANT, expected_state=expected_state,
+        )
 
     def _stored_response(self, writable, policy, state):
         snapshot = writable.get_latest_monitor_snapshot(policy.policy_id)
         if snapshot is None:
             return {"policy": json.loads(monitor_policy_to_json(policy)), "state": state}
-        if state == "active" and monitor_requires_rebootstrap(policy, snapshot[0]):
+        policy_state = state
+        if monitor_requires_rebootstrap(policy, snapshot[0]):
             state = "requires_rebootstrap"
         return self.response(
             policy,
             state,
             *snapshot,
+            policy_state=policy_state,
             approved_historical=(
                 writable.get_initial_monitor_snapshot(policy.policy_id)
                 if state in {"active", "requires_rebootstrap"}
@@ -224,6 +235,16 @@ class MonitorRoutes:
                 comparison = compare_manifest(units, manifest, policy)
                 writable.save_monitor_candidate(policy, manifest, comparison)
                 return self.response(policy, "candidate", manifest, comparison)
+            except MonitorProjectionPending as exc:
+                return JSONResponse(
+                    {"error": str(exc), "state": "projection_pending"},
+                    status_code=409,
+                )
+            except MonitorEvaluatorPending as exc:
+                return JSONResponse(
+                    {"error": str(exc), "state": "evaluator_pending"},
+                    status_code=409,
+                )
             except (KeyError, OSError, TypeError, UnicodeError, ValueError) as exc:
                 return _error_response(exc, "invalid monitor request")
             finally:
@@ -263,7 +284,9 @@ class MonitorRoutes:
                     raise ValueError("candidate has no snapshot")
                 prepared = _prepared_activation_snapshot(historical, latest)
                 if prepared is None:
-                    prepared = self.prospective(writable, stored[0])
+                    prepared = self.prospective(
+                        writable, stored[0], expected_state="candidate",
+                    )
                 policy = writable.activate_monitor_policy(
                     stored[0].scope_key,
                     policy_id,
@@ -273,6 +296,11 @@ class MonitorRoutes:
                 return self.response(
                     policy, "active", manifest, comparison,
                     approved_historical=historical,
+                )
+            except MonitorProjectionPending as exc:
+                return JSONResponse(
+                    {"error": str(exc), "state": "projection_pending"},
+                    status_code=409,
                 )
             except (OSError, TypeError, UnicodeError, ValueError) as exc:
                 return _error_response(exc, "invalid monitor activation")
@@ -308,6 +336,16 @@ class MonitorRoutes:
                     approved_historical=writable.get_initial_monitor_snapshot(
                         policy.policy_id
                     ),
+                )
+            except MonitorProjectionPending as exc:
+                return JSONResponse(
+                    {"error": str(exc), "state": "projection_pending"},
+                    status_code=409,
+                )
+            except MonitorRebootstrapRequired as exc:
+                return JSONResponse(
+                    {"error": str(exc), "state": "requires_rebootstrap"},
+                    status_code=409,
                 )
             except (OSError, TypeError, UnicodeError, ValueError) as exc:
                 return _error_response(exc, "monitor run unavailable")

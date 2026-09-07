@@ -4,6 +4,24 @@ import test from "node:test";
 
 import * as esbuild from "esbuild";
 
+async function evaluate(expression) {
+  const built = await esbuild.build({
+    stdin: {
+      contents: `
+        import { monitorStateParts } from "./Monitor.jsx";
+        export default ${expression};
+      `,
+      resolveDir: new URL("..", import.meta.url).pathname,
+    },
+    bundle: true, format: "cjs", platform: "node", write: false, jsx: "automatic",
+  });
+  const module = { exports: {} };
+  Function("require", "module", "exports", built.outputFiles[0].text)(
+    createRequire(import.meta.url), module, module.exports,
+  );
+  return module.exports.default;
+}
+
 async function render(component) {
   const built = await esbuild.build({
     stdin: {
@@ -125,4 +143,45 @@ test("monitor status shows active authority beside a newer candidate", async () 
   assert.match(html, /Provider error rate/);
   assert.match(html, /EXPLORATORY HISTORICAL COMPARISON/);
   assert.match(html, /Empty-response rate/);
+});
+
+test("full prospective cohort says it is awaiting evaluator results", async () => {
+  const fingerprint = "a".repeat(64);
+  const html = await render(`React.createElement(Monitor, {
+    configUrl: "/api/config", view: "status",
+    evaluation: { availableIdentities: [{ complete: true,
+      fingerprint: "${fingerprint}", label: "response quality" }] },
+    initialState: { active: {
+      state: "active",
+      policy: { prospective_target: 2, grouping_mode: "none",
+        evaluator_fingerprint: "${fingerprint}" },
+      snapshot: {
+        manifest: { reference_unit_ids: ["r1", "r2"],
+          current_unit_ids: ["c1", "c2"], prospective_open: true,
+          pending_evaluator_units: [{ unit_id: "c1" }, { unit_id: "c2" }],
+          comparison_index: 1 },
+        comparison: { status: "insufficient", alpha_threshold: 0.05,
+          metrics: [], metric_coverage: [{ metric: "judge.quality.pass",
+            reference_evaluable: 2, current_evaluable: 0,
+            reference_unclear: 0, current_unclear: 0,
+            reference_missing: 0, current_missing: 2,
+            reference_error: 0, current_error: 0 }], groups: [],
+          unseen_group_share: 0 },
+      },
+    } },
+  })`);
+
+  assert.match(html, /Awaiting 2 evaluator results/);
+  assert.match(html, /Run the selected evaluator/);
+  assert.doesNotMatch(html, /Collecting 2\/2/);
+});
+
+test("legacy candidate requiring re-bootstrap is not mistaken for active", async () => {
+  const state = await evaluate(`monitorStateParts({
+    state: "requires_rebootstrap", active: null,
+    candidate: { state: "requires_rebootstrap", rebootstrapReason: "Preview again" },
+  })`);
+
+  assert.equal(state.active, null);
+  assert.equal(state.candidate.rebootstrapReason, "Preview again");
 });

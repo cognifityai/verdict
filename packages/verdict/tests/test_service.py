@@ -162,8 +162,10 @@ def test_scheduled_monitor_uses_the_frozen_evaluator_and_dimensions(tmp_path) ->
     for index in range(20):
         trace_id = f"historical-{index:03d}"
         storage.insert_trace(Trace(
-            trace_id=trace_id, tenant_id=TENANT,
-            started_at=now + timedelta(minutes=index), response_redacted="ok",
+                trace_id=trace_id, tenant_id=TENANT,
+                started_at=now + timedelta(minutes=index),
+                prompt_redacted="request", response_redacted="ok",
+            ended_at=now + timedelta(minutes=index, seconds=1),
         ))
         storage.insert_judgment(Judgment(
             judgment_id=f"judgment-{trace_id}", trace_id=trace_id,
@@ -207,9 +209,10 @@ def test_scheduled_monitor_uses_the_frozen_evaluator_and_dimensions(tmp_path) ->
     for index in range(10):
         trace_id = f"current-{index:03d}"
         storage.insert_trace(Trace(
-            trace_id=trace_id, tenant_id=TENANT,
-            started_at=now + timedelta(hours=2, minutes=index),
-            response_redacted="ok",
+                trace_id=trace_id, tenant_id=TENANT,
+                started_at=now + timedelta(hours=2, minutes=index),
+                ended_at=now + timedelta(hours=2, minutes=index, seconds=1),
+                prompt_redacted="request", response_redacted="ok",
         ))
         storage.insert_judgment(Judgment(
             judgment_id=f"judgment-{trace_id}", trace_id=trace_id,

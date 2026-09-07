@@ -21,7 +21,9 @@ def test_monitor_cli_runs_one_idempotent_durable_cycle(tmp_path, capsys) -> None
         trace_id = f"trace-{index}"
         storage.insert_trace(Trace(
             trace_id=trace_id, started_at=now + timedelta(days=index),
-            provider="openai", request_model="model", response_redacted="ok",
+            ended_at=now + timedelta(days=index, seconds=1),
+            provider="openai", request_model="model",
+            prompt_redacted="request", response_redacted="ok",
         ))
         storage.insert_judgment(Judgment(
             trace_id=trace_id, evaluator_fingerprint=fingerprint,
@@ -47,7 +49,9 @@ def test_monitor_cli_runs_one_idempotent_durable_cycle(tmp_path, capsys) -> None
         trace_id = f"trace-{index}"
         storage.insert_trace(Trace(
             trace_id=trace_id, started_at=now + timedelta(days=index),
-            provider="openai", request_model="model", response_redacted="ok",
+            ended_at=now + timedelta(days=index, seconds=1),
+            provider="openai", request_model="model",
+            prompt_redacted="request", response_redacted="ok",
         ))
         storage.insert_judgment(Judgment(
             trace_id=trace_id, evaluator_fingerprint=fingerprint,

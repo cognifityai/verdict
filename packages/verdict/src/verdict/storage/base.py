@@ -172,6 +172,16 @@ class Storage(Protocol):
         self, policy_id: str, manifest: CohortManifest, comparison: MonitorComparison
     ) -> None: ...
 
+    def save_monitor_successor(
+        self,
+        policy_id: str,
+        expected_snapshot_id: str,
+        manifest: CohortManifest,
+        comparison: MonitorComparison,
+        *,
+        expected_state: str,
+    ) -> None: ...
+
     def get_latest_monitor_snapshot(
         self, policy_id: str
     ) -> tuple[CohortManifest, MonitorComparison] | None: ...

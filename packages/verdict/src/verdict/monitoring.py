@@ -30,6 +30,20 @@ class MonitorStatus(str, Enum):
 
 MAX_MONITOR_GROUPS = 250
 MAX_MONITOR_GROUP_METRICS = 4_000
+MAX_MONITOR_SNAPSHOT_BYTES = 4_194_304
+EVIDENCE_FINALIZATION_VERSION = 1
+
+
+class MonitorRebootstrapRequired(ValueError):
+    """The stored monitor cannot safely continue with its frozen evidence."""
+
+
+class MonitorStateConflict(ValueError):
+    """The monitor head or policy authority changed before a successor write."""
+
+
+class MonitorEvaluatorPending(ValueError):
+    """The selected historical evaluator has eligible unfinished work."""
 
 
 def _aware(value: datetime | None, name: str) -> None:
@@ -47,6 +61,8 @@ class AnalysisUnitRecord:
     group_label: str | None = None
     group_provider: str | None = None
     group_model: str | None = None
+    evaluator_state: str = "not_requested"
+    evaluator_evidence_digest: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.unit_id, str) or not self.unit_id:
@@ -79,6 +95,40 @@ class AnalysisUnitRecord:
             for name in ("group_label", "group_provider", "group_model")
         ):
             raise ValueError("group metadata requires a group identity")
+        if self.evaluator_state not in {
+            "not_requested", "not_evaluable", "pending", "error", "completed",
+        }:
+            raise ValueError("evaluator state is unsupported")
+        digest = self.evaluator_evidence_digest
+        if self.evaluator_state == "not_requested":
+            if digest is not None:
+                raise ValueError("judge evidence digest requires an evaluator")
+        elif (
+            not isinstance(digest, str)
+            or len(digest) != 64
+            or any(character not in "0123456789abcdef" for character in digest)
+        ):
+            raise ValueError("evaluator evidence digest must be a SHA-256 digest")
+
+
+@dataclass(frozen=True, slots=True)
+class FrozenPendingEvaluatorUnit:
+    unit_id: str
+    group_id: str | None
+    prior_state: str
+    evidence_digest: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.unit_id, str) or not self.unit_id:
+            raise ValueError("pending evaluator unit identity is required")
+        _validate_group_id(self.group_id)
+        if self.prior_state not in {"missing", "error"}:
+            raise ValueError("pending evaluator state must be missing or error")
+        if (
+            len(self.evidence_digest) != 64
+            or any(character not in "0123456789abcdef" for character in self.evidence_digest)
+        ):
+            raise ValueError("pending evaluator evidence digest is invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -318,6 +368,8 @@ class CohortManifest:
     comparison_index: int = 0
     reference_summary: FrozenCohortSummary | None = None
     current_summary: FrozenCohortSummary | None = None
+    pending_evaluator_units: tuple[FrozenPendingEvaluatorUnit, ...] = ()
+    evidence_finalization_version: int = 0
 
     def __post_init__(self) -> None:
         for name in ("snapshot_id", "policy_fingerprint"):
@@ -352,6 +404,15 @@ class CohortManifest:
                 raise ValueError("reference summary does not match membership")
             if self.current_summary.unit_count != len(self.current_unit_ids):
                 raise ValueError("current summary does not match membership")
+        pending_ids = tuple(item.unit_id for item in self.pending_evaluator_units)
+        if len(set(pending_ids)) != len(pending_ids) or not set(pending_ids) <= current:
+            raise ValueError("pending evaluator units must be unique current members")
+        if self.pending_evaluator_units and (
+            self.evidence_finalization_version != EVIDENCE_FINALIZATION_VERSION
+        ):
+            raise ValueError("pending evaluator units require versioned finalization")
+        if self.evidence_finalization_version not in {0, EVIDENCE_FINALIZATION_VERSION}:
+            raise ValueError("unsupported evidence finalization version")
 
 
 @dataclass(frozen=True, slots=True)
@@ -655,6 +716,104 @@ def _merge_summaries(
     )
 
 
+def _pending_evaluator_units(
+    units: list[AnalysisUnitRecord], *, tested_group_ids: set[str] | None,
+) -> tuple[FrozenPendingEvaluatorUnit, ...]:
+    pending = []
+    for unit in units:
+        if (
+            tested_group_ids is not None
+            and unit.group_id not in tested_group_ids
+        ) or unit.evaluator_state not in {
+            "pending", "error",
+        }:
+            continue
+        assert unit.evaluator_evidence_digest is not None
+        pending.append(FrozenPendingEvaluatorUnit(
+            unit.unit_id,
+            unit.group_id if tested_group_ids is not None else None,
+            "error" if unit.evaluator_state == "error" else "missing",
+            unit.evaluator_evidence_digest,
+        ))
+    return tuple(pending)
+
+
+def _replace_evaluator_state(
+    metrics: dict[tuple[str | None, str], FrozenMetricCounts],
+    pending: FrozenPendingEvaluatorUnit,
+    states: Mapping[str, str],
+) -> None:
+    for metric, state in states.items():
+        key = (pending.group_id, metric)
+        previous = metrics.get(key)
+        if previous is None:
+            raise MonitorRebootstrapRequired(
+                "pending evaluator summary changed; re-bootstrap the monitor"
+            )
+        values = {item.name: getattr(previous, item.name) for item in fields(previous)}
+        prior_name = f"state_{pending.prior_state}"
+        if values[prior_name] < 1:
+            raise MonitorRebootstrapRequired(
+                "pending evaluator summary changed; re-bootstrap the monitor"
+            )
+        values[prior_name] -= 1
+        values[f"state_{state}"] += 1
+        if state == "pass":
+            values["true_count"] += 1
+        elif state == "fail":
+            values["false_count"] += 1
+        metrics[key] = FrozenMetricCounts(**values)
+
+
+def _advance_pending_evaluator_units(
+    summary: FrozenCohortSummary,
+    pending: tuple[FrozenPendingEvaluatorUnit, ...],
+    units_by_id: Mapping[str, AnalysisUnitRecord],
+    dimensions: tuple[str, ...],
+) -> tuple[FrozenCohortSummary, tuple[FrozenPendingEvaluatorUnit, ...]]:
+    remaining = []
+    metrics = {(item.group_id, item.metric): item for item in summary.metrics}
+    changed = False
+    for item in pending:
+        unit = units_by_id.get(item.unit_id)
+        if unit is None or unit.evaluator_evidence_digest != item.evidence_digest:
+            raise MonitorRebootstrapRequired(
+                "pending evaluator evidence is unavailable or changed; re-bootstrap the monitor"
+            )
+        if unit.evaluator_state == "completed":
+            states = {
+                f"judge.{dimension}.pass": unit.metric_states[
+                    f"judge.{dimension}.pass"
+                ]
+                for dimension in dimensions
+            }
+            _replace_evaluator_state(metrics, item, states)
+            changed = True
+            continue
+        if unit.evaluator_state == "not_evaluable":
+            raise MonitorRebootstrapRequired(
+                "pending evaluator evidence is no longer evaluable; re-bootstrap the monitor"
+            )
+        if unit.evaluator_state == "error" and item.prior_state == "missing":
+            states = {f"judge.{dimension}.pass": "error" for dimension in dimensions}
+            _replace_evaluator_state(metrics, item, states)
+            changed = True
+            item = FrozenPendingEvaluatorUnit(
+                item.unit_id, item.group_id, "error", item.evidence_digest,
+            )
+        remaining.append(item)
+    if changed:
+        summary = FrozenCohortSummary(
+            summary.unit_count,
+            summary.unassigned_unit_count,
+            summary.groups,
+            tuple(sorted(
+                metrics.values(), key=lambda item: (item.group_id or "", item.metric),
+            )),
+        )
+    return summary, tuple(remaining)
+
+
 def _manifest(
     policy: MonitorPolicy,
     cutoff: datetime,
@@ -668,6 +827,8 @@ def _manifest(
     current_summary: FrozenCohortSummary | None = None,
     reference_unit_ids: tuple[str, ...] | None = None,
     current_unit_ids: tuple[str, ...] | None = None,
+    pending_evaluator_units: tuple[FrozenPendingEvaluatorUnit, ...] = (),
+    evidence_finalization_version: int = EVIDENCE_FINALIZATION_VERSION,
 ) -> CohortManifest:
     if reference_summary is None:
         reference_summary = _freeze_cohort(
@@ -709,10 +870,21 @@ def _manifest(
             "reference": frozen_reference_ids,
             "current": frozen_current_ids,
             "consumed": consumed,
+            "late_unit_count": late,
             "prospective_open": prospective_open,
             "comparison_index": comparison_index,
             "reference_evidence": reference_summary.evidence_digest,
             "current_evidence": current_summary.evidence_digest,
+            "pending_evaluator_units": [
+                {
+                    "unit_id": item.unit_id,
+                    "group_id": item.group_id,
+                    "prior_state": item.prior_state,
+                    "evidence_digest": item.evidence_digest,
+                }
+                for item in pending_evaluator_units
+            ],
+            "evidence_finalization_version": evidence_finalization_version,
         },
         sort_keys=True,
         separators=(",", ":"),
@@ -729,6 +901,8 @@ def _manifest(
         comparison_index,
         reference_summary,
         current_summary,
+        pending_evaluator_units,
+        evidence_finalization_version,
     )
 
 
@@ -749,6 +923,30 @@ def plan_historical_manifest(units, policy: MonitorPolicy, *, cutoff: datetime) 
             if policy.current_start <= unit.event_time < policy.current_end
         ]
     consumed = tuple(unit.unit_id for unit in (*reference, *current))
+    reference_group_ids = None
+    shared_group_ids = None
+    if policy.grouping_mode != "none":
+        reference_group_ids = {
+            unit.group_id for unit in reference if unit.group_id is not None
+        }
+        shared_group_ids = (
+            reference_group_ids
+            & {unit.group_id for unit in current if unit.group_id is not None}
+        )
+    pending = (
+        *_pending_evaluator_units(
+            reference, tested_group_ids=reference_group_ids,
+        ),
+        *_pending_evaluator_units(
+            current, tested_group_ids=shared_group_ids,
+        ),
+    )
+    if policy.evaluator_fingerprint is not None and pending:
+        noun = "trace" if len(pending) == 1 else "traces"
+        raise MonitorEvaluatorPending(
+            f"Run the selected evaluator for {len(pending)} eligible {noun}, "
+            "then preview this monitor again."
+        )
     return _manifest(policy, cutoff, reference, current, consumed)
 
 
@@ -761,6 +959,10 @@ def monitor_requires_rebootstrap(
         manifest.reference_summary is None
         or manifest.current_summary is None
         or (policy.grouping_mode == "cluster" and policy.cluster_registry_version_id is None)
+        or (
+            policy.evaluator_fingerprint is not None
+            and manifest.evidence_finalization_version != EVIDENCE_FINALIZATION_VERSION
+        )
     )
 
 
@@ -774,20 +976,34 @@ def plan_prospective_manifest(
         raise ValueError("monitor policy requires re-bootstrap")
     used = set(previous.consumed_unit_ids)
     rows = _ordered(units)
+    units_by_id = {unit.unit_id: unit for unit in rows}
     unseen_rows = [unit for unit in rows if unit.unit_id not in used]
-    late_units = [unit for unit in unseen_rows if unit.event_time < previous.cutoff]
+    tested_group_ids = (
+        {item.group_id for item in previous.reference_summary.groups}
+        if policy.grouping_mode != "none"
+        else None
+    )
     # A late-arriving unit is still evidence. Excluding it would selectively
     # discard slow/error-prone calls and bias the monitored failure rate.
     candidates = unseen_rows
     if previous.prospective_open:
+        current_summary, pending = _advance_pending_evaluator_units(
+            previous.current_summary,
+            previous.pending_evaluator_units,
+            units_by_id,
+            policy.evaluator_dimensions,
+        )
         target_remaining = policy.prospective_target - len(previous.current_unit_ids)
         candidates = candidates[:target_remaining]
         current_ids = (*previous.current_unit_ids, *(unit.unit_id for unit in candidates))
         comparison_index = previous.comparison_index
         current_summary = _merge_summaries(
-            previous.current_summary,
+            current_summary,
             _freeze_cohort(candidates, grouped=policy.grouping_mode != "none"),
         )
+        pending = (*pending, *_pending_evaluator_units(
+            candidates, tested_group_ids=tested_group_ids,
+        ))
     else:
         candidates = candidates[:policy.prospective_target]
         current_ids = tuple(unit.unit_id for unit in candidates)
@@ -796,7 +1012,11 @@ def plan_prospective_manifest(
             candidates,
             grouped=policy.grouping_mode != "none",
         )
-    prospective_open = len(current_ids) < policy.prospective_target
+        pending = _pending_evaluator_units(
+            candidates, tested_group_ids=tested_group_ids,
+        )
+    admitted_late = sum(unit.event_time < previous.cutoff for unit in candidates)
+    prospective_open = len(current_ids) < policy.prospective_target or bool(pending)
     cutoff = max((previous.cutoff, *(unit.event_time for unit in candidates)))
     consumed = (
         *previous.consumed_unit_ids,
@@ -808,15 +1028,16 @@ def plan_prospective_manifest(
         [],
         [],
         consumed,
-        previous.late_unit_count + len(late_units)
+        previous.late_unit_count + admitted_late
         if previous.prospective_open
-        else len(late_units),
+        else admitted_late,
         prospective_open,
         comparison_index,
         previous.reference_summary,
         current_summary,
         previous.reference_unit_ids,
         current_ids,
+        tuple(pending),
     )
 
 
@@ -843,14 +1064,6 @@ def compare_manifest(units, manifest: CohortManifest, policy: MonitorPolicy) -> 
         )
         for group_id in group_ids
     )
-    if manifest.prospective_open:
-        return MonitorComparison(
-            MonitorStatus.INSUFFICIENT,
-            (),
-            0.0,
-            alpha_threshold,
-            groups=group_coverage,
-        )
     grouped = policy.grouping_mode != "none"
     reference_metrics = {(item.group_id, item.metric): item for item in reference.metrics}
     current_metrics = {(item.group_id, item.metric): item for item in current.metrics}
@@ -872,6 +1085,15 @@ def compare_manifest(units, manifest: CohortManifest, policy: MonitorPolicy) -> 
         )
         for group_id, metric in coverage_keys
     )
+    if manifest.prospective_open:
+        return MonitorComparison(
+            MonitorStatus.INSUFFICIENT,
+            (),
+            0.0,
+            alpha_threshold,
+            metric_coverage,
+            groups=group_coverage,
+        )
     if (
         reference.unit_count < policy.minimum_reference
         or current.unit_count < policy.minimum_current
@@ -1059,11 +1281,16 @@ def trace_monitor_units(
     cluster_labels: Mapping[str, str] | None = None,
 ) -> tuple[AnalysisUnitRecord, ...]:
     """Project genuine LLM calls and one frozen evaluator into monitor units."""
+    from verdict.schema import JudgmentStatus
     from verdict.structural import is_refusal
+    from verdict.trace_facts import trace_evidence_reason, trace_judge_evidence_digest
 
     units = []
     for trace in traces:
-        if trace.tags.get("verdict.workload") == "judge":
+        if (
+            trace.ended_at is None
+            or trace.tags.get("verdict.workload") in {"judge", "paired_replay"}
+        ):
             continue
         metrics = {"provider_error": bool(trace.error)}
         if trace.response_redacted is not None:
@@ -1072,11 +1299,29 @@ def trace_monitor_units(
                 "refusal_signature": is_refusal(trace.response_redacted),
             })
         metric_states = {}
+        evaluator_state = "not_requested"
+        evaluator_evidence_digest = None
         if evaluator_dimensions:
-            states = judgment_metric_states(
-                (judgments_by_trace or {}).get(trace.trace_id),
-                evaluator_dimensions,
+            judgment = (judgments_by_trace or {}).get(trace.trace_id)
+            evaluator_evidence_digest = trace_judge_evidence_digest(
+                error=trace.error,
+                prompt=trace.prompt_redacted,
+                response=trace.response_redacted,
             )
+            evidence_reason = trace_evidence_reason(
+                error=trace.error,
+                prompt=trace.prompt_redacted,
+                response=trace.response_redacted,
+            )
+            if evidence_reason is not None:
+                evaluator_state = "not_evaluable"
+                states = judgment_metric_states(None, evaluator_dimensions)
+            elif getattr(judgment, "status", None) is JudgmentStatus.COMPLETED:
+                evaluator_state = "completed"
+                states = judgment_metric_states(judgment, evaluator_dimensions)
+            else:
+                evaluator_state = "error" if judgment is not None else "pending"
+                states = judgment_metric_states(judgment, evaluator_dimensions)
             for dimension, state in states.items():
                 metric = f"judge.{dimension}.pass"
                 metric_states[metric] = state
@@ -1108,6 +1353,8 @@ def trace_monitor_units(
                 group_label,
                 group_provider,
                 group_model,
+                evaluator_state,
+                evaluator_evidence_digest,
             )
         )
     return tuple(units)
@@ -1227,6 +1474,16 @@ def monitor_snapshot_to_json(
             "late_unit_count": manifest.late_unit_count,
             "prospective_open": manifest.prospective_open,
             "comparison_index": manifest.comparison_index,
+            "pending_evaluator_units": [
+                {
+                    "unit_id": item.unit_id,
+                    "group_id": item.group_id,
+                    "prior_state": item.prior_state,
+                    "evidence_digest": item.evidence_digest,
+                }
+                for item in manifest.pending_evaluator_units
+            ],
+            "evidence_finalization_version": manifest.evidence_finalization_version,
         },
         "comparison": {
             "status": comparison.status.value,
@@ -1266,7 +1523,10 @@ def monitor_snapshot_to_json(
     if manifest.reference_summary is not None:
         payload["manifest"]["reference_summary"] = _serialized_summary(manifest.reference_summary)
         payload["manifest"]["current_summary"] = _serialized_summary(manifest.current_summary)
-    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    if not 2 <= len(encoded.encode("utf-8")) <= MAX_MONITOR_SNAPSHOT_BYTES:
+        raise ValueError("monitor snapshot exceeds the 4 MiB storage contract")
+    return encoded
 
 
 def monitor_snapshot_from_json(
@@ -1295,6 +1555,11 @@ def monitor_snapshot_from_json(
                 if "current_summary" in manifest_data
                 else None
             ),
+            tuple(
+                FrozenPendingEvaluatorUnit(**item)
+                for item in manifest_data.get("pending_evaluator_units", [])
+            ),
+            manifest_data.get("evidence_finalization_version", 0),
         )
         comparison = MonitorComparison(
             MonitorStatus(comparison_data["status"]),

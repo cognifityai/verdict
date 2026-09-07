@@ -199,16 +199,21 @@ freezes that evaluator fingerprint and its expected dimensions. Provider/model
 and reviewed-cluster facets produce separate comparisons for every eligible
 group and metric; Verdict corrects across that complete family instead of
 pooling groups. Reviewed-cluster policies pin the registry version used by the
-preview, and each run projects newly eligible traces through that version
-without fitting or changing clusters. The approved membership and normalized
-metric counts are frozen together, so later source edits or re-judging do not
-rewrite the baseline. If no group/metric cell has enough eligible LLM calls,
-Verdict reports
+preview, and each run completes projection of eligible new traces through that
+version before saving monitor membership, without fitting or changing clusters.
+If bounded projection work remains, the run reports `projection_pending` and
+saves no monitor snapshot. Approved baseline facts are immutable. An open
+evaluator-backed cohort fixes membership, reports pending/error coverage, and
+waits for stored results required by like-for-like metric cells before
+comparing. Unassigned and new groups remain coverage signals. Changed or
+removed pending evidence requires a new reviewed preview. If no group/metric
+cell has enough eligible completed LLM calls, Verdict reports
 `insufficient`; if unassigned or new groups exceed the configured
 support threshold, it reports `reference_stale`.
 Previewed comparisons remain exploratory until explicitly activated.
 Activation does not promote the historical preview result: it freezes the
-reference and opens an empty prospective current bucket.
+reference and opens an empty prospective current bucket. In-flight traces are
+excluded from monitor evidence.
 
 To run the active policy from cron, systemd, Kubernetes, or another scheduler:
 
@@ -223,12 +228,16 @@ summable `6 / (pi² × look²)` schedule after applying Benjamini-Hochberg withi
 each look. The dashboard, `verdict-monitor`, manual scheduled action, and
 `verdict-service` share the same trace, stored-judgment, evaluator-dimension,
 and frozen-group input construction; none of these monitor paths calls a judge.
+Cluster-backed runs complete assignment through the pinned registry before
+freezing membership. Rerunning after `projection_pending` resumes from durable
+assignments already written.
 Repeating the command without new eligible traffic returns the same snapshot
 identity instead of duplicating work. The reference does not silently move or
 recluster; create and review a new candidate when the comparison contract must
 change. A grouped monitor can contain at most 250 distinct groups. A stored
 monitor without frozen cohort facts remains readable but must be replaced from
-a new reviewed preview before it can execute.
+a new reviewed preview before it can execute. The same applies to an older
+evaluator-backed monitor that cannot represent pending finalization.
 
 Safety limits are 64 MiB per JSON file or hosted API response, 16 MiB per
 NDJSON row, and 16 MiB per OTLP receiver request by default (including bounded
@@ -496,7 +505,8 @@ baseline is the preceding 7 days after its 24-hour lag, with a global minimum of
 is met. The pipeline still checks judged-sample sufficiency for every eligible
 cluster and rubric dimension, and actual job flags may use different windows or
 sample floors.
-`No drift analysis has completed yet`, `Collecting n/target`, `Insufficient`,
+`No drift analysis has completed yet`, `Collecting n/target`,
+`Awaiting n evaluator results`, `Insufficient`,
 `Completed with no signals`, and `Completed with signals` are separate states.
 Only the latter two represent a persisted completed comparison. A mounted host that supplies the
 same-origin Operations adapter also exposes the action from the empty state.

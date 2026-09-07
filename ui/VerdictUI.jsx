@@ -966,14 +966,19 @@ function MetricCell({ label, value, sub, icon: Icon, accent }) {
 }
 
 function MonitorResult({ current }) {
-  const candidate = current.state === "candidate";
+  const candidate = current.policyState === "candidate" || current.state === "candidate";
   const snapshot = current.snapshot;
   const manifest = snapshot?.manifest;
   const comparison = snapshot?.comparison;
   const collecting = manifest?.prospective_open === true;
+  const pendingEvaluations = manifest?.pending_evaluator_units?.length || 0;
+  const target = current.policy?.prospective_target || 0;
+  const awaitingEvaluator = collecting
+    && manifest.current_unit_ids.length >= target && pendingEvaluations > 0;
   const alerts = (comparison?.metrics || []).filter((metric) => metric.alert).length;
   const title = current.state === "requires_rebootstrap" ? "Re-bootstrap required"
-    : collecting ? `Collecting ${manifest.current_unit_ids.length}/${current.policy?.prospective_target || 0} new traces`
+    : awaitingEvaluator ? `Awaiting ${pendingEvaluations} evaluator results`
+      : collecting ? `Collecting ${manifest.current_unit_ids.length}/${target} new traces`
       : comparison?.status === "alert" ? `${alerts || 1} alert${alerts === 1 ? "" : "s"} detected`
         : comparison?.status === "no_alert" ? "No alert in this comparison"
           : "Insufficient evidence for a decision";
@@ -984,7 +989,7 @@ function MonitorResult({ current }) {
         <div className="text-xs font-mono" style={{ color }}>{candidate ? "EXPLORATORY HISTORICAL COMPARISON" : "ACTIVE MONITOR"}</div>
         <div className="font-semibold mt-1">{title}</div>
         <div className="text-sm mt-1" style={{ color: C.sub }}>
-          {candidate ? "Stored preview; not active." : collecting ? "The frozen reference is waiting for a complete prospective cohort." : "Latest completed prospective comparison."}
+          {candidate ? "Stored preview; not active." : awaitingEvaluator ? "Membership is fixed. Run the selected evaluator, then run the monitor again." : collecting ? "The frozen reference is waiting for a complete prospective cohort." : "Latest completed prospective comparison."}
         </div>
       </div>
       {manifest && <div className="text-sm" style={{ color: C.sub }}>{manifest.reference_unit_ids.length} reference → {manifest.current_unit_ids.length} current</div>}

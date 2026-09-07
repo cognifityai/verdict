@@ -24,9 +24,10 @@ from verdict.dashboard.control_plane import ControlStore
 from verdict.monitor_inputs import (
     LOCAL_TENANT,
     LOCAL_TRACE_SCOPE,
-    MonitorRebootstrapRequired,
+    MonitorProjectionPending,
     advance_monitor,
 )
+from verdict.monitoring import MonitorRebootstrapRequired, MonitorStateConflict
 from verdict.telemetry.local_agents import capture_local_agents
 
 _log = logging.getLogger("verdict.service")
@@ -170,6 +171,18 @@ def run_cycle(storage_url: str, schedule: dict[str, object]) -> dict[str, object
                 monitor = {
                     "policyId": policy.policy_id,
                     "status": "requires_rebootstrap",
+                    "alerts": 0,
+                }
+            except MonitorProjectionPending:
+                monitor = {
+                    "policyId": policy.policy_id,
+                    "status": "projection_pending",
+                    "alerts": 0,
+                }
+            except MonitorStateConflict:
+                monitor = {
+                    "policyId": policy.policy_id,
+                    "status": "superseded",
                     "alerts": 0,
                 }
             else:

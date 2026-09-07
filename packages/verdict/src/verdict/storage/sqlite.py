@@ -34,6 +34,7 @@ from verdict.monitoring import (
     CohortManifest,
     MonitorComparison,
     MonitorPolicy,
+    MonitorStateConflict,
     monitor_policy_from_json,
     monitor_policy_to_json,
     monitor_snapshot_from_json,
@@ -945,6 +946,7 @@ class SQLiteStorage:
         manifest: CohortManifest,
         comparison: MonitorComparison,
     ) -> None:
+        monitor_snapshot_to_json(manifest, comparison)
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
             try:
@@ -1054,6 +1056,40 @@ class SQLiteStorage:
                 ).fetchone()
                 if raced is None or raced["content_hash"] != digest:
                     raise
+
+    def save_monitor_successor(
+        self,
+        policy_id: str,
+        expected_snapshot_id: str,
+        manifest: CohortManifest,
+        comparison: MonitorComparison,
+        *,
+        expected_state: str,
+    ) -> None:
+        if expected_state not in {"active", "candidate"}:
+            raise ValueError("monitor expected state is invalid")
+        monitor_snapshot_to_json(manifest, comparison)
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                policy = self._conn.execute(
+                    "SELECT state FROM monitor_policies WHERE policy_id=?",
+                    (policy_id,),
+                ).fetchone()
+                if policy is None or policy["state"] != expected_state:
+                    raise MonitorStateConflict(f"monitor policy is not {expected_state}")
+                head = self._conn.execute(
+                    "SELECT snapshot_id FROM monitor_snapshots WHERE policy_id=? "
+                    "ORDER BY rowid DESC LIMIT 1",
+                    (policy_id,),
+                ).fetchone()
+                if head is None or head["snapshot_id"] != expected_snapshot_id:
+                    raise MonitorStateConflict("monitor snapshot changed")
+                self.save_monitor_snapshot(policy_id, manifest, comparison)
+                self._conn.execute("COMMIT")
+            except BaseException:
+                self._conn.execute("ROLLBACK")
+                raise
 
     def get_latest_monitor_snapshot(
         self, policy_id: str
@@ -1336,7 +1372,8 @@ class SQLiteStorage:
                 f"""SELECT * FROM (
                        SELECT j.*, ROW_NUMBER() OVER (
                            PARTITION BY j.trace_id
-                           ORDER BY j.created_at DESC,j.judgment_id DESC
+                           ORDER BY CASE WHEN j.status='completed' THEN 1 ELSE 0 END DESC,
+                             j.created_at DESC,j.judgment_id DESC
                        ) AS evaluator_rank
                        FROM judgments j JOIN traces t ON t.trace_id=j.trace_id
                        WHERE {_trace_tenant_clause(tenant_id, "t.tenant_id")}
