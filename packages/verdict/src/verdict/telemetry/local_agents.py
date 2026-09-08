@@ -467,8 +467,9 @@ def _parse_claude(path: Path, *, home: Path | None) -> tuple[str, str, list[_Raw
     version = ""
     active: _RawTurn | None = None
     turns: list[_RawTurn] = []
-    seen_messages: set[str] = set()
+    model_events: dict[str, _RawEvent] = {}
     tool_names: dict[str, str] = {}
+    seen_tool_calls: set[str] = set()
     for row in records:
         if (
             row.get("isSidechain") is True
@@ -503,8 +504,9 @@ def _parse_claude(path: Path, *, home: Path | None) -> tuple[str, str, list[_Raw
                 active = None
                 continue
             active = _RawTurn(source_id, occurred_at, request=prompt)
-            seen_messages = set()
+            model_events = {}
             tool_names = {}
+            seen_tool_calls = set()
             continue
         if active is None:
             continue
@@ -541,8 +543,9 @@ def _parse_claude(path: Path, *, home: Path | None) -> tuple[str, str, list[_Raw
             continue
         message_id = message.get("id")
         model = message.get("model")
-        if isinstance(message_id, str) and message_id not in seen_messages:
-            seen_messages.add(message_id)
+        response_text = _message_text(message, home=home)
+        model_event = model_events.get(message_id) if isinstance(message_id, str) else None
+        if isinstance(message_id, str) and model_event is None:
             usage = _mapping(message.get("usage")) or {}
             _event(
                 active,
@@ -560,14 +563,22 @@ def _parse_claude(path: Path, *, home: Path | None) -> tuple[str, str, list[_Raw
                 },
                 status=ExecutionStatus.COMPLETED,
                 provider_response_id=message_id,
-                response_text=_message_text(message, home=home),
+                response_text=response_text,
             )
+            if occurred_at is not None:
+                model_events[message_id] = active.events[-1]
+        elif model_event is not None and response_text and not model_event.response_text:
+            model_event.response_text = response_text
         for item in content:
             block = _mapping(item)
             if block is None:
                 continue
             if block.get("type") == "tool_use":
                 call_id = _bounded_utf8(str(block.get("id") or ""), 256)
+                if call_id and call_id in seen_tool_calls:
+                    continue
+                if call_id:
+                    seen_tool_calls.add(call_id)
                 name = _tool_name(block)
                 tool_names[call_id] = name
                 arguments = block.get("input")
@@ -590,9 +601,11 @@ def _parse_claude(path: Path, *, home: Path | None) -> tuple[str, str, list[_Raw
                         has_content=True,
                     )
         if message.get("stop_reason") == "end_turn":
-            active.response = _message_text(message, home=home)
+            if response_text:
+                active.response = response_text
             active.status = ExecutionStatus.COMPLETED
-            active.ended_at = occurred_at
+            if active.ended_at is None:
+                active.ended_at = occurred_at
     if active is not None:
         turns.append(active)
     if not session_id:

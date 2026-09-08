@@ -70,6 +70,10 @@ the capture. Bounded redacted content retention is on by default; clear it only
 for an intentional metadata-only run. The server rejects capture when those
 exact paths were not previewed in the current process. Source files are
 read-only and repeated rescans are idempotent.
+Claude Code may record one provider response across multiple history rows.
+Verdict coalesces those rows into one model-call Trace and fills later response
+text without changing its evidence identity; a genuine tool-only call remains
+visible as textless rather than being presented as a missing capture.
 
 Successful capture opens **Overview**. Local execution evidence is under
 **Explore → Agent Runs & Tools** and genuine model calls are under

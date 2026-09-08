@@ -1489,6 +1489,7 @@ function TraceDetail({ s, onClose }) {
   const hasContent = capturedContent(s);
   const hasPrompt = s.prompt_redacted != null;
   const hasResponse = s.response_redacted != null;
+  const toolOnlyResponse = !hasResponse && hasPrompt && !s.error && s.finish_reason === "tool_use";
   const contentLabel = hasPrompt && hasResponse
     ? "Content captured"
     : hasContent
@@ -1502,7 +1503,7 @@ function TraceDetail({ s, onClose }) {
   const evidenceReason = {
     provider_call_failed: "Provider call failed",
     prompt_not_captured: "Prompt evidence missing",
-    response_not_captured: "Response evidence missing",
+    response_not_captured: toolOnlyResponse ? "No assistant text (tool use)" : "Response evidence missing",
   }[facts?.notEvaluableReason] || facts?.notEvaluableReason;
   return (
     <Panel className="overflow-hidden sticky top-20">
@@ -1539,7 +1540,7 @@ function TraceDetail({ s, onClose }) {
         <div>
           <div className="text-xs mb-1" style={{ color: C.faint }}>RESPONSE</div>
           <div className="text-sm p-2.5" style={{ background: C.panel2, color: C.sub, border: `1px solid ${C.border}`, borderRadius: 3, lineHeight: 1.5 }}>
-            {s.response_redacted == null ? (hasContent ? "Response was not captured for this trace." : "Not available for this historical metadata-only trace.") : (s.response_redacted || "Captured response was empty.")}
+            {s.response_redacted == null ? (toolOnlyResponse ? "This model call returned tool calls without assistant text." : hasContent ? "Response was not captured for this trace." : "Not available for this historical metadata-only trace.") : (s.response_redacted || "Captured response was empty.")}
           </div>
         </div>
         {s.error && (
@@ -1554,7 +1555,7 @@ function TraceDetail({ s, onClose }) {
             <TraceFact label="Provider outcome" value={facts.providerOutcome} />
             <TraceFact label="Judge evidence" value={facts.judgeEligible ? "Eligible" : evidenceReason || "Not evaluable"} />
             <TraceFact label="Prompt evidence" value={facts.promptPresent ? "Present" : "Missing"} />
-            <TraceFact label="Response evidence" value={facts.responsePresent ? "Present" : "Missing"} />
+            <TraceFact label="Response evidence" value={facts.responsePresent ? "Present" : toolOnlyResponse ? "No assistant text (tool use)" : "Missing"} />
             <TraceFact label="Response length" value={facts.responseCharacters == null ? "Unavailable" : `${facts.responseCharacters} characters`} />
             <TraceFact label="Valid JSON" value={factFlag(facts.validJson)} />
             <TraceFact label="Refusal signature" value={factFlag(facts.refusalSignature, "Detected", "Not detected")} />

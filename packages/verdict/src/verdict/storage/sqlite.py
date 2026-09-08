@@ -1194,20 +1194,31 @@ class SQLiteStorage:
             self._conn.execute("BEGIN IMMEDIATE")
             try:
                 prepared_traces = []
+                message_updates: set[str] = set()
                 for trace in capture_traces:
                     row = self._conn.execute(
                         "SELECT * FROM traces WHERE trace_id=?", (trace.trace_id,)
                     ).fetchone()
-                    prepared_traces.append(
-                        merge_capture_trace(self._row_to_trace(row) if row else None, trace)
-                    )
+                    current = self._row_to_trace(row) if row else None
+                    prepared = merge_capture_trace(current, trace)
+                    prepared_traces.append(prepared)
+                    if current is not None and current.raw_messages != prepared.raw_messages:
+                        message_updates.add(prepared.trace_id)
                 for trace in prepared_traces:
                     self.insert_trace(trace)
-                    if trace.raw_messages is not None:
+                    if trace.trace_id in message_updates:
                         self._conn.execute(
-                            "UPDATE traces SET raw_messages_json=? "
-                            "WHERE trace_id=? AND raw_messages_json IS NULL",
-                            (json.dumps(trace.raw_messages), trace.trace_id),
+                            """UPDATE traces SET
+                               raw_messages_json=?,
+                               analysis_raw_messages_utf8_bytes=?,
+                               analysis_raw_messages_state=?
+                               WHERE trace_id=?""",
+                            (
+                                json.dumps(trace.raw_messages),
+                                trace.analysis_raw_messages_utf8_bytes,
+                                trace.analysis_raw_messages_state,
+                                trace.trace_id,
+                            ),
                         )
                 linked_ids = tuple(sorted(linked_trace_ids))
                 if linked_ids:

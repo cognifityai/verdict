@@ -8,6 +8,9 @@ the product is refined.
 
 ### Changed
 
+- Claude Code history capture now coalesces split records for the same provider
+  response, so later text completes the existing model-call Trace without
+  changing its identity. Genuine tool-only calls remain explicitly textless.
 - Agent evidence now uses normalized source, run, turn, and event storage.
   Model-call events link to genuine Trace records without duplicating LLM
   content, run detail is paginated, and supported legacy bundle rows migrate
