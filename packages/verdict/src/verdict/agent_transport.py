@@ -256,15 +256,38 @@ class FileCaptureSink:
                 self._reset_process_file()
             if self._directory_size + len(record) > self.directory_bytes:
                 raise CaptureQuotaExceeded("agent capture directory quota exceeded")
+            if self._file is None:
+                self._open_segment()
             if self._size and self._size + len(record) > self.segment_bytes:
                 assert self._file is not None
                 self._file.close()
                 self._file = None
                 self._open_segment()
             assert self._file is not None
-            self._file.write(record)
-            self._size += len(record)
-            self._directory_size += len(record)
+            written = 0
+            view = memoryview(record)
+            try:
+                while written < len(record):
+                    count = self._file.write(view[written:])
+                    if (
+                        not isinstance(count, int)
+                        or isinstance(count, bool)
+                        or count <= 0
+                        or count > len(record) - written
+                    ):
+                        raise OSError("agent capture file did not accept the complete record")
+                    written += count
+            except BaseException:
+                self._size += written
+                self._directory_size += written
+                try:
+                    self._file.close()
+                except BaseException:
+                    pass
+                self._file = None
+                raise
+            self._size += written
+            self._directory_size += written
 
     def capture_trace(self, trace: Trace) -> None:
         prepared = sanitize_trace(

@@ -162,7 +162,12 @@ The spool uses versioned JSONL with fixed record, segment, and directory byte
 limits. An incomplete final record from a process crash is reported and
 ignored; a malformed complete record fails the import. Retain the files until
 the import succeeds. The file transport does not delete files or provide
-delivery acknowledgement, network retry, or a remote collector.
+delivery acknowledgement, network retry, or a remote collector. Completed
+appends bypass Python userspace buffering but are not `fsync`-ed against an
+operating-system or host failure. Check the process-local
+`capture.dropped_records` runtime metric for records rejected by a full or
+failed spool; equivalent failures produce one bounded warning per failure
+class.
 
 ## 3b. Existing conversation export with `verdict-inspect`
 

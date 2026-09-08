@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
+import logging
 import math
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -286,6 +288,102 @@ def test_direct_verdict_client_remains_a_supported_trace_sink() -> None:
     trace = _completed_trace()
     safe_persist_trace(client, trace)
     assert storage.get_trace(trace.trace_id) is not None
+
+
+def test_verdict_client_preserves_published_positional_field_order() -> None:
+    storage = InMemoryStorage()
+    client = VerdictClient(
+        "",
+        "service",
+        "production",
+        True,
+        "redact",
+        None,
+        1.0,
+        "tenant-a",
+        storage,
+        ["openai"],
+    )
+
+    assert client.storage is storage
+    assert client.enabled_instrumentors == ["openai"]
+    assert client.transport == "storage"
+    assert list(inspect.signature(VerdictClient).parameters)[:12] == [
+        "api_key",
+        "service_name",
+        "environment",
+        "capture_content",
+        "redaction_mode",
+        "redaction_secret",
+        "sample_rate",
+        "tenant_id",
+        "storage",
+        "enabled_instrumentors",
+        "_instrumentors",
+        "_initialized",
+    ]
+
+
+def test_agent_capture_failure_and_logging_failure_do_not_escape() -> None:
+    class CaptureFailure(RuntimeError):
+        pass
+
+    class ApplicationFailure(RuntimeError):
+        pass
+
+    class FailingSink:
+        def capture_agent(self, batch: object, traces: object = ()) -> None:
+            raise CaptureFailure("private failure detail")
+
+        def capture_trace(self, trace: object) -> None:
+            raise CaptureFailure("private failure detail")
+
+        def close(self) -> None:
+            pass
+
+    class FailingHandler(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            raise RuntimeError("logging failed")
+
+    client = verdict.init(storage=InMemoryStorage(), tenant_id="tenant-a", instrumentors=[])
+    client._capture_sink = FailingSink()  # type: ignore[assignment]
+    handler = FailingHandler()
+    logger = logging.getLogger("verdict.agent")
+    logger.addHandler(handler)
+    failure = ApplicationFailure("application failure")
+    try:
+        with pytest.raises(ApplicationFailure) as caught:
+            with verdict.agent_run(name="agent"):
+                raise failure
+    finally:
+        logger.removeHandler(handler)
+
+    assert caught.value is failure
+
+
+def test_tool_exception_remains_authoritative_when_stringification_fails() -> None:
+    class OriginalFailure(RuntimeError):
+        def __str__(self) -> str:
+            raise RuntimeError("stringification failed")
+
+    storage = InMemoryStorage()
+    verdict.init(storage=storage, tenant_id="tenant-a", instrumentors=[])
+
+    failure = OriginalFailure()
+    with pytest.raises(OriginalFailure) as caught:
+        with verdict.agent_run(name="agent") as run:
+            with run.turn(user_input="hello") as turn:
+                with turn.tool("lookup"):
+                    raise failure
+
+    assert caught.value is failure
+    [bundle] = storage.list_agent_run_bundles("tenant-a")
+    result = next(
+        event for event in bundle.events if event.event_type is AgentEventType.TOOL_RESULT
+    )
+    assert result.status is ExecutionStatus.FAILED
+    assert result.attributes["result"]["error_type"] == "OriginalFailure"
+    assert result.attributes["result"]["message"] == "<UNAVAILABLE>"
 
 
 def test_multiple_turns_append_without_rewriting_the_run() -> None:

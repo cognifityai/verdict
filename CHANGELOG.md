@@ -14,7 +14,9 @@ the product is refined.
   provider calls to genuine LLM Traces.
 - A bounded local file transport writes redacted, process-owned versioned JSONL
   segments that `verdict-import agent-file` replays idempotently through the
-  canonical normalized-evidence storage boundary.
+  canonical normalized-evidence storage boundary. Completed records bypass
+  Python userspace buffering; rejected records are counted and warnings are
+  deduplicated without affecting application execution.
 
 ### Changed
 

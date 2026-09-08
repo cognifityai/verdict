@@ -148,6 +148,14 @@ def _terminal_status(error: BaseException | None) -> ExecutionStatus:
     return ExecutionStatus.FAILED
 
 
+def _exception_evidence(error: BaseException) -> dict[str, str]:
+    try:
+        message = str(error)
+    except BaseException:
+        message = "<UNAVAILABLE>"
+    return {"error_type": type(error).__name__, "message": message}
+
+
 def _sink(client: Any) -> AgentCaptureSink:
     if client._capture_sink is not None:
         return client._capture_sink
@@ -307,7 +315,7 @@ class ToolContext:
         self._closed = True
         output = self._output
         if exc is not None:
-            output = {"error_type": type(exc).__name__, "message": str(exc)}
+            output = _exception_evidence(exc)
         event = self._turn._state._event(
             AgentEventType.TOOL_RESULT,
             {
@@ -703,25 +711,30 @@ class AgentRunContext:
         event: AgentEvent | None = None,
         trace: Trace | None = None,
     ) -> None:
-        if not self.sampled or self._capture_failed or self._source is None or self._run is None:
+        if not self.sampled or self._source is None or self._run is None:
             return
-        source = replace(self._source, observed_at=_utcnow())
-        batch = AgentCaptureBatch(
-            source,
-            self._run,
-            (turn,) if turn is not None else (),
-            (event,) if event is not None else (),
-        )
+        if self._capture_failed:
+            self.client.runtime_metrics.record_dropped()
+            return
         try:
+            source = replace(self._source, observed_at=_utcnow())
+            batch = AgentCaptureBatch(
+                source,
+                self._run,
+                (turn,) if turn is not None else (),
+                (event,) if event is not None else (),
+            )
             sink = _sink(self.client)
             sink.capture_agent(batch, (trace,) if trace is not None else ())
         except Exception as error:
             self._capture_failed = True
+            self.client.runtime_metrics.record_dropped()
             target = self.client._capture_sink or self.client.storage
-            log.warning(
-                "Verdict discarded agent evidence after %s failed with %s",
-                type(target).__name__,
-                type(error).__name__,
+            self.client.runtime_metrics.warn_capture_failure_once(
+                log,
+                evidence="agent evidence",
+                target=target,
+                error=error,
             )
 
 

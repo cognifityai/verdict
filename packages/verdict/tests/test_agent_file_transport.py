@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import os
 import runpy
+import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -124,6 +127,32 @@ def test_file_transport_quota_failure_does_not_change_agent_result(
     assert result is marker
 
 
+def test_file_transport_quota_drops_are_counted_and_warned_once(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    client = verdict.init(
+        transport="file",
+        spool_directory=tmp_path / "spool",
+        tenant_id="tenant-file",
+        instrumentors=[],
+    )
+    assert client._capture_sink is not None
+    client._capture_sink.directory_bytes = 1  # type: ignore[attr-defined]
+
+    caplog.set_level("WARNING", logger="verdict.agent")
+    for ordinal in range(2):
+        with verdict.agent_run(name="agent", external_id=f"run-{ordinal}") as run:
+            with run.turn(user_input="hello") as turn:
+                turn.set_output("done")
+
+    snapshot = client.runtime_metrics.snapshot(client.storage)
+    assert snapshot["capture"]["dropped_records"] == 8
+    records = [record for record in caplog.records if record.name == "verdict.agent"]
+    assert len(records) == 1
+    assert "CaptureQuotaExceeded" in records[0].getMessage()
+
+
 def test_file_transport_rejects_incompatible_storage_options(tmp_path: Path) -> None:
     storage = _resolve_storage("memory://")
     with pytest.raises(ValueError, match="file transport"):
@@ -181,6 +210,80 @@ def test_file_transport_rotates_segments_and_enforces_its_byte_quota(tmp_path: P
     assert all(path.stat().st_mode & 0o077 == 0 for path in files)
 
 
+def test_file_transport_completes_short_writes(tmp_path: Path) -> None:
+    class ShortWriter:
+        def __init__(self) -> None:
+            self.parts: list[bytes] = []
+            self.calls = 0
+
+        def write(self, value: bytes) -> int:
+            raw = bytes(value)
+            size = max(1, len(raw) // 2)
+            self.parts.append(raw[:size])
+            self.calls += 1
+            return size
+
+        def close(self) -> None:
+            pass
+
+    sink = FileCaptureSink(tmp_path, redaction_mode="redact", redaction_secret=None)
+    assert sink._file is not None
+    sink._file.close()
+    writer = ShortWriter()
+    sink._file = writer  # type: ignore[assignment]
+    sink._size = 0
+    sink._directory_size = 0
+
+    sink.capture_trace(Trace(started_at=datetime.now(timezone.utc), provider="test"))
+
+    record = b"".join(writer.parts)
+    assert writer.calls > 1
+    assert record.endswith(b"\n")
+    kind, batch, traces = agent_transport.decode_capture_record(record[:-1])
+    assert kind == "trace"
+    assert batch is None
+    assert len(traces) == 1
+
+
+def test_partial_write_failure_abandons_segment_before_later_records(tmp_path: Path) -> None:
+    class PartialThenError:
+        def __init__(self, target: object) -> None:
+            self.target = target
+            self.calls = 0
+
+        def write(self, value: bytes) -> int:
+            self.calls += 1
+            if self.calls > 1:
+                raise OSError("injected write failure")
+            raw = bytes(value)
+            return self.target.write(raw[: max(1, len(raw) // 2)])  # type: ignore[attr-defined]
+
+        def close(self) -> None:
+            self.target.close()  # type: ignore[attr-defined]
+
+    sink = FileCaptureSink(tmp_path, redaction_mode="redact", redaction_secret=None)
+    assert sink._file is not None
+    failing = PartialThenError(sink._file)
+    sink._file = failing  # type: ignore[assignment]
+    first = Trace(trace_id="first", started_at=datetime.now(timezone.utc), provider="test")
+    second = Trace(trace_id="second", started_at=datetime.now(timezone.utc), provider="test")
+
+    with pytest.raises(OSError, match="write failure"):
+        sink.capture_trace(first)
+    sink.capture_trace(second)
+    sink.close()
+
+    incomplete = 0
+
+    def mark_incomplete() -> None:
+        nonlocal incomplete
+        incomplete += 1
+
+    records = list(agent_transport.iter_capture_records(tmp_path, on_incomplete=mark_incomplete))
+    assert incomplete == 1
+    assert [record[2][0].trace_id for record in records] == ["second"]
+
+
 def test_file_transport_switches_to_a_new_process_owned_file_after_fork(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -207,6 +310,37 @@ def test_file_transport_switches_to_a_new_process_owned_file_after_fork(
     assert len(files) == 2
     assert sink._lock is not inherited_lock
     assert files[0].name.split("-")[2] != files[1].name.split("-")[2]
+
+
+def test_file_transport_survives_process_exit_without_shutdown(tmp_path: Path) -> None:
+    spool = tmp_path / "spool"
+    script = """
+import os
+import sys
+import verdict
+
+verdict.init(
+    transport="file",
+    spool_directory=sys.argv[1],
+    tenant_id="tenant-file",
+    instrumentors=[],
+)
+for ordinal in range(10):
+    with verdict.agent_run(name="agent", external_id=f"run-{ordinal}") as run:
+        with run.turn(user_input="hello") as turn:
+            turn.set_output("done")
+os._exit(0)
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", script, os.fspath(spool)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+    records = list(agent_transport.iter_capture_records(spool))
+    assert len(records) == 40
 
 
 def test_public_agent_sdk_example_writes_importable_evidence(tmp_path: Path, monkeypatch) -> None:

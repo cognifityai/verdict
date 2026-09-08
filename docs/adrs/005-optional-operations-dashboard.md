@@ -60,6 +60,7 @@ them through their own observability system.
 | --- | --- | --- |
 | Supported provider call reaches Verdict persistence | Instrumentor | Record one bounded overhead sample and success/failure counter |
 | Synchronous persistence fails | Instrumentor | Preserve the provider result/exception, increment the adapter-failure counter, and emit the existing bounded warning |
+| Provider Trace or Agent SDK record cannot be retained | Capture boundary | Increment the process-local dropped-record counter and emit at most one bounded warning per evidence, sink, and error class |
 | Buffered write is accepted | Buffered storage | Queue depth and accepted-write counters change; durability is not claimed |
 | Buffered fallback or worker failure | Buffered storage | Existing fallback/error counters remain authoritative and appear in the snapshot |
 | Client shutdown | Storage owner | Existing flush/close contract remains unchanged; metrics add no worker or persistence path |

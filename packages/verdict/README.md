@@ -76,7 +76,9 @@ verdict-import agent-file ./verdict-capture --storage sqlite:///./verdict.db
 
 Use one spool directory per producer process. Files remain until an operator
 removes them after successful import; this transport does not claim remote
-delivery or acknowledgement.
+delivery or acknowledgement. Completed appends bypass Python userspace
+buffering but are not `fsync`-ed. Quota or write failures increment the
+process-local `capture.dropped_records` metric and produce a bounded warning.
 
 The Monitor UI previews an immutable count-based (older 80% / newer 20% by
 default) or explicit-date policy before activation. Each metric has its own
@@ -224,7 +226,9 @@ The packaged dashboard recognizes `agent` and `judge`; missing and custom labels
 remain visible as unclassified rather than being guessed. The SDK also exposes
 aggregate process-local capture/queue telemetry through
 `VerdictClient.runtime_metrics.snapshot(client.storage)`. It contains counts and
-latency summaries only, never prompts, responses, or exception text.
+latency summaries only, never prompts, responses, or exception text. The
+capture counts include `dropped_records`, which increases when a provider Trace
+or Agent SDK record cannot be retained.
 
 ```python
 import verdict

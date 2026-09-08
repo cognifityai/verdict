@@ -30,9 +30,14 @@ only bounded operational fields and the Trace identifier.
 The default transport writes directly through the normalized storage port. An
 optional local file transport writes redacted, versioned JSONL records with
 fixed record, segment, and directory byte limits. Files are process-owned and a
-producer uses its own spool directory. Import replays complete records
-idempotently through the same normalized storage boundary. An incomplete final
-record is observable and ignored; a malformed complete record fails import.
+producer uses its own spool directory. An append writes the complete record or
+abandons that segment; completed appends bypass Python userspace buffering but
+are not synchronized against an operating-system or host failure. Import
+replays complete records idempotently through the same normalized storage
+boundary. An incomplete final record is observable and ignored; a malformed
+complete record fails import. Quota and write failures increment a process-local
+dropped-record counter and emit a bounded, non-sensitive warning without
+changing application behavior.
 
 Local files are not a delivery protocol. They are retained until an operator
 removes them and do not provide acknowledgements, remote authentication,

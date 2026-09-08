@@ -147,8 +147,12 @@ verdict-import agent-file /var/spool/verdict/worker-1 \
 
 Use a separate spool directory per producer process and retain files until the
 import completes. This local transport has hard segment, record, and directory
-bounds. It does not provide remote delivery, acknowledgements, retry, or file
-deletion; an authenticated collector is a separate roadmap capability. See
+bounds. Completed appends bypass Python userspace buffering, but are not
+`fsync`-ed against an operating-system or host failure. Quota or write failures
+increment the process-local `capture.dropped_records` metric and emit one
+bounded warning per failure class. The transport does not provide remote
+delivery, acknowledgements, retry, or file deletion; an authenticated collector
+is a separate roadmap capability. See
 [`examples/agent_sdk.py`](examples/agent_sdk.py) for a runnable local example.
 
 An initial monitor proposal uses exact event-time membership. The count-mode

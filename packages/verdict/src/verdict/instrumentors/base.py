@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import abc
 import logging
-import threading
 import time
 from typing import TYPE_CHECKING
 
@@ -16,8 +15,6 @@ if TYPE_CHECKING:
 
 
 log = logging.getLogger("verdict.instrumentors")
-_persistence_warning_lock = threading.Lock()
-_warned_persistence_failures: set[tuple[str, str, type[BaseException]]] = set()
 
 
 def is_verdict_wrapt_wrapper(obj: object, *, owner: object | None = None) -> bool:
@@ -138,24 +135,12 @@ def _warn_persistence_failure_once(
     """Emit one non-sensitive warning for each provider/backend/error class."""
     provider = trace.provider if isinstance(trace.provider, str) else type(trace.provider).__name__
     target = client._capture_sink or client.storage
-    storage_type = type(target)
-    storage_name = f"{storage_type.__module__}.{storage_type.__qualname__}"
-    key = (provider, storage_name, type(exc))
-    with _persistence_warning_lock:
-        if key in _warned_persistence_failures:
-            return
-        _warned_persistence_failures.add(key)
-    try:
-        log.warning(
-            "Verdict discarded a %s trace after %s persistence failed with %s",
-            provider or "unknown-provider",
-            storage_name,
-            type(exc).__name__,
-        )
-    except Exception:
-        # A user-supplied logging handler must not turn telemetry into an
-        # application-path exception.
-        pass
+    client.runtime_metrics.warn_capture_failure_once(
+        log,
+        evidence=f"a {provider or 'unknown-provider'} trace",
+        target=target,
+        error=exc,
+    )
 
 
 def safe_persist_trace(client: VerdictClient, trace: Trace) -> None:
@@ -171,6 +156,7 @@ def safe_persist_trace(client: VerdictClient, trace: Trace) -> None:
         persist_trace(client, trace)
     except Exception as exc:
         failed = True
+        client.runtime_metrics.record_dropped()
         _warn_persistence_failure_once(client, trace, exc)
     finally:
         client.runtime_metrics.record_capture(

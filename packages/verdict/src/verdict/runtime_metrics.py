@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 import math
 import threading
 from collections import deque
 from typing import Any
+
+_MAX_CAPTURE_WARNING_KEYS = 128
 
 
 class RuntimeMetrics:
@@ -16,6 +19,8 @@ class RuntimeMetrics:
         self._overhead_ms: deque[float] = deque(maxlen=max_samples)
         self._attempts = 0
         self._failures = 0
+        self._dropped_records = 0
+        self._warning_keys: set[tuple[str, str, type[BaseException]]] = set()
 
     def record_capture(self, overhead_ms: float, *, failed: bool) -> None:
         value = float(overhead_ms)
@@ -25,17 +30,53 @@ class RuntimeMetrics:
             if math.isfinite(value) and value >= 0:
                 self._overhead_ms.append(value)
 
+    def record_dropped(self) -> None:
+        with self._lock:
+            self._dropped_records += 1
+
+    def warn_capture_failure_once(
+        self,
+        logger: logging.Logger,
+        *,
+        evidence: str,
+        target: object,
+        error: BaseException,
+    ) -> None:
+        """Emit one bounded warning without letting logging affect the application."""
+        try:
+            evidence = evidence[:160]
+            target_type = type(target)
+            target_name = f"{target_type.__module__}.{target_type.__qualname__}"
+            key = (evidence, target_name, type(error))
+            with self._lock:
+                if (
+                    key in self._warning_keys
+                    or len(self._warning_keys) >= _MAX_CAPTURE_WARNING_KEYS
+                ):
+                    return
+                self._warning_keys.add(key)
+            logger.warning(
+                "Verdict discarded %s after %s failed with %s",
+                evidence,
+                target_name,
+                type(error).__name__,
+            )
+        except BaseException:
+            pass
+
     def snapshot(self, storage: Any) -> dict[str, Any]:
         with self._lock:
             values = sorted(self._overhead_ms)
             attempts = self._attempts
             failures = self._failures
+            dropped_records = self._dropped_records
         buffer_snapshot = getattr(storage, "telemetry_snapshot", None)
         buffer = buffer_snapshot() if callable(buffer_snapshot) else {"enabled": False}
         return {
             "capture": {
                 "attempts": attempts,
                 "failures": failures,
+                "dropped_records": dropped_records,
                 "overhead_ms": {
                     "samples": len(values),
                     "p50": _percentile(values, 0.50),

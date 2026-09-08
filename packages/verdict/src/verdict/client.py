@@ -58,7 +58,6 @@ class VerdictClient:
 
     # Storage
     storage: Storage | None = field(default_factory=lambda: SQLiteStorage("./verdict.db"))
-    transport: str = "storage"
 
     # Which instrumentors to enable (defaults to all installed)
     enabled_instrumentors: list[str] = field(default_factory=list)
@@ -66,6 +65,9 @@ class VerdictClient:
     # Internal — bound instrumentors after init() runs
     _instrumentors: list[BaseInstrumentor] = field(default_factory=list, repr=False)
     _initialized: bool = False
+
+    # Fields added after the published a17 constructor retain its positional order.
+    transport: str = "storage"
     _capture_sink: AgentCaptureSink | None = field(default=None, repr=False)
     runtime_metrics: RuntimeMetrics = field(
         default_factory=RuntimeMetrics,
