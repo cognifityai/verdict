@@ -1153,6 +1153,32 @@ test("trace detail distinguishes content, provider failure, and judge availabili
   assert.doesNotMatch(rendered, /response.*historical metadata-only trace/i);
 });
 
+test("trace detail identifies a successful tool-only response without calling it uncaptured", async () => {
+  const ui = await loadUiModule();
+  const sample = {
+    trace_id: "tool-trace", provider: "anthropic", request_model: "claude-test",
+    prompt_redacted: "inspect the repository", response_redacted: null,
+    finish_reason: "tool_use", error: null, started_at: "2026-08-23T22:20:00Z",
+    deterministicFacts: {
+      providerOutcome: "succeeded", promptPresent: true, responsePresent: false,
+      judgeEligible: false, notEvaluableReason: "response_not_captured",
+      responseCharacters: null, validJson: null, refusalSignature: null,
+      apologyStart: null, hedgePhrases: null,
+    },
+  };
+
+  const tree = render(ui.TraceDetail, createHooks(), { s: sample, onClose() {} });
+  const rendered = textOf(tree);
+  const responseEvidence = findAll(
+    tree,
+    (node) => node.type?.name === "TraceFact" && node.props?.label === "Response evidence",
+  )[0];
+
+  assert.match(rendered, /model call returned tool calls without assistant text/i);
+  assert.equal(responseEvidence.props.value, "No assistant text (tool use)");
+  assert.doesNotMatch(rendered, /Response was not captured for this trace/);
+});
+
 test("trace detail exposes bounded judge-free facts without claiming quality", async () => {
   const ui = await loadUiModule();
   const sample = {

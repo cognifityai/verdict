@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -122,6 +123,39 @@ def _claude_records() -> list[dict[str, object]]:
             },
         },
         {
+            "timestamp": "2026-08-30T11:00:01.100000Z",
+            "type": "assistant",
+            "uuid": "assistant-1-text",
+            "sessionId": "claude-session-1",
+            "message": {
+                "id": "msg-1",
+                "model": "claude-sonnet-4-5",
+                "stop_reason": "tool_use",
+                "usage": {"input_tokens": 12, "output_tokens": 3},
+                "content": [{"type": "text", "text": "I will run the tests."}],
+            },
+        },
+        {
+            "timestamp": "2026-08-30T11:00:01.200000Z",
+            "type": "assistant",
+            "uuid": "assistant-1-duplicate-tool",
+            "sessionId": "claude-session-1",
+            "message": {
+                "id": "msg-1",
+                "model": "claude-sonnet-4-5",
+                "stop_reason": "tool_use",
+                "usage": {"input_tokens": 12, "output_tokens": 3},
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "tool-1",
+                        "name": "Bash",
+                        "input": {"command": "do not replace the first call"},
+                    },
+                ],
+            },
+        },
+        {
             "timestamp": "2026-08-30T11:00:02Z",
             "type": "user",
             "sessionId": "claude-session-1",
@@ -140,7 +174,20 @@ def _claude_records() -> list[dict[str, object]]:
         {
             "timestamp": "2026-08-30T11:00:03Z",
             "type": "assistant",
-            "uuid": "assistant-2",
+            "uuid": "assistant-2-empty",
+            "sessionId": "claude-session-1",
+            "message": {
+                "id": "msg-2",
+                "model": "claude-sonnet-4-5",
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 18, "output_tokens": 5},
+                "content": [],
+            },
+        },
+        {
+            "timestamp": "2026-08-30T11:00:03.100000Z",
+            "type": "assistant",
+            "uuid": "assistant-2-text",
             "sessionId": "claude-session-1",
             "message": {
                 "id": "msg-2",
@@ -148,6 +195,19 @@ def _claude_records() -> list[dict[str, object]]:
                 "stop_reason": "end_turn",
                 "usage": {"input_tokens": 18, "output_tokens": 5},
                 "content": [{"type": "text", "text": "The build passes."}],
+            },
+        },
+        {
+            "timestamp": "2026-08-30T11:00:03.200000Z",
+            "type": "assistant",
+            "uuid": "assistant-2-trailing-empty",
+            "sessionId": "claude-session-1",
+            "message": {
+                "id": "msg-2",
+                "model": "claude-sonnet-4-5",
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 18, "output_tokens": 5},
+                "content": [],
             },
         },
     ]
@@ -204,7 +264,11 @@ def test_codex_capture_can_explicitly_disable_content(tmp_path: Path) -> None:
 def test_claude_capture_preserves_typed_evidence_without_thinking(tmp_path: Path) -> None:
     root = tmp_path / "claude"
     records = _claude_records()
-    records[2]["message"]["content"][0]["content"] = (
+    tool_result = next(
+        row for row in records
+        if row.get("type") == "user" and row.get("sourceToolAssistantUUID") is not None
+    )
+    tool_result["message"]["content"][0]["content"] = (
         f"failure at {tmp_path}/private/project.py"
     )
     _write_jsonl(root / "session.jsonl", records)
@@ -224,8 +288,13 @@ def test_claude_capture_preserves_typed_evidence_without_thinking(tmp_path: Path
     assert bundle.turns[0].final_response_redacted == "The build passes."
     assert [event.sequence for event in bundle.events] == list(range(len(bundle.events)))
     assert [event.event_type for event in bundle.events].count(AgentEventType.MODEL_CALL) == 2
+    assert [event.event_type for event in bundle.events].count(AgentEventType.TOOL_CALL) == 1
     assert AgentEventType.TOOL_CALL in {event.event_type for event in bundle.events}
     assert AgentEventType.TOOL_RESULT in {event.event_type for event in bundle.events}
+    [tool_call] = [
+        event for event in bundle.events if event.event_type is AgentEventType.TOOL_CALL
+    ]
+    assert tool_call.attributes["arguments"] == {"command": "pytest"}
     assert "never retain this reasoning" not in repr(bundle)
     assert str(tmp_path) not in repr(bundle)
     assert "~/private/project.py" in repr(bundle)
@@ -241,13 +310,54 @@ def test_claude_capture_preserves_typed_evidence_without_thinking(tmp_path: Path
     assert all(trace.tags["verdict.agent_run_id"] == bundle.run.run_id for trace in traces)
     assert all(trace.cost_usd is None for trace in traces)
     assert all(trace.prompt_redacted == "diagnose build" for trace in traces)
-    assert {trace.response_redacted for trace in traces} == {None, "The build passes."}
+    assert {trace.response_redacted for trace in traces} == {
+        "I will run the tests.", "The build passes.",
+    }
     assert all(trace.raw_messages[0] == {"role": "user", "content": "diagnose build"} for trace in traces)
     assert any(
         trace.raw_messages[-1] == {"role": "assistant", "content": "The build passes."}
         for trace in traces
     )
     assert all(trace.tags["verdict.input_evidence"] == "turn_request_only" for trace in traces)
+
+
+def test_claude_rescan_fills_split_responses_without_changing_evidence_ids(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "claude"
+    path = root / "session.jsonl"
+    complete = _claude_records()
+    initial = [
+        row for row in complete
+        if row.get("uuid") not in {
+            "assistant-1-text", "assistant-2-text", "assistant-2-trailing-empty",
+        }
+    ]
+    _write_jsonl(path, initial)
+    storage = SQLiteStorage(str(tmp_path / "verdict.db"))
+
+    capture_local_agents(storage, tenant_id="local", claude_root=root)
+    [before_bundle] = storage.list_agent_run_bundles("local")
+    before_traces = storage.list_traces(tenant_id="local", limit=10)
+    before_trace_ids = {
+        trace.finish_reason: trace.trace_id for trace in before_traces
+    }
+    before_event_ids = [event.event_id for event in before_bundle.events]
+    assert all(trace.response_redacted is None for trace in before_traces)
+
+    _write_jsonl(path, complete)
+    revised_mtime = path.stat().st_mtime_ns + 1_000_000_000
+    os.utime(path, ns=(revised_mtime, revised_mtime))
+    capture_local_agents(storage, tenant_id="local", claude_root=root)
+
+    [after_bundle] = storage.list_agent_run_bundles("local")
+    after_traces = storage.list_traces(tenant_id="local", limit=10)
+    assert {trace.finish_reason: trace.trace_id for trace in after_traces} == before_trace_ids
+    assert [event.event_id for event in after_bundle.events] == before_event_ids
+    assert after_bundle.turns[0].final_response_redacted == "The build passes."
+    assert {trace.response_redacted for trace in after_traces} == {
+        "I will run the tests.", "The build passes.",
+    }
 
 
 def test_claude_metadata_only_capture_links_genuine_traces_without_content(tmp_path: Path) -> None:

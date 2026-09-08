@@ -213,6 +213,50 @@ def test_capture_advances_in_progress_lifecycle_without_replacing_prior_facts(
     assert stored_trace.raw_messages == completed_trace.raw_messages
 
 
+def test_capture_adds_response_without_replacing_an_existing_terminal_end(
+    tmp_path: Path,
+) -> None:
+    storage = SQLiteStorage(str(tmp_path / "verdict.db"))
+    completed, completed_trace = _capture()
+    prompt_only = replace(
+        completed,
+        turns=(
+            replace(
+                completed.turns[0],
+                final_response_redacted=None,
+                response_state=EvidenceState.MISSING,
+            ),
+        ),
+    )
+    prompt_only_trace = replace(
+        completed_trace,
+        response_redacted=None,
+        raw_messages=completed_trace.raw_messages[:1],
+    )
+    earlier_completion = replace(
+        completed,
+        turns=(replace(completed.turns[0], ended_at=NOW - timedelta(seconds=1)),),
+    )
+
+    storage.replace_agent_capture(prompt_only, (prompt_only_trace,))
+    before = storage.get_trace("trace-1")
+    storage.replace_agent_capture(earlier_completion, (completed_trace,))
+
+    loaded = storage.get_agent_run_bundle("tenant-a", "run-1")
+    stored = storage.get_trace("trace-1")
+    assert loaded is not None
+    assert before is not None
+    assert stored is not None
+    assert loaded.turns[0].ended_at == NOW
+    assert loaded.turns[0].final_response_redacted == "resolved"
+    assert stored.response_redacted == "MODEL_RESPONSE_CANARY"
+    assert stored.raw_messages == completed_trace.raw_messages
+    assert stored.analysis_raw_messages_state == "valid"
+    assert before.analysis_raw_messages_utf8_bytes is not None
+    assert stored.analysis_raw_messages_utf8_bytes is not None
+    assert stored.analysis_raw_messages_utf8_bytes > before.analysis_raw_messages_utf8_bytes
+
+
 def test_capture_advances_open_run_end_as_source_grows(tmp_path: Path) -> None:
     storage = SQLiteStorage(str(tmp_path / "verdict.db"))
     completed, trace = _capture()
@@ -274,6 +318,37 @@ def test_capture_rejects_conflicting_trace_completion_without_mutation(
 
     assert storage.get_trace(trace.trace_id) == stored_trace
     assert storage.get_agent_run_bundle("tenant-a", "run-1") == bundle
+
+
+def test_capture_rejects_rewritten_trace_messages_without_mutation(tmp_path: Path) -> None:
+    storage = SQLiteStorage(str(tmp_path / "verdict.db"))
+    bundle, trace = _capture()
+    service = AgentCaptureService(storage)
+    service.capture(bundle, traces=(trace,))
+    stored_trace = storage.get_trace(trace.trace_id)
+
+    with pytest.raises(ValueError, match="Trace messages"):
+        service.capture(
+            bundle,
+            traces=(replace(trace, raw_messages=[{"role": "user", "content": "changed"}]),),
+        )
+
+    assert storage.get_trace(trace.trace_id) == stored_trace
+
+
+def test_idempotent_capture_does_not_rewrite_trace_messages(tmp_path: Path) -> None:
+    database = tmp_path / "verdict.db"
+    storage = SQLiteStorage(str(database))
+    bundle, trace = _capture()
+    storage.replace_agent_capture(bundle, (trace,))
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """CREATE TRIGGER reject_message_rewrite
+               BEFORE UPDATE OF raw_messages_json ON traces
+               BEGIN SELECT RAISE(ABORT, 'message rewrite'); END"""
+        )
+
+    storage.replace_agent_capture(bundle, (trace,))
 
 
 def test_storage_rejects_unlinked_trace_without_mutation(tmp_path: Path) -> None:

@@ -92,6 +92,13 @@ def _advance_end(
 ) -> datetime | None:
     """Advance an open lifecycle while keeping terminal evidence immutable."""
     if current_status is not ExecutionStatus.UNKNOWN:
+        if (
+            current_status is incoming_status
+            and current is not None
+            and incoming is not None
+            and incoming < current
+        ):
+            return current
         return _fill_optional(current, incoming, subject=subject)
     if incoming_status is not ExecutionStatus.UNKNOWN:
         return incoming
@@ -116,6 +123,20 @@ def _fill_optional(current: Any, incoming: Any, *, subject: str) -> Any:
     if incoming is None or incoming == current:
         return current
     raise ValueError(f"{subject} cannot be replaced")
+
+
+def _extend_messages(current: Any, incoming: Any) -> Any:
+    """Allow capture completion to append messages without rewriting evidence."""
+    if current is None:
+        return incoming
+    if incoming is None or incoming == current:
+        return current
+    if isinstance(current, list) and isinstance(incoming, list):
+        if incoming[: len(current)] == current:
+            return incoming
+        if current[: len(incoming)] == incoming:
+            return current
+    raise ValueError("Trace messages cannot be replaced")
 
 
 def _advance_evidence_state(
@@ -152,7 +173,7 @@ def merge_capture_trace(current: Trace | None, incoming: Trace) -> Trace:
     )
     if any(getattr(current, name) != getattr(incoming, name) for name in immutable_fields):
         raise ValueError("Trace request identity facts cannot be replaced")
-    return replace(
+    merged = replace(
         incoming,
         ended_at=_fill_optional(current.ended_at, incoming.ended_at, subject="Trace end"),
         response_model=_fill_text(
@@ -177,19 +198,15 @@ def merge_capture_trace(current: Trace | None, incoming: Trace) -> Trace:
         response_redacted=_fill_optional(
             current.response_redacted, incoming.response_redacted, subject="Trace response"
         ),
-        raw_messages=_fill_optional(
-            current.raw_messages, incoming.raw_messages, subject="Trace messages"
-        ),
+        raw_messages=_extend_messages(current.raw_messages, incoming.raw_messages),
         cost_usd=_fill_optional(current.cost_usd, incoming.cost_usd, subject="Trace cost"),
         parent_span_id=_fill_optional(
             current.parent_span_id, incoming.parent_span_id, subject="Trace parent span"
         ),
         cluster_id=incoming.cluster_id or current.cluster_id,
-        analysis_started_at_us=current.analysis_started_at_us,
-        analysis_started_at_state=current.analysis_started_at_state,
-        analysis_raw_messages_utf8_bytes=current.analysis_raw_messages_utf8_bytes,
-        analysis_raw_messages_state=current.analysis_raw_messages_state,
     )
+    populate_trace_analysis_fields(merged)
+    return merged
 
 
 def merge_source_session(
@@ -339,21 +356,25 @@ def merge_agent_turn(current: AgentTurn | None, incoming: AgentTurn) -> AgentTur
 def merge_agent_event(current: AgentEvent | None, incoming: AgentEvent) -> AgentEvent:
     if current is None:
         return incoming
+    capture_limit_marker = (
+        current.provenance == "verdict:capture_limit"
+        and incoming.provenance == current.provenance
+        and current.attributes.get("name") == "source_events_omitted"
+        and incoming.attributes.get("name") == current.attributes.get("name")
+    )
     if (
         current.event_id,
         current.turn_id,
         current.sequence,
-        current.occurred_at,
         current.event_type,
         current.provenance,
     ) != (
         incoming.event_id,
         incoming.turn_id,
         incoming.sequence,
-        incoming.occurred_at,
         incoming.event_type,
         incoming.provenance,
-    ):
+    ) or (current.occurred_at != incoming.occurred_at and not capture_limit_marker):
         raise ValueError("agent event facts cannot be replaced")
     attributes = dict(current.attributes)
     for name, value in incoming.attributes.items():
@@ -361,10 +382,7 @@ def merge_agent_event(current: AgentEvent | None, incoming: AgentEvent) -> Agent
             attributes[name] = value
         elif (
             name == "source"
-            and current.provenance == "verdict:capture_limit"
-            and incoming.provenance == current.provenance
-            and current.attributes.get("name") == "source_events_omitted"
-            and incoming.attributes.get("name") == current.attributes.get("name")
+            and capture_limit_marker
         ):
             try:
                 attributes[name] = str(max(int(str(attributes[name])), int(str(value))))

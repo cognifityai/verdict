@@ -502,6 +502,71 @@ def test_live_postgres_trace_retention_clears_agent_event_link():
         storage.close()
 
 
+def test_live_postgres_capture_extends_prompt_only_trace_messages():
+    suffix = uuid4().hex
+    tenant = f"capture-completion-{suffix}"
+    now = datetime.now(timezone.utc)
+    source = verdict.SourceSession(
+        f"source-{suffix}", tenant, "claude-code", "f" * 64, now, now
+    )
+    run = verdict.AgentRun(
+        f"run-{suffix}", source.source_session_id, tenant, now,
+        verdict.ExecutionStatus.COMPLETED, ended_at=now,
+    )
+    prompt_only_turn = verdict.AgentTurn(
+        f"turn-{suffix}", run.run_id, 0, now, verdict.ExecutionStatus.COMPLETED,
+        ended_at=now, user_request_redacted="inspect the build",
+        request_state=verdict.EvidenceState.PRESENT,
+        response_state=verdict.EvidenceState.MISSING,
+    )
+    event = verdict.AgentEvent(
+        f"event-{suffix}", prompt_only_turn.turn_id, 0, now,
+        verdict.AgentEventType.MODEL_CALL, verdict.ExecutionStatus.COMPLETED,
+        "claude-code:model", {"provider": "anthropic"},
+        trace_id=f"trace-{suffix}",
+    )
+    prompt_only = verdict.Trace(
+        trace_id=event.trace_id, tenant_id=tenant, started_at=now, ended_at=now,
+        provider="anthropic", request_model="claude-test",
+        prompt_redacted="inspect the build",
+        raw_messages=[{"role": "user", "content": "inspect the build"}],
+    )
+    completed_turn = replace(
+        prompt_only_turn,
+        final_response_redacted="the build passes",
+        response_state=verdict.EvidenceState.PRESENT,
+    )
+    completed_trace = replace(
+        prompt_only,
+        response_redacted="the build passes",
+        raw_messages=[
+            *prompt_only.raw_messages,
+            {"role": "assistant", "content": "the build passes"},
+        ],
+    )
+
+    with _isolated_postgres_storage() as storage:
+        storage.replace_agent_capture(
+            verdict.AgentRunBundle(source, run, (prompt_only_turn,), (event,)),
+            (prompt_only,),
+        )
+        before = storage.get_trace(prompt_only.trace_id)
+        storage.replace_agent_capture(
+            verdict.AgentRunBundle(source, run, (completed_turn,), (event,)),
+            (completed_trace,),
+        )
+        stored = storage.get_trace(prompt_only.trace_id)
+
+    assert before is not None
+    assert stored is not None
+    assert stored.response_redacted == "the build passes"
+    assert stored.raw_messages == completed_trace.raw_messages
+    assert stored.analysis_raw_messages_state == "valid"
+    assert before.analysis_raw_messages_utf8_bytes is not None
+    assert stored.analysis_raw_messages_utf8_bytes is not None
+    assert stored.analysis_raw_messages_utf8_bytes > before.analysis_raw_messages_utf8_bytes
+
+
 def test_live_postgres_migrates_a17_agent_bundle_transactionally():
     import psycopg
     from psycopg.errors import RaiseException

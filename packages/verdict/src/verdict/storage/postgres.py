@@ -1161,6 +1161,7 @@ class PostgresStorage:
                     (f"agent-run:{sanitized.run.tenant_id}:{sanitized.run.run_id}",),
                 )
                 prepared_traces = []
+                message_updates: set[str] = set()
                 for trace in capture_traces:
                     cur.execute(
                         f"SELECT {self._TRACE_COLUMNS} FROM traces "  # nosec B608
@@ -1168,16 +1169,26 @@ class PostgresStorage:
                         (trace.trace_id,),
                     )
                     row = cur.fetchone()
-                    prepared_traces.append(
-                        merge_capture_trace(self._row_to_trace(row) if row else None, trace)
-                    )
+                    current = self._row_to_trace(row) if row else None
+                    prepared = merge_capture_trace(current, trace)
+                    prepared_traces.append(prepared)
+                    if current is not None and current.raw_messages != prepared.raw_messages:
+                        message_updates.add(prepared.trace_id)
                 for trace in prepared_traces:
                     self._insert_trace_cursor(cur, trace)
-                    if trace.raw_messages is not None:
+                    if trace.trace_id in message_updates:
                         cur.execute(
-                            "UPDATE traces SET raw_messages=%s::jsonb "
-                            "WHERE trace_id=%s AND raw_messages IS NULL",
-                            (json.dumps(trace.raw_messages), trace.trace_id),
+                            """UPDATE traces SET
+                               raw_messages=%s::jsonb,
+                               analysis_raw_messages_utf8_bytes=%s,
+                               analysis_raw_messages_state=%s
+                               WHERE trace_id=%s""",
+                            (
+                                json.dumps(trace.raw_messages),
+                                trace.analysis_raw_messages_utf8_bytes,
+                                trace.analysis_raw_messages_state,
+                                trace.trace_id,
+                            ),
                         )
                 linked_ids = tuple(sorted(linked_trace_ids))
                 if linked_ids:

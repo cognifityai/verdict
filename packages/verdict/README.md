@@ -27,6 +27,9 @@ Trace totals remain visibly separate. The server requires a successful preview
 of the exact local or historical paths before it accepts the corresponding
 write. An explicitly saved daily schedule intentionally retains source paths in
 the local control store for `verdict-service`; no OS scheduler is installed.
+Claude Code history fragments that share one provider response identity are
+coalesced into one linked Trace; later response text completes that Trace while
+genuine tool-only calls remain textless.
 
 For automation, the equivalent commands are:
 

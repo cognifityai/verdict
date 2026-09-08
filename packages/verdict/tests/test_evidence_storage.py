@@ -327,7 +327,13 @@ def test_live_capture_limit_can_increase_without_rewriting_other_event_facts(
     first = replace(original, events=(marker,))
     second = replace(
         first,
-        events=(replace(marker, attributes=marker.attributes | {"source": "2"}),),
+        events=(
+            replace(
+                marker,
+                occurred_at=NOW.replace(microsecond=1),
+                attributes=marker.attributes | {"source": "2"},
+            ),
+        ),
     )
 
     evidence_storage.replace_agent_run_bundle(first)
@@ -335,6 +341,7 @@ def test_live_capture_limit_can_increase_without_rewriting_other_event_facts(
 
     loaded = evidence_storage.get_agent_run_bundle("tenant-a", "run_1")
     assert loaded is not None
+    assert loaded.events[0].occurred_at == NOW
     assert loaded.events[0].attributes["source"] == "2"
 
 
