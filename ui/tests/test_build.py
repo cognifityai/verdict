@@ -37,6 +37,14 @@ def test_overview_uses_the_canonical_monitor_read_model():
     assert "LATEST COMPLETED RUN" not in source
 
 
+def test_setup_sdk_example_captures_agent_run_and_turn_boundaries():
+    source = (build.HERE / "SetupWizard.jsx").read_text()
+    assert 'verdict.agent_run(name="support-agent", session_id=session_id)' in source
+    assert "with run.turn(user_input=user_message) as turn:" in source
+    assert "turn.set_output(answer)" in source
+    assert "Supported provider calls inside the turn link" in source
+
+
 def test_landing_source_link_is_a_real_link():
     assert 'href="https://github.com/cognifityai/verdict"' in (
         build.HERE / "VerdictUI.jsx"

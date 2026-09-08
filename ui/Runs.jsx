@@ -93,7 +93,7 @@ export function Runs({
   if (state.error) return <Notice icon={AlertTriangle} text={`Runs unavailable: ${state.error}`} />;
   if (!state.data) return <Notice icon={RefreshCw} text="Loading agent runs…" />;
   if (!runs.length && page.available === 0) {
-    return <Notice icon={CheckCircle2} text="No agent runs captured yet. Run verdict-import local, then refresh." />;
+    return <Notice icon={CheckCircle2} text="No agent runs captured yet. Capture local history or an SDK Agent Run, then refresh." />;
   }
   return (
     <div className="grid lg:grid-cols-[360px_minmax(0,1fr)] gap-4">

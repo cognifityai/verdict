@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-from verdict.evidence import AgentRunBundle
+from verdict.evidence import AgentCaptureBatch, AgentRunBundle
 from verdict.schema import Trace
 from verdict.storage.base import Storage
 
@@ -22,3 +22,11 @@ class AgentCaptureService:
         traces: Iterable[Trace] = (),
     ) -> None:
         self._storage.replace_agent_capture(bundle, tuple(traces))
+
+    def append(
+        self,
+        batch: AgentCaptureBatch,
+        *,
+        traces: Iterable[Trace] = (),
+    ) -> None:
+        self._storage.append_agent_capture(batch, tuple(traces))

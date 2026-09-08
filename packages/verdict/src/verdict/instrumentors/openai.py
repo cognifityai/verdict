@@ -18,6 +18,7 @@ from verdict.instrumentors.base import (
     decide_persist,
     is_verdict_wrapt_wrapper,
     normalize_finish_reason,
+    should_sample_trace,
 )
 from verdict.pricing import compute_cost_usd
 from verdict.redaction import redact, redact_messages
@@ -453,7 +454,7 @@ class OpenAIInstrumentor(BaseInstrumentor):
             trace.error = f"{type(e).__name__}: {e}"
             self._safe_persist(trace)
             raise
-        should_persist, _is_error = decide_persist(False, self._should_sample())
+        should_persist, _is_error = decide_persist(False, should_sample_trace(self, trace))
         if should_persist:
             self._fill_output(trace, resp)
             trace.latency_ms = (time.perf_counter() - t0) * 1000.0
@@ -497,7 +498,7 @@ class OpenAIInstrumentor(BaseInstrumentor):
             trace.error = f"{type(e).__name__}: {e}"
             self._safe_persist(trace)
             raise
-        should_persist, _is_error = decide_persist(False, self._should_sample())
+        should_persist, _is_error = decide_persist(False, should_sample_trace(self, trace))
         if should_persist:
             self._fill_output(trace, resp)
             trace.latency_ms = (time.perf_counter() - t0) * 1000.0
@@ -596,7 +597,7 @@ class OpenAIInstrumentor(BaseInstrumentor):
         self._fill_responses_output(trace, response)
         should_persist, _ = decide_persist(
             trace.error is not None,
-            self._should_sample(),
+            should_sample_trace(self, trace),
         )
         if should_persist:
             trace.latency_ms = (time.perf_counter() - t0) * 1000.0
@@ -645,7 +646,7 @@ class OpenAIInstrumentor(BaseInstrumentor):
         self._fill_responses_output(trace, response)
         should_persist, _ = decide_persist(
             trace.error is not None,
-            self._should_sample(),
+            should_sample_trace(self, trace),
         )
         if should_persist:
             trace.latency_ms = (time.perf_counter() - t0) * 1000.0
@@ -981,7 +982,9 @@ class _StreamingWrapper:
             return
 
         raised = self._error is not None
-        should_persist, is_error = decide_persist(raised, self._instr._should_sample())
+        should_persist, is_error = decide_persist(
+            raised, should_sample_trace(self._instr, self._trace)
+        )
         if not should_persist:
             return
 
@@ -1195,7 +1198,9 @@ class _ResponsesStreamingWrapper(_StreamingWrapper):
             )
 
         raised = self._trace.error is not None
-        should_persist, is_error = decide_persist(raised, self._instr._should_sample())
+        should_persist, is_error = decide_persist(
+            raised, should_sample_trace(self._instr, self._trace)
+        )
         if not should_persist:
             return
 

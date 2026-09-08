@@ -10,8 +10,9 @@ Verdict's established path focuses on the LLM-call layer inside LLM apps and
 agents. It can capture supported provider calls or import existing telemetry,
 store traces, evaluate responses with a rubric, cluster similar prompts, and
 inspect quality or cost changes over time. The local Claude Code/Codex adapter
-also stores typed, bounded source sessions, runs, turns, and observable events
-without relabeling them as provider calls.
+and framework-neutral application SDK also store typed, bounded source
+sessions, runs, turns, and observable events without relabeling them as
+provider calls.
 
 Today, Verdict can capture or import and evaluate calls such as:
 
@@ -29,41 +30,21 @@ then samples eligible stored calls for judging. Local history projection is a
 first-class evidence view, but it is not a complete runtime graph and does not
 invent links to genuine provider calls that the source cannot establish.
 
-## Planned Agent-Level Work
+## Agent-Level SDK
 
-The next layer is deeper agent-run observability: connecting genuine LLM calls,
-framework events, authoritative artifacts, and outcomes into one execution
-graph beyond the source-bounded local projection that now ships.
+The framework-neutral SDK provides sync and async run, turn, and tool contexts;
+typed command, test, artifact, retry, handoff, feedback, and outcome events; and
+automatic links from supported provider calls to genuine LLM `Trace` records.
+Run-level sampling is all-or-nothing. The dashboard reads these records through
+the same normalized evidence APIs used by local history capture.
 
-### Agent-Run Tracing
+Application hosts can write bounded, redacted, process-owned JSONL files and
+later replay them idempotently through canonical storage. This is a local
+transport, not a remote delivery system.
 
-Planned capabilities beyond the current typed evidence record:
-
-- Link genuine LLM calls and spans to the run that produced them when source
-  provenance establishes the relationship.
-- Track run-level metadata such as total steps, latency, token usage, cost, and
-  terminal status.
-- Support rollups by run, intent cluster, model, provider, and time window.
-
-### Tool-Call Instrumentation
-
-Planned capabilities:
-
-- Extend current Claude Code/Codex history normalization to common agent
-  frameworks and provider SDKs.
-- Store tool name, arguments, result metadata, latency, and success or failure.
-- Inspect tool-use sequences within an agent run.
-- Detect changes in retry rate, tool-selection patterns, and escalation paths.
-
-### Task-Success Signals
-
-Planned capabilities:
-
-- Let applications attach explicit success or failure outcomes to an agent run.
-- Support user feedback, business outcome webhooks, or application-defined
-  success criteria.
-- Compare task-success rates across model, prompt, release, provider, and
-  workload segments.
+Planned agent-level work includes maintained framework adapters, run-level
+cohort comparisons, application-specific outcome calibration, and an
+authenticated collector with acknowledgement, retry, and backpressure.
 
 ### Plan-Adherence Scoring
 
@@ -73,9 +54,10 @@ Planned capabilities:
 - Compare later steps against the stated plan.
 - Track plan-deviation rate over time.
 
-### Run-Level Cost And Reliability Metrics
+### Additional Run-Level Comparisons
 
-Planned capabilities:
+Current summaries report available run status, event failures, retries, linked
+Trace tokens, latency, and cost. Planned comparisons include:
 
 - Cost per successful run
 - Average steps per run
@@ -107,7 +89,8 @@ Areas under consideration:
 
 ## Known Boundaries In v0
 
-- Verdict v0 is LLM-call observability, not a full agent runtime.
+- Verdict v0 observes LLM calls and application-declared agent executions; it
+  is not a full agent runtime.
 - The local dashboard is intended for localhost or trusted-network use. Its v0
   JavaScript and CSS are pre-built local assets, so rendering does not require
   public CDN access. Put TLS and authentication in front of it before any
@@ -161,9 +144,9 @@ and an approved design before implementation.
    boundary with batching, durable retry/spooling, backpressure, idempotency,
    tenant isolation, and separate schema-migration credentials. Keep direct
    SQLite/PostgreSQL storage as the simple local and embedded option.
-5. **Framework-wide agent outcomes (large effort, high agent-workload value):**
-   extend the shipped typed sequence/privacy/storage/UI contract with genuine
-   provider-call links, authoritative task outcomes, and framework adapters.
+5. **Framework adapters and calibrated outcomes (large effort, high
+   agent-workload value):** add maintained framework integrations and validate
+   application-defined outcome semantics before comparing them across traffic.
 6. **Cluster naming (small/medium effort, usability value):** prefer explicit
    customer labels; any generated name needs versioning and privacy controls.
 7. **Cluster fusion (large, high-risk effort):** requires offline quality

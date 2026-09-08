@@ -73,6 +73,15 @@ def apply_routing_context(client: VerdictClient, trace: Trace) -> None:
         if intent_key is not None:
             trace.tags = {**trace.tags, "verdict.intent_key": intent_key}
 
+        from verdict.agent import current_agent_trace_context
+
+        agent_context = current_agent_trace_context()
+        if agent_context is not None:
+            trace.tenant_id = agent_context.tenant_id
+            trace.session_id = agent_context.session_id
+            trace.tags = {**trace.tags, "verdict.agent_run_id": agent_context.run_id}
+            trace._verdict_agent_context = agent_context  # type: ignore[attr-defined]
+
         # Automatic provider/manual-span correlation is deliberately one-way.
         # Multiple provider traces can share one manual parent, so choosing one
         # Trace as a reverse SpanRecord.trace_id owner would be lossy.
@@ -90,7 +99,35 @@ def persist_trace(client: VerdictClient, trace: Trace) -> None:
     # Provider response fields are filled after Trace.__post_init__, so repeat
     # the schema guard at the final synchronous persistence boundary.
     trace.normalize_scalars()
-    client.storage.insert_trace(trace)
+    from verdict.agent import trace_agent_context
+    from verdict.agent_transport import StorageCaptureSink
+
+    agent_context = trace_agent_context(trace)
+    if agent_context is not None:
+        try:
+            delattr(trace, "_verdict_agent_context")
+        except AttributeError:
+            pass
+        if agent_context.sampled:
+            agent_context.capture(trace)
+        return
+    sink = client._capture_sink
+    if sink is not None:
+        sink.capture_trace(trace)
+    elif client.storage is not None:
+        StorageCaptureSink(client.storage).capture_trace(trace)
+    else:
+        raise RuntimeError("Verdict capture transport is unavailable")
+
+
+def should_sample_trace(instrumentor: object, trace: Trace) -> bool:
+    """Apply one run decision, otherwise preserve instrumentor sampling."""
+    from verdict.agent import trace_agent_context
+
+    agent_context = trace_agent_context(trace)
+    if agent_context is not None:
+        return agent_context.sampled
+    return bool(instrumentor._should_sample())  # type: ignore[attr-defined]
 
 
 def _warn_persistence_failure_once(
@@ -100,7 +137,8 @@ def _warn_persistence_failure_once(
 ) -> None:
     """Emit one non-sensitive warning for each provider/backend/error class."""
     provider = trace.provider if isinstance(trace.provider, str) else type(trace.provider).__name__
-    storage_type = type(client.storage)
+    target = client._capture_sink or client.storage
+    storage_type = type(target)
     storage_name = f"{storage_type.__module__}.{storage_type.__qualname__}"
     key = (provider, storage_name, type(exc))
     with _persistence_warning_lock:

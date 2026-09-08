@@ -95,6 +95,8 @@ def test_analysis_reports_observed_failures_and_metrics_without_judge() -> None:
         "tool_calls": 1,
         "tool_errors": 1,
         "command_failures": 1,
+        "test_failures": 0,
+        "retries": 0,
         "input_tokens": 10,
         "output_tokens": 5,
         "model_latency_ms": 250.0,
@@ -145,6 +147,62 @@ def test_loop_detection_is_explicit_and_policy_controlled() -> None:
 
     loop = next(finding for finding in report.findings if finding.code == "possible_tool_loop")
     assert loop.evidence_event_ids == ("e1", "loop-0", "loop-1", "loop-2")
+
+
+def test_loop_detection_canonicalizes_structured_tool_arguments() -> None:
+    bundle = _bundle()
+    repeats = tuple(
+        replace(
+            bundle.events[1],
+            event_id=f"structured-{index}",
+            sequence=4 + index,
+            attributes={
+                "tool_name": "shell",
+                "call_id": f"structured-{index}",
+                "arguments": {"cwd": "/tmp", "cmd": "pytest"},
+            },
+        )
+        for index in range(4)
+    )
+
+    report = analyze_agent_run(
+        replace(bundle, events=bundle.events + repeats),
+        AnalysisPolicy(repeated_tool_call_threshold=4),
+    )
+
+    assert any(finding.code == "possible_tool_loop" for finding in report.findings)
+
+
+def test_analysis_counts_explicit_retries_and_failed_tests() -> None:
+    bundle = _bundle()
+    retry = AgentEvent(
+        "retry",
+        "turn",
+        4,
+        NOW,
+        AgentEventType.RETRY,
+        ExecutionStatus.COMPLETED,
+        "verdict:sdk",
+        {"reason": "rate limit", "attempt": 1},
+        PrivacyClassification.REDACTED,
+    )
+    test_result = AgentEvent(
+        "test",
+        "turn",
+        5,
+        NOW,
+        AgentEventType.TEST_RESULT,
+        ExecutionStatus.FAILED,
+        "verdict:sdk",
+        {"command": "pytest", "exit_code": 1, "passed": 3, "failed": 1, "skipped": 0},
+        PrivacyClassification.REDACTED,
+    )
+
+    report = analyze_agent_run(replace(bundle, events=(*bundle.events, retry, test_result)))
+
+    assert report.metrics["retries"] == 1
+    assert report.metrics["test_failures"] == 1
+    assert any(finding.code == "test_failed" for finding in report.findings)
 
 
 def test_different_calls_to_the_same_tool_are_not_called_a_loop() -> None:

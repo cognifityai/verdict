@@ -17,6 +17,7 @@ from verdict import (
     Trace,
 )
 from verdict.capture import AgentCaptureService
+from verdict.evidence import AgentCaptureBatch
 from verdict.storage import BufferedStorage, InMemoryStorage, SQLiteStorage
 
 NOW = datetime(2026, 8, 31, tzinfo=timezone.utc)
@@ -140,6 +141,32 @@ def test_atomic_agent_capture_has_adapter_parity(evidence_storage) -> None:
     assert stored_trace.prompt_redacted == "request"
     assert stored_trace.response_redacted == "response"
     assert evidence_storage.get_agent_run_bundle("tenant-a", "run_1") == linked
+
+
+def test_append_agent_capture_has_adapter_parity(evidence_storage) -> None:
+    linked, trace = _linked_capture()
+    batch = AgentCaptureBatch(
+        linked.session,
+        linked.run,
+        linked.turns,
+        linked.events,
+    )
+
+    evidence_storage.append_agent_capture(batch, (trace,))
+    evidence_storage.append_agent_capture(batch, (trace,))
+
+    assert evidence_storage.get_trace(trace.trace_id) is not None
+    assert evidence_storage.get_agent_run_bundle("tenant-a", "run_1") == linked
+
+
+def test_append_agent_capture_enforces_trace_tenant(evidence_storage) -> None:
+    linked, trace = _linked_capture()
+    batch = AgentCaptureBatch(linked.session, linked.run, linked.turns, linked.events)
+
+    with pytest.raises(ValueError, match="same-tenant Trace"):
+        evidence_storage.append_agent_capture(batch, (replace(trace, tenant_id="tenant-b"),))
+
+    assert evidence_storage.get_agent_run_bundle("tenant-a", "run_1") is None
 
 
 def test_atomic_capture_guards_have_adapter_parity(evidence_storage) -> None:

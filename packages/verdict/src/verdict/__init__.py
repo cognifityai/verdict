@@ -11,7 +11,8 @@ Five-line install pattern:
 
 from __future__ import annotations
 
-from verdict.client import VerdictClient, init
+from verdict.agent import AgentRunContext, TurnContext, agent_run
+from verdict.client import VerdictClient, init, shutdown
 from verdict.evidence import (
     AgentEvent,
     AgentEventType,
@@ -46,6 +47,7 @@ __all__ = [
     "AgentEventType",
     "AgentRun",
     "AgentRunBundle",
+    "AgentRunContext",
     "AgentTurn",
     "DriftRun",
     "DriftSignal",
@@ -55,8 +57,10 @@ __all__ = [
     "PrivacyClassification",
     "SourceSession",
     "Trace",
+    "TurnContext",
     "VerdictClient",
     "__version__",
+    "agent_run",
     "agent_run_bundle_from_json",
     "agent_run_bundle_to_json",
     "clear_context",
@@ -65,6 +69,7 @@ __all__ = [
     "intent_context",
     "record_user_signal",
     "set_context",
+    "shutdown",
     "span",
     "stable_evidence_id",
     "trace",

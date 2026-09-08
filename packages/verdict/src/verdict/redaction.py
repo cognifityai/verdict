@@ -20,7 +20,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
-    from verdict.evidence import AgentRunBundle
+    from verdict.evidence import AgentCaptureBatch, AgentRunBundle
     from verdict.schema import Judgment, SpanRecord, Trace
 
 RedactionMode = Literal["redact", "hash", "encrypt"]
@@ -148,17 +148,11 @@ def _redact_emails(
             break
 
         start = at_index
-        while (
-            start > output_cursor
-            and _is_email_local_character(text[start - 1])
-        ):
+        while start > output_cursor and _is_email_local_character(text[start - 1]):
             start -= 1
 
         domain_end = at_index + 1
-        while (
-            domain_end < text_length
-            and _is_email_domain_label_character(text[domain_end])
-        ):
+        while domain_end < text_length and _is_email_domain_label_character(text[domain_end]):
             domain_end += 1
 
         has_local = start < at_index
@@ -166,10 +160,7 @@ def _redact_emails(
         has_dot = domain_end < text_length and text[domain_end] == "."
         tail_end = domain_end + 1
         if has_dot:
-            while (
-                tail_end < text_length
-                and _is_email_domain_tail_character(text[tail_end])
-            ):
+            while tail_end < text_length and _is_email_domain_tail_character(text[tail_end]):
                 tail_end += 1
         has_domain_tail = has_dot and tail_end > domain_end + 1
 
@@ -179,11 +170,7 @@ def _redact_emails(
 
         candidate = text[start:tail_end]
         output.append(text[output_cursor:start])
-        output.append(
-            _hash_match(candidate, "EMAIL", secret)
-            if mode == "hash"
-            else "<EMAIL>"
-        )
+        output.append(_hash_match(candidate, "EMAIL", secret) if mode == "hash" else "<EMAIL>")
         output_cursor = tail_end
         search_cursor = tail_end
 
@@ -321,9 +308,7 @@ def _ipv6_repl(
     prefix_ends = [len(candidate)]
     bounded_base = candidate.split("%", 1)[0]
     prefix_ends.extend(
-        index
-        for index, character in enumerate(bounded_base)
-        if index > 0 and character in ".:"
+        index for index, character in enumerate(bounded_base) if index > 0 and character in ".:"
     )
     if len(bounded_base) < len(candidate):
         prefix_ends.append(len(bounded_base))
@@ -388,9 +373,7 @@ def redact_messages(
             if key not in message:
                 continue
             sanitized_key = redact(key, mode=mode, secret=secret) or key
-            sanitized[sanitized_key] = redact_structure(
-                message[key], mode=mode, secret=secret
-            )
+            sanitized[sanitized_key] = redact_structure(message[key], mode=mode, secret=secret)
         out.append(sanitized)
     return out
 
@@ -459,24 +442,28 @@ def redact_structure(
                             _seen=seen,
                             _shared=None,
                         )
-                        entries.append((
-                            sanitized_key,
-                            key,
-                            json.dumps(sanitized_arguments, separators=(",", ":")),
-                        ))
+                        entries.append(
+                            (
+                                sanitized_key,
+                                key,
+                                json.dumps(sanitized_arguments, separators=(",", ":")),
+                            )
+                        )
                         continue
-                entries.append((
-                    sanitized_key,
-                    key,
-                    redact_structure(
-                        child,
-                        mode=mode,
-                        secret=secret,
-                        _depth=_depth + 1,
-                        _seen=seen,
-                        _shared=_shared,
-                    ),
-                ))
+                entries.append(
+                    (
+                        sanitized_key,
+                        key,
+                        redact_structure(
+                            child,
+                            mode=mode,
+                            secret=secret,
+                            _depth=_depth + 1,
+                            _seen=seen,
+                            _shared=_shared,
+                        ),
+                    )
+                )
         finally:
             seen.remove(identity)
         return _mapping_from_redacted_entries(entries)
@@ -580,9 +567,7 @@ def sanitize_trace(
     trace.response_redacted = redact(trace.response_redacted, mode=mode, secret=secret)
     trace.error = redact(trace.error, mode=mode, secret=secret)
     if trace.raw_messages is not None:
-        trace.raw_messages = redact_messages(
-            trace.raw_messages, mode=mode, secret=secret
-        )
+        trace.raw_messages = redact_messages(trace.raw_messages, mode=mode, secret=secret)
     sanitized_tags = redact_structure(trace.tags, mode=mode, secret=secret)
     # Keep the marker rather than silently dropping to {}: an over-budget or
     # unrepresentable structure must be visible, not indistinguishable from
@@ -603,9 +588,7 @@ def sanitize_judgment(
     """Redact content-bearing judge output without changing evaluator identity."""
     judgment.error = redact(judgment.error, mode=mode, secret=secret)
     for dimension in judgment.dimensions:
-        dimension.reasoning = (
-            redact(dimension.reasoning, mode=mode, secret=secret) or ""
-        )
+        dimension.reasoning = redact(dimension.reasoning, mode=mode, secret=secret) or ""
     return judgment
 
 
@@ -618,9 +601,7 @@ def sanitize_span(
     span.name = redact(span.name, mode=mode, secret=secret) or ""
     span.parent_name = redact(span.parent_name, mode=mode, secret=secret)
     span.error = redact(span.error, mode=mode, secret=secret)
-    sanitized_attributes = redact_structure(
-        span.attributes, mode=mode, secret=secret
-    )
+    sanitized_attributes = redact_structure(span.attributes, mode=mode, secret=secret)
     # See sanitize_trace: preserve the marker instead of wiping every sibling
     # attribute and leaving no evidence that anything was dropped.
     span.attributes = (
@@ -631,13 +612,12 @@ def sanitize_span(
     return span
 
 
-def sanitize_agent_run_bundle(
-    bundle: AgentRunBundle,
+def _sanitize_agent_capture(
+    capture: AgentRunBundle | AgentCaptureBatch,
     mode: RedactionMode = "redact",
     secret: str | None = None,
-) -> AgentRunBundle:
-    """Return a detached bundle with every content-bearing field sanitized."""
-    from verdict.evidence import AgentRunBundle
+) -> AgentRunBundle | AgentCaptureBatch:
+    """Return detached agent evidence with every content field sanitized."""
 
     turns = tuple(
         replace(
@@ -645,18 +625,40 @@ def sanitize_agent_run_bundle(
             user_request_redacted=redact(turn.user_request_redacted, mode=mode, secret=secret),
             final_response_redacted=redact(turn.final_response_redacted, mode=mode, secret=secret),
         )
-        for turn in bundle.turns
+        for turn in capture.turns
     )
     events = []
-    for event in bundle.events:
+    for event in capture.events:
         attributes = {
             key: redact_structure(value, mode=mode, secret=secret)
             for key, value in event.attributes.items()
         }
         events.append(replace(event, attributes=attributes))
-    return AgentRunBundle(
-        session=bundle.session,
-        run=bundle.run,
+    return type(capture)(
+        session=capture.session,
+        run=capture.run,
         turns=turns,
         events=tuple(events),
     )
+
+
+def sanitize_agent_run_bundle(
+    bundle: AgentRunBundle,
+    mode: RedactionMode = "redact",
+    secret: str | None = None,
+) -> AgentRunBundle:
+    """Return a detached bundle with every content-bearing field sanitized."""
+    sanitized = _sanitize_agent_capture(bundle, mode=mode, secret=secret)
+    assert isinstance(sanitized, type(bundle))
+    return sanitized
+
+
+def sanitize_agent_capture_batch(
+    batch: AgentCaptureBatch,
+    mode: RedactionMode = "redact",
+    secret: str | None = None,
+) -> AgentCaptureBatch:
+    """Return a detached append batch with content sanitized."""
+    sanitized = _sanitize_agent_capture(batch, mode=mode, secret=secret)
+    assert isinstance(sanitized, type(batch))
+    return sanitized

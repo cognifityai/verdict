@@ -18,8 +18,10 @@ import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING
 
+from verdict.agent_transport import AgentCaptureSink, FileCaptureSink, StorageCaptureSink
 from verdict.runtime_metrics import RuntimeMetrics
 from verdict.storage.base import Storage
 from verdict.storage.sqlite import SQLiteStorage
@@ -28,6 +30,7 @@ if TYPE_CHECKING:
     from verdict.instrumentors.base import BaseInstrumentor
 
 log = logging.getLogger("verdict")
+_DEFAULT_STORAGE_URL = "sqlite:///./verdict.db"
 
 
 @dataclass
@@ -44,17 +47,18 @@ class VerdictClient:
     # Content is bounded and redacted before persistence. Callers can still
     # disable it explicitly for metadata-only deployments.
     capture_content: bool = True
-    redaction_mode: str = "redact"          # "redact" | "hash"  ("encrypt" planned)
-    redaction_secret: str | None = None     # required for hash mode
+    redaction_mode: str = "redact"  # "redact" | "hash"  ("encrypt" planned)
+    redaction_secret: str | None = None  # required for hash mode
 
     # Sampling
-    sample_rate: float = 1.0                # 1.0 = capture everything
+    sample_rate: float = 1.0  # 1.0 = capture everything
 
     # Multi-tenancy — stamped onto every trace from this process if set.
     tenant_id: str | None = None
 
     # Storage
-    storage: Storage = field(default_factory=lambda: SQLiteStorage("./verdict.db"))
+    storage: Storage | None = field(default_factory=lambda: SQLiteStorage("./verdict.db"))
+    transport: str = "storage"
 
     # Which instrumentors to enable (defaults to all installed)
     enabled_instrumentors: list[str] = field(default_factory=list)
@@ -62,6 +66,7 @@ class VerdictClient:
     # Internal — bound instrumentors after init() runs
     _instrumentors: list[BaseInstrumentor] = field(default_factory=list, repr=False)
     _initialized: bool = False
+    _capture_sink: AgentCaptureSink | None = field(default=None, repr=False)
     runtime_metrics: RuntimeMetrics = field(
         default_factory=RuntimeMetrics,
         init=False,
@@ -80,7 +85,7 @@ def init(
     api_key: str | None = None,
     service_name: str = "unknown-service",
     environment: str = "production",
-    storage: str | Storage = "sqlite:///./verdict.db",
+    storage: str | Storage = _DEFAULT_STORAGE_URL,
     capture_content: bool = True,
     redaction_mode: str = "redact",
     redaction_secret: str | None = None,
@@ -88,6 +93,8 @@ def init(
     tenant_id: str | None = None,
     instrumentors: list[str] | None = None,
     buffered_writes: bool = False,
+    transport: str = "storage",
+    spool_directory: str | Path | None = None,
 ) -> VerdictClient:
     """Initialize Verdict and install auto-instrumentation.
 
@@ -111,6 +118,10 @@ def init(
                        traces are written on a background thread (batched) instead
                        of synchronously on the request hot path. Recommended for
                        high-volume production; adds a background flush thread.
+        transport: ``"storage"`` keeps the existing direct SQLite/PostgreSQL
+                   capture path. ``"file"`` writes bounded process-owned JSONL
+                   records for a local Verdict service to import.
+        spool_directory: Required local directory when ``transport="file"``.
 
     Returns:
         The VerdictClient singleton.
@@ -143,33 +154,47 @@ def init(
         # capture behavior. Reject it loudly.
         if not isinstance(sample_rate, (int, float)) or not (0.0 <= sample_rate <= 1.0):
             raise ValueError(
-                f"sample_rate={sample_rate!r} is out of range. "
-                "It must be a number in [0.0, 1.0]."
+                f"sample_rate={sample_rate!r} is out of range. It must be a number in [0.0, 1.0]."
             )
 
-        # Resolve storage URL → instance
-        if isinstance(storage, str):
-            storage_inst = _resolve_storage(storage)
+        if transport not in {"storage", "file"}:
+            raise ValueError("transport must be 'storage' or 'file'")
+        if transport == "file":
+            if not spool_directory:
+                raise ValueError("file transport requires spool_directory")
+            if buffered_writes:
+                raise ValueError("file transport cannot use buffered_writes")
+            if not isinstance(storage, str) or storage != _DEFAULT_STORAGE_URL:
+                raise ValueError("file transport cannot also use a storage adapter")
+            storage_inst = None
+            capture_sink: AgentCaptureSink = FileCaptureSink(
+                spool_directory,
+                redaction_mode=redaction_mode,  # type: ignore[arg-type]
+                redaction_secret=redaction_secret,
+            )
         else:
-            storage_inst = storage
+            if spool_directory is not None:
+                raise ValueError("spool_directory is valid only for file transport")
+            storage_inst = _resolve_storage(storage) if isinstance(storage, str) else storage
+            if buffered_writes:
+                from verdict.storage.buffered import BufferedStorage
 
-        # Optionally move writes off the request hot path onto a background
-        # batched writer. Opt-in because it starts a flush thread.
-        if buffered_writes:
-            from verdict.storage.buffered import BufferedStorage
-            storage_inst = BufferedStorage(storage_inst)
+                storage_inst = BufferedStorage(storage_inst)
+            capture_sink = StorageCaptureSink(storage_inst)
 
         client = VerdictClient(
             api_key=api_key or "",
             service_name=service_name,
             environment=environment,
             storage=storage_inst,
+            transport=transport,
             capture_content=capture_content,
             redaction_mode=redaction_mode,
             redaction_secret=redaction_secret,
             sample_rate=sample_rate,
             tenant_id=tenant_id,
             enabled_instrumentors=instrumentors or [],
+            _capture_sink=capture_sink,
         )
 
         # Install instrumentors that are available
@@ -179,7 +204,10 @@ def init(
         client._initialized = True
         log.info(
             "Verdict initialized: service=%s env=%s instrumentors=%s capture_content=%s",
-            service_name, environment, [i.name for i in client._instrumentors], capture_content,
+            service_name,
+            environment,
+            [i.name for i in client._instrumentors],
+            capture_content,
         )
         return client
 
@@ -191,9 +219,11 @@ def _resolve_storage(url: str) -> Storage:
         return SQLiteStorage(path)
     if url == "memory://" or url.startswith("memory://"):
         from verdict.storage.memory import InMemoryStorage
+
         return InMemoryStorage()
     if url.startswith("postgres://") or url.startswith("postgresql://"):
         from verdict.storage.postgres import PostgresStorage
+
         return PostgresStorage(url)
     raise ValueError(f"Unsupported storage URL: {url!r}")
 
@@ -249,16 +279,20 @@ def get_client() -> VerdictClient | None:
 # ---------------------------------------------------------------------------
 
 _ctx_session_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
-    "verdict_session_id", default=None,
+    "verdict_session_id",
+    default=None,
 )
 _ctx_user_id_hash: contextvars.ContextVar[str | None] = contextvars.ContextVar(
-    "verdict_user_id_hash", default=None,
+    "verdict_user_id_hash",
+    default=None,
 )
 _ctx_trace_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
-    "verdict_trace_id", default=None,
+    "verdict_trace_id",
+    default=None,
 )
 _ctx_workload: contextvars.ContextVar[str | None] = contextvars.ContextVar(
-    "verdict_workload", default=None,
+    "verdict_workload",
+    default=None,
 )
 _ctx_intent_key: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "verdict_intent_key",
@@ -390,6 +424,9 @@ def clear_context() -> None:
     _ctx_trace_id.set(None)
     _ctx_workload.set(None)
     _ctx_intent_key.set(None)
+    from verdict.agent import clear_agent_context
+
+    clear_agent_context()
 
 
 def shutdown() -> None:
@@ -404,9 +441,15 @@ def shutdown() -> None:
                 instr.uninstall()
             except Exception as e:  # pragma: no cover
                 log.warning("Error uninstalling %s: %s", instr.name, e)
-        try:
-            _client.storage.close()
-        except Exception:
-            pass
+        if _client._capture_sink is not None:
+            try:
+                _client._capture_sink.close()
+            except Exception:
+                pass
+        if _client.storage is not None:
+            try:
+                _client.storage.close()
+            except Exception:
+                pass
         _client = None
         clear_context()

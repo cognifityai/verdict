@@ -26,6 +26,7 @@ from verdict.analysis_records import (
     validate_delivery_query,
 )
 from verdict.evidence import (
+    AgentCaptureBatch,
     AgentRunBundle,
     agent_run_bundle_from_json,
 )
@@ -54,6 +55,7 @@ from verdict.normalized_evidence import (
     merge_source_session,
     normalize_bundle_timestamps,
     prepare_agent_capture,
+    prepare_agent_capture_batch,
     require_same_tenant_linked_traces,
     source_session_from_row,
 )
@@ -763,13 +765,9 @@ class SQLiteStorage:
                 for row in legacy_rows:
                     bundle = agent_run_bundle_from_json(row["payload_json"])
                     if bundle.content_hash != row["content_hash"]:
-                        raise RuntimeError(
-                            "stored agent run bundle content hash is inconsistent"
-                        )
+                        raise RuntimeError("stored agent run bundle content hash is inconsistent")
                     linked_ids = tuple(
-                        event.trace_id
-                        for event in bundle.events
-                        if event.trace_id is not None
+                        event.trace_id for event in bundle.events if event.trace_id is not None
                     )
                     available_ids: set[str] = set()
                     if linked_ids:
@@ -799,16 +797,18 @@ class SQLiteStorage:
                             SELECT RAISE(ABORT, '{LEGACY_AGENT_WRITER_ERROR}');
                         END"""  # nosec B608 -- fixed names and compile-time message
                     )
-                orphaned_legacy_write = self._conn.execute(
-                    """SELECT 1 FROM agent_run_bundles b
+                orphaned_legacy_write = (
+                    self._conn.execute(
+                        """SELECT 1 FROM agent_run_bundles b
                        LEFT JOIN agent_runs r
                          ON r.tenant_id=b.tenant_id AND r.run_id=b.run_id
                        WHERE r.run_id IS NULL LIMIT 1"""
-                ).fetchone() is not None
+                    ).fetchone()
+                    is not None
+                )
             if not orphaned_legacy_write:
                 self._conn.execute(
-                    "INSERT OR IGNORE INTO verdict_schema_migrations(name,applied_at) "
-                    "VALUES (?,?)",
+                    "INSERT OR IGNORE INTO verdict_schema_migrations(name,applied_at) VALUES (?,?)",
                     (
                         LEGACY_AGENT_WRITER_MIGRATION,
                         _iso(datetime.now(timezone.utc)),
@@ -822,7 +822,10 @@ class SQLiteStorage:
             self._conn.close()
             raise RuntimeError(LEGACY_AGENT_WRITER_ERROR)
 
-    def _write_normalized_bundle(self, bundle: AgentRunBundle) -> None:
+    def _write_normalized_bundle(
+        self,
+        bundle: AgentRunBundle | AgentCaptureBatch,
+    ) -> None:
         bundle = normalize_bundle_timestamps(bundle)
         tenant_id = bundle.run.tenant_id
         row = self._conn.execute(
@@ -849,13 +852,8 @@ class SQLiteStorage:
                 f"AND turn_id IN ({placeholders})",  # nosec B608
                 (tenant_id, bundle.run.run_id, *(turn.turn_id for turn in turns)),
             ).fetchall()
-            current_turns = {
-                row["turn_id"]: agent_turn_from_row(dict(row)) for row in rows
-            }
-            turns = [
-                merge_agent_turn(current_turns.get(turn.turn_id), turn)
-                for turn in turns
-            ]
+            current_turns = {row["turn_id"]: agent_turn_from_row(dict(row)) for row in rows}
+            turns = [merge_agent_turn(current_turns.get(turn.turn_id), turn) for turn in turns]
         events = list(bundle.events)
         if events:
             placeholders = ",".join("?" for _ in events)
@@ -864,12 +862,9 @@ class SQLiteStorage:
                 f"AND event_id IN ({placeholders})",  # nosec B608
                 (tenant_id, bundle.run.run_id, *(event.event_id for event in events)),
             ).fetchall()
-            current_events = {
-                row["event_id"]: agent_event_from_row(dict(row)) for row in rows
-            }
+            current_events = {row["event_id"]: agent_event_from_row(dict(row)) for row in rows}
             events = [
-                merge_agent_event(current_events.get(event.event_id), event)
-                for event in events
+                merge_agent_event(current_events.get(event.event_id), event) for event in events
             ]
         now = _iso(datetime.now(timezone.utc))
         self._conn.execute(
@@ -1187,9 +1182,23 @@ class SQLiteStorage:
         bundle: AgentRunBundle,
         traces: tuple[Trace, ...] = (),
     ) -> None:
-        sanitized, capture_traces, linked_trace_ids = prepare_agent_capture(
-            bundle, traces
-        )
+        sanitized, capture_traces, linked_trace_ids = prepare_agent_capture(bundle, traces)
+        self._store_agent_capture(sanitized, capture_traces, linked_trace_ids)
+
+    def append_agent_capture(
+        self,
+        batch: AgentCaptureBatch,
+        traces: tuple[Trace, ...] = (),
+    ) -> None:
+        sanitized, capture_traces, linked_trace_ids = prepare_agent_capture_batch(batch, traces)
+        self._store_agent_capture(sanitized, capture_traces, linked_trace_ids)
+
+    def _store_agent_capture(
+        self,
+        capture: AgentRunBundle | AgentCaptureBatch,
+        capture_traces: tuple[Trace, ...],
+        linked_trace_ids: frozenset[str],
+    ) -> None:
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
             try:
@@ -1228,10 +1237,8 @@ class SQLiteStorage:
                         linked_ids,
                     ).fetchall()
                     tenants = {row["trace_id"]: row["tenant_id"] for row in rows}
-                    require_same_tenant_linked_traces(
-                        sanitized.run.tenant_id, linked_ids, tenants
-                    )
-                self._write_normalized_bundle(sanitized)
+                    require_same_tenant_linked_traces(capture.run.tenant_id, linked_ids, tenants)
+                self._write_normalized_bundle(capture)
                 self._conn.commit()
             except sqlite3.IntegrityError as exc:
                 self._conn.rollback()
@@ -1530,11 +1537,15 @@ class SQLiteStorage:
         digest = hashlib.sha256(payload.encode()).hexdigest()
         with self._lock:
             policy = self._conn.execute(
-                "SELECT payload_json FROM monitor_policies WHERE policy_id=?", (policy_id,),
+                "SELECT payload_json FROM monitor_policies WHERE policy_id=?",
+                (policy_id,),
             ).fetchone()
             if policy is None:
                 raise ValueError("unknown policy")
-            if monitor_policy_from_json(policy["payload_json"]).fingerprint != manifest.policy_fingerprint:
+            if (
+                monitor_policy_from_json(policy["payload_json"]).fingerprint
+                != manifest.policy_fingerprint
+            ):
                 raise ValueError("monitor snapshot does not match policy")
             existing = self._conn.execute(
                 "SELECT content_hash FROM monitor_snapshots WHERE snapshot_id=?",
@@ -1547,8 +1558,14 @@ class SQLiteStorage:
                     "INSERT INTO monitor_snapshots "
                     "(snapshot_id,policy_id,cutoff,content_hash,payload_json,created_at) "
                     "VALUES (?,?,?,?,?,?)",
-                    (manifest.snapshot_id, policy_id, _iso(manifest.cutoff), digest, payload,
-                     _iso(datetime.now(timezone.utc))),
+                    (
+                        manifest.snapshot_id,
+                        policy_id,
+                        _iso(manifest.cutoff),
+                        digest,
+                        payload,
+                        _iso(datetime.now(timezone.utc)),
+                    ),
                 )
             except sqlite3.IntegrityError:
                 raced = self._conn.execute(
@@ -1598,7 +1615,8 @@ class SQLiteStorage:
         with self._lock:
             row = self._conn.execute(
                 "SELECT payload_json FROM monitor_snapshots WHERE policy_id=? "
-                "ORDER BY rowid DESC LIMIT 1", (policy_id,),
+                "ORDER BY rowid DESC LIMIT 1",
+                (policy_id,),
             ).fetchone()
         return monitor_snapshot_from_json(row["payload_json"]) if row else None
 
@@ -1608,7 +1626,8 @@ class SQLiteStorage:
         with self._lock:
             row = self._conn.execute(
                 "SELECT payload_json FROM monitor_snapshots WHERE policy_id=? "
-                "ORDER BY rowid ASC LIMIT 1", (policy_id,),
+                "ORDER BY rowid ASC LIMIT 1",
+                (policy_id,),
             ).fetchone()
         return monitor_snapshot_from_json(row["payload_json"]) if row else None
 
@@ -1618,7 +1637,7 @@ class SQLiteStorage:
         with self._lock:
             row = self._conn.execute(
                 "SELECT payload_json FROM monitor_snapshots WHERE policy_id=? "
-                "AND payload_json LIKE '%\"status\":\"alert\"%' "
+                'AND payload_json LIKE \'%"status":"alert"%\' '
                 "ORDER BY rowid DESC LIMIT 1",
                 (policy_id,),
             ).fetchone()
@@ -1856,7 +1875,10 @@ class SQLiteStorage:
         return [self._row_to_judgment(r) for r in rows]
 
     def list_judgments_for_trace(
-        self, trace_id: str, *, limit: int = 100,
+        self,
+        trace_id: str,
+        *,
+        limit: int = 100,
     ) -> list[Judgment]:
         if not isinstance(trace_id, str) or not trace_id or not 1 <= limit <= 10_000:
             raise ValueError("invalid trace judgment query")
@@ -1895,7 +1917,9 @@ class SQLiteStorage:
         return [self._row_to_judgment(row) for row in rows]
 
     def has_completed_judgment(
-        self, trace_id: str, evaluator_fingerprint: str,
+        self,
+        trace_id: str,
+        evaluator_fingerprint: str,
     ) -> bool:
         with self._lock:
             row = self._conn.execute(
@@ -3012,10 +3036,7 @@ class SQLiteStorage:
         target_workload: str | None,
     ) -> tuple[int, int | None, int | None]:
         tenant_clause = _trace_tenant_clause(authorized_tenant)
-        where = (
-            f"{tenant_clause} AND ended_at IS NOT NULL "
-            "AND analysis_started_at_state='valid'"
-        )
+        where = f"{tenant_clause} AND ended_at IS NOT NULL AND analysis_started_at_state='valid'"
         params: list[object] = [authorized_tenant]
         if target_workload is None:
             where += f" AND COALESCE(({self._WORKLOAD_VALUE_SQL}),'') NOT IN (?,?)"

@@ -113,6 +113,57 @@ verdict-import local --storage sqlite:///./verdict.db
 verdict-dashboard --storage sqlite:///./verdict.db
 ```
 
+## 3a. Instrument the surrounding agent execution
+
+Provider instrumentation captures the LLM calls. Add `agent_run` and `turn`
+contexts where the application knows the execution boundary, then record only
+the observable facts it can establish:
+
+```python
+import verdict
+
+verdict.init(storage="sqlite:///./verdict.db", service_name="support-api")
+with verdict.agent_run(name="support-agent", session_id=session_id) as run:
+    with run.turn(user_input=user_message) as turn:
+        with turn.tool("lookup_order", arguments={"order_id": order_id}) as tool:
+            order = lookup_order(order_id)
+            tool.set_output({"found": order is not None})
+        answer = respond(user_message, order)
+        turn.set_output(answer)
+    run.record_business_outcome("resolved", True)
+```
+
+The same contexts work with `async with`. Tool exceptions and run/turn timeout,
+cancellation, failure, or completion are recorded without replacing the
+application exception. Supported provider calls that begin inside a turn link
+their genuine `Trace` to that turn. The Trace remains the sole owner of prompt,
+response, and raw-message content; the event contains bounded operational
+fields only. Sampling retains or omits the complete run as a unit.
+
+For an application host that should not hold database credentials, configure a
+separate local spool directory for each producer process:
+
+```python
+verdict.init(
+    transport="file",
+    spool_directory="/var/spool/verdict/worker-1",
+    service_name="support-api",
+)
+```
+
+Stop or quiesce that producer, then import the files idempotently:
+
+```bash
+verdict-import agent-file /var/spool/verdict/worker-1 \
+  --storage postgresql://verdict@db/verdict
+```
+
+The spool uses versioned JSONL with fixed record, segment, and directory byte
+limits. An incomplete final record from a process crash is reported and
+ignored; a malformed complete record fails the import. Retain the files until
+the import succeeds. The file transport does not delete files or provide
+delivery acknowledgement, network retry, or a remote collector.
+
 ## 3b. Existing conversation export with `verdict-inspect`
 
 This is the fastest way to see Verdict find something real, with **no
@@ -668,10 +719,11 @@ the other captured workloads.
   alerts.
 - Pairwise model rankings and PASS/FAIL drift scoring are different tasks; use
   the included alignment scripts to verify the mode you plan to rely on.
-- Local Claude Code/Codex agent evidence now ships as typed, bounded
-  source/run/turn/event rows. It is not an authoritative agent-runtime
-  graph: task success, artifact state, deployments, subagents, and genuine LLM
-  `Trace` links remain unavailable unless an approved source exposes them.
+- Local Claude Code/Codex capture and explicit application SDK contexts produce
+  typed, bounded source/run/turn/event rows. SDK provider calls can establish
+  genuine LLM `Trace` links; other facts remain unavailable unless the source
+  or instrumented application records them. Verdict does not independently
+  prove task success, artifact state, deployments, or subagent correctness.
 - Judge calls run sequentially. Previewed all-eligible or numeric call caps are
   supported; cache-token accounting, human-readable cluster naming, and
   automatic cluster fusion are not implemented. See `docs/v1-roadmap.md` for

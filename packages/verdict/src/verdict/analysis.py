@@ -74,6 +74,17 @@ def analyze_agent_run(
             and event.attributes["exit_code"] != 0
         )
     ]
+    test_failures = [
+        event
+        for event in events_by_type[AgentEventType.TEST_RESULT]
+        if event.status.value == "failed"
+        or (isinstance(event.attributes.get("failed"), int) and event.attributes["failed"] > 0)
+        or (
+            isinstance(event.attributes.get("exit_code"), int)
+            and event.attributes["exit_code"] != 0
+        )
+    ]
+    retries = events_by_type[AgentEventType.RETRY]
     model_calls = events_by_type[AgentEventType.MODEL_CALL]
     input_tokens = sum(
         value
@@ -96,6 +107,8 @@ def analyze_agent_run(
         "tool_calls": len(tool_calls),
         "tool_errors": len(tool_errors),
         "command_failures": len(command_failures),
+        "test_failures": len(test_failures),
+        "retries": len(retries),
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
         "model_latency_ms": sum(latencies),
@@ -137,16 +150,30 @@ def analyze_agent_run(
             )
         )
     if tool_errors:
-        findings.append(_finding(
-            "tool_error", "error",
-            f"{len(tool_errors)} tool result(s) reported failure.", tool_errors,
-        ))
+        findings.append(
+            _finding(
+                "tool_error",
+                "error",
+                f"{len(tool_errors)} tool result(s) reported failure.",
+                tool_errors,
+            )
+        )
     if command_failures:
         findings.append(
             _finding(
-                "command_failed", "error",
+                "command_failed",
+                "error",
                 f"{len(command_failures)} command(s) returned a non-zero status.",
                 command_failures,
+            )
+        )
+    if test_failures:
+        findings.append(
+            _finding(
+                "test_failed",
+                "error",
+                f"{len(test_failures)} test execution(s) reported failure.",
+                test_failures,
             )
         )
 
@@ -161,16 +188,20 @@ def analyze_agent_run(
         )
     prohibited = {name.casefold() for name in selected_policy.prohibited_tools}
     prohibited_calls = [
-        event for event in tool_calls
+        event
+        for event in tool_calls
         if str(event.attributes.get("tool_name") or "").casefold() in prohibited
     ]
     if prohibited_calls:
         names = sorted({str(event.attributes.get("tool_name")) for event in prohibited_calls})
-        findings.append(_finding(
-            "prohibited_tool_used", "error",
-            f"Prohibited tool(s) {', '.join(names)} were called {len(prohibited_calls)} time(s).",
-            prohibited_calls,
-        ))
+        findings.append(
+            _finding(
+                "prohibited_tool_used",
+                "error",
+                f"Prohibited tool(s) {', '.join(names)} were called {len(prohibited_calls)} time(s).",
+                prohibited_calls,
+            )
+        )
     findings.extend(_loop_findings(tool_calls, selected_policy.repeated_tool_call_threshold))
     if selected_policy.expected_response_format == "json":
         invalid_responses = 0
@@ -182,10 +213,13 @@ def analyze_agent_run(
             except (json.JSONDecodeError, RecursionError):
                 invalid_responses += 1
         if invalid_responses:
-            findings.append(_finding(
-                "response_schema_invalid", "error",
-                f"{invalid_responses} response(s) were not valid JSON as required by policy.",
-            ))
+            findings.append(
+                _finding(
+                    "response_schema_invalid",
+                    "error",
+                    f"{invalid_responses} response(s) were not valid JSON as required by policy.",
+                )
+            )
     return AgentRunAnalysis(bundle.run.run_id, metrics, coverage, tuple(findings))
 
 
@@ -201,20 +235,28 @@ def _loop_findings(tool_calls: list[AgentEvent], threshold: int) -> list[Finding
     grouped: dict[tuple[str, str, str], list[AgentEvent]] = {}
     for event in tool_calls:
         arguments = event.attributes.get("arguments")
-        if not isinstance(arguments, str) or not arguments:
+        if arguments in (None, ""):
             continue
+        signature_arguments = (
+            arguments
+            if isinstance(arguments, str)
+            else json.dumps(arguments, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        )
         signature = (
             event.turn_id,
             str(event.attributes.get("tool_name") or "").casefold(),
-            arguments,
+            signature_arguments,
         )
         grouped.setdefault(signature, []).append(event)
     loops = [events for events in grouped.values() if len(events) >= threshold]
     if not loops:
         return []
     evidence = [event for events in loops for event in events]
-    return [_finding(
-        "possible_tool_loop", "warning",
-        f"{len(loops)} identical turn/tool/argument call(s) reached the repeated-call threshold.",
-        evidence,
-    )]
+    return [
+        _finding(
+            "possible_tool_loop",
+            "warning",
+            f"{len(loops)} identical turn/tool/argument call(s) reached the repeated-call threshold.",
+            evidence,
+        )
+    ]

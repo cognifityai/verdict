@@ -114,8 +114,8 @@ export function SetupWizard({ configUrl, onComplete, onNavigate, onRefresh, agen
 
       {source === "sdk" && <section className={panel} style={style}>
         <div className="text-xs font-mono" style={{ color: "#56b6ff" }}>2 · LIVE SDK</div>
-        <pre className="mt-4 p-4 overflow-x-auto text-sm" style={{ background: "#0b0e0d" }}>{`import verdict\nverdict.init(\n    storage="sqlite:///./verdict.db",\n    capture_content=True,\n    sample_rate=1.0,\n)`}</pre>
-        <p className="text-sm mt-3" style={{ color: "#94a39d" }}>A few calls appear immediately. Drift remains insufficient until an approved reference and current cohort have enough independent units.</p>
+        <pre className="mt-4 p-4 overflow-x-auto text-sm" style={{ background: "#0b0e0d" }}>{`import verdict\nverdict.init(\n    storage="sqlite:///./verdict.db",\n    capture_content=True,\n    sample_rate=1.0,\n)\n\nwith verdict.agent_run(name="support-agent", session_id=session_id) as run:\n    with run.turn(user_input=user_message) as turn:\n        answer = handle_request(user_message)\n        turn.set_output(answer)`}</pre>
+        <p className="text-sm mt-3" style={{ color: "#94a39d" }}>Supported provider calls inside the turn link to genuine LLM Traces automatically. Record tool, command, test, retry, feedback, and business-outcome evidence through the same turn. A few runs appear immediately; drift still needs reviewed reference and current cohorts.</p>
         <button onClick={() => onComplete("sdk")} className="mt-4 border px-4 py-2 text-sm">I ran a few calls — refresh Verdict</button>
       </section>}
 

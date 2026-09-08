@@ -62,11 +62,14 @@ class AgentEventType(str, Enum):
     TEST_RESULT = "test_result"
     ARTIFACT = "artifact"
     SUBAGENT = "subagent"
+    RETRY = "retry"
+    FEEDBACK = "feedback"
+    OUTCOME = "outcome"
 
 
 _EVENT_FIELDS: dict[AgentEventType, frozenset[str]] = {
     AgentEventType.INSTRUCTION: frozenset({"name", "text", "source", "available"}),
-    AgentEventType.CONTEXT: frozenset({"name", "text", "source", "available"}),
+    AgentEventType.CONTEXT: frozenset({"name", "text", "value", "source", "available"}),
     AgentEventType.MODEL_CALL: frozenset(
         {
             "provider",
@@ -88,18 +91,54 @@ _EVENT_FIELDS: dict[AgentEventType, frozenset[str]] = {
     ),
     AgentEventType.ARTIFACT: frozenset({"path_hash", "action", "authoritative", "state"}),
     AgentEventType.SUBAGENT: frozenset({"agent_name", "action", "child_run_id", "state"}),
+    AgentEventType.RETRY: frozenset({"reason", "attempt", "operation"}),
+    AgentEventType.FEEDBACK: frozenset({"kind", "value"}),
+    AgentEventType.OUTCOME: frozenset({"name", "value", "source"}),
 }
-_CONTENT_FIELDS = frozenset(
-    {"text", "arguments", "result", "command", "stdout", "stderr", "output"}
+EVENT_CONTENT_FIELDS = frozenset(
+    {
+        "text",
+        "value",
+        "arguments",
+        "result",
+        "command",
+        "stdout",
+        "stderr",
+        "output",
+        "reason",
+    }
 )
-_TEXT_FIELDS = frozenset({
-    "name", "text", "source", "provider", "request_model", "response_model",
-    "operation", "finish_reason", "error", "tool_name", "call_id", "command",
-    "cwd_hash", "stdout", "stderr", "output", "path_hash", "action", "state",
-    "agent_name", "child_run_id",
-})
+_TEXT_FIELDS = frozenset(
+    {
+        "name",
+        "text",
+        "source",
+        "provider",
+        "request_model",
+        "response_model",
+        "operation",
+        "finish_reason",
+        "error",
+        "tool_name",
+        "call_id",
+        "command",
+        "cwd_hash",
+        "stdout",
+        "stderr",
+        "output",
+        "path_hash",
+        "action",
+        "state",
+        "agent_name",
+        "child_run_id",
+        "reason",
+        "kind",
+    }
+)
 _BOOLEAN_FIELDS = frozenset({"available", "is_error", "authoritative"})
-_COUNT_FIELDS = frozenset({"input_tokens", "output_tokens", "passed", "failed", "skipped"})
+_COUNT_FIELDS = frozenset(
+    {"input_tokens", "output_tokens", "passed", "failed", "skipped", "attempt"}
+)
 
 
 def _validate_text(value: str, *, field_name: str, maximum: int) -> None:
@@ -270,8 +309,12 @@ class AgentRun:
         if self.status is not ExecutionStatus.UNKNOWN and self.ended_at is None:
             raise ValueError("terminal run status requires ended_at")
         for name in (
-            "agent_name", "agent_version", "configuration_fingerprint",
-            "service_name", "environment", "instance_id",
+            "agent_name",
+            "agent_version",
+            "configuration_fingerprint",
+            "service_name",
+            "environment",
+            "instance_id",
         ):
             value = getattr(self, name)
             if value:
@@ -377,7 +420,7 @@ class AgentEvent:
         _validate_attributes(self.event_type, self.attributes)
         if (
             self.privacy_classification is PrivacyClassification.METADATA
-            and _CONTENT_FIELDS.intersection(self.attributes)
+            and EVENT_CONTENT_FIELDS.intersection(self.attributes)
         ):
             raise ValueError("content-bearing event attributes cannot be classified as metadata")
         if self.trace_id is not None:
@@ -387,7 +430,7 @@ class AgentEvent:
         if self.privacy_classification is PrivacyClassification.OMITTED:
             if not self.omission_reason:
                 raise ValueError("omitted event requires omission_reason")
-            if _CONTENT_FIELDS.intersection(self.attributes):
+            if EVENT_CONTENT_FIELDS.intersection(self.attributes):
                 raise ValueError("omitted event cannot retain content attributes")
         elif self.omission_reason is not None:
             raise ValueError("omission_reason is valid only for omitted evidence")
@@ -424,9 +467,52 @@ def _canonical_value(value: Any) -> Any:
     return value
 
 
+def _validate_agent_capture_parts(
+    session: SourceSession,
+    run: AgentRun,
+    turns: tuple[AgentTurn, ...],
+    events: tuple[AgentEvent, ...],
+    *,
+    contiguous: bool,
+) -> None:
+    if run.source_session_id != session.source_session_id:
+        raise ValueError("run references an unknown source session")
+    if run.tenant_id != session.tenant_id:
+        raise ValueError("run and source session tenant_id must match")
+    turn_ids: set[str] = set()
+    turn_sequences: set[int] = set()
+    for turn in turns:
+        if turn.run_id != run.run_id:
+            raise ValueError("turn references an unknown run")
+        if turn.turn_id in turn_ids:
+            raise ValueError("agent capture contains duplicate turn_id")
+        if turn.sequence in turn_sequences:
+            raise ValueError("agent capture contains duplicate turn sequence")
+        turn_ids.add(turn.turn_id)
+        turn_sequences.add(turn.sequence)
+    if contiguous and turn_sequences != set(range(len(turns))):
+        raise ValueError("turn sequences must be contiguous from zero")
+
+    event_ids: set[str] = set()
+    event_sequences: dict[str, set[int]] = {turn_id: set() for turn_id in turn_ids}
+    for event in events:
+        if event.turn_id not in turn_ids:
+            raise ValueError("event references an unknown turn")
+        if event.event_id in event_ids:
+            raise ValueError("agent capture contains duplicate event_id")
+        if event.sequence in event_sequences[event.turn_id]:
+            raise ValueError("agent capture contains duplicate event sequence")
+        event_ids.add(event.event_id)
+        event_sequences[event.turn_id].add(event.sequence)
+    if contiguous:
+        for sequences in event_sequences.values():
+            if sequences != set(range(len(sequences))):
+                raise ValueError("event sequences must be contiguous from zero per turn")
+
+
 @dataclass(frozen=True)
-class AgentRunBundle:
-    """A validated Agent Run evidence batch committed atomically."""
+class AgentCaptureBatch:
+    """One append-safe revision of normalized Agent Run evidence."""
 
     session: SourceSession
     run: AgentRun
@@ -434,34 +520,24 @@ class AgentRunBundle:
     events: tuple[AgentEvent, ...] = ()
 
     def __post_init__(self) -> None:
-        if self.run.source_session_id != self.session.source_session_id:
-            raise ValueError("run references an unknown source session")
-        if self.run.tenant_id != self.session.tenant_id:
-            raise ValueError("run and source session tenant_id must match")
-        turn_ids: set[str] = set()
-        turn_sequences: set[int] = set()
-        for turn in self.turns:
-            if turn.run_id != self.run.run_id:
-                raise ValueError("turn references an unknown run")
-            if turn.turn_id in turn_ids:
-                raise ValueError("bundle contains duplicate turn_id")
-            turn_ids.add(turn.turn_id)
-            turn_sequences.add(turn.sequence)
-        if turn_sequences != set(range(len(self.turns))):
-            raise ValueError("turn sequences must be contiguous from zero")
+        _validate_agent_capture_parts(
+            self.session, self.run, self.turns, self.events, contiguous=False
+        )
 
-        event_ids: set[str] = set()
-        event_sequences: dict[str, set[int]] = {turn_id: set() for turn_id in turn_ids}
-        for event in self.events:
-            if event.turn_id not in turn_ids:
-                raise ValueError("event references an unknown turn")
-            if event.event_id in event_ids:
-                raise ValueError("bundle contains duplicate event_id")
-            event_ids.add(event.event_id)
-            event_sequences[event.turn_id].add(event.sequence)
-        for sequences in event_sequences.values():
-            if sequences != set(range(len(sequences))):
-                raise ValueError("event sequences must be contiguous from zero per turn")
+
+@dataclass(frozen=True)
+class AgentRunBundle:
+    """A complete validated Agent Run compatibility representation."""
+
+    session: SourceSession
+    run: AgentRun
+    turns: tuple[AgentTurn, ...] = ()
+    events: tuple[AgentEvent, ...] = ()
+
+    def __post_init__(self) -> None:
+        _validate_agent_capture_parts(
+            self.session, self.run, self.turns, self.events, contiguous=True
+        )
 
     @property
     def content_hash(self) -> str:
@@ -469,32 +545,37 @@ class AgentRunBundle:
         return hashlib.sha256(encoded).hexdigest()
 
 
-def agent_run_bundle_to_json(bundle: AgentRunBundle) -> str:
-    """Serialize a validated bundle to the bounded compatibility representation."""
-    run_payload = asdict(bundle.run)
+def _agent_capture_to_json(capture: AgentRunBundle | AgentCaptureBatch) -> str:
+    run_payload = asdict(capture.run)
     for name, empty in (
-        ("session_id", None), ("parent_run_id", None), ("service_name", ""),
-        ("environment", ""), ("instance_id", ""),
+        ("session_id", None),
+        ("parent_run_id", None),
+        ("service_name", ""),
+        ("environment", ""),
+        ("instance_id", ""),
     ):
         if run_payload[name] == empty:
             run_payload.pop(name)
     event_payloads = []
     for event in sorted(
-        bundle.events, key=lambda item: (item.turn_id, item.sequence, item.event_id),
+        capture.events,
+        key=lambda item: (item.turn_id, item.sequence, item.event_id),
     ):
         payload = asdict(event)
         for name, empty in (
-            ("producer_id", ""), ("producer_sequence", None), ("parent_event_id", None),
+            ("producer_id", ""),
+            ("producer_sequence", None),
+            ("parent_event_id", None),
         ):
             if payload[name] == empty:
                 payload.pop(name)
         event_payloads.append(_canonical_value(payload))
     payload = {
-        "session": _canonical_value(asdict(bundle.session)),
+        "session": _canonical_value(asdict(capture.session)),
         "run": _canonical_value(run_payload),
         "turns": [
             _canonical_value(asdict(turn))
-            for turn in sorted(bundle.turns, key=lambda item: (item.sequence, item.turn_id))
+            for turn in sorted(capture.turns, key=lambda item: (item.sequence, item.turn_id))
         ],
         "events": event_payloads,
     }
@@ -512,6 +593,16 @@ def agent_run_bundle_to_json(bundle: AgentRunBundle) -> str:
     return encoded
 
 
+def agent_run_bundle_to_json(bundle: AgentRunBundle) -> str:
+    """Serialize a complete bundle to the bounded compatibility representation."""
+    return _agent_capture_to_json(bundle)
+
+
+def agent_capture_batch_to_json(batch: AgentCaptureBatch) -> str:
+    """Serialize one bounded append batch for local transport."""
+    return _agent_capture_to_json(batch)
+
+
 def _parse_datetime(value: Any, *, field_name: str) -> datetime:
     if not isinstance(value, str):
         raise ValueError(f"{field_name} must be an ISO timestamp")
@@ -527,9 +618,15 @@ def _parse_optional_datetime(value: Any, *, field_name: str) -> datetime | None:
     return None if value is None else _parse_datetime(value, field_name=field_name)
 
 
-def agent_run_bundle_from_json(payload_json: str) -> AgentRunBundle:
-    """Load and revalidate a canonical bundle from durable storage."""
-    if not isinstance(payload_json, str) or len(payload_json.encode("utf-8")) > _MAX_BUNDLE_JSON_BYTES:
+def _agent_capture_from_json(
+    payload_json: str,
+    *,
+    complete: bool,
+) -> AgentRunBundle | AgentCaptureBatch:
+    if (
+        not isinstance(payload_json, str)
+        or len(payload_json.encode("utf-8")) > _MAX_BUNDLE_JSON_BYTES
+    ):
         raise ValueError("agent run bundle JSON must be bounded text")
     try:
         payload = json.loads(payload_json)
@@ -545,29 +642,46 @@ def agent_run_bundle_from_json(payload_json: str) -> AgentRunBundle:
         raise ValueError("agent run bundle JSON has an invalid shape")
     if not isinstance(turn_data, list) or not isinstance(event_data, list):
         raise ValueError("agent run bundle JSON has an invalid shape")
-    if set(session_data) != {
-        "source_session_id",
-        "tenant_id",
-        "source_kind",
-        "source_locator_hash",
-        "started_at",
-        "observed_at",
-        "ended_at",
-    } or not {
-        "run_id",
-        "source_session_id",
-        "tenant_id",
-        "started_at",
-        "status",
-        "ended_at",
-        "agent_name",
-        "agent_version",
-        "configuration_fingerprint",
-    }.issubset(run_data) or set(run_data) - {
-        "run_id", "source_session_id", "tenant_id", "started_at", "status",
-        "ended_at", "agent_name", "agent_version", "configuration_fingerprint",
-        "session_id", "parent_run_id", "service_name", "environment", "instance_id",
-    }:
+    if (
+        set(session_data)
+        != {
+            "source_session_id",
+            "tenant_id",
+            "source_kind",
+            "source_locator_hash",
+            "started_at",
+            "observed_at",
+            "ended_at",
+        }
+        or not {
+            "run_id",
+            "source_session_id",
+            "tenant_id",
+            "started_at",
+            "status",
+            "ended_at",
+            "agent_name",
+            "agent_version",
+            "configuration_fingerprint",
+        }.issubset(run_data)
+        or set(run_data)
+        - {
+            "run_id",
+            "source_session_id",
+            "tenant_id",
+            "started_at",
+            "status",
+            "ended_at",
+            "agent_name",
+            "agent_version",
+            "configuration_fingerprint",
+            "session_id",
+            "parent_run_id",
+            "service_name",
+            "environment",
+            "instance_id",
+        }
+    ):
         raise ValueError("agent run bundle JSON has invalid typed fields")
     turn_fields = {
         "turn_id",
@@ -670,4 +784,19 @@ def agent_run_bundle_from_json(payload_json: str) -> AgentRunBundle:
         raise ValueError("agent run bundle JSON has invalid typed fields") from exc
     if len(turns) != len(turn_data) or len(events) != len(event_data):
         raise ValueError("agent run bundle JSON has an invalid shape")
-    return AgentRunBundle(session=session, run=run, turns=turns, events=events)
+    capture_type = AgentRunBundle if complete else AgentCaptureBatch
+    return capture_type(session=session, run=run, turns=turns, events=events)
+
+
+def agent_run_bundle_from_json(payload_json: str) -> AgentRunBundle:
+    """Load and revalidate a complete canonical bundle from durable storage."""
+    capture = _agent_capture_from_json(payload_json, complete=True)
+    assert isinstance(capture, AgentRunBundle)
+    return capture
+
+
+def agent_capture_batch_from_json(payload_json: str) -> AgentCaptureBatch:
+    """Load and revalidate one append-safe local transport batch."""
+    capture = _agent_capture_from_json(payload_json, complete=False)
+    assert isinstance(capture, AgentCaptureBatch)
+    return capture

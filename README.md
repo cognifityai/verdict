@@ -26,10 +26,11 @@ best-effort-redacted content retention is on by default; explicitly set
 
 The first agent-run analysis pass is deterministic and key-free: it reports
 evidence coverage, source-exposed completion state, model/tool-call counts,
-tokens and latency, observed tool/command failures, and possible repeated-tool
-patterns. Programmatic policies can additionally require event types, prohibit
-named tools, or require JSON responses. Verdict does not infer task success,
-retries, file state, or cost when the source evidence does not establish them.
+tokens and latency, observed tool/command/test failures, retries, and possible
+repeated-tool patterns. Programmatic policies can additionally require event
+types, prohibit named tools, or require JSON responses. Verdict does not infer
+task success, file state, retries, or cost when the source evidence does not
+establish them.
 On top of that capture Verdict also retains its existing monitoring stack:
 
 - **Structural checks** (no LLM needed): refusal-rate spikes, JSON-validity drops, response-length and latency drift, hedge/apology rate.
@@ -98,6 +99,57 @@ The equivalent non-interactive local import is:
 verdict-import local --storage sqlite:///./verdict.db
 verdict-dashboard --storage sqlite:///./verdict.db
 ```
+
+### Instrument a complete agent run
+
+Provider auto-instrumentation captures genuine LLM calls. Wrap the surrounding
+application work to add the run, turn, tool, command, test, retry, feedback, and
+business-outcome evidence that only the application can establish:
+
+```python
+import verdict
+
+verdict.init(storage="sqlite:///./verdict.db", service_name="support-api")
+
+with verdict.agent_run(name="support-agent", session_id=session_id) as run:
+    with run.turn(user_input=user_message) as turn:
+        with turn.tool("lookup_order", arguments={"order_id": order_id}) as tool:
+            order = lookup_order(order_id)
+            tool.set_output({"found": order is not None})
+        answer = respond(user_message, order)  # supported LLM calls auto-link
+        turn.set_output(answer)
+    run.record_business_outcome("resolved", True)
+```
+
+The run is sampled as one unit. A supported provider call inside the active
+turn creates one genuine `Trace` for its prompt/response and one model-call
+event containing only operational scalars and the Trace link; LLM content is
+not copied into event storage. Sync and async context managers have the same
+contract. Identifiers such as `tenant_id` and `session_id` must be non-sensitive.
+
+For application hosts that should not connect to the Verdict database, write
+bounded, redacted, process-owned JSONL segments locally:
+
+```python
+verdict.init(
+    transport="file",
+    spool_directory="/var/spool/verdict/worker-1",
+    service_name="support-api",
+)
+```
+
+Import a stopped producer's files through the canonical idempotent storage path:
+
+```bash
+verdict-import agent-file /var/spool/verdict/worker-1 \
+  --storage postgresql://verdict@db/verdict
+```
+
+Use a separate spool directory per producer process and retain files until the
+import completes. This local transport has hard segment, record, and directory
+bounds. It does not provide remote delivery, acknowledgements, retry, or file
+deletion; an authenticated collector is a separate roadmap capability. See
+[`examples/agent_sdk.py`](examples/agent_sdk.py) for a runnable local example.
 
 An initial monitor proposal uses exact event-time membership. The count-mode
 default is an older 80% reference and newer 20% current cohort; explicit date
@@ -489,15 +541,17 @@ Hexagonal / ports-and-adapters, ≥2 adapters per port (one real + in-memory for
 - **`encrypt` redaction mode** is not implemented (rejected at `init()`);
   redaction uses a linear email scanner plus regex candidates, Luhn card checks,
   and standard-library IP validation. Presidio is not used.
-- **Agent-run evidence is source-bounded.** Local Claude Code/Codex capture now
-  persists source/run/turn/event rows atomically and separately from genuine
+- **Agent-run evidence is source-bounded.** Local Claude Code/Codex capture and
+  explicit application SDK contexts persist source/run/turn/event rows
+  atomically and separately from genuine
   provider `Trace` rows. Model-call events link to the Trace that owns LLM
   request/response content; Verdict does not duplicate that content in the
   event. Run detail reads page the normalized event timeline instead of loading
-  one growing serialized run. It currently normalizes model, tool,
-  tool-result, command, and context events exposed by the supported history
-  formats; it does not yet claim authoritative artifact state, deployment
-  success, or subagent correctness. Each turn and event is bounded
+  one growing serialized run. The SDK can record typed tool/result, command,
+  test, artifact, retry, handoff, feedback, and outcome events supplied by the
+  application. Local-history adapters remain limited to evidence present in
+  their source formats. Verdict does not independently prove artifact state,
+  deployment success, task outcomes, or subagent correctness. Each turn and event is bounded
   independently. If one event's opted-in content exceeds its evidence limit,
   Verdict retains that event's metadata and records why its content was
   omitted; it does not downgrade the entire run. Local-history token counts
