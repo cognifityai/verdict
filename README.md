@@ -231,6 +231,10 @@ approved. The retained `scripts/run_drift_pipeline.py` and `ui/server.py` source
 entry points continue as wrappers after the workspace packages are installed.
 Back up the store and lockfile before any alpha upgrade, then run the pipeline
 and dashboard smoke checks against a non-production copy.
+When upgrading a shared store to normalized agent evidence, stop and upgrade
+every Verdict writer before resuming capture. The migrated database rejects
+legacy agent-bundle writes rather than accepting evidence that current readers
+cannot see.
 
 An unrelated project owns the `verdict` distribution on PyPI and exposes the
 same top-level `verdict` import. Do not install that distribution in the same

@@ -47,6 +47,8 @@ from verdict.monitoring import (
     monitor_snapshot_to_json,
 )
 from verdict.normalized_evidence import (
+    LEGACY_AGENT_WRITER_ERROR,
+    LEGACY_AGENT_WRITER_MIGRATION,
     agent_event_from_row,
     agent_run_from_row,
     agent_turn_from_row,
@@ -58,10 +60,11 @@ from verdict.normalized_evidence import (
     merge_capture_trace,
     merge_source_session,
     normalize_bundle_timestamps,
+    prepare_agent_capture,
+    require_same_tenant_linked_traces,
     source_session_from_row,
 )
 from verdict.redaction import (
-    sanitize_agent_run_bundle,
     sanitize_judgment,
     sanitize_span,
     sanitize_trace,
@@ -592,6 +595,7 @@ class PostgresStorage:
         self._cluster_snapshot_connection: ContextVar[object | None] = ContextVar(
             "verdict_cluster_snapshot_connection", default=None
         )
+        orphaned_legacy_write = False
         # Initialize schema
         with self._pool.connection() as conn:
             with conn.transaction(), conn.cursor() as cur:
@@ -655,7 +659,10 @@ class PostgresStorage:
                 cur.execute(
                     "CREATE INDEX IF NOT EXISTS idx_traces_parent_span ON traces(parent_span_id)"
                 )
-                self._migrate_agent_run_bundles_cursor(cur)
+                orphaned_legacy_write = self._migrate_agent_run_bundles_cursor(cur)
+        if orphaned_legacy_write:
+            self._pool.close()
+            raise RuntimeError(LEGACY_AGENT_WRITER_ERROR)
 
     # -- helpers ----------------------------------------------------------
 
@@ -1048,37 +1055,83 @@ class PostgresStorage:
             ],
         )
 
-    def _migrate_agent_run_bundles_cursor(self, cur) -> None:
+    def _migrate_agent_run_bundles_cursor(self, cur) -> bool:
         migration_name = "normalize_agent_evidence_v1"
         cur.execute(
-            "SELECT 1 FROM verdict_schema_migrations WHERE name=%s",
-            (migration_name,),
+            "SELECT name FROM verdict_schema_migrations WHERE name=ANY(%s)",
+            ([migration_name, LEGACY_AGENT_WRITER_MIGRATION],),
         )
-        if cur.fetchone() is not None:
-            return
+        applied = {row[0] for row in cur.fetchall()}
+        if applied == {migration_name, LEGACY_AGENT_WRITER_MIGRATION}:
+            return False
+        cur.execute("LOCK TABLE agent_run_bundles IN SHARE ROW EXCLUSIVE MODE")
         cur.execute(
-            "SELECT payload_json,content_hash FROM agent_run_bundles ORDER BY tenant_id,run_id"
+            "SELECT name FROM verdict_schema_migrations WHERE name=ANY(%s)",
+            ([migration_name, LEGACY_AGENT_WRITER_MIGRATION],),
         )
-        for payload, content_hash in cur.fetchall():
-            bundle = agent_run_bundle_from_json(payload)
-            if bundle.content_hash != content_hash:
-                raise RuntimeError("stored agent run bundle content hash is inconsistent")
-            linked_ids = tuple(
-                event.trace_id for event in bundle.events if event.trace_id is not None
+        applied = {row[0] for row in cur.fetchall()}
+        if migration_name not in applied:
+            cur.execute(
+                "SELECT payload_json,content_hash FROM agent_run_bundles "
+                "ORDER BY tenant_id,run_id"
             )
-            available_ids: set[str] = set()
-            if linked_ids:
-                cur.execute(
-                    "SELECT trace_id FROM traces WHERE trace_id=ANY(%s)",
-                    (list(linked_ids),),
+            for payload, content_hash in cur.fetchall():
+                bundle = agent_run_bundle_from_json(payload)
+                if bundle.content_hash != content_hash:
+                    raise RuntimeError(
+                        "stored agent run bundle content hash is inconsistent"
+                    )
+                linked_ids = tuple(
+                    event.trace_id
+                    for event in bundle.events
+                    if event.trace_id is not None
                 )
-                available_ids = {row[0] for row in cur.fetchall()}
-            bundle = detach_missing_trace_links(bundle, available_ids)
-            self._write_normalized_bundle_cursor(cur, bundle)
-        cur.execute(
-            "INSERT INTO verdict_schema_migrations(name) VALUES (%s)",
-            (migration_name,),
-        )
+                available_ids: set[str] = set()
+                if linked_ids:
+                    cur.execute(
+                        "SELECT trace_id FROM traces WHERE trace_id=ANY(%s)",
+                        (list(linked_ids),),
+                    )
+                    available_ids = {row[0] for row in cur.fetchall()}
+                bundle = detach_missing_trace_links(bundle, available_ids)
+                self._write_normalized_bundle_cursor(cur, bundle)
+            cur.execute(
+                "INSERT INTO verdict_schema_migrations(name) VALUES (%s)",
+                (migration_name,),
+            )
+        orphaned_legacy_write = False
+        if LEGACY_AGENT_WRITER_MIGRATION not in applied:
+            cur.execute(
+                f"""CREATE OR REPLACE FUNCTION reject_legacy_agent_run_bundle_write()
+                RETURNS trigger LANGUAGE plpgsql AS $$
+                BEGIN
+                    RAISE EXCEPTION '{LEGACY_AGENT_WRITER_ERROR}';
+                END
+                $$"""  # nosec B608 -- compile-time message
+            )
+            cur.execute(
+                "DROP TRIGGER IF EXISTS reject_legacy_agent_run_bundle_write "
+                "ON agent_run_bundles"
+            )
+            cur.execute(
+                """CREATE TRIGGER reject_legacy_agent_run_bundle_write
+                BEFORE INSERT OR UPDATE ON agent_run_bundles
+                FOR EACH ROW EXECUTE FUNCTION reject_legacy_agent_run_bundle_write()"""
+            )
+            cur.execute(
+                """SELECT 1 FROM agent_run_bundles b
+                   LEFT JOIN agent_runs r
+                     ON r.tenant_id=b.tenant_id AND r.run_id=b.run_id
+                   WHERE r.run_id IS NULL LIMIT 1"""
+            )
+            orphaned_legacy_write = cur.fetchone() is not None
+        if not orphaned_legacy_write:
+            cur.execute(
+                "INSERT INTO verdict_schema_migrations(name) VALUES (%s) "
+                "ON CONFLICT(name) DO NOTHING",
+                (LEGACY_AGENT_WRITER_MIGRATION,),
+            )
+        return orphaned_legacy_write
 
     def replace_agent_capture(
         self,
@@ -1087,10 +1140,9 @@ class PostgresStorage:
     ) -> None:
         from psycopg import IntegrityError
 
-        sanitized = sanitize_agent_run_bundle(bundle)
-        for trace in traces:
-            sanitize_trace(trace)
-            populate_trace_analysis_fields(trace)
+        sanitized, capture_traces, linked_trace_ids = prepare_agent_capture(
+            bundle, traces
+        )
         try:
             with self._pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
                 for lock_key in (
@@ -1109,22 +1161,7 @@ class PostgresStorage:
                     (f"agent-run:{sanitized.run.tenant_id}:{sanitized.run.run_id}",),
                 )
                 prepared_traces = []
-                seen_trace_ids: set[str] = set()
-                linked_trace_ids = {
-                    event.trace_id for event in sanitized.events if event.trace_id is not None
-                }
-                for trace in traces:
-                    if trace.trace_id in seen_trace_ids:
-                        raise ValueError("agent capture contains duplicate trace_id")
-                    seen_trace_ids.add(trace.trace_id)
-                    if trace.tenant_id != sanitized.run.tenant_id:
-                        raise ValueError(
-                            "agent capture Trace tenant must match the Agent Run tenant"
-                        )
-                    if trace.trace_id not in linked_trace_ids:
-                        raise ValueError("agent capture contains an unlinked Trace")
-                    sanitize_trace(trace)
-                    populate_trace_analysis_fields(trace)
+                for trace in capture_traces:
                     cur.execute(
                         f"SELECT {self._TRACE_COLUMNS} FROM traces "  # nosec B608
                         "WHERE trace_id=%s FOR UPDATE",
@@ -1142,9 +1179,7 @@ class PostgresStorage:
                             "WHERE trace_id=%s AND raw_messages IS NULL",
                             (json.dumps(trace.raw_messages), trace.trace_id),
                         )
-                linked_ids = tuple(
-                    event.trace_id for event in sanitized.events if event.trace_id is not None
-                )
+                linked_ids = tuple(sorted(linked_trace_ids))
                 if linked_ids:
                     placeholders = ",".join("%s" for _ in linked_ids)
                     cur.execute(
@@ -1154,11 +1189,9 @@ class PostgresStorage:
                         linked_ids,
                     )
                     tenants = {trace_id: tenant_id for trace_id, tenant_id in cur.fetchall()}
-                    if any(
-                        tenants.get(trace_id) != sanitized.run.tenant_id
-                        for trace_id in linked_ids
-                    ):
-                        raise ValueError("model-call event requires a same-tenant Trace")
+                    require_same_tenant_linked_traces(
+                        sanitized.run.tenant_id, linked_ids, tenants
+                    )
                 self._write_normalized_bundle_cursor(cur, sanitized)
         except IntegrityError as exc:
             raise ValueError("agent capture conflicts with existing evidence") from exc

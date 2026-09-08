@@ -320,21 +320,6 @@ def test_append_does_not_reconstruct_the_existing_run(
     assert _table_count(database, "agent_turns") == 2
 
 
-def test_capture_rejects_cross_tenant_trace_link_before_writing(tmp_path: Path) -> None:
-    database = tmp_path / "verdict.db"
-    storage = SQLiteStorage(str(database))
-    bundle, trace = _capture()
-
-    with pytest.raises(ValueError, match="tenant"):
-        AgentCaptureService(storage).capture(
-            bundle,
-            traces=(replace(trace, tenant_id="tenant-b"),),
-        )
-
-    assert storage.get_trace("trace-1") is None
-    assert storage.get_agent_run_bundle("tenant-a", "run-1") is None
-
-
 def test_normalized_agent_identities_are_tenant_scoped(tmp_path: Path) -> None:
     storage = SQLiteStorage(str(tmp_path / "verdict.db"))
     first, _trace = _capture(tenant_id="tenant-a")
@@ -349,7 +334,7 @@ def test_normalized_agent_identities_are_tenant_scoped(tmp_path: Path) -> None:
     assert storage.get_agent_run_bundle("tenant-b", "run-1") == second
 
 
-def test_opening_a16_bundle_store_migrates_it_without_changing_identity(tmp_path: Path) -> None:
+def test_opening_a17_bundle_store_migrates_it_without_changing_identity(tmp_path: Path) -> None:
     database = tmp_path / "verdict.db"
     first, _trace = _capture()
     first = replace(
@@ -434,6 +419,8 @@ def test_concurrent_sqlite_legacy_bundle_migration_has_one_winner(tmp_path: Path
     SQLiteStorage(str(database)).close()
     storages = [SQLiteStorage(str(database)), SQLiteStorage(str(database))]
     with sqlite3.connect(database) as connection:
+        connection.execute("DROP TRIGGER reject_legacy_agent_run_bundle_insert")
+        connection.execute("DROP TRIGGER reject_legacy_agent_run_bundle_update")
         connection.execute("DELETE FROM verdict_schema_migrations")
         connection.execute(
             "INSERT INTO agent_run_bundles VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -461,7 +448,72 @@ def test_concurrent_sqlite_legacy_bundle_migration_has_one_winner(tmp_path: Path
     assert _table_count(database, "agent_runs") == 1
 
 
-def test_corrupt_a16_bundle_aborts_migration_without_marking_it_complete(
+def test_sqlite_rejects_legacy_writes_after_normalized_migration(tmp_path: Path) -> None:
+    database = tmp_path / "verdict.db"
+    bundle, _trace = _capture()
+    SQLiteStorage(str(database)).close()
+
+    with sqlite3.connect(database) as connection, pytest.raises(
+        sqlite3.IntegrityError,
+        match=r"^legacy agent evidence writer detected after normalized migration$",
+    ):
+        connection.execute(
+            "INSERT INTO agent_run_bundles VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                bundle.run.tenant_id,
+                bundle.run.run_id,
+                bundle.session.source_session_id,
+                bundle.session.source_kind,
+                bundle.run.started_at.isoformat(),
+                bundle.run.ended_at.isoformat(),
+                bundle.run.status.value,
+                bundle.content_hash,
+                agent_run_bundle_to_json(bundle),
+                NOW.isoformat(),
+            ),
+        )
+
+
+def test_sqlite_detects_orphan_from_an_earlier_normalized_writer(tmp_path: Path) -> None:
+    database = tmp_path / "verdict.db"
+    bundle, _trace = _capture()
+    SQLiteStorage(str(database)).close()
+    with sqlite3.connect(database) as connection:
+        connection.execute("DROP TRIGGER reject_legacy_agent_run_bundle_insert")
+        connection.execute(
+            "DELETE FROM verdict_schema_migrations "
+            "WHERE name='block_legacy_agent_evidence_writes_v1'"
+        )
+        connection.execute(
+            "INSERT INTO agent_run_bundles VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                bundle.run.tenant_id,
+                bundle.run.run_id,
+                bundle.session.source_session_id,
+                bundle.session.source_kind,
+                bundle.run.started_at.isoformat(),
+                bundle.run.ended_at.isoformat(),
+                bundle.run.status.value,
+                bundle.content_hash,
+                agent_run_bundle_to_json(bundle),
+                NOW.isoformat(),
+            ),
+        )
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"^legacy agent evidence writer detected after normalized migration$",
+    ):
+        SQLiteStorage(str(database))
+
+    with sqlite3.connect(database) as connection, pytest.raises(
+        sqlite3.IntegrityError,
+        match=r"^legacy agent evidence writer detected after normalized migration$",
+    ):
+        connection.execute("UPDATE agent_run_bundles SET status='failed'")
+
+
+def test_corrupt_a17_bundle_aborts_migration_without_marking_it_complete(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "verdict.db"

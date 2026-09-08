@@ -89,6 +89,9 @@ into event storage. When upgrading an existing SQLite or PostgreSQL store, stop
 older Verdict processes and take a backup before the first new process opens
 the store; that first open transactionally migrates legacy serialized agent
 bundles. Do not run old and new Verdict writers against the same store.
+The migrated store rejects writes from an older process rather than silently
+hiding them; upgrade every SDK, collector, service, and CLI writer that shares
+the database before resuming capture.
 
 Local-history token counts are usage evidence, not billing evidence. Verdict
 therefore leaves cost unavailable for Claude Code and Codex history instead of

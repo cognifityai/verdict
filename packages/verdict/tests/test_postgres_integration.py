@@ -502,8 +502,9 @@ def test_live_postgres_trace_retention_clears_agent_event_link():
         storage.close()
 
 
-def test_live_postgres_migrates_a16_agent_bundle_transactionally():
+def test_live_postgres_migrates_a17_agent_bundle_transactionally():
     import psycopg
+    from psycopg.errors import RaiseException
 
     tenant = f"legacy-{uuid4().hex}"
     now = datetime.now(timezone.utc)
@@ -584,8 +585,76 @@ def test_live_postgres_migrates_a16_agent_bundle_transactionally():
             assert storage._fetchone(
                 "SELECT COUNT(*) FROM agent_events WHERE tenant_id=%s", (tenant,)
             )[0] == 2
+            with pytest.raises(
+                RaiseException,
+                match="legacy agent evidence writer detected after normalized migration",
+            ):
+                storage._exec(
+                    "UPDATE agent_run_bundles SET status='failed' WHERE tenant_id=%s",
+                    (tenant,),
+                )
         finally:
             storage.close()
+
+
+def test_live_postgres_rejects_new_legacy_bundle_writes_after_migration():
+    import psycopg
+    from psycopg.errors import RaiseException
+
+    with isolated_test_dsn(DSN) as scoped_dsn:
+        storage = PostgresStorage(scoped_dsn, min_pool=1, max_pool=1)
+        storage.close()
+
+        with psycopg.connect(scoped_dsn, autocommit=True) as connection, pytest.raises(
+            RaiseException,
+            match="legacy agent evidence writer detected after normalized migration",
+        ):
+            connection.execute(
+                """INSERT INTO agent_run_bundles (
+                    tenant_id,run_id,source_session_id,source_kind,started_at,
+                    status,content_hash,payload_json,updated_at
+                ) VALUES ('tenant-a','run-a','source-a','custom-agent',now(),
+                          'unknown',repeat('0',64),'{}',now())"""
+            )
+
+
+def test_live_postgres_detects_orphan_from_an_earlier_normalized_writer():
+    import psycopg
+    from psycopg.errors import RaiseException
+
+    with isolated_test_dsn(DSN) as scoped_dsn:
+        storage = PostgresStorage(scoped_dsn, min_pool=1, max_pool=1)
+        storage.close()
+        with psycopg.connect(scoped_dsn, autocommit=True) as connection:
+            connection.execute(
+                "DROP TRIGGER reject_legacy_agent_run_bundle_write "
+                "ON agent_run_bundles"
+            )
+            connection.execute(
+                "DELETE FROM verdict_schema_migrations "
+                "WHERE name='block_legacy_agent_evidence_writes_v1'"
+            )
+            connection.execute(
+                """INSERT INTO agent_run_bundles (
+                    tenant_id,run_id,source_session_id,source_kind,started_at,
+                    status,content_hash,payload_json,updated_at
+                ) VALUES ('tenant-a','orphan','source-a','custom-agent',now(),
+                          'unknown',repeat('0',64),'{}',now())"""
+            )
+
+        with pytest.raises(
+            RuntimeError,
+            match=r"^legacy agent evidence writer detected after normalized migration$",
+        ):
+            PostgresStorage(scoped_dsn, min_pool=1, max_pool=1)
+
+        with psycopg.connect(scoped_dsn, autocommit=True) as connection, pytest.raises(
+            RaiseException,
+            match="legacy agent evidence writer detected after normalized migration",
+        ):
+            connection.execute(
+                "UPDATE agent_run_bundles SET status='failed' WHERE run_id='orphan'"
+            )
 
 
 def test_live_postgres_monitor_policy_activation_and_snapshot():

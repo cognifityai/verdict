@@ -51,9 +51,13 @@ monitor, and drift identities are unchanged.
 
 On first open, a supported SQLite or PostgreSQL store transactionally migrates
 legacy `agent_run_bundles` rows into the normalized relations. The legacy table
-is retained as rollback evidence but current capture and dashboard paths do not
-read or write it. Operators must stop older Verdict processes and back up the
-store before upgrading; mixed old and new writers are not supported.
+is retained for migration audit and recovery inspection, but current capture
+and dashboard paths do not read or write it. Migration installs a database
+write barrier on that table so an older writer fails visibly instead of
+accepting evidence that current readers cannot see. Operators must stop older
+Verdict processes, upgrade every writer that shares the store, and back up the
+store before the first new process opens it. Rolling back to a legacy writer
+requires restoring that pre-migration backup.
 
 ## Consequences
 

@@ -48,9 +48,10 @@ from verdict.normalized_evidence import (
     merge_capture_trace,
     merge_source_session,
     normalize_bundle_timestamps,
+    prepare_agent_capture,
+    require_same_tenant_linked_traces,
 )
 from verdict.redaction import (
-    sanitize_agent_run_bundle,
     sanitize_judgment,
     sanitize_span,
     sanitize_trace,
@@ -191,27 +192,15 @@ class InMemoryStorage:
         bundle: AgentRunBundle,
         traces: tuple[Trace, ...] = (),
     ) -> None:
-        sanitized = sanitize_agent_run_bundle(bundle)
+        sanitized, capture_traces, linked_trace_ids = prepare_agent_capture(
+            bundle, traces
+        )
         with self._agent_evidence_lock:
             sanitized = normalize_bundle_timestamps(sanitized)
-            prepared_traces: list[Trace] = []
-            seen_trace_ids: set[str] = set()
-            linked_trace_ids = {
-                event.trace_id for event in sanitized.events if event.trace_id is not None
-            }
-            for trace in traces:
-                if trace.trace_id in seen_trace_ids:
-                    raise ValueError("agent capture contains duplicate trace_id")
-                seen_trace_ids.add(trace.trace_id)
-                if trace.tenant_id != sanitized.run.tenant_id:
-                    raise ValueError("agent capture Trace tenant must match the Agent Run tenant")
-                if trace.trace_id not in linked_trace_ids:
-                    raise ValueError("agent capture contains an unlinked Trace")
-                sanitize_trace(trace)
-                populate_trace_analysis_fields(trace)
-                prepared_traces.append(
-                    merge_capture_trace(self._traces.get(trace.trace_id), trace)
-                )
+            prepared_traces = [
+                merge_capture_trace(self._traces.get(trace.trace_id), trace)
+                for trace in capture_traces
+            ]
             tenant_id = sanitized.run.tenant_id
             source_key = (tenant_id, sanitized.session.source_session_id)
             source = merge_source_session(
@@ -295,13 +284,17 @@ class InMemoryStorage:
                     )
                     if producer_owner != event.event_id:
                         raise ValueError("producer sequence cannot be reassigned")
-            trace_by_id = {trace.trace_id: trace for trace in prepared_traces}
-            for event in events:
-                if event.trace_id is None:
-                    continue
-                trace = trace_by_id.get(event.trace_id) or self._traces.get(event.trace_id)
-                if trace is None or trace.tenant_id != tenant_id:
-                    raise ValueError("model-call event requires a same-tenant Trace")
+            prepared_by_id = {trace.trace_id: trace for trace in prepared_traces}
+            trace_tenants = {
+                trace_id: prepared_by_id[trace_id].tenant_id
+                if trace_id in prepared_by_id
+                else self._traces[trace_id].tenant_id
+                for trace_id in linked_trace_ids
+                if trace_id in prepared_by_id or trace_id in self._traces
+            }
+            require_same_tenant_linked_traces(
+                tenant_id, tuple(linked_trace_ids), trace_tenants
+            )
             with self._cluster_v2_lock:
                 for trace in prepared_traces:
                     self._traces[trace.trace_id] = trace

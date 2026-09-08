@@ -142,6 +142,73 @@ def test_atomic_agent_capture_has_adapter_parity(evidence_storage) -> None:
     assert evidence_storage.get_agent_run_bundle("tenant-a", "run_1") == linked
 
 
+def test_atomic_capture_guards_have_adapter_parity(evidence_storage) -> None:
+    bundle, trace = _linked_capture()
+
+    with pytest.raises(
+        ValueError,
+        match=r"^model-call event requires a same-tenant Trace$",
+    ):
+        evidence_storage.replace_agent_capture(
+            bundle,
+            (replace(trace, tenant_id="tenant-b"),),
+        )
+    with pytest.raises(ValueError, match=r"^agent capture contains duplicate trace_id$"):
+        evidence_storage.replace_agent_capture(bundle, (trace, trace))
+    with pytest.raises(
+        ValueError,
+        match=r"^model-call event requires a same-tenant Trace$",
+    ):
+        evidence_storage.replace_agent_capture(bundle)
+
+    duplicate_link = replace(
+        bundle.events[0],
+        event_id="event_2",
+        sequence=1,
+    )
+    with pytest.raises(
+        ValueError,
+        match=r"^agent capture links one Trace to multiple AgentEvents$",
+    ):
+        evidence_storage.replace_agent_capture(
+            replace(bundle, events=(*bundle.events, duplicate_link)),
+            (trace,),
+        )
+
+    evidence_storage.insert_trace(replace(trace, tenant_id="tenant-b"))
+    with pytest.raises(
+        ValueError,
+        match=r"^model-call event requires a same-tenant Trace$",
+    ):
+        evidence_storage.replace_agent_capture(bundle)
+    assert evidence_storage.get_agent_run_bundle("tenant-a", "run_1") is None
+
+
+def test_atomic_capture_sanitizes_trace_without_mutating_input(evidence_storage) -> None:
+    bundle, trace = _linked_capture()
+    trace.prompt_redacted = "email customer@example.com"
+    trace.raw_messages = [{"role": "user", "content": "email customer@example.com"}]
+
+    evidence_storage.replace_agent_capture(bundle, (trace,))
+
+    stored = evidence_storage.get_trace(trace.trace_id)
+    assert stored is not None
+    assert stored.prompt_redacted == "email <EMAIL>"
+    assert stored.raw_messages == [{"role": "user", "content": "email <EMAIL>"}]
+    assert trace.prompt_redacted == "email customer@example.com"
+
+
+def test_atomic_capture_rejects_terminal_status_replacement(evidence_storage) -> None:
+    bundle, trace = _linked_capture()
+    evidence_storage.replace_agent_capture(bundle, (trace,))
+    failed = replace(bundle, run=replace(bundle.run, status=ExecutionStatus.FAILED))
+
+    with pytest.raises(ValueError, match=r"^run terminal status cannot be replaced$"):
+        evidence_storage.replace_agent_capture(failed, (trace,))
+
+    assert evidence_storage.get_agent_run_bundle("tenant-a", "run_1") == bundle
+
+
 def test_deleting_linked_trace_preserves_event_and_clears_link(evidence_storage) -> None:
     bundle, trace = _linked_capture()
     AgentCaptureService(evidence_storage).capture(bundle, traces=(trace,))

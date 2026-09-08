@@ -40,6 +40,8 @@ from verdict.monitoring import (
     monitor_snapshot_to_json,
 )
 from verdict.normalized_evidence import (
+    LEGACY_AGENT_WRITER_ERROR,
+    LEGACY_AGENT_WRITER_MIGRATION,
     agent_event_from_row,
     agent_run_from_row,
     agent_turn_from_row,
@@ -51,10 +53,11 @@ from verdict.normalized_evidence import (
     merge_capture_trace,
     merge_source_session,
     normalize_bundle_timestamps,
+    prepare_agent_capture,
+    require_same_tenant_linked_traces,
     source_session_from_row,
 )
 from verdict.redaction import (
-    sanitize_agent_run_bundle,
     sanitize_judgment,
     sanitize_span,
     sanitize_trace,
@@ -733,48 +736,91 @@ class SQLiteStorage:
 
     def _migrate_agent_run_bundles(self) -> None:
         migration_name = "normalize_agent_evidence_v1"
+        applied = {
+            row["name"]
+            for row in self._conn.execute(
+                "SELECT name FROM verdict_schema_migrations WHERE name IN (?, ?)",
+                (migration_name, LEGACY_AGENT_WRITER_MIGRATION),
+            )
+        }
+        if applied == {migration_name, LEGACY_AGENT_WRITER_MIGRATION}:
+            return
+        orphaned_legacy_write = False
         self._conn.execute("BEGIN IMMEDIATE")
         try:
-            applied = self._conn.execute(
-                "SELECT 1 FROM verdict_schema_migrations WHERE name=?",
-                (migration_name,),
-            ).fetchone()
-            if applied is not None:
-                self._conn.commit()
-                return
-            legacy_rows = self._conn.execute(
-                "SELECT payload_json, content_hash FROM agent_run_bundles "
-                "ORDER BY tenant_id, run_id"
-            ).fetchall()
-            for row in legacy_rows:
-                bundle = agent_run_bundle_from_json(row["payload_json"])
-                if bundle.content_hash != row["content_hash"]:
-                    raise RuntimeError("stored agent run bundle content hash is inconsistent")
-                linked_ids = tuple(
-                    event.trace_id for event in bundle.events if event.trace_id is not None
+            applied = {
+                row["name"]
+                for row in self._conn.execute(
+                    "SELECT name FROM verdict_schema_migrations WHERE name IN (?, ?)",
+                    (migration_name, LEGACY_AGENT_WRITER_MIGRATION),
                 )
-                available_ids: set[str] = set()
-                if linked_ids:
-                    placeholders = ",".join("?" for _ in linked_ids)
-                    available_ids = {
-                        result["trace_id"]
-                        for result in self._conn.execute(
-                            "SELECT trace_id FROM traces WHERE trace_id IN ("
-                            + placeholders
-                            + ")",  # nosec B608 -- placeholders only
-                            linked_ids,
+            }
+            if migration_name not in applied:
+                legacy_rows = self._conn.execute(
+                    "SELECT payload_json, content_hash FROM agent_run_bundles "
+                    "ORDER BY tenant_id, run_id"
+                ).fetchall()
+                for row in legacy_rows:
+                    bundle = agent_run_bundle_from_json(row["payload_json"])
+                    if bundle.content_hash != row["content_hash"]:
+                        raise RuntimeError(
+                            "stored agent run bundle content hash is inconsistent"
                         )
-                    }
-                bundle = detach_missing_trace_links(bundle, available_ids)
-                self._write_normalized_bundle(bundle)
-            self._conn.execute(
-                "INSERT INTO verdict_schema_migrations(name,applied_at) VALUES (?,?)",
-                (migration_name, _iso(datetime.now(timezone.utc))),
-            )
+                    linked_ids = tuple(
+                        event.trace_id
+                        for event in bundle.events
+                        if event.trace_id is not None
+                    )
+                    available_ids: set[str] = set()
+                    if linked_ids:
+                        placeholders = ",".join("?" for _ in linked_ids)
+                        available_ids = {
+                            result["trace_id"]
+                            for result in self._conn.execute(
+                                "SELECT trace_id FROM traces WHERE trace_id IN ("
+                                + placeholders
+                                + ")",  # nosec B608 -- placeholders only
+                                linked_ids,
+                            )
+                        }
+                    bundle = detach_missing_trace_links(bundle, available_ids)
+                    self._write_normalized_bundle(bundle)
+                self._conn.execute(
+                    "INSERT INTO verdict_schema_migrations(name,applied_at) VALUES (?,?)",
+                    (migration_name, _iso(datetime.now(timezone.utc))),
+                )
+            if LEGACY_AGENT_WRITER_MIGRATION not in applied:
+                for operation in ("INSERT", "UPDATE"):
+                    trigger = f"reject_legacy_agent_run_bundle_{operation.lower()}"
+                    self._conn.execute(
+                        f"""CREATE TRIGGER IF NOT EXISTS {trigger}
+                        BEFORE {operation} ON agent_run_bundles
+                        BEGIN
+                            SELECT RAISE(ABORT, '{LEGACY_AGENT_WRITER_ERROR}');
+                        END"""  # nosec B608 -- fixed names and compile-time message
+                    )
+                orphaned_legacy_write = self._conn.execute(
+                    """SELECT 1 FROM agent_run_bundles b
+                       LEFT JOIN agent_runs r
+                         ON r.tenant_id=b.tenant_id AND r.run_id=b.run_id
+                       WHERE r.run_id IS NULL LIMIT 1"""
+                ).fetchone() is not None
+            if not orphaned_legacy_write:
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO verdict_schema_migrations(name,applied_at) "
+                    "VALUES (?,?)",
+                    (
+                        LEGACY_AGENT_WRITER_MIGRATION,
+                        _iso(datetime.now(timezone.utc)),
+                    ),
+                )
             self._conn.commit()
         except BaseException:
             self._conn.rollback()
             raise
+        if orphaned_legacy_write:
+            self._conn.close()
+            raise RuntimeError(LEGACY_AGENT_WRITER_ERROR)
 
     def _write_normalized_bundle(self, bundle: AgentRunBundle) -> None:
         bundle = normalize_bundle_timestamps(bundle)
@@ -1141,27 +1187,14 @@ class SQLiteStorage:
         bundle: AgentRunBundle,
         traces: tuple[Trace, ...] = (),
     ) -> None:
-        sanitized = sanitize_agent_run_bundle(bundle)
+        sanitized, capture_traces, linked_trace_ids = prepare_agent_capture(
+            bundle, traces
+        )
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
             try:
                 prepared_traces = []
-                seen_trace_ids: set[str] = set()
-                linked_trace_ids = {
-                    event.trace_id for event in sanitized.events if event.trace_id is not None
-                }
-                for trace in traces:
-                    if trace.trace_id in seen_trace_ids:
-                        raise ValueError("agent capture contains duplicate trace_id")
-                    seen_trace_ids.add(trace.trace_id)
-                    if trace.tenant_id != sanitized.run.tenant_id:
-                        raise ValueError(
-                            "agent capture Trace tenant must match the Agent Run tenant"
-                        )
-                    if trace.trace_id not in linked_trace_ids:
-                        raise ValueError("agent capture contains an unlinked Trace")
-                    sanitize_trace(trace)
-                    populate_trace_analysis_fields(trace)
+                for trace in capture_traces:
                     row = self._conn.execute(
                         "SELECT * FROM traces WHERE trace_id=?", (trace.trace_id,)
                     ).fetchone()
@@ -1176,9 +1209,7 @@ class SQLiteStorage:
                             "WHERE trace_id=? AND raw_messages_json IS NULL",
                             (json.dumps(trace.raw_messages), trace.trace_id),
                         )
-                linked_ids = tuple(
-                    event.trace_id for event in sanitized.events if event.trace_id is not None
-                )
+                linked_ids = tuple(sorted(linked_trace_ids))
                 if linked_ids:
                     placeholders = ",".join("?" for _ in linked_ids)
                     rows = self._conn.execute(
@@ -1186,10 +1217,9 @@ class SQLiteStorage:
                         linked_ids,
                     ).fetchall()
                     tenants = {row["trace_id"]: row["tenant_id"] for row in rows}
-                    if any(
-                        tenants.get(trace_id) != sanitized.run.tenant_id for trace_id in linked_ids
-                    ):
-                        raise ValueError("model-call event requires a same-tenant Trace")
+                    require_same_tenant_linked_traces(
+                        sanitized.run.tenant_id, linked_ids, tenants
+                    )
                 self._write_normalized_bundle(sanitized)
                 self._conn.commit()
             except sqlite3.IntegrityError as exc:

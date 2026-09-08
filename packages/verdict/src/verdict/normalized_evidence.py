@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping, Sequence
+from copy import deepcopy
 from dataclasses import asdict, replace
 from datetime import datetime, timezone
 from enum import Enum
@@ -21,7 +22,51 @@ from verdict.evidence import (
     PrivacyClassification,
     SourceSession,
 )
-from verdict.schema import Trace
+from verdict.redaction import sanitize_agent_run_bundle, sanitize_trace
+from verdict.schema import Trace, populate_trace_analysis_fields
+
+LEGACY_AGENT_WRITER_ERROR = (
+    "legacy agent evidence writer detected after normalized migration"
+)
+LEGACY_AGENT_WRITER_MIGRATION = "block_legacy_agent_evidence_writes_v1"
+
+
+def prepare_agent_capture(
+    bundle: AgentRunBundle,
+    traces: Sequence[Trace],
+) -> tuple[AgentRunBundle, tuple[Trace, ...], frozenset[str]]:
+    """Sanitize and validate capture-owned records before an atomic write."""
+    sanitized_bundle = sanitize_agent_run_bundle(bundle)
+    event_links = tuple(
+        event.trace_id
+        for event in sanitized_bundle.events
+        if event.trace_id is not None
+    )
+    linked_ids = frozenset(event_links)
+    if len(linked_ids) != len(event_links):
+        raise ValueError("agent capture links one Trace to multiple AgentEvents")
+    prepared: list[Trace] = []
+    seen: set[str] = set()
+    for source_trace in traces:
+        trace = sanitize_trace(deepcopy(source_trace))
+        populate_trace_analysis_fields(trace)
+        if trace.trace_id in seen:
+            raise ValueError("agent capture contains duplicate trace_id")
+        if trace.trace_id not in linked_ids:
+            raise ValueError("agent capture contains an unlinked Trace")
+        seen.add(trace.trace_id)
+        prepared.append(trace)
+    return sanitized_bundle, tuple(prepared), linked_ids
+
+
+def require_same_tenant_linked_traces(
+    tenant_id: str,
+    linked_trace_ids: Sequence[str],
+    trace_tenants: Mapping[str, str | None],
+) -> None:
+    """Validate transaction-visible Trace ownership for every event link."""
+    if any(trace_tenants.get(trace_id) != tenant_id for trace_id in linked_trace_ids):
+        raise ValueError("model-call event requires a same-tenant Trace")
 
 
 def _advance_status(

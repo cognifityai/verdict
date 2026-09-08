@@ -227,6 +227,9 @@ The published wheels replace editable installs without a new clone and reuse the
 selected SQLite file or PostgreSQL tables in place. See the repository
 [upgrade instructions](https://github.com/cognifityai/verdict#upgrade-from-an-earlier-synchronized-alpha)
 for the synchronized three-package command and verification steps.
+All writers sharing a store must be stopped and upgraded together when the store
+first moves to normalized agent evidence; migrated stores reject legacy bundle
+writes.
 
 An authenticated host may add infrastructure and job evidence under
 **Settings → Integrations** by passing a same-origin API path:
