@@ -231,6 +231,10 @@ approved. The retained `scripts/run_drift_pipeline.py` and `ui/server.py` source
 entry points continue as wrappers after the workspace packages are installed.
 Back up the store and lockfile before any alpha upgrade, then run the pipeline
 and dashboard smoke checks against a non-production copy.
+When upgrading a shared store to normalized agent evidence, stop and upgrade
+every Verdict writer before resuming capture. The migrated database rejects
+legacy agent-bundle writes rather than accepting evidence that current readers
+cannot see.
 
 An unrelated project owns the `verdict` distribution on PyPI and exposes the
 same top-level `verdict` import. Do not install that distribution in the same
@@ -459,6 +463,9 @@ Hexagonal / ports-and-adapters, ≥2 adapters per port (one real + in-memory for
   row keeps that bounded page visible and opens provider outcome, evidence
   coverage, response structure, tokens, latency, and supplied cost for the
   individual trace. These judge-free facts do not establish semantic quality.
+- Agent Run exploration pages through every stored run in 30-row pages while
+  retaining bounded event and turn detail. Finding links continue to show the
+  exact affected-run set rather than applying list offsets to it.
 - **Published capture coverage in `0.1.0a17`:** the bounded POC profile names
   Anthropic
   `messages.create(...)` (including `stream=True`), OpenAI
@@ -483,13 +490,18 @@ Hexagonal / ports-and-adapters, ≥2 adapters per port (one real + in-memory for
   redaction uses a linear email scanner plus regex candidates, Luhn card checks,
   and standard-library IP validation. Presidio is not used.
 - **Agent-run evidence is source-bounded.** Local Claude Code/Codex capture now
-  persists session/run/turn/event projections atomically and separately from
-  genuine provider `Trace` rows. It currently normalizes model, tool,
+  persists source/run/turn/event rows atomically and separately from genuine
+  provider `Trace` rows. Model-call events link to the Trace that owns LLM
+  request/response content; Verdict does not duplicate that content in the
+  event. Run detail reads page the normalized event timeline instead of loading
+  one growing serialized run. It currently normalizes model, tool,
   tool-result, command, and context events exposed by the supported history
   formats; it does not yet claim authoritative artifact state, deployment
-  success, or subagent correctness. If opted-in content would exceed the
-  atomic evidence-row limit, Verdict keeps the metadata-only run rather than
-  dropping the session. Local-history token counts remain observable, but
+  success, or subagent correctness. Each turn and event is bounded
+  independently. If one event's opted-in content exceeds its evidence limit,
+  Verdict retains that event's metadata and records why its content was
+  omitted; it does not downgrade the entire run. Local-history token counts
+  remain observable, but
   Verdict does not convert them into API-list-price spend because desktop or
   subscription billing is not established by those files. Codex runs remain
   outside LLM Trace comparisons when the source does not expose genuine model

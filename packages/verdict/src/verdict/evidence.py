@@ -28,7 +28,7 @@ _MAX_BUNDLE_JSON_BYTES = 4_194_304
 
 
 class EvidenceBundleTooLarge(ValueError):
-    """The validated bundle cannot fit the canonical atomic storage row."""
+    """The bundle exceeds the bounded legacy transfer representation."""
 
 
 class ExecutionStatus(str, Enum):
@@ -254,6 +254,11 @@ class AgentRun:
     agent_name: str = ""
     agent_version: str = ""
     configuration_fingerprint: str = ""
+    session_id: str | None = None
+    parent_run_id: str | None = None
+    service_name: str = ""
+    environment: str = ""
+    instance_id: str = ""
 
     def __post_init__(self) -> None:
         for name in ("run_id", "source_session_id", "tenant_id"):
@@ -264,10 +269,19 @@ class AgentRun:
             object.__setattr__(self, "status", ExecutionStatus(self.status))
         if self.status is not ExecutionStatus.UNKNOWN and self.ended_at is None:
             raise ValueError("terminal run status requires ended_at")
-        for name in ("agent_name", "agent_version", "configuration_fingerprint"):
+        for name in (
+            "agent_name", "agent_version", "configuration_fingerprint",
+            "service_name", "environment", "instance_id",
+        ):
             value = getattr(self, name)
             if value:
                 _validate_text(value, field_name=name, maximum=_MAX_IDENTIFIER_BYTES)
+        for name in ("session_id", "parent_run_id"):
+            value = getattr(self, name)
+            if value is not None:
+                _validate_text(value, field_name=name, maximum=_MAX_IDENTIFIER_BYTES)
+        if self.parent_run_id == self.run_id:
+            raise ValueError("run cannot be its own parent")
 
 
 @dataclass(frozen=True)
@@ -331,6 +345,9 @@ class AgentEvent:
     privacy_classification: PrivacyClassification = PrivacyClassification.METADATA
     omission_reason: str | None = None
     trace_id: str | None = None
+    producer_id: str = ""
+    producer_sequence: int | None = None
+    parent_event_id: str | None = None
 
     def __post_init__(self) -> None:
         for name in ("event_id", "turn_id"):
@@ -380,6 +397,19 @@ class AgentEvent:
                 field_name="omission_reason",
                 maximum=256,
             )
+        for name in ("producer_id", "parent_event_id"):
+            value = getattr(self, name)
+            if value:
+                _validate_text(value, field_name=name, maximum=_MAX_IDENTIFIER_BYTES)
+        if self.producer_sequence is not None and (
+            isinstance(self.producer_sequence, bool)
+            or not isinstance(self.producer_sequence, int)
+            or self.producer_sequence < 0
+            or self.producer_sequence > 2**63 - 1
+        ):
+            raise ValueError("producer_sequence must be a non-negative 64-bit integer")
+        if self.parent_event_id == self.event_id:
+            raise ValueError("event cannot be its own parent")
 
 
 def _canonical_value(value: Any) -> Any:
@@ -396,7 +426,7 @@ def _canonical_value(value: Any) -> Any:
 
 @dataclass(frozen=True)
 class AgentRunBundle:
-    """One complete normalized projection, replaced atomically on rescan."""
+    """A validated Agent Run evidence batch committed atomically."""
 
     session: SourceSession
     run: AgentRun
@@ -440,21 +470,33 @@ class AgentRunBundle:
 
 
 def agent_run_bundle_to_json(bundle: AgentRunBundle) -> str:
-    """Serialize a validated bundle to one canonical storage representation."""
+    """Serialize a validated bundle to the bounded compatibility representation."""
+    run_payload = asdict(bundle.run)
+    for name, empty in (
+        ("session_id", None), ("parent_run_id", None), ("service_name", ""),
+        ("environment", ""), ("instance_id", ""),
+    ):
+        if run_payload[name] == empty:
+            run_payload.pop(name)
+    event_payloads = []
+    for event in sorted(
+        bundle.events, key=lambda item: (item.turn_id, item.sequence, item.event_id),
+    ):
+        payload = asdict(event)
+        for name, empty in (
+            ("producer_id", ""), ("producer_sequence", None), ("parent_event_id", None),
+        ):
+            if payload[name] == empty:
+                payload.pop(name)
+        event_payloads.append(_canonical_value(payload))
     payload = {
         "session": _canonical_value(asdict(bundle.session)),
-        "run": _canonical_value(asdict(bundle.run)),
+        "run": _canonical_value(run_payload),
         "turns": [
             _canonical_value(asdict(turn))
             for turn in sorted(bundle.turns, key=lambda item: (item.sequence, item.turn_id))
         ],
-        "events": [
-            _canonical_value(asdict(event))
-            for event in sorted(
-                bundle.events,
-                key=lambda item: (item.turn_id, item.sequence, item.event_id),
-            )
-        ],
+        "events": event_payloads,
     }
     encoded = json.dumps(
         payload,
@@ -464,7 +506,9 @@ def agent_run_bundle_to_json(bundle: AgentRunBundle) -> str:
         allow_nan=False,
     )
     if len(encoded.encode("utf-8")) > _MAX_BUNDLE_JSON_BYTES:
-        raise EvidenceBundleTooLarge("agent run bundle exceeds the atomic evidence limit")
+        raise EvidenceBundleTooLarge(
+            "agent run bundle exceeds the compatibility serialization limit"
+        )
     return encoded
 
 
@@ -509,7 +553,7 @@ def agent_run_bundle_from_json(payload_json: str) -> AgentRunBundle:
         "started_at",
         "observed_at",
         "ended_at",
-    } or set(run_data) != {
+    } or not {
         "run_id",
         "source_session_id",
         "tenant_id",
@@ -519,6 +563,10 @@ def agent_run_bundle_from_json(payload_json: str) -> AgentRunBundle:
         "agent_name",
         "agent_version",
         "configuration_fingerprint",
+    }.issubset(run_data) or set(run_data) - {
+        "run_id", "source_session_id", "tenant_id", "started_at", "status",
+        "ended_at", "agent_name", "agent_version", "configuration_fingerprint",
+        "session_id", "parent_run_id", "service_name", "environment", "instance_id",
     }:
         raise ValueError("agent run bundle JSON has invalid typed fields")
     turn_fields = {
@@ -548,7 +596,13 @@ def agent_run_bundle_from_json(payload_json: str) -> AgentRunBundle:
     }
     if any(not isinstance(item, dict) or set(item) != turn_fields for item in turn_data):
         raise ValueError("agent run bundle JSON has invalid typed fields")
-    if any(not isinstance(item, dict) or set(item) != event_fields for item in event_data):
+    event_optional = {"producer_id", "producer_sequence", "parent_event_id"}
+    if any(
+        not isinstance(item, dict)
+        or not event_fields.issubset(item)
+        or set(item) - event_fields - event_optional
+        for item in event_data
+    ):
         raise ValueError("agent run bundle JSON has invalid typed fields")
     try:
         session = SourceSession(
@@ -570,6 +624,11 @@ def agent_run_bundle_from_json(payload_json: str) -> AgentRunBundle:
             agent_name=run_data.get("agent_name", ""),
             agent_version=run_data.get("agent_version", ""),
             configuration_fingerprint=run_data.get("configuration_fingerprint", ""),
+            session_id=run_data.get("session_id"),
+            parent_run_id=run_data.get("parent_run_id"),
+            service_name=run_data.get("service_name", ""),
+            environment=run_data.get("environment", ""),
+            instance_id=run_data.get("instance_id", ""),
         )
         turns = tuple(
             AgentTurn(
@@ -600,6 +659,9 @@ def agent_run_bundle_from_json(payload_json: str) -> AgentRunBundle:
                 privacy_classification=PrivacyClassification(item["privacy_classification"]),
                 omission_reason=item.get("omission_reason"),
                 trace_id=item.get("trace_id"),
+                producer_id=item.get("producer_id", ""),
+                producer_sequence=item.get("producer_sequence"),
+                parent_event_id=item.get("parent_event_id"),
             )
             for item in event_data
             if isinstance(item, dict)

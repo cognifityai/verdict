@@ -51,6 +51,9 @@ success, or retry causality when the source history does not establish it.
 - The SDK stores Verdict's own `Trace`, `SpanRecord`, `Judgment`, and
   `DriftSignal` schemas. It does not currently emit OpenTelemetry or
   OpenInference spans.
+- Agent evidence is stored as normalized source/run/turn/event rows. A
+  model-call event links to the genuine `Trace`, which remains the only owner
+  of LLM request/response content and the complete provider-call record.
 - SQLite is the default local store. Postgres is available for shared
   environments.
 - Redaction is best-effort pattern matching plus Luhn validation for payment-card

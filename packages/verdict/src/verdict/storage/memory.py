@@ -11,6 +11,7 @@ import copy
 import json
 import threading
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import datetime
 
 from verdict.analysis_records import (
@@ -24,9 +25,11 @@ from verdict.analysis_records import (
     validate_delivery_query,
 )
 from verdict.evidence import (
+    AgentEvent,
+    AgentRun,
     AgentRunBundle,
-    agent_run_bundle_from_json,
-    agent_run_bundle_to_json,
+    AgentTurn,
+    SourceSession,
 )
 from verdict.monitoring import (
     CohortManifest,
@@ -38,8 +41,17 @@ from verdict.monitoring import (
     monitor_snapshot_from_json,
     monitor_snapshot_to_json,
 )
+from verdict.normalized_evidence import (
+    merge_agent_event,
+    merge_agent_run,
+    merge_agent_turn,
+    merge_capture_trace,
+    merge_source_session,
+    normalize_bundle_timestamps,
+    prepare_agent_capture,
+    require_same_tenant_linked_traces,
+)
 from verdict.redaction import (
-    sanitize_agent_run_bundle,
     sanitize_judgment,
     sanitize_span,
     sanitize_trace,
@@ -80,7 +92,10 @@ class InMemoryStorage:
 
     def __init__(self) -> None:
         self._traces: dict[str, Trace] = {}
-        self._agent_run_bundles: dict[tuple[str, str], str] = {}
+        self._import_sources: dict[tuple[str, str], SourceSession] = {}
+        self._agent_runs: dict[tuple[str, str], AgentRun] = {}
+        self._agent_turns: dict[tuple[str, str, str], AgentTurn] = {}
+        self._agent_events: dict[tuple[str, str, str], AgentEvent] = {}
         self._agent_evidence_lock = threading.RLock()
         self._analysis_runs: dict[str, str] = {}
         self._analysis_inputs: dict[tuple[str, str, str, str, str], str] = {}
@@ -142,11 +157,164 @@ class InMemoryStorage:
         with self._cluster_v2_lock:
             self._traces[trace.trace_id] = trace
 
-    def replace_agent_run_bundle(self, bundle: AgentRunBundle) -> None:
-        sanitized = sanitize_agent_run_bundle(bundle)
-        payload = agent_run_bundle_to_json(sanitized)
+    def _agent_bundle(self, tenant_id: str, run_id: str) -> AgentRunBundle | None:
+        run = self._agent_runs.get((tenant_id, run_id))
+        if run is None:
+            return None
+        source = self._import_sources[(tenant_id, run.source_session_id)]
+        turns = tuple(
+            sorted(
+                (
+                    turn
+                    for (scope, owner_run_id, _turn_id), turn in self._agent_turns.items()
+                    if scope == tenant_id and owner_run_id == run_id
+                ),
+                key=lambda item: (item.sequence, item.turn_id),
+            )
+        )
+        turn_ids = {turn.turn_id for turn in turns}
+        events = tuple(
+            sorted(
+                (
+                    event
+                    for (scope, owner_run_id, _event_id), event in self._agent_events.items()
+                    if scope == tenant_id
+                    and owner_run_id == run_id
+                    and event.turn_id in turn_ids
+                ),
+                key=lambda item: (item.turn_id, item.sequence, item.event_id),
+            )
+        )
+        return copy.deepcopy(AgentRunBundle(source, run, turns, events))
+
+    def replace_agent_capture(
+        self,
+        bundle: AgentRunBundle,
+        traces: tuple[Trace, ...] = (),
+    ) -> None:
+        sanitized, capture_traces, linked_trace_ids = prepare_agent_capture(
+            bundle, traces
+        )
         with self._agent_evidence_lock:
-            self._agent_run_bundles[(sanitized.run.tenant_id, sanitized.run.run_id)] = payload
+            sanitized = normalize_bundle_timestamps(sanitized)
+            prepared_traces = [
+                merge_capture_trace(self._traces.get(trace.trace_id), trace)
+                for trace in capture_traces
+            ]
+            tenant_id = sanitized.run.tenant_id
+            source_key = (tenant_id, sanitized.session.source_session_id)
+            source = merge_source_session(
+                self._import_sources.get(source_key), sanitized.session
+            )
+            run_key = (tenant_id, sanitized.run.run_id)
+            run = merge_agent_run(self._agent_runs.get(run_key), sanitized.run)
+            turns = [
+                merge_agent_turn(
+                    self._agent_turns.get((tenant_id, run.run_id, turn.turn_id)), turn
+                )
+                for turn in sanitized.turns
+            ]
+            events = [
+                merge_agent_event(
+                    self._agent_events.get((tenant_id, run.run_id, event.event_id)), event
+                )
+                for event in sanitized.events
+            ]
+            locator_owner = next(
+                (
+                    value.source_session_id
+                    for (scope, _source_id), value in self._import_sources.items()
+                    if scope == tenant_id
+                    and value.source_kind == source.source_kind
+                    and value.source_locator_hash == source.source_locator_hash
+                ),
+                source.source_session_id,
+            )
+            if locator_owner != source.source_session_id:
+                raise ValueError("import source identity facts cannot be replaced")
+            for turn in turns:
+                owner = next(
+                    (
+                        value.turn_id
+                        for (scope, owner_run_id, _turn_id), value in self._agent_turns.items()
+                        if scope == tenant_id
+                        and owner_run_id == run.run_id
+                        and value.sequence == turn.sequence
+                    ),
+                    turn.turn_id,
+                )
+                if owner != turn.turn_id:
+                    raise ValueError("turn sequence cannot be reassigned")
+            for event in events:
+                owner = next(
+                    (
+                        value.event_id
+                        for (scope, owner_run_id, _event_id), value in self._agent_events.items()
+                        if scope == tenant_id
+                        and owner_run_id == run.run_id
+                        and value.turn_id == event.turn_id
+                        and value.sequence == event.sequence
+                    ),
+                    event.event_id,
+                )
+                if owner != event.event_id:
+                    raise ValueError("event sequence cannot be reassigned")
+                if event.trace_id is not None:
+                    trace_owner = next(
+                        (
+                            value.event_id
+                            for (scope, _owner_run_id, _event_id), value in self._agent_events.items()
+                            if scope == tenant_id and value.trace_id == event.trace_id
+                        ),
+                        event.event_id,
+                    )
+                    if trace_owner != event.event_id:
+                        raise ValueError("Trace is already linked to another AgentEvent")
+                if event.producer_id and event.producer_sequence is not None:
+                    producer_owner = next(
+                        (
+                            value.event_id
+                            for (scope, owner_run_id, _event_id), value in self._agent_events.items()
+                            if scope == tenant_id
+                            and owner_run_id == run.run_id
+                            and value.producer_id == event.producer_id
+                            and value.producer_sequence == event.producer_sequence
+                        ),
+                        event.event_id,
+                    )
+                    if producer_owner != event.event_id:
+                        raise ValueError("producer sequence cannot be reassigned")
+            prepared_by_id = {trace.trace_id: trace for trace in prepared_traces}
+            trace_tenants = {
+                trace_id: prepared_by_id[trace_id].tenant_id
+                if trace_id in prepared_by_id
+                else self._traces[trace_id].tenant_id
+                for trace_id in linked_trace_ids
+                if trace_id in prepared_by_id or trace_id in self._traces
+            }
+            require_same_tenant_linked_traces(
+                tenant_id, tuple(linked_trace_ids), trace_tenants
+            )
+            with self._cluster_v2_lock:
+                for trace in prepared_traces:
+                    self._traces[trace.trace_id] = trace
+            self._import_sources[source_key] = copy.deepcopy(source)
+            self._agent_runs[run_key] = copy.deepcopy(run)
+            self._agent_turns.update(
+                {
+                    (tenant_id, run.run_id, turn.turn_id): copy.deepcopy(turn)
+                    for turn in turns
+                }
+            )
+            self._agent_events.update(
+                {
+                    (tenant_id, run.run_id, event.event_id): copy.deepcopy(event)
+                    for event in events
+                }
+            )
+
+    def replace_agent_run_bundle(self, bundle: AgentRunBundle) -> None:
+        self.replace_agent_capture(bundle)
 
     def get_agent_run_bundle(
         self,
@@ -156,8 +324,7 @@ class InMemoryStorage:
         _validate_agent_bundle_query(tenant_id, 1)
         _validate_agent_bundle_run_id(run_id)
         with self._agent_evidence_lock:
-            payload = self._agent_run_bundles.get((tenant_id, run_id))
-        return agent_run_bundle_from_json(payload) if payload is not None else None
+            return self._agent_bundle(tenant_id, run_id)
 
     def list_agent_run_bundles(
         self,
@@ -168,9 +335,10 @@ class InMemoryStorage:
         _validate_agent_bundle_query(tenant_id, limit)
         with self._agent_evidence_lock:
             bundles = [
-                agent_run_bundle_from_json(payload)
-                for (scope, _run_id), payload in self._agent_run_bundles.items()
+                bundle
+                for (scope, run_id), _run in self._agent_runs.items()
                 if scope == tenant_id
+                if (bundle := self._agent_bundle(tenant_id, run_id)) is not None
             ]
         bundles.sort(key=lambda bundle: (bundle.run.started_at, bundle.run.run_id), reverse=True)
         return bundles[:limit]
@@ -181,9 +349,8 @@ class InMemoryStorage:
             raise ValueError("invalid source kind")
         with self._agent_evidence_lock:
             return any(
-                scope == tenant_id
-                and agent_run_bundle_from_json(payload).session.source_kind == source_kind
-                for (scope, _run_id), payload in self._agent_run_bundles.items()
+                scope == tenant_id and source.source_kind == source_kind
+                for (scope, _source_id), source in self._import_sources.items()
             )
 
     def save_deterministic_analysis_run(self, run: DeterministicAnalysisRun) -> None:
@@ -453,8 +620,12 @@ class InMemoryStorage:
     def delete_trace(self, trace_id: str) -> None:
         # Registry activation holds this lock while proving candidate coverage.
         # Make source-row removal participate in the same atomic boundary.
-        with self._cluster_v2_lock:
+        with self._agent_evidence_lock, self._cluster_v2_lock:
             self._traces.pop(trace_id, None)
+            self._agent_events = {
+                key: replace(event, trace_id=None) if event.trace_id == trace_id else event
+                for key, event in self._agent_events.items()
+            }
         retained_parent_span_ids = {
             parent_span_id
             for trace in self._traces.values()
@@ -474,7 +645,7 @@ class InMemoryStorage:
         }
 
     def prune_before(self, cutoff_iso: str) -> int:
-        with self._cluster_v2_lock:
+        with self._agent_evidence_lock, self._cluster_v2_lock:
             doomed = [
                 tid
                 for tid, trace in self._traces.items()
@@ -483,6 +654,12 @@ class InMemoryStorage:
             doomed_set = set(doomed)
             for tid in doomed:
                 self._traces.pop(tid, None)
+            self._agent_events = {
+                key: replace(event, trace_id=None)
+                if event.trace_id in doomed_set
+                else event
+                for key, event in self._agent_events.items()
+            }
         retained_parent_span_ids = {
             parent_span_id
             for trace in self._traces.values()

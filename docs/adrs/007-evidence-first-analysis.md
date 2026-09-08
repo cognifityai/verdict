@@ -35,8 +35,8 @@ for ingesting or inspecting evidence.
 Verdict ships as one installable package with separable runtime roles and four
 internal capabilities:
 
-1. **Evidence intake** normalizes supported sources into Trace records and
-   atomic AgentRun bundles.
+1. **Evidence intake** normalizes supported sources into Trace records and an
+   atomic run/turn/event hierarchy.
 2. **Finding analysis** derives deterministic evidence, reliability,
    performance, structural, and outcome findings without model calls.
 3. **Policy execution** freezes analysis unit, reference/current membership,
@@ -50,7 +50,8 @@ shared PostgreSQL store. SQLite remains the local default.
 
 ## Storage and monitoring lifecycle
 
-- Evidence intake owns source snapshots and AgentRun-bundle writes.
+- Evidence intake atomically owns source, run, turn, event, and linked Trace
+  writes. A model-call event links to its Trace instead of copying LLM content.
 - An analysis computes before atomically publishing one immutable `completed`
   or `error` record. A crash before publication leaves no authoritative result.
 - The policy registry owns immutable candidate and active versions plus the

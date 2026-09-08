@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 import verdict.evidence as evidence_contract
 from verdict import AgentEventType, EvidenceState, ExecutionStatus, PrivacyClassification
 from verdict.storage import SQLiteStorage
@@ -380,7 +381,7 @@ def test_oversized_tool_content_omits_only_content_not_the_session(tmp_path: Pat
     assert "arguments" not in tool_call.attributes
 
 
-def test_atomic_bundle_limit_downgrades_content_without_dropping_session(
+def test_normalized_capture_is_not_limited_by_legacy_bundle_serialization(
     tmp_path: Path, monkeypatch,
 ) -> None:
     root = tmp_path / "codex"
@@ -395,17 +396,11 @@ def test_atomic_bundle_limit_downgrades_content_without_dropping_session(
 
     assert summary.stored == 1
     bundle = storage.list_agent_run_bundles("local")[0]
-    assert bundle.turns[0].request_state is EvidenceState.NOT_CAPTURED
-    assert bundle.turns[0].response_state is EvidenceState.NOT_CAPTURED
-    assert all(
-        event.privacy_classification is not PrivacyClassification.REDACTED
-        for event in bundle.events
-    )
-    assert {
-        event.omission_reason
-        for event in bundle.events
-        if event.privacy_classification is PrivacyClassification.OMITTED
-    } == {"content_exceeded_bundle_limit"}
+    assert bundle.turns[0].request_state is EvidenceState.PRESENT
+    assert bundle.turns[0].response_state is EvidenceState.PRESENT
+    assert bundle.turns[0].user_request_redacted is not None
+    with pytest.raises(evidence_contract.EvidenceBundleTooLarge):
+        evidence_contract.agent_run_bundle_to_json(bundle)
 
 
 def test_live_partial_final_line_preserves_complete_records_and_marks_omission(

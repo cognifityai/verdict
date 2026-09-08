@@ -83,14 +83,24 @@ what cannot be evaluated. Local sources that do not expose a genuine provider
 call do not create fake `Trace` rows, so the LLM-call Monitor may truthfully be
 empty while agent evidence is useful.
 
+Agent timelines are stored as normalized source/run/turn/event rows. Genuine
+model calls link to existing `Trace` records rather than copying their content
+into event storage. When upgrading an existing SQLite or PostgreSQL store, stop
+older Verdict processes and take a backup before the first new process opens
+the store; that first open transactionally migrates legacy serialized agent
+bundles. Do not run old and new Verdict writers against the same store.
+The migrated store rejects writes from an older process rather than silently
+hiding them; upgrade every SDK, collector, service, and CLI writer that shares
+the database before resuming capture.
+
 Local-history token counts are usage evidence, not billing evidence. Verdict
 therefore leaves cost unavailable for Claude Code and Codex history instead of
 applying API list prices to desktop or subscription activity.
 
-Opted-in content remains bounded and recursively redacted. If a content-heavy
-session cannot fit the atomic evidence-row limit, Verdict preserves that
-session as metadata-only rather than failing the entire capture; the UI then
-labels its request/response evidence as not captured.
+Opted-in content remains bounded and recursively redacted. Each turn and event
+is bounded independently. If one event's content exceeds its evidence limit,
+Verdict retains that event's metadata and records why its content was omitted;
+it does not downgrade the entire run.
 
 The non-interactive equivalent is:
 
@@ -655,7 +665,7 @@ the other captured workloads.
 - Pairwise model rankings and PASS/FAIL drift scoring are different tasks; use
   the included alignment scripts to verify the mode you plan to rely on.
 - Local Claude Code/Codex agent evidence now ships as typed, bounded
-  session/run/turn/event projections. It is not an authoritative agent-runtime
+  source/run/turn/event rows. It is not an authoritative agent-runtime
   graph: task success, artifact state, deployments, subagents, and genuine LLM
   `Trace` links remain unavailable unless an approved source exposes them.
 - Judge calls run sequentially. Previewed all-eligible or numeric call caps are

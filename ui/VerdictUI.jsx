@@ -940,6 +940,7 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
           evaluatorFingerprint={evaluation.selectedIdentity?.fingerprint || null}
           onSelectRun={(runId) => commitRoute({ ...route, selectedRunId: runId })}
           onShowAll={() => commitRoute({ ...route, tab: "explore", section: "runs", findingCode: null, runIds: [], selectedRunId: null })}
+          onOpenTrace={(traceId) => commitRoute({ ...route, tab: "explore", section: "calls", traceJudgeStatus: "all", traceId })}
         />}
         {tab === "explore" && route.section === "calls" && <Traces key={evaluation.selectedId || "none"} data={DATA} source={source}
           traceOffset={traceOffset} reloading={reloading} onTracePageChange={onTracePageChange}

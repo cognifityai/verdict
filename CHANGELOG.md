@@ -6,6 +6,21 @@ the product is refined.
 
 ## [Unreleased]
 
+### Changed
+
+- Agent evidence now uses normalized source, run, turn, and event storage.
+  Model-call events link to genuine Trace records without duplicating LLM
+  content, run detail is paginated, and supported legacy bundle rows migrate
+  transactionally on first SQLite or PostgreSQL open. Migrated stores reject
+  writes from older agent-bundle writers instead of silently hiding them. Trace
+  retention preserves the surrounding execution event while clearing its
+  removed Trace link.
+- Agent runs can retain optional session, parent-run, service, environment,
+  instance, producer, and producer-sequence correlation when a source exposes
+  it. Source-local turn and event identifiers remain isolated by run.
+- Agent Run exploration now pages through the complete newest-first run list;
+  finding links continue to load their exact bounded set of affected runs.
+
 ## [0.1.0a17] - 2026-09-07
 
 ### Fixed

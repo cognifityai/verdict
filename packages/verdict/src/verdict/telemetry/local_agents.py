@@ -16,18 +16,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from verdict.capture import AgentCaptureService
 from verdict.evidence import (
     AgentEvent,
     AgentEventType,
     AgentRun,
     AgentRunBundle,
     AgentTurn,
-    EvidenceBundleTooLarge,
     EvidenceState,
     ExecutionStatus,
     PrivacyClassification,
     SourceSession,
-    agent_run_bundle_to_json,
     stable_evidence_id,
 )
 from verdict.redaction import redact, redact_structure
@@ -636,6 +635,8 @@ def _bundle(
         status=ExecutionStatus.UNKNOWN,
         agent_name=source_kind,
         agent_version=version,
+        session_id=source_session_id,
+        service_name=source_kind,
     )
     total_source_events = sum(len(turn.events) for turn in raw_turns)
     stored_event_count = min(total_source_events, _MAX_STORED_EVENTS - 1)
@@ -763,23 +764,6 @@ def _bundle(
             )
             omitted_event_count = 0
     bundle = AgentRunBundle(session=session, run=run, turns=tuple(turns), events=tuple(events))
-    try:
-        agent_run_bundle_to_json(bundle)
-    except EvidenceBundleTooLarge:
-        if not capture_content:
-            raise
-        return _bundle(
-            source_kind=source_kind,
-            source_scope=source_scope,
-            path=path,
-            session_id=session_id,
-            version=version,
-            raw_turns=raw_turns,
-            tenant_id=tenant_id,
-            capture_content=False,
-            home=home,
-            content_omission_reason="content_exceeded_bundle_limit",
-        )
     return bundle
 
 
@@ -864,11 +848,12 @@ def capture_local_agents(
     capture_content: bool = True,
     home: Path | None = None,
 ) -> LocalCaptureSummary:
-    """Rescan selected local roots and atomically replace normalized sessions."""
+    """Rescan selected local roots into the canonical agent capture boundary."""
     if not tenant_id:
         raise ValueError("tenant_id is required")
     sources = (("claude-code", claude_root, _parse_claude), ("codex", codex_root, _parse_codex))
     summary = LocalCaptureSummary()
+    capture_service = AgentCaptureService(storage)
     for source_kind, root, parser in sources:
         if root is None:
             continue
@@ -890,16 +875,13 @@ def capture_local_agents(
                         capture_content=capture_content,
                         home=home,
                     )
-                    # Trace rows are written before the evidence link. A crash
-                    # can therefore leave a recoverable unlinked source Trace,
-                    # but can never leave an AgentEvent pointing at a missing
-                    # Trace. Deterministic IDs make the next full rescan repair
-                    # the projection idempotently.
-                    for trace in _linked_traces(
-                        bundle, turns, source_kind=source_kind, source_scope=source_scope
-                    ):
-                        storage.insert_trace(trace)
-                    storage.replace_agent_run_bundle(bundle)
+                    capture_service.capture(
+                        bundle,
+                        traces=_linked_traces(
+                            bundle, turns, source_kind=source_kind,
+                            source_scope=source_scope,
+                        ),
+                    )
                 except (OSError, ValueError) as exc:
                     summary.add_skip(str(exc) or type(exc).__name__)
                     continue
