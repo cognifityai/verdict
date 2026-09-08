@@ -1,7 +1,7 @@
 import asyncio
 import json
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import httpx
 from verdict.capture import AgentCaptureService
@@ -399,6 +399,113 @@ def test_agent_runs_can_filter_multiple_affected_runs_beyond_default_page(tmp_pa
     assert selected["filter"] == {
         "requested": 2, "matched": 2, "complete": True,
     }
+
+
+def test_agent_runs_pages_all_runs_in_stable_newest_first_order(tmp_path):
+    path = tmp_path / "runs.db"
+    storage = SQLiteStorage(str(path))
+    now = datetime(2026, 8, 31, tzinfo=timezone.utc)
+    for index in range(35):
+        tenant = f"local-{index}"
+        bundle = _bundle(tenant, now + timedelta(minutes=index))
+        storage.replace_agent_run_bundle(AgentRunBundle(
+            replace(
+                bundle.session,
+                tenant_id="local",
+                source_locator_hash=f"{index:064x}",
+            ),
+            replace(bundle.run, tenant_id="local"),
+            bundle.turns,
+            bundle.events,
+        ))
+    storage.close()
+
+    first = build_agent_runs_bundle(path, tenant="local", limit=10)
+    second = build_agent_runs_bundle(path, tenant="local", limit=10, offset=10)
+    last = build_agent_runs_bundle(path, tenant="local", limit=10, offset=30)
+
+    async def request_second_page():
+        transport = httpx.ASGITransport(
+            app=create_app(storage=f"sqlite:///{path}")
+        )
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
+            return await client.get("/api/runs?tenant=local&limit=10&offset=10")
+
+    response = asyncio.run(request_second_page())
+
+    assert [run["runId"] for run in first["runs"]] == [
+        f"r-local-{index}" for index in range(34, 24, -1)
+    ]
+    assert [run["runId"] for run in second["runs"]] == [
+        f"r-local-{index}" for index in range(24, 14, -1)
+    ]
+    assert [run["runId"] for run in last["runs"]] == [
+        f"r-local-{index}" for index in range(4, -1, -1)
+    ]
+    assert set(run["runId"] for run in first["runs"]).isdisjoint(
+        run["runId"] for run in second["runs"]
+    )
+    assert first["page"] == {
+        "available": 35, "shown": 10, "offset": 0, "limit": 10,
+        "truncated": True,
+    }
+    assert second["page"] == {
+        "available": 35, "shown": 10, "offset": 10, "limit": 10,
+        "truncated": True,
+    }
+    assert last["page"] == {
+        "available": 35, "shown": 5, "offset": 30, "limit": 10,
+        "truncated": False,
+    }
+    assert response.status_code == 200
+    assert response.json() == second
+
+
+def test_agent_runs_reject_invalid_or_filtered_offsets(tmp_path):
+    path = tmp_path / "runs.db"
+    storage = SQLiteStorage(str(path))
+    storage.replace_agent_run_bundle(
+        _bundle("local", datetime(2026, 8, 31, tzinfo=timezone.utc))
+    )
+    storage.close()
+
+    for offset in (-1, True, 100_001):
+        try:
+            build_agent_runs_bundle(path, tenant="local", offset=offset)
+        except ValueError as error:
+            assert str(error) == "invalid offset"
+        else:  # pragma: no cover - makes the failed contract explicit
+            raise AssertionError(f"offset {offset!r} was accepted")
+    try:
+        build_agent_runs_bundle(
+            path, tenant="local", run_ids=("r-local",), offset=1,
+        )
+    except ValueError as error:
+        assert str(error) == "offset is not supported with selected runs"
+    else:  # pragma: no cover - makes the failed contract explicit
+        raise AssertionError("filtered offset was accepted")
+
+    async def request_invalid_offsets():
+        transport = httpx.ASGITransport(
+            app=create_app(storage=f"sqlite:///{path}")
+        )
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
+            return (
+                await client.get("/api/runs?tenant=local&offset=-1"),
+                await client.get("/api/runs?tenant=local&offset=100001"),
+                await client.get(
+                    "/api/runs?tenant=local&run_ids=r-local&offset=1"
+                ),
+            )
+
+    negative, oversized, filtered = asyncio.run(request_invalid_offsets())
+    assert negative.status_code == 422
+    assert oversized.status_code == 422
+    assert filtered.status_code == 400
 
 
 def test_agent_runs_api_is_tenant_scoped_and_bounded(tmp_path):

@@ -97,10 +97,10 @@ Local-history token counts are usage evidence, not billing evidence. Verdict
 therefore leaves cost unavailable for Claude Code and Codex history instead of
 applying API list prices to desktop or subscription activity.
 
-Opted-in content remains bounded and recursively redacted. If a content-heavy
-session cannot fit the atomic evidence-row limit, Verdict preserves that
-session as metadata-only rather than failing the entire capture; the UI then
-labels its request/response evidence as not captured.
+Opted-in content remains bounded and recursively redacted. Each turn and event
+is bounded independently. If one event's content exceeds its evidence limit,
+Verdict retains that event's metadata and records why its content was omitted;
+it does not downgrade the entire run.
 
 The non-interactive equivalent is:
 

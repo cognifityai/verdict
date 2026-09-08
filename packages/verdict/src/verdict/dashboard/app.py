@@ -511,6 +511,7 @@ def build_registry_bundle(
 
 def build_agent_runs_bundle(
     storage: str | os.PathLike[str], *, tenant: str, limit: int = 30,
+    offset: int = 0,
     run_id: str | None = None, run_ids: tuple[str, ...] | None = None,
     evaluator_fingerprint: str | None = None,
 ) -> dict:
@@ -519,12 +520,20 @@ def build_agent_runs_bundle(
         raise ValueError("invalid tenant")
     if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
         raise ValueError("invalid limit")
+    if (
+        isinstance(offset, bool)
+        or not isinstance(offset, int)
+        or not 0 <= offset <= 100_000
+    ):
+        raise ValueError("invalid offset")
     if run_id is not None and (
         not isinstance(run_id, str) or not run_id or len(run_id.encode("utf-8")) > 256
     ):
         raise ValueError("invalid run_id")
     if run_id is not None and run_ids is not None:
         raise ValueError("run_id and run_ids are mutually exclusive")
+    if offset and (run_id is not None or run_ids is not None):
+        raise ValueError("offset is not supported with selected runs")
     if run_ids is not None:
         if not isinstance(run_ids, tuple) or not 1 <= len(run_ids) <= 50:
             raise ValueError("invalid run_ids")
@@ -546,7 +555,14 @@ def build_agent_runs_bundle(
 
     def builder(session: _QuerySession) -> dict:
         if not agent_evidence_queries.available(session):
-            return {"summary": {"available": 0, "shown": 0}, "runs": []}
+            return {
+                "summary": {"available": 0, "shown": 0},
+                "page": {
+                    "available": 0, "shown": 0, "offset": offset,
+                    "limit": limit, "truncated": False,
+                },
+                "runs": [],
+            }
         selected_run_ids = run_ids or ((run_id,) if run_id is not None else None)
         if selected_run_ids is None:
             available_runs = agent_evidence_queries.count_runs(session, tenant)
@@ -559,7 +575,7 @@ def build_agent_runs_bundle(
             ).fetchone()
             available_runs = int(count["count"] if count else 0)
         bundles = agent_evidence_queries.load_bundles(
-            session, tenant, limit=limit, run_ids=selected_run_ids,
+            session, tenant, limit=limit, offset=offset, run_ids=selected_run_ids,
         )
         runs = []
         linked_trace_ids: dict[str, set[str]] = defaultdict(set)
@@ -634,8 +650,21 @@ def build_agent_runs_bundle(
                 "notJudged": len(linked) - completed - errors,
                 "complete": True,
             }
-        result = {"summary": {"available": available_runs,
-                              "shown": len(runs)}, "runs": runs}
+        page_offset = 0 if selected_run_ids is not None else offset
+        result = {
+            "summary": {"available": available_runs, "shown": len(runs)},
+            "page": {
+                "available": available_runs,
+                "shown": len(runs),
+                "offset": page_offset,
+                "limit": len(selected_run_ids) if selected_run_ids is not None else limit,
+                "truncated": (
+                    selected_run_ids is None
+                    and page_offset + len(runs) < available_runs
+                ),
+            },
+            "runs": runs,
+        }
         if selected_run_ids is not None:
             result["filter"] = {
                 "requested": len(selected_run_ids),
@@ -2699,6 +2728,7 @@ def create_app(
         request,
         tenant: str | None = None,
         limit: int = Query(default=30, ge=1, le=100),
+        offset: int = Query(default=0, ge=0, le=100_000),
         run_id: str | None = None,
         evaluator_fingerprint: str | None = None,
     ):
@@ -2712,6 +2742,7 @@ def create_app(
                 configured_storage,
                 tenant=authorized_tenant,
                 limit=limit,
+                offset=offset,
                 run_id=run_id,
                 run_ids=selected_run_ids,
                 evaluator_fingerprint=evaluator_fingerprint,

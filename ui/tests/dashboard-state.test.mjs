@@ -28,7 +28,7 @@ function componentStub(names) {
 }
 
 async function loadUiModule() {
-  const source = `${await readFile(UI_SOURCE, "utf8")}\nexport { Dashboard, Overview, DriftSignals, Traces, TraceDetail, TabHelp, Judge, Compare, mountedApiUrl };\nexport { useOperations } from "./Operations.jsx";\nexport { RegistryView } from "./Registry.jsx";\nexport { EvaluatorLab } from "./EvaluatorLab.jsx";`;
+  const source = `${await readFile(UI_SOURCE, "utf8")}\nexport { Dashboard, Overview, DriftSignals, Traces, TraceDetail, TabHelp, Judge, Compare, mountedApiUrl };\nexport { useOperations } from "./Operations.jsx";\nexport { RegistryView } from "./Registry.jsx";\nexport { EvaluatorLab } from "./EvaluatorLab.jsx";\nexport { Runs } from "./Runs.jsx";`;
   const result = await build({
     stdin: {
       contents: source,
@@ -119,6 +119,72 @@ function createHooks() {
       return refs[index];
     },
     useCallback(fn) { return fn; },
+  };
+}
+
+function createEffectHooks() {
+  const states = [];
+  const refs = [];
+  const callbacks = [];
+  const effects = [];
+  let stateCursor = 0;
+  let refCursor = 0;
+  let callbackCursor = 0;
+  let effectCursor = 0;
+  let pendingEffects = [];
+  const changed = (left, right) => !left || !right
+    || left.length !== right.length
+    || left.some((value, index) => !Object.is(value, right[index]));
+  return {
+    begin() {
+      stateCursor = 0;
+      refCursor = 0;
+      callbackCursor = 0;
+      effectCursor = 0;
+      pendingEffects = [];
+    },
+    createElement(type, props, ...children) {
+      return { type, props: { ...(props || {}), children } };
+    },
+    useState(initial) {
+      const index = stateCursor++;
+      if (!(index in states)) {
+        states[index] = typeof initial === "function" ? initial() : initial;
+      }
+      const setState = (next) => {
+        states[index] = typeof next === "function" ? next(states[index]) : next;
+      };
+      return [states[index], setState];
+    },
+    useRef(initial) {
+      const index = refCursor++;
+      if (!(index in refs)) refs[index] = { current: initial };
+      return refs[index];
+    },
+    useCallback(fn, dependencies) {
+      const index = callbackCursor++;
+      if (!callbacks[index] || changed(callbacks[index].dependencies, dependencies)) {
+        callbacks[index] = { value: fn, dependencies: [...dependencies] };
+      }
+      return callbacks[index].value;
+    },
+    useEffect(fn, dependencies) {
+      const index = effectCursor++;
+      if (!effects[index] || changed(effects[index].dependencies, dependencies)) {
+        pendingEffects.push({ index, fn, dependencies: [...dependencies] });
+      }
+    },
+    flushEffects() {
+      for (const pending of pendingEffects) {
+        effects[pending.index]?.cleanup?.();
+        const cleanup = pending.fn();
+        effects[pending.index] = {
+          dependencies: pending.dependencies,
+          cleanup: typeof cleanup === "function" ? cleanup : null,
+        };
+      }
+      pendingEffects = [];
+    },
   };
 }
 
@@ -669,6 +735,97 @@ async function resolveJson(request, payload) {
   request.resolve({ ok: true, json: async () => payload });
   for (let index = 0; index < 6; index += 1) await Promise.resolve();
 }
+
+function runListRow(runId) {
+  return {
+    runId, sourceKind: "codex", startedAt: "2026-09-01T00:00:00Z",
+    status: "completed", sourceOutcome: "completed", agentName: runId,
+    turnCount: 1, eventCount: 1, findings: [], metrics: {},
+    evidenceCoverage: {}, turnOutcomes: {}, findingSeverity: {},
+    evaluationCoverage: { state: "not_selected" },
+  };
+}
+
+function runListPage(offset, runIds, available = 61) {
+  return {
+    summary: { available, shown: runIds.length },
+    page: {
+      available, shown: runIds.length, offset, limit: 30,
+      truncated: offset + runIds.length < available,
+    },
+    runs: runIds.map(runListRow),
+  };
+}
+
+test("Agent Runs pages the full list and keeps an empty last page recoverable", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const selections = [];
+  const props = {
+    url: "/api/runs",
+    onSelectRun(runId) { selections.push(runId); },
+  };
+
+  render(ui.Runs, hooks, props);
+  hooks.flushEffects();
+  assert.match(requests[0].url, /limit=30/);
+  assert.match(requests[0].url, /offset=0/);
+  await resolveJson(requests[0], runListPage(0, ["run-61", "run-60"]));
+
+  let tree = render(ui.Runs, hooks, props);
+  hooks.flushEffects();
+  assert.match(textOf(tree), /Showing 1–2 of 61 runs/);
+  findAll(tree, (node) => node.type === "button" && textOf(node) === "Next")[0]
+    .props.onClick();
+  tree = render(ui.Runs, hooks, props);
+  hooks.flushEffects();
+  const secondRequest = requests.find((request) => /offset=30/.test(request.url));
+  assert.ok(secondRequest);
+  assert.deepEqual(selections, [null]);
+  await resolveJson(secondRequest, runListPage(30, ["run-31"]));
+
+  tree = render(ui.Runs, hooks, props);
+  hooks.flushEffects();
+  assert.match(textOf(tree), /Showing 31–31 of 61 runs/);
+  findAll(tree, (node) => node.type === "button" && textOf(node) === "Next")[0]
+    .props.onClick();
+  tree = render(ui.Runs, hooks, props);
+  hooks.flushEffects();
+  const emptyRequest = requests.find((request) => /offset=60/.test(request.url));
+  assert.ok(emptyRequest);
+  await resolveJson(emptyRequest, runListPage(60, []));
+
+  tree = render(ui.Runs, hooks, props);
+  hooks.flushEffects();
+  assert.match(textOf(tree), /No runs on this page/);
+  const previous = findAll(
+    tree, (node) => node.type === "button" && textOf(node) === "Previous",
+  )[0];
+  assert.equal(previous.props.disabled, false);
+});
+
+test("Agent Runs ignores an older list response after its query changes", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+
+  render(ui.Runs, hooks, { url: "/api/runs", evaluatorFingerprint: "old" });
+  hooks.flushEffects();
+  render(ui.Runs, hooks, { url: "/api/runs", evaluatorFingerprint: "new" });
+  hooks.flushEffects();
+  assert.equal(requests.length, 2);
+
+  await resolveJson(requests[1], runListPage(0, ["new-run"], 1));
+  await resolveJson(requests[0], runListPage(0, ["old-run"], 1));
+  const tree = render(
+    ui.Runs, hooks, { url: "/api/runs", evaluatorFingerprint: "new" },
+  );
+  hooks.flushEffects();
+
+  assert.match(textOf(tree), /new-run/);
+  assert.doesNotMatch(textOf(tree), /old-run/);
+});
 
 test("an older evaluator response cannot overwrite the newest confirmed snapshot", async () => {
   const ui = await loadUiModule();
