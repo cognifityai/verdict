@@ -125,7 +125,10 @@ The run is sampled as one unit. A supported provider call inside the active
 turn creates one genuine `Trace` for its prompt/response and one model-call
 event containing only operational scalars and the Trace link; LLM content is
 not copied into event storage. Sync and async context managers have the same
-contract. Identifiers such as `tenant_id` and `session_id` must be non-sensitive.
+contract. If content capture is enabled but `set_output()` is not called, the
+turn records missing response evidence; disabled content is recorded separately
+as not captured. Identifiers such as `tenant_id` and `session_id` must be
+non-sensitive.
 
 For application hosts that should not connect to the Verdict database, write
 bounded, redacted, process-owned JSONL segments locally:
@@ -147,12 +150,15 @@ verdict-import agent-file /var/spool/verdict/worker-1 \
 
 Use a separate spool directory per producer process and retain files until the
 import completes. This local transport has hard segment, record, and directory
-bounds. Completed appends bypass Python userspace buffering, but are not
-`fsync`-ed against an operating-system or host failure. Quota or write failures
-increment the process-local `capture.dropped_records` metric and emit one
-bounded warning per failure class. The transport does not provide remote
-delivery, acknowledgements, retry, or file deletion; an authenticated collector
-is a separate roadmap capability. See
+bounds and carries provider Traces, Agent evidence, manual spans, and user
+signals through the same selected transport. Completed appends bypass Python
+userspace buffering, but are not `fsync`-ed against an operating-system or host
+failure. If an Agent evidence stream fails, it stays closed to prevent sequence
+gaps while later provider calls fall back to standalone Trace records. Quota or
+write failures increment the process-local `capture.dropped_records` metric and
+emit one bounded warning per failure class. The transport does not provide
+remote delivery, acknowledgements, retry, or file deletion; an authenticated
+collector is a separate roadmap capability. See
 [`examples/agent_sdk.py`](examples/agent_sdk.py) for a runnable local example.
 
 An initial monitor proposal uses exact event-time membership. The count-mode

@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from typing import Any, Literal
 from uuid import uuid4
 
-from verdict.agent_transport import AgentCaptureSink, StorageCaptureSink
+from verdict.agent_transport import CaptureSink, StorageCaptureSink
 from verdict.evidence import (
     EVENT_CONTENT_FIELDS,
     AgentCaptureBatch,
@@ -69,7 +69,10 @@ def _utcnow() -> datetime:
 
 
 def _truncate_utf8(value: str, maximum: int) -> str:
-    encoded = value.encode("utf-8")
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeError:
+        return "<OMITTED:invalid>"
     if len(encoded) <= maximum:
         return value
     return encoded[:maximum].decode("utf-8", "ignore")
@@ -78,46 +81,61 @@ def _truncate_utf8(value: str, maximum: int) -> str:
 def _content(client: Any, value: object) -> str | None:
     if not client.capture_content:
         return None
-    text = value if isinstance(value, str) else str(value)
-    sanitized = redact(
-        text,
-        mode=client.redaction_mode,
-        secret=client.redaction_secret,
-    )
-    return _truncate_utf8(sanitized or "", _MAX_CONTENT_BYTES)
+    try:
+        text = value if isinstance(value, str) else str(value)
+        sanitized = redact(
+            text,
+            mode=client.redaction_mode,
+            secret=client.redaction_secret,
+        )
+        return _truncate_utf8(sanitized or "", _MAX_CONTENT_BYTES)
+    except Exception:
+        return "<OMITTED:invalid>"
 
 
 def _bounded_value(client: Any, value: object) -> Any:
-    sanitized = redact_structure(
-        value,
-        mode=client.redaction_mode,
-        secret=client.redaction_secret,
-    )
-    nodes = [0]
+    try:
+        sanitized = redact_structure(
+            value,
+            mode=client.redaction_mode,
+            secret=client.redaction_secret,
+        )
+        nodes = [0]
 
-    def visit(item: Any, depth: int) -> Any:
-        nodes[0] += 1
-        if nodes[0] > _MAX_VALUE_NODES or depth > _MAX_VALUE_DEPTH:
-            return "<OMITTED:bounded>"
-        if item is None or isinstance(item, (bool, int)):
-            return item
-        if isinstance(item, float):
-            return item if math.isfinite(item) else "<OMITTED:non_finite>"
-        if isinstance(item, str):
-            return _truncate_utf8(item, 1024)
-        if isinstance(item, list):
-            return [visit(child, depth + 1) for child in item[:24]]
-        if isinstance(item, dict):
-            return {
-                _truncate_utf8(str(key), 64): visit(child, depth + 1)
-                for key, child in list(item.items())[:24]
-            }
-        return "<REDACTED>"
+        def visit(item: Any, depth: int) -> Any:
+            nodes[0] += 1
+            if nodes[0] > _MAX_VALUE_NODES or depth > _MAX_VALUE_DEPTH:
+                return "<OMITTED:bounded>"
+            if item is None or isinstance(item, (bool, int)):
+                return item
+            if isinstance(item, float):
+                return item if math.isfinite(item) else "<OMITTED:non_finite>"
+            if isinstance(item, str):
+                return _truncate_utf8(item, 1024)
+            if isinstance(item, list):
+                return [visit(child, depth + 1) for child in item[:24]]
+            if isinstance(item, dict):
+                return {
+                    _truncate_utf8(str(key), 64): visit(child, depth + 1)
+                    for key, child in list(item.items())[:24]
+                }
+            return "<REDACTED>"
 
-    bounded = visit(sanitized, 0)
-    if len(json.dumps(bounded, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) > 12_000:
-        return "<OMITTED:oversize>"
-    return bounded
+        bounded = visit(sanitized, 0)
+        if (
+            len(
+                json.dumps(
+                    bounded,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            )
+            > 12_000
+        ):
+            return "<OMITTED:oversize>"
+        return bounded
+    except Exception:
+        return "<OMITTED:invalid>"
 
 
 def _fingerprint(client: Any, configuration: Mapping[str, object] | None) -> str:
@@ -151,12 +169,16 @@ def _terminal_status(error: BaseException | None) -> ExecutionStatus:
 def _exception_evidence(error: BaseException) -> dict[str, str]:
     try:
         message = str(error)
+        message.encode("utf-8")
     except BaseException:
         message = "<UNAVAILABLE>"
-    return {"error_type": type(error).__name__, "message": message}
+    return {
+        "error_type": type(error).__name__,
+        "message": _truncate_utf8(message, 1024),
+    }
 
 
-def _sink(client: Any) -> AgentCaptureSink:
+def _sink(client: Any) -> CaptureSink:
     if client._capture_sink is not None:
         return client._capture_sink
     if client.storage is None:
@@ -183,8 +205,8 @@ class AgentTraceContext:
     def run_id(self) -> str:
         return self.turn.owner.run_id
 
-    def capture(self, trace: Trace) -> None:
-        self.turn.capture_model_trace(trace)
+    def capture(self, trace: Trace) -> bool:
+        return self.turn.capture_model_trace(trace)
 
 
 class _TurnState:
@@ -203,10 +225,6 @@ class _TurnState:
         occurred_at: datetime | None = None,
         trace_id: str | None = None,
     ) -> AgentEvent:
-        with self._lock:
-            sequence = self._next_event_sequence
-            self._next_event_sequence += 1
-            producer_sequence = self.owner._next_producer_sequence()
         has_content = bool(EVENT_CONTENT_FIELDS & attributes.keys())
         safe_attributes = {
             key: _bounded_value(self.owner.client, value)
@@ -220,10 +238,10 @@ class _TurnState:
             if has_content
             else PrivacyClassification.METADATA
         )
-        return AgentEvent(
+        event = AgentEvent(
             event_id=f"event_{uuid4().hex}",
             turn_id=self.turn.turn_id,
-            sequence=sequence,
+            sequence=0,
             occurred_at=occurred_at or _utcnow(),
             event_type=event_type,
             status=status,
@@ -237,13 +255,22 @@ class _TurnState:
             ),
             trace_id=trace_id,
             producer_id=self.owner.producer_id,
+            producer_sequence=0,
+        )
+        with self._lock:
+            sequence = self._next_event_sequence
+            producer_sequence = self.owner._next_producer_sequence()
+            self._next_event_sequence += 1
+        return replace(
+            event,
+            sequence=sequence,
             producer_sequence=producer_sequence,
         )
 
-    def emit(self, event: AgentEvent, *, trace: Trace | None = None) -> None:
-        self.owner._emit(turn=self.turn, event=event, trace=trace)
+    def emit(self, event: AgentEvent, *, trace: Trace | None = None) -> bool:
+        return self.owner._emit(turn=self.turn, event=event, trace=trace)
 
-    def capture_model_trace(self, trace: Trace) -> None:
+    def capture_model_trace(self, trace: Trace) -> bool:
         attributes = {
             key: value
             for key, value in {
@@ -266,7 +293,7 @@ class _TurnState:
             occurred_at=trace.started_at,
             trace_id=trace.trace_id,
         )
-        self.emit(event, trace=trace)
+        return self.emit(event, trace=trace)
 
 
 class ToolContext:
@@ -353,14 +380,12 @@ class TurnContext:
             raise RuntimeError("agent turn context cannot be entered twice")
         if _active_turn.get() is not None:
             raise RuntimeError("agent turns cannot be nested")
-        self._entered = True
         started_at = _utcnow()
-        sequence = self._owner._next_turn_sequence()
         request = _content(self._owner.client, self._user_input)
         turn = AgentTurn(
             turn_id=f"turn_{uuid4().hex}",
             run_id=self._owner.run_id,
-            sequence=sequence,
+            sequence=0,
             started_at=started_at,
             status=ExecutionStatus.UNKNOWN,
             user_request_redacted=request,
@@ -368,6 +393,8 @@ class TurnContext:
                 EvidenceState.PRESENT if request is not None else EvidenceState.NOT_CAPTURED
             ),
         )
+        turn = replace(turn, sequence=self._owner._next_turn_sequence())
+        self._entered = True
         self._state = _TurnState(self._owner, turn)
         self._owner._latest_turn = self._state
         self._owner._emit(turn=turn)
@@ -388,7 +415,11 @@ class TurnContext:
             ended_at=_utcnow(),
             final_response_redacted=response,
             response_state=(
-                EvidenceState.PRESENT if response is not None else EvidenceState.NOT_CAPTURED
+                EvidenceState.PRESENT
+                if response is not None
+                else EvidenceState.MISSING
+                if self._owner.client.capture_content
+                else EvidenceState.NOT_CAPTURED
             ),
         )
         self._owner._emit(turn=self._state.turn)
@@ -710,12 +741,12 @@ class AgentRunContext:
         turn: AgentTurn | None = None,
         event: AgentEvent | None = None,
         trace: Trace | None = None,
-    ) -> None:
+    ) -> bool:
         if not self.sampled or self._source is None or self._run is None:
-            return
+            return False
         if self._capture_failed:
             self.client.runtime_metrics.record_dropped()
-            return
+            return False
         try:
             source = replace(self._source, observed_at=_utcnow())
             batch = AgentCaptureBatch(
@@ -726,6 +757,7 @@ class AgentRunContext:
             )
             sink = _sink(self.client)
             sink.capture_agent(batch, (trace,) if trace is not None else ())
+            return True
         except Exception as error:
             self._capture_failed = True
             self.client.runtime_metrics.record_dropped()
@@ -736,6 +768,7 @@ class AgentRunContext:
                 target=target,
                 error=error,
             )
+            return False
 
 
 def agent_run(

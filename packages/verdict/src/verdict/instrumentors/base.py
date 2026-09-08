@@ -105,9 +105,13 @@ def persist_trace(client: VerdictClient, trace: Trace) -> None:
             delattr(trace, "_verdict_agent_context")
         except AttributeError:
             pass
-        if agent_context.sampled:
-            agent_context.capture(trace)
-        return
+        if not agent_context.sampled:
+            return
+        if agent_context.capture(trace):
+            return
+        # The normalized Agent stream cannot resume after an ambiguous append:
+        # doing so could persist a sequence gap. Preserve the canonical provider
+        # Trace independently instead of discarding all later LLM telemetry.
     sink = client._capture_sink
     if sink is not None:
         sink.capture_trace(trace)

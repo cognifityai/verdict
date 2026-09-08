@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import runpy
 import subprocess
@@ -86,6 +87,173 @@ def test_file_transport_does_not_open_default_database(tmp_path: Path, monkeypat
     monkeypatch.chdir(tmp_path)
     _capture_file_run(tmp_path / "spool")
     assert not (tmp_path / "verdict.db").exists()
+
+
+def test_file_transport_creates_no_segment_until_the_first_record(tmp_path: Path) -> None:
+    sink = FileCaptureSink(
+        tmp_path,
+        redaction_mode="redact",
+        redaction_secret=None,
+    )
+    sink.close()
+    assert list(tmp_path.glob("verdict-agent-*.jsonl")) == []
+
+
+def test_file_transport_replays_spans_and_user_signals(tmp_path: Path) -> None:
+    spool = tmp_path / "spool"
+    database = tmp_path / "verdict.db"
+    client = verdict.init(
+        transport="file",
+        spool_directory=spool,
+        tenant_id="tenant-file",
+        instrumentors=[],
+    )
+    trace = Trace(
+        trace_id="trace-with-span",
+        started_at=datetime.now(timezone.utc),
+        provider="test",
+    )
+    safe_persist_trace(client, trace)
+    with verdict.trace_context(trace.trace_id):
+        with verdict.span("retrieve alice@example.com", owner="alice@example.com"):
+            pass
+    verdict.record_user_signal(trace.trace_id, "thumbs_up")
+    verdict.shutdown()
+
+    storage = SQLiteStorage(str(database))
+    try:
+        first = agent_transport.import_capture_records(spool, storage)
+        second = agent_transport.import_capture_records(spool, storage)
+        assert first.seen == first.stored == 3
+        assert second.seen == second.stored == 3
+        [span] = storage.list_spans()
+        [signal] = storage.list_user_signals()
+        assert span.trace_id == trace.trace_id
+        assert span.name == "retrieve <EMAIL>"
+        assert span.attributes == {"owner": "<EMAIL>"}
+        assert signal.trace_id == trace.trace_id
+        assert signal.kind == "thumbs_up"
+    finally:
+        storage.close()
+
+
+def test_file_transport_preserves_provider_traces_after_agent_stream_failure(
+    tmp_path: Path,
+) -> None:
+    class FailingSecondAgentRecord(FileCaptureSink):
+        def __init__(self, path: Path) -> None:
+            super().__init__(path, redaction_mode="redact", redaction_secret=None)
+            self.agent_calls = 0
+
+        def capture_agent(self, batch, traces=()) -> None:
+            self.agent_calls += 1
+            if self.agent_calls == 2:
+                raise OSError("transient write failure")
+            super().capture_agent(batch, traces)
+
+    spool = tmp_path / "spool"
+    client = verdict.init(
+        transport="file",
+        spool_directory=spool,
+        tenant_id="tenant-file",
+        instrumentors=[],
+    )
+    assert client._capture_sink is not None
+    client._capture_sink.close()
+    failing = FailingSecondAgentRecord(spool)
+    client._capture_sink = failing
+    with verdict.agent_run(name="agent") as run:
+        with run.turn(user_input="hello") as turn:
+            for trace_id in ("first", "second"):
+                trace = Trace(
+                    trace_id=trace_id,
+                    started_at=datetime.now(timezone.utc),
+                    provider="test",
+                )
+                apply_routing_context(client, trace)
+                safe_persist_trace(client, trace)
+            turn.set_output("done")
+    verdict.shutdown()
+
+    storage = SQLiteStorage(str(tmp_path / "verdict.db"))
+    try:
+        summary = agent_transport.import_capture_records(spool, storage)
+        assert summary.seen == 3
+        assert {trace.trace_id for trace in storage.list_traces(limit=10)} == {
+            "first",
+            "second",
+        }
+    finally:
+        storage.close()
+
+
+def test_failed_first_write_removes_the_empty_segment(tmp_path: Path) -> None:
+    class ZeroWriter:
+        def __init__(self, target: object) -> None:
+            self.target = target
+
+        def write(self, value: bytes) -> int:
+            raise OSError("injected write failure")
+
+        def close(self) -> None:
+            self.target.close()  # type: ignore[attr-defined]
+
+    sink = FileCaptureSink(tmp_path, redaction_mode="redact", redaction_secret=None)
+    sink._open_segment()
+    assert sink._file is not None
+    sink._file = ZeroWriter(sink._file)  # type: ignore[assignment]
+
+    with pytest.raises(OSError, match="write failure"):
+        sink.capture_trace(Trace(started_at=datetime.now(timezone.utc), provider="test"))
+
+    assert list(tmp_path.glob("verdict-agent-*.jsonl")) == []
+
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        {
+            "signal_id": "signal",
+            "trace_id": "trace",
+            "kind": "unknown",
+            "created_at": "2026-01-01T00:00:00+00:00",
+        },
+        {
+            "signal_id": "\ud800",
+            "trace_id": "trace",
+            "kind": "thumbs_up",
+            "created_at": "2026-01-01T00:00:00+00:00",
+        },
+    ],
+)
+def test_file_transport_rejects_malformed_user_signal_records(record: dict) -> None:
+    raw = json.dumps(
+        {"schema": agent_transport.CAPTURE_SCHEMA, "kind": "signal", "record": record}
+    ).encode()
+    with pytest.raises(ValueError, match="user signal"):
+        agent_transport.decode_capture_record(raw)
+
+
+def test_file_transport_rejects_malformed_span_record() -> None:
+    raw = json.dumps(
+        {
+            "schema": agent_transport.CAPTURE_SCHEMA,
+            "kind": "span",
+            "record": {
+                "span_id": "span",
+                "name": "name",
+                "trace_id": None,
+                "parent_name": None,
+                "started_at": "2026-01-01T00:00:00+00:00",
+                "ended_at": None,
+                "duration_ms": -1,
+                "attributes": {},
+                "error": None,
+            },
+        }
+    ).encode()
+    with pytest.raises(ValueError, match="duration"):
+        agent_transport.decode_capture_record(raw)
 
 
 def test_import_tolerates_only_incomplete_final_crash_fragment(
@@ -227,6 +395,7 @@ def test_file_transport_completes_short_writes(tmp_path: Path) -> None:
             pass
 
     sink = FileCaptureSink(tmp_path, redaction_mode="redact", redaction_secret=None)
+    sink._open_segment()
     assert sink._file is not None
     sink._file.close()
     writer = ShortWriter()
@@ -239,10 +408,9 @@ def test_file_transport_completes_short_writes(tmp_path: Path) -> None:
     record = b"".join(writer.parts)
     assert writer.calls > 1
     assert record.endswith(b"\n")
-    kind, batch, traces = agent_transport.decode_capture_record(record[:-1])
-    assert kind == "trace"
-    assert batch is None
-    assert len(traces) == 1
+    decoded = agent_transport.decode_capture_record(record[:-1])
+    assert decoded.kind == "trace"
+    assert decoded.trace is not None
 
 
 def test_partial_write_failure_abandons_segment_before_later_records(tmp_path: Path) -> None:
@@ -262,6 +430,7 @@ def test_partial_write_failure_abandons_segment_before_later_records(tmp_path: P
             self.target.close()  # type: ignore[attr-defined]
 
     sink = FileCaptureSink(tmp_path, redaction_mode="redact", redaction_secret=None)
+    sink._open_segment()
     assert sink._file is not None
     failing = PartialThenError(sink._file)
     sink._file = failing  # type: ignore[assignment]
@@ -281,7 +450,7 @@ def test_partial_write_failure_abandons_segment_before_later_records(tmp_path: P
 
     records = list(agent_transport.iter_capture_records(tmp_path, on_incomplete=mark_incomplete))
     assert incomplete == 1
-    assert [record[2][0].trace_id for record in records] == ["second"]
+    assert [record.trace.trace_id for record in records if record.trace is not None] == ["second"]
 
 
 def test_file_transport_switches_to_a_new_process_owned_file_after_fork(

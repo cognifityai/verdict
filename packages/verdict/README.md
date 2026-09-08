@@ -60,7 +60,9 @@ with verdict.agent_run(name="support-agent", session_id=session_id) as run:
 Supported provider calls inside the turn automatically create linked genuine
 `Trace` records. The SDK also exposes typed helpers for instructions, context,
 commands, tests, artifacts, retries, handoffs, feedback, and outcomes. Sync and
-async context managers share the same API contract.
+async context managers share the same API contract. With content capture on, a
+turn whose caller does not provide an output records missing response evidence;
+metadata-only capture records that content as not captured.
 
 To keep application processes off the database, select the bounded local file
 transport and later import its process-owned JSONL segments through canonical
@@ -74,11 +76,15 @@ verdict.init(transport="file", spool_directory="./verdict-capture")
 verdict-import agent-file ./verdict-capture --storage sqlite:///./verdict.db
 ```
 
-Use one spool directory per producer process. Files remain until an operator
-removes them after successful import; this transport does not claim remote
-delivery or acknowledgement. Completed appends bypass Python userspace
-buffering but are not `fsync`-ed. Quota or write failures increment the
-process-local `capture.dropped_records` metric and produce a bounded warning.
+The same file transport carries provider Traces, Agent evidence, manual spans,
+and user signals. Use one spool directory per producer process. Stop or quiesce
+that producer before importing or removing its files. Files remain until an
+operator removes them after successful import; this transport does not claim
+remote delivery or acknowledgement. Completed appends bypass Python userspace
+buffering but are not `fsync`-ed. If an Agent evidence stream fails, later
+provider calls fall back to standalone Trace records. Quota or write failures
+increment the process-local `capture.dropped_records` metric and produce a
+bounded warning.
 
 The Monitor UI previews an immutable count-based (older 80% / newer 20% by
 default) or explicit-date policy before activation. Each metric has its own

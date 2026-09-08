@@ -138,7 +138,9 @@ cancellation, failure, or completion are recorded without replacing the
 application exception. Supported provider calls that begin inside a turn link
 their genuine `Trace` to that turn. The Trace remains the sole owner of prompt,
 response, and raw-message content; the event contains bounded operational
-fields only. Sampling retains or omits the complete run as a unit.
+fields only. Sampling retains or omits the complete run as a unit. With content
+capture enabled, omitting `set_output()` records missing response evidence;
+metadata-only capture records the response as not captured.
 
 For an application host that should not hold database credentials, configure a
 separate local spool directory for each producer process:
@@ -158,16 +160,18 @@ verdict-import agent-file /var/spool/verdict/worker-1 \
   --storage postgresql://verdict@db/verdict
 ```
 
-The spool uses versioned JSONL with fixed record, segment, and directory byte
-limits. An incomplete final record from a process crash is reported and
-ignored; a malformed complete record fails the import. Retain the files until
-the import succeeds. The file transport does not delete files or provide
-delivery acknowledgement, network retry, or a remote collector. Completed
-appends bypass Python userspace buffering but are not `fsync`-ed against an
-operating-system or host failure. Check the process-local
-`capture.dropped_records` runtime metric for records rejected by a full or
-failed spool; equivalent failures produce one bounded warning per failure
-class.
+The spool carries provider Traces, Agent evidence, manual spans, and user
+signals in versioned JSONL with fixed record, segment, and directory byte
+limits. An incomplete final record from a process crash is reported and ignored;
+a malformed complete record fails the import. Retain the files until the import
+succeeds. The file transport does not delete files or provide delivery
+acknowledgement, network retry, or a remote collector. Completed appends bypass
+Python userspace buffering but are not `fsync`-ed against an operating-system or
+host failure. If an Agent evidence stream fails, later provider calls fall back
+to standalone Trace records rather than creating sequence gaps. Check the
+process-local `capture.dropped_records` runtime metric for records rejected by a
+full or failed spool; equivalent failures produce one bounded warning per
+failure class.
 
 ## 3b. Existing conversation export with `verdict-inspect`
 

@@ -20,26 +20,31 @@ not infer missing execution success or semantic correctness.
 One deterministic decision samples the whole run. Child runs inherit the
 parent decision. Context is task-local and is restored after nested or failed
 execution. Application exceptions remain authoritative; capture failure is
-reported without replacing an application result or exception.
+reported without replacing an application result or exception. Missing response
+evidence remains distinct from content that the caller deliberately disabled.
 
 A supported provider call snapshots the active turn when the call begins. Its
 genuine `Trace` and linked model-call event are written atomically. The Trace is
 the sole owner of prompt, response, and raw-message content. The event contains
-only bounded operational fields and the Trace identifier.
+only bounded operational fields and the Trace identifier. If the normalized
+Agent stream fails, it remains closed to prevent sequence gaps while later
+provider calls use the standalone Trace path.
 
-The default transport writes directly through the normalized storage port. An
-optional local file transport writes redacted, versioned JSONL records with
-fixed record, segment, and directory byte limits. Files are process-owned and a
+The default transport writes directly through the storage port. The same sink
+owns provider Traces, Agent evidence, manual spans, and user signals. An optional
+local file implementation writes redacted, versioned JSONL records with fixed
+record, segment, and directory byte limits. Files are process-owned and a
 producer uses its own spool directory. An append writes the complete record or
 abandons that segment; completed appends bypass Python userspace buffering but
 are not synchronized against an operating-system or host failure. Import
-replays complete records idempotently through the same normalized storage
-boundary. An incomplete final record is observable and ignored; a malformed
-complete record fails import. Quota and write failures increment a process-local
+replays complete records idempotently through each canonical storage boundary.
+An incomplete final record is observable and ignored; a malformed complete
+record fails import. Quota and write failures increment a process-local
 dropped-record counter and emit a bounded, non-sensitive warning without
 changing application behavior.
 
-Local files are not a delivery protocol. They are retained until an operator
+Local files are not a delivery protocol. A producer is stopped or quiesced
+before its files are imported or removed. Files are retained until an operator
 removes them and do not provide acknowledgements, remote authentication,
 network retry, or backpressure. Those guarantees belong to a future collector
 boundary.

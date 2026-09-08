@@ -13,10 +13,11 @@ the product is refined.
   handoff, feedback, and outcome events; and automatic links from supported
   provider calls to genuine LLM Traces.
 - A bounded local file transport writes redacted, process-owned versioned JSONL
-  segments that `verdict-import agent-file` replays idempotently through the
-  canonical normalized-evidence storage boundary. Completed records bypass
-  Python userspace buffering; rejected records are counted and warnings are
-  deduplicated without affecting application execution.
+  segments for provider Traces, Agent evidence, manual spans, and user signals.
+  `verdict-import agent-file` replays them idempotently through their canonical
+  storage boundaries. Completed records bypass Python userspace buffering;
+  rejected records are counted and warnings are deduplicated without affecting
+  application execution.
 
 ### Changed
 
@@ -35,6 +36,9 @@ the product is refined.
   it. Source-local turn and event identifiers remain isolated by run.
 - Deterministic Agent Run analysis reports typed test failures and retries when
   the instrumented application supplies that evidence.
+- A failed Agent evidence stream no longer discards later provider Traces from
+  the sampled run; those calls remain available as standalone Traces. Missing
+  turn output is now distinct from deliberately disabled content capture.
 - Agent Run exploration now pages through the complete newest-first run list;
   finding links continue to load their exact bounded set of affected runs.
 

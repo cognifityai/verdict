@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from verdict.agent_transport import AgentCaptureSink, FileCaptureSink, StorageCaptureSink
+from verdict.agent_transport import CaptureSink, FileCaptureSink, StorageCaptureSink
 from verdict.runtime_metrics import RuntimeMetrics
 from verdict.storage.base import Storage
 from verdict.storage.sqlite import SQLiteStorage
@@ -68,7 +68,7 @@ class VerdictClient:
 
     # Fields added after the published a17 constructor retain its positional order.
     transport: str = "storage"
-    _capture_sink: AgentCaptureSink | None = field(default=None, repr=False)
+    _capture_sink: CaptureSink | None = field(default=None, repr=False)
     runtime_metrics: RuntimeMetrics = field(
         default_factory=RuntimeMetrics,
         init=False,
@@ -169,7 +169,7 @@ def init(
             if not isinstance(storage, str) or storage != _DEFAULT_STORAGE_URL:
                 raise ValueError("file transport cannot also use a storage adapter")
             storage_inst = None
-            capture_sink: AgentCaptureSink = FileCaptureSink(
+            capture_sink: CaptureSink = FileCaptureSink(
                 spool_directory,
                 redaction_mode=redaction_mode,  # type: ignore[arg-type]
                 redaction_secret=redaction_secret,

@@ -2,7 +2,8 @@
 
 Patches `anthropic.resources.messages.Messages.create` and `Messages.stream`
 (plus their async variants) using `wrapt`. Captures a Trace per provider
-request, redacts content if enabled, and hands the Trace to client.storage.
+request, redacts content if enabled, and hands the Trace to the configured
+capture sink.
 
 The wrapper records both normal responses and streaming responses while passing
 provider objects through to user code with minimal behavioral change.

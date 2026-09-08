@@ -193,6 +193,72 @@ def test_run_sampling_is_all_or_nothing_and_standalone_traces_are_unchanged() ->
     assert storage.get_trace(standalone.trace_id) is not None
 
 
+def test_sampled_run_controls_the_real_provider_wrapper_sampling_decision() -> None:
+    from verdict.instrumentors.anthropic import AnthropicInstrumentor
+
+    storage = InMemoryStorage()
+    client = verdict.init(
+        storage=storage,
+        tenant_id="tenant-a",
+        sample_rate=1.0,
+        instrumentors=[],
+    )
+    instrumentor = AnthropicInstrumentor(client)
+    instrumentor._should_sample = lambda: False  # type: ignore[method-assign]
+
+    def provider_call(*args, **kwargs):
+        return SimpleNamespace(
+            model="claude-test",
+            usage=SimpleNamespace(input_tokens=3, output_tokens=2),
+            stop_reason="end_turn",
+            content=[SimpleNamespace(type="text", text="provider answer")],
+        )
+
+    with verdict.agent_run(name="agent") as run:
+        with run.turn(user_input="provider question") as turn:
+            response = instrumentor._wrap_create_sync(
+                provider_call,
+                None,
+                (),
+                {"model": "claude-test", "max_tokens": 20, "messages": []},
+            )
+            turn.set_output(response.content[0].text)
+
+    [bundle] = storage.list_agent_run_bundles("tenant-a")
+    [model_event] = [
+        event for event in bundle.events if event.event_type is AgentEventType.MODEL_CALL
+    ]
+    assert storage.get_trace(model_event.trace_id) is not None  # type: ignore[arg-type]
+
+
+def test_agent_stream_failure_preserves_later_provider_traces_standalone() -> None:
+    class FailingSecondAppend(InMemoryStorage):
+        def __init__(self) -> None:
+            super().__init__()
+            self.append_calls = 0
+
+        def append_agent_capture(self, batch, traces=()) -> None:
+            self.append_calls += 1
+            if self.append_calls == 2:
+                raise RuntimeError("transient append failure")
+            super().append_agent_capture(batch, traces)
+
+    storage = FailingSecondAppend()
+    client = verdict.init(storage=storage, tenant_id="tenant-a", instrumentors=[])
+    with verdict.agent_run(name="agent") as run:
+        with run.turn(user_input="hello") as turn:
+            for _ in range(2):
+                trace = _completed_trace()
+                apply_routing_context(client, trace)
+                safe_persist_trace(client, trace)
+            turn.set_output("done")
+
+    assert storage.append_calls == 2
+    assert len(storage.list_traces(limit=10)) == 2
+    [bundle] = storage.list_agent_run_bundles("tenant-a")
+    assert bundle.events == ()
+
+
 def test_invalid_agent_api_arguments_fail_before_writing() -> None:
     storage = InMemoryStorage()
     verdict.init(storage=storage, tenant_id="tenant-a", instrumentors=[])
@@ -215,12 +281,55 @@ def test_invalid_typed_helper_arguments_fail_at_the_call_site() -> None:
                 turn.set_output(42)
             with pytest.raises(ValueError, match="instruction name"):
                 turn.record_instruction(name="", text="policy")
+            with pytest.raises(ValueError, match="available"):
+                turn.record_instruction(name="policy", text="text", available="yes")  # type: ignore[arg-type]
+            turn.record_feedback(kind="thumbs_up")
             turn.record_outcome("score", math.nan)
             turn.set_output("done")
 
     bundle = storage.list_agent_run_bundles("tenant-a")[0]
     outcome = next(event for event in bundle.events if event.event_type is AgentEventType.OUTCOME)
     assert outcome.attributes["value"] == "<REDACTED>"
+    feedback = next(event for event in bundle.events if event.event_type is AgentEventType.FEEDBACK)
+    assert feedback.sequence == 0
+
+
+def test_unrepresentable_nested_evidence_is_omitted_without_breaking_sequence() -> None:
+    class BadMapping(dict):
+        def items(self):
+            raise RuntimeError("mapping unavailable")
+
+    storage = InMemoryStorage()
+    verdict.init(storage=storage, tenant_id="tenant-a", instrumentors=[])
+    with verdict.agent_run(name="agent") as run:
+        with run.turn(user_input="hello") as turn:
+            turn.record_context(name="record", value=BadMapping(secret="value"))
+            turn.record_feedback(kind="thumbs_up")
+            turn.set_output("done")
+
+    [bundle] = storage.list_agent_run_bundles("tenant-a")
+    assert [event.sequence for event in bundle.events] == [0, 1]
+    assert bundle.events[0].attributes["value"] == "<OMITTED:invalid>"
+
+
+def test_turn_without_output_distinguishes_missing_from_disabled_capture() -> None:
+    for capture_content, expected in (
+        (True, EvidenceState.MISSING),
+        (False, EvidenceState.NOT_CAPTURED),
+    ):
+        storage = InMemoryStorage()
+        verdict.init(
+            storage=storage,
+            tenant_id="tenant-a",
+            capture_content=capture_content,
+            instrumentors=[],
+        )
+        with verdict.agent_run(name="agent") as run:
+            with run.turn(user_input="hello"):
+                pass
+        [bundle] = storage.list_agent_run_bundles("tenant-a")
+        assert bundle.turns[0].response_state is expected
+        verdict.shutdown()
 
 
 def test_metadata_only_agent_capture_omits_every_content_field() -> None:
@@ -251,9 +360,9 @@ def test_metadata_only_agent_capture_omits_every_content_field() -> None:
                 output="private output",
             )
             turn.record_retry(reason="private reason", attempt=1)
-            turn.record_feedback(kind="thumbs_down", value="private feedback")
+            turn.record_feedback(kind="thumbs_down", value=True)
             turn.set_output("private response")
-        run.record_business_outcome("resolved", "private outcome")
+        run.record_business_outcome("resolved", True)
 
     bundle = storage.list_agent_run_bundles("tenant-a")[0]
     assert bundle.turns[0].request_state is EvidenceState.NOT_CAPTURED
@@ -383,6 +492,29 @@ def test_tool_exception_remains_authoritative_when_stringification_fails() -> No
     )
     assert result.status is ExecutionStatus.FAILED
     assert result.attributes["result"]["error_type"] == "OriginalFailure"
+    assert result.attributes["result"]["message"] == "<UNAVAILABLE>"
+
+
+def test_tool_exception_remains_authoritative_when_message_is_not_utf8() -> None:
+    class OriginalFailure(RuntimeError):
+        def __str__(self) -> str:
+            return "\ud800"
+
+    storage = InMemoryStorage()
+    verdict.init(storage=storage, tenant_id="tenant-a", instrumentors=[])
+
+    failure = OriginalFailure()
+    with pytest.raises(OriginalFailure) as caught:
+        with verdict.agent_run(name="agent") as run:
+            with run.turn(user_input="hello") as turn:
+                with turn.tool("lookup"):
+                    raise failure
+
+    assert caught.value is failure
+    [bundle] = storage.list_agent_run_bundles("tenant-a")
+    result = next(
+        event for event in bundle.events if event.event_type is AgentEventType.TOOL_RESULT
+    )
     assert result.attributes["result"]["message"] == "<UNAVAILABLE>"
 
 
