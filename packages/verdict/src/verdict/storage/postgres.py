@@ -33,6 +33,7 @@ from verdict.analysis_records import (
     validate_delivery_query,
 )
 from verdict.evidence import (
+    AgentCaptureBatch,
     AgentRunBundle,
     agent_run_bundle_from_json,
 )
@@ -61,6 +62,7 @@ from verdict.normalized_evidence import (
     merge_source_session,
     normalize_bundle_timestamps,
     prepare_agent_capture,
+    prepare_agent_capture_batch,
     require_same_tenant_linked_traces,
     source_session_from_row,
 )
@@ -869,7 +871,11 @@ class PostgresStorage:
             )
         return [by_id[run_id] for run_id in run_ids if run_id in by_id]
 
-    def _write_normalized_bundle_cursor(self, cur, bundle: AgentRunBundle) -> None:
+    def _write_normalized_bundle_cursor(
+        self,
+        cur,
+        bundle: AgentRunBundle | AgentCaptureBatch,
+    ) -> None:
         bundle = normalize_bundle_timestamps(bundle)
         tenant_id = bundle.run.tenant_id
         from psycopg.rows import dict_row
@@ -903,10 +909,7 @@ class PostgresStorage:
                 current_turns = {
                     row["turn_id"]: agent_turn_from_row(row) for row in read_cur.fetchall()
                 }
-                turns = [
-                    merge_agent_turn(current_turns.get(turn.turn_id), turn)
-                    for turn in turns
-                ]
+                turns = [merge_agent_turn(current_turns.get(turn.turn_id), turn) for turn in turns]
             events = list(bundle.events)
             if events:
                 read_cur.execute(
@@ -918,8 +921,7 @@ class PostgresStorage:
                     row["event_id"]: agent_event_from_row(row) for row in read_cur.fetchall()
                 }
                 events = [
-                    merge_agent_event(current_events.get(event.event_id), event)
-                    for event in events
+                    merge_agent_event(current_events.get(event.event_id), event) for event in events
                 ]
         cur.execute(
             """INSERT INTO import_sources (
@@ -1072,19 +1074,14 @@ class PostgresStorage:
         applied = {row[0] for row in cur.fetchall()}
         if migration_name not in applied:
             cur.execute(
-                "SELECT payload_json,content_hash FROM agent_run_bundles "
-                "ORDER BY tenant_id,run_id"
+                "SELECT payload_json,content_hash FROM agent_run_bundles ORDER BY tenant_id,run_id"
             )
             for payload, content_hash in cur.fetchall():
                 bundle = agent_run_bundle_from_json(payload)
                 if bundle.content_hash != content_hash:
-                    raise RuntimeError(
-                        "stored agent run bundle content hash is inconsistent"
-                    )
+                    raise RuntimeError("stored agent run bundle content hash is inconsistent")
                 linked_ids = tuple(
-                    event.trace_id
-                    for event in bundle.events
-                    if event.trace_id is not None
+                    event.trace_id for event in bundle.events if event.trace_id is not None
                 )
                 available_ids: set[str] = set()
                 if linked_ids:
@@ -1110,8 +1107,7 @@ class PostgresStorage:
                 $$"""  # nosec B608 -- compile-time message
             )
             cur.execute(
-                "DROP TRIGGER IF EXISTS reject_legacy_agent_run_bundle_write "
-                "ON agent_run_bundles"
+                "DROP TRIGGER IF EXISTS reject_legacy_agent_run_bundle_write ON agent_run_bundles"
             )
             cur.execute(
                 """CREATE TRIGGER reject_legacy_agent_run_bundle_write
@@ -1138,19 +1134,32 @@ class PostgresStorage:
         bundle: AgentRunBundle,
         traces: tuple[Trace, ...] = (),
     ) -> None:
+        sanitized, capture_traces, linked_trace_ids = prepare_agent_capture(bundle, traces)
+        self._store_agent_capture(sanitized, capture_traces, linked_trace_ids)
+
+    def append_agent_capture(
+        self,
+        batch: AgentCaptureBatch,
+        traces: tuple[Trace, ...] = (),
+    ) -> None:
+        sanitized, capture_traces, linked_trace_ids = prepare_agent_capture_batch(batch, traces)
+        self._store_agent_capture(sanitized, capture_traces, linked_trace_ids)
+
+    def _store_agent_capture(
+        self,
+        capture: AgentRunBundle | AgentCaptureBatch,
+        capture_traces: tuple[Trace, ...],
+        linked_trace_ids: frozenset[str],
+    ) -> None:
         from psycopg import IntegrityError
 
-        sanitized, capture_traces, linked_trace_ids = prepare_agent_capture(
-            bundle, traces
-        )
         try:
             with self._pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
                 for lock_key in (
-                    "agent-source-id:"
-                    f"{sanitized.run.tenant_id}:{sanitized.session.source_session_id}",
+                    f"agent-source-id:{capture.run.tenant_id}:{capture.session.source_session_id}",
                     "agent-source-locator:"
-                    f"{sanitized.run.tenant_id}:{sanitized.session.source_kind}:"
-                    f"{sanitized.session.source_locator_hash}",
+                    f"{capture.run.tenant_id}:{capture.session.source_kind}:"
+                    f"{capture.session.source_locator_hash}",
                 ):
                     cur.execute(
                         "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
@@ -1158,7 +1167,7 @@ class PostgresStorage:
                     )
                 cur.execute(
                     "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
-                    (f"agent-run:{sanitized.run.tenant_id}:{sanitized.run.run_id}",),
+                    (f"agent-run:{capture.run.tenant_id}:{capture.run.run_id}",),
                 )
                 prepared_traces = []
                 message_updates: set[str] = set()
@@ -1200,10 +1209,8 @@ class PostgresStorage:
                         linked_ids,
                     )
                     tenants = {trace_id: tenant_id for trace_id, tenant_id in cur.fetchall()}
-                    require_same_tenant_linked_traces(
-                        sanitized.run.tenant_id, linked_ids, tenants
-                    )
-                self._write_normalized_bundle_cursor(cur, sanitized)
+                    require_same_tenant_linked_traces(capture.run.tenant_id, linked_ids, tenants)
+                self._write_normalized_bundle_cursor(cur, capture)
         except IntegrityError as exc:
             raise ValueError("agent capture conflicts with existing evidence") from exc
 
@@ -1262,9 +1269,15 @@ class PostgresStorage:
                    ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
                    ON CONFLICT DO NOTHING""",
                 (
-                    run.analysis_id, run.tenant_id, run.scope_key, run.cutoff,
-                    run.completed_at, run.status.value, run.analyzer_version,
-                    run.input_fingerprint, payload,
+                    run.analysis_id,
+                    run.tenant_id,
+                    run.scope_key,
+                    run.cutoff,
+                    run.completed_at,
+                    run.status.value,
+                    run.analyzer_version,
+                    run.input_fingerprint,
+                    payload,
                 ),
             )
             cur.execute(
@@ -1281,8 +1294,11 @@ class PostgresStorage:
                    WHERE tenant_id=%s AND scope_key=%s AND analyzer_version=%s
                      AND input_fingerprint=%s AND status=%s""",
                 (
-                    run.tenant_id, run.scope_key, run.analyzer_version,
-                    run.input_fingerprint, run.status.value,
+                    run.tenant_id,
+                    run.scope_key,
+                    run.analyzer_version,
+                    run.input_fingerprint,
+                    run.status.value,
                 ),
             )
             prior = cur.fetchone()
@@ -1293,7 +1309,9 @@ class PostgresStorage:
                 raise ValueError("analysis input produced different content")
 
     def get_latest_deterministic_analysis_run(
-        self, tenant_id: str, scope_key: str,
+        self,
+        tenant_id: str,
+        scope_key: str,
     ) -> DeterministicAnalysisRun | None:
         row = self._fetchone(
             """SELECT payload_json FROM deterministic_analysis_runs
@@ -1304,7 +1322,8 @@ class PostgresStorage:
         return analysis_run_from_json(row[0]) if row is not None else None
 
     def save_notification_delivery_attempt(
-        self, attempt: NotificationDeliveryAttempt,
+        self,
+        attempt: NotificationDeliveryAttempt,
     ) -> None:
         payload = notification_attempt_to_json(attempt)
         with self._pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
@@ -1314,9 +1333,13 @@ class PostgresStorage:
                        attempted_at,outcome,payload_json
                    ) VALUES (%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING""",
                 (
-                    attempt.attempt_id, attempt.notification_id, attempt.tenant_id,
-                    attempt.destination_fingerprint, attempt.attempted_at,
-                    attempt.outcome.value, payload,
+                    attempt.attempt_id,
+                    attempt.notification_id,
+                    attempt.tenant_id,
+                    attempt.destination_fingerprint,
+                    attempt.attempted_at,
+                    attempt.outcome.value,
+                    payload,
                 ),
             )
             cur.execute(
@@ -1346,7 +1369,9 @@ class PostgresStorage:
         return [notification_attempt_from_json(row[0]) for row in rows]
 
     def notification_was_delivered(
-        self, notification_id: str, destination_fingerprint: str,
+        self,
+        notification_id: str,
+        destination_fingerprint: str,
     ) -> bool:
         validate_delivery_query(notification_id, destination_fingerprint, 1)
         row = self._fetchone(
@@ -1358,7 +1383,10 @@ class PostgresStorage:
         return row is not None
 
     def list_notification_delivery_attempts_for_tenant(
-        self, tenant_id: str, *, limit: int = 100,
+        self,
+        tenant_id: str,
+        *,
+        limit: int = 100,
     ) -> list[NotificationDeliveryAttempt]:
         _validate_agent_bundle_query(tenant_id, limit)
         rows = self._fetchall(
@@ -1397,20 +1425,26 @@ class PostgresStorage:
         monitor_snapshot_to_json(manifest, comparison)
         with self._pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
             self._save_monitor_policy(cur, policy)
-            self._save_monitor_snapshot(
-                cur, policy.policy_id, manifest, comparison
-            )
+            self._save_monitor_snapshot(cur, policy.policy_id, manifest, comparison)
 
     @staticmethod
     def _monitor_policy_payload(value) -> str:
-        return (json.dumps(value, sort_keys=True, separators=(",", ":"))
-                if isinstance(value, dict) else value)
+        return (
+            json.dumps(value, sort_keys=True, separators=(",", ":"))
+            if isinstance(value, dict)
+            else value
+        )
 
     def get_monitor_policy(self, policy_id: str) -> tuple[MonitorPolicy, str] | None:
         row = self._fetchone(
-            "SELECT payload_json,state FROM monitor_policies WHERE policy_id=%s", (policy_id,),
+            "SELECT payload_json,state FROM monitor_policies WHERE policy_id=%s",
+            (policy_id,),
         )
-        return (monitor_policy_from_json(self._monitor_policy_payload(row[0])), row[1]) if row else None
+        return (
+            (monitor_policy_from_json(self._monitor_policy_payload(row[0])), row[1])
+            if row
+            else None
+        )
 
     def get_active_monitor_policy(self, scope_key: str) -> MonitorPolicy | None:
         row = self._fetchone(
@@ -1436,8 +1470,8 @@ class PostgresStorage:
         with self._pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
             cur.execute("LOCK TABLE monitor_policies IN SHARE ROW EXCLUSIVE MODE")
             cur.execute(
-                "SELECT policy_id FROM monitor_policies "
-                "WHERE scope_key=%s AND state='active'", (scope_key,),
+                "SELECT policy_id FROM monitor_policies WHERE scope_key=%s AND state='active'",
+                (scope_key,),
             )
             row = cur.fetchone()
             current_id = row[0] if row else None
@@ -1453,16 +1487,20 @@ class PostgresStorage:
             cur.execute(
                 "UPDATE monitor_policies SET state='retired',updated_at=now() "
                 "WHERE scope_key=%s AND state IN ('active','candidate') "
-                "AND policy_id<>%s", (scope_key, policy_id),
+                "AND policy_id<>%s",
+                (scope_key, policy_id),
             )
             cur.execute(
-                "UPDATE monitor_policies SET state='active',updated_at=now() "
-                "WHERE policy_id=%s", (policy_id,),
+                "UPDATE monitor_policies SET state='active',updated_at=now() WHERE policy_id=%s",
+                (policy_id,),
             )
         return monitor_policy_from_json(self._monitor_policy_payload(target[0]))
 
     def _save_monitor_snapshot(
-        self, cur, policy_id: str, manifest: CohortManifest,
+        self,
+        cur,
+        policy_id: str,
+        manifest: CohortManifest,
         comparison: MonitorComparison,
     ) -> None:
         payload = monitor_snapshot_to_json(manifest, comparison)
@@ -1470,14 +1508,13 @@ class PostgresStorage:
             raise ValueError("monitor snapshot exceeds the 4 MiB storage contract")
         digest = hashlib.sha256(payload.encode()).hexdigest()
         cur.execute(
-            "SELECT payload_json FROM monitor_policies WHERE policy_id=%s", (policy_id,),
+            "SELECT payload_json FROM monitor_policies WHERE policy_id=%s",
+            (policy_id,),
         )
         policy_row = cur.fetchone()
         if policy_row is None:
             raise ValueError("unknown policy")
-        stored_policy = monitor_policy_from_json(
-            self._monitor_policy_payload(policy_row[0])
-        )
+        stored_policy = monitor_policy_from_json(self._monitor_policy_payload(policy_row[0]))
         if stored_policy.fingerprint != manifest.policy_fingerprint:
             raise ValueError("monitor snapshot does not match policy")
         cur.execute(
@@ -1535,7 +1572,8 @@ class PostgresStorage:
     ) -> tuple[CohortManifest, MonitorComparison] | None:
         row = self._fetchone(
             "SELECT payload_json FROM monitor_snapshots WHERE policy_id=%s "
-            "ORDER BY created_at DESC,write_sequence DESC LIMIT 1", (policy_id,),
+            "ORDER BY created_at DESC,write_sequence DESC LIMIT 1",
+            (policy_id,),
         )
         return monitor_snapshot_from_json(self._monitor_policy_payload(row[0])) if row else None
 
@@ -1544,7 +1582,8 @@ class PostgresStorage:
     ) -> tuple[CohortManifest, MonitorComparison] | None:
         row = self._fetchone(
             "SELECT payload_json FROM monitor_snapshots WHERE policy_id=%s "
-            "ORDER BY created_at ASC,write_sequence ASC LIMIT 1", (policy_id,),
+            "ORDER BY created_at ASC,write_sequence ASC LIMIT 1",
+            (policy_id,),
         )
         return monitor_snapshot_from_json(self._monitor_policy_payload(row[0])) if row else None
 
@@ -1553,7 +1592,7 @@ class PostgresStorage:
     ) -> tuple[CohortManifest, MonitorComparison] | None:
         row = self._fetchone(
             "SELECT payload_json FROM monitor_snapshots WHERE policy_id=%s "
-            "AND payload_json LIKE '%%\"status\":\"alert\"%%' "
+            'AND payload_json LIKE \'%%"status":"alert"%%\' '
             "ORDER BY created_at DESC,write_sequence DESC LIMIT 1",
             (policy_id,),
         )
@@ -1797,7 +1836,10 @@ class PostgresStorage:
         return [self._row_to_judgment(r) for r in rows]
 
     def list_judgments_for_trace(
-        self, trace_id: str, *, limit: int = 100,
+        self,
+        trace_id: str,
+        *,
+        limit: int = 100,
     ) -> list[Judgment]:
         if not isinstance(trace_id, str) or not trace_id or not 1 <= limit <= 10_000:
             raise ValueError("invalid trace judgment query")
@@ -1832,13 +1874,18 @@ class PostgresStorage:
         return [self._row_to_judgment(row) for row in rows]
 
     def has_completed_judgment(
-        self, trace_id: str, evaluator_fingerprint: str,
+        self,
+        trace_id: str,
+        evaluator_fingerprint: str,
     ) -> bool:
-        return self._fetchone(
-            "SELECT 1 FROM judgments WHERE trace_id=%s "
-            "AND evaluator_fingerprint=%s AND status=%s LIMIT 1",
-            (trace_id, evaluator_fingerprint, JudgmentStatus.COMPLETED.value),
-        ) is not None
+        return (
+            self._fetchone(
+                "SELECT 1 FROM judgments WHERE trace_id=%s "
+                "AND evaluator_fingerprint=%s AND status=%s LIMIT 1",
+                (trace_id, evaluator_fingerprint, JudgmentStatus.COMPLETED.value),
+            )
+            is not None
+        )
 
     # -- Evaluator health ------------------------------------------------
 

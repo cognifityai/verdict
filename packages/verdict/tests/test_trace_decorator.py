@@ -289,12 +289,14 @@ def test_invalid_explicit_trace_context_never_persists_an_orphan_link():
     client_mod.init(storage=storage, instrumentors=["none"])
     try:
         with trace_context("missing-trace"):
-            with span("invalid-link"):
+            with span("invalid-link") as captured_span:
                 pass
 
         [record] = storage.list_spans()
         assert record.trace_id is None
         assert record.attributes["verdict.link_status"] == "trace_not_found"
+        assert captured_span.trace_id is None
+        assert captured_span.attributes["verdict.link_status"] == "trace_not_found"
     finally:
         clear_context()
         client_mod.shutdown()

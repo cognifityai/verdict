@@ -12,6 +12,7 @@ from hashlib import sha256
 from typing import Any
 
 from verdict.evidence import (
+    AgentCaptureBatch,
     AgentEvent,
     AgentEventType,
     AgentRun,
@@ -22,12 +23,15 @@ from verdict.evidence import (
     PrivacyClassification,
     SourceSession,
 )
-from verdict.redaction import sanitize_agent_run_bundle, sanitize_trace
+from verdict.redaction import (
+    RedactionMode,
+    sanitize_agent_capture_batch,
+    sanitize_agent_run_bundle,
+    sanitize_trace,
+)
 from verdict.schema import Trace, populate_trace_analysis_fields
 
-LEGACY_AGENT_WRITER_ERROR = (
-    "legacy agent evidence writer detected after normalized migration"
-)
+LEGACY_AGENT_WRITER_ERROR = "legacy agent evidence writer detected after normalized migration"
 LEGACY_AGENT_WRITER_MIGRATION = "block_legacy_agent_evidence_writes_v1"
 
 
@@ -37,18 +41,25 @@ def prepare_agent_capture(
 ) -> tuple[AgentRunBundle, tuple[Trace, ...], frozenset[str]]:
     """Sanitize and validate capture-owned records before an atomic write."""
     sanitized_bundle = sanitize_agent_run_bundle(bundle)
-    event_links = tuple(
-        event.trace_id
-        for event in sanitized_bundle.events
-        if event.trace_id is not None
-    )
+    prepared, linked_ids = _prepare_linked_traces(sanitized_bundle.events, traces)
+    return sanitized_bundle, prepared, linked_ids
+
+
+def _prepare_linked_traces(
+    events: Sequence[AgentEvent],
+    traces: Sequence[Trace],
+    *,
+    mode: RedactionMode = "redact",
+    secret: str | None = None,
+) -> tuple[tuple[Trace, ...], frozenset[str]]:
+    event_links = tuple(event.trace_id for event in events if event.trace_id is not None)
     linked_ids = frozenset(event_links)
     if len(linked_ids) != len(event_links):
         raise ValueError("agent capture links one Trace to multiple AgentEvents")
     prepared: list[Trace] = []
     seen: set[str] = set()
     for source_trace in traces:
-        trace = sanitize_trace(deepcopy(source_trace))
+        trace = sanitize_trace(deepcopy(source_trace), mode=mode, secret=secret)
         populate_trace_analysis_fields(trace)
         if trace.trace_id in seen:
             raise ValueError("agent capture contains duplicate trace_id")
@@ -56,7 +67,22 @@ def prepare_agent_capture(
             raise ValueError("agent capture contains an unlinked Trace")
         seen.add(trace.trace_id)
         prepared.append(trace)
-    return sanitized_bundle, tuple(prepared), linked_ids
+    return tuple(prepared), linked_ids
+
+
+def prepare_agent_capture_batch(
+    batch: AgentCaptureBatch,
+    traces: Sequence[Trace],
+    *,
+    mode: RedactionMode = "redact",
+    secret: str | None = None,
+) -> tuple[AgentCaptureBatch, tuple[Trace, ...], frozenset[str]]:
+    """Sanitize and validate one append batch before an atomic write."""
+    sanitized_batch = sanitize_agent_capture_batch(batch, mode=mode, secret=secret)
+    prepared, linked_ids = _prepare_linked_traces(
+        sanitized_batch.events, traces, mode=mode, secret=secret
+    )
+    return sanitized_batch, prepared, linked_ids
 
 
 def require_same_tenant_linked_traces(
@@ -189,9 +215,7 @@ def merge_capture_trace(current: Trace | None, incoming: Trace) -> Trace:
             current.finish_reason, incoming.finish_reason, subject="Trace finish reason"
         ),
         error=_fill_optional(current.error, incoming.error, subject="Trace error"),
-        latency_ms=_fill_optional(
-            current.latency_ms, incoming.latency_ms, subject="Trace latency"
-        ),
+        latency_ms=_fill_optional(current.latency_ms, incoming.latency_ms, subject="Trace latency"),
         prompt_redacted=_fill_optional(
             current.prompt_redacted, incoming.prompt_redacted, subject="Trace prompt"
         ),
@@ -236,11 +260,7 @@ def merge_source_session(
         source_locator_hash=current.source_locator_hash,
         started_at=current.started_at,
         observed_at=max(current.observed_at, incoming.observed_at),
-        ended_at=max(
-            value
-            for value in (current.ended_at, incoming.ended_at)
-            if value is not None
-        )
+        ended_at=max(value for value in (current.ended_at, incoming.ended_at) if value is not None)
         if current.ended_at is not None or incoming.ended_at is not None
         else None,
     )
@@ -274,9 +294,7 @@ def merge_agent_run(current: AgentRun | None, incoming: AgentRun) -> AgentRun:
             incoming.ended_at,
             subject="run end",
         ),
-        agent_name=_fill_text(
-            current.agent_name, incoming.agent_name, subject="agent name"
-        ),
+        agent_name=_fill_text(current.agent_name, incoming.agent_name, subject="agent name"),
         agent_version=_fill_text(
             current.agent_version,
             incoming.agent_version,
@@ -296,12 +314,8 @@ def merge_agent_run(current: AgentRun | None, incoming: AgentRun) -> AgentRun:
         service_name=_fill_text(
             current.service_name, incoming.service_name, subject="service name"
         ),
-        environment=_fill_text(
-            current.environment, incoming.environment, subject="environment"
-        ),
-        instance_id=_fill_text(
-            current.instance_id, incoming.instance_id, subject="instance"
-        ),
+        environment=_fill_text(current.environment, incoming.environment, subject="environment"),
+        instance_id=_fill_text(current.instance_id, incoming.instance_id, subject="instance"),
     )
 
 
@@ -380,10 +394,7 @@ def merge_agent_event(current: AgentEvent | None, incoming: AgentEvent) -> Agent
     for name, value in incoming.attributes.items():
         if name not in attributes or attributes[name] is None or attributes[name] == "":
             attributes[name] = value
-        elif (
-            name == "source"
-            and capture_limit_marker
-        ):
+        elif name == "source" and capture_limit_marker:
             try:
                 attributes[name] = str(max(int(str(attributes[name])), int(str(value))))
             except ValueError as exc:
@@ -420,9 +431,7 @@ def merge_agent_event(current: AgentEvent | None, incoming: AgentEvent) -> Agent
         privacy_classification=privacy,
         omission_reason=omission_reason,
         trace_id=_fill_optional(current.trace_id, incoming.trace_id, subject="event Trace link"),
-        producer_id=_fill_text(
-            current.producer_id, incoming.producer_id, subject="event producer"
-        ),
+        producer_id=_fill_text(current.producer_id, incoming.producer_id, subject="event producer"),
         producer_sequence=_fill_optional(
             current.producer_sequence,
             incoming.producer_sequence,
@@ -436,42 +445,41 @@ def merge_agent_event(current: AgentEvent | None, incoming: AgentEvent) -> Agent
     )
 
 
-def normalize_bundle_timestamps(bundle: AgentRunBundle) -> AgentRunBundle:
+def normalize_bundle_timestamps(
+    bundle: AgentRunBundle | AgentCaptureBatch,
+) -> AgentRunBundle | AgentCaptureBatch:
     """Canonicalize persisted timestamps independently of SQL timezone settings."""
     utc = timezone.utc
-    return AgentRunBundle(
-        replace(
-            bundle.session,
-            started_at=bundle.session.started_at.astimezone(utc),
-            observed_at=bundle.session.observed_at.astimezone(utc),
-            ended_at=(
-                bundle.session.ended_at.astimezone(utc)
-                if bundle.session.ended_at
-                else None
-            ),
-        ),
-        replace(
-            bundle.run,
-            started_at=bundle.run.started_at.astimezone(utc),
-            ended_at=bundle.run.ended_at.astimezone(utc) if bundle.run.ended_at else None,
-        ),
-        tuple(
-            replace(
-                turn,
-                started_at=turn.started_at.astimezone(utc),
-                ended_at=turn.ended_at.astimezone(utc) if turn.ended_at else None,
-            )
-            for turn in bundle.turns
-        ),
-        tuple(
-            replace(event, occurred_at=event.occurred_at.astimezone(utc))
-            for event in bundle.events
-        ),
+    session = replace(
+        bundle.session,
+        started_at=bundle.session.started_at.astimezone(utc),
+        observed_at=bundle.session.observed_at.astimezone(utc),
+        ended_at=bundle.session.ended_at.astimezone(utc) if bundle.session.ended_at else None,
     )
+    run = replace(
+        bundle.run,
+        started_at=bundle.run.started_at.astimezone(utc),
+        ended_at=bundle.run.ended_at.astimezone(utc) if bundle.run.ended_at else None,
+    )
+    turns = tuple(
+        replace(
+            turn,
+            started_at=turn.started_at.astimezone(utc),
+            ended_at=turn.ended_at.astimezone(utc) if turn.ended_at else None,
+        )
+        for turn in bundle.turns
+    )
+    events = tuple(
+        replace(event, occurred_at=event.occurred_at.astimezone(utc)) for event in bundle.events
+    )
+    if isinstance(bundle, AgentRunBundle):
+        return AgentRunBundle(session, run, turns, events)
+    return AgentCaptureBatch(session, run, turns, events)
 
 
 def normalized_bundle_digest(bundle: AgentRunBundle) -> str:
     """Hash a normalized aggregate without reintroducing the legacy blob limit."""
+
     def encode_value(value: object) -> str:
         if isinstance(value, datetime):
             return value.isoformat()
@@ -550,9 +558,7 @@ def agent_run_from_row(row: Mapping[str, object]) -> AgentRun:
         agent_version=str(row["agent_version"] or ""),
         configuration_fingerprint=str(row["configuration_fingerprint"] or ""),
         session_id=str(row["session_id"]) if row.get("session_id") is not None else None,
-        parent_run_id=(
-            str(row["parent_run_id"]) if row.get("parent_run_id") is not None else None
-        ),
+        parent_run_id=(str(row["parent_run_id"]) if row.get("parent_run_id") is not None else None),
         service_name=str(row.get("service_name") or ""),
         environment=str(row.get("environment") or ""),
         instance_id=str(row.get("instance_id") or ""),
@@ -568,9 +574,7 @@ def agent_turn_from_row(row: Mapping[str, object]) -> AgentTurn:
         status=ExecutionStatus(str(row["status"])),
         ended_at=_datetime(row["ended_at"]),
         user_request_redacted=(
-            str(row["user_request_redacted"])
-            if row["user_request_redacted"] is not None
-            else None
+            str(row["user_request_redacted"]) if row["user_request_redacted"] is not None else None
         ),
         final_response_redacted=(
             str(row["final_response_redacted"])
@@ -599,14 +603,10 @@ def agent_event_from_row(row: Mapping[str, object]) -> AgentEvent:
         trace_id=str(row["trace_id"]) if row["trace_id"] is not None else None,
         producer_id=str(row.get("producer_id") or ""),
         producer_sequence=(
-            int(row["producer_sequence"])
-            if row.get("producer_sequence") is not None
-            else None
+            int(row["producer_sequence"]) if row.get("producer_sequence") is not None else None
         ),
         parent_event_id=(
-            str(row["parent_event_id"])
-            if row.get("parent_event_id") is not None
-            else None
+            str(row["parent_event_id"]) if row.get("parent_event_id") is not None else None
         ),
     )
 

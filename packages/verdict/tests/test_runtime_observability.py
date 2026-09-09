@@ -22,6 +22,7 @@ def test_real_persistence_boundary_records_bounded_capture_overhead() -> None:
     snapshot = client.runtime_metrics.snapshot(client.storage)
     assert snapshot["capture"]["attempts"] == 1
     assert snapshot["capture"]["failures"] == 0
+    assert snapshot["capture"]["dropped_records"] == 0
     assert snapshot["capture"]["overhead_ms"]["samples"] == 1
     assert snapshot["capture"]["overhead_ms"]["p50"] >= 0
     assert snapshot["buffer"] == {"enabled": False}
@@ -39,6 +40,7 @@ def test_persistence_failure_is_counted_without_exposing_exception_text() -> Non
     snapshot = client.runtime_metrics.snapshot(client.storage)
     assert snapshot["capture"]["attempts"] == 1
     assert snapshot["capture"]["failures"] == 1
+    assert snapshot["capture"]["dropped_records"] == 1
     assert "canary-database-password" not in str(snapshot)
 
 

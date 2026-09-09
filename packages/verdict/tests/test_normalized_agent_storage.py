@@ -20,6 +20,7 @@ from verdict import (
     agent_run_bundle_to_json,
 )
 from verdict.capture import AgentCaptureService
+from verdict.evidence import AgentCaptureBatch
 from verdict.storage import SQLiteStorage
 
 NOW = datetime(2026, 9, 6, tzinfo=timezone.utc)
@@ -387,9 +388,8 @@ def test_append_does_not_reconstruct_the_existing_run(
         lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("whole-run read")),
     )
 
-    storage.replace_agent_capture(
-        replace(bundle, turns=(*bundle.turns, appended_turn)),
-        (trace,),
+    storage.append_agent_capture(
+        AgentCaptureBatch(bundle.session, bundle.run, (appended_turn,)),
     )
 
     assert _table_count(database, "agent_turns") == 2
@@ -422,12 +422,14 @@ def test_opening_a17_bundle_store_migrates_it_without_changing_identity(tmp_path
             environment="",
             instance_id="",
         ),
-        events=(replace(
-            first.events[0],
-            producer_id="",
-            producer_sequence=None,
-            parent_event_id=None,
-        ),),
+        events=(
+            replace(
+                first.events[0],
+                producer_id="",
+                producer_sequence=None,
+                parent_event_id=None,
+            ),
+        ),
     )
     expected_first = replace(first, events=(replace(first.events[0], trace_id=None),))
     second = replace(
@@ -528,9 +530,12 @@ def test_sqlite_rejects_legacy_writes_after_normalized_migration(tmp_path: Path)
     bundle, _trace = _capture()
     SQLiteStorage(str(database)).close()
 
-    with sqlite3.connect(database) as connection, pytest.raises(
-        sqlite3.IntegrityError,
-        match=r"^legacy agent evidence writer detected after normalized migration$",
+    with (
+        sqlite3.connect(database) as connection,
+        pytest.raises(
+            sqlite3.IntegrityError,
+            match=r"^legacy agent evidence writer detected after normalized migration$",
+        ),
     ):
         connection.execute(
             "INSERT INTO agent_run_bundles VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -581,9 +586,12 @@ def test_sqlite_detects_orphan_from_an_earlier_normalized_writer(tmp_path: Path)
     ):
         SQLiteStorage(str(database))
 
-    with sqlite3.connect(database) as connection, pytest.raises(
-        sqlite3.IntegrityError,
-        match=r"^legacy agent evidence writer detected after normalized migration$",
+    with (
+        sqlite3.connect(database) as connection,
+        pytest.raises(
+            sqlite3.IntegrityError,
+            match=r"^legacy agent evidence writer detected after normalized migration$",
+        ),
     ):
         connection.execute("UPDATE agent_run_bundles SET status='failed'")
 
@@ -624,6 +632,11 @@ def test_corrupt_a17_bundle_aborts_migration_without_marking_it_complete(
         SQLiteStorage(str(database))
 
     with sqlite3.connect(database) as connection:
-        assert connection.execute("SELECT payload_json FROM agent_run_bundles").fetchone()[0] == payload
+        assert (
+            connection.execute("SELECT payload_json FROM agent_run_bundles").fetchone()[0]
+            == payload
+        )
         assert connection.execute("SELECT COUNT(*) FROM agent_runs").fetchone()[0] == 0
-        assert connection.execute("SELECT COUNT(*) FROM verdict_schema_migrations").fetchone()[0] == 0
+        assert (
+            connection.execute("SELECT COUNT(*) FROM verdict_schema_migrations").fetchone()[0] == 0
+        )

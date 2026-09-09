@@ -4,6 +4,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 import httpx
+import verdict
 from verdict.capture import AgentCaptureService
 from verdict.dashboard import agent_evidence_queries
 from verdict.dashboard.analysis_service import run_analysis
@@ -282,6 +283,33 @@ def test_local_insights_include_tenantless_historical_imports(tmp_path):
     assert unrelated["scope"]["traces"] == {
         "available": 0, "analyzed": 0, "complete": True,
     }
+
+
+def test_insights_reports_retries_captured_by_the_agent_sdk(tmp_path):
+    path = tmp_path / "sdk.db"
+    verdict.shutdown()
+    verdict.init(
+        storage=f"sqlite:///{path}",
+        tenant_id="sdk-tenant",
+        instrumentors=[],
+    )
+    try:
+        with verdict.agent_run(name="support-agent") as run:
+            with run.turn(user_input="retry the request") as turn:
+                turn.record_retry(reason="rate limit", attempt=1)
+                turn.record_test(command="pytest", exit_code=1, passed=2, failed=1)
+                turn.set_output("done")
+    finally:
+        verdict.shutdown()
+
+    report = build_agent_insights_bundle(path, tenant="sdk-tenant")
+
+    [comparison] = report["comparisons"]
+    assert comparison["source"] == "verdict_sdk"
+    assert comparison["retries"] == 1
+    assert comparison["retryState"] == "captured"
+    assert comparison["testFailures"] == 1
+    assert report["reliability"]["testFailures"] == 1
 
 
 def test_insights_marks_missing_responses_not_evaluable(tmp_path):

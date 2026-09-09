@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import abc
 import logging
-import threading
 import time
 from typing import TYPE_CHECKING
 
@@ -16,8 +15,6 @@ if TYPE_CHECKING:
 
 
 log = logging.getLogger("verdict.instrumentors")
-_persistence_warning_lock = threading.Lock()
-_warned_persistence_failures: set[tuple[str, str, type[BaseException]]] = set()
 
 
 def is_verdict_wrapt_wrapper(obj: object, *, owner: object | None = None) -> bool:
@@ -73,6 +70,15 @@ def apply_routing_context(client: VerdictClient, trace: Trace) -> None:
         if intent_key is not None:
             trace.tags = {**trace.tags, "verdict.intent_key": intent_key}
 
+        from verdict.agent import current_agent_trace_context
+
+        agent_context = current_agent_trace_context()
+        if agent_context is not None:
+            trace.tenant_id = agent_context.tenant_id
+            trace.session_id = agent_context.session_id
+            trace.tags = {**trace.tags, "verdict.agent_run_id": agent_context.run_id}
+            trace._verdict_agent_context = agent_context  # type: ignore[attr-defined]
+
         # Automatic provider/manual-span correlation is deliberately one-way.
         # Multiple provider traces can share one manual parent, so choosing one
         # Trace as a reverse SpanRecord.trace_id owner would be lossy.
@@ -90,7 +96,39 @@ def persist_trace(client: VerdictClient, trace: Trace) -> None:
     # Provider response fields are filled after Trace.__post_init__, so repeat
     # the schema guard at the final synchronous persistence boundary.
     trace.normalize_scalars()
-    client.storage.insert_trace(trace)
+    from verdict.agent import trace_agent_context
+    from verdict.agent_transport import StorageCaptureSink
+
+    agent_context = trace_agent_context(trace)
+    if agent_context is not None:
+        try:
+            delattr(trace, "_verdict_agent_context")
+        except AttributeError:
+            pass
+        if not agent_context.sampled:
+            return
+        if agent_context.capture(trace):
+            return
+        # The normalized Agent stream cannot resume after an ambiguous append:
+        # doing so could persist a sequence gap. Preserve the canonical provider
+        # Trace independently instead of discarding all later LLM telemetry.
+    sink = client._capture_sink
+    if sink is not None:
+        sink.capture_trace(trace)
+    elif client.storage is not None:
+        StorageCaptureSink(client.storage).capture_trace(trace)
+    else:
+        raise RuntimeError("Verdict capture transport is unavailable")
+
+
+def should_sample_trace(instrumentor: object, trace: Trace) -> bool:
+    """Apply one run decision, otherwise preserve instrumentor sampling."""
+    from verdict.agent import trace_agent_context
+
+    agent_context = trace_agent_context(trace)
+    if agent_context is not None:
+        return agent_context.sampled
+    return bool(instrumentor._should_sample())  # type: ignore[attr-defined]
 
 
 def _warn_persistence_failure_once(
@@ -100,24 +138,13 @@ def _warn_persistence_failure_once(
 ) -> None:
     """Emit one non-sensitive warning for each provider/backend/error class."""
     provider = trace.provider if isinstance(trace.provider, str) else type(trace.provider).__name__
-    storage_type = type(client.storage)
-    storage_name = f"{storage_type.__module__}.{storage_type.__qualname__}"
-    key = (provider, storage_name, type(exc))
-    with _persistence_warning_lock:
-        if key in _warned_persistence_failures:
-            return
-        _warned_persistence_failures.add(key)
-    try:
-        log.warning(
-            "Verdict discarded a %s trace after %s persistence failed with %s",
-            provider or "unknown-provider",
-            storage_name,
-            type(exc).__name__,
-        )
-    except Exception:
-        # A user-supplied logging handler must not turn telemetry into an
-        # application-path exception.
-        pass
+    target = client._capture_sink or client.storage
+    client.runtime_metrics.warn_capture_failure_once(
+        log,
+        evidence=f"a {provider or 'unknown-provider'} trace",
+        target=target,
+        error=exc,
+    )
 
 
 def safe_persist_trace(client: VerdictClient, trace: Trace) -> None:
@@ -133,6 +160,7 @@ def safe_persist_trace(client: VerdictClient, trace: Trace) -> None:
         persist_trace(client, trace)
     except Exception as exc:
         failed = True
+        client.runtime_metrics.record_dropped()
         _warn_persistence_failure_once(client, trace, exc)
     finally:
         client.runtime_metrics.record_capture(

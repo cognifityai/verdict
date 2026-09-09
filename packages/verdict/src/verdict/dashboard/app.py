@@ -1055,7 +1055,10 @@ def build_agent_insights_bundle(
                 elif event.event_type.value == "tool_call":
                     totals["tool_calls"] += 1
                     source_metrics[source]["tool_calls"] += 1
-            for name in ("tool_errors", "command_failures"):
+                elif event.event_type.value == "retry":
+                    totals["retries"] += 1
+                    source_metrics[source]["retries"] += 1
+            for name in ("tool_errors", "command_failures", "test_failures"):
                 value = analysis.metrics.get(name)
                 if isinstance(value, int):
                     totals[name] += value
@@ -1093,6 +1096,7 @@ def build_agent_insights_bundle(
                 "toolCalls": metrics["tool_calls"],
                 "toolErrors": metrics["tool_errors"],
                 "commandFailures": metrics["command_failures"],
+                "testFailures": metrics["test_failures"],
                 "inputTokens": metrics["trace_input_tokens"] or metrics["input_tokens"],
                 "outputTokens": metrics["trace_output_tokens"] or metrics["output_tokens"],
                 "averageModelLatencyMs": (
@@ -1110,8 +1114,8 @@ def build_agent_insights_bundle(
                 ),
                 "providerErrors": metrics["trace_errors"],
                 "runOutcomes": dict(sorted(source_outcomes[source].items())),
-                "retries": None,
-                "retryState": "not_captured",
+                "retries": metrics["retries"] if source == "verdict_sdk" else None,
+                "retryState": "captured" if source == "verdict_sdk" else "not_captured",
             })
         model_comparisons = []
         for (provider, model), metrics in sorted(trace_metrics.items()):
@@ -1173,6 +1177,8 @@ def build_agent_insights_bundle(
                 "traceOutcomes": dict(sorted(trace_outcomes.items())),
                 "toolErrors": totals["tool_errors"],
                 "commandFailures": totals["command_failures"],
+                "testFailures": totals["test_failures"],
+                "retries": totals["retries"],
             },
             "performance": {
                 "modelCalls": trace_scope["analyzed"] or model_calls,
@@ -1252,7 +1258,7 @@ def _empty_agent_insights() -> dict:
         },
         "reliability": {
             "runOutcomes": {}, "turnOutcomes": {}, "traceOutcomes": {},
-            "toolErrors": 0, "commandFailures": 0,
+            "toolErrors": 0, "commandFailures": 0, "testFailures": 0, "retries": 0,
         },
         "performance": {
             "modelCalls": 0, "toolCalls": 0, "inputTokens": 0, "outputTokens": 0,

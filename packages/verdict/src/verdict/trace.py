@@ -10,6 +10,7 @@ from __future__ import annotations
 import contextvars
 import functools
 import inspect
+import logging
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -31,9 +32,11 @@ from verdict.client import (  # noqa: F401
 )
 
 T = TypeVar("T")
+log = logging.getLogger("verdict")
 
 _current: contextvars.ContextVar[Span | None] = contextvars.ContextVar(
-    "verdict_current_span", default=None,
+    "verdict_current_span",
+    default=None,
 )
 
 
@@ -58,9 +61,7 @@ class Span:
     trace_id: str | None = None
     # Wall-clock timestamps for persistence (perf_counter above is monotonic and
     # not a real time; SpanRecord.started_at/ended_at need datetimes).
-    started_wall: datetime = field(
-        default_factory=lambda: datetime.now(timezone.utc)
-    )
+    started_wall: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     ended_wall: datetime | None = None
     span_id: str = field(default_factory=lambda: uuid4().hex)
     trace_link_state: TraceLinkState = TraceLinkState.NONE
@@ -85,11 +86,6 @@ class Span:
 def current_span() -> Span | None:
     """Return the innermost active span, or None."""
     return _current.get()
-
-
-_EXPLICIT_STATES = frozenset(
-    {TraceLinkState.EXPLICIT, TraceLinkState.INHERITED_EXPLICIT}
-)
 
 
 @contextmanager
@@ -150,36 +146,19 @@ def _persist_span(sp: Span) -> None:
     if client is None:
         return
     try:
+        from verdict.agent_transport import StorageCaptureSink
         from verdict.redaction import sanitize_span
         from verdict.schema import SpanRecord
 
-        linked_trace_id = sp.trace_id
-        attributes = dict(sp.attributes)
-        if linked_trace_id is not None and sp.trace_link_state in _EXPLICIT_STATES:
-            try:
-                trace_exists = getattr(client.storage, "trace_exists", None)
-                if callable(trace_exists):
-                    link_exists = bool(trace_exists(linked_trace_id))
-                else:
-                    link_exists = client.storage.get_trace(linked_trace_id) is not None
-            except Exception:
-                link_exists = False
-                attributes.setdefault("verdict.link_status", "trace_lookup_failed")
-            if not link_exists:
-                linked_trace_id = None
-                attributes.setdefault("verdict.link_status", "trace_not_found")
-                sp.trace_id = None
-                sp.trace_link_state = TraceLinkState.NONE
-                sp.attributes.update(attributes)
         record = SpanRecord(
             span_id=sp.span_id,
             name=sp.name,
-            trace_id=linked_trace_id,
+            trace_id=sp.trace_id,
             parent_name=sp.parent.name if sp.parent is not None else None,
             started_at=sp.started_wall,
             ended_at=sp.ended_wall,
             duration_ms=sp.duration_ms,
-            attributes=attributes,
+            attributes=dict(sp.attributes),
             error=sp.error,
         )
         sanitize_span(
@@ -187,13 +166,30 @@ def _persist_span(sp: Span) -> None:
             mode=client.redaction_mode,  # type: ignore[arg-type]
             secret=client.redaction_secret,
         )
-        client.storage.insert_span(record)
-    except Exception:
-        # Telemetry must never propagate into the caller's path.
-        pass
+        sink = client._capture_sink
+        if sink is None:
+            if client.storage is None:
+                raise RuntimeError("Verdict capture transport is unavailable")
+            sink = StorageCaptureSink(client.storage)
+        persisted = sink.capture_span(record)
+        if persisted.trace_id != sp.trace_id:
+            sp.trace_id = persisted.trace_id
+            sp.trace_link_state = TraceLinkState.NONE
+            sp.attributes.update(persisted.attributes)
+    except Exception as error:
+        client.runtime_metrics.record_dropped()
+        target = client._capture_sink or client.storage
+        client.runtime_metrics.warn_capture_failure_once(
+            log,
+            evidence="a manual span",
+            target=target,
+            error=error,
+        )
 
 
-def trace(name: str | None = None, **attributes: Any) -> Callable[[Callable[..., T]], Callable[..., T]]:
+def trace(
+    name: str | None = None, **attributes: Any
+) -> Callable[[Callable[..., T]], Callable[..., T]]:
     """Decorator that wraps a function call in a span.
 
     Usage:
@@ -206,6 +202,7 @@ def trace(name: str | None = None, **attributes: Any) -> Callable[[Callable[...,
         is_coro = inspect.iscoroutinefunction(fn)
 
         if is_coro:
+
             @functools.wraps(fn)
             async def awrapper(*args: Any, **kwargs: Any) -> T:
                 with span(span_name, **attributes):

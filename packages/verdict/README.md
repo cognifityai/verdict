@@ -21,7 +21,7 @@ content. Run timelines are read in bounded pages instead of from one growing
 serialized row.
 Bounded redacted content retention is on by default; metadata-only capture is
 an explicit SDK/programmatic override, not a shortcut in local setup. After capture, the same page becomes
-**Data sources**, reports the configured local evidence source, and requires
+**Data sources**, reports the evidence sources observed in the current store, and requires
 fresh in-process path approval for manual edits or rescans. Agent Run and LLM
 Trace totals remain visibly separate. The server requires a successful preview
 of the exact local or historical paths before it accepts the corresponding
@@ -39,6 +39,52 @@ verdict-dashboard --storage sqlite:///./verdict.db
 verdict-monitor run --storage sqlite:///./verdict.db
 verdict-service --storage sqlite:///./verdict.db --once
 ```
+
+Instrumented applications can add the execution structure surrounding those
+LLM calls without creating a second content record:
+
+```python
+import verdict
+
+verdict.init(storage="sqlite:///./verdict.db", service_name="support-api")
+with verdict.agent_run(name="support-agent", session_id=session_id) as run:
+    with run.turn(user_input=user_message) as turn:
+        with turn.tool("lookup_order", arguments={"order_id": order_id}) as tool:
+            order = lookup_order(order_id)
+            tool.set_output({"found": order is not None})
+        answer = respond(user_message, order)
+        turn.set_output(answer)
+    run.record_business_outcome("resolved", True)
+```
+
+Supported provider calls inside the turn automatically create linked genuine
+`Trace` records. The SDK also exposes typed helpers for instructions, context,
+commands, tests, artifacts, retries, handoffs, feedback, and outcomes. Sync and
+async context managers share the same API contract. With content capture on, a
+turn whose caller does not provide an output records missing response evidence;
+metadata-only capture records that content as not captured.
+
+To keep application processes off the database, select the bounded local file
+transport and later import its process-owned JSONL segments through canonical
+storage:
+
+```python
+verdict.init(transport="file", spool_directory="./verdict-capture")
+```
+
+```bash
+verdict-import agent-file ./verdict-capture --storage sqlite:///./verdict.db
+```
+
+The same file transport carries provider Traces, Agent evidence, manual spans,
+and user signals. Use one spool directory per producer process. Stop or quiesce
+that producer before importing or removing its files. Files remain until an
+operator removes them after successful import; this transport does not claim
+remote delivery or acknowledgement. Completed appends bypass Python userspace
+buffering but are not `fsync`-ed. If an Agent evidence stream fails, later
+provider calls fall back to standalone Trace records. Quota or write failures
+increment the process-local `capture.dropped_records` metric and produce a
+bounded warning.
 
 The Monitor UI previews an immutable count-based (older 80% / newer 20% by
 default) or explicit-date policy before activation. Each metric has its own
@@ -186,7 +232,9 @@ The packaged dashboard recognizes `agent` and `judge`; missing and custom labels
 remain visible as unclassified rather than being guessed. The SDK also exposes
 aggregate process-local capture/queue telemetry through
 `VerdictClient.runtime_metrics.snapshot(client.storage)`. It contains counts and
-latency summaries only, never prompts, responses, or exception text.
+latency summaries only, never prompts, responses, or exception text. The
+capture counts include `dropped_records`, which increases when a provider Trace
+or Agent SDK record cannot be retained.
 
 ```python
 import verdict

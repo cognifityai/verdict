@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { setupFailureMessage } from "./source-state.mjs";
+import { observedSourcePresentation, setupFailureMessage } from "./source-state.mjs";
 
 const panel = "border p-5";
 const style = { borderColor: "#26332e", background: "#111715" };
@@ -18,8 +18,9 @@ export function SetupWizard({ configUrl, onComplete, onNavigate, onRefresh, agen
   const [previewedImport, setPreviewedImport] = useState(null);
   const hasAgentRuns = Number(agentSummary.totalAgentRuns) > 0;
   const hasTraces = Number(agentSummary.totalTraces) > 0;
-  const configured = hasAgentRuns || hasTraces;
-  const [editing, setEditing] = useState(!configured);
+  const hasData = hasAgentRuns || hasTraces;
+  const sourcePresentation = observedSourcePresentation(agentSummary);
+  const [editing, setEditing] = useState(!hasData);
   const root = configUrl.replace(/\/api\/config$/, "");
   const serverOrigin = root || (typeof window === "undefined" ? "this Verdict server" : window.location.origin);
   useEffect(() => {
@@ -29,8 +30,8 @@ export function SetupWizard({ configUrl, onComplete, onNavigate, onRefresh, agen
       .catch((failure) => setError(setupFailureMessage(failure, serverOrigin)));
   }, [configUrl, serverOrigin]);
   useEffect(() => {
-    if (configured) setEditing(false);
-  }, [configured]);
+    if (hasData) setEditing(false);
+  }, [hasData]);
 
   async function post(path, payload) {
     setBusy(true); setError(null);
@@ -54,24 +55,28 @@ export function SetupWizard({ configUrl, onComplete, onNavigate, onRefresh, agen
   ];
   const localKey = JSON.stringify([claudeRoot, codexRoot]);
   const importKey = JSON.stringify([filePath, fileFormat]);
-  if (configured && !editing) {
-    const sourceText = (agentSummary.agentRunSources || [])
+  if (hasData && !editing) {
+    const sourceText = (Array.isArray(agentSummary.agentRunSources) ? agentSummary.agentRunSources : [])
+      .filter((item) => typeof item?.sourceKind === "string" && item.sourceKind && Number.isInteger(Number(item.runs)) && Number(item.runs) > 0)
       .map((item) => `${item.sourceKind}: ${item.runs}`)
       .join(" · ");
     return (
       <div className="max-w-4xl space-y-4">
         <section className={panel} style={style}>
-          <div className="text-xs font-mono" style={{ color: "#4ee1aa" }}>CONFIGURED DATA SOURCE</div>
-          <h2 className="text-lg font-semibold mt-1">{hasAgentRuns && hasTraces ? "Agent and LLM telemetry" : hasAgentRuns ? "Claude Code / Codex" : "LLM telemetry"}</h2>
+          <div className="text-xs font-mono" style={{ color: "#4ee1aa" }}>OBSERVED DATA SOURCES</div>
+          <h2 className="text-lg font-semibold mt-1">{sourcePresentation.heading}</h2>
           <div className="grid sm:grid-cols-3 gap-2 mt-4">
             <div className="border p-3" style={{ borderColor: "#26332e" }}><div className="text-xs" style={{ color: "#94a39d" }}>Agent Runs</div><div className="text-xl mt-1">{agentSummary.totalAgentRuns || 0}</div></div>
             <div className="border p-3" style={{ borderColor: "#26332e" }}><div className="text-xs" style={{ color: "#94a39d" }}>LLM Traces</div><div className="text-xl mt-1">{agentSummary.totalTraces || 0}</div></div>
-            <div className="border p-3" style={{ borderColor: "#26332e" }}><div className="text-xs" style={{ color: "#94a39d" }}>{hasAgentRuns ? "Local sources" : "Source type"}</div><div className="text-sm mt-1">{sourceText || "imported or instrumented telemetry"}{agentSummary.agentRunSourcesTruncated ? " · additional sources omitted" : ""}</div></div>
+            <div className="border p-3" style={{ borderColor: "#26332e" }}><div className="text-xs" style={{ color: "#94a39d" }}>{sourcePresentation.sourceLabel}</div><div className="text-sm mt-1">{sourceText || (hasAgentRuns ? "source details unavailable" : "trace records")}{agentSummary.agentRunSourcesTruncated ? " · additional sources omitted" : ""}</div></div>
           </div>
           {hasAgentRuns && <p className="text-sm mt-4" style={{ color: "#94a39d" }}>
-            Newest indexed run started: <span className="font-mono">{agentSummary.lastAgentCaptureAt || "unavailable"}</span>. A manual capture retains normalized evidence but not its one-time preview approval; re-approve paths for another manual rescan. If you explicitly save a daily schedule, those paths become durable local schedule configuration. No background watcher runs unless you start <code>verdict-service</code>.
+            Newest observed run started: <span className="font-mono">{agentSummary.lastAgentCaptureAt || "unavailable"}</span>.
+            {sourcePresentation.hasLocalAgents && <> Claude Code and Codex history can be manually rescanned or collected by a saved <code>verdict-service</code> schedule.</>}
+            {sourcePresentation.hasSdkAgents && <> New instrumented activity appears when the SDK writes to this store or its capture files are imported.</>}
+            {!sourcePresentation.hasLocalAgents && !sourcePresentation.hasSdkAgents && <> Add or import another source to collect more agent activity.</>}
           </p>}
-          <button onClick={() => setEditing(true)} className="mt-4 border px-4 py-2 text-sm">{hasAgentRuns ? "Edit or rescan" : "Add or import another source"}</button>
+          <button onClick={() => { if (sourcePresentation.hasSdkAgents && !sourcePresentation.hasLocalAgents) setSource("sdk"); setEditing(true); }} className="mt-4 border px-4 py-2 text-sm">Manage data sources</button>
         </section>
       </div>
     );
@@ -79,9 +84,9 @@ export function SetupWizard({ configUrl, onComplete, onNavigate, onRefresh, agen
   return (
     <div className="max-w-4xl space-y-4">
       <section className={panel} style={style}>
-        <div className="text-xs font-mono" style={{ color: "#4ee1aa" }}>{configured ? "EDIT DATA SOURCE" : "1 · SOURCE"}</div>
-        <h2 className="text-lg font-semibold mt-1">{configured ? "Review or rescan a source" : "What do you want to analyze?"}</h2>
-        {configured && <button onClick={() => setEditing(false)} className="mt-3 text-sm underline">Back to configured source</button>}
+        <div className="text-xs font-mono" style={{ color: "#4ee1aa" }}>{hasData ? "ADD OR RESCAN DATA" : "1 · SOURCE"}</div>
+        <h2 className="text-lg font-semibold mt-1">{hasData ? "Add, import, or rescan a source" : "What do you want to analyze?"}</h2>
+        {hasData && <button onClick={() => setEditing(false)} className="mt-3 text-sm underline">Back to observed sources</button>}
         <div className="grid sm:grid-cols-2 gap-2 mt-4">
           {sources.map(([id, label]) => <button key={id} onClick={() => { setSource(id); setResult(null); }}
             className="border p-3 text-left text-sm" style={{ borderColor: source === id ? "#4ee1aa" : "#26332e", background: source === id ? "#18221e" : "transparent" }}>{label}</button>)}
@@ -114,8 +119,8 @@ export function SetupWizard({ configUrl, onComplete, onNavigate, onRefresh, agen
 
       {source === "sdk" && <section className={panel} style={style}>
         <div className="text-xs font-mono" style={{ color: "#56b6ff" }}>2 · LIVE SDK</div>
-        <pre className="mt-4 p-4 overflow-x-auto text-sm" style={{ background: "#0b0e0d" }}>{`import verdict\nverdict.init(\n    storage="sqlite:///./verdict.db",\n    capture_content=True,\n    sample_rate=1.0,\n)`}</pre>
-        <p className="text-sm mt-3" style={{ color: "#94a39d" }}>A few calls appear immediately. Drift remains insufficient until an approved reference and current cohort have enough independent units.</p>
+        <pre className="mt-4 p-4 overflow-x-auto text-sm" style={{ background: "#0b0e0d" }}>{`import verdict\nverdict.init(\n    storage="sqlite:///./verdict.db",\n    capture_content=True,\n    sample_rate=1.0,\n)\n\nwith verdict.agent_run(name="support-agent", session_id=session_id) as run:\n    with run.turn(user_input=user_message) as turn:\n        answer = handle_request(user_message)\n        turn.set_output(answer)`}</pre>
+        <p className="text-sm mt-3" style={{ color: "#94a39d" }}>Supported provider calls inside the turn link to genuine LLM Traces automatically. Record tool, command, test, retry, feedback, and business-outcome evidence through the same turn. A few runs appear immediately; drift still needs reviewed reference and current cohorts.</p>
         <button onClick={() => onComplete("sdk")} className="mt-4 border px-4 py-2 text-sm">I ran a few calls — refresh Verdict</button>
       </section>}
 

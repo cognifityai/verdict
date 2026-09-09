@@ -68,7 +68,7 @@ from verdict.analysis_records import (
     DeterministicAnalysisRun,
     NotificationDeliveryAttempt,
 )
-from verdict.evidence import AgentRunBundle
+from verdict.evidence import AgentCaptureBatch, AgentRunBundle
 from verdict.monitoring import CohortManifest, MonitorComparison, MonitorPolicy
 from verdict.schema import (
     DriftRun,
@@ -95,6 +95,7 @@ class _FlushBarrier:
     """FIFO marker used to wait only for writes preceding a flush call."""
 
     reached: threading.Event
+
 
 # Sentinel pushed on close() so the drain loop wakes up and exits promptly
 # instead of waiting out a full flush_interval.
@@ -182,11 +183,7 @@ class BufferedStorage:
                 batch.append(item)
 
             # Greedily pull up to batch_size-1 more without blocking, to batch.
-            while (
-                not got_shutdown
-                and barrier is None
-                and len(batch) < self._batch_size
-            ):
+            while not got_shutdown and barrier is None and len(batch) < self._batch_size:
                 try:
                     nxt = self._queue.get_nowait()
                 except queue.Empty:
@@ -370,10 +367,19 @@ class BufferedStorage:
         self.replace_agent_capture(bundle)
 
     def replace_agent_capture(
-        self, bundle: AgentRunBundle, traces: tuple[Trace, ...] = (),
+        self,
+        bundle: AgentRunBundle,
+        traces: tuple[Trace, ...] = (),
     ) -> None:
         # Trace links and their hierarchy share one inner adapter transaction.
         self._maintenance(self._inner.replace_agent_capture, bundle, traces)
+
+    def append_agent_capture(
+        self,
+        batch: AgentCaptureBatch,
+        traces: tuple[Trace, ...] = (),
+    ) -> None:
+        self._maintenance(self._inner.append_agent_capture, batch, traces)
 
     def save_deterministic_analysis_run(self, run: DeterministicAnalysisRun) -> None:
         # Terminal immutable snapshots are rare control-plane writes. Persist
@@ -381,7 +387,8 @@ class BufferedStorage:
         self._maintenance(self._inner.save_deterministic_analysis_run, run)
 
     def save_notification_delivery_attempt(
-        self, attempt: NotificationDeliveryAttempt,
+        self,
+        attempt: NotificationDeliveryAttempt,
     ) -> None:
         # The durable terminal outcome is part of retry ownership, not capture
         # telemetry, so it must be visible before the caller attempts a retry.
@@ -415,14 +422,20 @@ class BufferedStorage:
 
     def has_agent_run_source_kind(self, tenant_id: str, source_kind: str) -> bool:
         return self._read(
-            self._inner.has_agent_run_source_kind, tenant_id, source_kind,
+            self._inner.has_agent_run_source_kind,
+            tenant_id,
+            source_kind,
         )
 
     def get_latest_deterministic_analysis_run(
-        self, tenant_id: str, scope_key: str,
+        self,
+        tenant_id: str,
+        scope_key: str,
     ) -> DeterministicAnalysisRun | None:
         return self._read(
-            self._inner.get_latest_deterministic_analysis_run, tenant_id, scope_key,
+            self._inner.get_latest_deterministic_analysis_run,
+            tenant_id,
+            scope_key,
         )
 
     def list_notification_delivery_attempts(
@@ -440,7 +453,9 @@ class BufferedStorage:
         )
 
     def notification_was_delivered(
-        self, notification_id: str, destination_fingerprint: str,
+        self,
+        notification_id: str,
+        destination_fingerprint: str,
     ) -> bool:
         return self._read(
             self._inner.notification_was_delivered,
@@ -449,7 +464,10 @@ class BufferedStorage:
         )
 
     def list_notification_delivery_attempts_for_tenant(
-        self, tenant_id: str, *, limit: int = 100,
+        self,
+        tenant_id: str,
+        *,
+        limit: int = 100,
     ) -> list[NotificationDeliveryAttempt]:
         return self._read(
             self._inner.list_notification_delivery_attempts_for_tenant,
@@ -518,7 +536,10 @@ class BufferedStorage:
         )
 
     def list_judgments_for_trace(
-        self, trace_id: str, *, limit: int = 100,
+        self,
+        trace_id: str,
+        *,
+        limit: int = 100,
     ) -> list[Judgment]:
         return self._read(self._inner.list_judgments_for_trace, trace_id, limit=limit)
 
@@ -537,11 +558,11 @@ class BufferedStorage:
         )
 
     def has_completed_judgment(
-        self, trace_id: str, evaluator_fingerprint: str,
+        self,
+        trace_id: str,
+        evaluator_fingerprint: str,
     ) -> bool:
-        return self._read(
-            self._inner.has_completed_judgment, trace_id, evaluator_fingerprint
-        )
+        return self._read(self._inner.has_completed_judgment, trace_id, evaluator_fingerprint)
 
     def list_drift_signals(self, *, limit: int = 100) -> list[DriftSignal]:
         return self._read(self._inner.list_drift_signals, limit=limit)
@@ -567,9 +588,7 @@ class BufferedStorage:
             limit=limit,
         )
 
-    def list_spans(
-        self, *, trace_id: str | None = None, limit: int = 100
-    ) -> list[SpanRecord]:
+    def list_spans(self, *, trace_id: str | None = None, limit: int = 100) -> list[SpanRecord]:
         return self._read(self._inner.list_spans, trace_id=trace_id, limit=limit)
 
     def list_user_signals(self, *, limit: int = 1000) -> list[UserSignalRecord]:
@@ -627,7 +646,10 @@ class BufferedStorage:
         comparison: MonitorComparison,
     ) -> None:
         self._maintenance(
-            self._inner.save_monitor_candidate, policy, manifest, comparison,
+            self._inner.save_monitor_candidate,
+            policy,
+            manifest,
+            comparison,
         )
 
     def activate_monitor_policy(
@@ -644,7 +666,10 @@ class BufferedStorage:
         self, policy_id: str, manifest: CohortManifest, comparison: MonitorComparison
     ) -> None:
         self._maintenance(
-            self._inner.save_monitor_snapshot, policy_id, manifest, comparison,
+            self._inner.save_monitor_snapshot,
+            policy_id,
+            manifest,
+            comparison,
         )
 
     def save_monitor_successor(

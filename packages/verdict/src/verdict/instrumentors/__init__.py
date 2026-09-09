@@ -5,7 +5,7 @@ sites at import time via `wrapt`.
 2. `install()` calls `wrapt.wrap_function_wrapper` on every call site we care about.
 3. `uninstall()` reverses it (used in tests).
 4. Wrappers convert SDK-shaped calls into vendor-neutral `Trace` records
-   and hand them to `client.storage`.
+   and hand them to the configured capture sink.
 """
 
 from verdict.instrumentors.anthropic import AnthropicInstrumentor

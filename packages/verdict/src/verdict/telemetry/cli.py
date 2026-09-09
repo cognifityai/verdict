@@ -9,6 +9,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+from verdict.agent_transport import import_capture_records
 from verdict.client import _resolve_storage
 from verdict.telemetry.files import SUPPORTED_FORMATS, iter_telemetry_file
 from verdict.telemetry.http import JsonHttpClient
@@ -49,6 +50,10 @@ def build_parser() -> argparse.ArgumentParser:
     file_parser.add_argument("path", type=Path)
     file_parser.add_argument("--format", choices=sorted(SUPPORTED_FORMATS), default="auto")
     _add_storage(file_parser)
+
+    agent_file = sub.add_parser("agent-file", help="Import Verdict Agent SDK JSONL capture records")
+    agent_file.add_argument("path", type=Path)
+    agent_file.add_argument("--storage", default="sqlite:///./verdict.db")
 
     local = sub.add_parser("local", help="Capture local Claude Code and Codex histories")
     local.add_argument("--claude-root", type=Path, default=Path("~/.claude/projects"))
@@ -187,7 +192,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "local":
             storage = _open_storage(args.storage)
             try:
-                summary = capture_local_agents(
+                local_summary = capture_local_agents(
                     storage,
                     tenant_id=args.tenant_id or "__verdict_local__",
                     claude_root=args.claude_root.expanduser(),
@@ -196,7 +201,24 @@ def main(argv: list[str] | None = None) -> int:
                 )
             finally:
                 storage.close()
-            print(json.dumps(summary.as_dict(), sort_keys=True))
+            print(json.dumps(local_summary.as_dict(), sort_keys=True))
+            return 0
+        if args.command == "agent-file":
+            storage = _open_storage(args.storage)
+            try:
+                capture_summary = import_capture_records(args.path, storage)
+            finally:
+                storage.close()
+            print(
+                json.dumps(
+                    {
+                        "seen": capture_summary.seen,
+                        "stored": capture_summary.stored,
+                        "incomplete": capture_summary.incomplete,
+                    },
+                    sort_keys=True,
+                )
+            )
             return 0
         context = ImportContext(
             adapter="otlp" if args.command == "receive-otlp" else args.command,
@@ -227,16 +249,16 @@ def main(argv: list[str] | None = None) -> int:
             results = _api_source(args, context)
         storage = _open_storage(args.storage)
         try:
-            summary = import_into_storage(results, storage)
+            import_summary = import_into_storage(results, storage)
         finally:
             storage.close()
         print(
             json.dumps(
                 {
-                    "seen": summary.seen,
-                    "stored": summary.stored,
-                    "skipped": summary.skipped,
-                    "skip_reasons": summary.skip_reasons,
+                    "seen": import_summary.seen,
+                    "stored": import_summary.stored,
+                    "skipped": import_summary.skipped,
+                    "skip_reasons": import_summary.skip_reasons,
                 },
                 sort_keys=True,
             )

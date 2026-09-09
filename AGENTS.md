@@ -10,8 +10,10 @@ captures supported provider calls, stores traces, evaluates responses with a
 rubric, and helps inspect quality, cost, latency, and drift across similar
 workloads.
 
-Current scope includes individual LLM calls plus source-bounded local Claude
-Code/Codex session, run, turn, model-call, tool, command, and test evidence.
+Current scope includes individual LLM calls plus normalized session, run, turn,
+model-call, tool, command, and test evidence from local Claude Code/Codex
+history or explicit application SDK contexts. SDK capture can write directly to
+Verdict storage or to bounded local files for later import.
 Verdict does not infer authoritative task success, artifact state, deployment
 success, or retry causality when the source history does not establish it.
 

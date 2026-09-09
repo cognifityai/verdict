@@ -14,7 +14,7 @@ from verdict.analysis_records import (
     DeterministicAnalysisRun,
     NotificationDeliveryAttempt,
 )
-from verdict.evidence import AgentRunBundle
+from verdict.evidence import AgentCaptureBatch, AgentRunBundle
 from verdict.monitoring import CohortManifest, MonitorComparison, MonitorPolicy
 from verdict.schema import (
     DriftRun,
@@ -33,17 +33,13 @@ def _validate_drift_run_snapshot(
 ) -> None:
     """Validate a completed run before any adapter mutates durable state."""
     if run.signal_count != len(signals):
-        raise ValueError(
-            "drift run signal_count does not match the provided signal list"
-        )
+        raise ValueError("drift run signal_count does not match the provided signal list")
     signal_ids: set[str] = set()
     for signal in signals:
         if signal.run_id != run.run_id:
             raise ValueError("every drift signal must reference the owning run_id")
         if signal.evaluator_fingerprint != run.evaluator_fingerprint:
-            raise ValueError(
-                "every drift signal must match the run evaluator_fingerprint"
-            )
+            raise ValueError("every drift signal must match the run evaluator_fingerprint")
         if signal.signal_id in signal_ids:
             raise ValueError("drift run contains duplicate signal_id values")
         signal_ids.add(signal.signal_id)
@@ -110,6 +106,12 @@ class Storage(Protocol):
         traces: tuple[Trace, ...] = (),
     ) -> None: ...
 
+    def append_agent_capture(
+        self,
+        batch: AgentCaptureBatch,
+        traces: tuple[Trace, ...] = (),
+    ) -> None: ...
+
     def replace_agent_run_bundle(self, bundle: AgentRunBundle) -> None: ...
 
     def get_agent_run_bundle(
@@ -128,15 +130,19 @@ class Storage(Protocol):
     def has_agent_run_source_kind(self, tenant_id: str, source_kind: str) -> bool: ...
 
     def save_deterministic_analysis_run(
-        self, run: DeterministicAnalysisRun,
+        self,
+        run: DeterministicAnalysisRun,
     ) -> None: ...
 
     def get_latest_deterministic_analysis_run(
-        self, tenant_id: str, scope_key: str,
+        self,
+        tenant_id: str,
+        scope_key: str,
     ) -> DeterministicAnalysisRun | None: ...
 
     def save_notification_delivery_attempt(
-        self, attempt: NotificationDeliveryAttempt,
+        self,
+        attempt: NotificationDeliveryAttempt,
     ) -> None: ...
 
     def list_notification_delivery_attempts(
@@ -148,11 +154,16 @@ class Storage(Protocol):
     ) -> list[NotificationDeliveryAttempt]: ...
 
     def notification_was_delivered(
-        self, notification_id: str, destination_fingerprint: str,
+        self,
+        notification_id: str,
+        destination_fingerprint: str,
     ) -> bool: ...
 
     def list_notification_delivery_attempts_for_tenant(
-        self, tenant_id: str, *, limit: int = 100,
+        self,
+        tenant_id: str,
+        *,
+        limit: int = 100,
     ) -> list[NotificationDeliveryAttempt]: ...
 
     def save_monitor_policy(self, policy: MonitorPolicy) -> None: ...
@@ -219,7 +230,10 @@ class Storage(Protocol):
     def insert_judgment(self, judgment: Judgment) -> None: ...
 
     def list_judgments_for_trace(
-        self, trace_id: str, *, limit: int = 100,
+        self,
+        trace_id: str,
+        *,
+        limit: int = 100,
     ) -> list[Judgment]: ...
 
     def list_latest_judgments_for_evaluator(
@@ -231,7 +245,9 @@ class Storage(Protocol):
     ) -> list[Judgment]: ...
 
     def has_completed_judgment(
-        self, trace_id: str, evaluator_fingerprint: str,
+        self,
+        trace_id: str,
+        evaluator_fingerprint: str,
     ) -> bool: ...
 
     def list_judgments_for_cluster(
@@ -245,17 +261,23 @@ class Storage(Protocol):
     def insert_evaluator_health(self, record: EvaluatorHealthRecord) -> None: ...
 
     def list_evaluator_health(
-        self, *, evaluator_fingerprint: str | None = None, limit: int = 100,
+        self,
+        *,
+        evaluator_fingerprint: str | None = None,
+        limit: int = 100,
     ) -> list[EvaluatorHealthRecord]: ...
 
     def insert_drift_signal(self, signal: DriftSignal) -> None: ...
 
     def replace_drift_run(
-        self, run: DriftRun, signals: list[DriftSignal],
+        self,
+        run: DriftRun,
+        signals: list[DriftSignal],
     ) -> None: ...
 
     def get_latest_drift_run_snapshot(
-        self, evaluator_fingerprint: str,
+        self,
+        evaluator_fingerprint: str,
     ) -> tuple[DriftRun, list[DriftSignal]] | None: ...
 
     def delete_drift_signals_between(
@@ -282,7 +304,10 @@ class Storage(Protocol):
     def insert_span(self, span: SpanRecord) -> None: ...
 
     def list_spans(
-        self, *, trace_id: str | None = None, limit: int = 100,
+        self,
+        *,
+        trace_id: str | None = None,
+        limit: int = 100,
     ) -> list[SpanRecord]: ...
 
     # -- User signals (thumbs/regenerate/abandon, for the correlator) -------

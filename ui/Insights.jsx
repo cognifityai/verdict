@@ -46,6 +46,7 @@ export function Insights({ url, onOpenRuns, mode = "findings" }) {
     ["Agent turn outcomes", counts.turns ? displayCounts(data.reliability.turnOutcomes) : "Not available — no Agent Runs captured"],
     ["Tool errors", agentEvidenceValue(data.dataHealth, data.reliability.toolErrors)],
     ["Command failures", agentEvidenceValue(data.dataHealth, data.reliability.commandFailures)],
+    ["Test failures", agentEvidenceValue(data.dataHealth, data.reliability.testFailures ?? 0)],
     ["Judge-eligible traces", traceEvidence.judgeEligible],
     ["Traces without judge evidence", traceEvidence.notEvaluable],
   ]} comparisons={data.modelComparisons} />;
@@ -89,6 +90,7 @@ export function Insights({ url, onOpenRuns, mode = "findings" }) {
       <Section title="Reliability" rows={[
         ["Tool errors", agentEvidenceValue(data.dataHealth, data.reliability.toolErrors)],
         ["Command failures", agentEvidenceValue(data.dataHealth, data.reliability.commandFailures)],
+        ["Test failures", agentEvidenceValue(data.dataHealth, data.reliability.testFailures ?? 0)],
         ["Run outcomes", agentEvidenceValue(data.dataHealth, displayCounts(data.reliability.runOutcomes))],
         ["Turn outcomes", agentEvidenceValue(data.dataHealth, displayCounts(data.reliability.turnOutcomes))],
       ]} />
@@ -105,7 +107,7 @@ export function Insights({ url, onOpenRuns, mode = "findings" }) {
     </div>
     <section className="border p-5" style={{ borderColor: C.border, background: C.panel }}>
       <h2 className="font-semibold">Agent-run comparisons</h2>
-      <div className="overflow-x-auto mt-3"><table className="w-full text-sm"><thead><tr style={{ color: C.faint }}><th className="text-left p-2">Source</th><th className="text-right p-2">Runs / outcomes</th><th className="text-right p-2">Model calls</th><th className="text-right p-2">Tool / command failures</th><th className="text-right p-2">Tokens</th><th className="text-right p-2">Latency</th><th className="text-right p-2">Retries</th><th className="text-right p-2">Cost</th></tr></thead><tbody>{data.comparisons.map((row) => <tr key={row.source} className="border-t" style={{ borderColor: C.border }}><td className="p-2">{row.source}</td><td className="text-right p-2">{row.runs} · {displayCounts(row.runOutcomes)}</td><td className="text-right p-2">{row.modelCalls}</td><td className="text-right p-2">{row.toolErrors} / {row.commandFailures}</td><td className="text-right p-2">{row.inputTokens + row.outputTokens}</td><td className="text-right p-2">{row.averageModelLatencyMs == null ? "Not captured" : `${row.averageModelLatencyMs} ms`}</td><td className="text-right p-2">{row.retryState === "not_captured" ? "Not captured" : row.retries}</td><td className="text-right p-2">{row.costUsd == null ? "Not captured" : `$${row.costUsd}`}{row.costState === "partial" ? " (partial)" : ""}</td></tr>)}</tbody></table></div>
+      <div className="overflow-x-auto mt-3"><table className="w-full text-sm"><thead><tr style={{ color: C.faint }}><th className="text-left p-2">Source</th><th className="text-right p-2">Runs / outcomes</th><th className="text-right p-2">Model calls</th><th className="text-right p-2">Tool / command / test failures</th><th className="text-right p-2">Tokens</th><th className="text-right p-2">Latency</th><th className="text-right p-2">Retries</th><th className="text-right p-2">Cost</th></tr></thead><tbody>{data.comparisons.map((row) => <tr key={row.source} className="border-t" style={{ borderColor: C.border }}><td className="p-2">{row.source}</td><td className="text-right p-2">{row.runs} · {displayCounts(row.runOutcomes)}</td><td className="text-right p-2">{row.modelCalls}</td><td className="text-right p-2">{row.toolErrors} / {row.commandFailures} / {row.testFailures ?? "Not captured"}</td><td className="text-right p-2">{row.inputTokens + row.outputTokens}</td><td className="text-right p-2">{row.averageModelLatencyMs == null ? "Not captured" : `${row.averageModelLatencyMs} ms`}</td><td className="text-right p-2">{row.retryState === "captured" ? row.retries : "Not captured"}</td><td className="text-right p-2">{row.costUsd == null ? "Not captured" : `$${row.costUsd}`}{row.costState === "partial" ? " (partial)" : ""}</td></tr>)}</tbody></table></div>
     </section>
   </div>;
 }

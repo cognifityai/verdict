@@ -26,6 +26,7 @@ from verdict.analysis_records import (
     DeterministicAnalysisRun,
     NotificationDeliveryAttempt,
 )
+from verdict.evidence import AgentCaptureBatch
 from verdict.instrumentors.base import apply_routing_context, persist_trace
 from verdict.monitor_inputs import load_monitor_units
 from verdict.monitoring import (
@@ -407,6 +408,59 @@ def test_live_postgres_serializes_equivalent_agent_capture_replays():
         assert first._fetchone(
             "SELECT COUNT(*) FROM agent_runs WHERE tenant_id=%s", (tenant,)
         )[0] == 1
+    finally:
+        first._exec("DELETE FROM agent_runs WHERE tenant_id=%s", (tenant,))
+        first._exec("DELETE FROM import_sources WHERE tenant_id=%s", (tenant,))
+        first.close()
+        second.close()
+
+
+def test_live_postgres_serializes_concurrent_agent_event_appends():
+    suffix = uuid4().hex
+    tenant = f"agent-append-{suffix}"
+    now = datetime.now(timezone.utc)
+    source = verdict.SourceSession(
+        f"source-{suffix}", tenant, "verdict_sdk", "c" * 64, now, now
+    )
+    run = verdict.AgentRun(
+        f"run-{suffix}", source.source_session_id, tenant, now,
+        verdict.ExecutionStatus.UNKNOWN,
+    )
+    turn = verdict.AgentTurn(
+        f"turn-{suffix}", run.run_id, 0, now, verdict.ExecutionStatus.UNKNOWN
+    )
+    events = tuple(
+        verdict.AgentEvent(
+            f"event-{index}-{suffix}",
+            turn.turn_id,
+            index,
+            now,
+            verdict.AgentEventType.FEEDBACK,
+            verdict.ExecutionStatus.COMPLETED,
+            "verdict:sdk",
+            {"kind": "thumbs_up", "value": True},
+            verdict.PrivacyClassification.REDACTED,
+            producer_id="worker",
+            producer_sequence=index,
+        )
+        for index in range(2)
+    )
+    first = PostgresStorage(DSN, min_pool=1, max_pool=1)
+    second = PostgresStorage(DSN, min_pool=1, max_pool=1)
+    first.append_agent_capture(AgentCaptureBatch(source, run, (turn,)))
+    barrier = threading.Barrier(2)
+
+    def append(item):
+        storage, event = item
+        barrier.wait()
+        storage.append_agent_capture(AgentCaptureBatch(source, run, (turn,), (event,)))
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            list(executor.map(append, ((first, events[0]), (second, events[1]))))
+        loaded = first.get_agent_run_bundle(tenant, run.run_id)
+        assert loaded is not None
+        assert [event.sequence for event in loaded.events] == [0, 1]
     finally:
         first._exec("DELETE FROM agent_runs WHERE tenant_id=%s", (tenant,))
         first._exec("DELETE FROM import_sources WHERE tenant_id=%s", (tenant,))

@@ -75,8 +75,7 @@ def record_user_signal(trace_id: str, kind: str) -> None:
     # client, which defeats the "catch it early" purpose.
     if kind not in VALID_SIGNAL_KINDS:
         raise ValueError(
-            f"Unknown user-signal kind {kind!r}. "
-            f"Valid kinds are: {sorted(VALID_SIGNAL_KINDS)}"
+            f"Unknown user-signal kind {kind!r}. Valid kinds are: {sorted(VALID_SIGNAL_KINDS)}"
         )
 
     client = get_client()
@@ -90,6 +89,20 @@ def record_user_signal(trace_id: str, kind: str) -> None:
     # caller's request path. (We do NOT wrap the validation above in this —
     # that's a programming error and is meant to escape.)
     try:
-        client.storage.insert_user_signal(record)
-    except Exception:  # pragma: no cover — defensive; telemetry must not crash caller
-        log.warning("Failed to record user signal (trace_id=%s kind=%s)", trace_id, kind, exc_info=True)
+        from verdict.agent_transport import StorageCaptureSink
+
+        sink = client._capture_sink
+        if sink is None:
+            if client.storage is None:
+                raise RuntimeError("Verdict capture transport is unavailable")
+            sink = StorageCaptureSink(client.storage)
+        sink.capture_user_signal(record)
+    except Exception as error:  # pragma: no cover — defensive telemetry boundary
+        client.runtime_metrics.record_dropped()
+        target = client._capture_sink or client.storage
+        client.runtime_metrics.warn_capture_failure_once(
+            log,
+            evidence="a user signal",
+            target=target,
+            error=error,
+        )

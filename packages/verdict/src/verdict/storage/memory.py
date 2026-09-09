@@ -25,6 +25,7 @@ from verdict.analysis_records import (
     validate_delivery_query,
 )
 from verdict.evidence import (
+    AgentCaptureBatch,
     AgentEvent,
     AgentRun,
     AgentRunBundle,
@@ -49,6 +50,7 @@ from verdict.normalized_evidence import (
     merge_source_session,
     normalize_bundle_timestamps,
     prepare_agent_capture,
+    prepare_agent_capture_batch,
     require_same_tenant_linked_traces,
 )
 from verdict.redaction import (
@@ -178,9 +180,7 @@ class InMemoryStorage:
                 (
                     event
                     for (scope, owner_run_id, _event_id), event in self._agent_events.items()
-                    if scope == tenant_id
-                    and owner_run_id == run_id
-                    and event.turn_id in turn_ids
+                    if scope == tenant_id and owner_run_id == run_id and event.turn_id in turn_ids
                 ),
                 key=lambda item: (item.turn_id, item.sequence, item.event_id),
             )
@@ -192,33 +192,43 @@ class InMemoryStorage:
         bundle: AgentRunBundle,
         traces: tuple[Trace, ...] = (),
     ) -> None:
-        sanitized, capture_traces, linked_trace_ids = prepare_agent_capture(
-            bundle, traces
-        )
+        sanitized, capture_traces, linked_trace_ids = prepare_agent_capture(bundle, traces)
+        self._store_agent_capture(sanitized, capture_traces, linked_trace_ids)
+
+    def append_agent_capture(
+        self,
+        batch: AgentCaptureBatch,
+        traces: tuple[Trace, ...] = (),
+    ) -> None:
+        sanitized, capture_traces, linked_trace_ids = prepare_agent_capture_batch(batch, traces)
+        self._store_agent_capture(sanitized, capture_traces, linked_trace_ids)
+
+    def _store_agent_capture(
+        self,
+        capture: AgentRunBundle | AgentCaptureBatch,
+        capture_traces: tuple[Trace, ...],
+        linked_trace_ids: frozenset[str],
+    ) -> None:
         with self._agent_evidence_lock:
-            sanitized = normalize_bundle_timestamps(sanitized)
+            capture = normalize_bundle_timestamps(capture)
             prepared_traces = [
                 merge_capture_trace(self._traces.get(trace.trace_id), trace)
                 for trace in capture_traces
             ]
-            tenant_id = sanitized.run.tenant_id
-            source_key = (tenant_id, sanitized.session.source_session_id)
-            source = merge_source_session(
-                self._import_sources.get(source_key), sanitized.session
-            )
-            run_key = (tenant_id, sanitized.run.run_id)
-            run = merge_agent_run(self._agent_runs.get(run_key), sanitized.run)
+            tenant_id = capture.run.tenant_id
+            source_key = (tenant_id, capture.session.source_session_id)
+            source = merge_source_session(self._import_sources.get(source_key), capture.session)
+            run_key = (tenant_id, capture.run.run_id)
+            run = merge_agent_run(self._agent_runs.get(run_key), capture.run)
             turns = [
-                merge_agent_turn(
-                    self._agent_turns.get((tenant_id, run.run_id, turn.turn_id)), turn
-                )
-                for turn in sanitized.turns
+                merge_agent_turn(self._agent_turns.get((tenant_id, run.run_id, turn.turn_id)), turn)
+                for turn in capture.turns
             ]
             events = [
                 merge_agent_event(
                     self._agent_events.get((tenant_id, run.run_id, event.event_id)), event
                 )
-                for event in sanitized.events
+                for event in capture.events
             ]
             locator_owner = next(
                 (
@@ -263,7 +273,11 @@ class InMemoryStorage:
                     trace_owner = next(
                         (
                             value.event_id
-                            for (scope, _owner_run_id, _event_id), value in self._agent_events.items()
+                            for (
+                                scope,
+                                _owner_run_id,
+                                _event_id,
+                            ), value in self._agent_events.items()
                             if scope == tenant_id and value.trace_id == event.trace_id
                         ),
                         event.event_id,
@@ -274,7 +288,11 @@ class InMemoryStorage:
                     producer_owner = next(
                         (
                             value.event_id
-                            for (scope, owner_run_id, _event_id), value in self._agent_events.items()
+                            for (
+                                scope,
+                                owner_run_id,
+                                _event_id,
+                            ), value in self._agent_events.items()
                             if scope == tenant_id
                             and owner_run_id == run.run_id
                             and value.producer_id == event.producer_id
@@ -292,25 +310,17 @@ class InMemoryStorage:
                 for trace_id in linked_trace_ids
                 if trace_id in prepared_by_id or trace_id in self._traces
             }
-            require_same_tenant_linked_traces(
-                tenant_id, tuple(linked_trace_ids), trace_tenants
-            )
+            require_same_tenant_linked_traces(tenant_id, tuple(linked_trace_ids), trace_tenants)
             with self._cluster_v2_lock:
                 for trace in prepared_traces:
                     self._traces[trace.trace_id] = trace
             self._import_sources[source_key] = copy.deepcopy(source)
             self._agent_runs[run_key] = copy.deepcopy(run)
             self._agent_turns.update(
-                {
-                    (tenant_id, run.run_id, turn.turn_id): copy.deepcopy(turn)
-                    for turn in turns
-                }
+                {(tenant_id, run.run_id, turn.turn_id): copy.deepcopy(turn) for turn in turns}
             )
             self._agent_events.update(
-                {
-                    (tenant_id, run.run_id, event.event_id): copy.deepcopy(event)
-                    for event in events
-                }
+                {(tenant_id, run.run_id, event.event_id): copy.deepcopy(event) for event in events}
             )
 
     def replace_agent_run_bundle(self, bundle: AgentRunBundle) -> None:
@@ -376,7 +386,9 @@ class InMemoryStorage:
             self._analysis_inputs[input_key] = run.analysis_id
 
     def get_latest_deterministic_analysis_run(
-        self, tenant_id: str, scope_key: str,
+        self,
+        tenant_id: str,
+        scope_key: str,
     ) -> DeterministicAnalysisRun | None:
         with self._analysis_lock:
             matches = []
@@ -384,10 +396,15 @@ class InMemoryStorage:
                 parsed = analysis_run_from_json(payload)
                 if parsed.tenant_id == tenant_id and parsed.scope_key == scope_key:
                     matches.append(parsed)
-        return max(matches, key=lambda value: (value.completed_at, value.analysis_id)) if matches else None
+        return (
+            max(matches, key=lambda value: (value.completed_at, value.analysis_id))
+            if matches
+            else None
+        )
 
     def save_notification_delivery_attempt(
-        self, attempt: NotificationDeliveryAttempt,
+        self,
+        attempt: NotificationDeliveryAttempt,
     ) -> None:
         payload = notification_attempt_to_json(attempt)
         with self._analysis_lock:
@@ -410,7 +427,8 @@ class InMemoryStorage:
                 for payload in self._notification_attempts.values()
             ]
         attempts = [
-            value for value in attempts
+            value
+            for value in attempts
             if value.notification_id == notification_id
             and value.destination_fingerprint == destination_fingerprint
         ]
@@ -418,17 +436,24 @@ class InMemoryStorage:
         return attempts[:limit]
 
     def notification_was_delivered(
-        self, notification_id: str, destination_fingerprint: str,
+        self,
+        notification_id: str,
+        destination_fingerprint: str,
     ) -> bool:
         return any(
             attempt.outcome is DeliveryOutcome.DELIVERED
             for attempt in self.list_notification_delivery_attempts(
-                notification_id, destination_fingerprint, limit=1000,
+                notification_id,
+                destination_fingerprint,
+                limit=1000,
             )
         )
 
     def list_notification_delivery_attempts_for_tenant(
-        self, tenant_id: str, *, limit: int = 100,
+        self,
+        tenant_id: str,
+        *,
+        limit: int = 100,
     ) -> list[NotificationDeliveryAttempt]:
         _validate_agent_bundle_query(tenant_id, limit)
         with self._analysis_lock:
@@ -466,9 +491,7 @@ class InMemoryStorage:
             existing_snapshot = self._monitor_snapshots.get(snapshot_key)
             if existing_snapshot is not None and existing_snapshot != snapshot_payload:
                 raise ValueError("monitor snapshot identity has different content")
-            self._monitor_policies.setdefault(
-                policy.policy_id, (policy_payload, "candidate")
-            )
+            self._monitor_policies.setdefault(policy.policy_id, (policy_payload, "candidate"))
             self._monitor_snapshots.setdefault(snapshot_key, snapshot_payload)
 
     def get_monitor_policy(self, policy_id: str) -> tuple[MonitorPolicy, str] | None:
@@ -489,8 +512,11 @@ class InMemoryStorage:
             }
             for payload, state in reversed(self._monitor_policies.values()):
                 policy = monitor_policy_from_json(payload)
-                if (state == "candidate" and policy.scope_key == scope_key
-                        and policy.policy_id in policies_with_snapshots):
+                if (
+                    state == "candidate"
+                    and policy.scope_key == scope_key
+                    and policy.policy_id in policies_with_snapshots
+                ):
                     return policy
         return None
 
@@ -506,8 +532,11 @@ class InMemoryStorage:
                 raise ValueError("unknown monitor policy")
             for other_id, (payload, state) in list(self._monitor_policies.items()):
                 policy = monitor_policy_from_json(payload)
-                if (other_id != policy_id and policy.scope_key == scope_key
-                        and state in {"active", "candidate"}):
+                if (
+                    other_id != policy_id
+                    and policy.scope_key == scope_key
+                    and state in {"active", "candidate"}
+                ):
                     self._monitor_policies[other_id] = (payload, "retired")
             self._monitor_policies[policy_id] = (stored[0], "active")
             self._active_monitor_policies[scope_key] = policy_id
@@ -521,7 +550,10 @@ class InMemoryStorage:
             stored_policy = self._monitor_policies.get(policy_id)
             if stored_policy is None:
                 raise ValueError("unknown policy")
-            if monitor_policy_from_json(stored_policy[0]).fingerprint != manifest.policy_fingerprint:
+            if (
+                monitor_policy_from_json(stored_policy[0]).fingerprint
+                != manifest.policy_fingerprint
+            ):
                 raise ValueError("monitor snapshot does not match policy")
             key = (policy_id, manifest.snapshot_id)
             existing = self._monitor_snapshots.get(key)
@@ -564,7 +596,8 @@ class InMemoryStorage:
     ) -> tuple[CohortManifest, MonitorComparison] | None:
         with self._monitor_lock:
             rows = [
-                payload for (stored_policy, _snapshot), payload in self._monitor_snapshots.items()
+                payload
+                for (stored_policy, _snapshot), payload in self._monitor_snapshots.items()
                 if stored_policy == policy_id
             ]
         return monitor_snapshot_from_json(rows[-1]) if rows else None
@@ -574,7 +607,8 @@ class InMemoryStorage:
     ) -> tuple[CohortManifest, MonitorComparison] | None:
         with self._monitor_lock:
             rows = [
-                payload for (stored_policy, _snapshot), payload in self._monitor_snapshots.items()
+                payload
+                for (stored_policy, _snapshot), payload in self._monitor_snapshots.items()
                 if stored_policy == policy_id
             ]
         return monitor_snapshot_from_json(rows[0]) if rows else None
@@ -655,9 +689,7 @@ class InMemoryStorage:
             for tid in doomed:
                 self._traces.pop(tid, None)
             self._agent_events = {
-                key: replace(event, trace_id=None)
-                if event.trace_id in doomed_set
-                else event
+                key: replace(event, trace_id=None) if event.trace_id in doomed_set else event
                 for key, event in self._agent_events.items()
             }
         retained_parent_span_ids = {
@@ -718,7 +750,10 @@ class InMemoryStorage:
         return out
 
     def list_judgments_for_trace(
-        self, trace_id: str, *, limit: int = 100,
+        self,
+        trace_id: str,
+        *,
+        limit: int = 100,
     ) -> list[Judgment]:
         if not isinstance(trace_id, str) or not trace_id or not 1 <= limit <= 10_000:
             raise ValueError("invalid trace judgment query")
@@ -763,7 +798,9 @@ class InMemoryStorage:
         )[:limit]
 
     def has_completed_judgment(
-        self, trace_id: str, evaluator_fingerprint: str,
+        self,
+        trace_id: str,
+        evaluator_fingerprint: str,
     ) -> bool:
         return any(
             item.trace_id == trace_id
@@ -1169,8 +1206,11 @@ class InMemoryStorage:
             config = json.loads(version.fit_definition_json).get("config", {})
             candidate_ids = [
                 assignment.trace_id
-                for (tenant, candidate_version, _), assignment
-                in self._trace_cluster_assignments.items()
+                for (
+                    tenant,
+                    candidate_version,
+                    _,
+                ), assignment in self._trace_cluster_assignments.items()
                 if tenant == authorized_tenant
                 and candidate_version == version_id
                 and assignment.origin == "fit"

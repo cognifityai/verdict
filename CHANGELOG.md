@@ -6,6 +6,19 @@ the product is refined.
 
 ## [Unreleased]
 
+### Added
+
+- A framework-neutral Agent Run SDK provides sync and async run, turn, and tool
+  contexts; typed instruction, context, command, test, artifact, retry,
+  handoff, feedback, and outcome events; and automatic links from supported
+  provider calls to genuine LLM Traces.
+- A bounded local file transport writes redacted, process-owned versioned JSONL
+  segments for provider Traces, Agent evidence, manual spans, and user signals.
+  `verdict-import agent-file` replays them idempotently through their canonical
+  storage boundaries. Completed records bypass Python userspace buffering;
+  rejected records are counted and warnings are deduplicated without affecting
+  application execution.
+
 ### Changed
 
 - Claude Code history capture now coalesces split records for the same provider
@@ -21,8 +34,19 @@ the product is refined.
 - Agent runs can retain optional session, parent-run, service, environment,
   instance, producer, and producer-sequence correlation when a source exposes
   it. Source-local turn and event identifiers remain isolated by run.
+- Deterministic Agent Run analysis reports typed test failures and retries when
+  the instrumented application supplies that evidence.
+- A failed Agent evidence stream no longer discards later provider Traces from
+  the sampled run; those calls remain available as standalone Traces. Missing
+  turn output is now distinct from deliberately disabled content capture.
 - Agent Run exploration now pages through the complete newest-first run list;
   finding links continue to load their exact bounded set of affected runs.
+
+### Fixed
+
+- Provider calls started by inherited background work after an Agent Turn closes
+  remain standalone, and the data-source summary identifies observed SDK and
+  local-agent evidence without treating all Agent Runs as local history.
 
 ## [0.1.0a17] - 2026-09-07
 

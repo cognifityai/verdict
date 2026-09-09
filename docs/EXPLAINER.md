@@ -14,9 +14,10 @@ telemetry you already collect. Both paths store the same normalized traces
 locally by default, run rubric-based evaluation with a judge model you choose,
 and expose quality, cost, and drift across your own traffic.
 
-For agents, Verdict works at the LLM-call layer: planning prompts, tool-selection
-prompts, replanning prompts, and final-response prompts can all be captured when
-they go through a supported provider SDK.
+For agents, Verdict captures supported provider calls and can also retain the
+application-declared run, turn, tool, command, test, retry, feedback, and outcome
+structure around them. The provider `Trace` owns LLM content; the linked event
+does not duplicate it.
 
 ## What Verdict Does
 
@@ -39,14 +40,18 @@ they go through a supported provider SDK.
   intent instead of only as one global average.
 - Provides local inspection tools and a dashboard for exploring traces, judge
   results, and drift signals.
+- Provides sync and async Agent Run contexts with typed event helpers and a
+  bounded local file transport for application hosts that should not connect to
+  the Verdict database.
 - Includes calibration scripts so users can compare judge decisions against their
   own human labels before relying on alerts.
 
 ## How It Works
 
-1. **Produce traces**: call `verdict.init(...)` to wrap supported provider SDK
-   methods, or run `verdict-import` against an existing telemetry source. SDK
-   capture honors `sample_rate`; import intentionally stores every eligible LLM
+1. **Produce evidence**: call `verdict.init(...)` to wrap supported provider SDK
+   methods, optionally surround agent work with `agent_run`/`turn` contexts, or
+   run `verdict-import` against an existing telemetry source. SDK sampling keeps
+   an Agent Run and its linked calls together; import stores every eligible LLM
    call and leaves judgment sampling to the pipeline.
 2. **Store**: traces are written through a storage interface. SQLite is the
    default local store; Postgres is available for shared environments. Optional
@@ -103,9 +108,9 @@ Verdict is useful when you need to answer questions like:
 
 ## Current Scope
 
-Verdict v0 focuses on LLM-call observability inside LLM apps and agents. It is
-not a full agent runtime, task planner, tool executor, or hosted monitoring
-service.
+Verdict v0 observes LLM calls and application-declared agent executions. It is
+not an agent runtime, task planner, tool executor, or hosted monitoring service,
+and it cannot independently verify facts the application does not record.
 
 The current implementation is best suited for local evaluation, early pilots,
 and teams that want transparent observability primitives they can run and inspect
