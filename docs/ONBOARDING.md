@@ -77,8 +77,8 @@ visible as textless rather than being presented as a missing capture.
 
 Successful capture opens **Overview**. Local execution evidence is under
 **Explore → Agent Runs & Tools** and genuine model calls are under
-**Explore → LLM Calls**. Source configuration remains under
-**Settings → Data Sources**, where **Edit or rescan** asks you to approve local
+**Explore → LLM Calls**. Data-source actions remain under
+**Settings → Data Sources**, where **Manage data sources** asks you to approve local
 paths again. The header reports Agent Runs and LLM Calls separately.
 
 The Agent runs view shows source sessions, typed turns and observable events,

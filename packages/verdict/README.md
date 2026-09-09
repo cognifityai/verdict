@@ -21,7 +21,7 @@ content. Run timelines are read in bounded pages instead of from one growing
 serialized row.
 Bounded redacted content retention is on by default; metadata-only capture is
 an explicit SDK/programmatic override, not a shortcut in local setup. After capture, the same page becomes
-**Data sources**, reports the configured local evidence source, and requires
+**Data sources**, reports the evidence sources observed in the current store, and requires
 fresh in-process path approval for manual edits or rescans. Agent Run and LLM
 Trace totals remain visibly separate. The server requires a successful preview
 of the exact local or historical paths before it accepts the corresponding

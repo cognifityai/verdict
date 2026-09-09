@@ -42,6 +42,12 @@ the product is refined.
 - Agent Run exploration now pages through the complete newest-first run list;
   finding links continue to load their exact bounded set of affected runs.
 
+### Fixed
+
+- Provider calls started by inherited background work after an Agent Turn closes
+  remain standalone, and the data-source summary identifies observed SDK and
+  local-agent evidence without treating all Agent Runs as local history.
+
 ## [0.1.0a17] - 2026-09-07
 
 ### Fixed

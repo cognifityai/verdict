@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import runpy
@@ -7,6 +8,7 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import verdict
@@ -79,6 +81,58 @@ def test_file_transport_replays_idempotently_into_sqlite(tmp_path: Path) -> None
         model_event = bundles[0].events[0]
         assert model_event.trace_id is not None
         assert storage.get_trace(model_event.trace_id) is not None
+    finally:
+        storage.close()
+
+
+@pytest.mark.asyncio
+async def test_file_transport_keeps_late_inherited_provider_call_standalone(
+    tmp_path: Path,
+) -> None:
+    from verdict.instrumentors.anthropic import AnthropicInstrumentor
+
+    spool = tmp_path / "spool"
+    client = verdict.init(
+        transport="file",
+        spool_directory=spool,
+        tenant_id="tenant-file",
+        instrumentors=[],
+    )
+    instrumentor = AnthropicInstrumentor(client)
+    release = asyncio.Event()
+
+    async def provider_call(*args, **kwargs):
+        return SimpleNamespace(
+            model="claude-test",
+            usage=SimpleNamespace(input_tokens=3, output_tokens=2),
+            stop_reason="end_turn",
+            content=[SimpleNamespace(type="text", text="late answer")],
+        )
+
+    async def background_call():
+        await release.wait()
+        return await instrumentor._wrap_create_async(
+            provider_call,
+            None,
+            (),
+            {"model": "claude-test", "max_tokens": 20, "messages": []},
+        )
+
+    with verdict.agent_run(name="file-agent") as run:
+        with run.turn(user_input="question") as turn:
+            task = asyncio.create_task(background_call())
+            turn.set_output("parent answer")
+    release.set()
+    await task
+    verdict.shutdown()
+
+    storage = SQLiteStorage(str(tmp_path / "verdict.db"))
+    try:
+        agent_transport.import_capture_records(spool, storage)
+        [bundle] = storage.list_agent_run_bundles("tenant-file")
+        assert not any(event.event_type is AgentEventType.MODEL_CALL for event in bundle.events)
+        [trace] = storage.list_traces(limit=10)
+        assert "verdict.agent_run_id" not in trace.tags
     finally:
         storage.close()
 

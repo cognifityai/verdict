@@ -800,7 +800,7 @@ def agent_run(
 def current_agent_trace_context() -> AgentTraceContext | None:
     """Snapshot the active initiating turn for provider instrumentation."""
     turn = _active_turn.get()
-    if turn is None:
+    if turn is None or not turn.owner._open or turn.turn.status is not ExecutionStatus.UNKNOWN:
         return None
     return AgentTraceContext(turn=turn, sampled=turn.owner.sampled)
 

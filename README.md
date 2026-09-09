@@ -67,7 +67,7 @@ the current server process.
 After local capture, Verdict opens **Overview**. **Explore → Agent Runs & Tools**
 shows local execution evidence, while **Explore → LLM Calls** shows only genuine
 or imported model calls. A successful local capture can therefore show Agent
-Runs while the LLM Call count remains zero. Source configuration remains under
+Runs while the LLM Call count remains zero. Data-source actions remain under
 **Settings → Data Sources**. A manual rescan requires fresh in-process path
 approval. If the user explicitly saves a daily schedule, Verdict intentionally
 retains those source paths in the local control store so `verdict-service` can

@@ -609,6 +609,46 @@ def test_provider_context_is_snapshotted_when_call_begins() -> None:
     assert any(event.trace_id == trace.trace_id for event in bundle.events)
 
 
+@pytest.mark.asyncio
+async def test_provider_call_started_by_inherited_task_after_turn_closes_is_standalone() -> None:
+    from verdict.instrumentors.anthropic import AnthropicInstrumentor
+
+    storage = InMemoryStorage()
+    client = verdict.init(storage=storage, tenant_id="tenant-a", instrumentors=[])
+    instrumentor = AnthropicInstrumentor(client)
+    release = asyncio.Event()
+
+    async def provider_call(*args, **kwargs):
+        return SimpleNamespace(
+            model="claude-test",
+            usage=SimpleNamespace(input_tokens=3, output_tokens=2),
+            stop_reason="end_turn",
+            content=[SimpleNamespace(type="text", text="late answer")],
+        )
+
+    async def background_call():
+        await release.wait()
+        return await instrumentor._wrap_create_async(
+            provider_call,
+            None,
+            (),
+            {"model": "claude-test", "max_tokens": 20, "messages": []},
+        )
+
+    with verdict.agent_run(name="agent") as run:
+        with run.turn(user_input="question") as turn:
+            task = asyncio.create_task(background_call())
+            turn.set_output("parent answer")
+
+    release.set()
+    await task
+
+    [bundle] = storage.list_agent_run_bundles("tenant-a")
+    assert not any(event.event_type is AgentEventType.MODEL_CALL for event in bundle.events)
+    [trace] = storage.list_traces(limit=10)
+    assert "verdict.agent_run_id" not in trace.tags
+
+
 def test_nested_agent_run_restores_parent_turn_context() -> None:
     storage = InMemoryStorage()
     client = verdict.init(storage=storage, tenant_id="tenant-a", instrumentors=[])
