@@ -45,9 +45,9 @@ changing application behavior.
 
 Local files are not a delivery protocol. A producer is stopped or quiesced
 before its files are imported or removed. Files are retained until an operator
-removes them and do not provide acknowledgements, remote authentication,
-network retry, or backpressure. Those guarantees belong to a future collector
-boundary.
+removes them. Remote authentication and idempotent Agent-record acknowledgement
+are provided by the separate collector in ADR-011; automated file shipping,
+checkpointing, retry, and safe deletion remain outside this local transport.
 
 ## Compatibility
 
@@ -62,5 +62,5 @@ work without an Agent Run context.
 Instrumented applications can expose their actual execution structure while
 Verdict keeps LLM content canonical and storage writes constant-sized. Direct
 SQLite/PostgreSQL capture remains the simplest embedded option; the file
-transport removes database credentials from producer hosts but requires an
-external import process until a remote collector is implemented.
+transport removes database credentials from producer hosts and can feed the
+separate authenticated Agent collector through an external shipper.

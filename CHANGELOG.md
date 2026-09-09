@@ -18,6 +18,9 @@ the product is refined.
   storage boundaries. Completed records bypass Python userspace buffering;
   rejected records are counted and warnings are deduplicated without affecting
   application execution.
+- An independently deployable authenticated collector accepts bounded full
+  Agent-record batches into PostgreSQL with tenant authority, partial rejection,
+  cross-process idempotency, and durable byte-identical acknowledgements.
 
 ### Changed
 

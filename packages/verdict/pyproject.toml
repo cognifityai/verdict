@@ -55,6 +55,7 @@ verdict-dashboard = "verdict.dashboard.app:main"
 verdict-import = "verdict.telemetry.cli:main"
 verdict-monitor = "verdict.monitor_cli:main"
 verdict-service = "verdict.service:main"
+verdict-collector = "verdict.collector:main"
 
 [project.urls]
 Homepage = "https://cognifity.ai/verdict"

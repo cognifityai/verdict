@@ -164,14 +164,35 @@ The spool carries provider Traces, Agent evidence, manual spans, and user
 signals in versioned JSONL with fixed record, segment, and directory byte
 limits. An incomplete final record from a process crash is reported and ignored;
 a malformed complete record fails the import. Retain the files until the import
-succeeds. The file transport does not delete files or provide delivery
-acknowledgement, network retry, or a remote collector. Completed appends bypass
+succeeds. The file transport does not delete files or run a network shipper.
+Completed appends bypass
 Python userspace buffering but are not `fsync`-ed against an operating-system or
 host failure. If an Agent evidence stream fails, later provider calls fall back
 to standalone Trace records rather than creating sequence gaps. Check the
 process-local `capture.dropped_records` runtime metric for records rejected by a
 full or failed spool; equivalent failures produce one bounded warning per
 failure class.
+
+For a central PostgreSQL deployment, start the authenticated collector:
+
+The collector is currently available from a source build newer than the
+published `0.1.0a17` packages. Install the core package with its `postgres`
+extra when the next release containing this command is published.
+
+```bash
+export VERDICT_STORAGE='postgresql://verdict@db/verdict'
+export VERDICT_TENANT_ID='__verdict_local__'
+export VERDICT_COLLECTOR_API_KEY='use-a-protected-random-secret'
+verdict-collector --host 0.0.0.0 --port 8765
+```
+
+Terminate TLS before the collector. It accepts bounded `verdict-capture-v1`
+NDJSON batches containing full `agent` records and returns durable replay-safe
+acknowledgements. Standalone Trace, Span, and UserSignal records continue to use
+the direct or local-file import path. Automated spool checkpointing, retries,
+and acknowledged segment deletion are not part of the collector command. The
+stock single-tenant dashboard reads `__verdict_local__`; an authenticated host
+may supply a different authorized dashboard tenant as documented below.
 
 ## 3b. Existing conversation export with `verdict-inspect`
 

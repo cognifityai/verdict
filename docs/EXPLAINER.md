@@ -42,7 +42,8 @@ does not duplicate it.
   results, and drift signals.
 - Provides sync and async Agent Run contexts with typed event helpers and a
   bounded local file transport for application hosts that should not connect to
-  the Verdict database.
+  the Verdict database, plus an authenticated Agent collector for central
+  PostgreSQL deployments.
 - Includes calibration scripts so users can compare judge decisions against their
   own human labels before relying on alerts.
 
