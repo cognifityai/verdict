@@ -787,6 +787,167 @@ def test_codex_boundary_recovers_after_a_decrease_then_valid_observation(
     assert turns[1].total_tokens == 10
 
 
+def test_codex_detects_a_decrease_after_an_omitted_cumulative_field(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "codex"
+    records = _codex_records()
+    records[-2]["payload"]["info"] = {
+        "last_token_usage": {"total_tokens": 10},
+        "total_token_usage": {"total_tokens": 100},
+    }
+    records.insert(
+        -1,
+        {
+            "timestamp": "2026-08-30T10:01:06.400000Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "token_count",
+                "info": {
+                    "last_token_usage": {"input_tokens": 1},
+                    "total_token_usage": {"input_tokens": 101},
+                },
+            },
+        },
+    )
+    records.insert(
+        -1,
+        {
+            "timestamp": "2026-08-30T10:01:06.500000Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "token_count",
+                "info": {
+                    "last_token_usage": {"total_tokens": 10},
+                    "total_token_usage": {"total_tokens": 90},
+                },
+            },
+        },
+    )
+    records.extend(
+        [
+            {
+                "timestamp": "2026-08-30T10:02:00Z",
+                "type": "event_msg",
+                "payload": {"type": "task_started", "turn_id": "turn-b"},
+            },
+            {
+                "timestamp": "2026-08-30T10:02:01Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "last_token_usage": {"total_tokens": 10},
+                        "total_token_usage": {"total_tokens": 90},
+                    },
+                },
+            },
+            {
+                "timestamp": "2026-08-30T10:02:02Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "task_complete",
+                    "turn_id": "turn-b",
+                    "last_agent_message": "done",
+                },
+            },
+        ]
+    )
+    _write_jsonl(root / "session.jsonl", records)
+    storage = SQLiteStorage(str(tmp_path / "verdict.db"))
+
+    capture_local_agents(storage, tenant_id="local", codex_root=root)
+
+    turns = storage.list_agent_run_bundles("local")[0].turns
+    assert turns[0].token_usage_basis is None
+    assert turns[0].total_tokens is None
+    assert turns[1].token_usage_basis is None
+    assert turns[1].total_tokens is None
+
+
+def test_codex_keeps_non_decreasing_fields_across_partial_boundaries(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "codex"
+    records = _codex_records()
+    records[-2]["payload"]["info"] = {
+        "last_token_usage": {"input_tokens": 10, "total_tokens": 10},
+        "total_token_usage": {"input_tokens": 100, "total_tokens": 100},
+    }
+    records.insert(
+        -1,
+        {
+            "timestamp": "2026-08-30T10:01:06.400000Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "token_count",
+                "info": {
+                    "last_token_usage": {"input_tokens": 10},
+                    "total_token_usage": {"input_tokens": 110},
+                },
+            },
+        },
+    )
+    records.insert(
+        -1,
+        {
+            "timestamp": "2026-08-30T10:01:06.500000Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "token_count",
+                "info": {
+                    "last_token_usage": {"total_tokens": 10},
+                    "total_token_usage": {"total_tokens": 110},
+                },
+            },
+        },
+    )
+    records.extend(
+        [
+            {
+                "timestamp": "2026-08-30T10:02:00Z",
+                "type": "event_msg",
+                "payload": {"type": "task_started", "turn_id": "turn-b"},
+            },
+            {
+                "timestamp": "2026-08-30T10:02:01Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "last_token_usage": {
+                            "input_tokens": 10,
+                            "total_tokens": 10,
+                        },
+                        "total_token_usage": {
+                            "input_tokens": 120,
+                            "total_tokens": 120,
+                        },
+                    },
+                },
+            },
+            {
+                "timestamp": "2026-08-30T10:02:02Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "task_complete",
+                    "turn_id": "turn-b",
+                    "last_agent_message": "done",
+                },
+            },
+        ]
+    )
+    _write_jsonl(root / "session.jsonl", records)
+    storage = SQLiteStorage(str(tmp_path / "verdict.db"))
+
+    capture_local_agents(storage, tenant_id="local", codex_root=root)
+
+    turns = storage.list_agent_run_bundles("local")[0].turns
+    assert turns[0].total_tokens == 20
+    assert turns[1].input_tokens == 10
+    assert turns[1].total_tokens == 10
+
+
 def test_codex_usage_between_turns_is_not_charged_to_the_next_turn(
     tmp_path: Path,
 ) -> None:

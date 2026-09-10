@@ -290,9 +290,12 @@ def _record_codex_usage(turn: _RawTurn, info: object) -> None:
         turn.usage_invalid = True
         turn.codex_latest_boundary = None
     else:
-        turn.codex_latest_boundary = (
-            dict(total) if total and not invalid_total else None
-        )
+        if total and not invalid_total:
+            boundary = dict(turn.codex_latest_boundary or {})
+            boundary.update(total)
+            turn.codex_latest_boundary = boundary
+        else:
+            turn.codex_latest_boundary = None
     if invalid_last or invalid_total:
         turn.usage_invalid = True
         return
