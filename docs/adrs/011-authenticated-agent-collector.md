@@ -47,6 +47,6 @@ dashboard reads are unchanged.
 ## Consequences
 
 Many SDK Agent producers can send retry-safe evidence to a central PostgreSQL
-deployment without database credentials. Automated file checkpointing,
-acknowledged segment deletion, remote standalone-record delivery, and
-ingestion-triggered analysis require separate components.
+deployment without database credentials. ADR-012 provides file checkpointing
+and acknowledged segment deletion. Remote standalone-record delivery and
+ingestion-triggered analysis remain separate capabilities.

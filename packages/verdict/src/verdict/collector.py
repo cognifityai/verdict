@@ -298,17 +298,14 @@ def create_collector_app(
     async def lifespan(_app: FastAPI):
         yield
         if close_on_shutdown:
-            await anyio.to_thread.run_sync(
-                admission.close_and_wait,
-                abandon_on_cancel=False,
-            )
-            await anyio.to_thread.run_sync(service.close, abandon_on_cancel=False)
+            await anyio.to_thread.run_sync(admission.close_and_wait)
+            await anyio.to_thread.run_sync(service.close)
 
     app = FastAPI(title="Verdict Collector", version="1", lifespan=lifespan)
 
     @app.get("/healthz")
     async def health() -> Response:
-        ready = await anyio.to_thread.run_sync(service.ready, abandon_on_cancel=False)
+        ready = await anyio.to_thread.run_sync(service.ready)
         if not ready:
             return _json_error("unavailable", 503, retryable=True)
         return JSONResponse({"status": "ready"})
@@ -357,7 +354,6 @@ def create_collector_app(
                     batch_id,
                     producer_id,
                     bytes(body),
-                    abandon_on_cancel=False,
                 )
             except BatchBoundaryError as exc:
                 return _json_error(exc.code, exc.status_code)
@@ -381,7 +377,6 @@ def create_collector_app(
             item = await anyio.to_thread.run_sync(
                 service.get_receipt,
                 batch_id,
-                abandon_on_cancel=False,
             )
         except ValueError:
             return _json_error("invalid_identifier", 400)

@@ -41,11 +41,14 @@ the same normalized evidence APIs used by local history capture.
 Application hosts can write bounded, redacted, process-owned JSONL files and
 later replay them idempotently through canonical storage. This is a local
 transport. A separately deployable authenticated collector now provides
-idempotent remote ingestion for full Agent records into PostgreSQL.
+idempotent remote ingestion for full Agent records into PostgreSQL. A bounded
+host shipper uploads complete segment prefixes, retries exact batches, records
+acknowledged offsets, and deletes only sealed fully accepted segments.
 
-Planned agent-level work includes maintained framework adapters, run-level
+Planned agent-level work includes centralized producer-backlog health,
+receipt-triggered analysis, maintained framework adapters, run-level
 cohort comparisons, application-specific outcome calibration, and an automated
-shipper with checkpoints, retry, backpressure, and acknowledged file deletion.
+delivery path for standalone Trace, Span, and UserSignal records.
 
 ### Plan-Adherence Scoring
 
@@ -77,8 +80,8 @@ possible.
 
 Areas under consideration:
 
-- Automated shipping of local capture segments with checkpoints, retry,
-  backpressure health, and acknowledged deletion
+- Centralized host-backlog and dropped-record health plus a durable
+  receipt-to-analysis cursor
 - Tenant-safe remote ingestion for standalone Trace, Span, and UserSignal
   records; the current authenticated collector accepts full Agent records
 - OpenTelemetry and OpenInference-compatible export paths
@@ -122,9 +125,9 @@ Areas under consideration:
   human-readable naming or fragmented-cluster merge operation.
 - Direct PostgreSQL capture still connects from each instrumented process
   through a process-local driver pool. The separate authenticated collector
-  removes database credentials from Agent producers, but automated spool
-  shipping and remote standalone Trace, Span, and UserSignal ingestion are not
-  yet included.
+  and host shipper remove database credentials from file-transport Agent
+  producers. Remote standalone Trace, Span, and UserSignal ingestion is not yet
+  included.
 
 ## Prioritized Product Follow-ups
 
@@ -141,10 +144,10 @@ and an approved design before implementation.
    provider rate-limit handling, cancellation, deterministic output, and load
    tests. This reduces wall time, not token spend.
 4. **Remote ingestion expansion (large effort, high production-deployment
-   value):** add automated shipping, remote standalone Trace/Span/UserSignal
-   support, OTLP mapping, backpressure health, and separate schema-migration
-   credentials around the current Agent collector. Keep direct SQLite/
-   PostgreSQL storage as the simple local and embedded option.
+   value):** add remote standalone Trace/Span/UserSignal support, OTLP mapping,
+   centralized producer health, receipt-triggered analysis, and separate
+   schema-migration credentials around the current Agent collector. Keep direct
+   SQLite/PostgreSQL storage as the simple local and embedded option.
 5. **Framework adapters and calibrated outcomes (large effort, high
    agent-workload value):** add maintained framework integrations and validate
    application-defined outcome semantics before comparing them across traffic.

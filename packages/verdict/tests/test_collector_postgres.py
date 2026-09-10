@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import os
+import socket
 import threading
+import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
+import uvicorn
 import verdict
 from _postgres_test_safety import isolated_test_dsn, validate_test_dsn
 from fastapi.testclient import TestClient
@@ -25,6 +28,7 @@ from verdict.dashboard.app import create_app as create_dashboard_app
 from verdict.evidence import ExecutionStatus
 from verdict.instrumentors.base import apply_routing_context, safe_persist_trace
 from verdict.schema import Trace
+from verdict.shipper import HttpCollectorClient, SegmentShipper
 from verdict.storage.postgres import PostgresStorage
 
 DSN, POSTGRES_SKIP_REASON = validate_test_dsn(
@@ -53,6 +57,32 @@ def _collector_pair():
         finally:
             receipts.close()
             storage.close()
+
+
+@contextmanager
+def _live_server(app):
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen()
+    port = listener.getsockname()[1]
+    server = uvicorn.Server(
+        uvicorn.Config(app, log_level="critical", access_log=False, lifespan="on")
+    )
+    worker = threading.Thread(target=server.run, kwargs={"sockets": [listener]})
+    worker.start()
+    deadline = time.monotonic() + 10
+    while not server.started and worker.is_alive() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    if not server.started:
+        server.should_exit = True
+        worker.join(timeout=10)
+        raise RuntimeError("collector test server did not start")
+    try:
+        yield f"http://127.0.0.1:{port}"
+    finally:
+        server.should_exit = True
+        worker.join(timeout=10)
+        assert not worker.is_alive()
 
 
 def test_live_postgres_replay_is_byte_identical_after_receipt_restart(
@@ -323,21 +353,24 @@ def test_live_postgres_sdk_file_to_http_to_dashboard_journey(
             safe_persist_trace(sdk, trace)
             turn.set_output("order found")
     verdict.shutdown()
-    body = b"".join(item.read_bytes() for item in sorted(spool.glob("verdict-agent-*.jsonl")))
+    sealed = list(spool.glob("verdict-agent-*.jsonl"))
+    expected_records = sum(len(path.read_bytes().splitlines()) for path in sealed)
+    assert expected_records > 0
 
     with _collector_pair() as (dsn, storage, receipts):
         service = CollectorService(storage, receipts, tenant_id="__verdict_local__")
         collector = create_collector_app(service, api_key="collector-test-secret-value")
-        headers = {
-            "Authorization": "Bearer collector-test-secret-value",
-            "Content-Type": "application/x-ndjson",
-            "X-Verdict-Batch-ID": "sdk-batch",
-            "X-Verdict-Producer-ID": "sdk-host",
-        }
-        with TestClient(collector) as client:
-            response = client.post("/v1/ingest", content=body, headers=headers)
-        assert response.status_code == 200
-        assert response.json()["rejected"] == 0
+        with _live_server(collector) as endpoint:
+            sender = HttpCollectorClient(
+                endpoint,
+                "collector-test-secret-value",
+                allow_insecure_http=True,
+            )
+            summary = SegmentShipper(spool, sender).ship_once()
+        assert summary.accepted_records == expected_records
+        assert summary.rejected_records == 0
+        assert summary.deleted_segments == 1
+        assert not list(spool.glob("verdict-agent-*.jsonl"))
 
         [bundle] = storage.list_agent_run_bundles("__verdict_local__")
         assert storage.get_trace("remote-model-call") is not None

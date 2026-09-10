@@ -43,11 +43,11 @@ record fails import. Quota and write failures increment a process-local
 dropped-record counter and emit a bounded, non-sensitive warning without
 changing application behavior.
 
-Local files are not a delivery protocol. A producer is stopped or quiesced
-before its files are imported or removed. Files are retained until an operator
-removes them. Remote authentication and idempotent Agent-record acknowledgement
-are provided by the separate collector in ADR-011; automated file shipping,
-checkpointing, retry, and safe deletion remain outside this local transport.
+An active producer segment has an `.open` suffix and is atomically renamed to a
+sealed JSONL segment on normal rotation or shutdown. Local import reads complete
+records from either lifecycle. Remote authentication and idempotent Agent-record
+acknowledgement are provided by the collector in ADR-011; the separate shipper
+in ADR-012 owns network retry, acknowledgement checkpoints, and safe deletion.
 
 ## Compatibility
 
@@ -63,4 +63,4 @@ Instrumented applications can expose their actual execution structure while
 Verdict keeps LLM content canonical and storage writes constant-sized. Direct
 SQLite/PostgreSQL capture remains the simplest embedded option; the file
 transport removes database credentials from producer hosts and can feed the
-separate authenticated Agent collector through an external shipper.
+separate authenticated Agent collector through Verdict's host shipper.

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import threading
 from collections.abc import Callable, Iterator
 from copy import deepcopy
@@ -78,6 +79,28 @@ _SPAN_TRANSPORT_FIELDS = frozenset(
 )
 _SIGNAL_TRANSPORT_FIELDS = frozenset({"signal_id", "trace_id", "kind", "created_at"})
 CaptureKind = Literal["trace", "agent", "span", "signal"]
+_SEGMENT_NAME = re.compile(
+    r"^verdict-agent-(?P<producer>[A-Za-z0-9][A-Za-z0-9._:-]{0,127})-"
+    r"(?P<sequence>[0-9]{6,12})\.(?P<state>open|jsonl|rejected)$"
+)
+
+
+def capture_segment_identity(path: Path) -> tuple[str, int, str] | None:
+    match = _SEGMENT_NAME.fullmatch(path.name)
+    if match is None:
+        return None
+    return match["producer"], int(match["sequence"]), match["state"]
+
+
+def capture_segment_paths(directory: Path, *, maximum: int | None = None) -> list[Path]:
+    """Return bounded-transport segment files without following symlinks."""
+    paths: list[Path] = []
+    for path in directory.iterdir():
+        if capture_segment_identity(path) is not None and not path.is_symlink() and path.is_file():
+            paths.append(path)
+            if maximum is not None and len(paths) > maximum:
+                raise ValueError("agent capture directory contains too many segments")
+    return sorted(paths)
 
 
 def _require_transport_text(
@@ -374,23 +397,33 @@ class FileCaptureSink:
         self.directory.chmod(0o700)
         self._reset_process_file()
 
+    def _current_directory_size(self) -> int:
+        total = 0
+        for path in capture_segment_paths(self.directory):
+            try:
+                total += path.stat().st_size
+            except FileNotFoundError:
+                # A shipper may remove an acknowledged sealed segment between
+                # the directory scan and stat.
+                continue
+        return total
+
     def _reset_process_file(self) -> None:
         if self._file is not None:
+            # A fork inherited the descriptor but not ownership of the parent
+            # producer's segment. Closing the child copy must not seal or rename
+            # the file while the parent can still append to it.
             self._file.close()
         self._file = None
         self._path = None
         self._pid = os.getpid()
         self._producer_id = uuid4().hex
         self._segment = 0
-        self._directory_size = sum(
-            path.stat().st_size
-            for path in self.directory.glob("verdict-agent-*.jsonl")
-            if path.is_file()
-        )
+        self._directory_size = self._current_directory_size()
 
     def _open_segment(self) -> None:
         while True:
-            path = self.directory / (f"verdict-agent-{self._producer_id}-{self._segment:06d}.jsonl")
+            path = self.directory / (f"verdict-agent-{self._producer_id}-{self._segment:06d}.open")
             self._segment += 1
             try:
                 descriptor = os.open(
@@ -405,6 +438,21 @@ class FileCaptureSink:
             self._size = 0
             return
 
+    def _seal_segment(self) -> None:
+        if self._file is None or self._path is None:
+            return
+        path = self._path
+        self._file.close()
+        self._file = None
+        self._path = None
+        if self._size == 0:
+            path.unlink(missing_ok=True)
+            return
+        target = path.with_suffix(".jsonl")
+        if target.exists():
+            raise OSError("agent capture sealed segment already exists")
+        path.rename(target)
+
     def _append(self, record: bytes) -> None:
         if self._pid != os.getpid():
             # A fork can inherit a lock held by a thread that no longer exists.
@@ -413,14 +461,13 @@ class FileCaptureSink:
             if self._pid != os.getpid():
                 self._reset_process_file()
             if self._directory_size + len(record) > self.directory_bytes:
-                raise CaptureQuotaExceeded("agent capture directory quota exceeded")
+                self._directory_size = self._current_directory_size()
+                if self._directory_size + len(record) > self.directory_bytes:
+                    raise CaptureQuotaExceeded("agent capture directory quota exceeded")
             if self._file is None:
                 self._open_segment()
             if self._size and self._size + len(record) > self.segment_bytes:
-                assert self._file is not None
-                self._file.close()
-                self._file = None
-                self._path = None
+                self._seal_segment()
                 self._open_segment()
             assert self._file is not None
             written = 0
@@ -497,10 +544,12 @@ class FileCaptureSink:
 
     def close(self) -> None:
         with self._lock:
-            if self._file is not None:
-                self._file.close()
-                self._file = None
-                self._path = None
+            if self._pid != os.getpid():
+                # A forked child may run inherited shutdown hooks. It owns only
+                # its descriptor copy and must not seal the parent's segment.
+                self._reset_process_file()
+                return
+            self._seal_segment()
 
 
 def iter_capture_records(
@@ -509,11 +558,7 @@ def iter_capture_records(
     on_incomplete: Callable[[], None] | None = None,
 ) -> Iterator[CaptureRecord]:
     root = Path(path).expanduser()
-    files = (
-        sorted(item for item in root.glob("verdict-agent-*.jsonl") if item.is_file())
-        if root.is_dir()
-        else [root]
-    )
+    files = capture_segment_paths(root) if root.is_dir() else [root]
     if not files:
         raise ValueError("agent capture path contains no Verdict JSONL files")
     for capture_file in files:
