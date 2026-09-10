@@ -132,6 +132,24 @@ def test_latest_analysis_can_be_scoped_to_analyzer_version(storage) -> None:
     ) is None
 
 
+class _PublishedAnalysisReadStorage(InMemoryStorage):
+    def get_latest_deterministic_analysis_run(self, tenant_id: str, scope_key: str):
+        return super().get_latest_deterministic_analysis_run(tenant_id, scope_key)
+
+
+def test_buffered_analysis_read_preserves_the_published_inner_signature() -> None:
+    run = _analysis()
+    inner = _PublishedAnalysisReadStorage()
+    storage = BufferedStorage(inner)
+    try:
+        storage.save_deterministic_analysis_run(run)
+        assert storage.get_latest_deterministic_analysis_run(
+            "tenant-a", "agent-and-trace"
+        ) == run
+    finally:
+        storage.close()
+
+
 def test_analysis_snapshot_is_tenant_scoped_and_detached(storage) -> None:
     run = _analysis(findings=[{"code": "tool_error", "message": "safe"}])
     storage.save_deterministic_analysis_run(run)

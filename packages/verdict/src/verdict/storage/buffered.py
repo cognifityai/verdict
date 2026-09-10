@@ -447,6 +447,12 @@ class BufferedStorage:
         *,
         analyzer_version: str | None = None,
     ) -> DeterministicAnalysisRun | None:
+        if analyzer_version is None:
+            return self._read(
+                self._inner.get_latest_deterministic_analysis_run,
+                tenant_id,
+                scope_key,
+            )
         return self._read(
             self._inner.get_latest_deterministic_analysis_run,
             tenant_id,

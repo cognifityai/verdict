@@ -99,7 +99,6 @@ class _RawTurn:
     codex_usage_snapshots: list[tuple[dict[str, int], dict[str, int]]] = field(
         default_factory=list
     )
-    codex_cumulative_totals: list[dict[str, int]] = field(default_factory=list)
     codex_latest_boundary: dict[str, int] | None = None
     claude_usage_by_response_id: dict[str, dict[str, int]] = field(default_factory=dict)
     claude_invalid_response_ids: set[str] = field(default_factory=set)
@@ -252,6 +251,15 @@ def _token_usage(
     return canonical, False
 
 
+def _provider_response_id(value: object) -> str | None:
+    if not isinstance(value, str) or not value or "\x00" in value:
+        return None
+    try:
+        return value if len(value.encode("utf-8")) <= 256 else None
+    except UnicodeError:
+        return None
+
+
 def _record_codex_usage(turn: _RawTurn, info: object) -> None:
     mapped = _mapping(info)
     if mapped is None:
@@ -261,13 +269,34 @@ def _record_codex_usage(turn: _RawTurn, info: object) -> None:
         return
     last, invalid_last = _token_usage(mapped.get("last_token_usage"))
     total, invalid_total = _token_usage(mapped.get("total_token_usage"))
-    turn.codex_latest_boundary = dict(total) if not invalid_total and total else None
-    if total and not invalid_total:
-        turn.codex_cumulative_totals.append(total)
+    boundary_invalid = bool(
+        total
+        and not invalid_total
+        and (
+            any(
+                name in turn.codex_latest_boundary
+                and total[name] < turn.codex_latest_boundary[name]
+                for name in total
+            )
+            if turn.codex_latest_boundary is not None
+            else False
+        )
+    )
+    if last and total and not invalid_last and not invalid_total:
+        boundary_invalid = boundary_invalid or any(
+            name in total and total[name] < count for name, count in last.items()
+        )
+    if boundary_invalid:
+        turn.usage_invalid = True
+        turn.codex_latest_boundary = None
+    else:
+        turn.codex_latest_boundary = (
+            dict(total) if total and not invalid_total else None
+        )
     if invalid_last or invalid_total:
         turn.usage_invalid = True
         return
-    if last and total:
+    if last and total and not boundary_invalid:
         turn.codex_usage_snapshots.append((last, total))
 
 
@@ -282,19 +311,6 @@ def _finalize_codex_usage(
         if turn.codex_latest_boundary is not None
         else None
     )
-    for previous_cumulative, total in zip(
-        turn.codex_cumulative_totals,
-        turn.codex_cumulative_totals[1:],
-        strict=False,
-    ):
-        if any(
-            name in previous_cumulative
-            and name in total
-            and total[name] < previous_cumulative[name]
-            for name in _TOKEN_FIELDS
-        ):
-            turn.usage_invalid = True
-            break
     if turn.usage_invalid or not turn.codex_usage_snapshots:
         return safe_boundary
     if (
@@ -851,11 +867,11 @@ def _parse_claude(path: Path, *, home: Path | None) -> _ParsedHistory:
             continue
         if row.get("type") != "assistant" or not isinstance(content, list):
             continue
-        message_id = message.get("id")
+        message_id = _provider_response_id(message.get("id"))
         model = message.get("model")
         response_text = _message_text(message, home=home)
-        model_event = model_events.get(message_id) if isinstance(message_id, str) else None
-        if isinstance(message_id, str) and model_event is None:
+        model_event = model_events.get(message_id) if message_id is not None else None
+        if message_id is not None and model_event is None:
             usage = _record_claude_usage(active, message_id, message.get("usage")) or {}
             _event(
                 active,

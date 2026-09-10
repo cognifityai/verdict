@@ -656,6 +656,137 @@ def test_codex_valid_boundary_recovers_after_a_malformed_observation(
     assert turns[1].total_tokens == 10
 
 
+def test_codex_decreasing_total_does_not_become_the_next_turn_boundary(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "codex"
+    records = _codex_records()
+    records.insert(
+        -1,
+        {
+            "timestamp": "2026-08-30T10:01:06.500000Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "token_count",
+                "info": {
+                    "last_token_usage": {"total_tokens": 10},
+                    "total_token_usage": {"total_tokens": 134},
+                },
+            },
+        },
+    )
+    records.extend(
+        [
+            {
+                "timestamp": "2026-08-30T10:02:00Z",
+                "type": "event_msg",
+                "payload": {"type": "task_started", "turn_id": "turn-b"},
+            },
+            {
+                "timestamp": "2026-08-30T10:02:01Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "last_token_usage": {"total_tokens": 10},
+                        "total_token_usage": {"total_tokens": 134},
+                    },
+                },
+            },
+            {
+                "timestamp": "2026-08-30T10:02:02Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "task_complete",
+                    "turn_id": "turn-b",
+                    "last_agent_message": "done",
+                },
+            },
+        ]
+    )
+    _write_jsonl(root / "session.jsonl", records)
+    storage = SQLiteStorage(str(tmp_path / "verdict.db"))
+
+    capture_local_agents(storage, tenant_id="local", codex_root=root)
+
+    turns = storage.list_agent_run_bundles("local")[0].turns
+    assert turns[0].total_tokens is None
+    assert turns[1].total_tokens is None
+
+
+def test_codex_boundary_recovers_after_a_decrease_then_valid_observation(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "codex"
+    records = _codex_records()
+    for timestamp, total in (
+        ("2026-08-30T10:01:06.400000Z", 134),
+        ("2026-08-30T10:01:06.500000Z", 144),
+    ):
+        records.insert(
+            -1,
+            {
+                "timestamp": timestamp,
+                "type": "event_msg",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "last_token_usage": {"total_tokens": 10},
+                        "total_token_usage": {"total_tokens": total},
+                    },
+                },
+            },
+        )
+    records.extend(
+        [
+            {
+                "timestamp": "2026-08-30T10:02:00Z",
+                "type": "event_msg",
+                "payload": {"type": "task_started", "turn_id": "turn-b"},
+            },
+            {
+                "timestamp": "2026-08-30T10:02:01Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "last_token_usage": {"total_tokens": 10},
+                        "total_token_usage": {"total_tokens": 144},
+                    },
+                },
+            },
+            {
+                "timestamp": "2026-08-30T10:02:02Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "last_token_usage": {"total_tokens": 10},
+                        "total_token_usage": {"total_tokens": 154},
+                    },
+                },
+            },
+            {
+                "timestamp": "2026-08-30T10:02:03Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "task_complete",
+                    "turn_id": "turn-b",
+                    "last_agent_message": "done",
+                },
+            },
+        ]
+    )
+    _write_jsonl(root / "session.jsonl", records)
+    storage = SQLiteStorage(str(tmp_path / "verdict.db"))
+
+    capture_local_agents(storage, tenant_id="local", codex_root=root)
+
+    turns = storage.list_agent_run_bundles("local")[0].turns
+    assert turns[0].total_tokens is None
+    assert turns[1].total_tokens == 10
+
+
 def test_codex_usage_between_turns_is_not_charged_to_the_next_turn(
     tmp_path: Path,
 ) -> None:
@@ -1399,6 +1530,34 @@ def test_claude_component_only_usage_stays_partial(
     )["sourceActivity"]
     assert activity["totalTokens"] is None
     assert activity["tokenUsageState"] == "partial"
+
+
+@pytest.mark.parametrize("message_id", ["", "x" * 257, "bad\x00id"])
+@pytest.mark.parametrize("response_count", [1, 2])
+def test_claude_usage_requires_a_valid_provider_response_identity(
+    tmp_path: Path, response_count: int, message_id: str,
+) -> None:
+    root = tmp_path / "claude"
+    records = _claude_records()[:2]
+    records[1]["message"]["id"] = message_id
+    records[1]["message"]["stop_reason"] = "end_turn"
+    records[1]["message"]["content"] = [{"type": "text", "text": "done"}]
+    if response_count == 2:
+        records.append(json.loads(json.dumps(records[1])))
+        records[-1]["uuid"] = "assistant-empty-id-duplicate"
+    _write_jsonl(root / "session.jsonl", records)
+    storage = SQLiteStorage(str(tmp_path / "verdict.db"))
+
+    capture_local_agents(storage, tenant_id="local", claude_root=root)
+
+    [bundle] = storage.list_agent_run_bundles("local")
+    [turn] = bundle.turns
+    assert turn.total_tokens is None
+    assert turn.token_usage_basis is None
+    assert not any(
+        event.event_type is AgentEventType.MODEL_CALL for event in bundle.events
+    )
+    assert storage.list_traces(tenant_id="local") == []
 
 
 def test_claude_growing_turn_does_not_publish_a_stale_complete_total(
