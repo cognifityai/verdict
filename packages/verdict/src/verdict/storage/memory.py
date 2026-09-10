@@ -389,12 +389,21 @@ class InMemoryStorage:
         self,
         tenant_id: str,
         scope_key: str,
+        *,
+        analyzer_version: str | None = None,
     ) -> DeterministicAnalysisRun | None:
         with self._analysis_lock:
             matches = []
             for payload in self._analysis_runs.values():
                 parsed = analysis_run_from_json(payload)
-                if parsed.tenant_id == tenant_id and parsed.scope_key == scope_key:
+                if (
+                    parsed.tenant_id == tenant_id
+                    and parsed.scope_key == scope_key
+                    and (
+                        analyzer_version is None
+                        or parsed.analyzer_version == analyzer_version
+                    )
+                ):
                     matches.append(parsed)
         return (
             max(matches, key=lambda value: (value.completed_at, value.analysis_id))

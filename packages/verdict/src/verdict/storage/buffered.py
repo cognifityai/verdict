@@ -431,11 +431,14 @@ class BufferedStorage:
         self,
         tenant_id: str,
         scope_key: str,
+        *,
+        analyzer_version: str | None = None,
     ) -> DeterministicAnalysisRun | None:
         return self._read(
             self._inner.get_latest_deterministic_analysis_run,
             tenant_id,
             scope_key,
+            analyzer_version=analyzer_version,
         )
 
     def list_notification_delivery_attempts(

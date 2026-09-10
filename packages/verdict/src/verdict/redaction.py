@@ -387,6 +387,8 @@ def redact_structure(
     _seen: set[int] | None = None,
     _memo: dict[tuple[int, int], tuple[Any, Any]] | None = None,
     _shared: set[int] | None = None,
+    _max_nodes: int = _MAX_STRUCTURE_NODES,
+    _max_characters: int = _MAX_STRUCTURE_CHARACTERS,
 ) -> Any:
     """Recursively redact a JSON-compatible value, failing closed otherwise.
 
@@ -397,7 +399,11 @@ def redact_structure(
     boundary and guarantees that returned containers are never aliased.
     """
     if _shared is None:
-        shared, within_budget = _analyze_structure(value)
+        shared, within_budget = _analyze_structure(
+            value,
+            max_nodes=_max_nodes,
+            max_characters=_max_characters,
+        )
         if not within_budget:
             return _REDACTED
         # A directly supplied cyclic root remains representable as a container
@@ -441,6 +447,8 @@ def redact_structure(
                             _depth=_depth + 1,
                             _seen=seen,
                             _shared=None,
+                            _max_nodes=_max_nodes,
+                            _max_characters=_max_characters,
                         )
                         entries.append(
                             (
@@ -461,6 +469,8 @@ def redact_structure(
                             _depth=_depth + 1,
                             _seen=seen,
                             _shared=_shared,
+                            _max_nodes=_max_nodes,
+                            _max_characters=_max_characters,
                         ),
                     )
                 )
@@ -482,6 +492,8 @@ def redact_structure(
                     _depth=_depth + 1,
                     _seen=seen,
                     _shared=_shared,
+                    _max_nodes=_max_nodes,
+                    _max_characters=_max_characters,
                 )
                 for child in value
             ]
@@ -491,7 +503,12 @@ def redact_structure(
     return _REDACTED
 
 
-def _analyze_structure(value: Any) -> tuple[set[int], bool]:
+def _analyze_structure(
+    value: Any,
+    *,
+    max_nodes: int = _MAX_STRUCTURE_NODES,
+    max_characters: int = _MAX_STRUCTURE_CHARACTERS,
+) -> tuple[set[int], bool]:
     """Return multiply referenced container IDs and whether input is bounded."""
     references: Counter[int] = Counter()
     traversed: set[int] = set()
@@ -502,11 +519,11 @@ def _analyze_structure(value: Any) -> tuple[set[int], bool]:
     while stack:
         current, depth = stack.pop()
         nodes += 1
-        if nodes > _MAX_STRUCTURE_NODES:
+        if nodes > max_nodes:
             return set(), False
         if isinstance(current, str):
             characters += len(current)
-            if characters > _MAX_STRUCTURE_CHARACTERS:
+            if characters > max_characters:
                 return set(), False
             continue
         if depth > _MAX_NESTING_DEPTH or not isinstance(current, (dict, list, tuple)):
@@ -522,7 +539,7 @@ def _analyze_structure(value: Any) -> tuple[set[int], bool]:
             for key, child in current.items():
                 if isinstance(key, str):
                     characters += len(key)
-                    if characters > _MAX_STRUCTURE_CHARACTERS:
+                    if characters > max_characters:
                         return set(), False
                 stack.append((child, depth + 1))
         else:

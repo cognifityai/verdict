@@ -159,6 +159,48 @@ def test_agent_run_detail_exposes_ordered_bounded_events_and_trace_links(tmp_pat
     assert "payload_json" not in response.text
 
 
+def test_agent_run_detail_serves_multiple_maximum_size_turn_previews(tmp_path):
+    path = tmp_path / "large-turns.db"
+    storage = SQLiteStorage(str(path))
+    now = datetime(2026, 8, 31, tzinfo=timezone.utc)
+    bundle = _bundle("local", now, with_turn=True)
+    maximum_preview = "x" * 65_536
+    bundle = replace(
+        bundle,
+        turns=tuple(
+            replace(
+                bundle.turns[0],
+                turn_id=f"turn-{sequence}",
+                sequence=sequence,
+                started_at=now + timedelta(seconds=sequence),
+                ended_at=now + timedelta(seconds=sequence),
+                user_request_redacted=maximum_preview,
+                final_response_redacted=maximum_preview,
+            )
+            for sequence in range(8)
+        ),
+        events=(),
+    )
+    storage.replace_agent_run_bundle(bundle)
+    storage.close()
+
+    async def request_detail():
+        transport = httpx.ASGITransport(app=create_app(storage=f"sqlite:///{path}"))
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
+            return await client.get(
+                "/api/runs/r-local?tenant=local&event_limit=1&turn_limit=20"
+            )
+
+    response = asyncio.run(request_detail())
+
+    assert response.status_code == 200
+    assert len(response.json()["turns"]) == 8
+    assert all(len(turn["request"]) == 65_536 for turn in response.json()["turns"])
+    assert all(len(turn["response"]) == 65_536 for turn in response.json()["turns"])
+
+
 def test_agent_run_detail_reads_existing_schema_without_running_migrations(tmp_path):
     path = tmp_path / "existing.db"
     storage = SQLiteStorage(str(path))
@@ -530,6 +572,45 @@ def test_incompatible_persisted_insights_are_not_served_as_current(tmp_path):
     assert result["analysisState"]["analyzerVersion"] == "agent-insights-v2"
     assert result["schema"] == "agent-insights-v2"
     assert "comparisons" not in result
+
+
+def test_current_analysis_is_reused_after_a_newer_rollback_version(tmp_path):
+    path = tmp_path / "analysis-rollback.db"
+    storage_url = f"sqlite:///{path}"
+    fingerprint = "b" * 64
+
+    def build():
+        return {
+            "schema": "agent-insights-v2",
+            "sourceActivity": [],
+            "_analysisInputFingerprint": fingerprint,
+        }
+
+    first = run_analysis(storage_url, tenant="local", build=build)
+    rollback_time = datetime.now(timezone.utc) + timedelta(days=1)
+    storage = SQLiteStorage(str(path))
+    storage.save_deterministic_analysis_run(DeterministicAnalysisRun(
+        analysis_id="a" * 64,
+        tenant_id="local",
+        scope_key="agent-and-trace",
+        cutoff=rollback_time,
+        completed_at=rollback_time,
+        status=AnalysisRunStatus.COMPLETED,
+        analyzer_version="agent-insights-v1",
+        input_fingerprint=fingerprint,
+        result={"schema": "agent-insights-v1", "comparisons": []},
+    ))
+    storage.close()
+
+    second = run_analysis(storage_url, tenant="local", build=build)
+    current = read_latest_analysis(
+        storage_url,
+        tenant="local",
+        empty_result={"schema": "agent-insights-v2", "sourceActivity": []},
+    )
+
+    assert second == first
+    assert current == first
 
 
 def test_agent_runs_can_select_an_exact_tenant_scoped_run(tmp_path):

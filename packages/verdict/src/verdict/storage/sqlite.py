@@ -1410,14 +1410,24 @@ class SQLiteStorage:
         self,
         tenant_id: str,
         scope_key: str,
+        *,
+        analyzer_version: str | None = None,
     ) -> DeterministicAnalysisRun | None:
         with self._lock:
-            row = self._conn.execute(
-                """SELECT payload_json FROM deterministic_analysis_runs
-                   WHERE tenant_id=? AND scope_key=?
-                   ORDER BY completed_at DESC, analysis_id DESC LIMIT 1""",
-                (tenant_id, scope_key),
-            ).fetchone()
+            if analyzer_version is None:
+                row = self._conn.execute(
+                    """SELECT payload_json FROM deterministic_analysis_runs
+                       WHERE tenant_id=? AND scope_key=?
+                       ORDER BY completed_at DESC, analysis_id DESC LIMIT 1""",
+                    (tenant_id, scope_key),
+                ).fetchone()
+            else:
+                row = self._conn.execute(
+                    """SELECT payload_json FROM deterministic_analysis_runs
+                       WHERE tenant_id=? AND scope_key=? AND analyzer_version=?
+                       ORDER BY completed_at DESC, analysis_id DESC LIMIT 1""",
+                    (tenant_id, scope_key, analyzer_version),
+                ).fetchone()
         return analysis_run_from_json(row["payload_json"]) if row is not None else None
 
     def save_notification_delivery_attempt(

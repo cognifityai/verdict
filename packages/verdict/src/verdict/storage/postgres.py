@@ -1373,13 +1373,23 @@ class PostgresStorage:
         self,
         tenant_id: str,
         scope_key: str,
+        *,
+        analyzer_version: str | None = None,
     ) -> DeterministicAnalysisRun | None:
-        row = self._fetchone(
-            """SELECT payload_json FROM deterministic_analysis_runs
-               WHERE tenant_id=%s AND scope_key=%s
-               ORDER BY completed_at DESC, analysis_id DESC LIMIT 1""",
-            (tenant_id, scope_key),
-        )
+        if analyzer_version is None:
+            row = self._fetchone(
+                """SELECT payload_json FROM deterministic_analysis_runs
+                   WHERE tenant_id=%s AND scope_key=%s
+                   ORDER BY completed_at DESC, analysis_id DESC LIMIT 1""",
+                (tenant_id, scope_key),
+            )
+        else:
+            row = self._fetchone(
+                """SELECT payload_json FROM deterministic_analysis_runs
+                   WHERE tenant_id=%s AND scope_key=%s AND analyzer_version=%s
+                   ORDER BY completed_at DESC, analysis_id DESC LIMIT 1""",
+                (tenant_id, scope_key, analyzer_version),
+            )
         return analysis_run_from_json(row[0]) if row is not None else None
 
     def save_notification_delivery_attempt(

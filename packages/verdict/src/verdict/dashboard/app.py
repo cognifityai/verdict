@@ -104,6 +104,11 @@ MAX_DRIFT_SIGNAL_EXAMPLE_TRACES = 5
 MAX_DRIFT_SIGNAL_ACTION_CHARS = 1000
 MAX_PROVIDER_MODELS = 20
 MAX_TRACE_SAMPLES = 30
+# Run detail has stricter record/page bounds than the generic redaction API.
+# These endpoint-only limits cover the maximum valid 50-turn/200-event page
+# without weakening the default fail-closed budget used by capture paths.
+MAX_AGENT_DETAIL_REDACTION_NODES = 50_000
+MAX_AGENT_DETAIL_REDACTION_CHARACTERS = 16_000_000
 DRIFT_CURRENT_HOURS = 24
 DRIFT_BASELINE_LAG_HOURS = 24
 DRIFT_BASELINE_DAYS = 7
@@ -790,6 +795,8 @@ def build_agent_run_detail(
                         dimensions = []
                 safe_dimensions = []
                 for dimension in dimensions if isinstance(dimensions, list) else []:
+                    if len(safe_dimensions) >= MAX_DASHBOARD_DIMENSIONS:
+                        break
                     if not isinstance(dimension, dict):
                         continue
                     name = dimension.get("name")
@@ -889,7 +896,11 @@ def build_agent_run_detail(
             connection.commit()
         finally:
             connection.close()
-    redacted = redact_structure(result)
+    redacted = redact_structure(
+        result,
+        _max_nodes=MAX_AGENT_DETAIL_REDACTION_NODES,
+        _max_characters=MAX_AGENT_DETAIL_REDACTION_CHARACTERS,
+    )
     if not isinstance(redacted, dict):
         raise DashboardBundleLimitError("bounded agent-run detail exceeded redaction budget")
     return redacted

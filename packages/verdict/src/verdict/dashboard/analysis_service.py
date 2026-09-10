@@ -73,7 +73,11 @@ def read_latest_analysis(
 ) -> dict[str, Any]:
     storage = _storage(storage_url)
     try:
-        run = storage.get_latest_deterministic_analysis_run(tenant, SCOPE_KEY)
+        run = storage.get_latest_deterministic_analysis_run(
+            tenant,
+            SCOPE_KEY,
+            analyzer_version=ANALYZER_VERSION,
+        )
     finally:
         storage.close()
     if run is None or run.analyzer_version != ANALYZER_VERSION:
@@ -108,7 +112,11 @@ def run_analysis(
             }
             fingerprint = hashlib.sha256(_canonical(result)).hexdigest()
             status = AnalysisRunStatus.ERROR
-        latest = storage.get_latest_deterministic_analysis_run(tenant, SCOPE_KEY)
+        latest = storage.get_latest_deterministic_analysis_run(
+            tenant,
+            SCOPE_KEY,
+            analyzer_version=ANALYZER_VERSION,
+        )
         if (
             latest is not None
             and latest.analyzer_version == ANALYZER_VERSION

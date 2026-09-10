@@ -96,6 +96,7 @@ class _RawTurn:
         default_factory=list
     )
     claude_usage_by_response_id: dict[str, dict[str, int]] = field(default_factory=dict)
+    claude_invalid_response_ids: set[str] = field(default_factory=set)
     events: list[_RawEvent] = field(default_factory=list)
 
 
@@ -282,7 +283,13 @@ def _finalize_codex_usage(
     return dict(final_total)
 
 
-def _record_claude_usage(turn: _RawTurn, response_id: str, value: object) -> dict[str, int]:
+def _record_claude_usage(
+    turn: _RawTurn,
+    response_id: str,
+    value: object,
+) -> dict[str, int] | None:
+    if response_id in turn.claude_invalid_response_ids:
+        return None
     usage, invalid = _token_usage(
         value,
         aliases={
@@ -294,7 +301,8 @@ def _record_claude_usage(turn: _RawTurn, response_id: str, value: object) -> dic
     )
     if invalid:
         turn.usage_invalid = True
-        return {}
+        turn.claude_invalid_response_ids.add(response_id)
+        return None
     current = turn.claude_usage_by_response_id.get(response_id)
     if current is None:
         turn.claude_usage_by_response_id[response_id] = usage
@@ -302,7 +310,8 @@ def _record_claude_usage(turn: _RawTurn, response_id: str, value: object) -> dic
         for name, count in usage.items():
             if name in current and current[name] != count:
                 turn.usage_invalid = True
-                return {}
+                turn.claude_invalid_response_ids.add(response_id)
+                return None
             current[name] = count
     return usage
 
@@ -766,7 +775,7 @@ def _parse_claude(path: Path, *, home: Path | None) -> _ParsedHistory:
         response_text = _message_text(message, home=home)
         model_event = model_events.get(message_id) if isinstance(message_id, str) else None
         if isinstance(message_id, str) and model_event is None:
-            usage = _record_claude_usage(active, message_id, message.get("usage"))
+            usage = _record_claude_usage(active, message_id, message.get("usage")) or {}
             _event(
                 active,
                 occurred_at,
@@ -788,7 +797,14 @@ def _parse_claude(path: Path, *, home: Path | None) -> _ParsedHistory:
             if occurred_at is not None:
                 model_events[message_id] = active.events[-1]
         elif model_event is not None:
-            _record_claude_usage(active, message_id, message.get("usage"))
+            usage = _record_claude_usage(active, message_id, message.get("usage"))
+            if usage is None:
+                for name in ("input_tokens", "output_tokens"):
+                    model_event.attributes[name] = None
+            else:
+                for name in ("input_tokens", "output_tokens"):
+                    if name in usage:
+                        model_event.attributes[name] = usage[name]
             if response_text.value and not model_event.response_text:
                 model_event.response_text = response_text.value
         for item in content:

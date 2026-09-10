@@ -26,6 +26,7 @@ from verdict.analysis_records import (
     DeterministicAnalysisRun,
     NotificationDeliveryAttempt,
 )
+from verdict.dashboard.analysis_service import read_latest_analysis, run_analysis
 from verdict.dashboard.app import build_agent_run_detail
 from verdict.evidence import AgentCaptureBatch
 from verdict.instrumentors.base import apply_routing_context, persist_trace
@@ -196,6 +197,9 @@ def test_live_postgres_analysis_and_delivery_contracts():
         assert storage.get_latest_deterministic_analysis_run(
             f"other-{tenant}", "agent-and-trace"
         ) is None
+        assert storage.get_latest_deterministic_analysis_run(
+            tenant, "agent-and-trace", analyzer_version="agent-insights-v1"
+        ) == run
 
         storage.save_notification_delivery_attempt(failed)
         storage.save_notification_delivery_attempt(delivered)
@@ -215,6 +219,45 @@ def test_live_postgres_analysis_and_delivery_contracts():
             "DELETE FROM deterministic_analysis_runs WHERE tenant_id=%s", (tenant,)
         )
         storage.close()
+
+
+def test_live_postgres_current_analysis_is_reused_after_rollback_version():
+    with isolated_test_dsn(DSN) as scoped_dsn:
+        tenant = f"analysis-rollback-{uuid4().hex}"
+        fingerprint = uuid4().hex * 2
+
+        def build():
+            return {
+                "schema": "agent-insights-v2",
+                "sourceActivity": [],
+                "_analysisInputFingerprint": fingerprint,
+            }
+
+        first = run_analysis(scoped_dsn, tenant=tenant, build=build)
+        rollback_time = datetime.now(timezone.utc) + timedelta(days=1)
+        storage = PostgresStorage(scoped_dsn, min_pool=1, max_pool=1)
+        storage.save_deterministic_analysis_run(DeterministicAnalysisRun(
+            analysis_id=uuid4().hex * 2,
+            tenant_id=tenant,
+            scope_key="agent-and-trace",
+            cutoff=rollback_time,
+            completed_at=rollback_time,
+            status=AnalysisRunStatus.COMPLETED,
+            analyzer_version="agent-insights-v1",
+            input_fingerprint=fingerprint,
+            result={"schema": "agent-insights-v1", "comparisons": []},
+        ))
+        storage.close()
+
+        second = run_analysis(scoped_dsn, tenant=tenant, build=build)
+        current = read_latest_analysis(
+            scoped_dsn,
+            tenant=tenant,
+            empty_result={"schema": "agent-insights-v2", "sourceActivity": []},
+        )
+
+    assert second == first
+    assert current == first
 
 
 def test_live_postgres_versioned_registry_and_analysis_normalization():

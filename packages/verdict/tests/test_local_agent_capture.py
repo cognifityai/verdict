@@ -576,6 +576,57 @@ def test_claude_capture_preserves_typed_evidence_without_thinking(tmp_path: Path
     assert all(trace.tags["verdict.input_evidence"] == "turn_request_only" for trace in traces)
 
 
+def test_claude_split_response_can_complete_trace_usage_on_a_later_row(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "claude"
+    records = _claude_records()
+    first_response = next(
+        row for row in records if row.get("uuid") == "assistant-1"
+    )
+    first_response["message"].pop("usage")
+    _write_jsonl(root / "session.jsonl", records)
+    storage = SQLiteStorage(str(tmp_path / "verdict.db"))
+
+    capture_local_agents(storage, tenant_id="local", claude_root=root)
+
+    trace = next(
+        item
+        for item in storage.list_traces(tenant_id="local")
+        if item.response_redacted == "I will run the tests."
+    )
+    [bundle] = storage.list_agent_run_bundles("local")
+    assert bundle.turns[0].input_tokens == 30
+    assert bundle.turns[0].output_tokens == 8
+    assert trace.input_tokens == 12
+    assert trace.output_tokens == 3
+
+
+def test_conflicting_claude_split_response_usage_fails_closed_for_its_trace(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "claude"
+    records = _claude_records()
+    conflicting_response = next(
+        row for row in records if row.get("uuid") == "assistant-1-text"
+    )
+    conflicting_response["message"]["usage"]["input_tokens"] = 13
+    _write_jsonl(root / "session.jsonl", records)
+    storage = SQLiteStorage(str(tmp_path / "verdict.db"))
+
+    capture_local_agents(storage, tenant_id="local", claude_root=root)
+
+    trace = next(
+        item
+        for item in storage.list_traces(tenant_id="local")
+        if item.response_redacted == "I will run the tests."
+    )
+    [bundle] = storage.list_agent_run_bundles("local")
+    assert bundle.turns[0].token_usage_basis is None
+    assert trace.input_tokens is None
+    assert trace.output_tokens is None
+
+
 def test_claude_rescan_fills_split_responses_without_changing_evidence_ids(
     tmp_path: Path,
 ) -> None:

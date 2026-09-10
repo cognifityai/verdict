@@ -184,6 +184,14 @@ def test_recursive_redaction_fuzzes_arbitrary_json_shapes_without_mutation():
         assert value == original
 
 
+def test_larger_internal_redaction_budget_does_not_change_the_public_default():
+    value = {"payload": "x" * 1_000_001}
+
+    assert redact_structure(value) == "<REDACTED>"
+    assert redact_structure(value, _max_characters=1_100_000) == value
+    assert redact_structure(value) == "<REDACTED>"
+
+
 def test_recursive_redaction_rejects_shared_dag_nodes_without_retraversal(monkeypatch):
     """Shared Python graphs fail closed instead of expanding at JSON storage."""
     shared = {"email": "shared@example.com"}
