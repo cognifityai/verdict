@@ -392,67 +392,78 @@ def _save_state(root: Path, state: _State) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def _read_chunk(path: Path, offset: int) -> _Chunk:
-    if offset < 0 or path.is_symlink():
+def _open_segment(path: Path) -> BinaryIO:
+    if path.is_symlink():
         raise ShippingError("segment_changed")
     descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-    with os.fdopen(descriptor, "rb") as handle:
-        metadata = os.fstat(handle.fileno())
-        if not stat.S_ISREG(metadata.st_mode) or offset > metadata.st_size:
-            raise ShippingError("segment_changed")
-        if offset:
-            handle.seek(offset - 1)
-            if handle.read(1) != b"\n":
-                raise ShippingError("checkpoint_misaligned")
-        handle.seek(offset)
-        records: list[bytes] = []
-        digests: list[str] = []
-        body_size = 0
-        incomplete = False
-        while len(records) < MAX_BATCH_RECORDS:
-            start = handle.tell()
-            raw = handle.readline(MAX_RECORD_BYTES + 2)
-            if not raw:
-                break
-            if not raw.endswith(b"\n"):
-                if len(raw) > MAX_RECORD_BYTES + 1:
-                    raise ShippingError("segment_record_too_large")
-                incomplete = True
-                handle.seek(start)
-                break
-            if len(raw) - 1 > MAX_RECORD_BYTES:
-                raise ShippingError("segment_record_too_large")
-            if records and body_size + len(raw) > MAX_BATCH_BYTES:
-                handle.seek(start)
-                break
-            records.append(raw)
-            body_size += len(raw)
-            digests.append(hashlib.sha256(raw[:-1]).hexdigest())
-        return _Chunk(b"".join(records), handle.tell(), tuple(digests), incomplete)
-
-
-def _prefix_hasher(path: Path, progress: _Progress) -> tuple[Any, tuple[int, int]]:
-    digest = hashlib.sha256()
-    remaining = progress.offset
-    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-    with os.fdopen(descriptor, "rb") as handle:
+    handle = os.fdopen(descriptor, "rb")
+    try:
         metadata = os.fstat(handle.fileno())
         if not stat.S_ISREG(metadata.st_mode):
             raise ShippingError("segment_changed")
-        while remaining:
-            block = handle.read(min(remaining, 1024 * 1024))
-            if not block:
-                raise ShippingError("segment_changed")
-            digest.update(block)
-            remaining -= len(block)
+    except BaseException:
+        handle.close()
+        raise
+    return handle
+
+
+def _read_chunk(handle: BinaryIO, offset: int) -> _Chunk:
+    metadata = os.fstat(handle.fileno())
+    if offset < 0 or offset > metadata.st_size:
+        raise ShippingError("segment_changed")
+    if offset:
+        handle.seek(offset - 1)
+        if handle.read(1) != b"\n":
+            raise ShippingError("checkpoint_misaligned")
+    handle.seek(offset)
+    records: list[bytes] = []
+    digests: list[str] = []
+    body_size = 0
+    incomplete = False
+    while len(records) < MAX_BATCH_RECORDS:
+        start = handle.tell()
+        raw = handle.readline(MAX_RECORD_BYTES + 2)
+        if not raw:
+            break
+        if not raw.endswith(b"\n"):
+            if len(raw) > MAX_RECORD_BYTES + 1:
+                raise ShippingError("segment_record_too_large")
+            incomplete = True
+            handle.seek(start)
+            break
+        if len(raw) - 1 > MAX_RECORD_BYTES:
+            raise ShippingError("segment_record_too_large")
+        if records and body_size + len(raw) > MAX_BATCH_BYTES:
+            handle.seek(start)
+            break
+        records.append(raw)
+        body_size += len(raw)
+        digests.append(hashlib.sha256(raw[:-1]).hexdigest())
+    return _Chunk(b"".join(records), handle.tell(), tuple(digests), incomplete)
+
+
+def _prefix_hasher(handle: BinaryIO, progress: _Progress) -> Any:
+    digest = hashlib.sha256()
+    remaining = progress.offset
+    handle.seek(0)
+    while remaining:
+        block = handle.read(min(remaining, 1024 * 1024))
+        if not block:
+            raise ShippingError("segment_changed")
+        digest.update(block)
+        remaining -= len(block)
     if digest.hexdigest() != progress.prefix_sha256:
         raise ShippingError("segment_changed")
-    return digest, (metadata.st_dev, metadata.st_ino)
+    return digest
 
 
-def _require_same_file(path: Path, expected: tuple[int, int]) -> None:
-    metadata = path.lstat()
-    if not stat.S_ISREG(metadata.st_mode) or (metadata.st_dev, metadata.st_ino) != expected:
+def _require_same_file(path: Path, handle: BinaryIO) -> None:
+    expected = os.fstat(handle.fileno())
+    current = path.lstat()
+    if not stat.S_ISREG(current.st_mode) or (current.st_dev, current.st_ino) != (
+        expected.st_dev,
+        expected.st_ino,
+    ):
         raise ShippingError("segment_changed")
 
 
@@ -627,65 +638,66 @@ class SegmentShipper:
                     continue
                 key = _segment_key(producer_id, sequence)
                 progress = state.segments.get(key, _Progress())
-                prefix_hasher, source_identity = _prefix_hasher(path, progress)
-                while batches < self.max_batches and not self.stop_event.is_set():
-                    chunk = _read_chunk(path, progress.offset)
-                    if not chunk.body:
-                        break
-                    batch_id = _batch_id(
-                        producer_id,
-                        sequence,
-                        progress.offset,
-                        chunk.end_offset,
-                        chunk.body,
-                    )
-                    if state.destination_fingerprint is None:
-                        state.destination_fingerprint = self.destination_fingerprint
+                with _open_segment(path) as handle:
+                    prefix_hasher = _prefix_hasher(handle, progress)
+                    while batches < self.max_batches and not self.stop_event.is_set():
+                        chunk = _read_chunk(handle, progress.offset)
+                        if not chunk.body:
+                            break
+                        batch_id = _batch_id(
+                            producer_id,
+                            sequence,
+                            progress.offset,
+                            chunk.end_offset,
+                            chunk.body,
+                        )
+                        if state.destination_fingerprint is None:
+                            state.destination_fingerprint = self.destination_fingerprint
+                            _save_state(self.root, state)
+                        response = self._send(
+                            batch_id=batch_id,
+                            producer_id=producer_id,
+                            body=chunk.body,
+                        )
+                        try:
+                            acknowledgement = parse_acknowledgement(response, batch_id)
+                        except ReceiptCorrupt as exc:
+                            raise ShippingError("collector_invalid_acknowledgement") from exc
+                        results = acknowledgement["results"]
+                        if tuple(item["recordDigest"] for item in results) != chunk.record_digests:
+                            raise ShippingError("collector_digest_mismatch")
+                        batch_accepted = int(acknowledgement["accepted"])
+                        batch_rejected = int(acknowledgement["rejected"])
+                        accepted += batch_accepted
+                        rejected += batch_rejected
+                        state.last_batch_id = batch_id
+                        state.last_receipt_at = datetime.now(timezone.utc).isoformat()
+                        state.last_error = None
+                        prefix_hasher.update(chunk.body)
+                        progress = _Progress(
+                            offset=chunk.end_offset,
+                            rejected=progress.rejected or batch_rejected > 0,
+                            prefix_sha256=prefix_hasher.hexdigest(),
+                        )
+                        state.segments[key] = progress
                         _save_state(self.root, state)
-                    response = self._send(
-                        batch_id=batch_id,
-                        producer_id=producer_id,
-                        body=chunk.body,
-                    )
-                    try:
-                        acknowledgement = parse_acknowledgement(response, batch_id)
-                    except ReceiptCorrupt as exc:
-                        raise ShippingError("collector_invalid_acknowledgement") from exc
-                    results = acknowledgement["results"]
-                    if tuple(item["recordDigest"] for item in results) != chunk.record_digests:
-                        raise ShippingError("collector_digest_mismatch")
-                    batch_accepted = int(acknowledgement["accepted"])
-                    batch_rejected = int(acknowledgement["rejected"])
-                    accepted += batch_accepted
-                    rejected += batch_rejected
-                    state.last_batch_id = batch_id
-                    state.last_receipt_at = datetime.now(timezone.utc).isoformat()
-                    state.last_error = None
-                    prefix_hasher.update(chunk.body)
-                    progress = _Progress(
-                        offset=chunk.end_offset,
-                        rejected=progress.rejected or batch_rejected > 0,
-                        prefix_sha256=prefix_hasher.hexdigest(),
-                    )
-                    state.segments[key] = progress
-                    _save_state(self.root, state)
-                    batches += 1
-                if lifecycle == "jsonl" and path.exists():
-                    size = path.stat().st_size
-                    final = _read_chunk(path, progress.offset)
-                    if not final.body and not final.incomplete and progress.offset == size:
-                        _require_same_file(path, source_identity)
-                        if progress.rejected:
-                            target = path.with_suffix(".rejected")
-                            if target.exists():
-                                raise ShippingError("segment_identity_conflict")
-                            path.rename(target)
-                            quarantined += 1
-                        else:
-                            path.unlink()
-                            deleted += 1
-                        state.segments.pop(key, None)
-                        _save_state(self.root, state)
+                        batches += 1
+                    if lifecycle == "jsonl" and path.exists():
+                        size = os.fstat(handle.fileno()).st_size
+                        final = _read_chunk(handle, progress.offset)
+                        if not final.body and not final.incomplete and progress.offset == size:
+                            _require_same_file(path, handle)
+                            if progress.rejected:
+                                target = path.with_suffix(".rejected")
+                                if target.exists():
+                                    raise ShippingError("segment_identity_conflict")
+                                path.rename(target)
+                                quarantined += 1
+                            else:
+                                path.unlink()
+                                deleted += 1
+                            state.segments.pop(key, None)
+                            _save_state(self.root, state)
                 if batches >= self.max_batches:
                     break
             state.last_error = None
