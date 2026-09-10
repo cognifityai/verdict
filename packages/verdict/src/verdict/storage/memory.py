@@ -43,6 +43,8 @@ from verdict.monitoring import (
     monitor_snapshot_to_json,
 )
 from verdict.normalized_evidence import (
+    _LegacyLocalTextUpgrade,
+    _prepare_legacy_local_text_upgrade,
     merge_agent_event,
     merge_agent_run,
     merge_agent_turn,
@@ -193,7 +195,19 @@ class InMemoryStorage:
         traces: tuple[Trace, ...] = (),
     ) -> None:
         sanitized, capture_traces, linked_trace_ids = prepare_agent_capture(bundle, traces)
-        self._store_agent_capture(sanitized, capture_traces, linked_trace_ids)
+        self._store_agent_capture(sanitized, capture_traces, linked_trace_ids, None)
+
+    def _replace_local_agent_capture(
+        self,
+        bundle: AgentRunBundle,
+        traces: tuple[Trace, ...],
+        legacy_text_upgrade: _LegacyLocalTextUpgrade,
+    ) -> None:
+        sanitized, capture_traces, linked_trace_ids = prepare_agent_capture(bundle, traces)
+        upgrade = _prepare_legacy_local_text_upgrade(
+            sanitized, capture_traces, legacy_text_upgrade
+        )
+        self._store_agent_capture(sanitized, capture_traces, linked_trace_ids, upgrade)
 
     def append_agent_capture(
         self,
@@ -201,18 +215,26 @@ class InMemoryStorage:
         traces: tuple[Trace, ...] = (),
     ) -> None:
         sanitized, capture_traces, linked_trace_ids = prepare_agent_capture_batch(batch, traces)
-        self._store_agent_capture(sanitized, capture_traces, linked_trace_ids)
+        self._store_agent_capture(sanitized, capture_traces, linked_trace_ids, None)
 
     def _store_agent_capture(
         self,
         capture: AgentRunBundle | AgentCaptureBatch,
         capture_traces: tuple[Trace, ...],
         linked_trace_ids: frozenset[str],
+        text_compatibility: _LegacyLocalTextUpgrade | None,
     ) -> None:
         with self._agent_evidence_lock:
             capture = normalize_bundle_timestamps(capture)
             prepared_traces = [
-                merge_capture_trace(self._traces.get(trace.trace_id), trace)
+                merge_capture_trace(
+                    self._traces.get(trace.trace_id),
+                    trace,
+                    legacy_preview=(
+                        text_compatibility.trace_previews.get(trace.trace_id)
+                        if text_compatibility is not None else None
+                    ),
+                )
                 for trace in capture_traces
             ]
             tenant_id = capture.run.tenant_id
@@ -221,7 +243,14 @@ class InMemoryStorage:
             run_key = (tenant_id, capture.run.run_id)
             run = merge_agent_run(self._agent_runs.get(run_key), capture.run)
             turns = [
-                merge_agent_turn(self._agent_turns.get((tenant_id, run.run_id, turn.turn_id)), turn)
+                merge_agent_turn(
+                    self._agent_turns.get((tenant_id, run.run_id, turn.turn_id)),
+                    turn,
+                    legacy_preview=(
+                        text_compatibility.turn_previews.get(turn.turn_id)
+                        if text_compatibility is not None else None
+                    ),
+                )
                 for turn in capture.turns
             ]
             events = [
@@ -389,12 +418,21 @@ class InMemoryStorage:
         self,
         tenant_id: str,
         scope_key: str,
+        *,
+        analyzer_version: str | None = None,
     ) -> DeterministicAnalysisRun | None:
         with self._analysis_lock:
             matches = []
             for payload in self._analysis_runs.values():
                 parsed = analysis_run_from_json(payload)
-                if parsed.tenant_id == tenant_id and parsed.scope_key == scope_key:
+                if (
+                    parsed.tenant_id == tenant_id
+                    and parsed.scope_key == scope_key
+                    and (
+                        analyzer_version is None
+                        or parsed.analyzer_version == analyzer_version
+                    )
+                ):
                     matches.append(parsed)
         return (
             max(matches, key=lambda value: (value.completed_at, value.analysis_id))

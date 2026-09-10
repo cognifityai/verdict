@@ -115,6 +115,11 @@ def _agent_record(
         started_at=now,
         status=status,
         ended_at=ended_at,
+        input_tokens=17,
+        cached_input_tokens=11,
+        output_tokens=5,
+        total_tokens=22,
+        token_usage_basis="codex_turn_delta",
     )
     event = AgentEvent(
         event_id=f"event-{trace_id}",
@@ -209,6 +214,11 @@ def test_agent_batch_uses_configured_tenant_and_replays_exactly(tmp_path: Path) 
     [bundle] = storage.list_agent_run_bundles(TENANT)
     assert bundle.session.tenant_id == TENANT
     assert bundle.run.tenant_id == TENANT
+    assert bundle.turns[0].input_tokens == 17
+    assert bundle.turns[0].cached_input_tokens == 11
+    assert bundle.turns[0].output_tokens == 5
+    assert bundle.turns[0].total_tokens == 22
+    assert bundle.turns[0].token_usage_basis == "codex_turn_delta"
     [trace] = storage.list_traces(tenant_id=TENANT)
     assert trace.tenant_id == TENANT
     assert bundle.events[0].trace_id == trace.trace_id

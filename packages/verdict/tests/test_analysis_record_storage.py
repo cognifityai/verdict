@@ -112,6 +112,44 @@ def test_same_analysis_input_is_idempotent_across_new_attempt_identity(storage) 
     ) == first
 
 
+def test_latest_analysis_can_be_scoped_to_analyzer_version(storage) -> None:
+    older_version = _analysis()
+    newer_version = replace(
+        older_version,
+        analysis_id="f" * 64,
+        analyzer_version="agent-insights-v2",
+        input_fingerprint="c" * 64,
+        completed_at=older_version.completed_at + timedelta(minutes=1),
+    )
+    storage.save_deterministic_analysis_run(older_version)
+    storage.save_deterministic_analysis_run(newer_version)
+
+    assert storage.get_latest_deterministic_analysis_run(
+        "tenant-a", "agent-and-trace", analyzer_version="agent-insights-v1"
+    ) == older_version
+    assert storage.get_latest_deterministic_analysis_run(
+        "tenant-a", "agent-and-trace", analyzer_version="missing"
+    ) is None
+
+
+class _PublishedAnalysisReadStorage(InMemoryStorage):
+    def get_latest_deterministic_analysis_run(self, tenant_id: str, scope_key: str):
+        return super().get_latest_deterministic_analysis_run(tenant_id, scope_key)
+
+
+def test_buffered_analysis_read_preserves_the_published_inner_signature() -> None:
+    run = _analysis()
+    inner = _PublishedAnalysisReadStorage()
+    storage = BufferedStorage(inner)
+    try:
+        storage.save_deterministic_analysis_run(run)
+        assert storage.get_latest_deterministic_analysis_run(
+            "tenant-a", "agent-and-trace"
+        ) == run
+    finally:
+        storage.close()
+
+
 def test_analysis_snapshot_is_tenant_scoped_and_detached(storage) -> None:
     run = _analysis(findings=[{"code": "tool_error", "message": "safe"}])
     storage.save_deterministic_analysis_run(run)

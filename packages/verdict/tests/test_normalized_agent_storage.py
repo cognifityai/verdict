@@ -126,6 +126,62 @@ def test_capture_persists_normalized_rows_without_copying_model_content(tmp_path
     assert prompt == "MODEL_PROMPT_CANARY"
 
 
+def test_sqlite_adds_nullable_turn_evidence_columns_to_existing_schema(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "existing.db"
+    storage = SQLiteStorage(str(database))
+    bundle, _trace = _capture()
+    storage.replace_agent_run_bundle(replace(bundle, events=()))
+    storage.close()
+    legacy_columns = (
+        "tenant_id,turn_id,run_id,sequence,started_at,ended_at,status,"
+        "user_request_redacted,final_response_redacted,request_state,response_state"
+    )
+    with sqlite3.connect(database) as connection:
+        connection.execute("PRAGMA foreign_keys=OFF")
+        connection.execute(
+            """CREATE TABLE old_agent_turns (
+                tenant_id TEXT NOT NULL, turn_id TEXT NOT NULL, run_id TEXT NOT NULL,
+                sequence INTEGER NOT NULL, started_at TEXT NOT NULL, ended_at TEXT,
+                status TEXT NOT NULL, user_request_redacted TEXT,
+                final_response_redacted TEXT, request_state TEXT NOT NULL,
+                response_state TEXT NOT NULL,
+                PRIMARY KEY (tenant_id, run_id, turn_id),
+                UNIQUE (tenant_id, run_id, sequence)
+            )"""
+        )
+        connection.execute(
+            f"INSERT INTO old_agent_turns ({legacy_columns}) "
+            f"SELECT {legacy_columns} FROM agent_turns"
+        )
+        connection.execute("DROP TABLE agent_turns")
+        connection.execute("ALTER TABLE old_agent_turns RENAME TO agent_turns")
+
+    upgraded = SQLiteStorage(str(database))
+    loaded = upgraded.get_agent_run_bundle("tenant-a", "run-1")
+    columns = {
+        row[1]
+        for row in upgraded._conn.execute("PRAGMA table_info(agent_turns)").fetchall()
+    }
+    upgraded.close()
+
+    assert loaded is not None
+    assert loaded.turns[0].total_tokens is None
+    assert loaded.turns[0].response_truncated is False
+    assert {
+        "input_tokens",
+        "cached_input_tokens",
+        "cache_write_input_tokens",
+        "output_tokens",
+        "reasoning_output_tokens",
+        "total_tokens",
+        "token_usage_basis",
+        "request_truncated",
+        "response_truncated",
+    } <= columns
+
+
 def test_capture_rolls_back_trace_when_normalized_event_write_fails(tmp_path: Path) -> None:
     database = tmp_path / "verdict.db"
     storage = SQLiteStorage(str(database))
@@ -335,6 +391,72 @@ def test_capture_rejects_rewritten_trace_messages_without_mutation(tmp_path: Pat
         )
 
     assert storage.get_trace(trace.trace_id) == stored_trace
+
+
+def test_capture_extends_only_verdict_local_agent_trace_prefixes(tmp_path: Path) -> None:
+    storage = SQLiteStorage(str(tmp_path / "verdict.db"))
+    bundle, trace = _capture()
+    tags = {
+        "verdict.source": "claude-code",
+        "verdict.workload": "agent",
+        "verdict.agent_run_id": bundle.run.run_id,
+        "verdict.agent_event_id": bundle.events[0].event_id,
+        "verdict.input_evidence": "turn_request_only",
+        "verdict.time_evidence": "response_observed_at",
+    }
+    first = replace(
+        trace,
+        prompt_redacted="p" * 1_000,
+        response_redacted="r" * 1_000,
+        raw_messages=[
+            {"role": "user", "content": "p" * 1_000},
+            {"role": "assistant", "content": "r" * 1_000},
+        ],
+        tags=tags,
+    )
+    extended = replace(
+        first,
+        prompt_redacted="p" * 2_000,
+        response_redacted="r" * 2_000,
+        raw_messages=[
+            {"role": "user", "content": "p" * 2_000},
+            {"role": "assistant", "content": "r" * 2_000},
+        ],
+    )
+    service = AgentCaptureService(storage)
+    service.capture(bundle, traces=(first,))
+
+    service.capture(bundle, traces=(extended,))
+
+    stored = storage.get_trace(trace.trace_id)
+    assert stored is not None
+    assert stored.prompt_redacted == extended.prompt_redacted
+    assert stored.response_redacted == extended.response_redacted
+    assert stored.raw_messages == extended.raw_messages
+    service.capture(bundle, traces=(first,))
+    stored = storage.get_trace(trace.trace_id)
+    assert stored is not None
+    assert stored.prompt_redacted == extended.prompt_redacted
+    assert stored.response_redacted == extended.response_redacted
+    assert stored.raw_messages == extended.raw_messages
+    with pytest.raises(ValueError, match="Trace prompt"):
+        service.capture(
+            bundle,
+            traces=(replace(extended, prompt_redacted="different"),),
+        )
+
+
+def test_capture_rejects_generic_trace_prefix_extension(tmp_path: Path) -> None:
+    storage = SQLiteStorage(str(tmp_path / "verdict.db"))
+    bundle, trace = _capture()
+    service = AgentCaptureService(storage)
+    service.capture(bundle, traces=(trace,))
+
+    with pytest.raises(ValueError, match="Trace prompt"):
+        service.capture(
+            bundle,
+            traces=(replace(trace, prompt_redacted=f"{trace.prompt_redacted} more"),),
+        )
 
 
 def test_idempotent_capture_does_not_rewrite_trace_messages(tmp_path: Path) -> None:

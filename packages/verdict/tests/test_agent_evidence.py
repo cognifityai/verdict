@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from datetime import datetime, timezone
 
@@ -84,6 +85,62 @@ def test_bundle_round_trip_revalidates_canonical_storage_shape() -> None:
 
     assert loaded == original
     assert loaded.content_hash == original.content_hash
+
+
+def test_bundle_round_trip_preserves_optional_turn_usage_and_truncation() -> None:
+    original = _bundle()
+    enriched = replace(
+        original,
+        turns=(replace(
+            original.turns[0],
+            input_tokens=40,
+            cached_input_tokens=24,
+            cache_write_input_tokens=3,
+            output_tokens=8,
+            reasoning_output_tokens=2,
+            total_tokens=48,
+            token_usage_basis="codex_turn_delta",
+            response_truncated=True,
+        ),),
+    )
+
+    assert agent_run_bundle_from_json(agent_run_bundle_to_json(enriched)) == enriched
+
+
+def test_bundle_reader_accepts_pre_usage_turn_payload() -> None:
+    original = _bundle()
+    serialized = agent_run_bundle_to_json(original)
+    payload = json.loads(serialized)
+    for name in (
+        "input_tokens",
+        "cached_input_tokens",
+        "cache_write_input_tokens",
+        "output_tokens",
+        "reasoning_output_tokens",
+        "total_tokens",
+        "token_usage_basis",
+        "request_truncated",
+        "response_truncated",
+    ):
+        payload["turns"][0].pop(name, None)
+
+    legacy_serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    loaded = agent_run_bundle_from_json(legacy_serialized)
+
+    assert loaded == original
+    assert loaded.content_hash == original.content_hash
+    assert legacy_serialized == serialized
+
+
+@pytest.mark.parametrize("value", [-1, True, 2**63])
+def test_agent_turn_rejects_nonportable_usage_counts(value: object) -> None:
+    with pytest.raises(ValueError, match="token"):
+        replace(_bundle().turns[0], input_tokens=value)
+
+
+def test_agent_turn_requires_usage_basis_with_usage() -> None:
+    with pytest.raises(ValueError, match="token usage basis"):
+        replace(_bundle().turns[0], total_tokens=3)
 
 
 def test_bundle_round_trip_preserves_distributed_agent_correlation() -> None:

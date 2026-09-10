@@ -25,9 +25,11 @@ best-effort-redacted content retention is on by default; explicitly set
 `capture_content=False` for metadata-only capture.
 
 The first agent-run analysis pass is deterministic and key-free: it reports
-evidence coverage, source-exposed completion state, model/tool-call counts,
-tokens and latency, observed tool/command/test failures, retries, and possible
-repeated-tool patterns. Programmatic policies can additionally require event
+evidence coverage, source-exposed completion state, source-reported per-turn
+token activity when available, observed tool/command/test failures, retries,
+and possible repeated-tool patterns. Provider-call token, latency, cost, judge,
+and model-comparison views remain limited to genuine LLM `Trace` records.
+Programmatic policies can additionally require event
 types, prohibit named tools, or require JSON responses. Verdict does not infer
 task success, file state, retries, or cost when the source evidence does not
 establish them.
@@ -72,6 +74,8 @@ Runs while the LLM Call count remains zero. Data-source actions remain under
 approval. If the user explicitly saves a daily schedule, Verdict intentionally
 retains those source paths in the local control store so `verdict-service` can
 rescan them; that durable schedule is configuration, not captured evidence.
+When the source records child execution identity, local capture retains it as a
+separate child run instead of folding its turns into the parent.
 
 The findings-first dashboard has five top-level workspaces: **Overview**,
 **Explore**, **Evaluate**, **Monitor**, and **Settings**. Overview contains
@@ -582,11 +586,20 @@ Hexagonal / ports-and-adapters, ≥2 adapters per port (one real + in-memory for
   test, artifact, retry, handoff, feedback, and outcome events supplied by the
   application. Local-history adapters remain limited to evidence present in
   their source formats. Verdict does not independently prove artifact state,
-  deployment success, task outcomes, or subagent correctness. Each turn and event is bounded
-  independently. If one event's opted-in content exceeds its evidence limit,
+  deployment success, task outcomes, or subagent correctness. Source-identified
+  child histories remain distinct runs; a parent reference can remain unresolved
+  when the source's parent history is no longer present. Each turn and event is
+  bounded independently. Turn request/response text is redacted before its
+  64 KiB preview cutoff and explicitly reports truncation. If one event's
+  opted-in content exceeds its evidence limit,
   Verdict retains that event's metadata and records why its content was
-  omitted; it does not downgrade the entire run. Local-history token counts
-  remain observable, but
+  omitted; it does not downgrade the entire run. Codex turn usage is derived
+  from within-turn cumulative-counter deltas; Claude usage is summed once per
+  unique provider response, including cache-read and cache-creation counts. A
+  Claude total appears only after the turn is terminal and every response has
+  complete input/output usage.
+  Malformed or unavailable counters remain unavailable rather than becoming
+  zero. These local-history token counts remain observable, but
   Verdict does not convert them into API-list-price spend because desktop or
   subscription billing is not established by those files. Codex runs remain
   outside LLM Trace comparisons when the source does not expose genuine model
@@ -700,7 +713,7 @@ Hexagonal / ports-and-adapters, ≥2 adapters per port (one real + in-memory for
   a billing source of truth. Unknown models remain unpriced; caching, special
   tiers, tools, residency, and negotiated discounts are not modeled.
 - Judge execution is sequential. Judge token/cost usage, evaluation-budget
-  enforcement, cache-token accounting, human-readable cluster naming, and
+  enforcement, cache-aware provider-Trace pricing, human-readable cluster naming, and
   automatic fragmented-cluster fusion are not implemented. Their scoped
   follow-ups are listed in [`docs/v1-roadmap.md`](docs/v1-roadmap.md).
 - This is a **public alpha** release — not a hosted monitoring service and not a substitute for workload-specific calibration.

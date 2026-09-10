@@ -50,6 +50,8 @@ from verdict.monitoring import (
 from verdict.normalized_evidence import (
     LEGACY_AGENT_WRITER_ERROR,
     LEGACY_AGENT_WRITER_MIGRATION,
+    _LegacyLocalTextUpgrade,
+    _prepare_legacy_local_text_upgrade,
     agent_event_from_row,
     agent_run_from_row,
     agent_turn_from_row,
@@ -223,6 +225,18 @@ CREATE TABLE IF NOT EXISTS agent_turns (
         'present','missing','not_captured','not_applicable')),
     response_state TEXT NOT NULL CHECK(response_state IN (
         'present','missing','not_captured','not_applicable')),
+    input_tokens BIGINT CHECK(input_tokens IS NULL OR input_tokens >= 0),
+    cached_input_tokens BIGINT CHECK(cached_input_tokens IS NULL OR cached_input_tokens >= 0),
+    cache_write_input_tokens BIGINT
+        CHECK(cache_write_input_tokens IS NULL OR cache_write_input_tokens >= 0),
+    output_tokens BIGINT CHECK(output_tokens IS NULL OR output_tokens >= 0),
+    reasoning_output_tokens BIGINT
+        CHECK(reasoning_output_tokens IS NULL OR reasoning_output_tokens >= 0),
+    total_tokens BIGINT CHECK(total_tokens IS NULL OR total_tokens >= 0),
+    token_usage_basis TEXT CHECK(token_usage_basis IS NULL OR token_usage_basis IN (
+        'codex_turn_delta','claude_provider_response_sum')),
+    request_truncated BOOLEAN NOT NULL DEFAULT FALSE,
+    response_truncated BOOLEAN NOT NULL DEFAULT FALSE,
     PRIMARY KEY (tenant_id, run_id, turn_id),
     UNIQUE (tenant_id, run_id, sequence),
     FOREIGN KEY (tenant_id, run_id) REFERENCES agent_runs(tenant_id, run_id)
@@ -646,6 +660,35 @@ class PostgresStorage:
                     ("analysis_raw_messages_state", "TEXT NOT NULL DEFAULT 'pending'"),
                 ]:
                     cur.execute(f"ALTER TABLE traces ADD COLUMN IF NOT EXISTS {col} {ddl}")
+                for col, ddl in [
+                    ("input_tokens", "BIGINT CHECK(input_tokens IS NULL OR input_tokens >= 0)"),
+                    (
+                        "cached_input_tokens",
+                        "BIGINT CHECK(cached_input_tokens IS NULL OR cached_input_tokens >= 0)",
+                    ),
+                    (
+                        "cache_write_input_tokens",
+                        "BIGINT CHECK(cache_write_input_tokens IS NULL OR "
+                        "cache_write_input_tokens >= 0)",
+                    ),
+                    ("output_tokens", "BIGINT CHECK(output_tokens IS NULL OR output_tokens >= 0)"),
+                    (
+                        "reasoning_output_tokens",
+                        "BIGINT CHECK(reasoning_output_tokens IS NULL OR "
+                        "reasoning_output_tokens >= 0)",
+                    ),
+                    ("total_tokens", "BIGINT CHECK(total_tokens IS NULL OR total_tokens >= 0)"),
+                    (
+                        "token_usage_basis",
+                        "TEXT CHECK(token_usage_basis IS NULL OR token_usage_basis IN "
+                        "('codex_turn_delta','claude_provider_response_sum'))",
+                    ),
+                    ("request_truncated", "BOOLEAN NOT NULL DEFAULT FALSE"),
+                    ("response_truncated", "BOOLEAN NOT NULL DEFAULT FALSE"),
+                ]:
+                    cur.execute(
+                        f"ALTER TABLE agent_turns ADD COLUMN IF NOT EXISTS {col} {ddl}"
+                    )
                 cur.execute("""CREATE INDEX IF NOT EXISTS idx_traces_tenant_started_completed_v2
                     ON traces(tenant_id,analysis_started_at_us,trace_id)
                     WHERE ended_at IS NOT NULL AND analysis_started_at_state='valid'""")
@@ -875,6 +918,7 @@ class PostgresStorage:
         self,
         cur,
         bundle: AgentRunBundle | AgentCaptureBatch,
+        text_compatibility: _LegacyLocalTextUpgrade | None = None,
     ) -> None:
         bundle = normalize_bundle_timestamps(bundle)
         tenant_id = bundle.run.tenant_id
@@ -909,7 +953,17 @@ class PostgresStorage:
                 current_turns = {
                     row["turn_id"]: agent_turn_from_row(row) for row in read_cur.fetchall()
                 }
-                turns = [merge_agent_turn(current_turns.get(turn.turn_id), turn) for turn in turns]
+                turns = [
+                    merge_agent_turn(
+                        current_turns.get(turn.turn_id),
+                        turn,
+                        legacy_preview=(
+                            text_compatibility.turn_previews.get(turn.turn_id)
+                            if text_compatibility is not None else None
+                        ),
+                    )
+                    for turn in turns
+                ]
             events = list(bundle.events)
             if events:
                 read_cur.execute(
@@ -986,15 +1040,26 @@ class PostgresStorage:
             """INSERT INTO agent_turns (
                    tenant_id,turn_id,run_id,sequence,started_at,ended_at,status,
                    user_request_redacted,final_response_redacted,
-                   request_state,response_state
-               ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                   request_state,response_state,input_tokens,cached_input_tokens,
+                   cache_write_input_tokens,output_tokens,reasoning_output_tokens,
+                   total_tokens,token_usage_basis,request_truncated,response_truncated
+               ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                ON CONFLICT (tenant_id,run_id,turn_id) DO UPDATE SET
                    ended_at=EXCLUDED.ended_at,
                    status=EXCLUDED.status,
                    user_request_redacted=EXCLUDED.user_request_redacted,
                    final_response_redacted=EXCLUDED.final_response_redacted,
                    request_state=EXCLUDED.request_state,
-                   response_state=EXCLUDED.response_state""",
+                   response_state=EXCLUDED.response_state,
+                   input_tokens=EXCLUDED.input_tokens,
+                   cached_input_tokens=EXCLUDED.cached_input_tokens,
+                   cache_write_input_tokens=EXCLUDED.cache_write_input_tokens,
+                   output_tokens=EXCLUDED.output_tokens,
+                   reasoning_output_tokens=EXCLUDED.reasoning_output_tokens,
+                   total_tokens=EXCLUDED.total_tokens,
+                   token_usage_basis=EXCLUDED.token_usage_basis,
+                   request_truncated=EXCLUDED.request_truncated,
+                   response_truncated=EXCLUDED.response_truncated""",
             [
                 (
                     run.tenant_id,
@@ -1008,6 +1073,15 @@ class PostgresStorage:
                     turn.final_response_redacted,
                     turn.request_state.value,
                     turn.response_state.value,
+                    turn.input_tokens,
+                    turn.cached_input_tokens,
+                    turn.cache_write_input_tokens,
+                    turn.output_tokens,
+                    turn.reasoning_output_tokens,
+                    turn.total_tokens,
+                    turn.token_usage_basis,
+                    turn.request_truncated,
+                    turn.response_truncated,
                 )
                 for turn in turns
             ],
@@ -1135,7 +1209,19 @@ class PostgresStorage:
         traces: tuple[Trace, ...] = (),
     ) -> None:
         sanitized, capture_traces, linked_trace_ids = prepare_agent_capture(bundle, traces)
-        self._store_agent_capture(sanitized, capture_traces, linked_trace_ids)
+        self._store_agent_capture(sanitized, capture_traces, linked_trace_ids, None)
+
+    def _replace_local_agent_capture(
+        self,
+        bundle: AgentRunBundle,
+        traces: tuple[Trace, ...],
+        legacy_text_upgrade: _LegacyLocalTextUpgrade,
+    ) -> None:
+        sanitized, capture_traces, linked_trace_ids = prepare_agent_capture(bundle, traces)
+        upgrade = _prepare_legacy_local_text_upgrade(
+            sanitized, capture_traces, legacy_text_upgrade
+        )
+        self._store_agent_capture(sanitized, capture_traces, linked_trace_ids, upgrade)
 
     def append_agent_capture(
         self,
@@ -1143,13 +1229,14 @@ class PostgresStorage:
         traces: tuple[Trace, ...] = (),
     ) -> None:
         sanitized, capture_traces, linked_trace_ids = prepare_agent_capture_batch(batch, traces)
-        self._store_agent_capture(sanitized, capture_traces, linked_trace_ids)
+        self._store_agent_capture(sanitized, capture_traces, linked_trace_ids, None)
 
     def _store_agent_capture(
         self,
         capture: AgentRunBundle | AgentCaptureBatch,
         capture_traces: tuple[Trace, ...],
         linked_trace_ids: frozenset[str],
+        text_compatibility: _LegacyLocalTextUpgrade | None,
     ) -> None:
         from psycopg import IntegrityError
 
@@ -1179,7 +1266,14 @@ class PostgresStorage:
                     )
                     row = cur.fetchone()
                     current = self._row_to_trace(row) if row else None
-                    prepared = merge_capture_trace(current, trace)
+                    prepared = merge_capture_trace(
+                        current,
+                        trace,
+                        legacy_preview=(
+                            text_compatibility.trace_previews.get(trace.trace_id)
+                            if text_compatibility is not None else None
+                        ),
+                    )
                     prepared_traces.append(prepared)
                     if current is not None and current.raw_messages != prepared.raw_messages:
                         message_updates.add(prepared.trace_id)
@@ -1210,7 +1304,12 @@ class PostgresStorage:
                     )
                     tenants = {trace_id: tenant_id for trace_id, tenant_id in cur.fetchall()}
                     require_same_tenant_linked_traces(capture.run.tenant_id, linked_ids, tenants)
-                self._write_normalized_bundle_cursor(cur, capture)
+                if text_compatibility is None:
+                    self._write_normalized_bundle_cursor(cur, capture)
+                else:
+                    self._write_normalized_bundle_cursor(
+                        cur, capture, text_compatibility
+                    )
         except IntegrityError as exc:
             raise ValueError("agent capture conflicts with existing evidence") from exc
 
@@ -1312,13 +1411,23 @@ class PostgresStorage:
         self,
         tenant_id: str,
         scope_key: str,
+        *,
+        analyzer_version: str | None = None,
     ) -> DeterministicAnalysisRun | None:
-        row = self._fetchone(
-            """SELECT payload_json FROM deterministic_analysis_runs
-               WHERE tenant_id=%s AND scope_key=%s
-               ORDER BY completed_at DESC, analysis_id DESC LIMIT 1""",
-            (tenant_id, scope_key),
-        )
+        if analyzer_version is None:
+            row = self._fetchone(
+                """SELECT payload_json FROM deterministic_analysis_runs
+                   WHERE tenant_id=%s AND scope_key=%s
+                   ORDER BY completed_at DESC, analysis_id DESC LIMIT 1""",
+                (tenant_id, scope_key),
+            )
+        else:
+            row = self._fetchone(
+                """SELECT payload_json FROM deterministic_analysis_runs
+                   WHERE tenant_id=%s AND scope_key=%s AND analyzer_version=%s
+                   ORDER BY completed_at DESC, analysis_id DESC LIMIT 1""",
+                (tenant_id, scope_key, analyzer_version),
+            )
         return analysis_run_from_json(row[0]) if row is not None else None
 
     def save_notification_delivery_attempt(

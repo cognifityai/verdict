@@ -70,6 +70,7 @@ from verdict.analysis_records import (
 )
 from verdict.evidence import AgentCaptureBatch, AgentRunBundle
 from verdict.monitoring import CohortManifest, MonitorComparison, MonitorPolicy
+from verdict.normalized_evidence import _LegacyLocalTextUpgrade
 from verdict.schema import (
     DriftRun,
     DriftSignal,
@@ -374,6 +375,18 @@ class BufferedStorage:
         # Trace links and their hierarchy share one inner adapter transaction.
         self._maintenance(self._inner.replace_agent_capture, bundle, traces)
 
+    def _replace_local_agent_capture(
+        self,
+        bundle: AgentRunBundle,
+        traces: tuple[Trace, ...],
+        legacy_text_upgrade: _LegacyLocalTextUpgrade,
+    ) -> None:
+        replace_local = getattr(self._inner, "_replace_local_agent_capture", None)
+        if callable(replace_local):
+            self._maintenance(replace_local, bundle, traces, legacy_text_upgrade)
+            return
+        self._maintenance(self._inner.replace_agent_capture, bundle, traces)
+
     def append_agent_capture(
         self,
         batch: AgentCaptureBatch,
@@ -431,11 +444,20 @@ class BufferedStorage:
         self,
         tenant_id: str,
         scope_key: str,
+        *,
+        analyzer_version: str | None = None,
     ) -> DeterministicAnalysisRun | None:
+        if analyzer_version is None:
+            return self._read(
+                self._inner.get_latest_deterministic_analysis_run,
+                tenant_id,
+                scope_key,
+            )
         return self._read(
             self._inner.get_latest_deterministic_analysis_run,
             tenant_id,
             scope_key,
+            analyzer_version=analyzer_version,
         )
 
     def list_notification_delivery_attempts(

@@ -143,6 +143,29 @@ def test_atomic_agent_capture_has_adapter_parity(evidence_storage) -> None:
     assert evidence_storage.get_agent_run_bundle("tenant-a", "run_1") == linked
 
 
+class _PublishedSignatureStorage(InMemoryStorage):
+    """A third-party adapter compiled against the pre-change Storage port."""
+
+    def replace_agent_capture(
+        self,
+        bundle: AgentRunBundle,
+        traces: tuple[Trace, ...] = (),
+    ) -> None:
+        super().replace_agent_capture(bundle, traces)
+
+
+@pytest.mark.parametrize("buffered", [False, True])
+def test_capture_preserves_the_published_storage_method_signature(buffered: bool) -> None:
+    inner = _PublishedSignatureStorage()
+    storage = BufferedStorage(inner) if buffered else inner
+    linked, trace = _linked_capture()
+    try:
+        AgentCaptureService(storage).capture(linked, traces=(trace,))
+        assert storage.get_agent_run_bundle("tenant-a", "run_1") == linked
+    finally:
+        storage.close()
+
+
 def test_append_agent_capture_has_adapter_parity(evidence_storage) -> None:
     linked, trace = _linked_capture()
     batch = AgentCaptureBatch(
@@ -276,6 +299,41 @@ def test_replace_bundle_rejects_conflicting_complete_revision(evidence_storage) 
     assert loaded == original
     assert loaded is not None
     assert loaded.content_hash == original.content_hash
+
+
+def test_turn_usage_can_advance_but_never_decrease(evidence_storage) -> None:
+    original = _bundle()
+    first = replace(
+        original,
+        turns=(replace(
+            original.turns[0],
+            input_tokens=8,
+            output_tokens=2,
+            total_tokens=10,
+            token_usage_basis="codex_turn_delta",
+        ),),
+    )
+    advanced = replace(
+        first,
+        turns=(replace(
+            first.turns[0],
+            input_tokens=12,
+            output_tokens=3,
+            total_tokens=15,
+        ),),
+    )
+    decreased = replace(
+        advanced,
+        turns=(replace(advanced.turns[0], total_tokens=14),),
+    )
+
+    evidence_storage.replace_agent_run_bundle(first)
+    evidence_storage.replace_agent_run_bundle(advanced)
+
+    assert evidence_storage.get_agent_run_bundle("tenant-a", "run_1") == advanced
+    with pytest.raises(ValueError, match="total tokens cannot decrease"):
+        evidence_storage.replace_agent_run_bundle(decreased)
+    assert evidence_storage.get_agent_run_bundle("tenant-a", "run_1") == advanced
 
 
 def test_import_source_locator_cannot_be_reassigned(evidence_storage) -> None:

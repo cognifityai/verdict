@@ -142,9 +142,51 @@ export function Runs({
   );
 }
 
+const TOKEN_COMPONENTS = [
+  ["inputTokens", "input tokens"],
+  ["cachedInputTokens", "cached input tokens"],
+  ["cacheWriteInputTokens", "cache-write input tokens"],
+  ["outputTokens", "output tokens"],
+  ["reasoningOutputTokens", "reasoning output tokens"],
+];
+
+function availableTokenComponents(usage) {
+  return TOKEN_COMPONENTS.flatMap(([name, label]) => (
+    usage?.[name] == null ? [] : [`${Number(usage[name]).toLocaleString()} ${label}`]
+  ));
+}
+
+function sourceTokenSummary(usage) {
+  if (usage.totalTokens != null) {
+    return `${Number(usage.totalTokens).toLocaleString()} source-reported tokens${usage.state === "partial" ? " (partial)" : ""}`;
+  }
+  const components = availableTokenComponents(usage);
+  if (usage.state === "partial") {
+    return components.length
+      ? `${components.join(" · ")} (partial; total unavailable)`
+      : "source token usage partially captured; total unavailable";
+  }
+  return "source tokens not captured";
+}
+
+function turnTokenSummary(usage) {
+  if (usage?.totalTokens != null) {
+    const basis = usage.basis ? ` · ${usage.basis.replaceAll("_", " ")}` : "";
+    return `${Number(usage.totalTokens).toLocaleString()} total${basis}`;
+  }
+  const components = availableTokenComponents(usage);
+  if (components.length) {
+    const basis = usage?.basis ? ` · ${usage.basis.replaceAll("_", " ")}` : "";
+    return `${components.join(" · ")} · partial; total unavailable${basis}`;
+  }
+  return "not captured";
+}
+
 function RunDetail({ run, detail, onEventPage, onTurnPage, onFocusEvent, focusEventId, onOpenTrace }) {
   if (!run) return null;
   const metrics = run.metrics || {};
+  const sourceUsage = run.sourceTokenUsage || { totalTokens: null, state: "not_captured" };
+  const sourceTokens = sourceTokenSummary(sourceUsage);
   return (
     <section className="border p-5 min-w-0" style={{ borderColor: color.border, background: color.panel }}>
       <div className="flex flex-wrap justify-between gap-3">
@@ -156,7 +198,7 @@ function RunDetail({ run, detail, onEventPage, onTurnPage, onFocusEvent, focusEv
           </div>
         </div>
         <div className="text-xs" style={{ color: color.sub }}>
-          {metrics.model_calls || 0} model calls · {metrics.tool_calls || 0} tool calls · {metrics.input_tokens || 0} input tokens
+          {sourceTokens} · {metrics.tool_calls || 0} observed tool calls
         </div>
       </div>
       <div className="mt-5 grid sm:grid-cols-3 gap-2">
@@ -189,8 +231,9 @@ function RunDetail({ run, detail, onEventPage, onTurnPage, onFocusEvent, focusEv
           <details key={turn.turnId} className="border p-3" style={{ borderColor: color.border }}>
             <summary className="text-sm cursor-pointer">Turn {turn.sequence + 1} · {turn.status}</summary>
             <div className="mt-3 text-xs" style={{ color: color.sub }}>
-              <div>Request ({turn.requestState}): {turn.request ?? "not available"}</div>
-              <div className="mt-2">Response ({turn.responseState}): {turn.response ?? "not available"}</div>
+              <div>Request ({turn.requestState}{turn.requestTruncated ? ", bounded preview" : ""}): {turn.request ?? "not available"}</div>
+              <div className="mt-2">Response ({turn.responseState}{turn.responseTruncated ? ", bounded preview" : ""}): {turn.response ?? "not available"}</div>
+              <div className="mt-2">Source-reported token usage: {turnTokenSummary(turn.tokenUsage)}</div>
             </div>
           </details>
         ))}

@@ -43,6 +43,8 @@ from verdict.monitoring import (
 from verdict.normalized_evidence import (
     LEGACY_AGENT_WRITER_ERROR,
     LEGACY_AGENT_WRITER_MIGRATION,
+    _LegacyLocalTextUpgrade,
+    _prepare_legacy_local_text_upgrade,
     agent_event_from_row,
     agent_run_from_row,
     agent_turn_from_row,
@@ -232,6 +234,18 @@ CREATE TABLE IF NOT EXISTS agent_turns (
         'present','missing','not_captured','not_applicable')),
     response_state TEXT NOT NULL CHECK(response_state IN (
         'present','missing','not_captured','not_applicable')),
+    input_tokens INTEGER CHECK(input_tokens IS NULL OR input_tokens >= 0),
+    cached_input_tokens INTEGER CHECK(cached_input_tokens IS NULL OR cached_input_tokens >= 0),
+    cache_write_input_tokens INTEGER
+        CHECK(cache_write_input_tokens IS NULL OR cache_write_input_tokens >= 0),
+    output_tokens INTEGER CHECK(output_tokens IS NULL OR output_tokens >= 0),
+    reasoning_output_tokens INTEGER
+        CHECK(reasoning_output_tokens IS NULL OR reasoning_output_tokens >= 0),
+    total_tokens INTEGER CHECK(total_tokens IS NULL OR total_tokens >= 0),
+    token_usage_basis TEXT CHECK(token_usage_basis IS NULL OR token_usage_basis IN (
+        'codex_turn_delta','claude_provider_response_sum')),
+    request_truncated INTEGER NOT NULL DEFAULT 0 CHECK(request_truncated IN (0,1)),
+    response_truncated INTEGER NOT NULL DEFAULT 0 CHECK(response_truncated IN (0,1)),
     PRIMARY KEY (tenant_id, run_id, turn_id),
     UNIQUE (tenant_id, run_id, sequence),
     FOREIGN KEY (tenant_id, run_id) REFERENCES agent_runs(tenant_id, run_id)
@@ -689,6 +703,41 @@ class SQLiteStorage:
                 if "run_id" not in drift_columns:
                     self._conn.execute("ALTER TABLE drift_signals ADD COLUMN run_id TEXT")
             self._conn.executescript(_SCHEMA)
+            agent_turn_columns = {
+                row[1] for row in self._conn.execute("PRAGMA table_info(agent_turns)")
+            }
+            for column, ddl in (
+                ("input_tokens", "INTEGER CHECK(input_tokens IS NULL OR input_tokens >= 0)"),
+                (
+                    "cached_input_tokens",
+                    "INTEGER CHECK(cached_input_tokens IS NULL OR cached_input_tokens >= 0)",
+                ),
+                (
+                    "cache_write_input_tokens",
+                    "INTEGER CHECK(cache_write_input_tokens IS NULL OR cache_write_input_tokens >= 0)",
+                ),
+                ("output_tokens", "INTEGER CHECK(output_tokens IS NULL OR output_tokens >= 0)"),
+                (
+                    "reasoning_output_tokens",
+                    "INTEGER CHECK(reasoning_output_tokens IS NULL OR reasoning_output_tokens >= 0)",
+                ),
+                ("total_tokens", "INTEGER CHECK(total_tokens IS NULL OR total_tokens >= 0)"),
+                (
+                    "token_usage_basis",
+                    "TEXT CHECK(token_usage_basis IS NULL OR token_usage_basis IN "
+                    "('codex_turn_delta','claude_provider_response_sum'))",
+                ),
+                (
+                    "request_truncated",
+                    "INTEGER NOT NULL DEFAULT 0 CHECK(request_truncated IN (0,1))",
+                ),
+                (
+                    "response_truncated",
+                    "INTEGER NOT NULL DEFAULT 0 CHECK(response_truncated IN (0,1))",
+                ),
+            ):
+                if column not in agent_turn_columns:
+                    self._conn.execute(f"ALTER TABLE agent_turns ADD COLUMN {column} {ddl}")
             try:
                 self._conn.execute("ALTER TABLE traces ADD COLUMN parent_span_id TEXT")
             except sqlite3.OperationalError:
@@ -825,6 +874,7 @@ class SQLiteStorage:
     def _write_normalized_bundle(
         self,
         bundle: AgentRunBundle | AgentCaptureBatch,
+        text_compatibility: _LegacyLocalTextUpgrade | None = None,
     ) -> None:
         bundle = normalize_bundle_timestamps(bundle)
         tenant_id = bundle.run.tenant_id
@@ -853,7 +903,17 @@ class SQLiteStorage:
                 (tenant_id, bundle.run.run_id, *(turn.turn_id for turn in turns)),
             ).fetchall()
             current_turns = {row["turn_id"]: agent_turn_from_row(dict(row)) for row in rows}
-            turns = [merge_agent_turn(current_turns.get(turn.turn_id), turn) for turn in turns]
+            turns = [
+                merge_agent_turn(
+                    current_turns.get(turn.turn_id),
+                    turn,
+                    legacy_preview=(
+                        text_compatibility.turn_previews.get(turn.turn_id)
+                        if text_compatibility is not None else None
+                    ),
+                )
+                for turn in turns
+            ]
         events = list(bundle.events)
         if events:
             placeholders = ",".join("?" for _ in events)
@@ -931,15 +991,26 @@ class SQLiteStorage:
             """INSERT INTO agent_turns (
                 tenant_id, turn_id, run_id, sequence, started_at, ended_at,
                 status, user_request_redacted, final_response_redacted,
-                request_state, response_state
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                request_state, response_state, input_tokens, cached_input_tokens,
+                cache_write_input_tokens, output_tokens, reasoning_output_tokens,
+                total_tokens, token_usage_basis, request_truncated, response_truncated
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(tenant_id, run_id, turn_id) DO UPDATE SET
                 ended_at=excluded.ended_at,
                 status=excluded.status,
                 user_request_redacted=excluded.user_request_redacted,
                 final_response_redacted=excluded.final_response_redacted,
                 request_state=excluded.request_state,
-                response_state=excluded.response_state""",
+                response_state=excluded.response_state,
+                input_tokens=excluded.input_tokens,
+                cached_input_tokens=excluded.cached_input_tokens,
+                cache_write_input_tokens=excluded.cache_write_input_tokens,
+                output_tokens=excluded.output_tokens,
+                reasoning_output_tokens=excluded.reasoning_output_tokens,
+                total_tokens=excluded.total_tokens,
+                token_usage_basis=excluded.token_usage_basis,
+                request_truncated=excluded.request_truncated,
+                response_truncated=excluded.response_truncated""",
             [
                 (
                     run.tenant_id,
@@ -953,6 +1024,15 @@ class SQLiteStorage:
                     turn.final_response_redacted,
                     turn.request_state.value,
                     turn.response_state.value,
+                    turn.input_tokens,
+                    turn.cached_input_tokens,
+                    turn.cache_write_input_tokens,
+                    turn.output_tokens,
+                    turn.reasoning_output_tokens,
+                    turn.total_tokens,
+                    turn.token_usage_basis,
+                    int(turn.request_truncated),
+                    int(turn.response_truncated),
                 )
                 for turn in turns
             ],
@@ -1183,7 +1263,19 @@ class SQLiteStorage:
         traces: tuple[Trace, ...] = (),
     ) -> None:
         sanitized, capture_traces, linked_trace_ids = prepare_agent_capture(bundle, traces)
-        self._store_agent_capture(sanitized, capture_traces, linked_trace_ids)
+        self._store_agent_capture(sanitized, capture_traces, linked_trace_ids, None)
+
+    def _replace_local_agent_capture(
+        self,
+        bundle: AgentRunBundle,
+        traces: tuple[Trace, ...],
+        legacy_text_upgrade: _LegacyLocalTextUpgrade,
+    ) -> None:
+        sanitized, capture_traces, linked_trace_ids = prepare_agent_capture(bundle, traces)
+        upgrade = _prepare_legacy_local_text_upgrade(
+            sanitized, capture_traces, legacy_text_upgrade
+        )
+        self._store_agent_capture(sanitized, capture_traces, linked_trace_ids, upgrade)
 
     def append_agent_capture(
         self,
@@ -1191,13 +1283,14 @@ class SQLiteStorage:
         traces: tuple[Trace, ...] = (),
     ) -> None:
         sanitized, capture_traces, linked_trace_ids = prepare_agent_capture_batch(batch, traces)
-        self._store_agent_capture(sanitized, capture_traces, linked_trace_ids)
+        self._store_agent_capture(sanitized, capture_traces, linked_trace_ids, None)
 
     def _store_agent_capture(
         self,
         capture: AgentRunBundle | AgentCaptureBatch,
         capture_traces: tuple[Trace, ...],
         linked_trace_ids: frozenset[str],
+        text_compatibility: _LegacyLocalTextUpgrade | None,
     ) -> None:
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
@@ -1209,7 +1302,14 @@ class SQLiteStorage:
                         "SELECT * FROM traces WHERE trace_id=?", (trace.trace_id,)
                     ).fetchone()
                     current = self._row_to_trace(row) if row else None
-                    prepared = merge_capture_trace(current, trace)
+                    prepared = merge_capture_trace(
+                        current,
+                        trace,
+                        legacy_preview=(
+                            text_compatibility.trace_previews.get(trace.trace_id)
+                            if text_compatibility is not None else None
+                        ),
+                    )
                     prepared_traces.append(prepared)
                     if current is not None and current.raw_messages != prepared.raw_messages:
                         message_updates.add(prepared.trace_id)
@@ -1238,7 +1338,10 @@ class SQLiteStorage:
                     ).fetchall()
                     tenants = {row["trace_id"]: row["tenant_id"] for row in rows}
                     require_same_tenant_linked_traces(capture.run.tenant_id, linked_ids, tenants)
-                self._write_normalized_bundle(capture)
+                if text_compatibility is None:
+                    self._write_normalized_bundle(capture)
+                else:
+                    self._write_normalized_bundle(capture, text_compatibility)
                 self._conn.commit()
             except sqlite3.IntegrityError as exc:
                 self._conn.rollback()
@@ -1343,14 +1446,24 @@ class SQLiteStorage:
         self,
         tenant_id: str,
         scope_key: str,
+        *,
+        analyzer_version: str | None = None,
     ) -> DeterministicAnalysisRun | None:
         with self._lock:
-            row = self._conn.execute(
-                """SELECT payload_json FROM deterministic_analysis_runs
-                   WHERE tenant_id=? AND scope_key=?
-                   ORDER BY completed_at DESC, analysis_id DESC LIMIT 1""",
-                (tenant_id, scope_key),
-            ).fetchone()
+            if analyzer_version is None:
+                row = self._conn.execute(
+                    """SELECT payload_json FROM deterministic_analysis_runs
+                       WHERE tenant_id=? AND scope_key=?
+                       ORDER BY completed_at DESC, analysis_id DESC LIMIT 1""",
+                    (tenant_id, scope_key),
+                ).fetchone()
+            else:
+                row = self._conn.execute(
+                    """SELECT payload_json FROM deterministic_analysis_runs
+                       WHERE tenant_id=? AND scope_key=? AND analyzer_version=?
+                       ORDER BY completed_at DESC, analysis_id DESC LIMIT 1""",
+                    (tenant_id, scope_key, analyzer_version),
+                ).fetchone()
         return analysis_run_from_json(row["payload_json"]) if row is not None else None
 
     def save_notification_delivery_attempt(

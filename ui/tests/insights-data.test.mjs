@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { agentEvidenceValue, datasetActivitySummary, datasetEvidenceRows } from "../insights-data.mjs";
+import {
+  agentEvidenceValue,
+  datasetActivitySummary,
+  datasetEvidenceRows,
+  sourceTokenValue,
+} from "../insights-data.mjs";
 
 test("trace-only evidence health uses trace prompts and responses", () => {
   const rows = Object.fromEntries(datasetEvidenceRows({
@@ -58,4 +63,15 @@ test("Agent Run activity reports normalized events and observed trace links", ()
     linkValue: "4/5",
     linkDetail: "1 unlinked",
   });
+});
+
+test("source token activity distinguishes unavailable, reported zero, and partial", () => {
+  assert.equal(sourceTokenValue({ tokenUsageState: "not_captured", totalTokens: null }), "Not captured");
+  assert.equal(sourceTokenValue({ tokenUsageState: "complete", totalTokens: 0 }), "0");
+  assert.equal(sourceTokenValue({ tokenUsageState: "complete", totalTokens: 1200 }), "1,200");
+  assert.equal(sourceTokenValue({ tokenUsageState: "partial", totalTokens: 1200 }), "1,200 (partial)");
+  assert.equal(
+    sourceTokenValue({ tokenUsageState: "partial", totalTokens: null }),
+    "Components captured (partial)",
+  );
 });

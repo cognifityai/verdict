@@ -15,7 +15,14 @@ import verdict
 from verdict import agent_transport
 from verdict.agent_transport import MAX_RECORD_BYTES, CaptureQuotaExceeded, FileCaptureSink
 from verdict.client import _resolve_storage
-from verdict.evidence import AgentEventType
+from verdict.evidence import (
+    AgentCaptureBatch,
+    AgentEventType,
+    AgentRun,
+    AgentTurn,
+    ExecutionStatus,
+    SourceSession,
+)
 from verdict.instrumentors.base import apply_routing_context, safe_persist_trace
 from verdict.schema import Trace
 from verdict.storage.sqlite import SQLiteStorage
@@ -83,6 +90,37 @@ def test_file_transport_replays_idempotently_into_sqlite(tmp_path: Path) -> None
         assert storage.get_trace(model_event.trace_id) is not None
     finally:
         storage.close()
+
+
+def test_file_transport_preserves_optional_turn_usage(tmp_path: Path) -> None:
+    now = datetime.now(timezone.utc)
+    source = SourceSession("source", "tenant-file", "codex", "a" * 64, now, now)
+    run = AgentRun("run", "source", "tenant-file", now, ExecutionStatus.UNKNOWN)
+    turn = AgentTurn(
+        "turn",
+        "run",
+        0,
+        now,
+        ExecutionStatus.UNKNOWN,
+        input_tokens=9,
+        cached_input_tokens=4,
+        output_tokens=3,
+        total_tokens=12,
+        token_usage_basis="codex_turn_delta",
+    )
+    spool = tmp_path / "spool"
+    sink = FileCaptureSink(spool, redaction_mode="redact", redaction_secret=None)
+    sink.capture_agent(AgentCaptureBatch(source, run, (turn,)))
+    sink.close()
+    storage = SQLiteStorage(str(tmp_path / "verdict.db"))
+
+    agent_transport.import_capture_records(spool, storage)
+
+    [loaded] = storage.list_agent_run_bundles("tenant-file")
+    assert loaded.turns[0].total_tokens == 12
+    assert loaded.turns[0].cached_input_tokens == 4
+    assert loaded.turns[0].token_usage_basis == "codex_turn_delta"
+    storage.close()
 
 
 @pytest.mark.asyncio

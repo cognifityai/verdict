@@ -138,6 +138,8 @@ class Storage(Protocol):
         self,
         tenant_id: str,
         scope_key: str,
+        *,
+        analyzer_version: str | None = None,
     ) -> DeterministicAnalysisRun | None: ...
 
     def save_notification_delivery_attempt(

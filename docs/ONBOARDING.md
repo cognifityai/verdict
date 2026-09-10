@@ -83,7 +83,10 @@ paths again. The header reports Agent Runs and LLM Calls separately.
 
 The Agent runs view shows source sessions, typed turns and observable events,
 tool/command failures, completion evidence, possible repeated-tool loops, and
-what cannot be evaluated. Local sources that do not expose a genuine provider
+what cannot be evaluated. Source-identified Claude sidechains and Codex child
+histories remain separate linked runs rather than being folded into a parent.
+A parent reference can remain unresolved if the source no longer contains that
+parent history. Local sources that do not expose a genuine provider
 call do not create fake `Trace` rows, so the LLM-call Monitor may truthfully be
 empty while agent evidence is useful.
 
@@ -97,12 +100,19 @@ The migrated store rejects writes from an older process rather than silently
 hiding them; upgrade every SDK, collector, service, and CLI writer that shares
 the database before resuming capture.
 
-Local-history token counts are usage evidence, not billing evidence. Verdict
-therefore leaves cost unavailable for Claude Code and Codex history instead of
-applying API list prices to desktop or subscription activity.
+Local-history token counts are usage evidence, not billing evidence. Codex
+counts are derived from within-turn cumulative-counter deltas. Claude counts
+sum each unique provider response once and retain cache-read and cache-creation
+components. Its total appears only after the turn is terminal and every
+response has complete input/output usage. Missing or malformed counters display
+as unavailable, not zero.
+Verdict therefore leaves cost unavailable for Claude Code and Codex history
+instead of applying API list prices to desktop or subscription activity.
 
 Opted-in content remains bounded and recursively redacted. Each turn and event
-is bounded independently. If one event's content exceeds its evidence limit,
+is bounded independently. Turn request and final-response text is redacted
+before its 64 KiB preview cutoff and reports when it was truncated. If one
+event's content exceeds its evidence limit,
 Verdict retains that event's metadata and records why its content was omitted;
 it does not downgrade the entire run.
 
@@ -778,7 +788,7 @@ the other captured workloads.
   or instrumented application records them. Verdict does not independently
   prove task success, artifact state, deployments, or subagent correctness.
 - Judge calls run sequentially. Previewed all-eligible or numeric call caps are
-  supported; cache-token accounting, human-readable cluster naming, and
+  supported; cache-aware provider-Trace pricing, human-readable cluster naming, and
   automatic cluster fusion are not implemented. See `docs/v1-roadmap.md` for
   the scoped follow-ups.
 - Reproduce the validation checks yourself with the scripts here; don't take

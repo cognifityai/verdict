@@ -6,6 +6,7 @@ provides an ephemeral PostgreSQL service; these are not mocked SQL tests.
 
 from __future__ import annotations
 
+import json
 import os
 import threading
 import time
@@ -26,6 +27,8 @@ from verdict.analysis_records import (
     DeterministicAnalysisRun,
     NotificationDeliveryAttempt,
 )
+from verdict.dashboard.analysis_service import read_latest_analysis, run_analysis
+from verdict.dashboard.app import build_agent_run_detail
 from verdict.evidence import AgentCaptureBatch
 from verdict.instrumentors.base import apply_routing_context, persist_trace
 from verdict.monitor_inputs import load_monitor_units
@@ -58,8 +61,9 @@ from verdict.schema import (
     cluster_candidate_digest,
     datetime_to_utc_us,
 )
-from verdict.storage import BufferedStorage
+from verdict.storage import BufferedStorage, InMemoryStorage
 from verdict.storage.postgres import PostgresStorage
+from verdict.telemetry.local_agents import capture_local_agents
 from verdict.trace import span
 from verdict_eval.cluster_registry import ClusterRegistryService
 from verdict_eval.clustering_strategies import FitConfig
@@ -195,6 +199,9 @@ def test_live_postgres_analysis_and_delivery_contracts():
         assert storage.get_latest_deterministic_analysis_run(
             f"other-{tenant}", "agent-and-trace"
         ) is None
+        assert storage.get_latest_deterministic_analysis_run(
+            tenant, "agent-and-trace", analyzer_version="agent-insights-v1"
+        ) == run
 
         storage.save_notification_delivery_attempt(failed)
         storage.save_notification_delivery_attempt(delivered)
@@ -214,6 +221,45 @@ def test_live_postgres_analysis_and_delivery_contracts():
             "DELETE FROM deterministic_analysis_runs WHERE tenant_id=%s", (tenant,)
         )
         storage.close()
+
+
+def test_live_postgres_current_analysis_is_reused_after_rollback_version():
+    with isolated_test_dsn(DSN) as scoped_dsn:
+        tenant = f"analysis-rollback-{uuid4().hex}"
+        fingerprint = uuid4().hex * 2
+
+        def build():
+            return {
+                "schema": "agent-insights-v2",
+                "sourceActivity": [],
+                "_analysisInputFingerprint": fingerprint,
+            }
+
+        first = run_analysis(scoped_dsn, tenant=tenant, build=build)
+        rollback_time = datetime.now(timezone.utc) + timedelta(days=1)
+        storage = PostgresStorage(scoped_dsn, min_pool=1, max_pool=1)
+        storage.save_deterministic_analysis_run(DeterministicAnalysisRun(
+            analysis_id=uuid4().hex * 2,
+            tenant_id=tenant,
+            scope_key="agent-and-trace",
+            cutoff=rollback_time,
+            completed_at=rollback_time,
+            status=AnalysisRunStatus.COMPLETED,
+            analyzer_version="agent-insights-v1",
+            input_fingerprint=fingerprint,
+            result={"schema": "agent-insights-v1", "comparisons": []},
+        ))
+        storage.close()
+
+        second = run_analysis(scoped_dsn, tenant=tenant, build=build)
+        current = read_latest_analysis(
+            scoped_dsn,
+            tenant=tenant,
+            empty_result={"schema": "agent-insights-v2", "sourceActivity": []},
+        )
+
+    assert second == first
+    assert current == first
 
 
 def test_live_postgres_versioned_registry_and_analysis_normalization():
@@ -340,6 +386,12 @@ def test_live_postgres_agent_run_bundle_is_atomic_redacted_and_tenant_scoped():
                 final_response_redacted="done",
                 request_state=verdict.EvidenceState.PRESENT,
                 response_state=verdict.EvidenceState.PRESENT,
+                input_tokens=9,
+                cached_input_tokens=4,
+                output_tokens=3,
+                total_tokens=12,
+                token_usage_basis="codex_turn_delta",
+                response_truncated=True,
             ),
         ),
     )
@@ -351,6 +403,9 @@ def test_live_postgres_agent_run_bundle_is_atomic_redacted_and_tenant_scoped():
         loaded = storage.get_agent_run_bundle(tenant, bundle.run.run_id)
         assert loaded is not None
         assert loaded.turns[0].user_request_redacted == "email <EMAIL>"
+        assert loaded.turns[0].total_tokens == 12
+        assert loaded.turns[0].cached_input_tokens == 4
+        assert loaded.turns[0].response_truncated is True
         assert storage.get_agent_run_bundle(f"other-{tenant}", bundle.run.run_id) is None
         assert storage.list_agent_run_bundles(tenant, limit=10) == [loaded]
         assert storage.has_agent_run_source_kind(tenant, "unknown-agent") is True
@@ -375,6 +430,173 @@ def test_live_postgres_serializes_concurrent_fresh_schema_initialization():
 
         with ThreadPoolExecutor(max_workers=6) as executor:
             list(executor.map(initialize, range(6)))
+
+
+def test_live_postgres_adds_turn_usage_columns_to_existing_schema():
+    import psycopg
+
+    with isolated_test_dsn(DSN) as scoped_dsn:
+        with psycopg.connect(scoped_dsn, autocommit=True) as connection:
+            connection.execute(
+                """CREATE TABLE agent_turns (
+                    tenant_id TEXT NOT NULL, turn_id TEXT NOT NULL,
+                    run_id TEXT NOT NULL, sequence INTEGER NOT NULL,
+                    started_at TIMESTAMPTZ NOT NULL, ended_at TIMESTAMPTZ,
+                    status TEXT NOT NULL, user_request_redacted TEXT,
+                    final_response_redacted TEXT, request_state TEXT NOT NULL,
+                    response_state TEXT NOT NULL,
+                    PRIMARY KEY (tenant_id, run_id, turn_id),
+                    UNIQUE (tenant_id, run_id, sequence)
+                )"""
+            )
+        storage = PostgresStorage(scoped_dsn, min_pool=1, max_pool=1)
+        try:
+            rows = storage._fetchall(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema=current_schema() AND table_name='agent_turns'",
+                (),
+            )
+        finally:
+            storage.close()
+
+    assert {
+        "input_tokens",
+        "cached_input_tokens",
+        "cache_write_input_tokens",
+        "output_tokens",
+        "reasoning_output_tokens",
+        "total_tokens",
+        "token_usage_basis",
+        "request_truncated",
+        "response_truncated",
+    } <= {row[0] for row in rows}
+
+
+def test_live_postgres_dashboard_reads_existing_turn_schema_without_migration():
+    import psycopg
+
+    with isolated_test_dsn(DSN) as scoped_dsn:
+        now = datetime.now(timezone.utc)
+        tenant = f"legacy-detail-{uuid4().hex}"
+        source = verdict.SourceSession(
+            "source", tenant, "codex", "a" * 64, now, now
+        )
+        run = verdict.AgentRun(
+            "run", source.source_session_id, tenant, now,
+            verdict.ExecutionStatus.COMPLETED, ended_at=now,
+        )
+        turn = verdict.AgentTurn(
+            "turn", run.run_id, 0, now,
+            verdict.ExecutionStatus.COMPLETED, ended_at=now,
+        )
+        storage = PostgresStorage(scoped_dsn, min_pool=1, max_pool=1)
+        storage.replace_agent_run_bundle(verdict.AgentRunBundle(source, run, (turn,)))
+        storage.close()
+        with psycopg.connect(scoped_dsn, autocommit=True) as connection:
+            connection.execute(
+                """ALTER TABLE agent_turns
+                   DROP COLUMN input_tokens,
+                   DROP COLUMN cached_input_tokens,
+                   DROP COLUMN cache_write_input_tokens,
+                   DROP COLUMN output_tokens,
+                   DROP COLUMN reasoning_output_tokens,
+                   DROP COLUMN total_tokens,
+                   DROP COLUMN token_usage_basis,
+                   DROP COLUMN request_truncated,
+                   DROP COLUMN response_truncated"""
+            )
+
+        detail = build_agent_run_detail(scoped_dsn, tenant=tenant, run_id=run.run_id)
+
+    assert detail["turns"] == [{
+        "turnId": "turn",
+        "sequence": 0,
+        "startedAt": now.isoformat(),
+        "status": "completed",
+        "requestState": "not_captured",
+        "responseState": "not_captured",
+        "request": None,
+        "response": None,
+        "requestTruncated": False,
+        "responseTruncated": False,
+        "tokenUsage": {
+            "inputTokens": None,
+            "cachedInputTokens": None,
+            "cacheWriteInputTokens": None,
+            "outputTokens": None,
+            "reasoningOutputTokens": None,
+            "totalTokens": None,
+            "basis": None,
+        },
+    }]
+
+
+def test_live_postgres_reconciles_legacy_local_agent_text(tmp_path):
+    with isolated_test_dsn(DSN) as scoped_dsn:
+        tenant = f"local-preview-upgrade-{uuid4().hex}"
+        root = tmp_path / "claude"
+        root.mkdir()
+        fragment = "user@exam"
+        request = f"{'p' * (1_000 - len(fragment) - 1)} user@example.com private"
+        records = [
+            {
+                "timestamp": "2026-08-30T11:00:00Z",
+                "type": "user",
+                "uuid": "user-1",
+                "sessionId": "session-1",
+                "message": {"content": request},
+            },
+            {
+                "timestamp": "2026-08-30T11:00:01Z",
+                "type": "assistant",
+                "uuid": "assistant-1",
+                "sessionId": "session-1",
+                "message": {
+                    "id": "message-1",
+                    "model": "claude-test",
+                    "stop_reason": "end_turn",
+                    "usage": {"input_tokens": 2, "output_tokens": 1},
+                    "content": [{"type": "text", "text": "done"}],
+                },
+            },
+        ]
+        (root / "session.jsonl").write_text(
+            "".join(json.dumps(record) + "\n" for record in records)
+        )
+        seed = InMemoryStorage()
+        capture_local_agents(seed, tenant_id=tenant, claude_root=root)
+        [current_bundle] = seed.list_agent_run_bundles(tenant)
+        [current_trace] = seed.list_traces(tenant_id=tenant)
+        legacy_prompt = request[:1_000]
+        legacy_bundle = replace(
+            current_bundle,
+            turns=(replace(
+                current_bundle.turns[0], user_request_redacted=legacy_prompt
+            ),),
+        )
+        legacy_trace = replace(
+            current_trace,
+            prompt_redacted=legacy_prompt,
+            raw_messages=[
+                {**message, "content": legacy_prompt}
+                if message.get("role") == "user"
+                else message
+                for message in current_trace.raw_messages or []
+            ],
+        )
+        storage = PostgresStorage(scoped_dsn, min_pool=1, max_pool=1)
+        try:
+            storage.replace_agent_capture(legacy_bundle, (legacy_trace,))
+
+            summary = capture_local_agents(storage, tenant_id=tenant, claude_root=root)
+
+            assert summary.stored == 1
+            assert storage.get_agent_run_bundle(
+                tenant, current_bundle.run.run_id
+            ) == current_bundle
+            assert storage.get_trace(current_trace.trace_id) == current_trace
+        finally:
+            storage.close()
 
 
 def test_live_postgres_serializes_equivalent_agent_capture_replays():

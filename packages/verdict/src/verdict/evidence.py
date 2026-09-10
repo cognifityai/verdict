@@ -23,8 +23,18 @@ _MAX_ATTRIBUTE_KEYS = 24
 _MAX_ATTRIBUTE_DEPTH = 4
 _MAX_ATTRIBUTE_NODES = 128
 _MAX_ATTRIBUTE_STRING_BYTES = 4096
+_MAX_TURN_CONTENT_BYTES = 65_536
 _MAX_ATTRIBUTES_JSON_BYTES = 16_384
 _MAX_BUNDLE_JSON_BYTES = 4_194_304
+_TOKEN_USAGE_BASES = frozenset({"codex_turn_delta", "claude_provider_response_sum"})
+_TURN_TOKEN_FIELDS = (
+    "input_tokens",
+    "cached_input_tokens",
+    "cache_write_input_tokens",
+    "output_tokens",
+    "reasoning_output_tokens",
+    "total_tokens",
+)
 
 
 class EvidenceBundleTooLarge(ValueError):
@@ -339,6 +349,15 @@ class AgentTurn:
     final_response_redacted: str | None = None
     request_state: EvidenceState = EvidenceState.NOT_CAPTURED
     response_state: EvidenceState = EvidenceState.NOT_CAPTURED
+    input_tokens: int | None = None
+    cached_input_tokens: int | None = None
+    cache_write_input_tokens: int | None = None
+    output_tokens: int | None = None
+    reasoning_output_tokens: int | None = None
+    total_tokens: int | None = None
+    token_usage_basis: str | None = None
+    request_truncated: bool = False
+    response_truncated: bool = False
 
     def __post_init__(self) -> None:
         for name in ("turn_id", "run_id"):
@@ -369,10 +388,35 @@ class AgentTurn:
                 raise ValueError(f"{content_name} must be absent when evidence is not present")
             if content is not None:
                 try:
-                    if len(content.encode("utf-8")) > _MAX_ATTRIBUTE_STRING_BYTES:
+                    if len(content.encode("utf-8")) > _MAX_TURN_CONTENT_BYTES:
                         raise ValueError(f"{content_name} must be bounded")
                 except UnicodeError as exc:
                     raise ValueError(f"{content_name} must be valid UTF-8") from exc
+        for name in _TURN_TOKEN_FIELDS:
+            value = getattr(self, name)
+            if value is not None and (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or not 0 <= value <= 2**63 - 1
+            ):
+                raise ValueError(f"{name} must be a non-negative 64-bit token count")
+        has_usage = any(getattr(self, name) is not None for name in _TURN_TOKEN_FIELDS)
+        if has_usage and self.token_usage_basis not in _TOKEN_USAGE_BASES:
+            raise ValueError("token usage basis is required for captured token counts")
+        if not has_usage and self.token_usage_basis is not None:
+            raise ValueError("token usage basis requires at least one token count")
+        for state_name, content_name, truncated_name in (
+            ("request_state", "user_request_redacted", "request_truncated"),
+            ("response_state", "final_response_redacted", "response_truncated"),
+        ):
+            truncated = getattr(self, truncated_name)
+            if not isinstance(truncated, bool):
+                raise ValueError(f"{truncated_name} must be boolean")
+            if truncated and (
+                getattr(self, state_name) is not EvidenceState.PRESENT
+                or getattr(self, content_name) is None
+            ):
+                raise ValueError(f"{truncated_name} requires present turn content")
 
 
 @dataclass(frozen=True)
@@ -573,12 +617,18 @@ def _agent_capture_to_json(capture: AgentRunBundle | AgentCaptureBatch) -> str:
     payload = {
         "session": _canonical_value(asdict(capture.session)),
         "run": _canonical_value(run_payload),
-        "turns": [
-            _canonical_value(asdict(turn))
-            for turn in sorted(capture.turns, key=lambda item: (item.sequence, item.turn_id))
-        ],
+        "turns": [],
         "events": event_payloads,
     }
+    for turn in sorted(capture.turns, key=lambda item: (item.sequence, item.turn_id)):
+        turn_payload = asdict(turn)
+        for name in (*_TURN_TOKEN_FIELDS, "token_usage_basis"):
+            if turn_payload[name] is None:
+                turn_payload.pop(name)
+        for name in ("request_truncated", "response_truncated"):
+            if turn_payload[name] is False:
+                turn_payload.pop(name)
+        payload["turns"].append(_canonical_value(turn_payload))
     encoded = json.dumps(
         payload,
         ensure_ascii=False,
@@ -695,6 +745,12 @@ def _agent_capture_from_json(
         "request_state",
         "response_state",
     }
+    turn_optional = {
+        *_TURN_TOKEN_FIELDS,
+        "token_usage_basis",
+        "request_truncated",
+        "response_truncated",
+    }
     event_fields = {
         "event_id",
         "turn_id",
@@ -708,7 +764,12 @@ def _agent_capture_from_json(
         "omission_reason",
         "trace_id",
     }
-    if any(not isinstance(item, dict) or set(item) != turn_fields for item in turn_data):
+    if any(
+        not isinstance(item, dict)
+        or not turn_fields.issubset(item)
+        or set(item) - turn_fields - turn_optional
+        for item in turn_data
+    ):
         raise ValueError("agent run bundle JSON has invalid typed fields")
     event_optional = {"producer_id", "producer_sequence", "parent_event_id"}
     if any(
@@ -756,6 +817,15 @@ def _agent_capture_from_json(
                 final_response_redacted=item.get("final_response_redacted"),
                 request_state=EvidenceState(item["request_state"]),
                 response_state=EvidenceState(item["response_state"]),
+                input_tokens=item.get("input_tokens"),
+                cached_input_tokens=item.get("cached_input_tokens"),
+                cache_write_input_tokens=item.get("cache_write_input_tokens"),
+                output_tokens=item.get("output_tokens"),
+                reasoning_output_tokens=item.get("reasoning_output_tokens"),
+                total_tokens=item.get("total_tokens"),
+                token_usage_basis=item.get("token_usage_basis"),
+                request_truncated=item.get("request_truncated", False),
+                response_truncated=item.get("response_truncated", False),
             )
             for item in turn_data
             if isinstance(item, dict)
