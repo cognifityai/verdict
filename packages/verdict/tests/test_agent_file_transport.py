@@ -432,6 +432,38 @@ def test_file_transport_rotates_segments_and_enforces_its_byte_quota(tmp_path: P
     assert all(path.stat().st_mode & 0o077 == 0 for path in files)
 
 
+def test_file_transport_reclaims_quota_after_shipper_deletes_sealed_segment(
+    tmp_path: Path,
+) -> None:
+    sink = FileCaptureSink(
+        tmp_path,
+        redaction_mode="redact",
+        redaction_secret=None,
+        segment_bytes=MAX_RECORD_BYTES + 1,
+        directory_bytes=5_000_000,
+    )
+    now = datetime.now(timezone.utc)
+    trace = Trace(
+        started_at=now,
+        ended_at=now,
+        provider="test",
+        response_redacted="x" * 2_200_000,
+    )
+    sink.capture_trace(trace)
+    sink.capture_trace(Trace(**{**trace.__dict__, "trace_id": "second"}))
+    [sealed] = tmp_path.glob("verdict-agent-*.jsonl")
+    sealed.unlink()
+
+    sink.capture_trace(Trace(**{**trace.__dict__, "trace_id": "third"}))
+    sink.close()
+
+    records = list(agent_transport.iter_capture_records(tmp_path))
+    assert [record.trace.trace_id for record in records if record.trace is not None] == [
+        "second",
+        "third",
+    ]
+
+
 def test_file_transport_completes_short_writes(tmp_path: Path) -> None:
     class ShortWriter:
         def __init__(self) -> None:
@@ -529,10 +561,25 @@ def test_file_transport_switches_to_a_new_process_owned_file_after_fork(
         inherited_lock.release()
     sink.close()
 
-    files = sorted(tmp_path.glob("verdict-agent-*.jsonl"))
+    files = agent_transport.capture_segment_paths(tmp_path)
     assert len(files) == 2
+    assert {path.suffix for path in files} == {".open", ".jsonl"}
     assert sink._lock is not inherited_lock
     assert files[0].name.split("-")[2] != files[1].name.split("-")[2]
+
+
+def test_forked_child_shutdown_does_not_seal_parent_segment(tmp_path: Path, monkeypatch) -> None:
+    process = [100]
+    monkeypatch.setattr(agent_transport.os, "getpid", lambda: process[0])
+    sink = FileCaptureSink(tmp_path, redaction_mode="redact", redaction_secret=None)
+    sink.capture_trace(Trace(started_at=datetime.now(timezone.utc), provider="test"))
+    [parent_segment] = tmp_path.glob("verdict-agent-*.open")
+
+    process[0] = 101
+    sink.close()
+
+    assert parent_segment.exists()
+    assert not list(tmp_path.glob("verdict-agent-*.jsonl"))
 
 
 def test_file_transport_survives_process_exit_without_shutdown(tmp_path: Path) -> None:

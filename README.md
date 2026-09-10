@@ -160,8 +160,26 @@ emit one bounded warning per failure class. For a central PostgreSQL deployment,
 `verdict-collector` accepts authenticated, bounded batches of full `agent`
 records and returns durable idempotent acknowledgements. Agent records include
 their genuinely linked model-call Traces. Standalone Trace, Span, and UserSignal
-records remain local-import only. Automated file checkpointing, retry, and safe
-deletion are not yet included. See
+records remain on the direct and manual file-import paths. Run the host shipper
+beside each producer spool:
+
+```bash
+export VERDICT_COLLECTOR_API_KEY='use-the-collector-secret'
+verdict-shipper \
+  --spool-directory /var/spool/verdict/worker-1 \
+  --collector-url https://collector.example.com \
+  --json
+```
+
+The shipper sends complete records from active segments, checkpoints only
+validated acknowledgements, and deletes a segment only after the producer seals
+it and every record is accepted. A segment containing standalone or malformed
+records is retained with a `.rejected` suffix for inspection or manual import.
+`verdict-shipper --spool-directory /var/spool/verdict/worker-1 --status --json`
+reports local backlog, pending bytes, segment state, last append, receipt, and
+bounded error without needing the collector or its key.
+Restart an older producer with the upgraded SDK before enabling shipping;
+shipping itself does not run analysis, judges, clustering, or monitors. See
 [`examples/agent_sdk.py`](examples/agent_sdk.py) for a runnable local example.
 
 An initial monitor proposal uses exact event-time membership. The count-mode

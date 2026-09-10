@@ -449,6 +449,43 @@ def test_http_boundary_auth_headers_and_status_lookup(tmp_path: Path) -> None:
     assert len(storage.list_agent_run_bundles(TENANT)) == 1
 
 
+def test_collector_routes_use_the_anyio3_run_sync_call_shape(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Anyio3Thread:
+        @staticmethod
+        async def run_sync(function, *args):
+            return function(*args)
+
+    class Anyio3Surface:
+        to_thread = Anyio3Thread()
+
+    monkeypatch.setattr(collector_module, "anyio", Anyio3Surface())
+    service, storage, _receipts = _service()
+    app = create_collector_app(service, api_key=SECRET)
+    body = _agent_record(tmp_path)
+    headers = {
+        "Authorization": f"Bearer {SECRET}",
+        "Content-Type": "application/x-ndjson",
+        "X-Verdict-Batch-ID": "batch-anyio3",
+        "X-Verdict-Producer-ID": "host-anyio3",
+    }
+
+    with TestClient(app) as client:
+        assert client.get("/healthz").status_code == 200
+        assert client.post("/v1/ingest", content=body, headers=headers).status_code == 200
+        assert (
+            client.get(
+                "/v1/ingest/batch-anyio3",
+                headers={"Authorization": f"Bearer {SECRET}"},
+            ).status_code
+            == 200
+        )
+
+    assert len(storage.list_agent_run_bundles(TENANT)) == 1
+
+
 def test_http_duplicate_authorization_is_rejected_without_writes(tmp_path: Path) -> None:
     service, storage, receipts = _service()
     app = create_collector_app(service, api_key=SECRET)

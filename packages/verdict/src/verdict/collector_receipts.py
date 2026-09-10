@@ -84,7 +84,7 @@ def _validate_receipt(receipt: CollectorReceipt) -> None:
         _validate_acknowledgement(receipt.response_body, receipt.batch_id)
 
 
-def _validate_acknowledgement(response: bytes, batch_id: str) -> None:
+def _validate_acknowledgement(response: bytes, batch_id: str) -> dict[str, Any]:
     try:
         payload = json.loads(response)
         canonical = json.dumps(
@@ -114,6 +114,12 @@ def _validate_acknowledgement(response: bytes, batch_id: str) -> None:
         raise ReceiptCorrupt("collector acknowledgement result is invalid")
     if sum(result["status"] == "accepted" for result in results) != accepted:
         raise ReceiptCorrupt("collector acknowledgement counts are invalid")
+    return payload
+
+
+def parse_acknowledgement(response: bytes, batch_id: str) -> dict[str, Any]:
+    """Validate and decode canonical acknowledgement bytes for a transport client."""
+    return _validate_acknowledgement(response, batch_id)
 
 
 def _valid_result(result: object, index: int) -> bool:

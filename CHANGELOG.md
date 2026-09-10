@@ -21,6 +21,10 @@ the product is refined.
 - An independently deployable authenticated collector accepts bounded full
   Agent-record batches into PostgreSQL with tenant authority, partial rejection,
   cross-process idempotency, and durable byte-identical acknowledgements.
+- `verdict-shipper` uploads complete prefixes of process-owned capture segments
+  with bounded retry, validates every acknowledged record, checkpoints accepted
+  offsets, deletes only sealed fully accepted segments, and preserves rejected
+  segments for recovery.
 
 ### Changed
 
@@ -44,12 +48,17 @@ the product is refined.
   turn output is now distinct from deliberately disabled content capture.
 - Agent Run exploration now pages through the complete newest-first run list;
   finding links continue to load their exact bounded set of affected runs.
+- Live file segments use an `.open` suffix and become sealed JSONL segments on
+  normal rotation or shutdown. Local import continues to read complete records
+  from open, sealed, and rejected segments.
 
 ### Fixed
 
 - Provider calls started by inherited background work after an Agent Turn closes
   remain standalone, and the data-source summary identifies observed SDK and
   local-agent evidence without treating all Agent Runs as local history.
+- Collector routes support the AnyIO 3 and early AnyIO 4 versions permitted by
+  Verdict's existing dependency range.
 
 ## [0.1.0a17] - 2026-09-07
 

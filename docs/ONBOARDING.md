@@ -164,8 +164,7 @@ The spool carries provider Traces, Agent evidence, manual spans, and user
 signals in versioned JSONL with fixed record, segment, and directory byte
 limits. An incomplete final record from a process crash is reported and ignored;
 a malformed complete record fails the import. Retain the files until the import
-succeeds. The file transport does not delete files or run a network shipper.
-Completed appends bypass
+succeeds. Completed appends bypass
 Python userspace buffering but are not `fsync`-ed against an operating-system or
 host failure. If an Agent evidence stream fails, later provider calls fall back
 to standalone Trace records rather than creating sequence gaps. Check the
@@ -189,10 +188,34 @@ verdict-collector --host 0.0.0.0 --port 8765
 Terminate TLS before the collector. It accepts bounded `verdict-capture-v1`
 NDJSON batches containing full `agent` records and returns durable replay-safe
 acknowledgements. Standalone Trace, Span, and UserSignal records continue to use
-the direct or local-file import path. Automated spool checkpointing, retries,
-and acknowledged segment deletion are not part of the collector command. The
-stock single-tenant dashboard reads `__verdict_local__`; an authenticated host
-may supply a different authorized dashboard tenant as documented below.
+the direct or local-file import path. On each producer host, start the shipper
+with the same protected secret:
+
+```bash
+verdict-shipper \
+  --spool-directory /var/spool/verdict/worker-1 \
+  --collector-url https://collector.example.com \
+  --json
+```
+
+Run with `--once` for a scheduler-managed cycle; without it the shipper polls
+continuously. It uploads complete records from active files, advances its local
+checkpoint only after validating the collector acknowledgement, and deletes
+only sealed segments whose records were all accepted. A rejected segment is
+retained with a `.rejected` suffix for recovery or manual import. Restart an
+older producer with the upgraded SDK before enabling shipping. Shipping itself
+does not run analysis, evaluation, clustering, or monitoring. Inspect local
+delivery health without a collector connection or secret:
+
+```bash
+verdict-shipper \
+  --spool-directory /var/spool/verdict/worker-1 \
+  --status --json
+```
+
+The stock
+single-tenant dashboard reads `__verdict_local__`; an authenticated host may
+supply a different authorized dashboard tenant as documented below.
 
 ## 3b. Existing conversation export with `verdict-inspect`
 

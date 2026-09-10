@@ -77,16 +77,19 @@ verdict-import agent-file ./verdict-capture --storage sqlite:///./verdict.db
 ```
 
 The same file transport carries provider Traces, Agent evidence, manual spans,
-and user signals. Use one spool directory per producer process. Stop or quiesce
-that producer before importing or removing its files. Files remain until an
-operator removes them after successful import. For central PostgreSQL Agent
-ingestion, `verdict-collector` provides authenticated bounded batches and
-durable idempotent acknowledgements; automated file shipping and deletion are
-separate. Completed appends bypass Python userspace
-buffering but are not `fsync`-ed. If an Agent evidence stream fails, later
-provider calls fall back to standalone Trace records. Quota or write failures
-increment the process-local `capture.dropped_records` metric and produce a
-bounded warning.
+and user signals. Use one spool directory per producer process. Manual import
+reads complete records from active, sealed, or rejected segments. For central
+PostgreSQL Agent ingestion, `verdict-collector` provides authenticated bounded
+batches and durable idempotent acknowledgements, while `verdict-shipper`
+uploads complete segment prefixes and deletes only sealed, fully accepted
+segments. Collector-rejected segments remain locally recoverable. Standalone
+Trace, Span, and UserSignal records still require direct or manual file import.
+Use `verdict-shipper --spool-directory ./verdict-capture --status --json` to
+inspect local backlog without the collector or its key. Completed appends bypass
+Python userspace buffering but are not `fsync`-ed. If an Agent evidence stream
+fails, later provider calls fall back to standalone Trace records. Quota or
+write failures increment the process-local `capture.dropped_records` metric and
+produce a bounded warning.
 
 The Monitor UI previews an immutable count-based (older 80% / newer 20% by
 default) or explicit-date policy before activation. Each metric has its own
