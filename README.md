@@ -156,9 +156,12 @@ userspace buffering, but are not `fsync`-ed against an operating-system or host
 failure. If an Agent evidence stream fails, it stays closed to prevent sequence
 gaps while later provider calls fall back to standalone Trace records. Quota or
 write failures increment the process-local `capture.dropped_records` metric and
-emit one bounded warning per failure class. The transport does not provide
-remote delivery, acknowledgements, retry, or file deletion; an authenticated
-collector is a separate roadmap capability. See
+emit one bounded warning per failure class. For a central PostgreSQL deployment,
+`verdict-collector` accepts authenticated, bounded batches of full `agent`
+records and returns durable idempotent acknowledgements. Agent records include
+their genuinely linked model-call Traces. Standalone Trace, Span, and UserSignal
+records remain local-import only. Automated file checkpointing, retry, and safe
+deletion are not yet included. See
 [`examples/agent_sdk.py`](examples/agent_sdk.py) for a runnable local example.
 
 An initial monitor proposal uses exact event-time membership. The count-mode

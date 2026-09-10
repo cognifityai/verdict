@@ -79,8 +79,10 @@ verdict-import agent-file ./verdict-capture --storage sqlite:///./verdict.db
 The same file transport carries provider Traces, Agent evidence, manual spans,
 and user signals. Use one spool directory per producer process. Stop or quiesce
 that producer before importing or removing its files. Files remain until an
-operator removes them after successful import; this transport does not claim
-remote delivery or acknowledgement. Completed appends bypass Python userspace
+operator removes them after successful import. For central PostgreSQL Agent
+ingestion, `verdict-collector` provides authenticated bounded batches and
+durable idempotent acknowledgements; automated file shipping and deletion are
+separate. Completed appends bypass Python userspace
 buffering but are not `fsync`-ed. If an Agent evidence stream fails, later
 provider calls fall back to standalone Trace records. Quota or write failures
 increment the process-local `capture.dropped_records` metric and produce a

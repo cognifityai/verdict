@@ -19,7 +19,7 @@
 
   <rect width="1300" height="900" fill="#F5F7FA"/>
   <text x="40" y="44" class="title">Verdict v0 — Current Architecture</text>
-  <text x="40" y="66" class="subtitle">What's actually in the repo today: SDK capture or existing-telemetry import → one Trace schema → unchanged storage, eval, drift, and dashboard.</text>
+  <text x="40" y="66" class="subtitle">SDK capture, authenticated Agent collection, or existing-telemetry import → canonical evidence → storage, eval, drift, and dashboard.</text>
 
   <!-- USER LAYER -->
   <text x="40" y="80" class="plane">USER APPLICATION</text>
@@ -68,7 +68,7 @@
   <line x1="915" y1="150" x2="1090" y2="180" class="arrow-cyan" marker-end="url(#arrow-cyan)"/>
 
   <!-- STORAGE LAYER -->
-  <text x="40" y="290" class="plane">STORAGE · 3 ADAPTERS + BUFFERED WRAPPER</text>
+  <text x="40" y="290" class="plane">INGESTION + STORAGE · COLLECTOR + 3 ADAPTERS</text>
   <rect x="120" y="300" width="200" height="80" rx="10" fill="#FFFFFF" stroke="#0B1730" stroke-width="1.5"/>
   <text x="220" y="325" class="node-title" text-anchor="middle">SQLiteStorage</text>
   <text x="220" y="343" class="node-sub" text-anchor="middle">durable single-file</text>
@@ -87,16 +87,17 @@
   <text x="660" y="373" class="node-sub" text-anchor="middle">postgres:// URL</text>
 
   <rect x="780" y="300" width="380" height="80" rx="10" fill="#FFFFFF" stroke="#0B1730" stroke-width="1.5" stroke-dasharray="4 4"/>
-  <text x="970" y="325" class="node-title" text-anchor="middle">Storage Protocol + BufferedStorage</text>
-  <text x="970" y="343" class="node-sub" text-anchor="middle">optional background batched writes</text>
-  <text x="970" y="358" class="node-sub" text-anchor="middle">traces · evaluator IDs · signals · evidence IDs</text>
-  <text x="970" y="373" class="node-sub" text-anchor="middle">delete / prune · persistent cluster registry</text>
+  <text x="970" y="325" class="node-title" text-anchor="middle">Authenticated Agent Collector</text>
+  <text x="970" y="343" class="node-sub" text-anchor="middle">bounded NDJSON · configured tenant authority</text>
+  <text x="970" y="358" class="node-sub" text-anchor="middle">durable receipts · exact retry acknowledgement</text>
+  <text x="970" y="373" class="node-sub" text-anchor="middle">full Agent records → canonical Postgres storage</text>
 
   <line x1="220" y1="260" x2="220" y2="300" class="arrow-cyan" marker-end="url(#arrow-cyan)"/>
   <line x1="440" y1="260" x2="440" y2="300" class="arrow-cyan" marker-end="url(#arrow-cyan)"/>
   <line x1="660" y1="260" x2="660" y2="300" class="arrow-cyan" marker-end="url(#arrow-cyan)"/>
   <line x1="880" y1="260" x2="660" y2="300" class="arrow" marker-end="url(#arrow)"/>
   <line x1="1090" y1="260" x2="970" y2="300" class="arrow-cyan" marker-end="url(#arrow-cyan)"/>
+  <line x1="780" y1="340" x2="760" y2="340" class="arrow-cyan" marker-end="url(#arrow-cyan)"/>
 
   <!-- EVAL ENGINE -->
   <text x="40" y="410" class="plane">EVAL ENGINE · verdict_eval</text>

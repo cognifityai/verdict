@@ -40,11 +40,12 @@ the same normalized evidence APIs used by local history capture.
 
 Application hosts can write bounded, redacted, process-owned JSONL files and
 later replay them idempotently through canonical storage. This is a local
-transport, not a remote delivery system.
+transport. A separately deployable authenticated collector now provides
+idempotent remote ingestion for full Agent records into PostgreSQL.
 
 Planned agent-level work includes maintained framework adapters, run-level
-cohort comparisons, application-specific outcome calibration, and an
-authenticated collector with acknowledgement, retry, and backpressure.
+cohort comparisons, application-specific outcome calibration, and an automated
+shipper with checkpoints, retry, backpressure, and acknowledged file deletion.
 
 ### Plan-Adherence Scoring
 
@@ -76,11 +77,10 @@ possible.
 
 Areas under consideration:
 
-- An authenticated remote-ingestion service so production SDKs do not require
-  database credentials or one PostgreSQL connection pool per application
-  process
-- Durable batching, retry, backpressure, and idempotency between remote
-  producers and storage
+- Automated shipping of local capture segments with checkpoints, retry,
+  backpressure health, and acknowledged deletion
+- Tenant-safe remote ingestion for standalone Trace, Span, and UserSignal
+  records; the current authenticated collector accepts full Agent records
 - OpenTelemetry and OpenInference-compatible export paths
 - Additional source contracts through maintained OSS packages when they reduce
   format-specific maintenance
@@ -120,10 +120,11 @@ Areas under consideration:
 - Cache-token accounting and cache-aware pricing are not modeled.
 - Stable intent clusters have IDs and health diagnostics, but no automatic
   human-readable naming or fragmented-cluster merge operation.
-- PostgreSQL capture currently connects from each instrumented process through
-  a process-local driver pool. Standard remote PostgreSQL URLs are supported,
-  but Verdict does not yet provide a durable remote-ingestion gateway; network
-  persistence failures can therefore leave a trace uncaptured.
+- Direct PostgreSQL capture still connects from each instrumented process
+  through a process-local driver pool. The separate authenticated collector
+  removes database credentials from Agent producers, but automated spool
+  shipping and remote standalone Trace, Span, and UserSignal ingestion are not
+  yet included.
 
 ## Prioritized Product Follow-ups
 
@@ -139,11 +140,11 @@ and an approved design before implementation.
 3. **Concurrent judging (medium effort, latency value):** bounded concurrency,
    provider rate-limit handling, cancellation, deterministic output, and load
    tests. This reduces wall time, not token spend.
-4. **Remote ingestion gateway (large effort, high production-deployment
-   value):** add an authenticated, horizontally scalable HTTPS/OTLP ingestion
-   boundary with batching, durable retry/spooling, backpressure, idempotency,
-   tenant isolation, and separate schema-migration credentials. Keep direct
-   SQLite/PostgreSQL storage as the simple local and embedded option.
+4. **Remote ingestion expansion (large effort, high production-deployment
+   value):** add automated shipping, remote standalone Trace/Span/UserSignal
+   support, OTLP mapping, backpressure health, and separate schema-migration
+   credentials around the current Agent collector. Keep direct SQLite/
+   PostgreSQL storage as the simple local and embedded option.
 5. **Framework adapters and calibrated outcomes (large effort, high
    agent-workload value):** add maintained framework integrations and validate
    application-defined outcome semantics before comparing them across traffic.
