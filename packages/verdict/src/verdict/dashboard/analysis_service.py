@@ -15,7 +15,7 @@ from verdict.analysis_records import (
 )
 from verdict.dashboard.storage_url import is_postgres_storage
 
-ANALYZER_VERSION = "agent-insights-v1"
+ANALYZER_VERSION = "agent-insights-v2"
 SCOPE_KEY = "agent-and-trace"
 
 
@@ -76,10 +76,9 @@ def read_latest_analysis(
         run = storage.get_latest_deterministic_analysis_run(tenant, SCOPE_KEY)
     finally:
         storage.close()
-    return (
-        _run_response(run, empty_result=empty_result)
-        if run is not None else never_run_response(empty_result)
-    )
+    if run is None or run.analyzer_version != ANALYZER_VERSION:
+        return never_run_response(empty_result)
+    return _run_response(run, empty_result=empty_result)
 
 
 def run_analysis(
@@ -100,7 +99,7 @@ def run_analysis(
             status = AnalysisRunStatus.COMPLETED
         except Exception as exc:
             result = {
-                "schema": "agent-insights-v1",
+                "schema": "agent-insights-v2",
                 "error": {
                     "code": "analysis_failed",
                     "causeType": type(exc).__name__,

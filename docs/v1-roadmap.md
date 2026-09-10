@@ -60,8 +60,12 @@ Planned capabilities:
 
 ### Additional Run-Level Comparisons
 
-Current summaries report available run status, event failures, retries, linked
-Trace tokens, latency, and cost. Planned comparisons include:
+Current summaries report source evidence coverage and activity: separate root
+and child runs, turns, final-response previews, tool/command/test failures,
+retries when supplied by the SDK, and source-reported turn tokens when present.
+These are descriptive source facts, not an agent-quality ranking. Tokens,
+latency, cost, judging, and model comparison for provider calls continue to use
+genuine linked `Trace` records. Planned controlled run comparisons include:
 
 - Cost per successful run
 - Average steps per run
@@ -120,7 +124,8 @@ Areas under consideration:
   deterministic findings. Manual spans and supported provider traces still do
   not automatically reconstruct an authoritative cross-source agent graph or
   prove task success.
-- Cache-token accounting and cache-aware pricing are not modeled.
+- Cache-aware provider-Trace pricing is not modeled. Local-agent source cache
+  counters are retained as descriptive usage evidence and are not priced.
 - Stable intent clusters have IDs and health diagnostics, but no automatic
   human-readable naming or fragmented-cluster merge operation.
 - Direct PostgreSQL capture still connects from each instrumented process
@@ -137,9 +142,9 @@ and an approved design before implementation.
 1. **Judge cost and budget visibility (medium effort, high value for paid
    recurring evals):** retain usage, estimate judge cost, persist run budgets,
    and define partial-run/stop semantics.
-2. **Cache-token accounting (medium effort, high value for cache-heavy
-   workloads):** add provider-normalized cache fields, migrations, and pricing
-   reconciliation.
+2. **Cache-aware Trace pricing (medium effort, high value for cache-heavy
+   workloads):** add provider-normalized Trace cache fields, migrations, and
+   pricing reconciliation.
 3. **Concurrent judging (medium effort, latency value):** bounded concurrency,
    provider rate-limit handling, cancellation, deterministic output, and load
    tests. This reduces wall time, not token spend.

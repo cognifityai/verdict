@@ -151,6 +151,30 @@ def _fill_optional(current: Any, incoming: Any, *, subject: str) -> Any:
     raise ValueError(f"{subject} cannot be replaced")
 
 
+def _advance_count(current: int | None, incoming: int | None, *, subject: str) -> int | None:
+    """Allow append-only sources to complete or increase a provisional count."""
+    if current is None:
+        return incoming
+    if incoming is None or incoming == current:
+        return current
+    if incoming > current:
+        return incoming
+    raise ValueError(f"{subject} cannot decrease")
+
+
+def _extend_text(current: str | None, incoming: str | None, *, subject: str) -> str | None:
+    """Allow a later bounded scan to complete an earlier text prefix."""
+    if current is None:
+        return incoming
+    if incoming is None or incoming == current:
+        return current
+    if incoming.startswith(current):
+        return incoming
+    if current.startswith(incoming):
+        return current
+    raise ValueError(f"{subject} cannot be replaced")
+
+
 def _extend_messages(current: Any, incoming: Any) -> Any:
     """Allow capture completion to append messages without rewriting evidence."""
     if current is None:
@@ -329,12 +353,12 @@ def merge_agent_turn(current: AgentTurn | None, incoming: AgentTurn) -> AgentTur
         incoming.started_at,
     ):
         raise ValueError("turn identity facts cannot be replaced")
-    request = _fill_optional(
+    request = _extend_text(
         current.user_request_redacted,
         incoming.user_request_redacted,
         subject="turn request",
     )
-    response = _fill_optional(
+    response = _extend_text(
         current.final_response_redacted,
         incoming.final_response_redacted,
         subject="turn response",
@@ -363,6 +387,49 @@ def merge_agent_turn(current: AgentTurn | None, incoming: AgentTurn) -> AgentTur
             current.response_state,
             incoming.response_state,
             has_content=response is not None,
+        ),
+        input_tokens=_advance_count(
+            current.input_tokens, incoming.input_tokens, subject="turn input tokens"
+        ),
+        cached_input_tokens=_advance_count(
+            current.cached_input_tokens,
+            incoming.cached_input_tokens,
+            subject="turn cached input tokens",
+        ),
+        cache_write_input_tokens=_advance_count(
+            current.cache_write_input_tokens,
+            incoming.cache_write_input_tokens,
+            subject="turn cache-write input tokens",
+        ),
+        output_tokens=_advance_count(
+            current.output_tokens, incoming.output_tokens, subject="turn output tokens"
+        ),
+        reasoning_output_tokens=_advance_count(
+            current.reasoning_output_tokens,
+            incoming.reasoning_output_tokens,
+            subject="turn reasoning output tokens",
+        ),
+        total_tokens=_advance_count(
+            current.total_tokens, incoming.total_tokens, subject="turn total tokens"
+        ),
+        token_usage_basis=_fill_optional(
+            current.token_usage_basis,
+            incoming.token_usage_basis,
+            subject="turn token usage basis",
+        ),
+        request_truncated=(
+            incoming.request_truncated
+            if request == incoming.user_request_redacted != current.user_request_redacted
+            else current.request_truncated
+            if request == current.user_request_redacted != incoming.user_request_redacted
+            else current.request_truncated or incoming.request_truncated
+        ),
+        response_truncated=(
+            incoming.response_truncated
+            if response == incoming.final_response_redacted != current.final_response_redacted
+            else current.response_truncated
+            if response == current.final_response_redacted != incoming.final_response_redacted
+            else current.response_truncated or incoming.response_truncated
         ),
     )
 
@@ -583,6 +650,31 @@ def agent_turn_from_row(row: Mapping[str, object]) -> AgentTurn:
         ),
         request_state=EvidenceState(str(row["request_state"])),
         response_state=EvidenceState(str(row["response_state"])),
+        input_tokens=(int(row["input_tokens"]) if row.get("input_tokens") is not None else None),
+        cached_input_tokens=(
+            int(row["cached_input_tokens"])
+            if row.get("cached_input_tokens") is not None else None
+        ),
+        cache_write_input_tokens=(
+            int(row["cache_write_input_tokens"])
+            if row.get("cache_write_input_tokens") is not None else None
+        ),
+        output_tokens=(
+            int(row["output_tokens"]) if row.get("output_tokens") is not None else None
+        ),
+        reasoning_output_tokens=(
+            int(row["reasoning_output_tokens"])
+            if row.get("reasoning_output_tokens") is not None else None
+        ),
+        total_tokens=(
+            int(row["total_tokens"]) if row.get("total_tokens") is not None else None
+        ),
+        token_usage_basis=(
+            str(row["token_usage_basis"])
+            if row.get("token_usage_basis") is not None else None
+        ),
+        request_truncated=bool(row.get("request_truncated", False)),
+        response_truncated=bool(row.get("response_truncated", False)),
     )
 
 

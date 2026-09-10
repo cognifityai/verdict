@@ -8,6 +8,15 @@ export function agentEvidenceValue(dataHealth = {}, value) {
   return Number(dataHealth.counts?.runs) > 0 ? value : NO_AGENT_RUNS;
 }
 
+export function sourceTokenValue(activity = {}) {
+  if (activity.tokenUsageState === "not_captured") {
+    return "Not captured";
+  }
+  if (activity.totalTokens == null) return "Components captured (partial)";
+  const total = Number(activity.totalTokens).toLocaleString();
+  return activity.tokenUsageState === "partial" ? `${total} (partial)` : total;
+}
+
 export function datasetActivitySummary(dataHealth = {}, performance = {}) {
   const hasAgentRuns = Number(dataHealth.counts?.runs) > 0;
   const traceLinks = dataHealth.traceLinks || {};

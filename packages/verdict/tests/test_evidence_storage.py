@@ -278,6 +278,41 @@ def test_replace_bundle_rejects_conflicting_complete_revision(evidence_storage) 
     assert loaded.content_hash == original.content_hash
 
 
+def test_turn_usage_can_advance_but_never_decrease(evidence_storage) -> None:
+    original = _bundle()
+    first = replace(
+        original,
+        turns=(replace(
+            original.turns[0],
+            input_tokens=8,
+            output_tokens=2,
+            total_tokens=10,
+            token_usage_basis="codex_turn_delta",
+        ),),
+    )
+    advanced = replace(
+        first,
+        turns=(replace(
+            first.turns[0],
+            input_tokens=12,
+            output_tokens=3,
+            total_tokens=15,
+        ),),
+    )
+    decreased = replace(
+        advanced,
+        turns=(replace(advanced.turns[0], total_tokens=14),),
+    )
+
+    evidence_storage.replace_agent_run_bundle(first)
+    evidence_storage.replace_agent_run_bundle(advanced)
+
+    assert evidence_storage.get_agent_run_bundle("tenant-a", "run_1") == advanced
+    with pytest.raises(ValueError, match="total tokens cannot decrease"):
+        evidence_storage.replace_agent_run_bundle(decreased)
+    assert evidence_storage.get_agent_run_bundle("tenant-a", "run_1") == advanced
+
+
 def test_import_source_locator_cannot_be_reassigned(evidence_storage) -> None:
     original = _bundle()
     conflicting = AgentRunBundle(

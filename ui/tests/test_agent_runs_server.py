@@ -5,9 +5,10 @@ from datetime import datetime, timedelta, timezone
 
 import httpx
 import verdict
+from verdict.analysis_records import AnalysisRunStatus, DeterministicAnalysisRun
 from verdict.capture import AgentCaptureService
 from verdict.dashboard import agent_evidence_queries
-from verdict.dashboard.analysis_service import run_analysis
+from verdict.dashboard.analysis_service import read_latest_analysis, run_analysis
 from verdict.dashboard.app import (
     build_agent_insights_bundle,
     build_agent_run_detail,
@@ -96,6 +97,15 @@ def test_agent_run_detail_exposes_ordered_bounded_events_and_trace_links(tmp_pat
     bundle = _bundle("local", now, with_turn=True, trace_link=True)
     bundle = replace(
         bundle,
+        turns=(replace(
+            bundle.turns[0],
+            input_tokens=7,
+            cached_input_tokens=4,
+            output_tokens=11,
+            total_tokens=18,
+            token_usage_basis="claude_provider_response_sum",
+            response_truncated=True,
+        ),),
         events=(
             replace(bundle.events[0], producer_id="agent", producer_sequence=0),
             replace(bundle.events[1], producer_id="shell", producer_sequence=0),
@@ -122,6 +132,16 @@ def test_agent_run_detail_exposes_ordered_bounded_events_and_trace_links(tmp_pat
     assert response.status_code == 200
     assert [event["sequence"] for event in direct["events"]] == [0, 1]
     assert direct["turns"][0]["request"] == "request"
+    assert direct["turns"][0]["tokenUsage"] == {
+        "inputTokens": 7,
+        "cachedInputTokens": 4,
+        "cacheWriteInputTokens": None,
+        "outputTokens": 11,
+        "reasoningOutputTokens": None,
+        "totalTokens": 18,
+        "basis": "claude_provider_response_sum",
+    }
+    assert direct["turns"][0]["responseTruncated"] is True
     assert direct["events"][0]["traceId"] == "trace-1"
     assert direct["producerCount"] == 2
     assert {event["producerId"] for event in direct["events"]} == {"agent", "shell"}
@@ -186,9 +206,19 @@ def test_agent_insights_reports_dataset_wide_evidence_and_findings(tmp_path):
         tags={"verdict.agent_run_id": "r-local"},
         operation=Operation.CHAT, finish_reason="stop",
     )
-    AgentCaptureService(storage).capture(
-        _bundle("local", now, with_turn=True, trace_link=True), traces=(trace,),
+    local_bundle = _bundle("local", now, with_turn=True, trace_link=True)
+    local_bundle = replace(
+        local_bundle,
+        turns=(replace(
+            local_bundle.turns[0],
+            input_tokens=70,
+            cached_input_tokens=50,
+            output_tokens=30,
+            total_tokens=100,
+            token_usage_basis="codex_turn_delta",
+        ),),
     )
+    AgentCaptureService(storage).capture(local_bundle, traces=(trace,))
     storage.insert_trace(Trace(
         trace_id="trace-failed", started_at=now, ended_at=now, provider="openai",
         request_model="gpt-test", response_model="gpt-test",
@@ -219,7 +249,7 @@ def test_agent_insights_reports_dataset_wide_evidence_and_findings(tmp_path):
     persisted = response.json()
     assert persisted["analysisState"]["status"] == "completed"
     assert {key: value for key, value in persisted.items() if key != "analysisState"} == report
-    assert report["schema"] == "agent-insights-v1"
+    assert report["schema"] == "agent-insights-v2"
     assert report["scope"] == {
         "availableRuns": 1, "analyzedRuns": 1, "complete": True,
         "traces": {"available": 2, "analyzed": 2, "complete": True},
@@ -248,10 +278,13 @@ def test_agent_insights_reports_dataset_wide_evidence_and_findings(tmp_path):
     assert report["behavior"]["capturedResponses"] == 1
     assert report["behavior"]["apologyStarts"] == 1
     assert report["behavior"]["hedges"] == 1
-    assert report["comparisons"][0]["source"] == "codex"
-    assert report["comparisons"][0]["costUsd"] == 0.001
-    assert report["comparisons"][0]["runOutcomes"] == {"unknown": 1}
-    assert report["comparisons"][0]["retryState"] == "not_captured"
+    assert report["sourceActivity"][0]["source"] == "codex"
+    assert report["sourceActivity"][0]["runs"] == 1
+    assert report["sourceActivity"][0]["turns"] == 1
+    assert report["sourceActivity"][0]["finalResponses"] == 1
+    assert report["sourceActivity"][0]["totalTokens"] == 100
+    assert report["sourceActivity"][0]["tokenUsageState"] == "complete"
+    assert report["sourceActivity"][0]["runOutcomes"] == {"unknown": 1}
     command_finding = next(
         finding for finding in report["findings"] if finding["code"] == "command_failed"
     )
@@ -304,12 +337,63 @@ def test_insights_reports_retries_captured_by_the_agent_sdk(tmp_path):
 
     report = build_agent_insights_bundle(path, tenant="sdk-tenant")
 
-    [comparison] = report["comparisons"]
+    [comparison] = report["sourceActivity"]
     assert comparison["source"] == "verdict_sdk"
     assert comparison["retries"] == 1
     assert comparison["retryState"] == "captured"
     assert comparison["testFailures"] == 1
     assert report["reliability"]["testFailures"] == 1
+
+
+def test_trace_performance_never_falls_back_to_agent_event_usage(tmp_path):
+    path = tmp_path / "source-only.db"
+    storage = SQLiteStorage(str(path))
+    now = datetime(2026, 8, 31, tzinfo=timezone.utc)
+    storage.replace_agent_run_bundle(_bundle("local", now, with_turn=True))
+    storage.close()
+
+    report = build_agent_insights_bundle(path, tenant="local")
+
+    assert report["scope"]["traces"]["available"] == 0
+    assert report["performance"]["modelCalls"] == 0
+    assert report["performance"]["inputTokens"] is None
+    assert report["performance"]["outputTokens"] is None
+    [activity] = report["sourceActivity"]
+    assert activity["totalTokens"] is None
+    assert activity["tokenUsageState"] == "not_captured"
+
+
+def test_component_only_source_usage_is_partial_not_unavailable(tmp_path):
+    path = tmp_path / "component-usage.db"
+    storage = SQLiteStorage(str(path))
+    now = datetime(2026, 8, 31, tzinfo=timezone.utc)
+    bundle = _bundle("local", now, with_turn=True)
+    bundle = replace(
+        bundle,
+        turns=(replace(
+            bundle.turns[0],
+            input_tokens=9,
+            output_tokens=3,
+            token_usage_basis="codex_turn_delta",
+        ),),
+    )
+    storage.replace_agent_run_bundle(bundle)
+    storage.close()
+
+    runs = build_agent_runs_bundle(path, tenant="local")
+    insights = build_agent_insights_bundle(path, tenant="local")
+
+    assert runs["runs"][0]["sourceTokenUsage"] == {
+        "totalTokens": None,
+        "turns": 1,
+        "state": "partial",
+    }
+    [activity] = insights["sourceActivity"]
+    assert activity["inputTokens"] == 9
+    assert activity["outputTokens"] == 3
+    assert activity["totalTokens"] is None
+    assert activity["tokenUsageTurns"] == 1
+    assert activity["tokenUsageState"] == "partial"
 
 
 def test_insights_marks_missing_responses_not_evaluable(tmp_path):
@@ -361,6 +445,35 @@ def test_analysis_failure_is_persisted_and_returned_as_an_explicit_state(tmp_pat
     assert result["error"]["code"] == "analysis_failed"
     assert result["error"]["causeType"] == "ValueError"
     assert "secret source detail" not in json.dumps(result)
+
+
+def test_incompatible_persisted_insights_are_not_served_as_current(tmp_path):
+    storage_url = f"sqlite:///{tmp_path / 'old-analysis.db'}"
+    storage = SQLiteStorage(str(tmp_path / "old-analysis.db"))
+    now = datetime(2026, 8, 31, tzinfo=timezone.utc)
+    storage.save_deterministic_analysis_run(DeterministicAnalysisRun(
+        analysis_id="a" * 64,
+        tenant_id="local",
+        scope_key="agent-and-trace",
+        cutoff=now,
+        completed_at=now,
+        status=AnalysisRunStatus.COMPLETED,
+        analyzer_version="agent-insights-v1",
+        input_fingerprint="b" * 64,
+        result={"schema": "agent-insights-v1", "comparisons": []},
+    ))
+    storage.close()
+
+    result = read_latest_analysis(
+        storage_url,
+        tenant="local",
+        empty_result={"schema": "agent-insights-v2", "sourceActivity": []},
+    )
+
+    assert result["analysisState"]["status"] == "never_run"
+    assert result["analysisState"]["analyzerVersion"] == "agent-insights-v2"
+    assert result["schema"] == "agent-insights-v2"
+    assert "comparisons" not in result
 
 
 def test_agent_runs_can_select_an_exact_tenant_scoped_run(tmp_path):

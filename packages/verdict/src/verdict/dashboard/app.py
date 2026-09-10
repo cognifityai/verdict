@@ -45,6 +45,7 @@ from verdict.dashboard.registry import (
     build_registry_bundle as _build_registry_bundle,
 )
 from verdict.dashboard.storage_url import is_postgres_storage
+from verdict.evidence import EvidenceState
 from verdict.metrics import ScoreCounts, verdict_label
 from verdict.normalized_evidence import normalized_bundle_digest
 from verdict.redaction import redact, redact_structure
@@ -581,6 +582,12 @@ def build_agent_runs_bundle(
         linked_trace_ids: dict[str, set[str]] = defaultdict(set)
         for bundle in bundles:
             analysis = analyze_agent_run(bundle)
+            usage_turns = [
+                turn for turn in bundle.turns if turn.token_usage_basis is not None
+            ]
+            total_usage_turns = [
+                turn for turn in usage_turns if turn.total_tokens is not None
+            ]
             turn_outcomes = Counter(turn.status.value for turn in bundle.turns)
             finding_severity = Counter(finding.severity for finding in analysis.findings)
             runs.append({
@@ -598,6 +605,18 @@ def build_agent_runs_bundle(
                 "parentRunId": bundle.run.parent_run_id,
                 "turnCount": len(bundle.turns),
                 "eventCount": len(bundle.events),
+                "sourceTokenUsage": {
+                    "totalTokens": (
+                        sum(turn.total_tokens or 0 for turn in total_usage_turns)
+                        if total_usage_turns else None
+                    ),
+                    "turns": len(usage_turns),
+                    "state": (
+                        "complete"
+                        if bundle.turns and len(total_usage_turns) == len(bundle.turns)
+                        else "partial" if usage_turns else "not_captured"
+                    ),
+                },
                 "metrics": analysis.metrics,
                 "evidenceCoverage": analysis.evidence_coverage,
                 "turnOutcomes": dict(sorted(turn_outcomes.items())),
@@ -806,6 +825,17 @@ def build_agent_run_detail(
                 "responseState": turn["response_state"],
                 "request": turn["user_request_redacted"],
                 "response": turn["final_response_redacted"],
+                "requestTruncated": bool(turn["request_truncated"]),
+                "responseTruncated": bool(turn["response_truncated"]),
+                "tokenUsage": {
+                    "inputTokens": turn["input_tokens"],
+                    "cachedInputTokens": turn["cached_input_tokens"],
+                    "cacheWriteInputTokens": turn["cache_write_input_tokens"],
+                    "outputTokens": turn["output_tokens"],
+                    "reasoningOutputTokens": turn["reasoning_output_tokens"],
+                    "totalTokens": turn["total_tokens"],
+                    "basis": turn["token_usage_basis"],
+                },
             } for turn in shown_turns],
             "turnPage": {
                 "available": available_turns, "shown": len(shown_turns),
@@ -901,9 +931,7 @@ def build_agent_insights_bundle(
         finding_run_ids: dict[tuple[str, str], list[str]] = defaultdict(list)
         source_metrics: dict[str, Counter[str]] = defaultdict(Counter)
         source_outcomes: dict[str, Counter[str]] = defaultdict(Counter)
-        run_trace_metrics: dict[str, Counter[str]] = defaultdict(Counter)
         totals: Counter[str] = Counter()
-        latency_values: list[float] = []
         trace_scope = {"available": 0, "analyzed": 0, "complete": True}
         trace_metrics: dict[tuple[str, str], Counter[str]] = defaultdict(Counter)
         behavior = Counter()
@@ -921,11 +949,6 @@ def build_agent_insights_bundle(
                 if tenant == "__verdict_local__"
                 else "tenant_id=?"
             )
-            trace_columns = session.columns("traces")
-            trace_tags = (
-                "tags_json" if "tags_json" in trace_columns
-                else "tags" if "tags" in trace_columns else "NULL"
-            )
             trace_count_row = session.execute(
                 f"SELECT COUNT(*) AS count FROM traces WHERE {trace_tenant_predicate}",  # nosec B608 -- fixed predicate
                 (tenant,),
@@ -934,7 +957,7 @@ def build_agent_insights_bundle(
             trace_rows = list(session.execute(
                 "SELECT provider, request_model, operation, finish_reason, input_tokens, "
                 "output_tokens, latency_ms, cost_usd, error, prompt_redacted, "
-                f"response_redacted, {trace_tags} AS trace_tags "  # nosec B608 -- schema-selected identifier
+                "response_redacted "
                 f"FROM traces WHERE {trace_tenant_predicate} "  # nosec B608 -- fixed predicate
                 "ORDER BY started_at ASC, trace_id ASC LIMIT ?",
                 (tenant, scan_limit),
@@ -956,26 +979,16 @@ def build_agent_insights_bundle(
                 metrics["traces"] += 1
                 trace_operations[str(trace["operation"] or "unknown")] += 1
                 trace_finish_reasons[str(trace["finish_reason"] or "unknown")] += 1
-                tags = _json_value(trace["trace_tags"], {})
-                run_id = tags.get("verdict.agent_run_id") if isinstance(tags, dict) else None
-                run_metrics = (
-                    run_trace_metrics[run_id]
-                    if isinstance(run_id, str) and run_id else None
-                )
-                if run_metrics is not None:
-                    run_metrics["traces"] += 1
                 for name in ("input_tokens", "output_tokens"):
                     value = trace[name]
                     if isinstance(value, int):
                         trace_tokens[name] += value
+                        trace_tokens[f"{name}_known"] += 1
                         metrics[name] += value
-                        if run_metrics is not None:
-                            run_metrics[name] += value
+                        metrics[f"{name}_known"] += 1
                 if trace["error"]:
                     metrics["errors"] += 1
                     trace_outcomes["failed"] += 1
-                    if run_metrics is not None:
-                        run_metrics["errors"] += 1
                 else:
                     trace_outcomes["succeeded"] += 1
                 latency = trace["latency_ms"]
@@ -983,17 +996,11 @@ def build_agent_insights_bundle(
                     trace_latency_values.append(float(latency))
                     metrics["latency_known"] += 1
                     metrics["latency_ms"] += float(latency)
-                    if run_metrics is not None:
-                        run_metrics["latency_known"] += 1
-                        run_metrics["latency_ms"] += float(latency)
                 cost = trace["cost_usd"]
                 if isinstance(cost, (int, float)) and not isinstance(cost, bool):
                     trace_cost_values.append(float(cost))
                     metrics["cost_known"] += 1
                     metrics["cost_microusd"] += round(float(cost) * 1_000_000)
-                    if run_metrics is not None:
-                        run_metrics["cost_known"] += 1
-                        run_metrics["cost_microusd"] += round(float(cost) * 1_000_000)
                 prompt = trace["prompt_redacted"]
                 response = trace["response_redacted"]
                 facts = deterministic_trace_facts(
@@ -1024,14 +1031,34 @@ def build_agent_insights_bundle(
             run_outcomes[bundle.run.status.value] += 1
             source_outcomes[source][bundle.run.status.value] += 1
             source_metrics[source]["runs"] += 1
-            linked = run_trace_metrics.get(bundle.run.run_id)
-            if linked is not None:
-                for name, value in linked.items():
-                    source_metrics[source][f"trace_{name}"] += value
+            source_metrics[source]["child_runs"] += int(bundle.run.parent_run_id is not None)
             for turn in bundle.turns:
                 turn_outcomes[turn.status.value] += 1
                 prompt_states[turn.request_state.value] += 1
                 response_states[turn.response_state.value] += 1
+                source_metrics[source]["turns"] += 1
+                source_metrics[source]["final_responses"] += int(
+                    turn.response_state is EvidenceState.PRESENT
+                )
+                source_metrics[source]["truncated_responses"] += int(
+                    turn.response_truncated
+                )
+                if turn.token_usage_basis is not None:
+                    source_metrics[source]["token_usage_turns"] += 1
+                if turn.total_tokens is not None:
+                    source_metrics[source]["total_token_turns"] += 1
+                    source_metrics[source]["total_tokens"] += turn.total_tokens
+                for name in (
+                    "input_tokens",
+                    "cached_input_tokens",
+                    "cache_write_input_tokens",
+                    "output_tokens",
+                    "reasoning_output_tokens",
+                ):
+                    value = getattr(turn, name)
+                    if value is not None:
+                        source_metrics[source][name] += value
+                        source_metrics[source][f"{name}_known"] += 1
             totals["turns"] += len(bundle.turns)
             totals["events"] += len(bundle.events)
             for event in bundle.events:
@@ -1042,16 +1069,6 @@ def build_agent_insights_bundle(
                     source_metrics[source]["model_calls"] += 1
                     if event.trace_id:
                         totals["linked_model_calls"] += 1
-                    for name in ("input_tokens", "output_tokens"):
-                        value = event.attributes.get(name)
-                        if isinstance(value, int):
-                            totals[name] += value
-                            source_metrics[source][name] += value
-                    latency = event.attributes.get("latency_ms")
-                    if isinstance(latency, (int, float)) and not isinstance(latency, bool):
-                        latency_values.append(float(latency))
-                        source_metrics[source]["latency_known"] += 1
-                        source_metrics[source]["latency_ms"] += float(latency)
                 elif event.event_type.value == "tool_call":
                     totals["tool_calls"] += 1
                     source_metrics[source]["tool_calls"] += 1
@@ -1069,7 +1086,6 @@ def build_agent_insights_bundle(
                 finding_messages.setdefault(key, finding.message)
                 if len(finding_run_ids[key]) < 50:
                     finding_run_ids[key].append(bundle.run.run_id)
-        model_calls = totals["model_calls"]
         findings = [
             {
                 "code": code,
@@ -1083,36 +1099,46 @@ def build_agent_insights_bundle(
                 finding_counts.items(), key=lambda item: (-item[1], item[0][0])
             )[:50]
         ]
-        comparisons = []
+        source_activity = []
         for source, metrics in sorted(source_metrics.items()):
-            latency_known = metrics["trace_latency_known"] or metrics["latency_known"]
-            latency_total = metrics["trace_latency_ms"] or metrics["latency_ms"]
-            trace_calls = metrics["trace_traces"]
-            cost_known = metrics["trace_cost_known"]
-            comparisons.append({
+            token_usage_turns = metrics["token_usage_turns"]
+            total_token_turns = metrics["total_token_turns"]
+            turns = metrics["turns"]
+            source_activity.append({
                 "source": source,
                 "runs": metrics["runs"],
-                "modelCalls": metrics["model_calls"],
+                "childRuns": metrics["child_runs"],
+                "turns": turns,
+                "finalResponses": metrics["final_responses"],
+                "truncatedResponses": metrics["truncated_responses"],
                 "toolCalls": metrics["tool_calls"],
                 "toolErrors": metrics["tool_errors"],
                 "commandFailures": metrics["command_failures"],
                 "testFailures": metrics["test_failures"],
-                "inputTokens": metrics["trace_input_tokens"] or metrics["input_tokens"],
-                "outputTokens": metrics["trace_output_tokens"] or metrics["output_tokens"],
-                "averageModelLatencyMs": (
-                    round(latency_total / latency_known, 2)
-                    if latency_known else None
+                "inputTokens": (
+                    metrics["input_tokens"] if metrics["input_tokens_known"] else None
                 ),
-                "latencyKnownCalls": latency_known,
-                "costUsd": (
-                    round(metrics["trace_cost_microusd"] / 1_000_000, 8)
-                    if cost_known else None
+                "cachedInputTokens": (
+                    metrics["cached_input_tokens"]
+                    if metrics["cached_input_tokens_known"] else None
                 ),
-                "costState": (
-                    "complete" if trace_calls and cost_known == trace_calls
-                    else "partial" if cost_known else "not_captured"
+                "cacheWriteInputTokens": (
+                    metrics["cache_write_input_tokens"]
+                    if metrics["cache_write_input_tokens_known"] else None
                 ),
-                "providerErrors": metrics["trace_errors"],
+                "outputTokens": (
+                    metrics["output_tokens"] if metrics["output_tokens_known"] else None
+                ),
+                "reasoningOutputTokens": (
+                    metrics["reasoning_output_tokens"]
+                    if metrics["reasoning_output_tokens_known"] else None
+                ),
+                "totalTokens": metrics["total_tokens"] if total_token_turns else None,
+                "tokenUsageTurns": token_usage_turns,
+                "tokenUsageState": (
+                    "complete" if turns and total_token_turns == turns
+                    else "partial" if token_usage_turns else "not_captured"
+                ),
                 "runOutcomes": dict(sorted(source_outcomes[source].items())),
                 "retries": metrics["retries"] if source == "verdict_sdk" else None,
                 "retryState": "captured" if source == "verdict_sdk" else "not_captured",
@@ -1126,8 +1152,12 @@ def build_agent_insights_bundle(
                 "model": model,
                 "traces": metrics["traces"],
                 "errors": metrics["errors"],
-                "inputTokens": metrics["input_tokens"],
-                "outputTokens": metrics["output_tokens"],
+                "inputTokens": (
+                    metrics["input_tokens"] if metrics["input_tokens_known"] else None
+                ),
+                "outputTokens": (
+                    metrics["output_tokens"] if metrics["output_tokens_known"] else None
+                ),
                 "averageLatencyMs": (
                     round(metrics["latency_ms"] / latency_known, 2)
                     if latency_known else None
@@ -1138,11 +1168,8 @@ def build_agent_insights_bundle(
                 ),
                 "costKnownTraces": cost_known,
             })
-        input_tokens = trace_tokens["input_tokens"] or totals["input_tokens"]
-        output_tokens = trace_tokens["output_tokens"] or totals["output_tokens"]
-        known_latency = trace_latency_values or latency_values
         result = {
-            "schema": "agent-insights-v1",
+            "schema": "agent-insights-v2",
             "scope": {
                 "availableRuns": available,
                 "analyzedRuns": analyzed,
@@ -1157,9 +1184,11 @@ def build_agent_insights_bundle(
                 "promptStates": dict(sorted(prompt_states.items())),
                 "responseStates": dict(sorted(response_states.items())),
                 "traceLinks": {
-                    "modelCalls": model_calls,
+                    "modelCalls": totals["model_calls"],
                     "linked": totals["linked_model_calls"],
-                    "unlinked": model_calls - totals["linked_model_calls"],
+                    "unlinked": (
+                        totals["model_calls"] - totals["linked_model_calls"]
+                    ),
                 },
                 "traceEvidence": {
                     "promptPresent": trace_evidence["prompt_present"],
@@ -1181,15 +1210,21 @@ def build_agent_insights_bundle(
                 "retries": totals["retries"],
             },
             "performance": {
-                "modelCalls": trace_scope["analyzed"] or model_calls,
+                "modelCalls": trace_scope["analyzed"],
                 "toolCalls": totals["tool_calls"],
-                "inputTokens": input_tokens,
-                "outputTokens": output_tokens,
-                "averageModelLatencyMs": (
-                    round(sum(known_latency) / len(known_latency), 2)
-                    if known_latency else None
+                "inputTokens": (
+                    trace_tokens["input_tokens"]
+                    if trace_tokens["input_tokens_known"] else None
                 ),
-                "latencyKnownCalls": len(known_latency),
+                "outputTokens": (
+                    trace_tokens["output_tokens"]
+                    if trace_tokens["output_tokens_known"] else None
+                ),
+                "averageModelLatencyMs": (
+                    round(sum(trace_latency_values) / len(trace_latency_values), 2)
+                    if trace_latency_values else None
+                ),
+                "latencyKnownCalls": len(trace_latency_values),
                 "costUsd": round(sum(trace_cost_values), 8) if trace_cost_values else None,
                 "costState": "complete" if trace_scope["analyzed"] and len(trace_cost_values) == trace_scope["analyzed"] else "partial" if trace_cost_values else "not_captured",
             },
@@ -1206,7 +1241,7 @@ def build_agent_insights_bundle(
                 "hedges": behavior["hedges"],
                 "validJsonResponses": behavior["valid_json"],
             },
-            "comparisons": comparisons,
+            "sourceActivity": source_activity,
             "modelComparisons": model_comparisons,
         }
         result["_analysisInputFingerprint"] = input_hasher.hexdigest()
@@ -1242,7 +1277,7 @@ def build_agent_insights_bundle(
 
 def _empty_agent_insights() -> dict:
     return {
-        "schema": "agent-insights-v1",
+        "schema": "agent-insights-v2",
         "scope": {"availableRuns": 0, "analyzedRuns": 0, "complete": True,
                   "traces": {"available": 0, "analyzed": 0, "complete": True}},
         "findings": [],
@@ -1261,7 +1296,7 @@ def _empty_agent_insights() -> dict:
             "toolErrors": 0, "commandFailures": 0, "testFailures": 0, "retries": 0,
         },
         "performance": {
-            "modelCalls": 0, "toolCalls": 0, "inputTokens": 0, "outputTokens": 0,
+            "modelCalls": 0, "toolCalls": 0, "inputTokens": None, "outputTokens": None,
             "averageModelLatencyMs": None, "latencyKnownCalls": 0,
             "costUsd": None, "costState": "not_captured",
         },
@@ -1270,7 +1305,7 @@ def _empty_agent_insights() -> dict:
             "averageResponseCharacters": None, "refusals": 0,
             "apologyStarts": 0, "hedges": 0, "validJsonResponses": 0,
         },
-        "comparisons": [],
+        "sourceActivity": [],
         "modelComparisons": [],
     }
 

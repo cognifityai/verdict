@@ -17,7 +17,8 @@ Verdict stores captured agent evidence in four normalized relations:
 - `import_sources` owns source identity and observation time;
 - `agent_runs` owns run, session, parent-run, agent, service, environment, and
   instance correlation;
-- `agent_turns` owns ordered request/response evidence for one run; and
+- `agent_turns` owns ordered request/response evidence, explicit preview
+  truncation state, and optional source-reported token counters for one run; and
 - `agent_events` owns ordered model, tool, command, test, context, and omission
   observations.
 
@@ -47,7 +48,10 @@ serialized so concurrent process startup cannot race the initial DDL.
 The public `SourceSession`, `AgentRun`, `AgentTurn`, `AgentEvent`, and
 `AgentRunBundle` types remain available. `AgentRunBundle` is a transfer object,
 not the current physical storage format. Existing Trace, Judgment, cluster,
-monitor, and drift identities are unchanged.
+monitor, and drift identities are unchanged. Optional `AgentTurn` usage and
+truncation fields are appended to the public dataclass and omitted from the
+compatibility JSON representation when absent, so older positional construction
+and serialized evidence retain their prior meaning and content hash.
 
 On first open, a supported SQLite or PostgreSQL store transactionally migrates
 legacy `agent_run_bundles` rows into the normalized relations. The legacy table

@@ -232,6 +232,18 @@ CREATE TABLE IF NOT EXISTS agent_turns (
         'present','missing','not_captured','not_applicable')),
     response_state TEXT NOT NULL CHECK(response_state IN (
         'present','missing','not_captured','not_applicable')),
+    input_tokens INTEGER CHECK(input_tokens IS NULL OR input_tokens >= 0),
+    cached_input_tokens INTEGER CHECK(cached_input_tokens IS NULL OR cached_input_tokens >= 0),
+    cache_write_input_tokens INTEGER
+        CHECK(cache_write_input_tokens IS NULL OR cache_write_input_tokens >= 0),
+    output_tokens INTEGER CHECK(output_tokens IS NULL OR output_tokens >= 0),
+    reasoning_output_tokens INTEGER
+        CHECK(reasoning_output_tokens IS NULL OR reasoning_output_tokens >= 0),
+    total_tokens INTEGER CHECK(total_tokens IS NULL OR total_tokens >= 0),
+    token_usage_basis TEXT CHECK(token_usage_basis IS NULL OR token_usage_basis IN (
+        'codex_turn_delta','claude_provider_response_sum')),
+    request_truncated INTEGER NOT NULL DEFAULT 0 CHECK(request_truncated IN (0,1)),
+    response_truncated INTEGER NOT NULL DEFAULT 0 CHECK(response_truncated IN (0,1)),
     PRIMARY KEY (tenant_id, run_id, turn_id),
     UNIQUE (tenant_id, run_id, sequence),
     FOREIGN KEY (tenant_id, run_id) REFERENCES agent_runs(tenant_id, run_id)
@@ -689,6 +701,41 @@ class SQLiteStorage:
                 if "run_id" not in drift_columns:
                     self._conn.execute("ALTER TABLE drift_signals ADD COLUMN run_id TEXT")
             self._conn.executescript(_SCHEMA)
+            agent_turn_columns = {
+                row[1] for row in self._conn.execute("PRAGMA table_info(agent_turns)")
+            }
+            for column, ddl in (
+                ("input_tokens", "INTEGER CHECK(input_tokens IS NULL OR input_tokens >= 0)"),
+                (
+                    "cached_input_tokens",
+                    "INTEGER CHECK(cached_input_tokens IS NULL OR cached_input_tokens >= 0)",
+                ),
+                (
+                    "cache_write_input_tokens",
+                    "INTEGER CHECK(cache_write_input_tokens IS NULL OR cache_write_input_tokens >= 0)",
+                ),
+                ("output_tokens", "INTEGER CHECK(output_tokens IS NULL OR output_tokens >= 0)"),
+                (
+                    "reasoning_output_tokens",
+                    "INTEGER CHECK(reasoning_output_tokens IS NULL OR reasoning_output_tokens >= 0)",
+                ),
+                ("total_tokens", "INTEGER CHECK(total_tokens IS NULL OR total_tokens >= 0)"),
+                (
+                    "token_usage_basis",
+                    "TEXT CHECK(token_usage_basis IS NULL OR token_usage_basis IN "
+                    "('codex_turn_delta','claude_provider_response_sum'))",
+                ),
+                (
+                    "request_truncated",
+                    "INTEGER NOT NULL DEFAULT 0 CHECK(request_truncated IN (0,1))",
+                ),
+                (
+                    "response_truncated",
+                    "INTEGER NOT NULL DEFAULT 0 CHECK(response_truncated IN (0,1))",
+                ),
+            ):
+                if column not in agent_turn_columns:
+                    self._conn.execute(f"ALTER TABLE agent_turns ADD COLUMN {column} {ddl}")
             try:
                 self._conn.execute("ALTER TABLE traces ADD COLUMN parent_span_id TEXT")
             except sqlite3.OperationalError:
@@ -931,15 +978,26 @@ class SQLiteStorage:
             """INSERT INTO agent_turns (
                 tenant_id, turn_id, run_id, sequence, started_at, ended_at,
                 status, user_request_redacted, final_response_redacted,
-                request_state, response_state
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                request_state, response_state, input_tokens, cached_input_tokens,
+                cache_write_input_tokens, output_tokens, reasoning_output_tokens,
+                total_tokens, token_usage_basis, request_truncated, response_truncated
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(tenant_id, run_id, turn_id) DO UPDATE SET
                 ended_at=excluded.ended_at,
                 status=excluded.status,
                 user_request_redacted=excluded.user_request_redacted,
                 final_response_redacted=excluded.final_response_redacted,
                 request_state=excluded.request_state,
-                response_state=excluded.response_state""",
+                response_state=excluded.response_state,
+                input_tokens=excluded.input_tokens,
+                cached_input_tokens=excluded.cached_input_tokens,
+                cache_write_input_tokens=excluded.cache_write_input_tokens,
+                output_tokens=excluded.output_tokens,
+                reasoning_output_tokens=excluded.reasoning_output_tokens,
+                total_tokens=excluded.total_tokens,
+                token_usage_basis=excluded.token_usage_basis,
+                request_truncated=excluded.request_truncated,
+                response_truncated=excluded.response_truncated""",
             [
                 (
                     run.tenant_id,
@@ -953,6 +1011,15 @@ class SQLiteStorage:
                     turn.final_response_redacted,
                     turn.request_state.value,
                     turn.response_state.value,
+                    turn.input_tokens,
+                    turn.cached_input_tokens,
+                    turn.cache_write_input_tokens,
+                    turn.output_tokens,
+                    turn.reasoning_output_tokens,
+                    turn.total_tokens,
+                    turn.token_usage_basis,
+                    int(turn.request_truncated),
+                    int(turn.response_truncated),
                 )
                 for turn in turns
             ],

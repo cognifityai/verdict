@@ -340,6 +340,12 @@ def test_live_postgres_agent_run_bundle_is_atomic_redacted_and_tenant_scoped():
                 final_response_redacted="done",
                 request_state=verdict.EvidenceState.PRESENT,
                 response_state=verdict.EvidenceState.PRESENT,
+                input_tokens=9,
+                cached_input_tokens=4,
+                output_tokens=3,
+                total_tokens=12,
+                token_usage_basis="codex_turn_delta",
+                response_truncated=True,
             ),
         ),
     )
@@ -351,6 +357,9 @@ def test_live_postgres_agent_run_bundle_is_atomic_redacted_and_tenant_scoped():
         loaded = storage.get_agent_run_bundle(tenant, bundle.run.run_id)
         assert loaded is not None
         assert loaded.turns[0].user_request_redacted == "email <EMAIL>"
+        assert loaded.turns[0].total_tokens == 12
+        assert loaded.turns[0].cached_input_tokens == 4
+        assert loaded.turns[0].response_truncated is True
         assert storage.get_agent_run_bundle(f"other-{tenant}", bundle.run.run_id) is None
         assert storage.list_agent_run_bundles(tenant, limit=10) == [loaded]
         assert storage.has_agent_run_source_kind(tenant, "unknown-agent") is True
@@ -375,6 +384,46 @@ def test_live_postgres_serializes_concurrent_fresh_schema_initialization():
 
         with ThreadPoolExecutor(max_workers=6) as executor:
             list(executor.map(initialize, range(6)))
+
+
+def test_live_postgres_adds_turn_usage_columns_to_existing_schema():
+    import psycopg
+
+    with isolated_test_dsn(DSN) as scoped_dsn:
+        with psycopg.connect(scoped_dsn, autocommit=True) as connection:
+            connection.execute(
+                """CREATE TABLE agent_turns (
+                    tenant_id TEXT NOT NULL, turn_id TEXT NOT NULL,
+                    run_id TEXT NOT NULL, sequence INTEGER NOT NULL,
+                    started_at TIMESTAMPTZ NOT NULL, ended_at TIMESTAMPTZ,
+                    status TEXT NOT NULL, user_request_redacted TEXT,
+                    final_response_redacted TEXT, request_state TEXT NOT NULL,
+                    response_state TEXT NOT NULL,
+                    PRIMARY KEY (tenant_id, run_id, turn_id),
+                    UNIQUE (tenant_id, run_id, sequence)
+                )"""
+            )
+        storage = PostgresStorage(scoped_dsn, min_pool=1, max_pool=1)
+        try:
+            rows = storage._fetchall(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema=current_schema() AND table_name='agent_turns'",
+                (),
+            )
+        finally:
+            storage.close()
+
+    assert {
+        "input_tokens",
+        "cached_input_tokens",
+        "cache_write_input_tokens",
+        "output_tokens",
+        "reasoning_output_tokens",
+        "total_tokens",
+        "token_usage_basis",
+        "request_truncated",
+        "response_truncated",
+    } <= {row[0] for row in rows}
 
 
 def test_live_postgres_serializes_equivalent_agent_capture_replays():

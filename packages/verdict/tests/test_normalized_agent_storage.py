@@ -126,6 +126,62 @@ def test_capture_persists_normalized_rows_without_copying_model_content(tmp_path
     assert prompt == "MODEL_PROMPT_CANARY"
 
 
+def test_sqlite_adds_nullable_turn_evidence_columns_to_existing_schema(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "existing.db"
+    storage = SQLiteStorage(str(database))
+    bundle, _trace = _capture()
+    storage.replace_agent_run_bundle(replace(bundle, events=()))
+    storage.close()
+    legacy_columns = (
+        "tenant_id,turn_id,run_id,sequence,started_at,ended_at,status,"
+        "user_request_redacted,final_response_redacted,request_state,response_state"
+    )
+    with sqlite3.connect(database) as connection:
+        connection.execute("PRAGMA foreign_keys=OFF")
+        connection.execute(
+            """CREATE TABLE old_agent_turns (
+                tenant_id TEXT NOT NULL, turn_id TEXT NOT NULL, run_id TEXT NOT NULL,
+                sequence INTEGER NOT NULL, started_at TEXT NOT NULL, ended_at TEXT,
+                status TEXT NOT NULL, user_request_redacted TEXT,
+                final_response_redacted TEXT, request_state TEXT NOT NULL,
+                response_state TEXT NOT NULL,
+                PRIMARY KEY (tenant_id, run_id, turn_id),
+                UNIQUE (tenant_id, run_id, sequence)
+            )"""
+        )
+        connection.execute(
+            f"INSERT INTO old_agent_turns ({legacy_columns}) "
+            f"SELECT {legacy_columns} FROM agent_turns"
+        )
+        connection.execute("DROP TABLE agent_turns")
+        connection.execute("ALTER TABLE old_agent_turns RENAME TO agent_turns")
+
+    upgraded = SQLiteStorage(str(database))
+    loaded = upgraded.get_agent_run_bundle("tenant-a", "run-1")
+    columns = {
+        row[1]
+        for row in upgraded._conn.execute("PRAGMA table_info(agent_turns)").fetchall()
+    }
+    upgraded.close()
+
+    assert loaded is not None
+    assert loaded.turns[0].total_tokens is None
+    assert loaded.turns[0].response_truncated is False
+    assert {
+        "input_tokens",
+        "cached_input_tokens",
+        "cache_write_input_tokens",
+        "output_tokens",
+        "reasoning_output_tokens",
+        "total_tokens",
+        "token_usage_basis",
+        "request_truncated",
+        "response_truncated",
+    } <= columns
+
+
 def test_capture_rolls_back_trace_when_normalized_event_write_fails(tmp_path: Path) -> None:
     database = tmp_path / "verdict.db"
     storage = SQLiteStorage(str(database))
