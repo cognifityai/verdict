@@ -230,9 +230,13 @@ def _record_codex_usage(turn: _RawTurn, info: object) -> None:
         turn.codex_usage_snapshots.append((last, total))
 
 
-def _finalize_codex_usage(turn: _RawTurn) -> None:
+def _finalize_codex_usage(
+    turn: _RawTurn,
+    *,
+    previous_turn_total: dict[str, int] | None,
+) -> dict[str, int] | None:
     if turn.usage_invalid or not turn.codex_usage_snapshots:
-        return
+        return None
     first_last, first_total = turn.codex_usage_snapshots[0]
     final_total = turn.codex_usage_snapshots[-1][1]
     if any(
@@ -242,7 +246,7 @@ def _finalize_codex_usage(turn: _RawTurn) -> None:
         for name in _TOKEN_FIELDS
     ):
         turn.usage_invalid = True
-        return
+        return None
     previous_total = first_total
     for _, total in turn.codex_usage_snapshots[1:]:
         if any(
@@ -250,20 +254,32 @@ def _finalize_codex_usage(turn: _RawTurn) -> None:
             for name in _TOKEN_FIELDS
         ):
             turn.usage_invalid = True
-            return
+            return None
         previous_total = total
     usage: dict[str, int] = {}
     for name in _TOKEN_FIELDS:
         if name not in first_last or name not in first_total or name not in final_total:
             continue
-        delta = first_last[name] + final_total[name] - first_total[name]
+        if (
+            previous_turn_total is not None
+            and previous_turn_total.get(name) == first_total[name]
+        ):
+            # Codex can begin a turn by repeating the preceding turn's final
+            # cumulative snapshot and ``last_token_usage``. In that shape the
+            # last usage belongs to the preceding turn and must not be counted
+            # again. When the cumulative value advanced or reset between turns,
+            # retain the source-local first-snapshot calculation instead.
+            delta = final_total[name] - first_total[name]
+        else:
+            delta = first_last[name] + final_total[name] - first_total[name]
         if delta < 0 or delta > 2**63 - 1:
             turn.usage_invalid = True
-            return
+            return None
         usage[name] = delta
     if usage:
         turn.token_usage = usage
         turn.token_usage_basis = "codex_turn_delta"
+    return dict(final_total)
 
 
 def _record_claude_usage(turn: _RawTurn, response_id: str, value: object) -> dict[str, int]:
@@ -643,8 +659,12 @@ def _parse_codex(path: Path, *, home: Path | None) -> _ParsedHistory:
         turns.append(active)
     if not session_id:
         raise ValueError("unsupported_history")
+    previous_turn_total: dict[str, int] | None = None
     for turn in turns:
-        _finalize_codex_usage(turn)
+        previous_turn_total = _finalize_codex_usage(
+            turn,
+            previous_turn_total=previous_turn_total,
+        )
     _record_partial_source_line(turns, omitted_partial_lines)
     return _ParsedHistory(
         session_id, version, turns, parent_session_id, logical_session_id

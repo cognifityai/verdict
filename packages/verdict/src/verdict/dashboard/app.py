@@ -47,7 +47,7 @@ from verdict.dashboard.registry import (
 from verdict.dashboard.storage_url import is_postgres_storage
 from verdict.evidence import EvidenceState
 from verdict.metrics import ScoreCounts, verdict_label
-from verdict.normalized_evidence import normalized_bundle_digest
+from verdict.normalized_evidence import agent_turn_from_row, normalized_bundle_digest
 from verdict.redaction import redact, redact_structure
 from verdict.trace_facts import deterministic_trace_facts
 
@@ -764,7 +764,7 @@ def build_agent_run_detail(
             raise KeyError(run_id)
         run = page["run"]
         shown = page["events"]
-        shown_turns = page["turns"]
+        shown_turns = [agent_turn_from_row(turn) for turn in page["turns"]]
         available = page["eventCount"]
         available_turns = page["turnCount"]
         resolved_event_offset = page["eventOffset"]
@@ -818,23 +818,23 @@ def build_agent_run_detail(
             "parentRunId": run["parent_run_id"],
             "producerCount": page["producerCount"],
             "turns": [{
-                "turnId": turn["turn_id"], "sequence": turn["sequence"],
-                "startedAt": _dashboard_time(turn["started_at"]),
-                "status": turn["status"],
-                "requestState": turn["request_state"],
-                "responseState": turn["response_state"],
-                "request": turn["user_request_redacted"],
-                "response": turn["final_response_redacted"],
-                "requestTruncated": bool(turn["request_truncated"]),
-                "responseTruncated": bool(turn["response_truncated"]),
+                "turnId": turn.turn_id, "sequence": turn.sequence,
+                "startedAt": _dashboard_time(turn.started_at),
+                "status": turn.status.value,
+                "requestState": turn.request_state.value,
+                "responseState": turn.response_state.value,
+                "request": turn.user_request_redacted,
+                "response": turn.final_response_redacted,
+                "requestTruncated": turn.request_truncated,
+                "responseTruncated": turn.response_truncated,
                 "tokenUsage": {
-                    "inputTokens": turn["input_tokens"],
-                    "cachedInputTokens": turn["cached_input_tokens"],
-                    "cacheWriteInputTokens": turn["cache_write_input_tokens"],
-                    "outputTokens": turn["output_tokens"],
-                    "reasoningOutputTokens": turn["reasoning_output_tokens"],
-                    "totalTokens": turn["total_tokens"],
-                    "basis": turn["token_usage_basis"],
+                    "inputTokens": turn.input_tokens,
+                    "cachedInputTokens": turn.cached_input_tokens,
+                    "cacheWriteInputTokens": turn.cache_write_input_tokens,
+                    "outputTokens": turn.output_tokens,
+                    "reasoningOutputTokens": turn.reasoning_output_tokens,
+                    "totalTokens": turn.total_tokens,
+                    "basis": turn.token_usage_basis,
                 },
             } for turn in shown_turns],
             "turnPage": {

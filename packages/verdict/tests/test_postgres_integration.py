@@ -26,6 +26,7 @@ from verdict.analysis_records import (
     DeterministicAnalysisRun,
     NotificationDeliveryAttempt,
 )
+from verdict.dashboard.app import build_agent_run_detail
 from verdict.evidence import AgentCaptureBatch
 from verdict.instrumentors.base import apply_routing_context, persist_trace
 from verdict.monitor_inputs import load_monitor_units
@@ -424,6 +425,65 @@ def test_live_postgres_adds_turn_usage_columns_to_existing_schema():
         "request_truncated",
         "response_truncated",
     } <= {row[0] for row in rows}
+
+
+def test_live_postgres_dashboard_reads_existing_turn_schema_without_migration():
+    import psycopg
+
+    with isolated_test_dsn(DSN) as scoped_dsn:
+        now = datetime.now(timezone.utc)
+        tenant = f"legacy-detail-{uuid4().hex}"
+        source = verdict.SourceSession(
+            "source", tenant, "codex", "a" * 64, now, now
+        )
+        run = verdict.AgentRun(
+            "run", source.source_session_id, tenant, now,
+            verdict.ExecutionStatus.COMPLETED, ended_at=now,
+        )
+        turn = verdict.AgentTurn(
+            "turn", run.run_id, 0, now,
+            verdict.ExecutionStatus.COMPLETED, ended_at=now,
+        )
+        storage = PostgresStorage(scoped_dsn, min_pool=1, max_pool=1)
+        storage.replace_agent_run_bundle(verdict.AgentRunBundle(source, run, (turn,)))
+        storage.close()
+        with psycopg.connect(scoped_dsn, autocommit=True) as connection:
+            connection.execute(
+                """ALTER TABLE agent_turns
+                   DROP COLUMN input_tokens,
+                   DROP COLUMN cached_input_tokens,
+                   DROP COLUMN cache_write_input_tokens,
+                   DROP COLUMN output_tokens,
+                   DROP COLUMN reasoning_output_tokens,
+                   DROP COLUMN total_tokens,
+                   DROP COLUMN token_usage_basis,
+                   DROP COLUMN request_truncated,
+                   DROP COLUMN response_truncated"""
+            )
+
+        detail = build_agent_run_detail(scoped_dsn, tenant=tenant, run_id=run.run_id)
+
+    assert detail["turns"] == [{
+        "turnId": "turn",
+        "sequence": 0,
+        "startedAt": now.isoformat(),
+        "status": "completed",
+        "requestState": "not_captured",
+        "responseState": "not_captured",
+        "request": None,
+        "response": None,
+        "requestTruncated": False,
+        "responseTruncated": False,
+        "tokenUsage": {
+            "inputTokens": None,
+            "cachedInputTokens": None,
+            "cacheWriteInputTokens": None,
+            "outputTokens": None,
+            "reasoningOutputTokens": None,
+            "totalTokens": None,
+            "basis": None,
+        },
+    }]
 
 
 def test_live_postgres_serializes_equivalent_agent_capture_replays():

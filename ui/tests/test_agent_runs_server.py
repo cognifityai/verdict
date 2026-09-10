@@ -1,5 +1,6 @@
 import asyncio
 import json
+import sqlite3
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
@@ -156,6 +157,61 @@ def test_agent_run_detail_exposes_ordered_bounded_events_and_trace_links(tmp_pat
     assert focused.json()["focusEventId"] == "event-2"
     assert focused.json()["page"]["offset"] == 1
     assert "payload_json" not in response.text
+
+
+def test_agent_run_detail_reads_existing_schema_without_running_migrations(tmp_path):
+    path = tmp_path / "existing.db"
+    storage = SQLiteStorage(str(path))
+    storage.replace_agent_run_bundle(
+        _bundle("local", datetime(2026, 8, 31, tzinfo=timezone.utc), with_turn=True)
+    )
+    storage.close()
+    legacy_columns = (
+        "tenant_id,turn_id,run_id,sequence,started_at,ended_at,status,"
+        "user_request_redacted,final_response_redacted,request_state,response_state"
+    )
+    with sqlite3.connect(path) as connection:
+        connection.execute("PRAGMA foreign_keys=OFF")
+        connection.execute(
+            """CREATE TABLE old_agent_turns (
+                tenant_id TEXT NOT NULL, turn_id TEXT NOT NULL, run_id TEXT NOT NULL,
+                sequence INTEGER NOT NULL, started_at TEXT NOT NULL, ended_at TEXT,
+                status TEXT NOT NULL, user_request_redacted TEXT,
+                final_response_redacted TEXT, request_state TEXT NOT NULL,
+                response_state TEXT NOT NULL,
+                PRIMARY KEY (tenant_id, run_id, turn_id),
+                UNIQUE (tenant_id, run_id, sequence)
+            )"""
+        )
+        connection.execute(
+            f"INSERT INTO old_agent_turns ({legacy_columns}) "
+            f"SELECT {legacy_columns} FROM agent_turns"
+        )
+        connection.execute("DROP TABLE agent_turns")
+        connection.execute("ALTER TABLE old_agent_turns RENAME TO agent_turns")
+
+    async def request_detail():
+        transport = httpx.ASGITransport(app=create_app(storage=f"sqlite:///{path}"))
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
+            return await client.get("/api/runs/r-local?tenant=local")
+
+    response = asyncio.run(request_detail())
+
+    assert response.status_code == 200
+    [turn] = response.json()["turns"]
+    assert turn["requestTruncated"] is False
+    assert turn["responseTruncated"] is False
+    assert turn["tokenUsage"] == {
+        "inputTokens": None,
+        "cachedInputTokens": None,
+        "cacheWriteInputTokens": None,
+        "outputTokens": None,
+        "reasoningOutputTokens": None,
+        "totalTokens": None,
+        "basis": None,
+    }
 
 
 def test_agent_run_detail_does_not_reconstruct_a_whole_bundle(tmp_path, monkeypatch):

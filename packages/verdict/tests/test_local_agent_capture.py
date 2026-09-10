@@ -297,6 +297,201 @@ def test_codex_capture_is_idempotent_and_content_on_by_default(tmp_path: Path) -
     assert any(event.privacy_classification is PrivacyClassification.REDACTED for event in bundle.events)
 
 
+def test_codex_stale_first_snapshot_is_not_attributed_to_the_next_turn(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "codex"
+    records = _codex_records()
+    records.extend(
+        [
+            {
+                "timestamp": "2026-08-30T10:02:00Z",
+                "type": "event_msg",
+                "payload": {"type": "task_started", "turn_id": "turn-b"},
+            },
+            {
+                "timestamp": "2026-08-30T10:02:01Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "last_token_usage": {
+                            "input_tokens": 20,
+                            "cached_input_tokens": 8,
+                            "cache_write_input_tokens": 0,
+                            "output_tokens": 4,
+                            "reasoning_output_tokens": 2,
+                            "total_tokens": 24,
+                        },
+                        "total_token_usage": {
+                            "input_tokens": 120,
+                            "cached_input_tokens": 48,
+                            "cache_write_input_tokens": 0,
+                            "output_tokens": 24,
+                            "reasoning_output_tokens": 12,
+                            "total_tokens": 144,
+                        },
+                    },
+                },
+            },
+            {
+                "timestamp": "2026-08-30T10:02:02Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "last_token_usage": {
+                            "input_tokens": 7,
+                            "cached_input_tokens": 2,
+                            "cache_write_input_tokens": 0,
+                            "output_tokens": 3,
+                            "reasoning_output_tokens": 1,
+                            "total_tokens": 10,
+                        },
+                        "total_token_usage": {
+                            "input_tokens": 127,
+                            "cached_input_tokens": 50,
+                            "cache_write_input_tokens": 0,
+                            "output_tokens": 27,
+                            "reasoning_output_tokens": 13,
+                            "total_tokens": 154,
+                        },
+                    },
+                },
+            },
+            {
+                "timestamp": "2026-08-30T10:02:03Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "task_complete",
+                    "turn_id": "turn-b",
+                    "last_agent_message": "done",
+                },
+            },
+        ]
+    )
+    _write_jsonl(root / "session.jsonl", records)
+    storage = SQLiteStorage(str(tmp_path / "verdict.db"))
+
+    capture_local_agents(storage, tenant_id="local", codex_root=root)
+
+    [bundle] = storage.list_agent_run_bundles("local")
+    assert bundle.turns[0].total_tokens == 24
+    assert bundle.turns[1].input_tokens == 7
+    assert bundle.turns[1].cached_input_tokens == 2
+    assert bundle.turns[1].output_tokens == 3
+    assert bundle.turns[1].reasoning_output_tokens == 1
+    assert bundle.turns[1].total_tokens == 10
+
+
+def test_codex_usage_between_turns_is_not_charged_to_the_next_turn(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "codex"
+    records = _codex_records()
+    records.extend(
+        [
+            {
+                "timestamp": "2026-08-30T10:02:00Z",
+                "type": "event_msg",
+                "payload": {"type": "task_started", "turn_id": "turn-b"},
+            },
+            {
+                "timestamp": "2026-08-30T10:02:01Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "last_token_usage": {"total_tokens": 10},
+                        "total_token_usage": {"total_tokens": 174},
+                    },
+                },
+            },
+            {
+                "timestamp": "2026-08-30T10:02:02Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "last_token_usage": {"total_tokens": 10},
+                        "total_token_usage": {"total_tokens": 184},
+                    },
+                },
+            },
+            {
+                "timestamp": "2026-08-30T10:02:03Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "task_complete",
+                    "turn_id": "turn-b",
+                    "last_agent_message": "done",
+                },
+            },
+        ]
+    )
+    _write_jsonl(root / "session.jsonl", records)
+    storage = SQLiteStorage(str(tmp_path / "verdict.db"))
+
+    capture_local_agents(storage, tenant_id="local", codex_root=root)
+
+    [bundle] = storage.list_agent_run_bundles("local")
+    assert bundle.turns[1].total_tokens == 20
+
+
+def test_codex_counter_reset_between_turns_uses_current_turn_snapshots(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "codex"
+    records = _codex_records()
+    records.extend(
+        [
+            {
+                "timestamp": "2026-08-30T10:02:00Z",
+                "type": "event_msg",
+                "payload": {"type": "task_started", "turn_id": "turn-b"},
+            },
+            {
+                "timestamp": "2026-08-30T10:02:01Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "last_token_usage": {"total_tokens": 10},
+                        "total_token_usage": {"total_tokens": 10},
+                    },
+                },
+            },
+            {
+                "timestamp": "2026-08-30T10:02:02Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "last_token_usage": {"total_tokens": 10},
+                        "total_token_usage": {"total_tokens": 20},
+                    },
+                },
+            },
+            {
+                "timestamp": "2026-08-30T10:02:03Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "task_complete",
+                    "turn_id": "turn-b",
+                    "last_agent_message": "done",
+                },
+            },
+        ]
+    )
+    _write_jsonl(root / "session.jsonl", records)
+    storage = SQLiteStorage(str(tmp_path / "verdict.db"))
+
+    capture_local_agents(storage, tenant_id="local", codex_root=root)
+
+    [bundle] = storage.list_agent_run_bundles("local")
+    assert bundle.turns[1].total_tokens == 20
+
+
 def test_codex_capture_can_explicitly_disable_content(tmp_path: Path) -> None:
     root = tmp_path / "codex"
     _write_jsonl(root / "session.jsonl", _codex_records())
