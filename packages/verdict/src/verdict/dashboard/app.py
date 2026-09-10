@@ -32,7 +32,12 @@ from verdict.analysis import analyze_agent_run
 from verdict.analysis_records import analysis_run_from_json
 from verdict.cluster_health import UNCLUSTERED_ID, assess_cluster_health
 from verdict.dashboard import agent_evidence_queries
-from verdict.dashboard.analysis_service import read_latest_analysis, run_analysis
+from verdict.dashboard.analysis_service import (
+    ANALYZER_VERSION,
+    SCOPE_KEY,
+    read_latest_analysis,
+    run_analysis,
+)
 from verdict.dashboard.query import PostgresSession as _PostgresSession
 from verdict.dashboard.query import QuerySession as _QuerySession
 from verdict.dashboard.query import SQLiteSession as _SQLiteSession
@@ -1763,9 +1768,9 @@ def _analysis_coverage(
     if _table_exists(cur, "deterministic_analysis_runs"):
         row = cur.execute(
             """SELECT payload_json FROM deterministic_analysis_runs
-               WHERE tenant_id=? AND scope_key='agent-and-trace'
+               WHERE tenant_id=? AND scope_key=? AND analyzer_version=?
                ORDER BY completed_at DESC, analysis_id DESC LIMIT 1""",
-            (tenant,),
+            (tenant, SCOPE_KEY, ANALYZER_VERSION),
         ).fetchone()
         if row is not None:
             payload = row["payload_json"]

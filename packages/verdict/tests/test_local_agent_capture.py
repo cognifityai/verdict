@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import json
 import os
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 import verdict.evidence as evidence_contract
 from verdict import AgentEventType, EvidenceState, ExecutionStatus, PrivacyClassification
+from verdict.capture import AgentCaptureService
 from verdict.storage import SQLiteStorage
 from verdict.telemetry.cli import main
 from verdict.telemetry.local_agents import capture_local_agents
@@ -574,6 +576,72 @@ def test_claude_capture_preserves_typed_evidence_without_thinking(tmp_path: Path
         for trace in traces
     )
     assert all(trace.tags["verdict.input_evidence"] == "turn_request_only" for trace in traces)
+
+
+def test_claude_rescan_upgrades_legacy_long_trace_prefixes(tmp_path: Path) -> None:
+    root = tmp_path / "claude"
+    records = _claude_records()
+    records[0]["message"]["content"] = "p" * 2_000
+    for record in records:
+        if record.get("uuid") in {"assistant-1-text", "assistant-2-text"}:
+            record["message"]["content"][0]["text"] = "r" * 2_000
+    _write_jsonl(root / "session.jsonl", records)
+
+    seed = SQLiteStorage(str(tmp_path / "seed.db"))
+    capture_local_agents(seed, tenant_id="local", claude_root=root)
+    [current_bundle] = seed.list_agent_run_bundles("local")
+    current_traces = seed.list_traces(tenant_id="local")
+    seed.close()
+
+    legacy_bundle = replace(
+        current_bundle,
+        turns=tuple(
+            replace(
+                turn,
+                user_request_redacted=(turn.user_request_redacted or "")[:1_000],
+                final_response_redacted=(turn.final_response_redacted or "")[:1_000],
+                input_tokens=None,
+                cached_input_tokens=None,
+                cache_write_input_tokens=None,
+                output_tokens=None,
+                reasoning_output_tokens=None,
+                total_tokens=None,
+                token_usage_basis=None,
+                request_truncated=False,
+                response_truncated=False,
+            )
+            for turn in current_bundle.turns
+        ),
+    )
+    legacy_traces = tuple(
+        replace(
+            trace,
+            prompt_redacted=(trace.prompt_redacted or "")[:1_000],
+            response_redacted=(trace.response_redacted or "")[:1_000],
+            raw_messages=[
+                {
+                    **message,
+                    "content": str(message.get("content") or "")[:1_000],
+                }
+                for message in trace.raw_messages or []
+            ],
+        )
+        for trace in current_traces
+    )
+    storage = SQLiteStorage(str(tmp_path / "upgrade.db"))
+    AgentCaptureService(storage).capture(legacy_bundle, traces=legacy_traces)
+
+    summary = capture_local_agents(storage, tenant_id="local", claude_root=root)
+
+    assert summary.as_dict() == {
+        "files": 1,
+        "stored": 1,
+        "skipped": 0,
+        "skip_reasons": {},
+    }
+    [upgraded] = storage.list_agent_run_bundles("local")
+    assert upgraded == current_bundle
+    assert storage.list_traces(tenant_id="local") == current_traces
 
 
 def test_claude_split_response_can_complete_trace_usage_on_a_later_row(

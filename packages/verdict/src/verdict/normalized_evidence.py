@@ -189,6 +189,39 @@ def _extend_messages(current: Any, incoming: Any) -> Any:
     raise ValueError("Trace messages cannot be replaced")
 
 
+def _is_verdict_local_agent_trace(trace: Trace) -> bool:
+    """Identify the linked Trace projection owned by the local-history adapter."""
+    return (
+        trace.tags.get("verdict.source") == "claude-code"
+        and trace.tags.get("verdict.workload") == "agent"
+        and bool(trace.tags.get("verdict.agent_run_id"))
+        and bool(trace.tags.get("verdict.agent_event_id"))
+        and trace.tags.get("verdict.input_evidence") == "turn_request_only"
+        and trace.tags.get("verdict.time_evidence") == "response_observed_at"
+    )
+
+
+def _local_agent_messages(
+    prompt: str | None,
+    response: str | None,
+) -> list[dict[str, str]] | None:
+    """Build the local adapter's canonical two-role message view."""
+    messages = []
+    if prompt is not None:
+        messages.append({"role": "user", "content": prompt})
+    if response is not None:
+        messages.append({"role": "assistant", "content": response})
+    return messages or None
+
+
+def _validate_local_agent_messages(trace: Trace) -> None:
+    if trace.raw_messages != _local_agent_messages(
+        trace.prompt_redacted,
+        trace.response_redacted,
+    ):
+        raise ValueError("Trace messages cannot be replaced")
+
+
 def _advance_evidence_state(
     current: EvidenceState,
     incoming: EvidenceState,
@@ -223,6 +256,35 @@ def merge_capture_trace(current: Trace | None, incoming: Trace) -> Trace:
     )
     if any(getattr(current, name) != getattr(incoming, name) for name in immutable_fields):
         raise ValueError("Trace request identity facts cannot be replaced")
+    local_agent_trace = _is_verdict_local_agent_trace(current)
+    prompt = (
+        _extend_text(
+            current.prompt_redacted,
+            incoming.prompt_redacted,
+            subject="Trace prompt",
+        )
+        if local_agent_trace
+        else _fill_optional(
+            current.prompt_redacted, incoming.prompt_redacted, subject="Trace prompt"
+        )
+    )
+    response = (
+        _extend_text(
+            current.response_redacted,
+            incoming.response_redacted,
+            subject="Trace response",
+        )
+        if local_agent_trace
+        else _fill_optional(
+            current.response_redacted, incoming.response_redacted, subject="Trace response"
+        )
+    )
+    if local_agent_trace:
+        _validate_local_agent_messages(current)
+        _validate_local_agent_messages(incoming)
+        raw_messages = _local_agent_messages(prompt, response)
+    else:
+        raw_messages = _extend_messages(current.raw_messages, incoming.raw_messages)
     merged = replace(
         incoming,
         ended_at=_fill_optional(current.ended_at, incoming.ended_at, subject="Trace end"),
@@ -240,13 +302,9 @@ def merge_capture_trace(current: Trace | None, incoming: Trace) -> Trace:
         ),
         error=_fill_optional(current.error, incoming.error, subject="Trace error"),
         latency_ms=_fill_optional(current.latency_ms, incoming.latency_ms, subject="Trace latency"),
-        prompt_redacted=_fill_optional(
-            current.prompt_redacted, incoming.prompt_redacted, subject="Trace prompt"
-        ),
-        response_redacted=_fill_optional(
-            current.response_redacted, incoming.response_redacted, subject="Trace response"
-        ),
-        raw_messages=_extend_messages(current.raw_messages, incoming.raw_messages),
+        prompt_redacted=prompt,
+        response_redacted=response,
+        raw_messages=raw_messages,
         cost_usd=_fill_optional(current.cost_usd, incoming.cost_usd, subject="Trace cost"),
         parent_span_id=_fill_optional(
             current.parent_span_id, incoming.parent_span_id, subject="Trace parent span"

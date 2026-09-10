@@ -529,6 +529,102 @@ def test_live_postgres_dashboard_reads_existing_turn_schema_without_migration():
     }]
 
 
+def test_live_postgres_extends_legacy_local_agent_trace_prefixes():
+    with isolated_test_dsn(DSN) as scoped_dsn:
+        tenant = f"local-preview-upgrade-{uuid4().hex}"
+        now = datetime.now(timezone.utc)
+        source = verdict.SourceSession(
+            "source", tenant, "claude-code", "a" * 64, now, now, ended_at=now
+        )
+        run = verdict.AgentRun(
+            "run",
+            source.source_session_id,
+            tenant,
+            now,
+            verdict.ExecutionStatus.COMPLETED,
+            ended_at=now,
+        )
+        first_turn = verdict.AgentTurn(
+            "turn",
+            run.run_id,
+            0,
+            now,
+            verdict.ExecutionStatus.COMPLETED,
+            ended_at=now,
+            user_request_redacted="p" * 1_000,
+            final_response_redacted="r" * 1_000,
+            request_state=verdict.EvidenceState.PRESENT,
+            response_state=verdict.EvidenceState.PRESENT,
+        )
+        event = verdict.AgentEvent(
+            "event",
+            first_turn.turn_id,
+            0,
+            now,
+            verdict.AgentEventType.MODEL_CALL,
+            verdict.ExecutionStatus.COMPLETED,
+            "claude-code:assistant",
+            attributes={"provider": "anthropic", "response_model": "claude-test"},
+            trace_id="trace",
+        )
+        first_bundle = verdict.AgentRunBundle(source, run, (first_turn,), (event,))
+        tags = {
+            "verdict.source": "claude-code",
+            "verdict.workload": "agent",
+            "verdict.agent_run_id": run.run_id,
+            "verdict.agent_event_id": event.event_id,
+            "verdict.input_evidence": "turn_request_only",
+            "verdict.time_evidence": "response_observed_at",
+        }
+        first_trace = verdict.Trace(
+            trace_id=event.trace_id,
+            tenant_id=tenant,
+            started_at=now,
+            ended_at=now,
+            provider="anthropic",
+            request_model="claude-test",
+            response_model="claude-test",
+            prompt_redacted="p" * 1_000,
+            response_redacted="r" * 1_000,
+            raw_messages=[
+                {"role": "user", "content": "p" * 1_000},
+                {"role": "assistant", "content": "r" * 1_000},
+            ],
+            tags=tags,
+        )
+        extended_bundle = replace(
+            first_bundle,
+            turns=(replace(
+                first_turn,
+                user_request_redacted="p" * 2_000,
+                final_response_redacted="r" * 2_000,
+            ),),
+        )
+        extended_trace = replace(
+            first_trace,
+            prompt_redacted="p" * 2_000,
+            response_redacted="r" * 2_000,
+            raw_messages=[
+                {"role": "user", "content": "p" * 2_000},
+                {"role": "assistant", "content": "r" * 2_000},
+            ],
+        )
+        storage = PostgresStorage(scoped_dsn, min_pool=1, max_pool=1)
+        try:
+            storage.replace_agent_capture(first_bundle, (first_trace,))
+
+            storage.replace_agent_capture(extended_bundle, (extended_trace,))
+
+            assert storage.get_agent_run_bundle(tenant, run.run_id) == extended_bundle
+            stored_trace = storage.get_trace(event.trace_id)
+            assert stored_trace is not None
+            assert stored_trace.prompt_redacted == extended_trace.prompt_redacted
+            assert stored_trace.response_redacted == extended_trace.response_redacted
+            assert stored_trace.raw_messages == extended_trace.raw_messages
+        finally:
+            storage.close()
+
+
 def test_live_postgres_serializes_equivalent_agent_capture_replays():
     suffix = uuid4().hex
     tenant = f"capture-race-{suffix}"

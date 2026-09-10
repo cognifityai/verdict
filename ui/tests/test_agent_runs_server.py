@@ -549,9 +549,10 @@ def test_incompatible_persisted_insights_are_not_served_as_current(tmp_path):
     storage_url = f"sqlite:///{tmp_path / 'old-analysis.db'}"
     storage = SQLiteStorage(str(tmp_path / "old-analysis.db"))
     now = datetime(2026, 8, 31, tzinfo=timezone.utc)
+    tenant = "__verdict_local__"
     storage.save_deterministic_analysis_run(DeterministicAnalysisRun(
         analysis_id="a" * 64,
-        tenant_id="local",
+        tenant_id=tenant,
         scope_key="agent-and-trace",
         cutoff=now,
         completed_at=now,
@@ -560,18 +561,46 @@ def test_incompatible_persisted_insights_are_not_served_as_current(tmp_path):
         input_fingerprint="b" * 64,
         result={"schema": "agent-insights-v1", "comparisons": []},
     ))
+    storage.insert_trace(Trace(
+        trace_id="analysis-version-trace",
+        tenant_id=tenant,
+        started_at=now,
+        ended_at=now,
+        provider="anthropic",
+        request_model="claude-test",
+        prompt_redacted="request",
+        response_redacted="response",
+    ))
     storage.close()
 
-    result = read_latest_analysis(
-        storage_url,
-        tenant="local",
-        empty_result={"schema": "agent-insights-v2", "sourceActivity": []},
-    )
+    async def request_current_views():
+        transport = httpx.ASGITransport(app=create_app(storage=storage_url))
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
+            return await client.get(
+                f"/api/insights?tenant={tenant}"
+            ), await client.get("/api/data")
 
+    insights_response, data_response = asyncio.run(request_current_views())
+    result = insights_response.json()
+
+    assert insights_response.status_code == 200
+    assert data_response.status_code == 200
     assert result["analysisState"]["status"] == "never_run"
     assert result["analysisState"]["analyzerVersion"] == "agent-insights-v2"
     assert result["schema"] == "agent-insights-v2"
     assert "comparisons" not in result
+    assert data_response.json()["coverage"]["deterministicAnalysis"] == {
+        "status": "never_run",
+        "analysisId": None,
+        "completedAt": None,
+        "availableRuns": 0,
+        "analyzedRuns": 0,
+        "availableTraces": 1,
+        "analyzedTraces": 0,
+        "complete": False,
+    }
 
 
 def test_current_analysis_is_reused_after_a_newer_rollback_version(tmp_path):

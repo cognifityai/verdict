@@ -393,6 +393,72 @@ def test_capture_rejects_rewritten_trace_messages_without_mutation(tmp_path: Pat
     assert storage.get_trace(trace.trace_id) == stored_trace
 
 
+def test_capture_extends_only_verdict_local_agent_trace_prefixes(tmp_path: Path) -> None:
+    storage = SQLiteStorage(str(tmp_path / "verdict.db"))
+    bundle, trace = _capture()
+    tags = {
+        "verdict.source": "claude-code",
+        "verdict.workload": "agent",
+        "verdict.agent_run_id": bundle.run.run_id,
+        "verdict.agent_event_id": bundle.events[0].event_id,
+        "verdict.input_evidence": "turn_request_only",
+        "verdict.time_evidence": "response_observed_at",
+    }
+    first = replace(
+        trace,
+        prompt_redacted="p" * 1_000,
+        response_redacted="r" * 1_000,
+        raw_messages=[
+            {"role": "user", "content": "p" * 1_000},
+            {"role": "assistant", "content": "r" * 1_000},
+        ],
+        tags=tags,
+    )
+    extended = replace(
+        first,
+        prompt_redacted="p" * 2_000,
+        response_redacted="r" * 2_000,
+        raw_messages=[
+            {"role": "user", "content": "p" * 2_000},
+            {"role": "assistant", "content": "r" * 2_000},
+        ],
+    )
+    service = AgentCaptureService(storage)
+    service.capture(bundle, traces=(first,))
+
+    service.capture(bundle, traces=(extended,))
+
+    stored = storage.get_trace(trace.trace_id)
+    assert stored is not None
+    assert stored.prompt_redacted == extended.prompt_redacted
+    assert stored.response_redacted == extended.response_redacted
+    assert stored.raw_messages == extended.raw_messages
+    service.capture(bundle, traces=(first,))
+    stored = storage.get_trace(trace.trace_id)
+    assert stored is not None
+    assert stored.prompt_redacted == extended.prompt_redacted
+    assert stored.response_redacted == extended.response_redacted
+    assert stored.raw_messages == extended.raw_messages
+    with pytest.raises(ValueError, match="Trace prompt"):
+        service.capture(
+            bundle,
+            traces=(replace(extended, prompt_redacted="different"),),
+        )
+
+
+def test_capture_rejects_generic_trace_prefix_extension(tmp_path: Path) -> None:
+    storage = SQLiteStorage(str(tmp_path / "verdict.db"))
+    bundle, trace = _capture()
+    service = AgentCaptureService(storage)
+    service.capture(bundle, traces=(trace,))
+
+    with pytest.raises(ValueError, match="Trace prompt"):
+        service.capture(
+            bundle,
+            traces=(replace(trace, prompt_redacted=f"{trace.prompt_redacted} more"),),
+        )
+
+
 def test_idempotent_capture_does_not_rewrite_trace_messages(tmp_path: Path) -> None:
     database = tmp_path / "verdict.db"
     storage = SQLiteStorage(str(database))
