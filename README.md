@@ -589,12 +589,15 @@ Hexagonal / ports-and-adapters, ≥2 adapters per port (one real + in-memory for
   deployment success, task outcomes, or subagent correctness. Source-identified
   child histories remain distinct runs; a parent reference can remain unresolved
   when the source's parent history is no longer present. Each turn and event is
-  bounded independently. Turn request/response previews retain up to 64 KiB and
-  explicitly report truncation. If one event's opted-in content exceeds its evidence limit,
+  bounded independently. Turn request/response text is redacted before its
+  64 KiB preview cutoff and explicitly reports truncation. If one event's
+  opted-in content exceeds its evidence limit,
   Verdict retains that event's metadata and records why its content was
   omitted; it does not downgrade the entire run. Codex turn usage is derived
   from within-turn cumulative-counter deltas; Claude usage is summed once per
-  unique provider response, including cache-read and cache-creation counts.
+  unique provider response, including cache-read and cache-creation counts. A
+  Claude total appears only after the turn is terminal and every response has
+  complete input/output usage.
   Malformed or unavailable counters remain unavailable rather than becoming
   zero. These local-history token counts remain observable, but
   Verdict does not convert them into API-list-price spend because desktop or

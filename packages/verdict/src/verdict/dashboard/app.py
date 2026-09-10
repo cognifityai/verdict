@@ -598,6 +598,20 @@ def build_agent_runs_bundle(
             total_usage_turns = [
                 turn for turn in usage_turns if turn.total_tokens is not None
             ]
+            source_components = {}
+            for name in (
+                "input_tokens",
+                "cached_input_tokens",
+                "cache_write_input_tokens",
+                "output_tokens",
+                "reasoning_output_tokens",
+            ):
+                values = [
+                    value for turn in usage_turns
+                    if (value := getattr(turn, name)) is not None
+                ]
+                source_components[name] = sum(values) if values else None
+
             turn_outcomes = Counter(turn.status.value for turn in bundle.turns)
             finding_severity = Counter(finding.severity for finding in analysis.findings)
             runs.append({
@@ -620,6 +634,11 @@ def build_agent_runs_bundle(
                         sum(turn.total_tokens or 0 for turn in total_usage_turns)
                         if total_usage_turns else None
                     ),
+                    "inputTokens": source_components["input_tokens"],
+                    "cachedInputTokens": source_components["cached_input_tokens"],
+                    "cacheWriteInputTokens": source_components["cache_write_input_tokens"],
+                    "outputTokens": source_components["output_tokens"],
+                    "reasoningOutputTokens": source_components["reasoning_output_tokens"],
                     "turns": len(usage_turns),
                     "state": (
                         "complete"

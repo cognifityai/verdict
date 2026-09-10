@@ -483,6 +483,11 @@ def test_component_only_source_usage_is_partial_not_unavailable(tmp_path):
 
     assert runs["runs"][0]["sourceTokenUsage"] == {
         "totalTokens": None,
+        "inputTokens": 9,
+        "cachedInputTokens": None,
+        "cacheWriteInputTokens": None,
+        "outputTokens": 3,
+        "reasoningOutputTokens": None,
         "turns": 1,
         "state": "partial",
     }

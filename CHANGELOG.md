@@ -33,7 +33,9 @@ the product is refined.
   with explicit truncation state, and stores source-reported turn usage. Codex
   usage uses within-turn cumulative-counter deltas; Claude usage deduplicates
   split rows by provider response and retains cache-read/cache-creation counts.
-  Missing or malformed usage remains unavailable rather than becoming zero.
+  Content is redacted before the preview cutoff. Missing or incomplete usage
+  remains partial or unavailable rather than becoming a complete total or zero;
+  Claude totals appear only after terminal, complete response usage.
 - Agent insights now presents local histories as source evidence coverage and
   activity, not as a head-to-head agent comparison. Provider-call tokens,
   latency, cost, judge results, and model comparisons use genuine `Trace`

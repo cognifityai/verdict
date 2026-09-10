@@ -29,6 +29,7 @@ from verdict.evidence import (
     SourceSession,
     stable_evidence_id,
 )
+from verdict.normalized_evidence import _LegacyLocalTextUpgrade
 from verdict.redaction import redact, redact_structure
 from verdict.schema import Operation, Trace
 from verdict.storage.base import Storage
@@ -77,6 +78,7 @@ class _RawEvent:
     has_content: bool = False
     provider_response_id: str = ""
     response_text: str = ""
+    legacy_response_text: str = ""
 
 
 @dataclass
@@ -87,6 +89,8 @@ class _RawTurn:
     status: ExecutionStatus = ExecutionStatus.UNKNOWN
     request: str = ""
     response: str = ""
+    legacy_request: str = ""
+    legacy_response: str = ""
     request_truncated: bool = False
     response_truncated: bool = False
     token_usage: dict[str, int] = field(default_factory=dict)
@@ -95,6 +99,8 @@ class _RawTurn:
     codex_usage_snapshots: list[tuple[dict[str, int], dict[str, int]]] = field(
         default_factory=list
     )
+    codex_cumulative_totals: list[dict[str, int]] = field(default_factory=list)
+    codex_latest_boundary: dict[str, int] | None = None
     claude_usage_by_response_id: dict[str, dict[str, int]] = field(default_factory=dict)
     claude_invalid_response_ids: set[str] = field(default_factory=set)
     events: list[_RawEvent] = field(default_factory=list)
@@ -113,6 +119,7 @@ class _ParsedHistory:
 class _BoundedText:
     value: str
     truncated: bool = False
+    legacy_value: str = ""
 
 
 def _mapping(value: object) -> dict[str, object] | None:
@@ -149,16 +156,27 @@ def _clean_text(value: object, *, home: Path | None) -> str:
     return cleaned.strip()
 
 
-def _bounded_turn_text(value: str) -> _BoundedText:
-    encoded = value.encode("utf-8")
+def _legacy_bounded_text(value: str) -> str:
+    """Reproduce the a17 local-history text cutoff for upgrade validation."""
+    return _bounded_utf8(value[:_MAX_CONTENT_CHARS], 4_000)
+
+
+def _bounded_turn_text(value: str, *, source_truncated: bool = False) -> _BoundedText:
+    redacted = redact(value) or ""
+    encoded = redacted.encode("utf-8")
     return _BoundedText(
-        _bounded_utf8(value, _MAX_TURN_CONTENT_BYTES),
-        len(encoded) > _MAX_TURN_CONTENT_BYTES,
+        _bounded_utf8(redacted, _MAX_TURN_CONTENT_BYTES),
+        source_truncated or len(encoded) > _MAX_TURN_CONTENT_BYTES,
+        _legacy_bounded_text(value),
     )
 
 
 def _safe_text(value: object, *, home: Path | None) -> _BoundedText:
-    return _bounded_turn_text(_clean_text(value, home=home))
+    cleaned = _clean_text(value, home=home)
+    return _bounded_turn_text(
+        cleaned,
+        source_truncated=len(cleaned.encode("utf-8")) > _MAX_TURN_CONTENT_BYTES,
+    )
 
 
 def _message_text(message: dict[str, object], *, home: Path | None) -> _BoundedText:
@@ -167,19 +185,37 @@ def _message_text(message: dict[str, object], *, home: Path | None) -> _BoundedT
         return _safe_text(content, home=home)
     if not isinstance(content, list):
         return _BoundedText("")
-    return _bounded_turn_text("\n".join(
+    texts = [
         text
         for item in content
         if (block := _mapping(item)) is not None
         and block.get("type") == "text"
         and (text := _clean_text(block.get("text"), home=home))
-    ))
+    ]
+    joined = "\n".join(texts)
+    bounded = _bounded_turn_text(
+        joined,
+        source_truncated=len(joined.encode("utf-8")) > _MAX_TURN_CONTENT_BYTES,
+    )
+    legacy = "\n".join(_legacy_bounded_text(text) for text in texts)[:_MAX_CONTENT_CHARS]
+    return _BoundedText(bounded.value, bounded.truncated, legacy)
 
 
-def _append_turn_text(current: str, incoming: _BoundedText) -> _BoundedText:
+def _append_turn_text(
+    current: str,
+    current_legacy: str,
+    incoming: _BoundedText,
+) -> _BoundedText:
     joined = "\n\n".join(filter(None, (current, incoming.value)))
-    bounded = _bounded_turn_text(joined)
-    return _BoundedText(bounded.value, incoming.truncated or bounded.truncated)
+    encoded = joined.encode("utf-8")
+    legacy = "\n\n".join(
+        filter(None, (current_legacy, incoming.legacy_value))
+    )[:_MAX_CONTENT_CHARS]
+    return _BoundedText(
+        _bounded_utf8(joined, _MAX_TURN_CONTENT_BYTES),
+        incoming.truncated or len(encoded) > _MAX_TURN_CONTENT_BYTES,
+        legacy,
+    )
 
 
 _TOKEN_FIELDS = (
@@ -219,11 +255,15 @@ def _token_usage(
 def _record_codex_usage(turn: _RawTurn, info: object) -> None:
     mapped = _mapping(info)
     if mapped is None:
+        turn.codex_latest_boundary = None
         if info is not None:
             turn.usage_invalid = True
         return
     last, invalid_last = _token_usage(mapped.get("last_token_usage"))
     total, invalid_total = _token_usage(mapped.get("total_token_usage"))
+    turn.codex_latest_boundary = dict(total) if not invalid_total and total else None
+    if total and not invalid_total:
+        turn.codex_cumulative_totals.append(total)
     if invalid_last or invalid_total:
         turn.usage_invalid = True
         return
@@ -235,9 +275,34 @@ def _finalize_codex_usage(
     turn: _RawTurn,
     *,
     previous_turn_total: dict[str, int] | None,
+    has_previous_turn: bool,
 ) -> dict[str, int] | None:
+    safe_boundary = (
+        dict(turn.codex_latest_boundary)
+        if turn.codex_latest_boundary is not None
+        else None
+    )
+    for previous_cumulative, total in zip(
+        turn.codex_cumulative_totals,
+        turn.codex_cumulative_totals[1:],
+        strict=False,
+    ):
+        if any(
+            name in previous_cumulative
+            and name in total
+            and total[name] < previous_cumulative[name]
+            for name in _TOKEN_FIELDS
+        ):
+            turn.usage_invalid = True
+            break
     if turn.usage_invalid or not turn.codex_usage_snapshots:
-        return None
+        return safe_boundary
+    if (
+        has_previous_turn
+        and previous_turn_total is None
+        and len(turn.codex_usage_snapshots) < 2
+    ):
+        return safe_boundary
     first_last, first_total = turn.codex_usage_snapshots[0]
     final_total = turn.codex_usage_snapshots[-1][1]
     if any(
@@ -247,7 +312,7 @@ def _finalize_codex_usage(
         for name in _TOKEN_FIELDS
     ):
         turn.usage_invalid = True
-        return None
+        return safe_boundary
     previous_total = first_total
     for _, total in turn.codex_usage_snapshots[1:]:
         if any(
@@ -255,16 +320,19 @@ def _finalize_codex_usage(
             for name in _TOKEN_FIELDS
         ):
             turn.usage_invalid = True
-            return None
+            return safe_boundary
         previous_total = total
     usage: dict[str, int] = {}
     for name in _TOKEN_FIELDS:
         if name not in first_last or name not in first_total or name not in final_total:
             continue
-        if (
-            previous_turn_total is not None
-            and previous_turn_total.get(name) == first_total[name]
-        ):
+        if has_previous_turn and previous_turn_total is None:
+            # The first valid cumulative observation re-establishes a boundary;
+            # only subsequent growth can safely be assigned to this turn.
+            delta = final_total[name] - first_total[name]
+        elif has_previous_turn and name not in (previous_turn_total or {}):
+            continue
+        elif previous_turn_total is not None and previous_turn_total.get(name) == first_total[name]:
             # Codex can begin a turn by repeating the preceding turn's final
             # cumulative snapshot and ``last_token_usage``. In that shape the
             # last usage belongs to the preceding turn and must not be counted
@@ -275,12 +343,12 @@ def _finalize_codex_usage(
             delta = first_last[name] + final_total[name] - first_total[name]
         if delta < 0 or delta > 2**63 - 1:
             turn.usage_invalid = True
-            return None
+            return safe_boundary
         usage[name] = delta
     if usage:
         turn.token_usage = usage
         turn.token_usage_basis = "codex_turn_delta"
-    return dict(final_total)
+    return safe_boundary
 
 
 def _record_claude_usage(
@@ -327,7 +395,12 @@ def _finalize_claude_usage(turn: _RawTurn) -> None:
     }
     if not usage:
         return
-    usage["total_tokens"] = sum(usage.values())
+    complete_responses = all(
+        "input_tokens" in item and "output_tokens" in item
+        for item in turn.claude_usage_by_response_id.values()
+    )
+    if complete_responses and turn.status is not ExecutionStatus.UNKNOWN:
+        usage["total_tokens"] = sum(usage.values())
     if any(value > 2**63 - 1 for value in usage.values()):
         turn.usage_invalid = True
         return
@@ -463,6 +536,7 @@ def _event(
     has_content: bool = False,
     provider_response_id: str = "",
     response_text: str = "",
+    legacy_response_text: str = "",
 ) -> None:
     if occurred_at is None:
         turn.events.append(
@@ -482,7 +556,7 @@ def _event(
     turn.events.append(
         _RawEvent(
             occurred_at, event_type, status, provenance, attributes, has_content,
-            provider_response_id, response_text,
+            provider_response_id, response_text, legacy_response_text,
         )
     )
 
@@ -635,8 +709,11 @@ def _parse_codex(path: Path, *, home: Path | None) -> _ParsedHistory:
         elif outer == "event_msg" and inner == "user_message":
             text = _safe_text(payload.get("message"), home=home)
             if text.value:
-                appended = _append_turn_text(active.request, text)
+                appended = _append_turn_text(
+                    active.request, active.legacy_request, text
+                )
                 active.request = appended.value
+                active.legacy_request = appended.legacy_value
                 active.request_truncated = active.request_truncated or appended.truncated
         elif (
             outer == "event_msg"
@@ -645,6 +722,7 @@ def _parse_codex(path: Path, *, home: Path | None) -> _ParsedHistory:
         ):
             response = _safe_text(payload.get("message"), home=home)
             active.response = response.value
+            active.legacy_response = response.legacy_value
             active.response_truncated = response.truncated
         elif outer == "event_msg" and inner == "token_count":
             _record_codex_usage(active, payload.get("info"))
@@ -659,6 +737,7 @@ def _parse_codex(path: Path, *, home: Path | None) -> _ParsedHistory:
             response = _safe_text(payload.get("last_agent_message"), home=home)
             if response.value:
                 active.response = response.value
+                active.legacy_response = response.legacy_value
                 active.response_truncated = response.truncated
             active.status = ExecutionStatus.COMPLETED
             active.ended_at = _time(payload.get("completed_at")) or occurred_at
@@ -669,10 +748,11 @@ def _parse_codex(path: Path, *, home: Path | None) -> _ParsedHistory:
     if not session_id:
         raise ValueError("unsupported_history")
     previous_turn_total: dict[str, int] | None = None
-    for turn in turns:
+    for turn_index, turn in enumerate(turns):
         previous_turn_total = _finalize_codex_usage(
             turn,
             previous_turn_total=previous_turn_total,
+            has_previous_turn=turn_index > 0,
         )
     _record_partial_source_line(turns, omitted_partial_lines)
     return _ParsedHistory(
@@ -731,6 +811,7 @@ def _parse_claude(path: Path, *, home: Path | None) -> _ParsedHistory:
                 source_id,
                 occurred_at,
                 request=prompt.value,
+                legacy_request=prompt.legacy_value,
                 request_truncated=prompt.truncated,
             )
             model_events = {}
@@ -793,6 +874,7 @@ def _parse_claude(path: Path, *, home: Path | None) -> _ParsedHistory:
                 status=ExecutionStatus.COMPLETED,
                 provider_response_id=message_id,
                 response_text=response_text.value,
+                legacy_response_text=response_text.legacy_value,
             )
             if occurred_at is not None:
                 model_events[message_id] = active.events[-1]
@@ -807,6 +889,7 @@ def _parse_claude(path: Path, *, home: Path | None) -> _ParsedHistory:
                         model_event.attributes[name] = usage[name]
             if response_text.value and not model_event.response_text:
                 model_event.response_text = response_text.value
+                model_event.legacy_response_text = response_text.legacy_value
         for item in content:
             block = _mapping(item)
             if block is None:
@@ -841,6 +924,7 @@ def _parse_claude(path: Path, *, home: Path | None) -> _ParsedHistory:
         if message.get("stop_reason") == "end_turn":
             if response_text.value:
                 active.response = response_text.value
+                active.legacy_response = response_text.legacy_value
                 active.response_truncated = response_text.truncated
             active.status = ExecutionStatus.COMPLETED
             if active.ended_at is None:
@@ -860,8 +944,11 @@ def _parse_claude(path: Path, *, home: Path | None) -> _ParsedHistory:
 def _redacted_turn_text(value: str, *, truncated: bool) -> _BoundedText:
     if not value:
         return _BoundedText("")
-    bounded = _bounded_turn_text(redact(value))
-    return _BoundedText(bounded.value, truncated or bounded.truncated)
+    encoded = value.encode("utf-8")
+    return _BoundedText(
+        _bounded_utf8(value, _MAX_TURN_CONTENT_BYTES),
+        truncated or len(encoded) > _MAX_TURN_CONTENT_BYTES,
+    )
 
 
 def _turn_source_identity(bundle: AgentRunBundle, raw: _RawTurn) -> str:
@@ -1102,9 +1189,9 @@ def _linked_traces(
         response_model = str(attributes.get("response_model") or "")
         input_tokens = attributes.get("input_tokens")
         output_tokens = attributes.get("output_tokens")
-        request = redact(raw_turn.request) if content_present and raw_turn.request else None
+        request = raw_turn.request if content_present and raw_turn.request else None
         response = (
-            redact(raw_event.response_text)
+            raw_event.response_text
             if content_present and raw_event.response_text else None
         )
         messages = []
@@ -1138,6 +1225,74 @@ def _linked_traces(
             },
         ))
     return traces
+
+
+def _capture_text_compatibility(
+    bundle: AgentRunBundle,
+    raw_turns: list[_RawTurn],
+    traces: list[Trace],
+    *,
+    source_kind: str,
+    source_scope: str,
+    capture_content: bool,
+) -> _LegacyLocalTextUpgrade | None:
+    """Build redacted, non-persistent a17 projections for exact upgrade checks."""
+    if not capture_content:
+        return None
+
+    def boundary_projection(legacy: str, incoming: str) -> str | None:
+        projected = redact(legacy) if legacy else None
+        if (
+            projected is None
+            or not incoming
+            or projected == incoming
+            or incoming.startswith(projected)
+            or projected.startswith(incoming)
+        ):
+            return None
+        return projected
+
+    turn_previews: dict[str, tuple[str | None, str | None]] = {}
+    raw_by_event_id: dict[str, tuple[_RawTurn, _RawEvent]] = {}
+    for raw_turn in raw_turns:
+        source_turn_id = _turn_source_identity(bundle, raw_turn)
+        turn_id = stable_evidence_id("turn", source_kind, source_scope, source_turn_id)
+        preview = (
+            boundary_projection(raw_turn.legacy_request, raw_turn.request),
+            boundary_projection(raw_turn.legacy_response, raw_turn.response),
+        )
+        if preview != (None, None):
+            turn_previews[turn_id] = preview
+        for event_sequence, raw_event in enumerate(raw_turn.events):
+            event_id = stable_evidence_id(
+                "event",
+                source_kind,
+                source_scope,
+                f"{source_turn_id}:{event_sequence}:{raw_event.provenance}",
+            )
+            raw_by_event_id[event_id] = (raw_turn, raw_event)
+    trace_previews = {}
+    for trace in traces:
+        raw_pair = raw_by_event_id.get(trace.tags.get("verdict.agent_event_id", ""))
+        if raw_pair is None:
+            continue
+        raw_turn, raw_event = raw_pair
+        preview = (
+            boundary_projection(raw_turn.legacy_request, raw_turn.request),
+            boundary_projection(
+                raw_event.legacy_response_text,
+                raw_event.response_text,
+            ),
+        )
+        if preview != (None, None):
+            trace_previews[trace.trace_id] = preview
+    if not turn_previews and not trace_previews:
+        return None
+    return _LegacyLocalTextUpgrade(
+        version="a17-truncate-before-redact-v1",
+        turn_previews=turn_previews,
+        trace_previews=trace_previews,
+    )
 
 
 def capture_local_agents(
@@ -1178,11 +1333,20 @@ def capture_local_agents(
                         capture_content=capture_content,
                         home=home,
                     )
-                    capture_service.capture(
+                    traces = _linked_traces(
+                        bundle, parsed.turns, source_kind=source_kind,
+                        source_scope=source_scope,
+                    )
+                    capture_service._capture_local_history(
                         bundle,
-                        traces=_linked_traces(
-                            bundle, parsed.turns, source_kind=source_kind,
+                        traces=traces,
+                        legacy_text_upgrade=_capture_text_compatibility(
+                            bundle,
+                            parsed.turns,
+                            traces,
+                            source_kind=source_kind,
                             source_scope=source_scope,
+                            capture_content=capture_content,
                         ),
                     )
                 except (OSError, ValueError) as exc:

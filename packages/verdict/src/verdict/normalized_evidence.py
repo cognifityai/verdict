@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
-from dataclasses import asdict, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from enum import Enum
 from hashlib import sha256
@@ -25,6 +25,7 @@ from verdict.evidence import (
 )
 from verdict.redaction import (
     RedactionMode,
+    redact,
     sanitize_agent_capture_batch,
     sanitize_agent_run_bundle,
     sanitize_trace,
@@ -33,6 +34,102 @@ from verdict.schema import Trace, populate_trace_analysis_fields
 
 LEGACY_AGENT_WRITER_ERROR = "legacy agent evidence writer detected after normalized migration"
 LEGACY_AGENT_WRITER_MIGRATION = "block_legacy_agent_evidence_writes_v1"
+
+
+@dataclass(frozen=True)
+class _LegacyLocalTextUpgrade:
+    """Internal, non-persistent proof for the a17 local-preview transition."""
+
+    version: str
+    turn_previews: Mapping[str, tuple[str | None, str | None]]
+    trace_previews: Mapping[str, tuple[str | None, str | None]]
+
+
+def _sanitize_compatibility_preview(value: str | None) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or "\x00" in value:
+        raise ValueError("legacy local preview must be bounded text")
+    try:
+        if len(value.encode("utf-8")) > 4_000:
+            raise ValueError("legacy local preview must be bounded text")
+    except UnicodeError as exc:
+        raise ValueError("legacy local preview must be bounded text") from exc
+    return redact(value)
+
+
+def _prepare_legacy_local_text_upgrade(
+    bundle: AgentRunBundle,
+    traces: Sequence[Trace],
+    compatibility: _LegacyLocalTextUpgrade | None,
+) -> _LegacyLocalTextUpgrade | None:
+    """Validate and sanitize non-persistent a17 local-preview reconciliation hints."""
+    if compatibility is None:
+        return None
+    if compatibility.version != "a17-truncate-before-redact-v1":
+        raise ValueError("unsupported legacy local-preview transition")
+    if bundle.session.source_kind not in {"claude-code", "codex"}:
+        raise ValueError("legacy preview compatibility requires a local-history source")
+    turns_by_id = {turn.turn_id: turn for turn in bundle.turns}
+    traces_by_id = {trace.trace_id: trace for trace in traces}
+    turn_ids = set(turns_by_id)
+    trace_ids = set(traces_by_id)
+    if not set(compatibility.turn_previews) <= turn_ids:
+        raise ValueError("legacy preview references an unknown AgentTurn")
+    if not set(compatibility.trace_previews) <= trace_ids:
+        raise ValueError("legacy preview references an unknown Trace")
+
+    def sanitized(
+        previews: Mapping[str, tuple[str | None, str | None]],
+        incoming_by_id: Mapping[str, tuple[str | None, str | None]],
+    ) -> dict[str, tuple[str | None, str | None]]:
+        result = {}
+        for evidence_id, pair in previews.items():
+            if not isinstance(pair, tuple) or len(pair) != 2:
+                raise ValueError("legacy preview must contain request and response text")
+            clean_pair = (
+                _sanitize_compatibility_preview(pair[0]),
+                _sanitize_compatibility_preview(pair[1]),
+            )
+            incoming_pair = incoming_by_id[evidence_id]
+            for legacy, incoming in zip(clean_pair, incoming_pair, strict=True):
+                if legacy is None:
+                    continue
+                if (
+                    incoming is None
+                    or legacy == incoming
+                    or incoming.startswith(legacy)
+                    or legacy.startswith(incoming)
+                ):
+                    raise ValueError("legacy preview is not a cutoff-boundary projection")
+            if clean_pair == (None, None):
+                raise ValueError("legacy preview contains no cutoff-boundary projection")
+            result[evidence_id] = clean_pair
+        return result
+
+    return _LegacyLocalTextUpgrade(
+        version=compatibility.version,
+        turn_previews=sanitized(
+            compatibility.turn_previews,
+            {
+                turn_id: (
+                    turns_by_id[turn_id].user_request_redacted,
+                    turns_by_id[turn_id].final_response_redacted,
+                )
+                for turn_id in compatibility.turn_previews
+            },
+        ),
+        trace_previews=sanitized(
+            compatibility.trace_previews,
+            {
+                trace_id: (
+                    traces_by_id[trace_id].prompt_redacted,
+                    traces_by_id[trace_id].response_redacted,
+                )
+                for trace_id in compatibility.trace_previews
+            },
+        ),
+    )
 
 
 def prepare_agent_capture(
@@ -162,7 +259,13 @@ def _advance_count(current: int | None, incoming: int | None, *, subject: str) -
     raise ValueError(f"{subject} cannot decrease")
 
 
-def _extend_text(current: str | None, incoming: str | None, *, subject: str) -> str | None:
+def _extend_text(
+    current: str | None,
+    incoming: str | None,
+    *,
+    subject: str,
+    legacy_projection: str | None = None,
+) -> str | None:
     """Allow a later bounded scan to complete an earlier text prefix."""
     if current is None:
         return incoming
@@ -172,6 +275,8 @@ def _extend_text(current: str | None, incoming: str | None, *, subject: str) -> 
         return incoming
     if current.startswith(incoming):
         return current
+    if legacy_projection is not None and current == legacy_projection:
+        return incoming
     raise ValueError(f"{subject} cannot be replaced")
 
 
@@ -237,7 +342,12 @@ def _advance_evidence_state(
     raise ValueError("turn evidence state cannot be replaced")
 
 
-def merge_capture_trace(current: Trace | None, incoming: Trace) -> Trace:
+def merge_capture_trace(
+    current: Trace | None,
+    incoming: Trace,
+    *,
+    legacy_preview: tuple[str | None, str | None] | None = None,
+) -> Trace:
     """Preserve recorded request facts and only add compatible completion facts."""
     if current is None:
         return incoming
@@ -262,6 +372,7 @@ def merge_capture_trace(current: Trace | None, incoming: Trace) -> Trace:
             current.prompt_redacted,
             incoming.prompt_redacted,
             subject="Trace prompt",
+            legacy_projection=legacy_preview[0] if legacy_preview is not None else None,
         )
         if local_agent_trace
         else _fill_optional(
@@ -273,6 +384,7 @@ def merge_capture_trace(current: Trace | None, incoming: Trace) -> Trace:
             current.response_redacted,
             incoming.response_redacted,
             subject="Trace response",
+            legacy_projection=legacy_preview[1] if legacy_preview is not None else None,
         )
         if local_agent_trace
         else _fill_optional(
@@ -401,7 +513,12 @@ def merge_agent_run(current: AgentRun | None, incoming: AgentRun) -> AgentRun:
     )
 
 
-def merge_agent_turn(current: AgentTurn | None, incoming: AgentTurn) -> AgentTurn:
+def merge_agent_turn(
+    current: AgentTurn | None,
+    incoming: AgentTurn,
+    *,
+    legacy_preview: tuple[str | None, str | None] | None = None,
+) -> AgentTurn:
     if current is None:
         return incoming
     if (current.turn_id, current.run_id, current.sequence, current.started_at) != (
@@ -415,11 +532,13 @@ def merge_agent_turn(current: AgentTurn | None, incoming: AgentTurn) -> AgentTur
         current.user_request_redacted,
         incoming.user_request_redacted,
         subject="turn request",
+        legacy_projection=legacy_preview[0] if legacy_preview is not None else None,
     )
     response = _extend_text(
         current.final_response_redacted,
         incoming.final_response_redacted,
         subject="turn response",
+        legacy_projection=legacy_preview[1] if legacy_preview is not None else None,
     )
     return AgentTurn(
         turn_id=current.turn_id,

@@ -43,6 +43,8 @@ from verdict.monitoring import (
 from verdict.normalized_evidence import (
     LEGACY_AGENT_WRITER_ERROR,
     LEGACY_AGENT_WRITER_MIGRATION,
+    _LegacyLocalTextUpgrade,
+    _prepare_legacy_local_text_upgrade,
     agent_event_from_row,
     agent_run_from_row,
     agent_turn_from_row,
@@ -872,6 +874,7 @@ class SQLiteStorage:
     def _write_normalized_bundle(
         self,
         bundle: AgentRunBundle | AgentCaptureBatch,
+        text_compatibility: _LegacyLocalTextUpgrade | None = None,
     ) -> None:
         bundle = normalize_bundle_timestamps(bundle)
         tenant_id = bundle.run.tenant_id
@@ -900,7 +903,17 @@ class SQLiteStorage:
                 (tenant_id, bundle.run.run_id, *(turn.turn_id for turn in turns)),
             ).fetchall()
             current_turns = {row["turn_id"]: agent_turn_from_row(dict(row)) for row in rows}
-            turns = [merge_agent_turn(current_turns.get(turn.turn_id), turn) for turn in turns]
+            turns = [
+                merge_agent_turn(
+                    current_turns.get(turn.turn_id),
+                    turn,
+                    legacy_preview=(
+                        text_compatibility.turn_previews.get(turn.turn_id)
+                        if text_compatibility is not None else None
+                    ),
+                )
+                for turn in turns
+            ]
         events = list(bundle.events)
         if events:
             placeholders = ",".join("?" for _ in events)
@@ -1250,7 +1263,19 @@ class SQLiteStorage:
         traces: tuple[Trace, ...] = (),
     ) -> None:
         sanitized, capture_traces, linked_trace_ids = prepare_agent_capture(bundle, traces)
-        self._store_agent_capture(sanitized, capture_traces, linked_trace_ids)
+        self._store_agent_capture(sanitized, capture_traces, linked_trace_ids, None)
+
+    def _replace_local_agent_capture(
+        self,
+        bundle: AgentRunBundle,
+        traces: tuple[Trace, ...],
+        legacy_text_upgrade: _LegacyLocalTextUpgrade,
+    ) -> None:
+        sanitized, capture_traces, linked_trace_ids = prepare_agent_capture(bundle, traces)
+        upgrade = _prepare_legacy_local_text_upgrade(
+            sanitized, capture_traces, legacy_text_upgrade
+        )
+        self._store_agent_capture(sanitized, capture_traces, linked_trace_ids, upgrade)
 
     def append_agent_capture(
         self,
@@ -1258,13 +1283,14 @@ class SQLiteStorage:
         traces: tuple[Trace, ...] = (),
     ) -> None:
         sanitized, capture_traces, linked_trace_ids = prepare_agent_capture_batch(batch, traces)
-        self._store_agent_capture(sanitized, capture_traces, linked_trace_ids)
+        self._store_agent_capture(sanitized, capture_traces, linked_trace_ids, None)
 
     def _store_agent_capture(
         self,
         capture: AgentRunBundle | AgentCaptureBatch,
         capture_traces: tuple[Trace, ...],
         linked_trace_ids: frozenset[str],
+        text_compatibility: _LegacyLocalTextUpgrade | None,
     ) -> None:
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
@@ -1276,7 +1302,14 @@ class SQLiteStorage:
                         "SELECT * FROM traces WHERE trace_id=?", (trace.trace_id,)
                     ).fetchone()
                     current = self._row_to_trace(row) if row else None
-                    prepared = merge_capture_trace(current, trace)
+                    prepared = merge_capture_trace(
+                        current,
+                        trace,
+                        legacy_preview=(
+                            text_compatibility.trace_previews.get(trace.trace_id)
+                            if text_compatibility is not None else None
+                        ),
+                    )
                     prepared_traces.append(prepared)
                     if current is not None and current.raw_messages != prepared.raw_messages:
                         message_updates.add(prepared.trace_id)
@@ -1305,7 +1338,10 @@ class SQLiteStorage:
                     ).fetchall()
                     tenants = {row["trace_id"]: row["tenant_id"] for row in rows}
                     require_same_tenant_linked_traces(capture.run.tenant_id, linked_ids, tenants)
-                self._write_normalized_bundle(capture)
+                if text_compatibility is None:
+                    self._write_normalized_bundle(capture)
+                else:
+                    self._write_normalized_bundle(capture, text_compatibility)
                 self._conn.commit()
             except sqlite3.IntegrityError as exc:
                 self._conn.rollback()

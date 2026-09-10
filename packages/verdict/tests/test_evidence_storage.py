@@ -143,6 +143,29 @@ def test_atomic_agent_capture_has_adapter_parity(evidence_storage) -> None:
     assert evidence_storage.get_agent_run_bundle("tenant-a", "run_1") == linked
 
 
+class _PublishedSignatureStorage(InMemoryStorage):
+    """A third-party adapter compiled against the pre-change Storage port."""
+
+    def replace_agent_capture(
+        self,
+        bundle: AgentRunBundle,
+        traces: tuple[Trace, ...] = (),
+    ) -> None:
+        super().replace_agent_capture(bundle, traces)
+
+
+@pytest.mark.parametrize("buffered", [False, True])
+def test_capture_preserves_the_published_storage_method_signature(buffered: bool) -> None:
+    inner = _PublishedSignatureStorage()
+    storage = BufferedStorage(inner) if buffered else inner
+    linked, trace = _linked_capture()
+    try:
+        AgentCaptureService(storage).capture(linked, traces=(trace,))
+        assert storage.get_agent_run_bundle("tenant-a", "run_1") == linked
+    finally:
+        storage.close()
+
+
 def test_append_agent_capture_has_adapter_parity(evidence_storage) -> None:
     linked, trace = _linked_capture()
     batch = AgentCaptureBatch(

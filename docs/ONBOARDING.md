@@ -103,13 +103,16 @@ the database before resuming capture.
 Local-history token counts are usage evidence, not billing evidence. Codex
 counts are derived from within-turn cumulative-counter deltas. Claude counts
 sum each unique provider response once and retain cache-read and cache-creation
-components. Missing or malformed counters display as unavailable, not zero.
+components. Its total appears only after the turn is terminal and every
+response has complete input/output usage. Missing or malformed counters display
+as unavailable, not zero.
 Verdict therefore leaves cost unavailable for Claude Code and Codex history
 instead of applying API list prices to desktop or subscription activity.
 
 Opted-in content remains bounded and recursively redacted. Each turn and event
-is bounded independently. Turn request and final-response previews retain up
-to 64 KiB and report when they were truncated. If one event's content exceeds its evidence limit,
+is bounded independently. Turn request and final-response text is redacted
+before its 64 KiB preview cutoff and reports when it was truncated. If one
+event's content exceeds its evidence limit,
 Verdict retains that event's metadata and records why its content was omitted;
 it does not downgrade the entire run.
 

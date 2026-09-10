@@ -6,6 +6,7 @@ provides an ephemeral PostgreSQL service; these are not mocked SQL tests.
 
 from __future__ import annotations
 
+import json
 import os
 import threading
 import time
@@ -60,8 +61,9 @@ from verdict.schema import (
     cluster_candidate_digest,
     datetime_to_utc_us,
 )
-from verdict.storage import BufferedStorage
+from verdict.storage import BufferedStorage, InMemoryStorage
 from verdict.storage.postgres import PostgresStorage
+from verdict.telemetry.local_agents import capture_local_agents
 from verdict.trace import span
 from verdict_eval.cluster_registry import ClusterRegistryService
 from verdict_eval.clustering_strategies import FitConfig
@@ -529,98 +531,70 @@ def test_live_postgres_dashboard_reads_existing_turn_schema_without_migration():
     }]
 
 
-def test_live_postgres_extends_legacy_local_agent_trace_prefixes():
+def test_live_postgres_reconciles_legacy_local_agent_text(tmp_path):
     with isolated_test_dsn(DSN) as scoped_dsn:
         tenant = f"local-preview-upgrade-{uuid4().hex}"
-        now = datetime.now(timezone.utc)
-        source = verdict.SourceSession(
-            "source", tenant, "claude-code", "a" * 64, now, now, ended_at=now
+        root = tmp_path / "claude"
+        root.mkdir()
+        fragment = "user@exam"
+        request = f"{'p' * (1_000 - len(fragment) - 1)} user@example.com private"
+        records = [
+            {
+                "timestamp": "2026-08-30T11:00:00Z",
+                "type": "user",
+                "uuid": "user-1",
+                "sessionId": "session-1",
+                "message": {"content": request},
+            },
+            {
+                "timestamp": "2026-08-30T11:00:01Z",
+                "type": "assistant",
+                "uuid": "assistant-1",
+                "sessionId": "session-1",
+                "message": {
+                    "id": "message-1",
+                    "model": "claude-test",
+                    "stop_reason": "end_turn",
+                    "usage": {"input_tokens": 2, "output_tokens": 1},
+                    "content": [{"type": "text", "text": "done"}],
+                },
+            },
+        ]
+        (root / "session.jsonl").write_text(
+            "".join(json.dumps(record) + "\n" for record in records)
         )
-        run = verdict.AgentRun(
-            "run",
-            source.source_session_id,
-            tenant,
-            now,
-            verdict.ExecutionStatus.COMPLETED,
-            ended_at=now,
-        )
-        first_turn = verdict.AgentTurn(
-            "turn",
-            run.run_id,
-            0,
-            now,
-            verdict.ExecutionStatus.COMPLETED,
-            ended_at=now,
-            user_request_redacted="p" * 1_000,
-            final_response_redacted="r" * 1_000,
-            request_state=verdict.EvidenceState.PRESENT,
-            response_state=verdict.EvidenceState.PRESENT,
-        )
-        event = verdict.AgentEvent(
-            "event",
-            first_turn.turn_id,
-            0,
-            now,
-            verdict.AgentEventType.MODEL_CALL,
-            verdict.ExecutionStatus.COMPLETED,
-            "claude-code:assistant",
-            attributes={"provider": "anthropic", "response_model": "claude-test"},
-            trace_id="trace",
-        )
-        first_bundle = verdict.AgentRunBundle(source, run, (first_turn,), (event,))
-        tags = {
-            "verdict.source": "claude-code",
-            "verdict.workload": "agent",
-            "verdict.agent_run_id": run.run_id,
-            "verdict.agent_event_id": event.event_id,
-            "verdict.input_evidence": "turn_request_only",
-            "verdict.time_evidence": "response_observed_at",
-        }
-        first_trace = verdict.Trace(
-            trace_id=event.trace_id,
-            tenant_id=tenant,
-            started_at=now,
-            ended_at=now,
-            provider="anthropic",
-            request_model="claude-test",
-            response_model="claude-test",
-            prompt_redacted="p" * 1_000,
-            response_redacted="r" * 1_000,
-            raw_messages=[
-                {"role": "user", "content": "p" * 1_000},
-                {"role": "assistant", "content": "r" * 1_000},
-            ],
-            tags=tags,
-        )
-        extended_bundle = replace(
-            first_bundle,
+        seed = InMemoryStorage()
+        capture_local_agents(seed, tenant_id=tenant, claude_root=root)
+        [current_bundle] = seed.list_agent_run_bundles(tenant)
+        [current_trace] = seed.list_traces(tenant_id=tenant)
+        legacy_prompt = request[:1_000]
+        legacy_bundle = replace(
+            current_bundle,
             turns=(replace(
-                first_turn,
-                user_request_redacted="p" * 2_000,
-                final_response_redacted="r" * 2_000,
+                current_bundle.turns[0], user_request_redacted=legacy_prompt
             ),),
         )
-        extended_trace = replace(
-            first_trace,
-            prompt_redacted="p" * 2_000,
-            response_redacted="r" * 2_000,
+        legacy_trace = replace(
+            current_trace,
+            prompt_redacted=legacy_prompt,
             raw_messages=[
-                {"role": "user", "content": "p" * 2_000},
-                {"role": "assistant", "content": "r" * 2_000},
+                {**message, "content": legacy_prompt}
+                if message.get("role") == "user"
+                else message
+                for message in current_trace.raw_messages or []
             ],
         )
         storage = PostgresStorage(scoped_dsn, min_pool=1, max_pool=1)
         try:
-            storage.replace_agent_capture(first_bundle, (first_trace,))
+            storage.replace_agent_capture(legacy_bundle, (legacy_trace,))
 
-            storage.replace_agent_capture(extended_bundle, (extended_trace,))
+            summary = capture_local_agents(storage, tenant_id=tenant, claude_root=root)
 
-            assert storage.get_agent_run_bundle(tenant, run.run_id) == extended_bundle
-            stored_trace = storage.get_trace(event.trace_id)
-            assert stored_trace is not None
-            assert stored_trace.prompt_redacted == extended_trace.prompt_redacted
-            assert stored_trace.response_redacted == extended_trace.response_redacted
-            assert stored_trace.raw_messages == extended_trace.raw_messages
+            assert summary.stored == 1
+            assert storage.get_agent_run_bundle(
+                tenant, current_bundle.run.run_id
+            ) == current_bundle
+            assert storage.get_trace(current_trace.trace_id) == current_trace
         finally:
             storage.close()
 

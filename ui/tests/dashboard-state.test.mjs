@@ -805,6 +805,61 @@ test("Agent Runs pages the full list and keeps an empty last page recoverable", 
   assert.equal(previous.props.disabled, false);
 });
 
+test("Agent Runs presents component-only token evidence as partial", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const run = {
+    ...runListRow("run-partial"),
+    sourceTokenUsage: {
+      totalTokens: null, turns: 1, state: "partial",
+      inputTokens: 10, cachedInputTokens: null, cacheWriteInputTokens: null,
+      outputTokens: null, reasoningOutputTokens: null,
+    },
+  };
+
+  render(ui.Runs, hooks, { url: "/api/runs" });
+  hooks.flushEffects();
+  await resolveJson(requests[0], {
+    summary: { available: 1, shown: 1 },
+    page: { available: 1, shown: 1, offset: 0, limit: 30, truncated: false },
+    runs: [run],
+  });
+  let tree = render(ui.Runs, hooks, { url: "/api/runs" });
+  hooks.flushEffects();
+  const detailRequest = requests.find((request) => request.url.includes("run-partial"));
+  assert.ok(detailRequest);
+  await resolveJson(detailRequest, {
+    turns: [{
+      turnId: "turn-partial", sequence: 0, status: "completed",
+      request: "request", response: "response",
+      requestState: "present", responseState: "present",
+      requestTruncated: false, responseTruncated: false,
+      tokenUsage: {
+        inputTokens: 10, cachedInputTokens: null, cacheWriteInputTokens: null,
+        outputTokens: null, reasoningOutputTokens: null, totalTokens: null,
+        basis: "claude_provider_response_sum",
+      },
+    }],
+    turnPage: { available: 1, shown: 1, offset: 0, limit: 20, truncated: false },
+    events: [], producerCount: 0,
+    page: { available: 0, shown: 0, offset: 0, limit: 100, truncated: false },
+  });
+
+  tree = render(ui.Runs, hooks, { url: "/api/runs" });
+  const detail = findAll(
+    tree,
+    (node) => typeof node.type === "function" && node.type.name === "RunDetail",
+  )[0];
+  assert.ok(detail);
+  const rendered = textOf(render(detail.type, createHooks(), detail.props));
+  assert.match(rendered, /10 input tokens/);
+  assert.match(rendered, /partial/);
+  assert.match(rendered, /total unavailable/);
+  assert.doesNotMatch(rendered, /source tokens not captured/);
+  assert.doesNotMatch(rendered, /Source-reported token usage: not captured/);
+});
+
 test("Agent Runs ignores an older list response after its query changes", async () => {
   const ui = await loadUiModule();
   const hooks = createEffectHooks();

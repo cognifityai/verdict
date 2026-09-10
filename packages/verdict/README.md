@@ -32,9 +32,11 @@ coalesced into one linked Trace; later response text completes that Trace while
 genuine tool-only calls remain textless.
 Source-identified Claude sidechains and Codex child histories are stored as
 separate child runs. Agent Run views show bounded final-response previews and
-source-reported per-turn tokens when available. Those source activity totals
-are not a quality ranking: latency, price, judging, and model comparisons still
-use genuine `Trace` records only.
+source-reported per-turn tokens when available. Text is redacted before the
+preview cutoff, and incomplete token components remain explicitly partial;
+Claude totals appear only after terminal, complete response usage. Those source
+activity totals are not a quality ranking: latency, price, judging, and model
+comparisons still use genuine `Trace` records only.
 
 For automation, the equivalent commands are:
 
