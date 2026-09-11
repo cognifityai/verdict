@@ -137,6 +137,14 @@ otherwise the result is `degraded`. When a sentinel file is supplied,
 the runner persists the health record and exits 2 before production judgments
 unless status is `healthy`.
 
+`RubricDimension(requires_context=True)` is enforced when a `Judge` enables
+`skip_context_dependent_when_missing`. With missing or whitespace-only context,
+those dimensions are excluded from the effective rubric and its evaluator
+identity. If every dimension requires context, `evaluator_identity()` and
+`judge()` raise before a provider call instead of evaluating an unsupported
+rubric. Leaving the skip option disabled preserves the published alpha API for
+callers that deliberately define a different no-context interpretation.
+
 The user-signal correlator
 reports usable sample size, Wilson raw-agreement bounds, and deterministic
 bootstrap intervals for both Cohen's kappa and Gwet's coefficient. It refuses to

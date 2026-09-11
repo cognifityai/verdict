@@ -94,6 +94,8 @@ export function EvaluatorLab({ configUrl, onOpenEvaluated }) {
     {preview && <section className="border p-5" style={{ borderColor: C.border, background: C.panel }}>
       <div className="grid sm:grid-cols-5 gap-3"><Metric label="Eligible" value={preview.eligible} /><Metric label="Already evaluated by this evaluator" value={preview.alreadyJudged} /><Metric label="Not evaluable" value={preview.notEvaluable} /><Metric label="Planned calls" value={preview.plannedCalls} /><Metric label="Maximum estimated cost" value={preview.estimatedMaximumCostUsd == null ? "Unavailable" : `$${preview.estimatedMaximumCostUsd.toFixed(4)}`} /></div>
       <div className="text-xs mt-3" style={{ color: C.faint }}>Static estimate; maximum output allowance {preview.maximumOutputTokens.toLocaleString()} tokens. Provider billing is authoritative.</div>
+      {preview.rubric && <div className="text-sm mt-3" style={{ color: C.sub }}>Evaluated dimensions: {preview.rubric.dimensions.join(" · ")}</div>}
+      {preview.rubric?.skippedDimensions?.length > 0 && <div className="text-sm mt-2" style={{ color: C.amber }}>Skipped without retrieved context: {preview.rubric.skippedDimensions.join(" · ")}</div>}
       <div className="text-xs mt-2" style={{ color: C.faint }}>Coverage applies to this exact provider, model, rubric, version, dimensions, and evaluator configuration. Results from other evaluators remain separate.</div>
       <div className="text-sm mt-3" style={{ color: C.sub }}>Not evaluable: {Object.entries(preview.notEvaluableReasons).map(([reason, count]) => `${reason}: ${count}`).join(" · ") || "none"}</div>
       {!previewCurrent && <div className="text-sm mt-3" style={{ color: C.amber }}>Configuration changed. Preview again before approval.</div>}

@@ -78,8 +78,8 @@ class SemanticDriftRow:
 class JudgeRow:
     window: str
     n_judged: int
-    # value is None when the judge marked the dimension UNCLEAR for every
-    # sampled turn (e.g. groundedness with no retrieved context)
+    # value is None when a dimension has no PASS/FAIL observations, including a
+    # context-required dimension skipped because retrieved context is unavailable.
     pass_rate: dict[str, float | None]
 
 

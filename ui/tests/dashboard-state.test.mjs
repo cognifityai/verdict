@@ -120,6 +120,11 @@ test("Evaluator Lab makes a long judge run visible and prevents duplicate submis
     plannedCalls: 1917, estimatedMaximumCostUsd: 7.6901,
     maximumOutputTokens: 981504,
     notEvaluableReasons: { response_not_captured: 1859 },
+    rubric: {
+      name: "response_quality", version: "1",
+      dimensions: ["relevance", "completeness"],
+      skippedDimensions: ["groundedness"],
+    },
     planFingerprint: "plan-a", plannedTraces: ["trace-a"],
   });
   await previewPending;
@@ -130,6 +135,8 @@ test("Evaluator Lab makes a long judge run visible and prevents duplicate submis
     (node) => node.props?.label === "Already evaluated by this evaluator",
   ).length, 1);
   assert.match(textOf(tree), /Results from other evaluators remain separate/);
+  assert.match(textOf(tree), /Evaluated dimensions:\s+relevance · completeness/);
+  assert.match(textOf(tree), /Skipped without retrieved context:\s+groundedness/);
   const consent = findAll(
     tree,
     (node) => node.type === "input" && node.props.type === "checkbox",

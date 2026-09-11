@@ -34,6 +34,15 @@ identity. Historical rows without complete fields stay labeled incomplete and
 are not combined with complete identities. The latest attempt per trace wins;
 a latest error is coverage failure and may be retried later.
 
+Dimensions marked as requiring retrieved context are omitted only when the
+caller explicitly enables context-dependent skipping. The resulting effective
+rubric is the rubric shown at approval, sent to the provider, fingerprinted, and
+persisted. Omitted dimensions remain visible as skipped in Evaluator Lab. If no
+dimension remains, evaluation fails before provider egress instead of widening
+back to a rubric that cannot be supported by the available evidence. Nonblank
+explicit context restores the full configured rubric; whitespace is not
+evidence.
+
 Bias mitigations:
 
 1. **Position swap** for pairwise judgment. If order changes the result, treat

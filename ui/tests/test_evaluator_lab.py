@@ -2,6 +2,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
+import pytest
 from verdict.dashboard.evaluator_lab import (
     evaluator_environment,
     execute_calibration,
@@ -37,9 +38,11 @@ class CountingProvider:
 
     def __init__(self):
         self.calls = 0
+        self.requests = []
 
     def complete(self, request):
         self.calls += 1
+        self.requests.append(request)
         return CompletionResponse(
             text=(
                 '{"relevance":{"reasoning":"direct","verdict":"PASS"},'
@@ -77,6 +80,24 @@ def _config():
             "dimensions": [
                 {"name": "relevance", "description": "Directly answers the question."},
                 {"name": "completeness", "description": "Covers requested elements."},
+            ],
+        },
+    }
+
+
+def _mixed_context_config():
+    return {
+        **_config(),
+        "rubric": {
+            "name": "poc",
+            "version": "1",
+            "dimensions": [
+                {
+                    "name": "groundedness",
+                    "description": "Every claim is supported by retrieved context.",
+                    "requiresContext": True,
+                },
+                {"name": "relevance", "description": "Directly answers the question."},
             ],
         },
     }
@@ -146,6 +167,61 @@ def test_execute_judges_only_eligible_traces_and_persists_identity():
     )
     assert repeated_preview["plannedCalls"] == 0
     assert repeated_preview["alreadyJudged"] == 1
+
+
+def test_preview_execution_prompt_and_storage_share_the_effective_rubric():
+    storage = InMemoryStorage()
+    storage.insert_trace(_trace("eligible"))
+    config = _mixed_context_config()
+
+    preview = preview_evaluation(storage, tenant_id="local", config=config)
+    context_free_preview = preview_evaluation(
+        storage,
+        tenant_id="local",
+        config={
+            **config,
+            "rubric": {
+                **config["rubric"],
+                "dimensions": [config["rubric"]["dimensions"][1]],
+            },
+        },
+    )
+    provider = CountingProvider()
+    result = execute_evaluation(
+        storage,
+        tenant_id="local",
+        config={
+            **config,
+            "planFingerprint": preview["planFingerprint"],
+            "plannedTraces": preview["plannedTraces"],
+        },
+        provider=provider,
+        confirm_external_egress=True,
+    )
+
+    assert preview["rubric"] == {
+        "name": "poc",
+        "version": "1",
+        "dimensions": ["relevance"],
+        "skippedDimensions": ["groundedness"],
+    }
+    assert result["rubric"] == preview["rubric"]
+    assert preview["estimatedInputTokens"] == context_free_preview["estimatedInputTokens"]
+    assert "groundedness" not in provider.requests[0].messages[-1]["content"]
+    assert "relevance" in provider.requests[0].messages[-1]["content"]
+    [judgment] = storage.list_judgments_for_cluster("all", limit=10)
+    assert judgment.expected_dimensions == ["relevance"]
+    assert [dimension.name for dimension in judgment.dimensions] == ["relevance"]
+
+
+def test_preview_rejects_a_rubric_with_no_dimension_evaluable_without_context():
+    storage = InMemoryStorage()
+    storage.insert_trace(_trace("eligible"))
+    config = _mixed_context_config()
+    config["rubric"]["dimensions"] = [config["rubric"]["dimensions"][0]]
+
+    with pytest.raises(ValueError, match="no rubric dimensions are evaluable"):
+        preview_evaluation(storage, tenant_id="local", config=config)
 
 
 def test_matching_evaluation_is_not_repeated_when_newer_evaluators_exceed_page_limit():

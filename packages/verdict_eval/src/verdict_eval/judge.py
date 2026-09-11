@@ -113,6 +113,10 @@ Important:
 """
 
 
+def _has_context(context: str | None) -> bool:
+    return context is not None and bool(context.strip())
+
+
 def _user_prompt(
     query: str,
     response: str,
@@ -120,7 +124,7 @@ def _user_prompt(
     rubric: Rubric,
 ) -> str:
     parts = [f"USER QUERY:\n{query.strip()}\n"]
-    if context:
+    if _has_context(context):
         parts.append(f"RETRIEVED CONTEXT:\n{context.strip()}\n")
     parts.append(f"ASSISTANT RESPONSE:\n{response.strip()}\n")
     parts.append("RUBRIC DIMENSIONS:")
@@ -183,9 +187,11 @@ class Judge:
     def _effective_rubric(self, context: str | None) -> Rubric:
         """Drop context-dependent dimensions when there's no context and the
         skip flag is set; otherwise return the rubric unchanged."""
-        if self.skip_context_dependent_when_missing and not context:
+        if self.skip_context_dependent_when_missing and not _has_context(context):
             dims = tuple(d for d in self.rubric.dimensions if not d.requires_context)
-            if dims and len(dims) != len(self.rubric.dimensions):
+            if not dims:
+                raise ValueError("no rubric dimensions are evaluable without context")
+            if len(dims) != len(self.rubric.dimensions):
                 return Rubric(name=self.rubric.name, version=self.rubric.version,
                               dimensions=dims)
         return self.rubric

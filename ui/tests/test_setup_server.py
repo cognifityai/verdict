@@ -205,6 +205,47 @@ def test_setup_uses_canonical_historical_file_import(tmp_path):
     storage.close()
 
 
+def test_evaluator_preview_explains_when_every_dimension_requires_context(tmp_path):
+    async def preview():
+        app = create_app(storage=f"sqlite:///{tmp_path / 'verdict.db'}")
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            return await client.post(
+                "/api/evaluators/preview",
+                headers={"X-Verdict-Setup": token},
+                json={
+                    "provider": "anthropic",
+                    "model": "claude-haiku-4-5",
+                    "maxCalls": "all",
+                    "maxOutputTokens": 256,
+                    "rubric": {
+                        "name": "groundedness",
+                        "version": "1",
+                        "dimensions": [
+                            {
+                                "name": "groundedness",
+                                "description": "Supported by retrieved context.",
+                                "requiresContext": True,
+                            }
+                        ],
+                    },
+                },
+            )
+
+    response = asyncio.run(preview())
+
+    assert response.status_code == 400
+    assert response.json() == {
+        "error": (
+            "No rubric dimensions can be evaluated because Verdict traces do not "
+            "include retrieved context."
+        )
+    }
+
+
 def test_setup_imports_a_bounded_historical_directory(tmp_path):
     database = tmp_path / "verdict.db"
     exports = tmp_path / "exports"
