@@ -745,6 +745,11 @@ the other captured workloads.
   `verdict.set_context(trace_id=existing_trace_id)`. Context is task-local and
   scoped contexts restore the prior value. A missing explicit trace ID produces
   an unlinked span with `verdict.link_status=trace_not_found`, not an orphan.
+  For a separately authorized gateway correlation workflow,
+  `verdict.model_call_context()` instead yields a generated ID before one call
+  and assigns it to at most one supported provider Trace. Verdict does not
+  inject gateway headers, and equality with the Trace ID alone does not prove a
+  deployment or hardware resource.
   Buffered provider writes do not control span survival or trigger a later span
   repair: each ended span is persisted exactly once.
 

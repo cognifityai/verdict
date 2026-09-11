@@ -2269,7 +2269,6 @@ def test_live_postgres_read_port_round_trip_is_tenant_scoped():
     tenant = f"read-port-{suffix}"
     now = datetime.now(timezone.utc)
     trace = verdict.Trace(
-        trace_id=f"trace-{suffix}",
         tenant_id=tenant,
         started_at=now,
         ended_at=now,
@@ -2282,6 +2281,11 @@ def test_live_postgres_read_port_round_trip_is_tenant_scoped():
         raw_messages=[{"role": "user", "content": "private-message-canary"}],
         tags={"private-tag-canary": "private-value-canary"},
     )
+    with verdict.model_call_context() as correlation_id:
+        apply_routing_context(
+            client_module.VerdictClient(storage=None, tenant_id=tenant), trace
+        )
+    assert trace.trace_id == correlation_id
     source = verdict.SourceSession(
         f"source-{suffix}", tenant, "unknown-agent", "e" * 64, now, now
     )

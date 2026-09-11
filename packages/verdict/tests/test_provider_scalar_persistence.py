@@ -20,10 +20,13 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+import verdict
+import verdict.client as verdict_client_module
 import verdict.instrumentors.openai as openai_instrumentor
 from verdict.client import VerdictClient
 from verdict.instrumentors.base import persist_trace
 from verdict.schema import Trace
+from verdict.storage.memory import InMemoryStorage
 from verdict.storage.sqlite import SQLiteStorage
 
 
@@ -851,15 +854,17 @@ def test_real_openai_responses_nonstream_persists_one_redacted_trace(
         capture_content=True,
     ) as (_, provider, storage):
         method = getattr(provider.responses, surface)
-        response = method(
-            model="gpt-4o-mini",
-            input="prompt@example.com",
-            instructions="system@example.com",
-            max_output_tokens=8,
-        )
+        with verdict.model_call_context() as correlation_id:
+            response = method(
+                model="gpt-4o-mini",
+                input="prompt@example.com",
+                instructions="system@example.com",
+                max_output_tokens=8,
+            )
 
         assert response.output_text == "OK response@example.com"
         [trace] = storage.list_traces()
+        assert trace.trace_id == correlation_id
         assert trace.request_model == "gpt-4o-mini"
         assert trace.response_model == "gpt-4o-mini"
         assert trace.max_tokens == 8
@@ -882,14 +887,16 @@ async def test_real_async_openai_responses_nonstream_persists_one_trace(
         capture_content=True,
     ) as (_, provider, storage):
         method = getattr(provider.responses, surface)
-        response = await method(
-            model="gpt-4o-mini",
-            input="prompt@example.com",
-            max_output_tokens=8,
-        )
+        with verdict.model_call_context() as correlation_id:
+            response = await method(
+                model="gpt-4o-mini",
+                input="prompt@example.com",
+                max_output_tokens=8,
+            )
 
         assert response.output_text == "OK response@example.com"
         [trace] = storage.list_traces()
+        assert trace.trace_id == correlation_id
         assert trace.input_tokens == 2
         assert trace.output_tokens == 3
         assert trace.prompt_redacted == "<EMAIL>"
@@ -906,19 +913,21 @@ def test_real_openai_responses_stream_helper_persists_exactly_one_trace(
         f"openai-responses-helper-{consumer}",
         capture_content=True,
     ) as (_, provider, storage):
-        with provider.responses.stream(
-            model="gpt-4o-mini",
-            input="prompt@example.com",
-            max_output_tokens=8,
-        ) as stream:
-            if consumer == "events":
-                assert list(stream)
-            elif consumer == "until_done":
-                assert stream.until_done() is stream
-            else:
-                assert stream.get_final_response().output_text == ("OK response@example.com")
+        with verdict.model_call_context() as correlation_id:
+            with provider.responses.stream(
+                model="gpt-4o-mini",
+                input="prompt@example.com",
+                max_output_tokens=8,
+            ) as stream:
+                if consumer == "events":
+                    assert list(stream)
+                elif consumer == "until_done":
+                    assert stream.until_done() is stream
+                else:
+                    assert stream.get_final_response().output_text == ("OK response@example.com")
 
         [trace] = storage.list_traces()
+        assert trace.trace_id == correlation_id
         assert trace.tags["verdict.stream_completion"] == "complete"
         assert trace.prompt_redacted == "<EMAIL>"
         assert trace.response_redacted == "OK <EMAIL>"
@@ -936,20 +945,22 @@ async def test_real_async_openai_responses_stream_helper_persists_one_trace(
         f"async-openai-responses-helper-{consumer}",
         capture_content=True,
     ) as (_, provider, storage):
-        async with provider.responses.stream(
-            model="gpt-4o-mini",
-            input="prompt@example.com",
-            max_output_tokens=8,
-        ) as stream:
-            if consumer == "events":
-                assert [event async for event in stream]
-            elif consumer == "until_done":
-                assert await stream.until_done() is stream
-            else:
-                response = await stream.get_final_response()
-                assert response.output_text == "OK response@example.com"
+        with verdict.model_call_context() as correlation_id:
+            async with provider.responses.stream(
+                model="gpt-4o-mini",
+                input="prompt@example.com",
+                max_output_tokens=8,
+            ) as stream:
+                if consumer == "events":
+                    assert [event async for event in stream]
+                elif consumer == "until_done":
+                    assert await stream.until_done() is stream
+                else:
+                    response = await stream.get_final_response()
+                    assert response.output_text == "OK response@example.com"
 
         [trace] = storage.list_traces()
+        assert trace.trace_id == correlation_id
         assert trace.tags["verdict.stream_completion"] == "complete"
         assert trace.prompt_redacted == "<EMAIL>"
         assert trace.response_redacted == "OK <EMAIL>"
@@ -1201,7 +1212,7 @@ def test_real_openai_responses_helper_records_application_block_error(tmp_path):
 
 
 def test_real_openai_responses_helper_binds_routing_context_on_entry(tmp_path):
-    from verdict.client import clear_context, set_context
+    from verdict.client import clear_context, model_call_context, set_context
     from verdict.trace import span
 
     clear_context()
@@ -1209,7 +1220,8 @@ def test_real_openai_responses_helper_binds_routing_context_on_entry(tmp_path):
         tmp_path,
         "openai-responses-entry-context",
     ) as (_, provider, storage):
-        manager = provider.responses.stream(model="gpt-4o-mini", input="hi")
+        with model_call_context() as expired_correlation_id:
+            manager = provider.responses.stream(model="gpt-4o-mini", input="hi")
         set_context(session_id="entry-session", workload="entry-workload")
         try:
             with span("entry-parent") as parent:
@@ -1219,6 +1231,7 @@ def test_real_openai_responses_helper_binds_routing_context_on_entry(tmp_path):
             clear_context()
 
         [trace] = storage.list_traces()
+        assert trace.trace_id != expired_correlation_id
         assert trace.session_id == "entry-session"
         assert trace.tags["verdict.workload"] == "entry-workload"
         assert trace.parent_span_id == parent.span_id
@@ -1302,6 +1315,215 @@ async def test_real_async_openai_preconstructed_helper_stays_inactive_after_unin
         instrumentor.uninstall()
         await http_client.aclose()
         storage.close()
+
+
+@pytest.mark.parametrize("surface", ["create", "stream-manager"])
+def test_real_anthropic_retained_surfaces_stay_inactive_after_shutdown(surface):
+    anthropic = pytest.importorskip("anthropic")
+
+    storage = InMemoryStorage()
+    http_client = anthropic.DefaultHttpxClient(transport=_anthropic_mock_transport(anthropic))
+    verdict.shutdown()
+    try:
+        verdict.init(storage=storage, instrumentors=["anthropic"])
+        provider = anthropic.Anthropic(
+            api_key="test",
+            base_url="http://provider.test/v1",
+            max_retries=0,
+            http_client=http_client,
+        )
+        request = {
+            "model": "claude-haiku-4-5-20251001",
+            "max_tokens": 8,
+            "messages": [{"role": "user", "content": "hi"}],
+        }
+        retained = (
+            provider.messages.create if surface == "create" else provider.messages.stream(**request)
+        )
+        verdict.shutdown()
+
+        with verdict.model_call_context() as correlation_id:
+            if surface == "create":
+                assert retained(**request).content[0].text == "OK"
+            else:
+                with retained as stream:
+                    assert stream.until_done() is None
+            assert verdict_client_module._claim_model_call_correlation_id() == correlation_id
+
+        assert storage.list_traces() == []
+    finally:
+        verdict.shutdown()
+        http_client.close()
+
+
+@pytest.mark.parametrize("surface", ["create", "stream-manager"])
+async def test_real_async_anthropic_retained_surfaces_stay_inactive_after_shutdown(
+    surface,
+):
+    anthropic = pytest.importorskip("anthropic")
+
+    storage = InMemoryStorage()
+    http_client = anthropic.DefaultAsyncHttpxClient(transport=_anthropic_mock_transport(anthropic))
+    verdict.shutdown()
+    try:
+        verdict.init(storage=storage, instrumentors=["anthropic"])
+        provider = anthropic.AsyncAnthropic(
+            api_key="test",
+            base_url="http://provider.test/v1",
+            max_retries=0,
+            http_client=http_client,
+        )
+        request = {
+            "model": "claude-haiku-4-5-20251001",
+            "max_tokens": 8,
+            "messages": [{"role": "user", "content": "hi"}],
+        }
+        retained = (
+            provider.messages.create if surface == "create" else provider.messages.stream(**request)
+        )
+        verdict.shutdown()
+
+        with verdict.model_call_context() as correlation_id:
+            if surface == "create":
+                assert (await retained(**request)).content[0].text == "OK"
+            else:
+                async with retained as stream:
+                    assert await stream.until_done() is None
+            assert verdict_client_module._claim_model_call_correlation_id() == correlation_id
+
+        assert storage.list_traces() == []
+    finally:
+        verdict.shutdown()
+        await http_client.aclose()
+
+
+def test_real_google_retained_method_stays_inactive_after_shutdown():
+    pytest.importorskip("google.genai")
+    from google import genai
+    from google.genai import types
+
+    storage = InMemoryStorage()
+    http_client = httpx.Client(transport=httpx.MockTransport(_provider_response))
+    verdict.shutdown()
+    try:
+        verdict.init(storage=storage, instrumentors=["google"])
+        provider = genai.Client(
+            api_key="test",
+            http_options=types.HttpOptions(
+                base_url="http://provider.test",
+                httpx_client=http_client,
+            ),
+        )
+        retained = provider.models.generate_content
+        verdict.shutdown()
+
+        with verdict.model_call_context() as correlation_id:
+            assert retained(model="gemini-2.5-flash", contents="hi").text == "OK"
+            assert verdict_client_module._claim_model_call_correlation_id() == correlation_id
+
+        assert storage.list_traces() == []
+    finally:
+        verdict.shutdown()
+        http_client.close()
+
+
+async def test_real_async_google_retained_method_stays_inactive_after_shutdown():
+    pytest.importorskip("google.genai")
+    from google import genai
+    from google.genai import types
+
+    storage = InMemoryStorage()
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(_provider_response))
+    verdict.shutdown()
+    try:
+        verdict.init(storage=storage, instrumentors=["google"])
+        provider = genai.Client(
+            api_key="test",
+            http_options=types.HttpOptions(
+                base_url="http://provider.test",
+                httpx_async_client=http_client,
+            ),
+        )
+        retained = provider.aio.models.generate_content
+        verdict.shutdown()
+
+        with verdict.model_call_context() as correlation_id:
+            response = await retained(model="gemini-2.5-flash", contents="hi")
+            assert response.text == "OK"
+            assert verdict_client_module._claim_model_call_correlation_id() == correlation_id
+
+        assert storage.list_traces() == []
+    finally:
+        verdict.shutdown()
+        await http_client.aclose()
+
+
+def test_partial_anthropic_install_cannot_capture_after_shutdown_or_reinitialization(
+    monkeypatch,
+):
+    anthropic = pytest.importorskip("anthropic")
+    wrapt = pytest.importorskip("wrapt")
+
+    first_storage = InMemoryStorage()
+    second_storage = InMemoryStorage()
+    http_client = anthropic.DefaultHttpxClient(transport=_anthropic_mock_transport(anthropic))
+    real_wrap = wrapt.wrap_function_wrapper
+    patch_calls = 0
+
+    def fail_second_patch(*args, **kwargs):
+        nonlocal patch_calls
+        patch_calls += 1
+        if patch_calls == 2:
+            raise RuntimeError("injected second-surface patch failure")
+        return real_wrap(*args, **kwargs)
+
+    verdict.shutdown()
+    try:
+        with monkeypatch.context() as scoped:
+            scoped.setattr(wrapt, "wrap_function_wrapper", fail_second_patch)
+            verdict.init(
+                storage=first_storage, tenant_id="tenant-first", instrumentors=["anthropic"]
+            )
+
+        provider = anthropic.Anthropic(
+            api_key="test",
+            base_url="http://provider.test/v1",
+            max_retries=0,
+            http_client=http_client,
+        )
+        request = {
+            "model": "claude-haiku-4-5-20251001",
+            "max_tokens": 8,
+            "messages": [{"role": "user", "content": "hi"}],
+        }
+        retained = provider.messages.create
+        verdict.shutdown()
+        with verdict.model_call_context() as unused_id:
+            assert retained(**request).content[0].text == "OK"
+            assert verdict_client_module._claim_model_call_correlation_id() == unused_id
+        assert first_storage.list_traces() == []
+
+        verdict.init(
+            storage=second_storage,
+            tenant_id="tenant-second",
+            instrumentors=["anthropic"],
+        )
+        second_provider = anthropic.Anthropic(
+            api_key="test",
+            base_url="http://provider.test/v1",
+            max_retries=0,
+            http_client=http_client,
+        )
+        with verdict.model_call_context() as correlation_id:
+            assert second_provider.messages.create(**request).content[0].text == "OK"
+
+        assert first_storage.list_traces() == []
+        [trace] = second_storage.list_traces()
+        assert trace.trace_id == correlation_id
+        assert trace.tenant_id == "tenant-second"
+    finally:
+        verdict.shutdown()
+        http_client.close()
 
 
 def test_real_openai_responses_retry_persists_only_the_final_request_trace(tmp_path):
@@ -2251,13 +2473,15 @@ async def test_real_async_openai_request_cancellation_persists_exactly_one_trace
                     stream=surface == "chat-raw",
                 )
 
-        task = asyncio.create_task(make_request())
-        await request_started.wait()
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
+        with verdict.model_call_context() as correlation_id:
+            task = asyncio.create_task(make_request())
+            await request_started.wait()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
 
         [trace] = storage.list_traces()
+        assert trace.trace_id == correlation_id
         assert trace.error is not None
         assert trace.error.startswith("CancelledError:")
         expected_completion = (
@@ -2289,18 +2513,20 @@ def test_real_anthropic_unset_temperature_persists_exactly_one_row(
             max_retries=0,
             http_client=http_client,
         )
-        response = provider.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=8,
-            messages=[{"role": "user", "content": "hi"}],
-            **_anthropic_temperature_arg(
-                provider.messages.create,
-                getattr(anthropic, sentinel_name),
-            ),
-        )
+        with verdict.model_call_context() as correlation_id:
+            response = provider.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=8,
+                messages=[{"role": "user", "content": "hi"}],
+                **_anthropic_temperature_arg(
+                    provider.messages.create,
+                    getattr(anthropic, sentinel_name),
+                ),
+            )
 
         assert response.content[0].text == "OK"
         [trace] = storage.list_traces()
+        assert trace.trace_id == correlation_id
         assert trace.temperature is None
         assert trace.max_tokens == 8
         assert trace.input_tokens == 2
@@ -2329,18 +2555,20 @@ async def test_real_async_anthropic_unset_temperature_persists_exactly_one_row(
             max_retries=0,
             http_client=http_client,
         )
-        response = await provider.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=8,
-            messages=[{"role": "user", "content": "hi"}],
-            **_anthropic_temperature_arg(
-                provider.messages.create,
-                anthropic.omit,
-            ),
-        )
+        with verdict.model_call_context() as correlation_id:
+            response = await provider.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=8,
+                messages=[{"role": "user", "content": "hi"}],
+                **_anthropic_temperature_arg(
+                    provider.messages.create,
+                    anthropic.omit,
+                ),
+            )
 
         assert response.content[0].text == "OK"
         [trace] = storage.list_traces()
+        assert trace.trace_id == correlation_id
         assert trace.temperature is None
         assert trace.max_tokens == 8
         assert trace.input_tokens == 2
@@ -2365,24 +2593,26 @@ def test_real_anthropic_messages_stream_helper_persists_complete_trace(
         f"anthropic-stream-{consumer}",
         capture_content=True,
     ) as (_, provider, storage):
-        with provider.messages.stream(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=8,
-            messages=[{"role": "user", "content": "prompt@example.com"}],
-        ) as stream:
-            assert stream.response.headers["request-id"] == "request_test"
-            if consumer == "events":
-                assert list(stream)
-            elif consumer == "text_stream":
-                assert "".join(stream.text_stream) == "OK stream@example.com"
-            elif consumer == "until_done":
-                assert stream.until_done() is None
-            elif consumer == "final_message":
-                assert stream.get_final_message().content[0].text == "OK stream@example.com"
-            else:
-                assert stream.get_final_text() == "OK stream@example.com"
+        with verdict.model_call_context() as correlation_id:
+            with provider.messages.stream(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=8,
+                messages=[{"role": "user", "content": "prompt@example.com"}],
+            ) as stream:
+                assert stream.response.headers["request-id"] == "request_test"
+                if consumer == "events":
+                    assert list(stream)
+                elif consumer == "text_stream":
+                    assert "".join(stream.text_stream) == "OK stream@example.com"
+                elif consumer == "until_done":
+                    assert stream.until_done() is None
+                elif consumer == "final_message":
+                    assert stream.get_final_message().content[0].text == ("OK stream@example.com")
+                else:
+                    assert stream.get_final_text() == "OK stream@example.com"
 
         [trace] = storage.list_traces()
+        assert trace.trace_id == correlation_id
         assert trace.request_model == "claude-haiku-4-5-20251001"
         assert trace.response_model == "claude-haiku-4-5-20251001"
         assert trace.input_tokens == 2
@@ -2408,26 +2638,28 @@ async def test_real_async_anthropic_messages_stream_helper_persists_complete_tra
         f"async-anthropic-stream-{consumer}",
         capture_content=True,
     ) as (_, provider, storage):
-        async with provider.messages.stream(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=8,
-            messages=[{"role": "user", "content": "prompt@example.com"}],
-        ) as stream:
-            assert stream.response.headers["request-id"] == "request_test"
-            if consumer == "events":
-                assert [event async for event in stream]
-            elif consumer == "text_stream":
-                chunks = [text async for text in stream.text_stream]
-                assert "".join(chunks) == "OK stream@example.com"
-            elif consumer == "until_done":
-                assert await stream.until_done() is None
-            elif consumer == "final_message":
-                final_message = await stream.get_final_message()
-                assert final_message.content[0].text == "OK stream@example.com"
-            else:
-                assert await stream.get_final_text() == "OK stream@example.com"
+        with verdict.model_call_context() as correlation_id:
+            async with provider.messages.stream(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=8,
+                messages=[{"role": "user", "content": "prompt@example.com"}],
+            ) as stream:
+                assert stream.response.headers["request-id"] == "request_test"
+                if consumer == "events":
+                    assert [event async for event in stream]
+                elif consumer == "text_stream":
+                    chunks = [text async for text in stream.text_stream]
+                    assert "".join(chunks) == "OK stream@example.com"
+                elif consumer == "until_done":
+                    assert await stream.until_done() is None
+                elif consumer == "final_message":
+                    final_message = await stream.get_final_message()
+                    assert final_message.content[0].text == "OK stream@example.com"
+                else:
+                    assert await stream.get_final_text() == "OK stream@example.com"
 
         [trace] = storage.list_traces()
+        assert trace.trace_id == correlation_id
         assert trace.request_model == "claude-haiku-4-5-20251001"
         assert trace.response_model == "claude-haiku-4-5-20251001"
         assert trace.input_tokens == 2
@@ -2605,7 +2837,7 @@ async def test_real_async_anthropic_messages_stream_helper_preserves_raising_ite
 
 
 def test_real_anthropic_messages_stream_helper_binds_context_on_each_entry(tmp_path):
-    from verdict.client import clear_context, set_context
+    from verdict.client import clear_context, model_call_context, set_context
     from verdict.trace import span
 
     clear_context()
@@ -2613,11 +2845,12 @@ def test_real_anthropic_messages_stream_helper_binds_context_on_each_entry(tmp_p
         tmp_path,
         "anthropic-entry-context",
     ) as (_, provider, storage):
-        manager = provider.messages.stream(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=8,
-            messages=[{"role": "user", "content": "hi"}],
-        )
+        with model_call_context() as expired_correlation_id:
+            manager = provider.messages.stream(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=8,
+                messages=[{"role": "user", "content": "hi"}],
+            )
         set_context(session_id="entry-session", workload="entry-workload")
         try:
             with span("entry-parent") as parent:
@@ -2627,6 +2860,7 @@ def test_real_anthropic_messages_stream_helper_binds_context_on_each_entry(tmp_p
             clear_context()
 
         [trace] = storage.list_traces()
+        assert trace.trace_id != expired_correlation_id
         assert trace.session_id == "entry-session"
         assert trace.tags["verdict.workload"] == "entry-workload"
         assert trace.parent_span_id == parent.span_id
@@ -3078,14 +3312,16 @@ def test_real_google_config_persists_exactly_one_row(tmp_path):
                 httpx_client=http_client,
             ),
         )
-        response = provider.models.generate_content(
-            model="gemini-2.5-flash",
-            contents="hi",
-            config=types.GenerateContentConfig(max_output_tokens=8),
-        )
+        with verdict.model_call_context() as correlation_id:
+            response = provider.models.generate_content(
+                model="gemini-2.5-flash",
+                contents="hi",
+                config=types.GenerateContentConfig(max_output_tokens=8),
+            )
 
         assert response.text == "OK"
         [trace] = storage.list_traces()
+        assert trace.trace_id == correlation_id
         assert trace.temperature is None
         assert trace.max_tokens == 8
         assert trace.input_tokens == 2
@@ -3095,6 +3331,129 @@ def test_real_google_config_persists_exactly_one_row(tmp_path):
         instrumentor.uninstall()
         http_client.close()
         storage.close()
+
+
+async def test_real_async_google_call_uses_reserved_model_call_trace_id(tmp_path):
+    pytest.importorskip("google.genai")
+    from google import genai
+    from google.genai import types
+    from verdict.instrumentors.google import GoogleInstrumentor
+
+    verdict_client, storage = _sqlite_client(tmp_path, "async-google-correlation")
+    instrumentor = GoogleInstrumentor(verdict_client)
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(_provider_response))
+    instrumentor.install()
+    try:
+        provider = genai.Client(
+            api_key="test",
+            http_options=types.HttpOptions(
+                base_url="http://provider.test",
+                httpx_async_client=http_client,
+            ),
+        )
+        with verdict.model_call_context() as correlation_id:
+            response = await provider.aio.models.generate_content(
+                model="gemini-2.5-flash",
+                contents="hi",
+                config=types.GenerateContentConfig(max_output_tokens=8),
+            )
+
+        assert response.text == "OK"
+        [trace] = storage.list_traces()
+        assert trace.trace_id == correlation_id
+        assert trace.provider == "google"
+    finally:
+        instrumentor.uninstall()
+        await http_client.aclose()
+        storage.close()
+
+
+@pytest.mark.parametrize("surface", ["generate_content", "generate_content_stream"])
+async def test_real_async_google_entry_cancellation_persists_reserved_trace(
+    tmp_path,
+    surface,
+):
+    pytest.importorskip("google.genai")
+    from google import genai
+    from google.genai import types
+    from verdict.instrumentors.google import GoogleInstrumentor
+
+    request_started = asyncio.Event()
+
+    async def pending_response(_request):
+        request_started.set()
+        await asyncio.Event().wait()
+
+    verdict_client, storage = _sqlite_client(tmp_path, f"async-google-cancel-{surface}")
+    instrumentor = GoogleInstrumentor(verdict_client)
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(pending_response))
+    instrumentor.install()
+    try:
+        provider = genai.Client(
+            api_key="test",
+            http_options=types.HttpOptions(
+                base_url="http://provider.test",
+                httpx_async_client=http_client,
+            ),
+        )
+
+        async def make_request():
+            method = getattr(provider.aio.models, surface)
+            result = await method(model="gemini-2.5-flash", contents="hi")
+            if surface == "generate_content_stream":
+                async for _chunk in result:
+                    pass
+            return result
+
+        with verdict.model_call_context() as correlation_id:
+            task = asyncio.create_task(make_request())
+            await asyncio.wait_for(request_started.wait(), timeout=5)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        [trace] = storage.list_traces()
+        assert trace.trace_id == correlation_id
+        assert trace.error is not None
+        assert trace.error.startswith("CancelledError:")
+        assert trace.tags.get("verdict.stream_completion") is None
+    finally:
+        instrumentor.uninstall()
+        await http_client.aclose()
+        storage.close()
+
+
+async def test_google_async_stream_construction_cancellation_persists_reserved_trace():
+    from verdict.instrumentors.google import GoogleInstrumentor
+
+    storage = InMemoryStorage()
+    instrumentor = GoogleInstrumentor(VerdictClient(storage=storage))
+    request_started = asyncio.Event()
+
+    async def pending_stream(*_args, **_kwargs):
+        request_started.set()
+        await asyncio.Event().wait()
+
+    async def make_request():
+        return await instrumentor._wrap_genai_generate_stream_async(
+            pending_stream,
+            None,
+            (),
+            {"model": "gemini-2.5-flash", "contents": "hi"},
+        )
+
+    with verdict.model_call_context() as correlation_id:
+        task = asyncio.create_task(make_request())
+        await asyncio.wait_for(request_started.wait(), timeout=5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    [trace] = storage.list_traces()
+    assert trace.trace_id == correlation_id
+    assert trace.error is not None
+    assert trace.error.startswith("CancelledError:")
+    assert trace.tags["verdict.stream_completion"] == "error"
 
 
 def test_google_rejects_nonprimitive_config_scalars_before_sqlite(tmp_path):

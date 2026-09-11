@@ -138,6 +138,7 @@ class AnthropicInstrumentor(BaseInstrumentor):
     def install(self) -> None:
         if self._installed:
             return
+        self._disabled = False
         try:
             import wrapt
         except ImportError as e:
@@ -165,8 +166,7 @@ class AnthropicInstrumentor(BaseInstrumentor):
         self._installed = True
 
     def uninstall(self) -> None:
-        if not self._installed:
-            return
+        self._disabled = True
         try:
             mod, _module_path = _message_resource_module()
         except ImportError:
@@ -196,6 +196,8 @@ class AnthropicInstrumentor(BaseInstrumentor):
         return _rng.random() < rate
 
     def _wrap_create_sync(self, wrapped, instance, args, kwargs):
+        if self._disabled:
+            return wrapped(*args, **kwargs)
         trace_kwargs, call_kwargs = self._split_capture_kwargs(kwargs)
         trace = self._build_input_trace(trace_kwargs)
         t0 = time.perf_counter()
@@ -229,6 +231,8 @@ class AnthropicInstrumentor(BaseInstrumentor):
         return resp
 
     async def _wrap_create_async(self, wrapped, instance, args, kwargs):
+        if self._disabled:
+            return await wrapped(*args, **kwargs)
         trace_kwargs, call_kwargs = self._split_capture_kwargs(kwargs)
         trace = self._build_input_trace(trace_kwargs)
         t0 = time.perf_counter()
@@ -267,6 +271,8 @@ class AnthropicInstrumentor(BaseInstrumentor):
 
     def _wrap_stream_sync(self, wrapped, instance, args, kwargs):
         """Wrap the lazy manager returned by ``Messages.stream``."""
+        if self._disabled:
+            return wrapped(*args, **kwargs)
         trace_kwargs, call_kwargs = self._split_capture_kwargs(kwargs)
         t0 = time.perf_counter()
         try:
@@ -279,6 +285,8 @@ class AnthropicInstrumentor(BaseInstrumentor):
 
     def _wrap_stream_async(self, wrapped, instance, args, kwargs):
         """Wrap ``AsyncMessages.stream`` (the method itself is synchronous)."""
+        if self._disabled:
+            return wrapped(*args, **kwargs)
         trace_kwargs, call_kwargs = self._split_capture_kwargs(kwargs)
         t0 = time.perf_counter()
         try:
@@ -429,6 +437,8 @@ class _MessageStreamManagerWrapper:
         return getattr(self._inner, name)
 
     def __enter__(self):
+        if getattr(self._instr, "_disabled", False):
+            return self._inner.__enter__()
         trace = self._instr._build_input_trace(self._trace_kwargs)
         trace.started_at = datetime.now(timezone.utc)
         t0 = time.perf_counter()
@@ -487,6 +497,8 @@ class _AsyncMessageStreamManagerWrapper:
         return getattr(self._inner, name)
 
     async def __aenter__(self):
+        if getattr(self._instr, "_disabled", False):
+            return await self._inner.__aenter__()
         trace = self._instr._build_input_trace(self._trace_kwargs)
         trace.started_at = datetime.now(timezone.utc)
         t0 = time.perf_counter()

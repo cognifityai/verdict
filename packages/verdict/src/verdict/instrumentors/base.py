@@ -51,11 +51,16 @@ def apply_routing_context(client: VerdictClient, trace: Trace) -> None:
         trace.tenant_id = getattr(client, "tenant_id", None)
         # Imported lazily to avoid an import cycle (client imports instrumentors).
         from verdict.client import (
+            _claim_model_call_correlation_id,
             get_context_intent_key,
             get_context_session_id,
             get_context_user_id_hash,
             get_context_workload,
         )
+
+        correlation_id = _claim_model_call_correlation_id()
+        if correlation_id is not None:
+            trace.trace_id = correlation_id
 
         sid = get_context_session_id()
         if sid is not None:
@@ -228,9 +233,12 @@ class BaseInstrumentor(abc.ABC):
     def __init__(self, client: VerdictClient) -> None:
         self.client = client
         self._installed: bool = False
+        self._disabled: bool = False
 
     def _safe_persist(self, trace: Trace) -> None:
         """Persist through the single non-raising instrumentor sink."""
+        if self._disabled:
+            return
         safe_persist_trace(self.client, trace)
 
     @abc.abstractmethod

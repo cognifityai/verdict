@@ -358,8 +358,6 @@ class OpenAIInstrumentor(BaseInstrumentor):
         self._installed = True
 
     def uninstall(self) -> None:
-        if not self._installed:
-            return
         self._disabled = True
         try:
             import openai.resources.chat.completions as mod

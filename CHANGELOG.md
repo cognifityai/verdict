@@ -8,6 +8,10 @@ the product is refined.
 
 ### Added
 
+- `verdict.model_call_context()` yields a generated pre-call identifier and
+  assigns it to at most one supported instrumented provider Trace. This lets a
+  separately owned gateway integration propagate the same identity without
+  adding gateway headers, dependencies, or storage fields to Verdict.
 - `verdict.read_port` provides trusted same-process dependent packages with one
   versioned, tenant-scoped Agent Run lookup. Its bounded immutable DTOs expose
   exact model-call event/Trace identity and deterministic finding facts without
@@ -32,6 +36,9 @@ the product is refined.
 
 ### Changed
 
+- Retained Anthropic and Google bound methods and lazy stream managers now
+  remain pass-through after Verdict shutdown; they cannot resume Trace capture
+  or consume a pending one-call correlation reservation.
 - Shared Fisher exact, Benjamini-Hochberg, Wilson-interval, and Gwet agreement
   calculations now use one dependency-free implementation. Agreement reports
   correctly identify the existing nominal statistic as Gwet's AC1; versioned
@@ -88,6 +95,9 @@ the product is refined.
 
 ### Fixed
 
+- Provider auto-instrumentation now disables and rolls back partially patched
+  SDK surfaces when installation fails, and Google async entry cancellation
+  persists the already-claimed error Trace before re-raising cancellation.
 - Evaluator Lab now shows the exact effective rubric before approval, including
   context-required dimensions skipped because traces have no retrieved-context
   field. A rubric with no evaluable dimension fails before provider egress

@@ -45,6 +45,68 @@ def _fresh_module_with_native_wrapped():
     return Mod
 
 
+def _anthropic_surfaces():
+    mod, _module_path = anthropic_instr._message_resource_module()
+    return [
+        (mod, cls_name, method)
+        for cls_name, method in (
+            ("Messages", "create"),
+            ("Messages", "stream"),
+            ("AsyncMessages", "create"),
+            ("AsyncMessages", "stream"),
+        )
+        if hasattr(getattr(mod, cls_name, None), method)
+    ]
+
+
+def _openai_surfaces():
+    import openai.resources.chat.completions as chat_mod
+
+    resources = [
+        (chat_mod, cls_name, method)
+        for cls_name, method in (
+            ("Completions", "create"),
+            ("Completions", "stream"),
+            ("AsyncCompletions", "create"),
+            ("AsyncCompletions", "stream"),
+        )
+        if hasattr(getattr(chat_mod, cls_name, None), method)
+    ]
+    responses_resource = openai_instr._responses_resource_module()
+    if responses_resource is None:
+        return resources
+
+    import openai._base_client as base_client_mod
+
+    resources.extend(
+        (base_client_mod, cls_name, "request")
+        for cls_name in ("SyncAPIClient", "AsyncAPIClient")
+        if hasattr(getattr(base_client_mod, cls_name, None), "request")
+    )
+    for http_module in openai_instr._response_http_modules(base_client_mod):
+        resources.extend(
+            (http_module, cls_name, "_send_single_request")
+            for cls_name in ("Client", "AsyncClient")
+            if hasattr(getattr(http_module, cls_name, None), "_send_single_request")
+        )
+    responses_mod, _module_path = responses_resource
+    resources.extend(
+        (responses_mod, cls_name, method)
+        for cls_name, method in (
+            ("Responses", "create"),
+            ("Responses", "parse"),
+            ("Responses", "retrieve"),
+            ("Responses", "stream"),
+            ("AsyncResponses", "create"),
+            ("AsyncResponses", "parse"),
+            ("AsyncResponses", "retrieve"),
+            ("AsyncResponses", "stream"),
+        )
+        if hasattr(getattr(responses_mod, cls_name, None), method)
+    )
+    return resources
+
+
 def test_native_dunder_wrapped_is_NOT_treated_as_wrapped_anthropic():
     mod = _fresh_module_with_native_wrapped()
     # The whole bug: this must be False so install actually wraps.
@@ -92,84 +154,36 @@ def test_real_anthropic_install_wraps_and_restores_complete_supported_surface():
     from verdict.instrumentors.base import is_verdict_wrapt_wrapper
     from verdict.storage.memory import InMemoryStorage
 
-    mod, _module_path = anthropic_instr._message_resource_module()
-    surface = (
-        ("Messages", "create"),
-        ("Messages", "stream"),
-        ("AsyncMessages", "create"),
-        ("AsyncMessages", "stream"),
-    )
+    resources = _anthropic_surfaces()
     originals = {
-        (cls_name, method): getattr(getattr(mod, cls_name), method) for cls_name, method in surface
+        (id(mod), cls_name, method): getattr(getattr(mod, cls_name), method)
+        for mod, cls_name, method in resources
     }
     instrumentor = AnthropicInstrumentor(VerdictClient(storage=InMemoryStorage()))
 
     instrumentor.install()
     instrumentor.install()
     try:
-        for cls_name, method in surface:
+        for mod, cls_name, method in resources:
             wrapped = getattr(getattr(mod, cls_name), method)
             assert is_verdict_wrapt_wrapper(wrapped, owner=instrumentor)
-            assert wrapped.__wrapped__ is originals[(cls_name, method)]
+            assert wrapped.__wrapped__ is originals[(id(mod), cls_name, method)]
     finally:
         instrumentor.uninstall()
         instrumentor.uninstall()
 
-    for cls_name, method in surface:
-        assert getattr(getattr(mod, cls_name), method) is originals[(cls_name, method)]
+    for mod, cls_name, method in resources:
+        assert getattr(getattr(mod, cls_name), method) is originals[(id(mod), cls_name, method)]
 
 
 def test_real_openai_install_wraps_and_restores_complete_supported_surface():
     pytest.importorskip("openai")
-    import openai.resources.chat.completions as chat_mod
     from verdict.client import VerdictClient
     from verdict.instrumentors.base import is_verdict_wrapt_wrapper
     from verdict.instrumentors.openai import OpenAIInstrumentor
     from verdict.storage.memory import InMemoryStorage
 
-    resources = [
-        (chat_mod, cls_name, method)
-        for cls_name, method in (
-            ("Completions", "create"),
-            ("Completions", "stream"),
-            ("AsyncCompletions", "create"),
-            ("AsyncCompletions", "stream"),
-        )
-        if hasattr(getattr(chat_mod, cls_name, None), method)
-    ]
-    responses_resource = openai_instr._responses_resource_module()
-    if responses_resource is not None:
-        import openai._base_client as base_client_mod
-
-        resources.extend(
-            (base_client_mod, cls_name, "request")
-            for cls_name in ("SyncAPIClient", "AsyncAPIClient")
-            if hasattr(getattr(base_client_mod, cls_name, None), "request")
-        )
-        for http_module in openai_instr._response_http_modules(base_client_mod):
-            resources.extend(
-                (http_module, cls_name, "_send_single_request")
-                for cls_name in ("Client", "AsyncClient")
-                if hasattr(
-                    getattr(http_module, cls_name, None),
-                    "_send_single_request",
-                )
-            )
-        responses_mod, _module_path = responses_resource
-        resources.extend(
-            (responses_mod, cls_name, method)
-            for cls_name, method in (
-                ("Responses", "create"),
-                ("Responses", "parse"),
-                ("Responses", "retrieve"),
-                ("Responses", "stream"),
-                ("AsyncResponses", "create"),
-                ("AsyncResponses", "parse"),
-                ("AsyncResponses", "retrieve"),
-                ("AsyncResponses", "stream"),
-            )
-            if hasattr(getattr(responses_mod, cls_name, None), method)
-        )
+    resources = _openai_surfaces()
     originals = {
         (id(mod), cls_name, method): getattr(getattr(mod, cls_name), method)
         for mod, cls_name, method in resources
@@ -186,6 +200,113 @@ def test_real_openai_install_wraps_and_restores_complete_supported_surface():
     finally:
         instrumentor.uninstall()
         instrumentor.uninstall()
+
+    for mod, cls_name, method in resources:
+        assert getattr(getattr(mod, cls_name), method) is originals[(id(mod), cls_name, method)]
+
+
+@pytest.mark.parametrize(
+    ("provider_name", "instrumentor_type", "surface_factory"),
+    [
+        ("anthropic", anthropic_instr.AnthropicInstrumentor, _anthropic_surfaces),
+        ("openai", openai_instr.OpenAIInstrumentor, _openai_surfaces),
+    ],
+)
+def test_client_rolls_back_failure_after_every_provider_patch(
+    monkeypatch,
+    provider_name,
+    instrumentor_type,
+    surface_factory,
+):
+    from verdict.client import VerdictClient, _install_instrumentors
+    from verdict.storage.memory import InMemoryStorage
+
+    resources = surface_factory()
+    originals = {
+        (id(mod), cls_name, method): getattr(getattr(mod, cls_name), method)
+        for mod, cls_name, method in resources
+    }
+    real_wrap = wrapt.wrap_function_wrapper
+    successful_calls = 0
+
+    def count_wraps(*args, **kwargs):
+        nonlocal successful_calls
+        successful_calls += 1
+        return real_wrap(*args, **kwargs)
+
+    counting_instrumentor = instrumentor_type(VerdictClient(storage=InMemoryStorage()))
+    with monkeypatch.context() as scoped:
+        scoped.setattr(wrapt, "wrap_function_wrapper", count_wraps)
+        counting_instrumentor.install()
+    counting_instrumentor.uninstall()
+    assert successful_calls > 0
+
+    for failure_index in range(1, successful_calls + 1):
+        calls = 0
+
+        def fail_at_position(*args, fail_at=failure_index, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == fail_at:
+                raise RuntimeError("injected provider patch failure")
+            return real_wrap(*args, **kwargs)
+
+        client = VerdictClient(
+            storage=InMemoryStorage(),
+            enabled_instrumentors=[provider_name],
+        )
+        with monkeypatch.context() as scoped:
+            scoped.setattr(wrapt, "wrap_function_wrapper", fail_at_position)
+            _install_instrumentors(client)
+
+        assert calls == failure_index
+        assert client._instrumentors == []
+        for mod, cls_name, method in resources:
+            assert getattr(getattr(mod, cls_name), method) is originals[(id(mod), cls_name, method)]
+
+
+def test_failed_physical_rollback_retains_a_disabled_owner(monkeypatch):
+    from verdict.client import VerdictClient, _install_instrumentors
+    from verdict.instrumentors.base import is_verdict_wrapt_wrapper
+    from verdict.storage.memory import InMemoryStorage
+
+    resources = _anthropic_surfaces()
+    originals = {
+        (id(mod), cls_name, method): getattr(getattr(mod, cls_name), method)
+        for mod, cls_name, method in resources
+    }
+    real_wrap = wrapt.wrap_function_wrapper
+    real_uninstall = anthropic_instr.AnthropicInstrumentor.uninstall
+    calls = 0
+
+    def fail_second_patch(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("injected provider patch failure")
+        return real_wrap(*args, **kwargs)
+
+    def fail_rollback(_self):
+        raise RuntimeError("injected rollback failure")
+
+    client = VerdictClient(
+        storage=InMemoryStorage(),
+        enabled_instrumentors=["anthropic"],
+    )
+    with monkeypatch.context() as scoped:
+        scoped.setattr(wrapt, "wrap_function_wrapper", fail_second_patch)
+        scoped.setattr(anthropic_instr.AnthropicInstrumentor, "uninstall", fail_rollback)
+        _install_instrumentors(client)
+
+    [retained] = client._instrumentors
+    assert retained._disabled is True
+    try:
+        for mod, cls_name, method in resources:
+            wrapped = getattr(getattr(mod, cls_name), method)
+            if is_verdict_wrapt_wrapper(wrapped, owner=retained):
+                assert wrapped._self_wrapper.__self__._disabled is True
+    finally:
+        real_uninstall(retained)
 
     for mod, cls_name, method in resources:
         assert getattr(getattr(mod, cls_name), method) is originals[(id(mod), cls_name, method)]

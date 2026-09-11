@@ -85,6 +85,7 @@ class GoogleInstrumentor(BaseInstrumentor):
     def install(self) -> None:
         if self._installed:
             return
+        self._disabled = False
         try:
             import wrapt
         except ImportError as e:
@@ -164,8 +165,7 @@ class GoogleInstrumentor(BaseInstrumentor):
         self._installed = True
 
     def uninstall(self) -> None:
-        if not self._installed:
-            return
+        self._disabled = True
         # Best-effort unwrap; if the SDK isn't importable we silently skip.
         try:
             import google.genai.models as mod
@@ -203,6 +203,8 @@ class GoogleInstrumentor(BaseInstrumentor):
         return _rng.random() < rate
 
     def _wrap_genai_generate(self, wrapped, instance, args, kwargs):
+        if self._disabled:
+            return wrapped(*args, **kwargs)
         trace = self._build_input_trace(args, kwargs, sdk="google-genai")
         t0 = time.perf_counter()
 
@@ -232,12 +234,18 @@ class GoogleInstrumentor(BaseInstrumentor):
         return resp
 
     async def _wrap_genai_generate_async(self, wrapped, instance, args, kwargs):
+        if self._disabled:
+            return await wrapped(*args, **kwargs)
         trace = self._build_input_trace(args, kwargs, sdk="google-genai")
         t0 = time.perf_counter()
 
         if kwargs.get("stream"):
             try:
                 stream = await wrapped(*args, **kwargs)
+            except asyncio.CancelledError as e:
+                trace.tags = {**trace.tags, "verdict.stream_completion": "error"}
+                self._record_error(trace, t0, e)
+                raise
             except Exception as e:
                 self._record_error(trace, t0, e)
                 raise
@@ -245,6 +253,9 @@ class GoogleInstrumentor(BaseInstrumentor):
 
         try:
             resp = await wrapped(*args, **kwargs)
+        except asyncio.CancelledError as e:
+            self._record_error(trace, t0, e)
+            raise
         except Exception as e:
             self._record_error(trace, t0, e)
             raise
@@ -267,6 +278,8 @@ class GoogleInstrumentor(BaseInstrumentor):
         # (usage_metadata / candidates / text), so no chunk-extraction changes.
         # _on_chunk keeps the last non-None usage because cumulative totals
         # usually arrive late in the stream.
+        if self._disabled:
+            return wrapped(*args, **kwargs)
         trace = self._build_input_trace(args, kwargs, sdk="google-genai")
         t0 = time.perf_counter()
         try:
@@ -281,16 +294,24 @@ class GoogleInstrumentor(BaseInstrumentor):
         # awaitable that resolves to an async iterator of response chunks.
         # Strictly parallel to the kwargs.get("stream") branch of
         # _wrap_genai_generate_async above.
+        if self._disabled:
+            return await wrapped(*args, **kwargs)
         trace = self._build_input_trace(args, kwargs, sdk="google-genai")
         t0 = time.perf_counter()
         try:
             stream = await wrapped(*args, **kwargs)
+        except asyncio.CancelledError as e:
+            trace.tags = {**trace.tags, "verdict.stream_completion": "error"}
+            self._record_error(trace, t0, e)
+            raise
         except Exception as e:
             self._record_error(trace, t0, e)
             raise
         return _AsyncStreamingWrapper(stream, trace, t0, self)
 
     def _wrap_legacy_generate(self, wrapped, instance, args, kwargs):
+        if self._disabled:
+            return wrapped(*args, **kwargs)
         # Legacy SDK: model name is on the GenerativeModel instance
         model_name = getattr(instance, "model_name", "") or ""
         trace = self._build_input_trace(
