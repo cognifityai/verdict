@@ -13,12 +13,12 @@ from datetime import datetime, timedelta, timezone
 import numpy as np
 import pytest
 from verdict.schema import DriftDirection
+from verdict.statistics import benjamini_hochberg
 from verdict_eval.drift import (
     DriftDetector,
     DriftWindow,
-    _benjamini_hochberg,
     _cliffs_delta,
-    _psi,
+    _psi_discrete_or_linear,
     _wasserstein,
     split_windows_by_time,
 )
@@ -156,22 +156,22 @@ def test_psi_thresholds():
     same = np.random.RandomState(0).normal(0, 1, 1000)
     similar = np.random.RandomState(1).normal(0, 1, 1000)
     shifted = np.random.RandomState(2).normal(1.5, 1, 1000)
-    assert _psi(similar, same) < 0.1
-    assert _psi(shifted, same) > 0.25
+    assert _psi_discrete_or_linear(similar, same) < 0.1
+    assert _psi_discrete_or_linear(shifted, same) > 0.25
 
 
 def test_benjamini_hochberg_basic():
     # All p-values 1.0 → adjusted should also be 1.0
-    assert all(p == 1.0 for p in _benjamini_hochberg([1.0, 1.0, 1.0]))
+    assert all(p == 1.0 for p in benjamini_hochberg([1.0, 1.0, 1.0]))
     # A single tiny p with many large ones: BH adjusts upward
-    adj = _benjamini_hochberg([0.001, 0.5, 0.6, 0.7])
+    adj = benjamini_hochberg([0.001, 0.5, 0.6, 0.7])
     assert adj[0] < 0.01
     assert adj[1] > 0.4
 
 
 def test_benjamini_hochberg_preserves_order():
     p = [0.04, 0.001, 0.5]
-    adj = _benjamini_hochberg(p)
+    adj = benjamini_hochberg(p)
     # Returned in same order as input
     assert len(adj) == 3
     assert adj[1] < adj[0]                # tiny p stays tiny
@@ -179,7 +179,7 @@ def test_benjamini_hochberg_preserves_order():
 
 def test_benjamini_hochberg_matches_independent_known_answer_vector():
     """Exact vector calculated from p*m/rank plus reverse cumulative minima."""
-    adjusted = _benjamini_hochberg([0.01, 0.04, 0.03, 0.002])
+    adjusted = benjamini_hochberg([0.01, 0.04, 0.03, 0.002])
     assert adjusted == pytest.approx([0.02, 0.04, 0.04, 0.008], abs=1e-15)
 
 
@@ -194,11 +194,11 @@ def test_detector_requires_both_significance_and_effect_gates(monkeypatch):
         effect_size_threshold=0.2,
     )
 
-    monkeypatch.setattr(drift, "fisher_exact", lambda *_args, **_kwargs: (0.0, 0.02))
+    monkeypatch.setattr(drift, "fisher_exact_two_sided", lambda *_args: 0.02)
     monkeypatch.setattr(drift, "_cliffs_delta", lambda *_args: -1.0)
     assert detector.detect(current=current, baseline=baseline) == []
 
-    monkeypatch.setattr(drift, "fisher_exact", lambda *_args, **_kwargs: (0.0, 0.001))
+    monkeypatch.setattr(drift, "fisher_exact_two_sided", lambda *_args: 0.001)
     monkeypatch.setattr(drift, "_cliffs_delta", lambda *_args: -0.1)
     assert detector.detect(current=current, baseline=baseline) == []
 
@@ -215,15 +215,15 @@ def test_detector_gate_boundaries_are_strict(monkeypatch):
     )
 
     monkeypatch.setattr(drift, "_cliffs_delta", lambda *_args: -0.21)
-    monkeypatch.setattr(drift, "fisher_exact", lambda *_args, **_kwargs: (0.0, 0.01))
+    monkeypatch.setattr(drift, "fisher_exact_two_sided", lambda *_args: 0.01)
     assert detector.detect(current=current, baseline=baseline) == []
 
     monkeypatch.setattr(drift, "_cliffs_delta", lambda *_args: -0.2)
-    monkeypatch.setattr(drift, "fisher_exact", lambda *_args, **_kwargs: (0.0, 0.009))
+    monkeypatch.setattr(drift, "fisher_exact_two_sided", lambda *_args: 0.009)
     assert detector.detect(current=current, baseline=baseline) == []
 
     monkeypatch.setattr(drift, "_cliffs_delta", lambda *_args: -0.200001)
-    monkeypatch.setattr(drift, "fisher_exact", lambda *_args, **_kwargs: (0.0, 0.009))
+    monkeypatch.setattr(drift, "fisher_exact_two_sided", lambda *_args: 0.009)
     assert len(detector.detect(current=current, baseline=baseline)) == 1
 
 
@@ -233,8 +233,8 @@ def test_detector_applies_known_bh_results_before_emission(monkeypatch):
     p_values = iter([0.001, 0.02, 0.04])
     monkeypatch.setattr(
         drift,
-        "fisher_exact",
-        lambda *_args, **_kwargs: (0.0, next(p_values)),
+        "fisher_exact_two_sided",
+        lambda *_args: next(p_values),
     )
     monkeypatch.setattr(drift, "_cliffs_delta", lambda *_args: -1.0)
     current = [DriftWindow(f"c{i}", "d", [0.0] * 30) for i in range(3)]
@@ -335,7 +335,7 @@ def test_bh_pools_mixed_test_types_in_one_detection_family():
     }
 
     raw = [by_cluster[key].p_value for key in order]
-    expected_pooled = _benjamini_hochberg(raw)
+    expected_pooled = benjamini_hochberg(raw)
     emitted = [by_cluster[key].p_value_adjusted for key in order]
 
     assert np.allclose(emitted, expected_pooled, atol=1e-12)

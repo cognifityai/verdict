@@ -8,7 +8,7 @@ number does NOT condemn this path — you must measure it directly.
 
 It answers: on a set of real (query, response) examples that YOU labeled PASS/FAIL
 per dimension, how often does the judge's PASS/FAIL agree with yours? Reported as
-per-dimension and pooled Cohen's κ / Gwet's AC2 with 95% bootstrap CIs.
+per-dimension and pooled Cohen's κ / Gwet's AC1 with 95% bootstrap CIs.
 
 Why the bar here can be lower than "κ ≥ 0.6 vs humans": drift measures CHANGE vs a
 baseline, so a judge that is consistently biased but STABLE still detects a real
@@ -50,7 +50,8 @@ sys.path.insert(0, str(HERE.parent / "packages" / "verdict" / "src"))
 sys.path.insert(0, str(HERE.parent / "packages" / "verdict_eval" / "src"))
 
 # Reuse the tested metric functions from the ranking harness (single source).
-from verify_judge_alignment import bootstrap_ci, gwets_ac2  # noqa: E402
+from verdict.statistics import gwet_ac1  # noqa: E402
+from verify_judge_alignment import bootstrap_ci  # noqa: E402
 
 DIMENSIONS = ["groundedness", "relevance", "completeness", "safety", "instruction_following"]
 
@@ -110,10 +111,10 @@ def _report(per_dim_pairs: dict[str, list[tuple[int, int]]]) -> int:
         h = [p[0] for p in pairs]
         j = [p[1] for p in pairs]
         agree = sum(1 for a, b in pairs if a == b) / n
-        ac2 = gwets_ac2(h, j, 2)
-        lo, hi = bootstrap_ci(pairs, gwets_ac2, 2)
+        ac1 = gwet_ac1(h, j, 2)
+        lo, hi = bootstrap_ci(pairs, gwet_ac1, 2)
         return (f"  {name:22s}  n={n:<4d}  agree={agree:.3f}  "
-                f"AC2={ac2:.3f} [95% CI {lo:.3f}, {hi:.3f}]")
+                f"AC1={ac1:.3f} [95% CI {lo:.3f}, {hi:.3f}]")
 
     print("\nPer-dimension agreement (judge PASS/FAIL vs your PASS/FAIL):")
     for dim in DIMENSIONS:
@@ -123,7 +124,7 @@ def _report(per_dim_pairs: dict[str, list[tuple[int, int]]]) -> int:
     print("\nPooled (all dimensions):")
     print(_line("ALL", pooled))
 
-    # Pooled confusion + verdict off the pooled AC2 CI lower bound.
+    # Pooled confusion + verdict off the pooled AC1 CI lower bound.
     tp = sum(1 for a, b in pooled if a == 1 and b == 1)
     tn = sum(1 for a, b in pooled if a == 0 and b == 0)
     fp = sum(1 for a, b in pooled if a == 0 and b == 1)   # judge PASS, you FAIL
@@ -133,7 +134,7 @@ def _report(per_dim_pairs: dict[str, list[tuple[int, int]]]) -> int:
     print(f"    you:PASS   {tp:>7d}     {fn:>7d}")
     print(f"    you:FAIL   {fp:>7d}     {tn:>7d}")
 
-    lo, hi = bootstrap_ci(pooled, gwets_ac2, 2)
+    lo, hi = bootstrap_ci(pooled, gwet_ac1, 2)
     if lo >= 0.60:
         verdict = "STRONG — CI lower bound ≥ 0.60. Trustworthy binary signal."
     elif lo >= 0.40:
@@ -204,10 +205,10 @@ def run_offline() -> int:
         h = rng.randint(0, 1)
         j = h if rng.random() < 0.80 else 1 - h
         pairs.append((h, j))
-    ac2 = gwets_ac2([p[0] for p in pairs], [p[1] for p in pairs], 2)
-    lo, hi = bootstrap_ci(pairs, gwets_ac2, 2)
-    print(f"  Metric sanity: 80%-agree synthetic -> AC2={ac2:.3f} [CI {lo:.3f}, {hi:.3f}]")
-    assert 0.4 <= ac2 <= 0.9, "metric out of expected band"
+    ac1 = gwet_ac1([p[0] for p in pairs], [p[1] for p in pairs], 2)
+    lo, hi = bootstrap_ci(pairs, gwet_ac1, 2)
+    print(f"  Metric sanity: 80%-agree synthetic -> AC1={ac1:.3f} [CI {lo:.3f}, {hi:.3f}]")
+    assert 0.4 <= ac1 <= 0.9, "metric out of expected band"
     print("  Wiring OK. Run --labeled with your own PASS/FAIL data for a real number.")
     return 0
 

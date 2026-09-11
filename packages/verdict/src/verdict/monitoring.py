@@ -15,6 +15,8 @@ from dataclasses import dataclass, fields
 from datetime import datetime
 from enum import Enum
 
+from verdict.statistics import benjamini_hochberg, fisher_exact_two_sided
+
 
 class WindowMode(str, Enum):
     COUNT = "count"
@@ -1186,7 +1188,7 @@ def compare_manifest(units, manifest: CohortManifest, policy: MonitorPolicy) -> 
             current_n = current_true + current_false
             if reference_n < policy.minimum_reference or current_n < policy.minimum_current:
                 continue
-            p_value = _fisher_two_sided(
+            p_value = fisher_exact_two_sided(
                 reference_true,
                 reference_false,
                 current_true,
@@ -1206,7 +1208,7 @@ def compare_manifest(units, manifest: CohortManifest, policy: MonitorPolicy) -> 
                     p_value,
                 )
             )
-    adjusted = _benjamini_hochberg([item[-1] for item in raw])
+    adjusted = benjamini_hochberg([item[-1] for item in raw])
     metrics = tuple(
         MetricComparison(
             name, reference_n, current_n, reference_value, current_value,
@@ -1418,53 +1420,6 @@ def judgment_metric_states(
         else:
             states[dimension] = verdict_label(getattr(matches[0], "verdict", None)).lower()
     return states
-
-
-def _fisher_two_sided(a: int, b: int, c: int, d: int) -> float:
-    row1, col1, total = a + b, a + c, a + b + c + d
-    lower, upper = max(0, row1 - (total - col1)), min(row1, col1)
-    log_denominator = (
-        math.lgamma(total + 1)
-        - math.lgamma(row1 + 1)
-        - math.lgamma(total - row1 + 1)
-    )
-
-    def log_probability(x: int) -> float:
-        return (
-            math.lgamma(col1 + 1)
-            - math.lgamma(x + 1)
-            - math.lgamma(col1 - x + 1)
-            + math.lgamma(total - col1 + 1)
-            - math.lgamma(row1 - x + 1)
-            - math.lgamma(total - col1 - row1 + x + 1)
-            - log_denominator
-        )
-
-    observed_log = log_probability(a)
-    selected_log_sum = -math.inf
-    for x in range(lower, upper + 1):
-        current_log = log_probability(x)
-        if current_log <= observed_log + 1e-12:
-            if selected_log_sum == -math.inf:
-                selected_log_sum = current_log
-            else:
-                high, low = max(selected_log_sum, current_log), min(
-                    selected_log_sum, current_log
-                )
-                selected_log_sum = high + math.log1p(math.exp(low - high))
-    return min(1.0, math.exp(selected_log_sum))
-
-
-def _benjamini_hochberg(values: list[float]) -> list[float]:
-    if not values:
-        return []
-    ordered = sorted(enumerate(values), key=lambda item: item[1])
-    adjusted = [1.0] * len(values)
-    running = 1.0
-    for rank, (index, value) in reversed(list(enumerate(ordered, start=1))):
-        running = min(running, value * len(values) / rank)
-        adjusted[index] = min(1.0, running)
-    return adjusted
 
 
 def monitor_policy_to_json(policy: MonitorPolicy) -> str:

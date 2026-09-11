@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -20,6 +19,7 @@ from verdict.schema import (
     EvaluatorHealthStatus,
     Verdict,
 )
+from verdict.statistics import wilson_interval
 
 
 @dataclass(frozen=True)
@@ -119,23 +119,6 @@ def sentinel_set_fingerprint(examples: list[SentinelExample]) -> str:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
-def _wilson_interval(correct: float, total: int) -> tuple[float | None, float | None]:
-    if total <= 0:
-        return None, None
-    z = 1.959963984540054
-    observed = correct / total
-    denominator = 1 + z * z / total
-    center = (observed + z * z / (2 * total)) / denominator
-    half_width = (
-        z
-        * math.sqrt(
-            observed * (1 - observed) / total + z * z / (4 * total * total)
-        )
-        / denominator
-    )
-    return max(0.0, center - half_width), min(1.0, center + half_width)
-
-
 def evaluate_judge_health(
     judge,
     examples: list[SentinelExample],
@@ -193,7 +176,7 @@ def evaluate_judge_health(
         correct_examples / completed_examples if completed_examples else 0.0
     )
     label_agreement = correct / total if total else 0.0
-    low, high = _wilson_interval(correct_examples, completed_examples)
+    low, high = wilson_interval(correct_examples, completed_examples)
     if completed_examples < minimum_examples:
         status = EvaluatorHealthStatus.INSUFFICIENT_DATA
     elif errors:

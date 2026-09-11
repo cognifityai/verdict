@@ -3,7 +3,7 @@
 The missing orchestration around `verdict_eval.correlator.UserSignalCorrelator`.
 It reads persisted judgments + user signals from storage, joins each user
 signal's trace_id to that trace's overall judge verdict, runs the correlator,
-and prints the resulting CorrelationReport (agreement, Gwet AC2, disagreement
+and prints the resulting CorrelationReport (agreement, Gwet AC1, disagreement
 examples, interpretation).
 
 Overall verdict per trace = PASS if a majority of the judgment's dimensions are
@@ -332,11 +332,11 @@ def _print_report(report, join_stats: dict) -> None:
             f"[{report.raw_agreement_ci_low:.3f}, {report.raw_agreement_ci_high:.3f}]"
         )
     print(f"Cohen's kappa:             {report.cohens_kappa:.3f}")
-    print(f"Gwet's AC2:                {report.gwet_ac2:.3f}")
-    if report.gwet_ac2_ci_low is not None:
+    print(f"Gwet's AC1:                {report.gwet_ac1:.3f}")
+    if report.gwet_ac1_ci_low is not None:
         print(
             "  95% bootstrap CI:       "
-            f"[{report.gwet_ac2_ci_low:.3f}, {report.gwet_ac2_ci_high:.3f}]"
+            f"[{report.gwet_ac1_ci_low:.3f}, {report.gwet_ac1_ci_high:.3f}]"
         )
     print(f"Judge positive rate:       {report.judge_positive_rate:.3f}")
     print(f"User positive rate:        {report.user_positive_rate:.3f}")

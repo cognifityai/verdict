@@ -164,7 +164,7 @@
   <rect x="360" y="680" width="220" height="80" rx="10" fill="#FFFFFF" stroke="#0B1730" stroke-width="1.5"/>
   <text x="470" y="705" class="node-title" text-anchor="middle">MT-Bench Alignment</text>
   <text x="470" y="723" class="node-sub" text-anchor="middle">vs real human judgments</text>
-  <text x="470" y="738" class="node-sub" text-anchor="middle">3-way + binarized Cohen's κ / Gwet's AC2</text>
+  <text x="470" y="738" class="node-sub" text-anchor="middle">3-way + binarized Cohen's κ / Gwet's AC1</text>
 
   <rect x="600" y="680" width="220" height="80" rx="10" fill="#FFFFFF" stroke="#0B1730" stroke-width="1.5"/>
   <text x="710" y="705" class="node-title" text-anchor="middle">Multi-run validation</text>

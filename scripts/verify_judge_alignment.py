@@ -39,6 +39,8 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "packages" / "verdict" / "src"))
 sys.path.insert(0, str(HERE.parent / "packages" / "verdict_eval" / "src"))
 
+from verdict.statistics import gwet_ac1  # noqa: E402
+
 MT_BENCH_DATASET = "lmsys/mt_bench_human_judgments"
 MT_BENCH_DATASET_REVISION = "f7d2896d2cc5d80f8b55c2bbc722613555233c25"
 # This floor only rejects degenerate reports; it is not a claim that 50 pairs
@@ -52,7 +54,7 @@ def cohens_kappa(y_a: list[int], y_b: list[int], n_categories: int = 3) -> float
     Known issue: the "kappa paradox" — when both raters agree on most cases
     (high marginal pass rate), κ can be artificially deflated even with high
     raw agreement. This is exactly our situation with skewed PASS-heavy data.
-    Use `gwets_ac2` alongside this for a less paradox-prone number.
+    Use `gwet_ac1` alongside this for a less paradox-prone number.
     """
     if len(y_a) != len(y_b) or not y_a:
         return 0.0
@@ -65,45 +67,6 @@ def cohens_kappa(y_a: list[int], y_b: list[int], n_categories: int = 3) -> float
         p_a_c = sum(1 for x in y_a if x == c) / n
         p_b_c = sum(1 for x in y_b if x == c) / n
         pe += p_a_c * p_b_c
-    if pe >= 1.0:
-        return 1.0
-    return (po - pe) / (1.0 - pe)
-
-
-def gwets_ac2(y_a: list[int], y_b: list[int], n_categories: int = 3) -> float:
-    """Gwet's AC2 (2008) — agreement coefficient that fixes the kappa paradox.
-
-    Unlike Cohen's κ, Gwet's AC2 doesn't penalize agreement when the marginal
-    distribution is skewed (e.g. most things are PASS). For our use case —
-    judges that pass most responses — AC2 is methodologically more
-    appropriate than κ and gives a more honest picture of agreement.
-
-    Reference: Gwet, K. L. (2008). "Computing inter-rater reliability and
-    its variance in the presence of high agreement." British Journal of
-    Mathematical and Statistical Psychology, 61(1), 29-48.
-
-    Formula:
-        AC2 = (P_o - P_e) / (1 - P_e)
-    where:
-        P_o = observed agreement
-        P_e = chance agreement, computed differently than κ:
-              P_e = Σ_c [π_c * (1 - π_c)] / (n_categories - 1)
-              with π_c = (p_a_c + p_b_c) / 2  (averaged marginals)
-    """
-    if len(y_a) != len(y_b) or not y_a:
-        return 0.0
-    n = len(y_a)
-    agree = sum(1 for a, b in zip(y_a, y_b, strict=True) if a == b)
-    po = agree / n
-    if n_categories < 2:
-        return 1.0 if po == 1.0 else 0.0
-    pe = 0.0
-    for c in range(n_categories):
-        p_a_c = sum(1 for x in y_a if x == c) / n
-        p_b_c = sum(1 for x in y_b if x == c) / n
-        pi_c = (p_a_c + p_b_c) / 2.0
-        pe += pi_c * (1 - pi_c)
-    pe = pe / (n_categories - 1)
     if pe >= 1.0:
         return 1.0
     return (po - pe) / (1.0 - pe)
@@ -147,17 +110,17 @@ def _format_ci(ci: tuple[float, float] | None) -> str:
 
 
 def _alignment_verdict(
-    ac2_ci: tuple[float, float] | None,
+    ac1_ci: tuple[float, float] | None,
 ) -> tuple[str, str, bool]:
     """Return the serialized status, explanation, and evidence-gate outcome."""
-    if ac2_ci is None:
+    if ac1_ci is None:
         return (
             "unreliable",
             "UNRELIABLE — no binarized confidence interval could be computed; "
             "do not rely on rankings.",
             False,
         )
-    lo, hi = ac2_ci
+    lo, hi = ac1_ci
     if lo >= 0.60:
         return (
             "acceptable",
@@ -184,11 +147,11 @@ def _alignment_verdict(
     )
 
 
-def _binarized_ac2(pairs3: list[tuple[int, int]]) -> tuple[float, tuple[float, float], int]:
-    """Binarized AC2 for a set of 3-way (human, judge) pairs.
+def _binarized_ac1(pairs3: list[tuple[int, int]]) -> tuple[float, tuple[float, float], int]:
+    """Binarized AC1 for a set of 3-way (human, judge) pairs.
 
-    Drops ties (label 2) from BOTH sides, then computes 2-category AC2 plus its
-    bootstrap CI. Returns (ac2, (ci_lo, ci_hi), n_binarized). n < 2 yields zeros.
+    Drops ties (label 2) from BOTH sides, then computes 2-category AC1 plus its
+    bootstrap CI. Returns (ac1, (ci_lo, ci_hi), n_binarized). n < 2 yields zeros.
     Used both for the overall headline and per-category breakdown so the two
     numbers are computed the same way.
     """
@@ -197,9 +160,9 @@ def _binarized_ac2(pairs3: list[tuple[int, int]]) -> tuple[float, tuple[float, f
         return (0.0, (0.0, 0.0), len(bin_pairs))
     bin_h = [p[0] for p in bin_pairs]
     bin_j = [p[1] for p in bin_pairs]
-    ac2 = gwets_ac2(bin_h, bin_j, n_categories=2)
-    ci = bootstrap_ci(bin_pairs, gwets_ac2, 2)
-    return (ac2, ci, len(bin_pairs))
+    ac1 = gwet_ac1(bin_h, bin_j, n_categories=2)
+    ci = bootstrap_ci(bin_pairs, gwet_ac1, 2)
+    return (ac1, ci, len(bin_pairs))
 
 
 def _tie_detection_stats(pairs3: list[tuple[int, int]]) -> dict:
@@ -408,21 +371,21 @@ def _report_payload(
     component_inconsistent_count: int,
     agree3: float,
     kappa3: float,
-    ac2_3: float,
-    ac2_3_ci: tuple[float, float] | None,
+    ac1_3: float,
+    ac1_3_ci: tuple[float, float] | None,
     bin_pairs: list[tuple[int, int]],
     agree_bin: float,
     kappa_bin: float,
     kappa_bin_ci: tuple[float, float] | None,
-    ac2_bin: float,
-    ac2_bin_ci: tuple[float, float] | None,
+    ac1_bin: float,
+    ac1_bin_ci: tuple[float, float] | None,
     human_nontie_count: int,
     agree_human_nontie: float,
     verdict_status: str,
     verdict_message: str,
 ) -> dict:
     return {
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "mode": mode,
         "dataset": (
             {
@@ -462,16 +425,16 @@ def _report_payload(
             "threeWay": {
                 "rawAgreement": agree3,
                 "cohensKappa": kappa3,
-                "gwetsAc2": ac2_3,
-                "gwetsAc2Ci95": _ci_payload(ac2_3_ci),
+                "gwetsAc1": ac1_3,
+                "gwetsAc1Ci95": _ci_payload(ac1_3_ci),
             },
             "binarized": {
                 "pairsKept": len(bin_pairs),
                 "rawAgreement": agree_bin,
                 "cohensKappa": kappa_bin,
                 "cohensKappaCi95": _ci_payload(kappa_bin_ci),
-                "gwetsAc2": ac2_bin,
-                "gwetsAc2Ci95": _ci_payload(ac2_bin_ci),
+                "gwetsAc1": ac1_bin,
+                "gwetsAc1Ci95": _ci_payload(ac1_bin_ci),
             },
             "nonTiePairsKept": human_nontie_count,
             "nonTieAgreement": agree_human_nontie,
@@ -486,7 +449,7 @@ def run_offline(args: argparse.Namespace) -> int:
     The human labels are a realistic MIX of A/B/tie (not a degenerate all-one-
     class set — with zero human variance, κ is mathematically forced to 0
     regardless of agreement, which makes the wiring check meaningless). A noisy
-    judge agrees ~80% of the time, so both κ and AC2 land in a sane range and
+    judge agrees ~80% of the time, so both κ and AC1 land in a sane range and
     the harness is actually exercised.
     """
     import random
@@ -503,26 +466,26 @@ def run_offline(args: argparse.Namespace) -> int:
             judge.append(rng.choice([c for c in (0, 1, 2) if c != h]))
     agreement = sum(1 for h, j in zip(human, judge, strict=True) if h == j) / len(human)
     kappa = cohens_kappa(human, judge, n_categories=3)
-    ac2 = gwets_ac2(human, judge, n_categories=3)
+    ac1 = gwet_ac1(human, judge, n_categories=3)
     pairs3 = list(zip(human, judge, strict=True))
-    ac2_ci = bootstrap_ci(pairs3, gwets_ac2, 3)
+    ac1_ci = bootstrap_ci(pairs3, gwet_ac1, 3)
     bin_pairs = [(h, jl) for h, jl in pairs3 if h != 2 and jl != 2]
     bin_h = [pair[0] for pair in bin_pairs]
     bin_j = [pair[1] for pair in bin_pairs]
     agree_bin = sum(1 for h, jl in bin_pairs if h == jl) / len(bin_pairs)
     kappa_bin = cohens_kappa(bin_h, bin_j, n_categories=2)
-    ac2_bin = gwets_ac2(bin_h, bin_j, n_categories=2)
+    ac1_bin = gwet_ac1(bin_h, bin_j, n_categories=2)
     kappa_bin_ci = bootstrap_ci(bin_pairs, cohens_kappa, 2)
-    ac2_bin_ci = bootstrap_ci(bin_pairs, gwets_ac2, 2)
+    ac1_bin_ci = bootstrap_ci(bin_pairs, gwet_ac1, 2)
     human_nontie = [(h, jl) for h, jl in pairs3 if h != 2]
     agree_human_nontie = (
         sum(1 for h, jl in human_nontie if h == jl) / len(human_nontie)
     )
-    print(f"  n={len(human)}  agreement={agreement:.3f}  Cohen's κ={kappa:.3f}  Gwet's AC2={ac2:.3f}")
-    if not (0.4 <= kappa <= 0.9 and 0.4 <= ac2 <= 0.95):
-        print("  WARNING: offline κ/AC2 outside expected band — harness may be miswired.")
+    print(f"  n={len(human)}  agreement={agreement:.3f}  Cohen's κ={kappa:.3f}  Gwet's AC1={ac1:.3f}")
+    if not (0.4 <= kappa <= 0.9 and 0.4 <= ac1 <= 0.95):
+        print("  WARNING: offline κ/AC1 outside expected band — harness may be miswired.")
         return 1
-    print("  Harness wiring OK (κ and AC2 both in the expected band for ~80% agreement).")
+    print("  Harness wiring OK (κ and AC1 both in the expected band for ~80% agreement).")
     print("  NOTE: this is a WIRING check only. The real judge-vs-human number")
     print("  comes from `--mode online` against lmsys/mt_bench_human_judgments.")
     _write_json_report(
@@ -543,14 +506,14 @@ def run_offline(args: argparse.Namespace) -> int:
             component_inconsistent_count=0,
             agree3=agreement,
             kappa3=kappa,
-            ac2_3=ac2,
-            ac2_3_ci=ac2_ci,
+            ac1_3=ac1,
+            ac1_3_ci=ac1_ci,
             bin_pairs=bin_pairs,
             agree_bin=agree_bin,
             kappa_bin=kappa_bin,
             kappa_bin_ci=kappa_bin_ci,
-            ac2_bin=ac2_bin,
-            ac2_bin_ci=ac2_bin_ci,
+            ac1_bin=ac1_bin,
+            ac1_bin_ci=ac1_bin_ci,
             human_nontie_count=len(human_nontie),
             agree_human_nontie=agree_human_nontie,
             verdict_status="synthetic",
@@ -742,13 +705,13 @@ def run_online(args: argparse.Namespace) -> int:
     # 3-way kappa (includes ties as a real category)
     pairs3 = list(zip(human_labels, judge_labels, strict=True))
     kappa3 = cohens_kappa(human_labels, judge_labels, n_categories=3)
-    ac2_3 = gwets_ac2(human_labels, judge_labels, n_categories=3)
+    ac1_3 = gwet_ac1(human_labels, judge_labels, n_categories=3)
     agree3 = (
         sum(1 for h, jl in pairs3 if h == jl) / len(human_labels)
         if human_labels
         else 0.0
     )
-    ac2_3_ci = bootstrap_ci(pairs3, gwets_ac2, 3) if pairs3 else None
+    ac1_3_ci = bootstrap_ci(pairs3, gwet_ac1, 3) if pairs3 else None
 
     # Binarized kappa (Arena-Hard / MT-Bench standard: drop ties from BOTH sides
     # before computing kappa). This is the number most papers publish.
@@ -756,15 +719,15 @@ def run_online(args: argparse.Namespace) -> int:
     if bin_pairs:
         bin_h, bin_j = zip(*bin_pairs, strict=True)
         kappa_bin = cohens_kappa(list(bin_h), list(bin_j), n_categories=2)
-        ac2_bin = gwets_ac2(list(bin_h), list(bin_j), n_categories=2)
+        ac1_bin = gwet_ac1(list(bin_h), list(bin_j), n_categories=2)
         agree_bin = sum(1 for h, jl in bin_pairs if h == jl) / len(bin_pairs)
-        ac2_bin_ci = bootstrap_ci(bin_pairs, gwets_ac2, 2)
+        ac1_bin_ci = bootstrap_ci(bin_pairs, gwet_ac1, 2)
         kappa_bin_ci = bootstrap_ci(bin_pairs, cohens_kappa, 2)
     else:
         kappa_bin = 0.0
-        ac2_bin = 0.0
+        ac1_bin = 0.0
         agree_bin = 0.0
-        ac2_bin_ci = None
+        ac1_bin_ci = None
         kappa_bin_ci = None
 
     # Non-tie agreement rate (drop only HUMAN ties; treat judge ties as wrong):
@@ -779,7 +742,7 @@ def run_online(args: argparse.Namespace) -> int:
     # B-ALIGN-5: tie handling as a first-class binary detection problem.
     tie_stats = _tie_detection_stats(pairs3)
 
-    # B-ALIGN-4: per-category binarized AC2 breakdown. Group scored pairs by the
+    # B-ALIGN-4: per-category binarized AC1 breakdown. Group scored pairs by the
     # category captured during scoring, binarize within each category, and keep
     # categories with >= 5 binarized pairs. Offline mode never populates
     # `categories`, so this stays empty there (per-category is online-only).
@@ -790,12 +753,12 @@ def run_online(args: argparse.Namespace) -> int:
         for cat, h, jl in zip(categories, human_labels, judge_labels, strict=True):
             by_cat.setdefault(cat, []).append((h, jl))
         for cat, cat_pairs in by_cat.items():
-            ac2, ci, n_bin = _binarized_ac2(cat_pairs)
+            ac1, ci, n_bin = _binarized_ac1(cat_pairs)
             if n_bin < 5:
                 skipped_categories.append((cat, n_bin))
             else:
                 per_category.append({
-                    "category": cat, "ac2": ac2, "ci": ci,
+                    "category": cat, "ac1": ac1, "ci": ci,
                     "n_bin": n_bin, "n_total": len(cat_pairs),
                 })
         per_category.sort(key=lambda r: r["n_bin"], reverse=True)
@@ -817,7 +780,7 @@ def run_online(args: argparse.Namespace) -> int:
 
     # Honest verdict: a threshold is "cleared" only if the CI LOWER bound clears
     # it — not the point estimate. With small n the interval is wide on purpose.
-    verdict_status, verdict, verdict_passed = _alignment_verdict(ac2_bin_ci)
+    verdict_status, verdict, verdict_passed = _alignment_verdict(ac1_bin_ci)
     if not coverage_complete:
         verdict_status = "invalid_coverage"
         verdict = (
@@ -845,13 +808,13 @@ def run_online(args: argparse.Namespace) -> int:
         3-way agreement (A/B/Tie):
           Raw agreement:        {agree3:.3f}
           Cohen's κ:            {kappa3:.3f}   (paradox-vulnerable on skewed marginals)
-          Gwet's AC2:           {ac2_3:.3f}   [95% CI {_format_ci(ac2_3_ci)}]
+          Gwet's AC1:           {ac1_3:.3f}   [95% CI {_format_ci(ac1_3_ci)}]
 
         Binarized (Arena-Hard style — ties dropped from BOTH sides):
           Pairs kept:           {len(bin_pairs)}
           Raw agreement:        {agree_bin:.3f}
           Cohen's κ:            {kappa_bin:.3f}   [95% CI {_format_ci(kappa_bin_ci)}]
-          Gwet's AC2:           {ac2_bin:.3f}   [95% CI {_format_ci(ac2_bin_ci)}]   ← headline
+          Gwet's AC1:           {ac1_bin:.3f}   [95% CI {_format_ci(ac1_bin_ci)}]   ← headline
 
         Non-tie agreement (humans had clear winner, judge agreed):
           Pairs kept:           {len(human_nontie)}
@@ -901,24 +864,24 @@ def run_online(args: argparse.Namespace) -> int:
              Recall:              {tie_stats['recall']:.3f}   (of human ties, share the judge caught)
              F1:                  {tie_stats['f1']:.3f}
 
-        3) Binarized AC2 (ties dropped from both sides): {ac2_bin:.3f}
-             [95% CI {_format_ci(ac2_bin_ci)}]  — see Results block above.
+        3) Binarized AC1 (ties dropped from both sides): {ac1_bin:.3f}
+             [95% CI {_format_ci(ac1_bin_ci)}]  — see Results block above.
         ──────────────────────────────────────────────────
     """).strip())
 
-    # ── B-ALIGN-4: Per-category binarized AC2 ───────────────────────────────
+    # B-ALIGN-4: per-category binarized AC1.
     print()
-    print("─ Per-category (binarized AC2) (B-ALIGN-4) ───────")
+    print("─ Per-category (binarized AC1) (B-ALIGN-4) ───────")
     if not categories:
         print("  No category information on these examples — skipped.")
     elif not per_category and not skipped_categories:
         print("  No categories captured.")
     else:
-        print(f"  {'category':<14}{'AC2':>7}{'95% CI':>18}{'n_bin':>7}{'n_all':>7}")
+        print(f"  {'category':<14}{'AC1':>7}{'95% CI':>18}{'n_bin':>7}{'n_all':>7}")
         for row in per_category:
             lo, hi = row["ci"]
             ci_str = f"[{lo:.2f},{hi:.2f}]"
-            print(f"  {row['category']:<14}{row['ac2']:>7.3f}{ci_str:>18}"
+            print(f"  {row['category']:<14}{row['ac1']:>7.3f}{ci_str:>18}"
                   f"{row['n_bin']:>7}{row['n_total']:>7}")
         for cat, n_bin in skipped_categories:
             print(f"  {cat:<14}{'—':>7}{'n<5, skipped':>18}{n_bin:>7}")
@@ -945,14 +908,14 @@ def run_online(args: argparse.Namespace) -> int:
             component_inconsistent_count=n_component_inconsistent,
             agree3=agree3,
             kappa3=kappa3,
-            ac2_3=ac2_3,
-            ac2_3_ci=ac2_3_ci,
+            ac1_3=ac1_3,
+            ac1_3_ci=ac1_3_ci,
             bin_pairs=bin_pairs,
             agree_bin=agree_bin,
             kappa_bin=kappa_bin,
             kappa_bin_ci=kappa_bin_ci,
-            ac2_bin=ac2_bin,
-            ac2_bin_ci=ac2_bin_ci,
+            ac1_bin=ac1_bin,
+            ac1_bin_ci=ac1_bin_ci,
             human_nontie_count=len(human_nontie),
             agree_human_nontie=agree_human_nontie,
             verdict_status=verdict_status,

@@ -21,8 +21,8 @@ duplicate slot.
 Output: `CorrelationReport` with:
   - n_pairs total
   - judge_pos_user_pos / judge_pos_user_neg / judge_neg_user_pos / judge_neg_user_neg
-  - Cohen's κ (paradox-vulnerable; reported alongside Gwet's AC2)
-  - Gwet's AC2 (paradox-corrected, more honest on skewed marginals)
+  - Cohen's κ (paradox-vulnerable; reported alongside Gwet's AC1)
+  - Gwet's AC1 (nominal, paradox-resistant agreement for categorical labels)
   - Top disagreement examples (truncated text)
 
 User signal interpretation:
@@ -39,6 +39,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 from verdict.metrics import verdict_label
+from verdict.statistics import gwet_ac1, wilson_interval
 
 # --------------------------------------------------------------------------- #
 # Schema
@@ -127,6 +128,33 @@ class CorrelationReport:
     cohens_kappa_ci_high: float | None = None
     gwet_ac2_ci_low: float | None = None
     gwet_ac2_ci_high: float | None = None
+
+    # ``gwet_ac2*`` remain constructor fields for compatibility with released
+    # callers. The statistic has always been nominal/unweighted Gwet AC1; new
+    # code uses the accurately named aliases below.
+    @property
+    def gwet_ac1(self) -> float:
+        return self.gwet_ac2
+
+    @gwet_ac1.setter
+    def gwet_ac1(self, value: float) -> None:
+        self.gwet_ac2 = value
+
+    @property
+    def gwet_ac1_ci_low(self) -> float | None:
+        return self.gwet_ac2_ci_low
+
+    @gwet_ac1_ci_low.setter
+    def gwet_ac1_ci_low(self, value: float | None) -> None:
+        self.gwet_ac2_ci_low = value
+
+    @property
+    def gwet_ac1_ci_high(self) -> float | None:
+        return self.gwet_ac2_ci_high
+
+    @gwet_ac1_ci_high.setter
+    def gwet_ac1_ci_high(self, value: float | None) -> None:
+        self.gwet_ac2_ci_high = value
 
 
 # --------------------------------------------------------------------------- #
@@ -236,22 +264,15 @@ class UserSignalCorrelator:
             report.cohens_kappa,
         )
 
-        # Gwet's AC2 (binary) — π is mean marginal probability of "positive"
-        # AC2(2|2) = (Pa - Pe) / (1 - Pe), Pe = 2 * π * (1 - π)
-        pi = (p_judge_pos + p_user_pos) / 2.0
-        p_e_gwet = 2.0 * pi * (1.0 - pi)
-        report.gwet_ac2 = (
-            (report.raw_agreement - p_e_gwet) / (1 - p_e_gwet)
-            if (1 - p_e_gwet) > 1e-9 else 0.0
-        )
+        report.gwet_ac1 = _gwet_from_observations(observations)
 
         (
             report.raw_agreement_ci_low,
             report.raw_agreement_ci_high,
-        ) = _wilson_interval(tp + tn, n)
+        ) = wilson_interval(tp + tn, n)
         (
-            report.gwet_ac2_ci_low,
-            report.gwet_ac2_ci_high,
+            report.gwet_ac1_ci_low,
+            report.gwet_ac1_ci_high,
         ) = _bootstrap_gwet_interval(observations, self.bootstrap_samples)
 
         if n < self.minimum_pairs:
@@ -267,38 +288,11 @@ class UserSignalCorrelator:
         return report
 
 
-def _wilson_interval(correct: int, total: int) -> tuple[float | None, float | None]:
-    if total <= 0:
-        return None, None
-    z = 1.959963984540054
-    observed = correct / total
-    denominator = 1 + z * z / total
-    center = (observed + z * z / (2 * total)) / denominator
-    half_width = (
-        z
-        * math.sqrt(
-            observed * (1 - observed) / total + z * z / (4 * total * total)
-        )
-        / denominator
-    )
-    low = 0.0 if correct == 0 else max(0.0, center - half_width)
-    high = 1.0 if correct == total else min(1.0, center + half_width)
-    return low, high
-
-
 def _gwet_from_observations(observations: list[tuple[bool, bool]]) -> float:
-    n = len(observations)
-    if n == 0:
-        return 0.0
-    agreements = sum(judge == user for judge, user in observations)
-    judge_positive = sum(judge for judge, _ in observations) / n
-    user_positive = sum(user for _, user in observations) / n
-    observed_agreement = agreements / n
-    pi = (judge_positive + user_positive) / 2.0
-    expected = 2.0 * pi * (1.0 - pi)
-    return (
-        (observed_agreement - expected) / (1 - expected)
-        if (1 - expected) > 1e-9 else 0.0
+    return gwet_ac1(
+        [int(judge) for judge, _ in observations],
+        [int(user) for _, user in observations],
+        n_categories=2,
     )
 
 
@@ -351,7 +345,7 @@ def _bootstrap_gwet_interval(
 
 def _interpret(report: CorrelationReport) -> str:
     """Plain-language summary of the calibration state."""
-    kappa = report.gwet_ac2  # use AC2 — more honest on skewed marginals
+    kappa = report.gwet_ac1
     judge_positive = report.judge_pos_user_pos + report.judge_pos_user_neg
     judge_negative = report.judge_neg_user_pos + report.judge_neg_user_neg
     fp_rate = (
@@ -373,7 +367,7 @@ def _interpret(report: CorrelationReport) -> str:
         agreement_word = "poor"
 
     lines = [
-        f"Judge-user agreement is {agreement_word} (Gwet's AC2 = {kappa:.2f}).",
+        f"Judge-user agreement is {agreement_word} (Gwet's AC1 = {kappa:.2f}).",
     ]
     if fp_rate > 0.10:
         lines.append(
