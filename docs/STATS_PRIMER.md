@@ -20,7 +20,7 @@ You should be able to read this in 30-40 minutes and come away genuinely underst
 10. [Multi-testing and Benjamini-Hochberg correction](#10-multi-testing-and-benjamini-hochberg-correction)
 11. [Inter-rater agreement: do two judges agree?](#11-inter-rater-agreement-do-two-judges-agree)
 12. [Cohen's κ and its paradox](#12-cohens-κ-and-its-paradox)
-13. [Gwet's AC2 — the paradox fix](#13-gwets-ac2--the-paradox-fix)
+13. [Gwet's AC1 — the paradox fix](#13-gwets-ac1--the-paradox-fix)
 14. [Bradley-Terry — turning pairwise wins into rankings](#14-bradley-terry--turning-pairwise-wins-into-rankings)
 15. [How it all fits together in Verdict](#15-how-it-all-fits-together-in-verdict)
 16. [Quick reference card](#16-quick-reference-card)
@@ -131,7 +131,7 @@ You don't need to compute U by hand. `scipy.stats.mannwhitneyu` does it. What yo
 ### Why these two tests, and not a t-test
 
 - Our data is binary PASS/FAIL → not normal → t-test invalid.
-- For binary outcomes, Mann-Whitney degrades into a heavily-tied rank test that's only a weaker proxy for a two-proportion comparison — so we use **Fisher's exact test**, which answers exactly that question without approximation. `scipy.stats.fisher_exact` on the 2×2 (pass/fail × current/baseline) table returns the p-value directly.
+- For binary outcomes, Mann-Whitney degrades into a heavily-tied rank test that's only a weaker proxy for a two-proportion comparison — so we use **Fisher's exact test**, which answers exactly that question without approximation. Verdict's dependency-free implementation computes the two-sided p-value from the 2×2 (pass/fail × current/baseline) table and is differentially checked against SciPy.
 - For ordinal/continuous scores there are no such ties, and Mann-Whitney is exactly the right non-parametric two-sample test — the one LMSys's Chatbot Arena, Arena-Hard-Auto, and most modern LLM eval work reach for.
 - Either way we stay non-parametric and pair the test with **Cliff's δ** as the effect size (next section).
 
@@ -486,13 +486,13 @@ The paradox has been known since Feinstein and Cicchetti (1990) and is one of th
 
 ---
 
-## 13. Gwet's AC2 — the paradox fix
+## 13. Gwet's AC1 — the paradox fix
 
-**Gwet's AC2** (Gwet, 2008) was specifically designed to fix the kappa paradox. It uses a different formula for chance agreement that doesn't get inflated when marginals are skewed.
+**Gwet's AC1** (Gwet, 2008) was designed to avoid the kappa paradox for nominal, unweighted categories. It uses a different formula for chance agreement that does not become inflated when marginals are skewed.
 
 ### The formula
 
-> AC2 = (observed agreement − P_e) / (1 − P_e)
+> AC1 = (observed agreement − P_e) / (1 − P_e)
 >
 > where P_e = Σ [π_c × (1 − π_c)] / (n_categories − 1)
 >
@@ -502,12 +502,12 @@ The key change: instead of P_e = Σ p_a_c × p_b_c (product of marginals, which 
 
 ### Same interpretation scale
 
-You can use the same Landis & Koch thresholds for AC2:
+Verdict currently uses the same operational thresholds for AC1:
 
-- AC2 ≥ 0.80: strong
-- AC2 0.60–0.80: acceptable
-- AC2 0.40–0.60: preliminary
-- AC2 < 0.40: unreliable
+- AC1 ≥ 0.80: strong
+- AC1 0.60–0.80: acceptable
+- AC1 0.40–0.60: preliminary
+- AC1 < 0.40: unreliable
 
 The difference is *what number you get*, not how to interpret it.
 
@@ -538,13 +538,13 @@ Now consider an extreme case: 99 PASSes both, 1 disagreement.
 Raw agreement is still 95/100 = 95%.
 
 - Cohen's κ ≈ -0.04 (catastrophically dropped to near zero, paradoxically)
-- Gwet's AC2 ≈ 0.85 (handles the skew correctly)
+- Gwet's AC1 ≈ 0.85 (handles the skew correctly)
 
-Same raters, same raw agreement, but Cohen's κ drops to nothing while AC2 stays sensible.
+Same raters, same raw agreement, but Cohen's κ drops to nothing while AC1 stays sensible.
 
 ### Why Verdict reports both
 
-Verdict reports **both** Cohen's κ and Gwet's AC2 side by side with a
+Verdict reports **both** Cohen's κ and Gwet's AC1 side by side with a
 methodology note. Readers familiar with κ get their reference number, while
 readers who know about the paradox get the methodologically safer statistic for
 skewed rubric data.
@@ -649,10 +649,10 @@ For a sample of MT-Bench pairs (or a customer's labeled subset):
    fail the evidence gate if the selected run is incomplete.
 3. Compare the remaining usable verdicts to the human ground truth.
 4. **Cohen's κ** → chance-corrected agreement (paradox-vulnerable on skewed marginals)
-5. **Gwet's AC2** → chance-corrected agreement (paradox-corrected; preferred for our data)
+5. **Gwet's AC1** → chance-corrected agreement for nominal categories (paradox-resistant; preferred for our data)
 6. **Non-tie agreement** → raw agreement on cases where humans had a clear winner
 
-Both κ and AC2 are reported side by side. Workload-specific calibration should
+Both κ and AC1 are reported side by side. Workload-specific calibration should
 determine whether rankings are shown as decision support or treated as
 review-only.
 
@@ -677,7 +677,7 @@ This is `packages/verdict_eval/src/verdict_eval/compare.py` plus `pairwise.py`.
 Notice that every pipeline does the same three things in different ways:
 
 1. **Compare two distributions** (Fisher/Mann-Whitney, Cliff's δ, Wasserstein)
-2. **Quantify the disagreement** between observations (κ, AC2, BT win rate)
+2. **Quantify the disagreement** between observations (κ, AC1, BT win rate)
 3. **Correct for chance / multiple testing** (BH adjustment, chance-corrected agreement)
 
 That's basically all of frequentist statistics in three sentences.
@@ -697,7 +697,7 @@ That's basically all of frequentist statistics in three sentences.
 | I ran many tests — am I just getting false positives? | Benjamini-Hochberg correction | adjusted p-values |
 | Did judge evaluability deteriorate? | Deterministic UNCLEAR-rate gate | ≥15-point increase with total-n floor |
 | Do two raters agree (chance-corrected)? | Cohen's κ | -1 to +1; ≥ 0.6 acceptable |
-| Same but doesn't break on skewed marginals? | Gwet's AC2 | same scale |
+| Same but doesn't break on skewed marginals? | Gwet's AC1 | same scale |
 | Turn pairwise wins into a ranking with CIs? | Bradley-Terry + bootstrap | per-model rating + CI |
 
 The most important point: **p-value and effect size answer different questions and you need both**. p-value alone lets trivial differences trigger alarms with enough data. Effect size alone lets random fluctuations look meaningful. Use them together.

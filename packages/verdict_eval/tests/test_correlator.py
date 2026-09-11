@@ -34,6 +34,16 @@ def test_report_appends_new_fields_after_published_constructor() -> None:
     assert [field.name for field in fields(CorrelationReport)[:14]] == published_fields
 
 
+def test_released_ac2_fields_alias_the_correctly_named_ac1_properties() -> None:
+    report = CorrelationReport(gwet_ac2=0.75, gwet_ac2_ci_low=0.5, gwet_ac2_ci_high=0.9)
+
+    assert report.gwet_ac1 == 0.75
+    assert report.gwet_ac1_ci_low == 0.5
+    assert report.gwet_ac1_ci_high == 0.9
+    report.gwet_ac1 = 0.8
+    assert report.gwet_ac2 == 0.8
+
+
 def test_perfect_agreement() -> None:
     pairs = (
         [CorrelationPair(trace_id=f"p-{i}", judge_verdict="PASS",
@@ -45,11 +55,11 @@ def test_perfect_agreement() -> None:
     assert r.n_pairs == 100
     assert r.raw_agreement == 1.0
     assert r.cohens_kappa > 0.95
-    assert r.gwet_ac2 > 0.95
+    assert r.gwet_ac1 > 0.95
     assert r.status == "ready"
     assert r.raw_agreement_ci_low is not None
     assert r.raw_agreement_ci_high == 1.0
-    assert r.gwet_ac2_ci_low == r.gwet_ac2_ci_high == 1.0
+    assert r.gwet_ac1_ci_low == r.gwet_ac1_ci_high == 1.0
 
 
 def test_perfect_disagreement() -> None:
@@ -129,12 +139,12 @@ def test_lenient_judge_surfaces_examples() -> None:
     assert r.judge_pos_user_neg == 20
     assert r.judge_pos_user_pos == 5
     assert len(r.examples_judge_pass_user_neg) == 3
-    assert r.gwet_ac2 < 0.5
+    assert r.gwet_ac1 < 0.5
     assert "appears lenient" in r.interpretation
 
 
-def test_gwet_ac2_on_skewed_marginals() -> None:
-    """When most pairs are PASS / thumbs_up, Cohen's κ tanks but AC2 stays
+def test_gwet_ac1_on_skewed_marginals() -> None:
+    """When most pairs are PASS / thumbs_up, Cohen's κ tanks but AC1 stays
     high — the canonical kappa-paradox case. This proves the correlator
     reports both."""
     pairs = (
@@ -146,9 +156,9 @@ def test_gwet_ac2_on_skewed_marginals() -> None:
     r = UserSignalCorrelator().correlate(pairs)
     # Skewed marginals make Cohen's κ near zero (paradox) even at 95% agreement
     assert r.raw_agreement == 0.95
-    # AC2 should be much higher than κ here
-    assert r.gwet_ac2 > r.cohens_kappa
-    assert -1 <= r.gwet_ac2_ci_low <= r.gwet_ac2_ci_high <= 1
+    # AC1 should be much higher than κ here
+    assert r.gwet_ac1 > r.cohens_kappa
+    assert -1 <= r.gwet_ac1_ci_low <= r.gwet_ac1_ci_high <= 1
 
 
 def test_low_sample_report_is_explicitly_not_calibrated() -> None:
@@ -166,7 +176,7 @@ def test_low_sample_report_is_explicitly_not_calibrated() -> None:
     assert report.n_pairs == 5
     assert report.status == "low_data"
     assert report.raw_agreement_ci_low is not None
-    assert report.gwet_ac2_ci_low is not None
+    assert report.gwet_ac1_ci_low is not None
     assert "do not label this judge calibrated" in report.interpretation
 
 
@@ -185,7 +195,7 @@ def test_degenerate_all_negative_data_has_bounded_uncertainty() -> None:
     assert report.status == "ready"
     assert report.raw_agreement == 1.0
     assert 0 <= report.raw_agreement_ci_low <= report.raw_agreement_ci_high <= 1
-    assert -1 <= report.gwet_ac2_ci_low <= report.gwet_ac2_ci_high <= 1
+    assert -1 <= report.gwet_ac1_ci_low <= report.gwet_ac1_ci_high <= 1
 
 
 def test_duplicate_trace_signals_do_not_pseudoreplicate_confidence_sample() -> None:

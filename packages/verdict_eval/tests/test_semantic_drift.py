@@ -17,7 +17,7 @@ from verdict_eval.semantic_drift import (
     _cosine_distance,
     _l2_normalize_rows,
     _permutation_p_value,
-    _psi_1d,
+    _psi_baseline_quantile,
 )
 
 
@@ -117,7 +117,7 @@ def test_below_min_sample_size_returns_none() -> None:
     assert sig is None
 
 
-def test_psi_1d_is_non_negative() -> None:
+def test_baseline_quantile_psi_is_non_negative() -> None:
     """PSI is a magnitude — it must never be negative regardless of which way
     the distribution shifted (the old signed return could go negative)."""
     rng = np.random.default_rng(0)
@@ -125,9 +125,9 @@ def test_psi_1d_is_non_negative() -> None:
     # Shift in either direction; both must give PSI >= 0.
     shifted_up = rng.normal(1.5, 1.0, 500)
     shifted_down = rng.normal(-1.5, 1.0, 500)
-    assert _psi_1d(shifted_up, base) >= 0.0
-    assert _psi_1d(shifted_down, base) >= 0.0
-    assert _psi_1d(base, base) >= 0.0
+    assert _psi_baseline_quantile(shifted_up, base) >= 0.0
+    assert _psi_baseline_quantile(shifted_down, base) >= 0.0
+    assert _psi_baseline_quantile(base, base) >= 0.0
 
 
 def test_l2_normalize_rows_unit_length_and_zero_guard() -> None:

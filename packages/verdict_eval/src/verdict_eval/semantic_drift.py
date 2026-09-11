@@ -207,7 +207,7 @@ class SemanticDriftDetector:
         max_wass = float(wasserstein_per_dim.max())
         var_per_dim = base_emb.var(axis=0)
         dominant = int(np.argmax(var_per_dim))
-        cluster_psi = _psi_1d(cur_emb[:, dominant], base_emb[:, dominant])
+        cluster_psi = _psi_baseline_quantile(cur_emb[:, dominant], base_emb[:, dominant])
 
         # Gate: significant AND meaningfully large
         triggered = (
@@ -288,7 +288,9 @@ def _permutation_p_value(
     return (count + 1) / (n_permutations + 1)
 
 
-def _psi_1d(current: np.ndarray, baseline: np.ndarray, bins: int = 10) -> float:
+def _psi_baseline_quantile(
+    current: np.ndarray, baseline: np.ndarray, bins: int = 10,
+) -> float:
     """1D PSI on continuous values. Uses baseline-driven quantile bins so
     skewed distributions don't break the calculation."""
     if len(current) < 2 or len(baseline) < 2:
@@ -306,7 +308,7 @@ def _psi_1d(current: np.ndarray, baseline: np.ndarray, bins: int = 10) -> float:
     eps = 1e-6
     base_pct = base_hist / max(base_hist.sum(), 1) + eps
     cur_pct = cur_hist / max(cur_hist.sum(), 1) + eps
-    # PSI is a magnitude; wrap in abs() to match the sibling _psi in drift.py
+    # PSI is a magnitude; wrap in abs() to match the discrete/linear PSI path.
     # (floating-point rounding can otherwise leave a tiny negative value).
     return abs(float(np.sum((cur_pct - base_pct) * np.log(cur_pct / base_pct))))
 

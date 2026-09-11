@@ -57,9 +57,10 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
 import numpy as np
-from scipy.stats import fisher_exact, mannwhitneyu, wasserstein_distance
+from scipy.stats import mannwhitneyu, wasserstein_distance
 from verdict.metrics import verdict_label
 from verdict.schema import DriftDirection, DriftSignal, Judgment
+from verdict.statistics import benjamini_hochberg, fisher_exact_two_sided
 
 log = logging.getLogger("verdict_eval.drift")
 
@@ -192,7 +193,14 @@ class DriftDetector:
                         [pass_cur, len(cur_arr) - pass_cur],
                         [pass_base, len(base_arr) - pass_base],
                     ]
-                    odds, p = fisher_exact(table, alternative="two-sided")
+                    denominator = table[0][1] * table[1][0]
+                    odds = (
+                        table[0][0] * table[1][1] / denominator
+                        if denominator else 0.0
+                    )
+                    p = fisher_exact_two_sided(
+                        table[0][0], table[0][1], table[1][0], table[1][1]
+                    )
                     stat_name = "fisher_exact"
                     stat_value = float(odds) if math.isfinite(odds) else 0.0
                 else:
@@ -205,7 +213,7 @@ class DriftDetector:
             cliffs = _cliffs_delta(cur_arr, base_arr)
             cohen = _cohens_d(cur_arr, base_arr)
             wass = _wasserstein(cur_arr, base_arr)
-            psi = _psi(cur_arr, base_arr)
+            psi = _psi_discrete_or_linear(cur_arr, base_arr)
 
             mean_cur = float(cur_arr.mean())
             mean_base = float(base_arr.mean())
@@ -239,7 +247,7 @@ class DriftDetector:
         # the correction opportunistically as data types change. UNCLEAR-rate
         # alerts use a deterministic effect threshold, not p-values, so they are
         # not part of this family.
-        adjusted = _benjamini_hochberg([result["p"] for result in raw_results])
+        adjusted = benjamini_hochberg([result["p"] for result in raw_results])
 
         signals: list[DriftSignal] = []
         for r, p_adj in zip(raw_results, adjusted, strict=True):
@@ -501,7 +509,9 @@ def _wasserstein(a: np.ndarray, b: np.ndarray) -> float:
         return 0.0
 
 
-def _psi(current: np.ndarray, baseline: np.ndarray, bins: int = 10) -> float:
+def _psi_discrete_or_linear(
+    current: np.ndarray, baseline: np.ndarray, bins: int = 10,
+) -> float:
     """Population Stability Index.
 
     Standard industry interpretation:
@@ -566,23 +576,6 @@ def _cohens_d(a: np.ndarray, b: np.ndarray) -> float:
     if pooled == 0:
         return 0.0
     return float((a.mean() - b.mean()) / pooled)
-
-
-def _benjamini_hochberg(p_values: list[float]) -> list[float]:
-    """Benjamini-Hochberg FDR control. Returns adjusted p-values, original order."""
-    if not p_values:
-        return []
-    n = len(p_values)
-    indexed = sorted(enumerate(p_values), key=lambda x: x[1])
-    adjusted = [0.0] * n
-    prev = 1.0
-    for rank, (orig_idx, p) in enumerate(reversed(indexed), start=1):
-        true_rank = n - rank + 1
-        adj = min(prev, p * n / true_rank)
-        adj = min(adj, 1.0)
-        adjusted[orig_idx] = adj
-        prev = adj
-    return adjusted
 
 
 def _recommend(direction: DriftDirection, cliffs_delta: float, wasserstein: float) -> str:

@@ -1249,10 +1249,10 @@ def test_prospective_alpha_spending_is_summable_across_repeated_looks() -> None:
 def test_large_fisher_table_is_accurate_and_bounded() -> None:
     import time
 
-    from verdict.monitoring import _fisher_two_sided
+    from verdict.statistics import fisher_exact_two_sided
 
     started = time.perf_counter()
-    result = _fisher_two_sided(8_000, 72_000, 1_500, 18_500)
+    result = fisher_exact_two_sided(8_000, 72_000, 1_500, 18_500)
     elapsed = time.perf_counter() - started
 
     assert result == pytest.approx(2.0463505882235967e-28, rel=1e-8)

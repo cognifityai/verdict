@@ -96,7 +96,8 @@ def _load_report(
         report = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise ValueError(f"cannot read result JSON: {error}") from error
-    if report.get("schemaVersion") != 1:
+    schema_version = report.get("schemaVersion")
+    if schema_version not in {1, 2}:
         raise ValueError("unsupported or missing schemaVersion")
     if report.get("mode") != mode:
         raise ValueError("result JSON identifies a different mode")
@@ -156,20 +157,43 @@ def _load_report(
     )
     if status not in allowed_statuses or not isinstance(message, str) or not message:
         raise ValueError("invalid verdict status or message")
+    metrics_root = report.get("metrics")
+    if not isinstance(metrics_root, dict):
+        raise ValueError("missing JSON field: metrics")
+    three_way = metrics_root.get("threeWay")
+    binarized = metrics_root.get("binarized")
+    if not isinstance(three_way, dict) or not isinstance(binarized, dict):
+        raise ValueError("missing JSON field: metrics")
+    old_keys = {"gwetsAc2", "gwetsAc2Ci95"}
+    new_keys = {"gwetsAc1", "gwetsAc1Ci95"}
+    expected_keys, forbidden_keys = (
+        (old_keys, new_keys) if schema_version == 1 else (new_keys, old_keys)
+    )
+    if not expected_keys <= set(three_way) or not expected_keys <= set(binarized):
+        raise ValueError("agreement keys do not match schemaVersion")
+    if forbidden_keys & (set(three_way) | set(binarized)):
+        raise ValueError("mixed AC1/legacy AC2 agreement keys")
+
+    source_name = "gwetsAc2" if schema_version == 1 else "gwetsAc1"
+    source_ci_name = f"{source_name}Ci95"
     _number(report, "metrics", "threeWay", "cohensKappa")
-    _number(report, "metrics", "threeWay", "gwetsAc2")
-    ac2_3_ci = _ci(report, "metrics", "threeWay", "gwetsAc2Ci95")
+    _number(report, "metrics", "threeWay", source_name)
+    ac1_3_ci = _ci(report, "metrics", "threeWay", source_ci_name)
     _number(report, "metrics", "binarized", "cohensKappa")
     kappa_bin_ci = _ci(report, "metrics", "binarized", "cohensKappaCi95")
-    _number(report, "metrics", "binarized", "gwetsAc2")
-    ac2_bin_ci = _ci(report, "metrics", "binarized", "gwetsAc2Ci95")
+    _number(report, "metrics", "binarized", source_name)
+    ac1_bin_ci = _ci(report, "metrics", "binarized", source_ci_name)
     _integer(report, "metrics", "binarized", "pairsKept")
     _number(report, "metrics", "nonTieAgreement")
     _integer(report, "metrics", "inconsistentCount")
     if status in {"acceptable", "preliminary", "synthetic"} and (
-        ac2_3_ci is None or kappa_bin_ci is None or ac2_bin_ci is None
+        ac1_3_ci is None or kappa_bin_ci is None or ac1_bin_ci is None
     ):
         raise ValueError("a successful evidence status requires computed confidence intervals")
+    if schema_version == 1:
+        for metrics in (three_way, binarized):
+            metrics["gwetsAc1"] = metrics["gwetsAc2"]
+            metrics["gwetsAc1Ci95"] = metrics["gwetsAc2Ci95"]
     return report
 
 
@@ -239,7 +263,7 @@ def _write_summary(
         "",
         "## Headline numbers",
         "",
-        "| Judge | Evidence | Provider :: model | n scored/available | Binarized Gwet AC2 | Binarized Cohen κ | Gate |",
+        "| Judge | Evidence | Provider :: model | n scored/available | Binarized Gwet AC1 | Binarized Cohen κ | Gate |",
         "|---|---|---|---:|---|---|---|",
     ]
     for result in results:
@@ -247,7 +271,7 @@ def _write_summary(
         lines.append(
             f"| {result.label} | {evidence} | {result.provider} :: {result.model} | "
             f"{_format_counts(result)} | "
-            f"{_format_score(result, 'gwetsAc2')} | "
+            f"{_format_score(result, 'gwetsAc1')} | "
             f"{_format_score(result, 'cohensKappa')} | "
             f"{_format_verdict(result)} |"
         )

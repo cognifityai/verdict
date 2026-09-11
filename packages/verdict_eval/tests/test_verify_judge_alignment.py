@@ -17,6 +17,12 @@ assert SPEC is not None
 verifier = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 SPEC.loader.exec_module(verifier)
+SWEEP_SPEC = importlib.util.spec_from_file_location("run_alignment_sweep_module", SWEEP_SCRIPT)
+assert SWEEP_SPEC is not None
+sweep_module = importlib.util.module_from_spec(SWEEP_SPEC)
+assert SWEEP_SPEC.loader is not None
+sys.modules[SWEEP_SPEC.name] = sweep_module
+SWEEP_SPEC.loader.exec_module(sweep_module)
 
 
 def _mtbench_row() -> dict:
@@ -78,16 +84,65 @@ def test_offline_cli_writes_machine_readable_headline_metrics(tmp_path) -> None:
 
     assert result.returncode == 0, result.stderr
     report = json.loads(output.read_text())
-    assert report["schemaVersion"] == 1
+    assert report["schemaVersion"] == 2
     assert report["dataset"] == {"name": "synthetic", "revision": None}
     assert report["judge"] == {
         "provider": "anthropic",
         "model": "fixture-judge",
     }
     assert isinstance(report["metrics"]["threeWay"]["cohensKappa"], float)
+    assert isinstance(report["metrics"]["threeWay"]["gwetsAc1"], float)
+    assert "gwetsAc2" not in report["metrics"]["threeWay"]
     assert isinstance(report["metrics"]["binarized"]["cohensKappa"], float)
     assert isinstance(report["metrics"]["nonTieAgreement"], float)
     assert isinstance(report["metrics"]["inconsistentCount"], int)
+
+
+def test_alignment_reader_accepts_legacy_ac2_labels_and_rejects_mixed_labels(
+    tmp_path,
+) -> None:
+    output = tmp_path / "alignment.json"
+    assert verifier.run_offline(SimpleNamespace(
+        provider="anthropic",
+        judge_model="fixture-judge",
+        context_mode="full",
+        json_output=str(output),
+    )) == 0
+    current = json.loads(output.read_text())
+    legacy = json.loads(json.dumps(current))
+    legacy["schemaVersion"] = 1
+    for metrics in (
+        legacy["metrics"]["threeWay"],
+        legacy["metrics"]["binarized"],
+    ):
+        metrics["gwetsAc2"] = metrics.pop("gwetsAc1")
+        metrics["gwetsAc2Ci95"] = metrics.pop("gwetsAc1Ci95")
+    output.write_text(json.dumps(legacy))
+
+    loaded = sweep_module._load_report(
+        output,
+        "anthropic",
+        "fixture-judge",
+        mode="offline",
+        expected_pairs=120,
+    )
+    assert loaded["metrics"]["binarized"]["gwetsAc1"] == legacy["metrics"][
+        "binarized"
+    ]["gwetsAc2"]
+
+    mixed = json.loads(json.dumps(current))
+    mixed["metrics"]["binarized"]["gwetsAc2"] = mixed["metrics"]["binarized"][
+        "gwetsAc1"
+    ]
+    output.write_text(json.dumps(mixed))
+    with pytest.raises(ValueError, match="mixed AC1/legacy AC2"):
+        sweep_module._load_report(
+            output,
+            "anthropic",
+            "fixture-judge",
+            mode="offline",
+            expected_pairs=120,
+        )
 
 
 def test_online_dataset_revision_is_an_immutable_commit() -> None:
@@ -95,6 +150,16 @@ def test_online_dataset_revision_is_an_immutable_commit() -> None:
 
     assert len(revision) == 40
     assert all(character in "0123456789abcdef" for character in revision)
+
+
+def test_distinct_degenerate_cohen_contracts_remain_explicit() -> None:
+    from verdict_eval.correlator import _cohen_from_observations
+
+    # Alignment treats identical one-category raters as perfect agreement;
+    # product correlation treats chance-undefined agreement as zero. Choosing
+    # between them is a methodology decision, not a refactor side effect.
+    assert verifier.cohens_kappa([1, 1], [1, 1], n_categories=2) == 1.0
+    assert _cohen_from_observations([(True, True), (True, True)]) == 0.0
 
 
 def test_alignment_sweep_propagates_when_every_verifier_run_fails(tmp_path) -> None:
@@ -266,7 +331,7 @@ def test_online_all_tie_judge_is_not_a_success(monkeypatch, tmp_path) -> None:
     assert returncode != 0
     report = json.loads(report_path.read_text())
     assert report["verdict"]["status"] == "unreliable"
-    assert report["metrics"]["binarized"]["gwetsAc2Ci95"] is None
+    assert report["metrics"]["binarized"]["gwetsAc1Ci95"] is None
 
 
 def test_online_partial_judge_failures_are_reported_and_fail_coverage(

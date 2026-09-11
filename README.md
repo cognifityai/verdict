@@ -500,10 +500,10 @@ What this repo includes:
   provider keys into the process from a managed secret store or OS credential
   manager. It builds `SUMMARY.md` from JSON rather than formatted prose and
   exits non-zero if any run fails, is incomplete, produces an invalid result,
-  or does not clear the binarized-AC2 confidence-interval gate. Online runs
+  or does not clear the binarized-AC1 confidence-interval gate. Online runs
   require at least 50 requested pairs, pin the public MT-Bench dataset revision,
   and record scored/available coverage, invalid judge output, provider errors,
-  incomplete ensemble components, the verdict, Gwet's AC2, Cohen's κ, and their
+  incomplete ensemble components, the verdict, Gwet's AC1, Cohen's κ, and their
   95% confidence intervals. Invalid/error rows are excluded from diagnostic
   agreement metrics and force the evidence gate to fail; they are never counted
   as ties. Offline rows are labeled `SYNTHETIC WIRING ONLY` inside the headline
@@ -743,7 +743,7 @@ Apache 2.0 — see [LICENSE](LICENSE).
   partial-release recovery, and the immutable rollback boundary.
 - [`docs/POC_RELEASE_PROFILE.md`](docs/POC_RELEASE_PROFILE.md) — the exact
   provider, persistence, privacy, and evidence boundaries for customer POCs.
-- [`docs/STATS_PRIMER.md`](docs/STATS_PRIMER.md) — plain-language explanation of every statistical method Verdict uses (Fisher's exact, Cliff's δ, Wasserstein, PSI, Benjamini-Hochberg, Cohen's κ / Gwet's AC2, Bradley-Terry) and *why* each was chosen.
+- [`docs/STATS_PRIMER.md`](docs/STATS_PRIMER.md) — plain-language explanation of every statistical method Verdict uses (Fisher's exact, Cliff's δ, Wasserstein, PSI, Benjamini-Hochberg, Cohen's κ / Gwet's AC1, Bradley-Terry) and *why* each was chosen.
 - [`docs/EXPLAINER.md`](docs/EXPLAINER.md) — how the pipeline works end to end.
 - [`docs/adrs/`](docs/adrs/) — architecture decision records.
 - [`docs/v1-roadmap.md`](docs/v1-roadmap.md) — known limits and follow-up work.

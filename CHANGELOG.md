@@ -28,6 +28,10 @@ the product is refined.
 
 ### Changed
 
+- Shared Fisher exact, Benjamini-Hochberg, Wilson-interval, and Gwet agreement
+  calculations now use one dependency-free implementation. Agreement reports
+  correctly identify the existing nominal statistic as Gwet's AC1; versioned
+  alignment readers still accept earlier AC2-labeled reports.
 - Evaluator Lab now displays long-running judge activity and elapsed time,
   prevents repeated submission while a request is active, and explains that
   coverage belongs to the exact evaluator configuration. New Monitor previews
