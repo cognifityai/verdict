@@ -176,10 +176,11 @@ exact candidate:
 3. Storage and V1 ReadPort tests prove the value reaches the exact model-call
    `trace_id` without adding any DTO field or schema migration.
 4. A real installed OpenAI SDK calls the pinned real LiteLLM proxy with the
-   yielded value in LiteLLM's supported request-ID header; LiteLLM returns the
-   same request ID and Verdict's real capture/read path returns the same Trace
-   ID. The provider behind LiteLLM may be the repository's deterministic local
-   provider so the test spends no external model budget.
+   yielded value in LiteLLM's supported `x-litellm-trace-id` header. A
+   database-backed LiteLLM spend-log read returns that exact value as its
+   `session_id`, while Verdict's real capture/read path returns it as the
+   model-call Trace ID. The provider behind LiteLLM may be the repository's
+   deterministic local provider so the test spends no external model budget.
 5. Adversarial tests cover no instrumentation, unsampled success, provider
    failure before gateway evidence, two calls, concurrent copied contexts,
    lazy stream entry outside the context, and a persistence failure. They must
