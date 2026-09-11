@@ -104,7 +104,8 @@ eligible denominator, Fisher's exact p-value, Benjamini-Hochberg adjustment,
 and effect-size gate. With provider/model or reviewed-cluster grouping, Verdict
 computes separate group-by-metric comparisons and adjusts across the complete
 tested family; it does not pool the selected groups. The Measurement selector
-can add stored PASS/FAIL results from one complete evaluator identity without
+defaults to deterministic trace checks and can explicitly add stored PASS/FAIL
+results from one complete evaluator identity without
 running or paying for a judge. That evaluator fingerprint and its expected
 dimensions become immutable policy
 inputs. A reviewed-cluster policy also pins its registry version and completes
@@ -137,9 +138,10 @@ evaluation status, finding severity, and drift comparison independently.
 monitor distinguishes traffic collection from a full cohort awaiting selected
 evaluator results.
 The dashboard has five top-level workspaces: Overview, Explore, Evaluate,
-Monitor, and Settings. **Monitor → Signals** shows the latest persisted
-fixed-window evaluation signals. Monitor keeps those signals, stored historical
-candidates, and the active prospective policy visibly separate.
+Monitor, and Settings. Monitor is the current drift workflow: it shows reviewed
+historical comparisons, the active prospective policy, and optional facets.
+Results created by older fixed-window pipeline releases remain available under
+**Monitor → Legacy History** but are read-only and do not affect current status.
 
 The Verdict Python SDK. Auto-instruments your LLM calls via `wrapt` and
 captures them into a vendor-neutral `Trace` schema (attribute *names* follow
@@ -221,10 +223,9 @@ new reads/writes, drains every accepted FIFO write, stops and joins the worker,
 then closes the inner adapter; post-close `flush()` is an idempotent no-op.
 The `0.1.0a17` POC profile uses `buffered_writes=False`. Buffered mode requires
 an explicit `shutdown()` imported from `verdict.client` before process exit.
-Completed drift analyses use atomic `DriftRun` snapshots, including explicit
-zero-signal runs. Storage readers select a run marker and its exact signals from
-one snapshot; deleting a matched attributed signal window removes the completed
-run as a unit. `prune_before()`
+Fixed-window `DriftRun` snapshots created by older releases remain readable for
+compatibility; the current pipeline does not create or replace them.
+`prune_before()`
 removes expired standalone and orphan span rows while preserving an old span
 referenced by a retained Trace. SQLite and PostgreSQL execute multi-table trace
 deletion and pruning atomically and serialize concurrent trace writers while
@@ -275,13 +276,10 @@ totals. Provider/content-state filters apply to the current page. Judge
 telemetry remains in aggregate cost and store totals but does not displace
 application traces from this view. A `Historical
 metadata-only trace` means content was not captured when that specific trace was
-recorded; it does not report the application's current capture setting. Legacy
-Drift and Judge empty states show global content-bearing trace availability over
-the legacy pipeline's default 24-hour current and 7-day baseline windows. Meeting both displayed
-totals does not establish statistical readiness: the pipeline still checks each
-eligible cluster and rubric dimension for enough judged traces, and job flags
-may use different windows or sample floors. The dashboard distinguishes a run
-that has not completed from a completed run with zero signals.
+recorded; it does not report the application's current capture setting. Monitor
+previews show eligible evidence for the selected count-based or explicit
+event-time cohorts. Fixed-window results produced by older releases remain
+available only as read-only legacy history.
 
 Upgrade an existing synchronized `0.1.0a5` through `0.1.0a16` environment with
 `python -m pip install --upgrade`

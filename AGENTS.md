@@ -203,9 +203,10 @@ The following cases are mandatory whenever their area changes:
 - Judge-health gates count exact-match sentinel examples, never correlated
   labels. Keep label agreement as a separately named diagnostic and test
   unequal label counts per example.
-- Drift consumers read one atomic latest `DriftRun` snapshot, including an
-  explicit zero-signal run. Test rollback, concurrent replacement, legacy
-  signals without run identity, and deletion without partial snapshots.
+- Current drift consumers read one expected-head `MonitorComparison` successor
+  from the active policy. Test empty activation, collection, evaluator waiting,
+  concurrent successors, and stale-reference handling. Legacy `DriftRun` rows
+  remain read-only history and must not affect current status.
 - Dashboard request tests must execute reordered and failed fetches plus stale
   trace/drift selection. JSX substring checks are not evidence for state
   behavior.

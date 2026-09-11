@@ -7,6 +7,7 @@ from verdict.monitoring import (
     MonitorPolicy,
     compare_manifest,
     plan_historical_manifest,
+    plan_prospective_manifest,
 )
 from verdict.schema import DimensionScore, Judgment, Trace, Verdict
 from verdict.storage import SQLiteStorage
@@ -42,6 +43,16 @@ def test_monitor_cli_runs_one_idempotent_durable_cycle(tmp_path, capsys) -> None
     storage.save_monitor_policy(policy)
     storage.save_monitor_snapshot(policy.policy_id, manifest,
                                   compare_manifest(units, manifest, policy))
+    prepared = plan_prospective_manifest(
+        manifest, (), policy, prospective_start_at=now + timedelta(days=10),
+    )
+    storage.save_monitor_successor(
+        policy.policy_id,
+        manifest.snapshot_id,
+        prepared,
+        compare_manifest((), prepared, policy),
+        expected_state="candidate",
+    )
     storage.activate_monitor_policy(
         policy.scope_key, policy.policy_id, expected_active_policy_id=None,
     )

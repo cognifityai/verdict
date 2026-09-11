@@ -303,7 +303,7 @@ def test_grouped_evidence_coverage_keeps_group_denominators_separate() -> None:
     assert coverage[("b", "judge.quality.pass")].current_error == 1
 
 
-def test_prospective_cohorts_never_reuse_units_and_count_late_arrivals() -> None:
+def test_prospective_cohorts_exclude_pre_activation_events_and_never_reuse_units() -> None:
     policy = MonitorPolicy("p", "scope", reference_ratio=0.8,
                            minimum_reference=5, minimum_current=3,
                            prospective_target=3)
@@ -319,15 +319,78 @@ def test_prospective_cohorts_never_reuse_units_and_count_late_arrivals() -> None
         for i, unit in enumerate(new)
     )
 
-    first = plan_prospective_manifest(bootstrap, new, policy)
+    activation_time = NOW + timedelta(days=10)
+    first = plan_prospective_manifest(
+        bootstrap, new, policy, prospective_start_at=activation_time,
+    )
     second = plan_prospective_manifest(first, new, policy)
 
     assert first.reference_unit_ids == bootstrap.reference_unit_ids
-    assert first.current_unit_ids == ("late", "future-1", "future-2")
-    assert first.late_unit_count == 1
-    assert second.current_unit_ids == ("future-3", "future-4")
+    assert first.current_unit_ids == ("future-1", "future-2", "future-3")
+    assert first.prospective_start_at == activation_time
+    assert first.late_unit_count == 0
+    assert second.current_unit_ids == ("future-4",)
+    assert second.prospective_start_at == activation_time
     assert second.prospective_open is True
     assert not set(first.current_unit_ids) & set(second.current_unit_ids)
+
+
+def test_prospective_activation_boundary_is_inclusive_and_survives_round_trip() -> None:
+    policy = MonitorPolicy(
+        "p", "scope", reference_ratio=0.5,
+        minimum_reference=1, minimum_current=1, prospective_target=2,
+    )
+    historical = plan_historical_manifest(
+        _units(2), policy, cutoff=NOW + timedelta(days=2),
+    )
+    activated_at = NOW + timedelta(days=10)
+    rows = (
+        *_units(2),
+        AnalysisUnitRecord("before", activated_at - timedelta(microseconds=1), {"failed": True}),
+        AnalysisUnitRecord("at", activated_at, {"failed": False}),
+    )
+
+    prepared = plan_prospective_manifest(
+        historical, rows, policy, prospective_start_at=activated_at,
+    )
+    restored, _ = monitor_snapshot_from_json(
+        monitor_snapshot_to_json(prepared, compare_manifest(rows, prepared, policy))
+    )
+    delayed = AnalysisUnitRecord(
+        "delayed", activated_at + timedelta(seconds=1), {"failed": False},
+    )
+    completed = plan_prospective_manifest(restored, (*rows, delayed), policy)
+
+    assert restored.prospective_start_at == activated_at
+    assert restored.current_unit_ids == ("at",)
+    assert completed.current_unit_ids == ("at", "delayed")
+    assert "before" not in completed.consumed_unit_ids
+
+
+def test_post_activation_trace_can_arrive_after_a_newer_cohort() -> None:
+    policy = MonitorPolicy(
+        "p", "scope", reference_ratio=0.5,
+        minimum_reference=1, minimum_current=1, prospective_target=2,
+    )
+    activated_at = NOW + timedelta(days=10)
+    historical = plan_historical_manifest(
+        _units(2), policy, cutoff=activated_at,
+    )
+    first_rows = (
+        AnalysisUnitRecord("newer-1", activated_at + timedelta(days=2), {"failed": False}),
+        AnalysisUnitRecord("newer-2", activated_at + timedelta(days=3), {"failed": False}),
+    )
+    first = plan_prospective_manifest(
+        historical, first_rows, policy, prospective_start_at=activated_at,
+    )
+    delayed = AnalysisUnitRecord(
+        "delayed", activated_at + timedelta(days=1), {"failed": False},
+    )
+    second = plan_prospective_manifest(first, (*first_rows, delayed), policy)
+
+    assert first.prospective_open is False
+    assert second.current_unit_ids == ("delayed",)
+    assert second.late_unit_count == 1
 
 
 def test_underfilled_prospective_bucket_accumulates_before_one_comparison() -> None:
@@ -624,8 +687,9 @@ def test_unadmitted_late_trace_is_not_recounted_while_evaluator_is_pending() -> 
 
     assert closed.prospective_open is False
     assert closed.late_unit_count == 0
-    assert next_cohort.current_unit_ids == ("late",)
-    assert next_cohort.late_unit_count == 1
+    assert next_cohort.current_unit_ids == ()
+    assert next_cohort.late_unit_count == 0
+    assert "late" not in next_cohort.consumed_unit_ids
 
 
 def test_evaluator_error_can_be_replaced_by_later_completion() -> None:
@@ -829,6 +893,31 @@ def test_legacy_evaluator_snapshot_requires_rebootstrap() -> None:
     loaded, _ = monitor_snapshot_from_json(json.dumps(payload))
 
     assert monitor_requires_rebootstrap(policy, loaded) is True
+
+
+def test_legacy_prospective_snapshot_without_activation_boundary_requires_rebootstrap() -> None:
+    policy = MonitorPolicy(
+        "p", "scope", reference_ratio=0.5,
+        minimum_reference=1, minimum_current=1,
+    )
+    units = _units(2)
+    historical = plan_historical_manifest(
+        units, policy, cutoff=NOW + timedelta(days=2),
+    )
+    assert monitor_requires_rebootstrap(policy, historical) is False
+    assert monitor_requires_rebootstrap(policy, historical, active=True) is True
+    prospective = plan_prospective_manifest(historical, units, policy)
+    comparison = compare_manifest(units, prospective, policy)
+    payload = json.loads(monitor_snapshot_to_json(prospective, comparison))
+    payload["manifest"].pop("prospective_start_at")
+
+    loaded, _ = monitor_snapshot_from_json(json.dumps(payload))
+
+    assert monitor_requires_rebootstrap(policy, loaded) is True
+
+    payload["manifest"]["prospective_start_at"] = "2026-01-03T00:00:00"
+    with pytest.raises(ValueError, match="invalid monitor snapshot JSON"):
+        monitor_snapshot_from_json(json.dumps(payload))
 
 
 def test_provider_model_group_identity_is_unambiguous_and_bounded() -> None:

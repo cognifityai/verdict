@@ -422,12 +422,7 @@ class DriftDirection(str, Enum):
 
 @dataclass
 class DriftRun:
-    """One completed, immutable drift-analysis snapshot.
-
-    A run record exists even when no signal clears the gates. That explicit
-    zero-signal snapshot is what lets consumers distinguish "no current drift"
-    from "the pipeline has not run" and from legacy ungrouped signals.
-    """
+    """One immutable fixed-window snapshot retained for legacy history."""
 
     run_id: str = field(default_factory=_id)
     analysis_time: datetime = field(default_factory=_now)
@@ -446,10 +441,7 @@ class DriftRun:
 
 @dataclass
 class DriftSignal:
-    """A statistically significant deviation between current window and baseline.
-
-    One emitted per (cluster, dimension) when the test crosses threshold.
-    """
+    """A fixed-window deviation retained for legacy history."""
 
     signal_id: str = field(default_factory=_id)
     detected_at: datetime = field(default_factory=_now)

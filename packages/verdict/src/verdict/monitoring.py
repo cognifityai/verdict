@@ -370,6 +370,7 @@ class CohortManifest:
     current_summary: FrozenCohortSummary | None = None
     pending_evaluator_units: tuple[FrozenPendingEvaluatorUnit, ...] = ()
     evidence_finalization_version: int = 0
+    prospective_start_at: datetime | None = None
 
     def __post_init__(self) -> None:
         for name in ("snapshot_id", "policy_fingerprint"):
@@ -413,6 +414,8 @@ class CohortManifest:
             raise ValueError("pending evaluator units require versioned finalization")
         if self.evidence_finalization_version not in {0, EVIDENCE_FINALIZATION_VERSION}:
             raise ValueError("unsupported evidence finalization version")
+        if self.prospective_start_at is not None:
+            _aware(self.prospective_start_at, "prospective_start_at")
 
 
 @dataclass(frozen=True, slots=True)
@@ -829,6 +832,7 @@ def _manifest(
     current_unit_ids: tuple[str, ...] | None = None,
     pending_evaluator_units: tuple[FrozenPendingEvaluatorUnit, ...] = (),
     evidence_finalization_version: int = EVIDENCE_FINALIZATION_VERSION,
+    prospective_start_at: datetime | None = None,
 ) -> CohortManifest:
     if reference_summary is None:
         reference_summary = _freeze_cohort(
@@ -863,29 +867,32 @@ def _manifest(
     frozen_current_ids = (
         tuple(unit.unit_id for unit in current) if current_unit_ids is None else current_unit_ids
     )
+    identity_payload = {
+        "policy": policy.fingerprint,
+        "cutoff": cutoff.isoformat(),
+        "reference": frozen_reference_ids,
+        "current": frozen_current_ids,
+        "consumed": consumed,
+        "late_unit_count": late,
+        "prospective_open": prospective_open,
+        "comparison_index": comparison_index,
+        "reference_evidence": reference_summary.evidence_digest,
+        "current_evidence": current_summary.evidence_digest,
+        "pending_evaluator_units": [
+            {
+                "unit_id": item.unit_id,
+                "group_id": item.group_id,
+                "prior_state": item.prior_state,
+                "evidence_digest": item.evidence_digest,
+            }
+            for item in pending_evaluator_units
+        ],
+        "evidence_finalization_version": evidence_finalization_version,
+    }
+    if prospective_start_at is not None:
+        identity_payload["prospective_start_at"] = prospective_start_at.isoformat()
     identity = json.dumps(
-        {
-            "policy": policy.fingerprint,
-            "cutoff": cutoff.isoformat(),
-            "reference": frozen_reference_ids,
-            "current": frozen_current_ids,
-            "consumed": consumed,
-            "late_unit_count": late,
-            "prospective_open": prospective_open,
-            "comparison_index": comparison_index,
-            "reference_evidence": reference_summary.evidence_digest,
-            "current_evidence": current_summary.evidence_digest,
-            "pending_evaluator_units": [
-                {
-                    "unit_id": item.unit_id,
-                    "group_id": item.group_id,
-                    "prior_state": item.prior_state,
-                    "evidence_digest": item.evidence_digest,
-                }
-                for item in pending_evaluator_units
-            ],
-            "evidence_finalization_version": evidence_finalization_version,
-        },
+        identity_payload,
         sort_keys=True,
         separators=(",", ":"),
     )
@@ -903,6 +910,7 @@ def _manifest(
         current_summary,
         pending_evaluator_units,
         evidence_finalization_version,
+        prospective_start_at,
     )
 
 
@@ -953,6 +961,8 @@ def plan_historical_manifest(units, policy: MonitorPolicy, *, cutoff: datetime) 
 def monitor_requires_rebootstrap(
     policy: MonitorPolicy,
     manifest: CohortManifest,
+    *,
+    active: bool = False,
 ) -> bool:
     """Return whether a legacy policy lacks immutable execution evidence."""
     return (
@@ -963,28 +973,50 @@ def monitor_requires_rebootstrap(
             policy.evaluator_fingerprint is not None
             and manifest.evidence_finalization_version != EVIDENCE_FINALIZATION_VERSION
         )
+        or (
+            (active or manifest.comparison_index > 0)
+            and manifest.prospective_start_at is None
+        )
     )
 
 
 def plan_prospective_manifest(
-    previous: CohortManifest, units, policy: MonitorPolicy
+    previous: CohortManifest,
+    units,
+    policy: MonitorPolicy,
+    *,
+    prospective_start_at: datetime | None = None,
 ) -> CohortManifest:
     """Freeze the next non-overlapping current bucket against one reference."""
     if previous.policy_fingerprint != policy.fingerprint:
         raise ValueError("policy fingerprint changed; create a candidate policy")
     if previous.reference_summary is None or previous.current_summary is None:
         raise ValueError("monitor policy requires re-bootstrap")
+    if previous.comparison_index > 0 and previous.prospective_start_at is None:
+        raise ValueError("monitor policy requires re-bootstrap")
+    if previous.prospective_start_at is not None:
+        if (
+            prospective_start_at is not None
+            and prospective_start_at != previous.prospective_start_at
+        ):
+            raise ValueError("prospective start cannot change")
+        start_at = previous.prospective_start_at
+    else:
+        start_at = prospective_start_at or previous.cutoff
+    _aware(start_at, "prospective_start_at")
     used = set(previous.consumed_unit_ids)
     rows = _ordered(units)
     units_by_id = {unit.unit_id: unit for unit in rows}
-    unseen_rows = [unit for unit in rows if unit.unit_id not in used]
+    unseen_rows = [
+        unit for unit in rows if unit.unit_id not in used and unit.event_time >= start_at
+    ]
     tested_group_ids = (
         {item.group_id for item in previous.reference_summary.groups}
         if policy.grouping_mode != "none"
         else None
     )
-    # A late-arriving unit is still evidence. Excluding it would selectively
-    # discard slow/error-prone calls and bias the monitored failure rate.
+    # A post-activation event remains evidence even when it arrives late.
+    # Pre-activation history is excluded by the immutable start boundary above.
     candidates = unseen_rows
     if previous.prospective_open:
         current_summary, pending = _advance_pending_evaluator_units(
@@ -1017,7 +1049,7 @@ def plan_prospective_manifest(
         )
     admitted_late = sum(unit.event_time < previous.cutoff for unit in candidates)
     prospective_open = len(current_ids) < policy.prospective_target or bool(pending)
-    cutoff = max((previous.cutoff, *(unit.event_time for unit in candidates)))
+    cutoff = max((previous.cutoff, start_at, *(unit.event_time for unit in candidates)))
     consumed = (
         *previous.consumed_unit_ids,
         *(unit.unit_id for unit in candidates),
@@ -1038,6 +1070,7 @@ def plan_prospective_manifest(
         previous.reference_unit_ids,
         current_ids,
         tuple(pending),
+        prospective_start_at=start_at,
     )
 
 
@@ -1523,6 +1556,8 @@ def monitor_snapshot_to_json(
     if manifest.reference_summary is not None:
         payload["manifest"]["reference_summary"] = _serialized_summary(manifest.reference_summary)
         payload["manifest"]["current_summary"] = _serialized_summary(manifest.current_summary)
+    if manifest.prospective_start_at is not None:
+        payload["manifest"]["prospective_start_at"] = manifest.prospective_start_at.isoformat()
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     if not 2 <= len(encoded.encode("utf-8")) <= MAX_MONITOR_SNAPSHOT_BYTES:
         raise ValueError("monitor snapshot exceeds the 4 MiB storage contract")
@@ -1560,6 +1595,11 @@ def monitor_snapshot_from_json(
                 for item in manifest_data.get("pending_evaluator_units", [])
             ),
             manifest_data.get("evidence_finalization_version", 0),
+            (
+                datetime.fromisoformat(manifest_data["prospective_start_at"])
+                if manifest_data.get("prospective_start_at") is not None
+                else None
+            ),
         )
         comparison = MonitorComparison(
             MonitorStatus(comparison_data["status"]),

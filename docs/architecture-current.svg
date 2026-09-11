@@ -190,6 +190,6 @@
 
   <rect x="820" y="790" width="280" height="70" rx="10" fill="#FFFFFF" stroke="#0B1730" stroke-width="1.5"/>
   <text x="960" y="815" class="node-title" text-anchor="middle">Operational review view</text>
-  <text x="960" y="833" class="node-sub" text-anchor="middle">evaluator-scoped quality · drift signals</text>
-  <text x="960" y="848" class="node-sub" text-anchor="middle">current-window evidence trace IDs</text>
+  <text x="960" y="833" class="node-sub" text-anchor="middle">reviewed cohorts · current Monitor status</text>
+  <text x="960" y="848" class="node-sub" text-anchor="middle">optional evaluator and workload facets</text>
 </svg>

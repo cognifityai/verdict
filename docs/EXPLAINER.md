@@ -58,25 +58,24 @@ does not duplicate it.
    default local store; Postgres is available for shared environments. Optional
    buffered writes move persistence to a background batched writer and require
    explicit client shutdown. The `0.1.0a17` POC profile uses synchronous writes.
-3. **Group**: on a pipeline run, prompt embeddings are assigned against a
-   persisted cluster registry so existing cluster IDs remain stable. Registry
-   strategy selection is deliberate: exact-key `explicit` is supported, while
-   automatic MiniLM `semantic` and `hybrid` fallback are experimental opt-in
-   alpha features. The legacy pipeline's hash fallback remains lexical.
-4. **Evaluate**: the separately invoked batch pipeline selects traces per
-   cluster and time window, then scores them with a configured judge and rubric.
+3. **Group when useful**: reviewed provider/model or cluster facets can isolate
+   a workload, but the default Monitor comparison covers all eligible traffic.
+   Exact-key `explicit` clustering is supported; automatic MiniLM `semantic`
+   and `hybrid` fallback remain experimental opt-in alpha features.
+4. **Evaluate**: the separately invoked batch pipeline or Evaluator Lab selects
+   traces and scores them with a configured judge and rubric.
    Capture itself does not make judge calls. Every stored judgment identifies
    the evaluator provider, model list, rubric name/version, behavior-relevant
    configuration, expected dimensions, and prompt/rubric fingerprint. Results
-   from different identities are never pooled by the runner or dashboard.
-5. **Detect**: Verdict compares current and baseline judgments using each
-   trace's capture timestamp. It emits per-cluster, per-dimension signals only
-   when both statistical and practical thresholds clear, and retains up to five
-   current-window trace IDs as review evidence. Each completed analysis is an
-   atomic run snapshot containing its exact signal set, including an explicit
-   zero-signal result. Re-running the same hourly analysis identity replaces its
-   snapshot. Consumers select only the latest completed run for an evaluator;
-   historical signals without a run identity are unavailable, not current.
+   from different identities are never pooled by the runner or dashboard. Long
+   Evaluator Lab runs display activity and elapsed time while completed results
+   are stored.
+5. **Monitor**: preview count-based or explicit event-time reference/current
+   cohorts, then optionally activate the reviewed policy. Activation opens an
+   empty prospective bucket at a stored event-time boundary, so older imported
+   history cannot become new traffic. Fisher's exact test, practical-effect
+   thresholds, and multiple-testing correction are applied to eligible binary
+   metrics. Grouping is optional.
 6. **Inspect**: use the CLI, Python APIs, or dashboard to review traces, scores,
    clusters, and drift reports.
 
@@ -87,7 +86,8 @@ For a visual overview, see `docs/architecture-current.svg`.
 - Run the quickstart in `README.md` to capture real provider traffic.
 - Import one of the source-shaped fixtures in `examples/telemetry/`, or point a
   bounded API reader at an existing telemetry project.
-- Run `verdict-pipeline` to cluster, judge, and persist a drift snapshot.
+- Run `verdict-pipeline` to prepare optional clusters and judgments, then use
+  Monitor to preview and activate the comparison.
 - Run `scripts/live_capture_check.py` to verify capture against your configured
   providers from a source checkout.
 - Use `scripts/sample_to_label.py`, `scripts/label_ui.py`, and
@@ -119,8 +119,8 @@ themselves. Production deployments should validate provider coverage,
 storage settings, redaction behavior, retention policy, and judge calibration for
 their own traffic before depending on alerts.
 
-The v0 drift runner supports one tenant scope per store and rejects mixed-tenant
-analysis. Cost figures are best-effort estimates from a dated static table of
+The current Monitor scope is tenant-bound and never pools unrelated tenants.
+Cost figures are best-effort estimates from a dated static table of
 public base token prices, not provider billing data.
 
 PASS rate is `PASS / (PASS + FAIL)`. `UNCLEAR`, missing dimensions, and judge
@@ -135,7 +135,7 @@ independent-example floor and Wilson confidence-interval lower bound. An example
 passes only when every declared label matches; label-level agreement is a
 separate diagnostic and is not the gate's statistical unit. When a sentinel
 file is supplied, any non-healthy result is persisted and
-blocks production judging/drift with exit status 2. The anchor set cannot detect
+blocks production judging with exit status 2. The anchor set cannot detect
 changes outside the examples it covers. Any sentinel execution error prevents a
 healthy result: the status is insufficient when too few usable examples remain and
 degraded otherwise.
@@ -202,11 +202,11 @@ gates the dashboard shells at `/` and `/dashboard` plus `/api/data`, while
 `/api/health` remains public. Chart series contain observed bins only. The response keeps full-store
 totals while bounding presentation data to the latest 100 chart points, 8
 providers, 20 usable intent clusters, 12 dimensions, 20 evaluator identities,
-40 drift signals, 20 models per displayed provider, and one 30-row page of
+40 legacy drift-history rows, 20 models per displayed provider, and one 30-row page of
 non-judge application traces. Trace Explorer can page through the remaining
 application traces. The non-intent `unclustered` bucket is outside the cluster chart
 and cap counts;
-capped drift signals retain the largest absolute effect sizes. The UI reports
+capped legacy rows retain the largest absolute effect sizes. The UI reports
 shown-versus-available counts whenever a bound applies.
 
 ## Validation Position

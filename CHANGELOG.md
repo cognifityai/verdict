@@ -28,6 +28,20 @@ the product is refined.
 
 ### Changed
 
+- Evaluator Lab now displays long-running judge activity and elapsed time,
+  prevents repeated submission while a request is active, and explains that
+  coverage belongs to the exact evaluator configuration. New Monitor previews
+  default to judge-free deterministic trace checks. The OpenAI-compatible
+  label now selects the canonical configured OpenAI provider.
+- Monitor is now the only current drift workflow. Historical and prospective
+  comparisons share one result contract, all traffic is the default, and
+  provider/model or reviewed clusters are optional facets. The evaluation CLI
+  continues to prepare judgments but no longer writes fixed-window drift runs;
+  existing rows remain available as read-only legacy history.
+- Activating a Monitor policy records an immutable event-time boundary and
+  starts an empty prospective cohort, preventing older imported history from
+  being presented as new post-activation traffic. Existing active monitors
+  without that boundary require a new reviewed preview.
 - Local Claude Code and Codex capture now retains source-identified child
   histories as separate linked runs, keeps final-response previews up to 64 KiB
   with explicit truncation state, and stores source-reported turn usage. Codex
