@@ -28,6 +28,11 @@ the product is refined.
 
 ### Changed
 
+- Evaluator Lab now displays long-running judge activity and elapsed time,
+  prevents repeated submission while a request is active, and explains that
+  coverage belongs to the exact evaluator configuration. New Monitor previews
+  default to judge-free deterministic trace checks. The OpenAI-compatible
+  label now selects the canonical configured OpenAI provider.
 - Monitor is now the only current drift workflow. Historical and prospective
   comparisons share one result contract, all traffic is the default, and
   provider/model or reviewed clusters are optional facets. The evaluation CLI

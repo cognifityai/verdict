@@ -507,7 +507,10 @@ the UI reports only that a custom endpoint is configured and never returns the
 URL. Unknown local model names remain unpriced.
 The default selection is every evidence-complete, not-yet-evaluated trace in the bounded
 10,000-trace scan; an optional numeric cap remains available. Preview shows the
-exact planned calls and maximum static-price estimate before approval. Treat
+exact planned calls and maximum static-price estimate before approval. Coverage
+is specific to the exact evaluator configuration; other evaluator results are
+kept separate. During a run, the page shows activity, planned calls, and elapsed
+time while completed results are stored. Treat
 PASS/FAIL output as exploratory until it clears a customer-labelled calibration
 set. Prompt and response presence does not establish that an imported span is
 the final visible agent answer, so use a rubric appropriate for the source

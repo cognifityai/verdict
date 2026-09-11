@@ -42,7 +42,7 @@ async function render(component) {
   return module.exports.default;
 }
 
-test("monitor selects one existing evaluator and names the comparison action", async () => {
+test("monitor offers existing evaluators but defaults to deterministic checks", async () => {
   const html = await render(`React.createElement(Monitor, {
     configUrl: "/api/config",
     evaluation: {
@@ -54,7 +54,8 @@ test("monitor selects one existing evaluator and names the comparison action", a
   })`);
   assert.match(html, /Measurement/);
   assert.match(html, /judge · quality v1/);
-  assert.match(html, /existing stored judgments; this monitor makes no judge calls/);
+  assert.match(html, /<option value="" selected="">Deterministic trace checks only<\/option>/);
+  assert.match(html, /provider errors, empty responses, and refusal-like language/);
   assert.match(html, /Preview comparison/);
   assert.doesNotMatch(html, /Preview candidate/);
 });

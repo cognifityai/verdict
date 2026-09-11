@@ -104,7 +104,8 @@ eligible denominator, Fisher's exact p-value, Benjamini-Hochberg adjustment,
 and effect-size gate. With provider/model or reviewed-cluster grouping, Verdict
 computes separate group-by-metric comparisons and adjusts across the complete
 tested family; it does not pool the selected groups. The Measurement selector
-can add stored PASS/FAIL results from one complete evaluator identity without
+defaults to deterministic trace checks and can explicitly add stored PASS/FAIL
+results from one complete evaluator identity without
 running or paying for a judge. That evaluator fingerprint and its expected
 dimensions become immutable policy
 inputs. A reviewed-cluster policy also pins its registry version and completes

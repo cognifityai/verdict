@@ -96,6 +96,8 @@ provider success/failure, evidence coverage, operation and finish-reason
 counts, tokens, latency, supplied cost, and structural response signatures.
 Agent Run outcomes remain unavailable when the imported source contains LLM
 traces but no run/turn/event hierarchy.
+New historical comparisons default to these deterministic trace checks;
+selecting a stored evaluator is an explicit choice.
 
 The equivalent non-interactive local import is:
 

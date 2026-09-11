@@ -94,9 +94,6 @@ export function Monitor({ configUrl, evaluation = {}, initialState = null, view 
     (identity, index, rows) => identity.complete && identity.fingerprint
       && rows.findIndex((other) => other.fingerprint === identity.fingerprint) === index,
   );
-  const defaultEvaluator = evaluation.selectedIdentity?.complete
-    && evaluation.selectedIdentity.fingerprint
-    ? evaluation.selectedIdentity.fingerprint : "";
   const [token, setToken] = useState(null);
   const [active, setActive] = useState(initialState?.active || null);
   const [candidate, setCandidate] = useState(initialState?.candidate || null);
@@ -106,7 +103,7 @@ export function Monitor({ configUrl, evaluation = {}, initialState = null, view 
     windowMode: "count", referenceRatio: 0.8, minimumReference: 30,
     minimumCurrent: 30, prospectiveTarget: 30, minimumEffect: 0.1,
     analysisUnit: "trace", groupingMode: "none",
-    evaluatorFingerprint: defaultEvaluator,
+    evaluatorFingerprint: "",
     referenceStart: "", referenceEnd: "", currentStart: "", currentEnd: "",
   });
   useEffect(() => {

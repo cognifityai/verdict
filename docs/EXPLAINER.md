@@ -67,7 +67,9 @@ does not duplicate it.
    Capture itself does not make judge calls. Every stored judgment identifies
    the evaluator provider, model list, rubric name/version, behavior-relevant
    configuration, expected dimensions, and prompt/rubric fingerprint. Results
-   from different identities are never pooled by the runner or dashboard.
+   from different identities are never pooled by the runner or dashboard. Long
+   Evaluator Lab runs display activity and elapsed time while completed results
+   are stored.
 5. **Monitor**: preview count-based or explicit event-time reference/current
    cohorts, then optionally activate the reviewed policy. Activation opens an
    empty prospective bucket at a stored event-time boundary, so older imported

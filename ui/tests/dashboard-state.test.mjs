@@ -70,7 +70,7 @@ async function loadUiModule() {
             "Layers", "Scale", "Search", "Shield", "Signal", "TrendingDown",
             "Github", "Terminal", "Gauge", "FlaskConical",
             "Cpu", "DollarSign", "Filter", "X", "Sparkles", "ChevronRight",
-            "Eye", "Network", "RefreshCw",
+            "Eye", "Network", "RefreshCw", "LoaderCircle",
             "Info",
           ]), loader: "js" };
         });
@@ -90,6 +90,87 @@ test("Evaluator Lab starts with a neutral response-quality rubric name", async (
   )[0];
   const input = findAll(label, (node) => node.type === "input")[0];
   assert.equal(input.props.value, "response_quality");
+  const openAIOption = findAll(tree,
+    (node) => node.type === "option" && textOf(node).includes("compatible endpoint"))[0];
+  assert.equal(openAIOption.props.value, "openai");
+});
+
+test("Evaluator Lab makes a long judge run visible and prevents duplicate submission", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const props = { configUrl: "/api/config" };
+
+  render(ui.EvaluatorLab, hooks, props);
+  hooks.flushEffects();
+  await resolveJson(requests[0], { setupToken: "setup-token" });
+  await resolveJson(requests[1], {
+    evalPackageAvailable: true,
+    providers: [{ provider: "anthropic", configured: true }],
+  });
+
+  let tree = render(ui.EvaluatorLab, hooks, props);
+  const previewButton = findAll(
+    tree,
+    (node) => node.type === "button" && textOf(node).includes("Preview eligibility"),
+  )[0];
+  const previewPending = previewButton.props.onClick();
+  await resolveJson(requests[2], {
+    eligible: 1928, alreadyJudged: 11, notEvaluable: 1859,
+    plannedCalls: 1917, estimatedMaximumCostUsd: 7.6901,
+    maximumOutputTokens: 981504,
+    notEvaluableReasons: { response_not_captured: 1859 },
+    planFingerprint: "plan-a", plannedTraces: ["trace-a"],
+  });
+  await previewPending;
+
+  tree = render(ui.EvaluatorLab, hooks, props);
+  assert.equal(findAll(
+    tree,
+    (node) => node.props?.label === "Already evaluated by this evaluator",
+  ).length, 1);
+  assert.match(textOf(tree), /Results from other evaluators remain separate/);
+  const consent = findAll(
+    tree,
+    (node) => node.type === "input" && node.props.type === "checkbox",
+  )[0];
+  consent.props.onChange({ target: { checked: true } });
+
+  tree = render(ui.EvaluatorLab, hooks, props);
+  const runButton = findAll(
+    tree,
+    (node) => node.type === "button" && textOf(node).includes("Run 1917 judge calls"),
+  )[0];
+  const firstRun = runButton.props.onClick();
+  await runButton.props.onClick();
+  assert.equal(requests.length, 4);
+
+  tree = render(ui.EvaluatorLab, hooks, props);
+  assert.match(textOf(tree), /Evaluation running/);
+  assert.match(textOf(tree), /1,917\s+planned calls/);
+  assert.match(textOf(tree), /Completed results are saved as they arrive/);
+  assert.equal(findAll(tree, (node) => node.props?.role === "status").length, 1);
+  assert.equal(findAll(tree, (node) => node.type === "fieldset" && node.props.disabled === true).length, 1);
+
+  await resolveJson(requests[3], {
+    eligible: 1928, completed: 1917, alreadyJudged: 11, errors: 0,
+    notEvaluable: 1859, availableTraces: 3787, notEvaluableReasons: {},
+    evaluatorFingerprint: "evaluator-a", evaluatorId: "evaluator-id-a",
+  });
+  await firstRun;
+  tree = render(ui.EvaluatorLab, hooks, props);
+  assert.match(textOf(tree), /Evaluation completed/);
+  assert.doesNotMatch(textOf(tree), /Evaluation running/);
+
+  const failedRun = findAll(
+    tree,
+    (node) => node.type === "button" && textOf(node).includes("Run 1917 judge calls"),
+  )[0].props.onClick();
+  requests[4].reject(new Error("provider unavailable"));
+  await failedRun;
+  tree = render(ui.EvaluatorLab, hooks, props);
+  assert.match(textOf(tree), /provider unavailable/);
+  assert.doesNotMatch(textOf(tree), /Evaluation completed|Evaluation running/);
 });
 
 function createHooks() {
