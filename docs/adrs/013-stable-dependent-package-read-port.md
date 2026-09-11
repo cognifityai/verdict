@@ -61,7 +61,6 @@ class FindingRead:
     code: str
     severity: str
     witness_event_ids: tuple[str, ...]
-    judge_used: bool
 
 @dataclass(frozen=True)
 class AgentRunRead:
@@ -91,13 +90,21 @@ class StorageVerdictReadPort:
     ) -> AgentRunRead | None: ...
 
 def agent_run_read_to_json(value: AgentRunRead) -> str: ...
+
+class VerdictReadError(RuntimeError):
+    code: str
+    def __init__(self, code: str) -> None: ...
 ```
 
-The exact versions are `verdict.agent-run-read.v1` and
-`verdict.agent-analysis.v1`. A V1 class or protocol does not gain fields or
-methods. A future shape or operation gets V2 types, a V2 protocol, and a V2
-serializer so an installed dependent package does not change behavior merely
-because Verdict is upgraded.
+The exact schema version is `verdict.agent-run-read.v1`; the initial analysis
+version is `verdict.agent-analysis.v1`. A V1 class or protocol does not gain
+fields or methods. A future shape or operation gets V2 types, a V2 protocol,
+and a V2 serializer. Finding semantics remain owned by the shared
+`analyze_agent_run` implementation rather than being copied into this adapter.
+Every semantic change to that analyzer must bump the independent
+`analysis_version`, even when the DTO schema stays V1. A consumer maintains its
+own explicit analysis-version allowlist and rejects an unsupported value; it
+must not interpret every value carried by a schema-V1 DTO as equivalent.
 
 `StorageVerdictReadPort` is the only default adapter. It calls the existing
 exact `Storage.get_agent_run_bundle(tenant_id, run_id)` method. A dependent
@@ -109,8 +116,10 @@ table, or calls a dashboard module.
 ### Validation, errors, and authorization
 
 Public constructors reject invalid values with `ValueError`. The adapter and
-serializer expose one public `VerdictReadError` whose `code` and message are
-one of these exact strings:
+serializer expose `VerdictReadError`, which inherits directly from
+`RuntimeError`. Its constructor accepts only one supported code, stores that
+exact string in public `.code`, calls `RuntimeError.__init__(code)`, and
+therefore has `str(error) == code` and `error.args == (code,)`. Codes are:
 
 - `invalid_query`: tenant/run input is invalid before storage access;
 - `read_unavailable`: storage raised or could not complete the exact lookup;
@@ -130,15 +139,44 @@ through 2^63-1. Booleans are exact booleans. `latency_ms` is `None` or a finite
 non-negative float. Datetimes are timezone-aware, normalized to UTC, and an
 end time cannot precede the start time.
 
+`schema_version` must equal `verdict.agent-run-read.v1`.
+`analysis_version` must be a member of the Verdict release's explicit supported
+analysis-version set, initially only `verdict.agent-analysis.v1`. Consumers
+still enforce their own allowlists. Collection values must be exact tuples and
+their members must be exact `ModelCallRead` or `FindingRead` instances, not
+arbitrary lookalikes. Returned model-call event IDs are unique, as are their
+non-null Trace IDs. Every witness tuple contains no more than 20 unique IDs.
+
+The collection relations are exact:
+
+- `len(model_calls) == min(model_call_count, 16)` and
+  `model_calls_truncated is (model_call_count > 16)`; and
+- `len(findings) == min(finding_count, 4)` and
+  `findings_truncated is (finding_count > 4)`.
+
+This rejects contradictory directly constructed DTOs instead of relying on the
+adapter to be their only producer.
+
 `tenant_id` scopes the storage lookup; it does not authenticate or authorize a
 caller. The trusted composition root must authorize the tenant before invoking
 the port and must protect the returned metadata like other Verdict evidence.
 V1 deliberately does not contain an HTTP/authentication layer.
 
-### Canonical analysis and projection
+### Bounded canonical analysis and projection
 
-The adapter validates the stored bundle, then constructs one canonical
-`AgentRunBundle` before doing any analysis:
+Immediately after the exact storage lookup returns, and before copying,
+canonicalizing, or analyzing its tuples, the adapter rejects a bundle with
+more than 1,000 turns or 1,500 events as `invalid_read_model`. These constants
+cover Verdict's existing bounded source-import path while limiting in-process
+sort and analysis work. The existing storage method nevertheless materializes
+the full exact run before the adapter can inspect tuple lengths. V1 therefore
+bounds projection, analysis CPU/memory, and output, but does **not** claim a
+hard pre-I/O backing-store bound. It is restricted to the trusted same-process
+composition in this ADR. A hard database-read bound requires a separately
+justified storage primitive and does not belong in this PR.
+
+For an accepted-size bundle, the adapter validates it and constructs one
+canonical `AgentRunBundle` before doing any analysis:
 
 1. normalize every datetime to UTC;
 2. sort turns by `(sequence, turn_id)` and assign their resulting rank;
@@ -148,9 +186,10 @@ The adapter validates the stored bundle, then constructs one canonical
 The adapter passes that exact canonical bundle to Verdict's judge-free
 `analyze_agent_run` and projects model calls from the same bundle. Model calls
 keep canonical event order. Findings are sorted by severity rank
-`error, warning, info`, then `code`, `witness_event_ids`, and `judge_used`.
+`error, warning, info`, then `code` and `witness_event_ids`.
 Counts are measured before collection truncation. No finding is re-run against
-a differently ordered bundle, and no judge is invoked by this port.
+a differently ordered bundle. The port invokes no judge and therefore exports
+no redundant `judge_used` field.
 
 V1 returns at most 16 model calls and four findings. A finding's
 `witness_event_ids` are the analyzer-selected, already bounded set of at most
@@ -245,13 +284,21 @@ may reuse versioned DTO semantics after those requirements are justified.
   JSON; included IDs remain exact, proving the privacy claim is neither broader
   nor narrower than the real contract.
 - Consumer fixtures pin dataclass field order and annotations, protocol and
-  serializer signatures, versions, exact JSON keys, timestamp formatting, and
+  serializer signatures, schema version, current analysis version, explicit
+  unsupported-analysis rejection, exact JSON keys, timestamp formatting, and
   the rule that V1 does not grow additively.
+- Constructor tests cover exact tuple/member types, count/length/truncation
+  relations, unique event/Trace/witness IDs, and the exact
+  `VerdictReadError` inheritance, `.code`, `str`, and `args` contract.
 - Shuffled equivalent bundles produce byte-identical JSON and findings.
   Deliberate mutations prove canonicalization occurs before analysis, finding
   totals precede truncation, and witness IDs are never presented as exhaustive.
-- Limits test exactly 16/17 model calls, 4/5 findings, 20/21 analyzer witnesses,
-  the conservative worst-case envelope, and the 262,144-byte final rejection.
+- Limits test exactly 1,000/1,001 source turns, 1,500/1,501 source events,
+  16/17 returned model calls, 4/5 findings, 20/21 analyzer witnesses, the
+  conservative worst-case envelope, and the 262,144-byte final rejection.
+- A storage spy proves oversized source tuples are rejected before any
+  canonical copy or analyzer call; documentation and tests do not claim the
+  preceding exact database lookup itself is bounded.
 - The same lookup, canonical DTO, and tenant-isolation contract runs through
   InMemory, SQLite, Buffered SQLite, and a live disposable PostgreSQL database.
   If live PostgreSQL cannot run, the PR is not merge-ready.
