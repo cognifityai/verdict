@@ -8,6 +8,10 @@ the product is refined.
 
 ### Added
 
+- `verdict.read_port` provides trusted same-process dependent packages with one
+  versioned, tenant-scoped Agent Run lookup. Its bounded immutable DTOs expose
+  exact model-call event/Trace identity and deterministic finding facts without
+  exposing Verdict tables, prompts, responses, model names, or write methods.
 - A framework-neutral Agent Run SDK provides sync and async run, turn, and tool
   contexts; typed instruction, context, command, test, artifact, retry,
   handoff, feedback, and outcome events; and automatic links from supported

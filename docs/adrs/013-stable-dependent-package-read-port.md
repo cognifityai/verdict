@@ -1,6 +1,6 @@
 # ADR-013: Stable read port for dependent packages
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-09-11
 **Decider:** Cognifity AI
 
@@ -139,7 +139,8 @@ bytes. Finding code is at most 64 UTF-8 bytes. Status is exactly one of
 exactly `info`, `warning`, or `error`. Counts are non-Boolean integers from 0
 through 2^63-1. Booleans are exact booleans. `latency_ms` is `None` or a finite
 non-negative float. Datetimes are timezone-aware, normalized to UTC, and an
-end time cannot precede the start time.
+end time cannot precede the start time. A terminal run status requires an end
+time; `unknown` may remain open.
 
 `schema_version` must equal `verdict.agent-run-read.v1`.
 `analysis_version` must be a member of the Verdict release's explicit supported

@@ -40,6 +40,7 @@ from verdict.monitoring import (
     plan_historical_manifest,
     plan_prospective_manifest,
 )
+from verdict.read_port import StorageVerdictReadPort, agent_run_read_to_json
 from verdict.schema import (
     ClusterIdentity,
     ClusterRegistryCluster,
@@ -2261,3 +2262,71 @@ def test_live_buffered_postgres_inserts_each_manual_span_once():
         postgres._exec("DELETE FROM spans WHERE name = ANY(%s)", (list(names),))
         postgres._exec("DELETE FROM traces WHERE trace_id = %s", (trace_id,))
         buffered.close()
+
+
+def test_live_postgres_read_port_round_trip_is_tenant_scoped():
+    suffix = uuid4().hex
+    tenant = f"read-port-{suffix}"
+    now = datetime.now(timezone.utc)
+    trace = verdict.Trace(
+        trace_id=f"trace-{suffix}",
+        tenant_id=tenant,
+        started_at=now,
+        ended_at=now,
+        provider="private-provider-canary",
+        request_model="private-model-canary",
+        response_model="private-model-canary",
+        prompt_redacted="private-prompt-canary",
+        response_redacted="private-response-canary",
+        error="private-error-canary",
+        raw_messages=[{"role": "user", "content": "private-message-canary"}],
+        tags={"private-tag-canary": "private-value-canary"},
+    )
+    source = verdict.SourceSession(
+        f"source-{suffix}", tenant, "unknown-agent", "e" * 64, now, now
+    )
+    run = verdict.AgentRun(
+        f"run-{suffix}", source.source_session_id, tenant, now,
+        verdict.ExecutionStatus.COMPLETED, ended_at=now,
+    )
+    turn = verdict.AgentTurn(
+        f"turn-{suffix}", run.run_id, 0, now,
+        verdict.ExecutionStatus.COMPLETED, ended_at=now,
+    )
+    event = verdict.AgentEvent(
+        f"event-{suffix}", turn.turn_id, 0, now,
+        verdict.AgentEventType.MODEL_CALL, verdict.ExecutionStatus.COMPLETED,
+        "unknown-agent:model",
+        {"provider": "private-provider-canary", "latency_ms": 3.5},
+        trace_id=trace.trace_id,
+    )
+    bundle = verdict.AgentRunBundle(source, run, (turn,), (event,))
+    storage = PostgresStorage(DSN, min_pool=1, max_pool=1)
+    try:
+        storage.replace_agent_capture(bundle, (trace,))
+        port = StorageVerdictReadPort(storage)
+
+        value = port.get_agent_run(tenant_id=tenant, run_id=run.run_id)
+
+        assert value is not None
+        assert value.model_calls[0].trace_id == trace.trace_id
+        encoded = agent_run_read_to_json(value)
+        for excluded in (
+            "private-provider-canary",
+            "private-model-canary",
+            "private-prompt-canary",
+            "private-response-canary",
+            "private-error-canary",
+            "private-message-canary",
+            "private-tag-canary",
+            "private-value-canary",
+        ):
+            assert excluded not in encoded
+        assert port.get_agent_run(
+            tenant_id=f"other-{tenant}", run_id=run.run_id
+        ) is None
+    finally:
+        storage._exec("DELETE FROM agent_runs WHERE tenant_id=%s", (tenant,))
+        storage._exec("DELETE FROM import_sources WHERE tenant_id=%s", (tenant,))
+        storage._exec("DELETE FROM traces WHERE trace_id=%s", (trace.trace_id,))
+        storage.close()
