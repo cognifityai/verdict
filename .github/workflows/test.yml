@@ -39,7 +39,11 @@ jobs:
           pnpm --dir ui build
 
       - name: Verify generated dashboard assets are current
-        run: git diff --exit-code -- ui/landing.html ui/dashboard.html ui/assets
+        run: |
+          git diff --exit-code -- \
+            ui/landing.html \
+            ui/assets \
+            packages/verdict/src/verdict/dashboard/static
 
   test:
     name: Python ${{ matrix.python-version }}
