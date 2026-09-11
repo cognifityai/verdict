@@ -229,6 +229,15 @@ def test_read_error_has_stable_public_shape() -> None:
         VerdictReadError([])  # type: ignore[arg-type]
 
 
+def _assert_detached_read_error(error: VerdictReadError, code: str, canary: str) -> None:
+    assert error.code == code
+    assert str(error) == code
+    assert error.args == (code,)
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    assert canary not in repr(error)
+
+
 @pytest.mark.parametrize(
     ("status", "ended_at"),
     [
@@ -348,6 +357,36 @@ def test_datetime_normalization_and_canonical_json_shape() -> None:
     assert encoded == agent_run_read_to_json(value)
 
 
+@pytest.mark.parametrize(
+    "constructor",
+    [
+        lambda: ModelCallRead(
+            "event",
+            datetime.min.replace(tzinfo=timezone(timedelta(hours=1))),
+            "completed",
+            None,
+            None,
+        ),
+        lambda: ModelCallRead(
+            "event",
+            datetime.max.replace(tzinfo=timezone(-timedelta(hours=1))),
+            "completed",
+            None,
+            None,
+        ),
+        lambda: _empty_read(started_at=datetime.min.replace(tzinfo=timezone(timedelta(hours=1)))),
+        lambda: _empty_read(started_at=datetime.max.replace(tzinfo=timezone(-timedelta(hours=1)))),
+        lambda: _empty_read(ended_at=datetime.min.replace(tzinfo=timezone(timedelta(hours=1)))),
+        lambda: _empty_read(ended_at=datetime.max.replace(tzinfo=timezone(-timedelta(hours=1)))),
+    ],
+)
+def test_datetime_normalization_overflow_is_a_detached_value_error(constructor) -> None:
+    with pytest.raises(ValueError) as error:
+        constructor()
+    assert error.value.__cause__ is None
+    assert error.value.__context__ is None
+
+
 def test_worst_case_valid_json_remains_below_the_response_limit() -> None:
     def bounded_unique(prefix: str, index: int) -> str:
         suffix = f"{prefix}{index:03d}"
@@ -397,21 +436,41 @@ def test_serializer_revalidates_and_enforces_final_encoded_byte_limit(monkeypatc
     assert oversized.value.code == "response_limit_exceeded"
 
 
-def test_exact_lookup_validates_before_io_and_sanitizes_storage_errors() -> None:
-    storage = _StorageStub(error=RuntimeError("postgres://user:secret@example.invalid"))
+def test_exact_lookup_validates_before_io_and_detaches_storage_errors() -> None:
+    canary = "postgres://user:secret@example.invalid"
+    storage = _StorageStub(error=RuntimeError(canary))
     port = StorageVerdictReadPort(storage)  # type: ignore[arg-type]
 
     with pytest.raises(VerdictReadError) as invalid:
         port.get_agent_run(tenant_id="", run_id="run")
-    assert invalid.value.code == "invalid_query"
+    _assert_detached_read_error(invalid.value, "invalid_query", canary)
     assert storage.calls == []
 
     with pytest.raises(VerdictReadError) as unavailable:
         port.get_agent_run(tenant_id="tenant", run_id="run")
-    assert unavailable.value.code == "read_unavailable"
-    assert unavailable.value.__cause__ is None
-    assert unavailable.value.__suppress_context__ is True
-    assert "secret" not in repr(unavailable.value)
+    _assert_detached_read_error(unavailable.value, "read_unavailable", canary)
+
+
+def test_projection_and_serializer_errors_are_detached(monkeypatch) -> None:
+    canary = "projection-or-serializer-secret-canary"
+
+    def invalid_projection(*args: object, **kwargs: object) -> AgentRunRead:
+        raise RuntimeError(canary)
+
+    monkeypatch.setattr(read_port_module, "_project_agent_run", invalid_projection)
+    with pytest.raises(VerdictReadError) as projection:
+        StorageVerdictReadPort(_StorageStub(_bundle())).get_agent_run(
+            tenant_id="tenant-included", run_id="run-included"
+        )
+    _assert_detached_read_error(projection.value, "invalid_read_model", canary)
+
+    def invalid_serializer(*args: object, **kwargs: object) -> str:
+        raise RuntimeError(canary)
+
+    monkeypatch.setattr(read_port_module.json, "dumps", invalid_serializer)
+    with pytest.raises(VerdictReadError) as serializer:
+        agent_run_read_to_json(_empty_read())
+    _assert_detached_read_error(serializer.value, "invalid_read_model", canary)
 
 
 def test_absent_and_mismatched_exact_lookups_are_distinct() -> None:
@@ -491,6 +550,60 @@ def test_projection_excludes_content_and_display_metadata_but_keeps_exact_ids() 
     assert value.run_id == "run-included"
     assert value.model_calls[0].event_id == "model-event"
     assert value.model_calls[0].trace_id == "trace-1"
+
+
+def test_analysis_v1_golden_finding_semantics() -> None:
+    turn = AgentTurn(
+        "turn-1",
+        "run-included",
+        0,
+        NOW,
+        ExecutionStatus.COMPLETED,
+        NOW + timedelta(seconds=10),
+        user_request_redacted="PROMPT_CONTENT_CANARY",
+        request_state=EvidenceState.PRESENT,
+        response_state=EvidenceState.NOT_CAPTURED,
+    )
+    tool_error = AgentEvent(
+        "tool-error",
+        "turn-1",
+        0,
+        NOW,
+        AgentEventType.TOOL_RESULT,
+        ExecutionStatus.FAILED,
+        "test:tool",
+        {"tool_name": "tool", "call_id": "call-1", "is_error": True},
+    )
+    capture_limit = AgentEvent(
+        "capture-limit",
+        "turn-1",
+        1,
+        NOW + timedelta(microseconds=1),
+        AgentEventType.CONTEXT,
+        ExecutionStatus.COMPLETED,
+        "verdict:capture_limit",
+        {},
+    )
+    value = StorageVerdictReadPort(
+        _StorageStub(
+            _bundle(
+                status=ExecutionStatus.UNKNOWN,
+                turns=(turn,),
+                events=(capture_limit, tool_error),
+            )
+        )
+    ).get_agent_run(tenant_id="tenant-included", run_id="run-included")
+
+    assert value is not None
+    assert value.analysis_version == "verdict.agent-analysis.v1"
+    assert value.finding_count == 4
+    assert value.findings_truncated is False
+    assert value.findings == (
+        FindingRead("tool_error", "error", ("tool-error",)),
+        FindingRead("event_capture_partial", "warning", ("capture-limit",)),
+        FindingRead("response_not_evaluable", "info", ()),
+        FindingRead("run_status_unknown", "info", ()),
+    )
 
 
 def test_canonicalization_precedes_analysis_and_makes_storage_order_irrelevant(

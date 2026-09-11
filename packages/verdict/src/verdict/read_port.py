@@ -77,7 +77,13 @@ def _validate_version(value: object, *, field_name: str) -> str:
 def _utc(value: object, *, field_name: str) -> datetime:
     if not isinstance(value, datetime) or value.tzinfo is None:
         raise ValueError(f"{field_name} must be timezone-aware")
-    return value.astimezone(timezone.utc)
+    try:
+        normalized = value.astimezone(timezone.utc)
+    except Exception:
+        normalized = None
+    if normalized is None:
+        raise ValueError(f"{field_name} must be a valid timezone-aware datetime")
+    return normalized
 
 
 def _validate_count(value: object, *, field_name: str) -> int:
@@ -239,23 +245,35 @@ class StorageVerdictReadPort:
         self._storage = storage
 
     def get_agent_run(self, *, tenant_id: str, run_id: str) -> AgentRunRead | None:
+        invalid_query = False
         try:
             _validate_text(tenant_id, maximum=_MAX_IDENTIFIER_BYTES, field_name="tenant_id")
             _validate_text(run_id, maximum=_MAX_IDENTIFIER_BYTES, field_name="run_id")
         except (TypeError, ValueError, UnicodeError):
-            raise VerdictReadError("invalid_query") from None
+            invalid_query = True
+        if invalid_query:
+            raise VerdictReadError("invalid_query")
 
+        read_unavailable = False
         try:
             bundle = self._storage.get_agent_run_bundle(tenant_id, run_id)
         except Exception:
-            raise VerdictReadError("read_unavailable") from None
+            bundle = None
+            read_unavailable = True
+        if read_unavailable:
+            raise VerdictReadError("read_unavailable")
         if bundle is None:
             return None
 
+        invalid_read_model = False
         try:
-            return _project_agent_run(bundle, tenant_id=tenant_id, run_id=run_id)
+            projected = _project_agent_run(bundle, tenant_id=tenant_id, run_id=run_id)
         except Exception:
-            raise VerdictReadError("invalid_read_model") from None
+            projected = None
+            invalid_read_model = True
+        if invalid_read_model:
+            raise VerdictReadError("invalid_read_model")
+        return projected
 
 
 def _project_agent_run(bundle: object, *, tenant_id: str, run_id: str) -> AgentRunRead:
@@ -398,6 +416,7 @@ def _rfc3339(value: datetime) -> str:
 def agent_run_read_to_json(value: AgentRunRead) -> str:
     """Serialize an exact V1 read DTO to bounded canonical JSON."""
 
+    invalid_read_model = False
     try:
         if type(value) is not AgentRunRead:
             raise ValueError("value must be an exact AgentRunRead")
@@ -440,10 +459,11 @@ def agent_run_read_to_json(value: AgentRunRead) -> str:
             sort_keys=True,
             separators=(",", ":"),
         )
-    except VerdictReadError:
-        raise
     except Exception:
-        raise VerdictReadError("invalid_read_model") from None
+        encoded = ""
+        invalid_read_model = True
+    if invalid_read_model:
+        raise VerdictReadError("invalid_read_model")
     if len(encoded.encode("utf-8")) > _MAX_RESPONSE_BYTES:
         raise VerdictReadError("response_limit_exceeded")
     return encoded
