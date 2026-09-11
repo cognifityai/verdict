@@ -21,6 +21,7 @@ from verdict import (
 )
 from verdict.capture import AgentCaptureService
 from verdict.evidence import AgentCaptureBatch
+from verdict.read_port import StorageVerdictReadPort
 from verdict.storage import SQLiteStorage
 
 NOW = datetime(2026, 9, 6, tzinfo=timezone.utc)
@@ -160,13 +161,17 @@ def test_sqlite_adds_nullable_turn_evidence_columns_to_existing_schema(
 
     upgraded = SQLiteStorage(str(database))
     loaded = upgraded.get_agent_run_bundle("tenant-a", "run-1")
+    read_model = StorageVerdictReadPort(upgraded).get_agent_run(
+        tenant_id="tenant-a", run_id="run-1"
+    )
     columns = {
-        row[1]
-        for row in upgraded._conn.execute("PRAGMA table_info(agent_turns)").fetchall()
+        row[1] for row in upgraded._conn.execute("PRAGMA table_info(agent_turns)").fetchall()
     }
     upgraded.close()
 
     assert loaded is not None
+    assert read_model is not None
+    assert read_model.run_id == "run-1"
     assert loaded.turns[0].total_tokens is None
     assert loaded.turns[0].response_truncated is False
     assert {

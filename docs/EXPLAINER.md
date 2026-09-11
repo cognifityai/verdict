@@ -44,6 +44,10 @@ does not duplicate it.
   bounded local file transport for application hosts that should not connect to
   the Verdict database, plus an authenticated Agent collector for central
   PostgreSQL deployments.
+- Provides a narrow versioned Python read port so trusted optional packages can
+  retrieve one authorized Agent Run without reading Verdict tables or dashboard
+  queries. The port excludes LLM content and does not infer gateway or hardware
+  identity.
 - Includes calibration scripts so users can compare judge decisions against their
   own human labels before relying on alerts.
 

@@ -71,6 +71,36 @@ async context managers share the same API contract. With content capture on, a
 turn whose caller does not provide an output records missing response evidence;
 metadata-only capture records that content as not captured.
 
+## Stable read port for optional packages
+
+Trusted same-process extensions can read one authorized Agent Run without
+depending on Verdict tables or dashboard queries:
+
+```python
+from verdict.read_port import StorageVerdictReadPort
+from verdict.storage import SQLiteStorage
+
+storage = SQLiteStorage("./verdict.db")
+port = StorageVerdictReadPort(storage)
+
+# The host must authorize tenant_id before making this call.
+run = port.get_agent_run(tenant_id=authorized_tenant_id, run_id=selected_run_id)
+```
+
+The immutable V1 result contains run timing/status, at most 16 exact model-call
+event/Trace references, and at most four deterministic findings with explicit
+totals and truncation flags. It excludes prompts, responses, provider/model
+display names, arbitrary event attributes, and analysis prose. Returned IDs
+remain protected Verdict metadata.
+
+This is a Python composition boundary, not an HTTP service or authorization
+layer. `tenant_id` scopes the lookup but does not prove the caller may read that
+tenant. Runs above 1,000 turns or 1,500 events fail closed after the exact store
+lookup. The port cannot identify a LiteLLM deployment or GPU; a dependent
+package needs a separate propagated identity source and must otherwise report
+the correlation as unmapped. See
+[`ADR-013`](../../docs/adrs/013-stable-dependent-package-read-port.md).
+
 To keep application processes off the database, select the bounded local file
 transport and later import its process-owned JSONL segments through canonical
 storage:

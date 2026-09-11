@@ -538,6 +538,14 @@ You hand-label a sample PASS/FAIL (blind, before the judge runs), then the harne
 
 Hexagonal / ports-and-adapters, ≥2 adapters per port (one real + in-memory for tests). Storage: `SQLiteStorage`, `PostgresStorage`, `InMemoryStorage`, plus a `BufferedStorage` wrapper for async batched writes. Judge providers: Anthropic, OpenAI, Google, optional LiteLLM, and a `FakeProvider` for tests. SDK capture and existing-telemetry import both produce the same **vendor-neutral `Trace` schema**. Verdict accepts OTLP/OpenInference inputs but does **not** emit OTel/OpenInference spans; an exporter remains a v1 roadmap item. See the ADRs in [`docs/adrs/`](docs/adrs/).
 
+Optional same-process packages should depend on the versioned
+`verdict.read_port` DTO/Protocol boundary, not Verdict tables, the broad storage
+port, or dashboard SQL. V1 performs one tenant-scoped selected Agent Run lookup
+and exposes bounded run, model-call event/Trace, and finding facts. The trusted
+host remains responsible for tenant authorization. This boundary does not infer
+gateway deployment or GPU identity; those require a separate exact correlation
+source. See [`ADR-013`](docs/adrs/013-stable-dependent-package-read-port.md).
+
 ## Honest limits / not in v0
 
 - **No OpenTelemetry/OpenInference span emission** yet. OTLP/OpenInference
