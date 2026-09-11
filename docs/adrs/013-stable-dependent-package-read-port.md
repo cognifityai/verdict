@@ -101,10 +101,12 @@ version is `verdict.agent-analysis.v1`. A V1 class or protocol does not gain
 fields or methods. A future shape or operation gets V2 types, a V2 protocol,
 and a V2 serializer. Finding semantics remain owned by the shared
 `analyze_agent_run` implementation rather than being copied into this adapter.
-Every semantic change to that analyzer must bump the independent
-`analysis_version`, even when the DTO schema stays V1. A consumer maintains its
-own explicit analysis-version allowlist and rejects an unsupported value; it
-must not interpret every value carried by a schema-V1 DTO as equivalent.
+Every change that affects an exported finding's code, severity, witness
+selection, presence, or order must bump the independent `analysis_version`,
+even when the DTO schema stays V1. Changes only to unexported analyzer messages
+or metrics do not trigger a bump. A consumer maintains its own explicit
+analysis-version allowlist and rejects an unsupported value; it must not
+interpret every value carried by a schema-V1 DTO as equivalent.
 
 `StorageVerdictReadPort` is the only default adapter. It calls the existing
 exact `Storage.get_agent_run_bundle(tenant_id, run_id)` method. A dependent
@@ -141,11 +143,15 @@ end time cannot precede the start time.
 
 `schema_version` must equal `verdict.agent-run-read.v1`.
 `analysis_version` must be a member of the Verdict release's explicit supported
-analysis-version set, initially only `verdict.agent-analysis.v1`. Consumers
-still enforce their own allowlists. Collection values must be exact tuples and
-their members must be exact `ModelCallRead` or `FindingRead` instances, not
-arbitrary lookalikes. Returned model-call event IDs are unique, as are their
-non-null Trace IDs. Every witness tuple contains no more than 20 unique IDs.
+analysis-version set, initially only `verdict.agent-analysis.v1`. Schema and
+analysis version strings are 1 through 64 ASCII bytes matching
+`[a-z0-9.-]+`. The supported analysis-version set is monotonic for schema V1:
+a Verdict release may add a version but cannot remove or reinterpret an older
+one. Consumers still enforce their own allowlists. Collection values must be
+exact tuples and their members must be exact `ModelCallRead` or `FindingRead`
+instances, not arbitrary lookalikes. Returned model-call event IDs are unique,
+as are their non-null Trace IDs. Every witness tuple contains no more than 20
+unique IDs.
 
 The collection relations are exact:
 
@@ -166,10 +172,12 @@ V1 deliberately does not contain an HTTP/authentication layer.
 
 Immediately after the exact storage lookup returns, and before copying,
 canonicalizing, or analyzing its tuples, the adapter rejects a bundle with
-more than 1,000 turns or 1,500 events as `invalid_read_model`. These constants
-cover Verdict's existing bounded source-import path while limiting in-process
-sort and analysis work. The existing storage method nevertheless materializes
-the full exact run before the adapter can inspect tuple lengths. V1 therefore
+more than 1,000 turns or 1,500 events as `invalid_read_model`. The event limit
+matches Verdict's existing bounded local-history import, while the turn limit
+is an intentional V1 read restriction: a valid existing import can contain
+more than 1,000 turns and will be rejected by this port. The existing storage
+method nevertheless materializes the full exact run before the adapter can
+inspect tuple lengths. V1 therefore
 bounds projection, analysis CPU/memory, and output, but does **not** claim a
 hard pre-I/O backing-store bound. It is restricted to the trusted same-process
 composition in this ADR. A hard database-read bound requires a separately
@@ -235,11 +243,13 @@ Customer/private composition root
                `-- depends only on VerdictReadPort + read DTOs
 ```
 
-A Verdict schema migration updates the storage adapter and parity tests. The
-optional package does not change unless it deliberately adopts a new public
-read contract version. It pins a supported Verdict version range and upgrades
-by replacing its own package version plus a compatible public Verdict wheel;
-it never runs or owns a Verdict migration itself.
+A Verdict schema migration updates the storage adapter and parity tests without
+changing a consumer. A DTO schema-version change requires deliberate adoption
+of the new read contract. A new analysis version can also require a private
+package release to expand its explicit allowlist even while the DTO remains
+schema V1. The optional package pins a supported Verdict version range and
+upgrades by replacing its own package version plus a compatible public Verdict
+wheel; it never runs or owns a Verdict migration itself.
 
 ### Correlation boundary
 
@@ -299,6 +309,9 @@ may reuse versioned DTO semantics after those requirements are justified.
 - A storage spy proves oversized source tuples are rejected before any
   canonical copy or analyzer call; documentation and tests do not claim the
   preceding exact database lookup itself is bounded.
+- A real local-history import containing 1,000 and 1,001 turns is persisted and
+  read through the port, proving the documented accepted/rejected boundary at
+  the actual customer path.
 - The same lookup, canonical DTO, and tenant-isolation contract runs through
   InMemory, SQLite, Buffered SQLite, and a live disposable PostgreSQL database.
   If live PostgreSQL cannot run, the PR is not merge-ready.
@@ -318,6 +331,8 @@ may reuse versioned DTO semantics after those requirements are justified.
 - Optional packages gain a small testable dependency surface with no database
   or dashboard knowledge.
 - Included IDs are useful for exact joins but remain protected metadata.
+- V1 rejects otherwise-valid runs above 1,000 turns or 1,500 events after the
+  exact storage lookup; callers receive `invalid_read_model`, not partial data.
 - V1 supports exact selected Agent Run correlation only. Trace scans, reporting
   aggregates, remote access, and writes remain absent until a consumer proves
   those contracts are needed.
