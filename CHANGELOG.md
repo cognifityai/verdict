@@ -95,6 +95,9 @@ the product is refined.
 
 ### Fixed
 
+- Provider auto-instrumentation now disables and rolls back partially patched
+  SDK surfaces when installation fails, and Google async entry cancellation
+  persists the already-claimed error Trace before re-raising cancellation.
 - Evaluator Lab now shows the exact effective rubric before approval, including
   context-required dimensions skipped because traces have no retrieved-context
   field. A rubric with no evaluable dimension fails before provider egress

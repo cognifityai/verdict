@@ -265,9 +265,24 @@ def _install_instrumentors(client: VerdictClient) -> None:
             continue
         try:
             instr.install()
-            client._instrumentors.append(instr)
         except Exception as e:  # pragma: no cover — defensive
+            # A provider SDK can fail after an earlier surface was patched.
+            # Disable first so even a failed physical rollback is a pass-through,
+            # then let the owner remove every wrapper it managed to install.
+            instr._disabled = True
+            try:
+                instr.uninstall()
+            except Exception as rollback_error:
+                # Retain the disabled owner so shutdown can retry cleanup.
+                client._instrumentors.append(instr)
+                log.warning(
+                    "Failed to roll back %s instrumentor after install error (%s)",
+                    instr.name,
+                    type(rollback_error).__name__,
+                )
             log.warning("Failed to install %s instrumentor: %s", instr.name, e)
+        else:
+            client._instrumentors.append(instr)
 
 
 def get_client() -> VerdictClient | None:

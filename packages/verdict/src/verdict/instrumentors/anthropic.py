@@ -167,8 +167,6 @@ class AnthropicInstrumentor(BaseInstrumentor):
 
     def uninstall(self) -> None:
         self._disabled = True
-        if not self._installed:
-            return
         try:
             mod, _module_path = _message_resource_module()
         except ImportError:

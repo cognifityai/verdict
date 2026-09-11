@@ -166,8 +166,6 @@ class GoogleInstrumentor(BaseInstrumentor):
 
     def uninstall(self) -> None:
         self._disabled = True
-        if not self._installed:
-            return
         # Best-effort unwrap; if the SDK isn't importable we silently skip.
         try:
             import google.genai.models as mod
@@ -244,6 +242,10 @@ class GoogleInstrumentor(BaseInstrumentor):
         if kwargs.get("stream"):
             try:
                 stream = await wrapped(*args, **kwargs)
+            except asyncio.CancelledError as e:
+                trace.tags = {**trace.tags, "verdict.stream_completion": "error"}
+                self._record_error(trace, t0, e)
+                raise
             except Exception as e:
                 self._record_error(trace, t0, e)
                 raise
@@ -251,6 +253,9 @@ class GoogleInstrumentor(BaseInstrumentor):
 
         try:
             resp = await wrapped(*args, **kwargs)
+        except asyncio.CancelledError as e:
+            self._record_error(trace, t0, e)
+            raise
         except Exception as e:
             self._record_error(trace, t0, e)
             raise
@@ -295,6 +300,10 @@ class GoogleInstrumentor(BaseInstrumentor):
         t0 = time.perf_counter()
         try:
             stream = await wrapped(*args, **kwargs)
+        except asyncio.CancelledError as e:
+            trace.tags = {**trace.tags, "verdict.stream_completion": "error"}
+            self._record_error(trace, t0, e)
+            raise
         except Exception as e:
             self._record_error(trace, t0, e)
             raise

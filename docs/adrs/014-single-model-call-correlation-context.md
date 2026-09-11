@@ -36,8 +36,10 @@ Trace.
 | Sampling or an unsampled Agent Run prevents persistence | The context reserves identity but does not promise persistence or override existing sampling decisions | Verdict store and ReadPort `None`/missing call |
 | Instrumentation is disabled, unavailable, or not initialized | The ID can still reach a gateway through private code, but Verdict creates no matching record and correlation remains unavailable | Private correlation result |
 | A bound provider method or lazy stream manager survives uninstall/shutdown | Retained wrappers recheck their owning instrumentor before constructing a Trace, and final persistence rechecks the same disabled state; post-shutdown calls pass through without claiming or capturing | Real provider result, reservation state, and storage |
+| Provider SDK patching fails after one or more surfaces were wrapped | Installation is transactional: the failed instrumentor is disabled before rollback, every wrapper owned by it is removed when possible, and a retained partial wrapper remains a disabled pass-through rather than capturing into an old client generation | Provider SDK method, post-shutdown call, and reinitialized tenant/store |
 | Caller performs an application-level retry in the same context | Only the first supported instrumented attempt claims the reservation; each separately correlated retry needs its own context | Stored attempts and gateway facts |
 | OpenAI, Anthropic, or Google sync, async, streaming, error, or cancellation paths diverge | All provider Trace builders use one provider-neutral claim helper before the provider call | Real SDK return/error plus stored Trace |
+| Google async request or initial stream construction is cancelled after claiming | `CancelledError` follows the same error finalization path as the other providers, persists the claimed Trace once, and re-raises cancellation | Cancelled task, reservation state, and stored Trace |
 | Existing `trace_context`, manual spans, routing context, or automatic parent spans change meaning | The new reservation uses a distinct context variable and does not read or write the manual-span link | Existing public API and span storage fixtures |
 | Caller supplies a collision-prone, secret-bearing, or personally identifying ID | V1 accepts no caller-provided value and yields a generated 128-bit lowercase hexadecimal identifier | Public value, request header, logs, and storage |
 | The identifier is logged or presented as non-sensitive | Verdict emits no new log; callers must protect it as operational Trace metadata | Application/gateway logs and dependent-package output |
@@ -196,11 +198,16 @@ exact candidate:
 7. Retained Anthropic and Google sync/async bound methods and Anthropic
    sync/async lazy stream managers pass through after public shutdown without
    claiming the reservation or writing storage.
-8. Mutations that remove either claim or close locking, permit a second claim,
+8. Injected failure after each supported Anthropic and OpenAI patch position
+   proves partial installation is disabled and rolled back, cannot capture
+   after shutdown, and cannot route a later reinitialized call to an old
+   tenant/store. Real Google async request and initial-stream cancellation
+   persist the claimed error Trace once and re-raise `CancelledError`.
+9. Mutations that remove either claim or close locking, permit a second claim,
    skip provider Trace assignment, permit a post-close claim, bypass the
-   post-shutdown guard, or couple the provider Trace to `trace_context` fail the
-   relevant last-sink tests.
-9. The full Verdict gate, cold built-wheel install, documentation search,
+   post-shutdown/partial-install guard, omit Google cancellation handling, or
+   couple the provider Trace to `trace_context` fail the relevant last-sink tests.
+10. The full Verdict gate, cold built-wheel install, documentation search,
    independent architecture/security review, and hosted CI pass for the exact
    immutable candidate.
 

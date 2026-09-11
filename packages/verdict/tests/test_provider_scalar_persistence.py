@@ -1458,6 +1458,74 @@ async def test_real_async_google_retained_method_stays_inactive_after_shutdown()
         await http_client.aclose()
 
 
+def test_partial_anthropic_install_cannot_capture_after_shutdown_or_reinitialization(
+    monkeypatch,
+):
+    anthropic = pytest.importorskip("anthropic")
+    wrapt = pytest.importorskip("wrapt")
+
+    first_storage = InMemoryStorage()
+    second_storage = InMemoryStorage()
+    http_client = anthropic.DefaultHttpxClient(transport=_anthropic_mock_transport(anthropic))
+    real_wrap = wrapt.wrap_function_wrapper
+    patch_calls = 0
+
+    def fail_second_patch(*args, **kwargs):
+        nonlocal patch_calls
+        patch_calls += 1
+        if patch_calls == 2:
+            raise RuntimeError("injected second-surface patch failure")
+        return real_wrap(*args, **kwargs)
+
+    verdict.shutdown()
+    try:
+        with monkeypatch.context() as scoped:
+            scoped.setattr(wrapt, "wrap_function_wrapper", fail_second_patch)
+            verdict.init(
+                storage=first_storage, tenant_id="tenant-first", instrumentors=["anthropic"]
+            )
+
+        provider = anthropic.Anthropic(
+            api_key="test",
+            base_url="http://provider.test/v1",
+            max_retries=0,
+            http_client=http_client,
+        )
+        request = {
+            "model": "claude-haiku-4-5-20251001",
+            "max_tokens": 8,
+            "messages": [{"role": "user", "content": "hi"}],
+        }
+        retained = provider.messages.create
+        verdict.shutdown()
+        with verdict.model_call_context() as unused_id:
+            assert retained(**request).content[0].text == "OK"
+            assert verdict_client_module._claim_model_call_correlation_id() == unused_id
+        assert first_storage.list_traces() == []
+
+        verdict.init(
+            storage=second_storage,
+            tenant_id="tenant-second",
+            instrumentors=["anthropic"],
+        )
+        second_provider = anthropic.Anthropic(
+            api_key="test",
+            base_url="http://provider.test/v1",
+            max_retries=0,
+            http_client=http_client,
+        )
+        with verdict.model_call_context() as correlation_id:
+            assert second_provider.messages.create(**request).content[0].text == "OK"
+
+        assert first_storage.list_traces() == []
+        [trace] = second_storage.list_traces()
+        assert trace.trace_id == correlation_id
+        assert trace.tenant_id == "tenant-second"
+    finally:
+        verdict.shutdown()
+        http_client.close()
+
+
 def test_real_openai_responses_retry_persists_only_the_final_request_trace(tmp_path):
     attempts = 0
 
@@ -3298,6 +3366,94 @@ async def test_real_async_google_call_uses_reserved_model_call_trace_id(tmp_path
         instrumentor.uninstall()
         await http_client.aclose()
         storage.close()
+
+
+@pytest.mark.parametrize("surface", ["generate_content", "generate_content_stream"])
+async def test_real_async_google_entry_cancellation_persists_reserved_trace(
+    tmp_path,
+    surface,
+):
+    pytest.importorskip("google.genai")
+    from google import genai
+    from google.genai import types
+    from verdict.instrumentors.google import GoogleInstrumentor
+
+    request_started = asyncio.Event()
+
+    async def pending_response(_request):
+        request_started.set()
+        await asyncio.Event().wait()
+
+    verdict_client, storage = _sqlite_client(tmp_path, f"async-google-cancel-{surface}")
+    instrumentor = GoogleInstrumentor(verdict_client)
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(pending_response))
+    instrumentor.install()
+    try:
+        provider = genai.Client(
+            api_key="test",
+            http_options=types.HttpOptions(
+                base_url="http://provider.test",
+                httpx_async_client=http_client,
+            ),
+        )
+
+        async def make_request():
+            method = getattr(provider.aio.models, surface)
+            result = await method(model="gemini-2.5-flash", contents="hi")
+            if surface == "generate_content_stream":
+                async for _chunk in result:
+                    pass
+            return result
+
+        with verdict.model_call_context() as correlation_id:
+            task = asyncio.create_task(make_request())
+            await asyncio.wait_for(request_started.wait(), timeout=5)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        [trace] = storage.list_traces()
+        assert trace.trace_id == correlation_id
+        assert trace.error is not None
+        assert trace.error.startswith("CancelledError:")
+        assert trace.tags.get("verdict.stream_completion") is None
+    finally:
+        instrumentor.uninstall()
+        await http_client.aclose()
+        storage.close()
+
+
+async def test_google_async_stream_construction_cancellation_persists_reserved_trace():
+    from verdict.instrumentors.google import GoogleInstrumentor
+
+    storage = InMemoryStorage()
+    instrumentor = GoogleInstrumentor(VerdictClient(storage=storage))
+    request_started = asyncio.Event()
+
+    async def pending_stream(*_args, **_kwargs):
+        request_started.set()
+        await asyncio.Event().wait()
+
+    async def make_request():
+        return await instrumentor._wrap_genai_generate_stream_async(
+            pending_stream,
+            None,
+            (),
+            {"model": "gemini-2.5-flash", "contents": "hi"},
+        )
+
+    with verdict.model_call_context() as correlation_id:
+        task = asyncio.create_task(make_request())
+        await asyncio.wait_for(request_started.wait(), timeout=5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    [trace] = storage.list_traces()
+    assert trace.trace_id == correlation_id
+    assert trace.error is not None
+    assert trace.error.startswith("CancelledError:")
+    assert trace.tags["verdict.stream_completion"] == "error"
 
 
 def test_google_rejects_nonprimitive_config_scalars_before_sqlite(tmp_path):
