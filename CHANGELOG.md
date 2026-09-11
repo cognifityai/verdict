@@ -84,6 +84,10 @@ the product is refined.
 
 ### Fixed
 
+- Evaluator Lab now shows the exact effective rubric before approval, including
+  context-required dimensions skipped because traces have no retrieved-context
+  field. A rubric with no evaluable dimension fails before provider egress
+  instead of silently widening to unsupported dimensions.
 - Provider calls started by inherited background work after an Agent Turn closes
   remain standalone, and the data-source summary identifies observed SDK and
   local-agent evidence without treating all Agent Runs as local history.

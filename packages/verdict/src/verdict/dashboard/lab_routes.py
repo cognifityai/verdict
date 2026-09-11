@@ -33,7 +33,19 @@ def register_lab_routes(app, setup: SetupRoutes) -> None:
             return preview_evaluation(
                 writable, tenant_id="__verdict_local__", config=payload
             )
-        except (ImportError, OSError, TypeError, UnicodeError, ValueError):
+        except ValueError as exc:
+            if str(exc) == "no rubric dimensions are evaluable without context":
+                return JSONResponse(
+                    {
+                        "error": (
+                            "No rubric dimensions can be evaluated because Verdict "
+                            "traces do not include retrieved context."
+                        )
+                    },
+                    status_code=400,
+                )
+            return JSONResponse({"error": "invalid evaluator preview"}, status_code=400)
+        except (ImportError, OSError, TypeError, UnicodeError):
             return JSONResponse({"error": "invalid evaluator preview"}, status_code=400)
         finally:
             if writable is not None:

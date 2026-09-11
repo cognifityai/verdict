@@ -11,7 +11,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from verdict_eval.judge import DEFAULT_RUBRIC, Judge
+import pytest
+from verdict_eval.judge import (
+    DEFAULT_RUBRIC,
+    Judge,
+    Rubric,
+    RubricDimension,
+)
 
 
 @dataclass
@@ -53,6 +59,20 @@ def test_groundedness_skipped_without_context_when_flag_set() -> None:
     assert "groundedness" not in prov.last_prompt
 
 
+def test_whitespace_context_is_not_sent_or_used_for_required_dimensions() -> None:
+    provider = _CapturingProvider()
+    judge = Judge(
+        provider=provider,
+        model="m",
+        skip_context_dependent_when_missing=True,
+    )
+
+    judgment = judge.judge(query="Q", response="R", context="   ")
+
+    assert "groundedness" not in {dimension.name for dimension in judgment.dimensions}
+    assert "RETRIEVED CONTEXT" not in provider.last_prompt
+
+
 def test_groundedness_kept_with_context() -> None:
     prov = _CapturingProvider()
     judge = Judge(provider=prov, model="m",
@@ -71,3 +91,58 @@ def test_groundedness_kept_when_flag_off_even_without_context() -> None:
     names = {d.name for d in judgment.dimensions}
     assert "groundedness" in names
     assert len(judgment.dimensions) == len(DEFAULT_RUBRIC.dimensions)
+
+
+@pytest.mark.parametrize("context", [None, "", "   "])
+def test_context_only_rubric_without_context_fails_before_provider_call(
+    context: str | None,
+) -> None:
+    provider = _CapturingProvider()
+    rubric = Rubric(
+        name="context_only",
+        version="1",
+        dimensions=(
+            RubricDimension(
+                "groundedness",
+                "Every claim is supported by the retrieved context.",
+                requires_context=True,
+            ),
+        ),
+    )
+    judge = Judge(
+        provider=provider,
+        model="m",
+        rubric=rubric,
+        skip_context_dependent_when_missing=True,
+    )
+
+    with pytest.raises(ValueError, match="no rubric dimensions are evaluable"):
+        judge.judge(query="Q", response="R", context=context)
+
+    assert provider.last_prompt == ""
+
+
+def test_context_only_rubric_is_evaluated_with_nonblank_context() -> None:
+    provider = _CapturingProvider()
+    rubric = Rubric(
+        name="context_only",
+        version="1",
+        dimensions=(
+            RubricDimension(
+                "groundedness",
+                "Every claim is supported by the retrieved context.",
+                requires_context=True,
+            ),
+        ),
+    )
+    judge = Judge(
+        provider=provider,
+        model="m",
+        rubric=rubric,
+        skip_context_dependent_when_missing=True,
+    )
+
+    judgment = judge.judge(query="Q", response="R", context="source evidence")
+
+    assert [dimension.name for dimension in judgment.dimensions] == ["groundedness"]
+    assert "groundedness" in provider.last_prompt

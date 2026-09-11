@@ -95,8 +95,9 @@ def to_markdown(report: InspectReport) -> str:
             cells = " | ".join(_pct(r.pass_rate.get(d)) for d in all_dims)
             lines.append(f"| {r.window} | {r.n_judged} | {cells} |")
         lines.append("")
-        lines.append("_Pass rate = PASS / (PASS + FAIL); `n/a` = judge marked the "
-                     "dimension UNCLEAR (e.g. groundedness with no retrieved context)._")
+        lines.append("_Pass rate = PASS / (PASS + FAIL); `n/a` means the dimension "
+                     "had no PASS/FAIL observations. Context-required dimensions "
+                     "are not evaluated when retrieved context is unavailable._")
         if report.judge_deltas_vs_early:
             lines.append("")
             lines.append("### Delta vs early window (negative = degradation)")

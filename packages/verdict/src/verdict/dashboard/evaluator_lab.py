@@ -156,6 +156,21 @@ def _judge(provider, model, rubric, max_output):
     )
 
 
+def _rubric_summary(rubric, identity):
+    effective = identity["expected_dimensions"]
+    effective_names = set(effective)
+    return {
+        "name": rubric.name,
+        "version": rubric.version,
+        "dimensions": effective,
+        "skippedDimensions": [
+            dimension.name
+            for dimension in rubric.dimensions
+            if dimension.name not in effective_names
+        ],
+    }
+
+
 def _pending(
     storage, eligible, identity, max_calls, approved_trace_ids=None
 ):
@@ -247,13 +262,19 @@ def preview_evaluation(
     identity = _judge(
         _IdentityOnlyProvider(provider), model, rubric, max_output
     ).evaluator_identity(context=None)
+    rubric_summary = _rubric_summary(rubric, identity)
     selected, already_judged = _pending(
         storage, eligible, identity, max_calls
     )
     planned_traces = [_planned_trace(trace) for trace in selected]
+    effective_names = set(identity["expected_dimensions"])
+    rubric_chars = sum(
+        len(d.name) + len(d.description)
+        for d in rubric.dimensions
+        if d.name in effective_names
+    )
     input_estimate = 0
     for trace in selected:
-        rubric_chars = sum(len(d.name) + len(d.description) for d in rubric.dimensions)
         input_estimate += math.ceil(
             (len(trace.prompt_redacted or "") + len(trace.response_redacted or "") + rubric_chars)
             / 4
@@ -262,8 +283,7 @@ def preview_evaluation(
     return {
         "provider": provider,
         "model": model,
-        "rubric": {"name": rubric.name, "version": rubric.version,
-                   "dimensions": [d.name for d in rubric.dimensions]},
+        "rubric": rubric_summary,
         "availableTraces": len(traces),
         "eligible": len(traces) - sum(reasons.values()),
         "notEvaluable": sum(reasons.values()),
@@ -383,8 +403,7 @@ def _execute_evaluation(
         "notEvaluableReasons": dict(sorted(reasons.items())),
         "evaluatorFingerprint": identity["evaluator_fingerprint"],
         "evaluatorId": dashboard_identity["id"],
-        "rubric": {"name": rubric.name, "version": rubric.version,
-                   "dimensions": identity["expected_dimensions"]},
+        "rubric": _rubric_summary(rubric, identity),
     }
 
 

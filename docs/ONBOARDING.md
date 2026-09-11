@@ -509,8 +509,13 @@ The default selection is every evidence-complete, not-yet-evaluated trace in the
 10,000-trace scan; an optional numeric cap remains available. Preview shows the
 exact planned calls and maximum static-price estimate before approval. Coverage
 is specific to the exact evaluator configuration; other evaluator results are
-kept separate. During a run, the page shows activity, planned calls, and elapsed
-time while completed results are stored. Treat
+kept separate. The approval screen names the exact dimensions that will be sent
+to the judge and lists context-required dimensions that cannot run because a
+stored `Trace` has no canonical retrieved-context field. If none remain, preview
+fails before any provider call. Customer-labelled calibration examples may
+include explicit context and can validate those dimensions separately. During a
+run, the page shows activity, planned calls, and elapsed time while completed
+results are stored. Treat
 PASS/FAIL output as exploratory until it clears a customer-labelled calibration
 set. Prompt and response presence does not establish that an imported span is
 the final visible agent answer, so use a rubric appropriate for the source

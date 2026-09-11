@@ -68,7 +68,9 @@ Turns with fewer than 10 assistant-response words are excluded from windowed
 analysis. At least 16 substantive turns are required for a two-window
 comparison; 24 create the default early/middle/late split. Each window's judge
 sample is capped at 25 turns. Treat small-window output as exploratory rather
-than calibrated production evidence.
+than calibrated production evidence. Chat exports do not contain retrieved
+context, so the default context-required groundedness dimension is shown as
+`n/a` and is not sent to the judge.
 
 ## Privacy
 
