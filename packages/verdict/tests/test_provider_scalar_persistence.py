@@ -21,10 +21,12 @@ from types import SimpleNamespace
 import httpx
 import pytest
 import verdict
+import verdict.client as verdict_client_module
 import verdict.instrumentors.openai as openai_instrumentor
 from verdict.client import VerdictClient
 from verdict.instrumentors.base import persist_trace
 from verdict.schema import Trace
+from verdict.storage.memory import InMemoryStorage
 from verdict.storage.sqlite import SQLiteStorage
 
 
@@ -1313,6 +1315,147 @@ async def test_real_async_openai_preconstructed_helper_stays_inactive_after_unin
         instrumentor.uninstall()
         await http_client.aclose()
         storage.close()
+
+
+@pytest.mark.parametrize("surface", ["create", "stream-manager"])
+def test_real_anthropic_retained_surfaces_stay_inactive_after_shutdown(surface):
+    anthropic = pytest.importorskip("anthropic")
+
+    storage = InMemoryStorage()
+    http_client = anthropic.DefaultHttpxClient(transport=_anthropic_mock_transport(anthropic))
+    verdict.shutdown()
+    try:
+        verdict.init(storage=storage, instrumentors=["anthropic"])
+        provider = anthropic.Anthropic(
+            api_key="test",
+            base_url="http://provider.test/v1",
+            max_retries=0,
+            http_client=http_client,
+        )
+        request = {
+            "model": "claude-haiku-4-5-20251001",
+            "max_tokens": 8,
+            "messages": [{"role": "user", "content": "hi"}],
+        }
+        retained = (
+            provider.messages.create if surface == "create" else provider.messages.stream(**request)
+        )
+        verdict.shutdown()
+
+        with verdict.model_call_context() as correlation_id:
+            if surface == "create":
+                assert retained(**request).content[0].text == "OK"
+            else:
+                with retained as stream:
+                    assert stream.until_done() is None
+            assert verdict_client_module._claim_model_call_correlation_id() == correlation_id
+
+        assert storage.list_traces() == []
+    finally:
+        verdict.shutdown()
+        http_client.close()
+
+
+@pytest.mark.parametrize("surface", ["create", "stream-manager"])
+async def test_real_async_anthropic_retained_surfaces_stay_inactive_after_shutdown(
+    surface,
+):
+    anthropic = pytest.importorskip("anthropic")
+
+    storage = InMemoryStorage()
+    http_client = anthropic.DefaultAsyncHttpxClient(transport=_anthropic_mock_transport(anthropic))
+    verdict.shutdown()
+    try:
+        verdict.init(storage=storage, instrumentors=["anthropic"])
+        provider = anthropic.AsyncAnthropic(
+            api_key="test",
+            base_url="http://provider.test/v1",
+            max_retries=0,
+            http_client=http_client,
+        )
+        request = {
+            "model": "claude-haiku-4-5-20251001",
+            "max_tokens": 8,
+            "messages": [{"role": "user", "content": "hi"}],
+        }
+        retained = (
+            provider.messages.create if surface == "create" else provider.messages.stream(**request)
+        )
+        verdict.shutdown()
+
+        with verdict.model_call_context() as correlation_id:
+            if surface == "create":
+                assert (await retained(**request)).content[0].text == "OK"
+            else:
+                async with retained as stream:
+                    assert await stream.until_done() is None
+            assert verdict_client_module._claim_model_call_correlation_id() == correlation_id
+
+        assert storage.list_traces() == []
+    finally:
+        verdict.shutdown()
+        await http_client.aclose()
+
+
+def test_real_google_retained_method_stays_inactive_after_shutdown():
+    pytest.importorskip("google.genai")
+    from google import genai
+    from google.genai import types
+
+    storage = InMemoryStorage()
+    http_client = httpx.Client(transport=httpx.MockTransport(_provider_response))
+    verdict.shutdown()
+    try:
+        verdict.init(storage=storage, instrumentors=["google"])
+        provider = genai.Client(
+            api_key="test",
+            http_options=types.HttpOptions(
+                base_url="http://provider.test",
+                httpx_client=http_client,
+            ),
+        )
+        retained = provider.models.generate_content
+        verdict.shutdown()
+
+        with verdict.model_call_context() as correlation_id:
+            assert retained(model="gemini-2.5-flash", contents="hi").text == "OK"
+            assert verdict_client_module._claim_model_call_correlation_id() == correlation_id
+
+        assert storage.list_traces() == []
+    finally:
+        verdict.shutdown()
+        http_client.close()
+
+
+async def test_real_async_google_retained_method_stays_inactive_after_shutdown():
+    pytest.importorskip("google.genai")
+    from google import genai
+    from google.genai import types
+
+    storage = InMemoryStorage()
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(_provider_response))
+    verdict.shutdown()
+    try:
+        verdict.init(storage=storage, instrumentors=["google"])
+        provider = genai.Client(
+            api_key="test",
+            http_options=types.HttpOptions(
+                base_url="http://provider.test",
+                httpx_async_client=http_client,
+            ),
+        )
+        retained = provider.aio.models.generate_content
+        verdict.shutdown()
+
+        with verdict.model_call_context() as correlation_id:
+            response = await retained(model="gemini-2.5-flash", contents="hi")
+            assert response.text == "OK"
+            assert verdict_client_module._claim_model_call_correlation_id() == correlation_id
+
+        assert storage.list_traces() == []
+    finally:
+        verdict.shutdown()
+        await http_client.aclose()
 
 
 def test_real_openai_responses_retry_persists_only_the_final_request_trace(tmp_path):

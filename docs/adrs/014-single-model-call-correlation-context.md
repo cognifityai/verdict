@@ -1,6 +1,6 @@
 # ADR-014: Single model-call correlation context
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-09-11
 **Decider:** Cognifity AI
 
@@ -35,6 +35,7 @@ Trace.
 | A provider call fails before reaching the gateway | Verdict may capture the failed call under the reserved Trace ID, while the gateway join remains absent and therefore unmapped | ReadPort result and private correlation result |
 | Sampling or an unsampled Agent Run prevents persistence | The context reserves identity but does not promise persistence or override existing sampling decisions | Verdict store and ReadPort `None`/missing call |
 | Instrumentation is disabled, unavailable, or not initialized | The ID can still reach a gateway through private code, but Verdict creates no matching record and correlation remains unavailable | Private correlation result |
+| A bound provider method or lazy stream manager survives uninstall/shutdown | Retained wrappers recheck their owning instrumentor before constructing a Trace, and final persistence rechecks the same disabled state; post-shutdown calls pass through without claiming or capturing | Real provider result, reservation state, and storage |
 | Caller performs an application-level retry in the same context | Only the first supported instrumented attempt claims the reservation; each separately correlated retry needs its own context | Stored attempts and gateway facts |
 | OpenAI, Anthropic, or Google sync, async, streaming, error, or cancellation paths diverge | All provider Trace builders use one provider-neutral claim helper before the provider call | Real SDK return/error plus stored Trace |
 | Existing `trace_context`, manual spans, routing context, or automatic parent spans change meaning | The new reservation uses a distinct context variable and does not read or write the manual-span link | Existing public API and span storage fixtures |
@@ -188,12 +189,18 @@ exact candidate:
    lazy stream entry outside the context, and a persistence failure. They must
    make absence explicit rather than synthesize a join.
 6. Delayed copied-task/thread tests prove that normal, exception, cancellation,
-   and `clear_context()` exits close the shared reservation. A controlled
-   claim-versus-close race proves the two permitted linearized outcomes.
-7. Mutations that remove atomic claiming, permit a second claim, skip provider
-   Trace assignment, permit a post-close claim, or couple the provider Trace
-   to `trace_context` fail the relevant last-sink tests.
-8. The full Verdict gate, cold built-wheel install, documentation search,
+   and `clear_context()` exits close the shared reservation. A deterministic
+   synchronization test proves that both claim and close block on the same held
+   lock; a controlled claim-versus-close race permits only the two linearized
+   terminal outcomes. Removing either lock must fail the test.
+7. Retained Anthropic and Google sync/async bound methods and Anthropic
+   sync/async lazy stream managers pass through after public shutdown without
+   claiming the reservation or writing storage.
+8. Mutations that remove either claim or close locking, permit a second claim,
+   skip provider Trace assignment, permit a post-close claim, bypass the
+   post-shutdown guard, or couple the provider Trace to `trace_context` fail the
+   relevant last-sink tests.
+9. The full Verdict gate, cold built-wheel install, documentation search,
    independent architecture/security review, and hosted CI pass for the exact
    immutable candidate.
 

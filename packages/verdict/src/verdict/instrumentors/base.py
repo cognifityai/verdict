@@ -233,9 +233,12 @@ class BaseInstrumentor(abc.ABC):
     def __init__(self, client: VerdictClient) -> None:
         self.client = client
         self._installed: bool = False
+        self._disabled: bool = False
 
     def _safe_persist(self, trace: Trace) -> None:
         """Persist through the single non-raising instrumentor sink."""
+        if self._disabled:
+            return
         safe_persist_trace(self.client, trace)
 
     @abc.abstractmethod

@@ -36,6 +36,9 @@ the product is refined.
 
 ### Changed
 
+- Retained Anthropic and Google bound methods and lazy stream managers now
+  remain pass-through after Verdict shutdown; they cannot resume Trace capture
+  or consume a pending one-call correlation reservation.
 - Shared Fisher exact, Benjamini-Hochberg, Wilson-interval, and Gwet agreement
   calculations now use one dependency-free implementation. Agreement reports
   correctly identify the existing nominal statistic as Gwet's AC1; versioned

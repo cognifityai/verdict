@@ -4,7 +4,7 @@ import asyncio
 import contextvars
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
-from threading import Event
+from threading import Event, Thread
 
 import pytest
 import verdict
@@ -85,6 +85,41 @@ def test_copied_threads_can_claim_reservation_only_once() -> None:
 
     assert results.count(correlation_id) == 1
     assert results.count(None) == 1
+
+
+@pytest.mark.parametrize("operation", ["claim", "close"])
+def test_claim_and_close_share_the_reservation_lock(operation: str) -> None:
+    reservation = client_module._ModelCallReservation("a" * 32)
+    started = Event()
+    finished = Event()
+    returned: list[str | None] = []
+
+    def run() -> None:
+        started.set()
+        if operation == "claim":
+            returned.append(reservation.claim())
+        else:
+            reservation.close()
+        finished.set()
+
+    reservation._lock.acquire()
+    worker = Thread(target=run)
+    try:
+        worker.start()
+        assert started.wait(timeout=2)
+        assert not finished.wait(timeout=0.1)
+    finally:
+        reservation._lock.release()
+        worker.join(timeout=2)
+
+    assert not worker.is_alive()
+    assert finished.is_set()
+    if operation == "claim":
+        assert returned == ["a" * 32]
+        assert reservation.claim() is None
+    else:
+        assert returned == []
+        assert reservation.claim() is None
 
 
 def test_delayed_copied_thread_cannot_claim_after_owner_exit() -> None:
