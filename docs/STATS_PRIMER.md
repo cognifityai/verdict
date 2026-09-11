@@ -2,7 +2,8 @@
 
 A plain-language explanation of every statistical method Verdict uses — what it is, why it was chosen over the alternatives, and how to interpret its output. Written for engineers who are strong at code but didn't take graduate statistics: it starts from intuition and builds up, with worked examples.
 
-You should be able to read this in 30-40 minutes and come away genuinely understanding what's happening inside the drift detector and the judge-alignment scripts. No black boxes by the end.
+You should be able to read this in 30-40 minutes and come away understanding
+the statistics behind Monitor, semantic drift, and judge calibration.
 
 ---
 
@@ -19,11 +20,9 @@ You should be able to read this in 30-40 minutes and come away genuinely underst
 9. [Population Stability Index — PSI](#9-population-stability-index--psi)
 10. [Multi-testing and Benjamini-Hochberg correction](#10-multi-testing-and-benjamini-hochberg-correction)
 11. [Inter-rater agreement: do two judges agree?](#11-inter-rater-agreement-do-two-judges-agree)
-12. [Cohen's κ and its paradox](#12-cohens-κ-and-its-paradox)
-13. [Gwet's AC1 — the paradox fix](#13-gwets-ac1--the-paradox-fix)
-14. [Bradley-Terry — turning pairwise wins into rankings](#14-bradley-terry--turning-pairwise-wins-into-rankings)
-15. [How it all fits together in Verdict](#15-how-it-all-fits-together-in-verdict)
-16. [Quick reference card](#16-quick-reference-card)
+12. [Gwet's AC1 — chance-corrected agreement](#12-gwets-ac1--chance-corrected-agreement)
+13. [How it all fits together in Verdict](#13-how-it-all-fits-together-in-verdict)
+14. [Quick reference card](#14-quick-reference-card)
 
 ---
 
@@ -402,11 +401,9 @@ The procedure:
 
 ### Our application
 
-When we run drift detection across N eligible scored (cluster, dimension) pairs,
-we apply BH to those N p-values together. The declared family is one call to
-`DriftDetector.detect()`: every scored hypothesis that could emit an alert in
-that run. Deterministic `UNCLEAR`-rate alerts have no p-value and are outside the
-BH family.
+When Monitor compares N eligible group/metric pairs, it applies BH to those N
+p-values together. The declared family is one reviewed comparison: every
+scored hypothesis that could alert in that look.
 
 If a future caller mixes binary and continuous windows, Fisher's-exact and
 Mann-Whitney p-values remain in that same family. They test different data types,
@@ -430,11 +427,11 @@ That keeps us honest. Without BH correction, customers would mute our alerts wit
 
 Switching gears now from "drift detection" to "how do we know our judge LLM is any good."
 
-When we score Verdict's judge against MT-Bench's real human judgments, we get pairs like:
+When we score Verdict's judge against human PASS/FAIL labels, we get pairs like:
 
-- Human said "A wins"; judge said "A wins" → agreement
-- Human said "A wins"; judge said "B wins" → disagreement
-- Human said "tie"; judge said "A wins" → disagreement
+- Human said PASS; judge said PASS → agreement
+- Human said FAIL; judge said PASS → disagreement
+- Human said FAIL; judge said FAIL → agreement
 
 We want a single number that summarizes how often they agree.
 
@@ -442,51 +439,14 @@ We want a single number that summarizes how often they agree.
 
 Just count: out of 100 comparisons, how many times did human and judge agree? Get a percentage. Done.
 
-**Why it's not enough.** Suppose I have two raters who both say "A wins" 95% of the time. They'll agree about 90% of the time just by both being biased toward A — even if their decisions are independent. Raw agreement of 90% sounds great but mostly reflects shared bias, not real skill.
+**Why it's not enough.** Suppose two raters both say PASS 95% of the time.
+They can agree often merely because the labels are heavily skewed.
 
 We need a measure that **corrects for chance agreement**.
 
 ---
 
-## 12. Cohen's κ and its paradox
-
-**Cohen's kappa** (1960) is the most famous chance-corrected agreement measure.
-
-### The formula
-
-> κ = (observed agreement − chance agreement) / (1 − chance agreement)
-
-Where "chance agreement" is what you'd expect if both raters were independent given their marginal distributions.
-
-### Interpretation (Landis & Koch, 1977)
-
-- κ ≥ 0.80: strong
-- κ 0.60–0.80: acceptable
-- κ 0.40–0.60: preliminary / borderline
-- κ < 0.40: unreliable
-
-### Why κ can look harsher than raw agreement
-
-In judge-alignment sweeps with skewed labels, Cohen's κ can look much worse than
-raw agreement. That does not mean κ should be ignored; it means the marginal
-distributions matter, and you need to understand what the statistic is
-correcting for before treating it as the whole story.
-
-### The Kappa Paradox
-
-But here's the subtle issue: **Cohen's κ has a known mathematical problem called the "kappa paradox."**
-
-When both raters agree on most cases (high overall agreement) BUT the marginal distribution is skewed (e.g., both rate 95% PASS), the chance-agreement term in the denominator gets very large. The (1 − chance agreement) gets small. The whole fraction gets squashed toward zero — even when raw agreement is high.
-
-In plain English: when judges agree on the easy cases (most things are PASS) and only disagree on the hard cases, Cohen's κ can be artificially deflated, making good agreement look bad.
-
-**This is exactly our situation.** Our judges all rate ~90% of responses PASS. Most pairs have an obvious winner that both judge and human agree on. The disagreements are clustered in genuinely-close pairs. Cohen's κ punishes this even though it's the natural pattern.
-
-The paradox has been known since Feinstein and Cicchetti (1990) and is one of the main reasons modern methodology papers prefer alternatives.
-
----
-
-## 13. Gwet's AC1 — the paradox fix
+## 12. Gwet's AC1 — chance-corrected agreement
 
 **Gwet's AC1** (Gwet, 2008) was designed to avoid the kappa paradox for nominal, unweighted categories. It uses a different formula for chance agreement that does not become inflated when marginals are skewed.
 
@@ -500,7 +460,7 @@ The paradox has been known since Feinstein and Cicchetti (1990) and is one of th
 
 The key change: instead of P_e = Σ p_a_c × p_b_c (product of marginals, which inflates on skew), Gwet uses an average-marginal formulation that stays well-behaved.
 
-### Same interpretation scale
+### Operational interpretation
 
 Verdict currently uses the same operational thresholds for AC1:
 
@@ -509,118 +469,14 @@ Verdict currently uses the same operational thresholds for AC1:
 - AC1 0.40–0.60: preliminary
 - AC1 < 0.40: unreliable
 
-The difference is *what number you get*, not how to interpret it.
-
-### Worked example showing the paradox
-
-Suppose two raters score 100 items and agree on 99:
-
-| Rater A | Rater B | Count |
-|---|---|---|
-| PASS | PASS | 94 |
-| PASS | FAIL | 1 |
-| FAIL | PASS | 0 |
-| FAIL | FAIL | 5 |
-
-Raw agreement is 99/100 = 99%. Clearly the raters agree.
-
-- Cohen's κ ≈ 0.85 (still high, but starting to feel the paradox)
-
-Now consider an extreme case: 99 PASSes both, 1 disagreement.
-
-| Rater A | Rater B | Count |
-|---|---|---|
-| PASS | PASS | 95 |
-| PASS | FAIL | 1 |
-| FAIL | PASS | 4 |
-| FAIL | FAIL | 0 |
-
-Raw agreement is still 95/100 = 95%.
-
-- Cohen's κ ≈ -0.04 (catastrophically dropped to near zero, paradoxically)
-- Gwet's AC1 ≈ 0.85 (handles the skew correctly)
-
-Same raters, same raw agreement, but Cohen's κ drops to nothing while AC1 stays sensible.
-
-### Why Verdict reports both
-
-Verdict reports **both** Cohen's κ and Gwet's AC1 side by side with a
-methodology note. Readers familiar with κ get their reference number, while
-readers who know about the paradox get the methodologically safer statistic for
-skewed rubric data.
-
-For user-signal correlation, Verdict computes the binary confusion matrix only
-from one unambiguous PASS/FAIL plus positive/negative observation per trace.
-`UNCLEAR` and non-label signals are coverage skips, exact duplicates collapse,
-and contradictory usable duplicates are excluded and counted. Raw agreement
-gets a Wilson interval; Cohen's κ and Gwet's coefficient get deterministic
-bootstrap intervals. A leniency rate means “user-negative among responses the
-judge called PASS,” while a strictness rate means “user-positive among responses
-the judge called FAIL,” so each uses the judge decision it conditions on as its
-denominator.
+Verdict reports AC1 beside raw agreement and confidence intervals so the point
+estimate is never read without its sample uncertainty.
 
 ---
 
-## 14. Bradley-Terry — turning pairwise wins into rankings
+## 13. How it all fits together in Verdict
 
-Last big concept. This one's about ranking LLMs against each other.
-
-### The problem
-
-You want to rank N models (Claude, GPT, Gemini, Llama, ...) by quality on your traffic. You can only test them pairwise — each match-up compares two models on the same prompt. How do you turn a pile of pairwise outcomes into a single ranking with confidence intervals?
-
-Same problem as ranking chess players (each game is pairwise), tennis players, or any tournament. The classic solution is **Bradley-Terry**.
-
-### The model
-
-Each model has a hidden "strength" parameter β:
-
-> P(A beats B) = e^(β_A) / (e^(β_A) + e^(β_B))
-
-If β_A = β_B, P = 0.5 (coin flip).
-If β_A >> β_B, P → 1 (A almost always wins).
-
-This is just a logistic function applied to the difference in strengths.
-
-### How to fit it
-
-Given a bunch of pairwise outcomes, find the β values that maximize the likelihood of those observations. **This is just logistic regression with a special feature design**:
-
-- One row per pairwise game.
-- Features: a vector of zeros except +1 in position of model A, −1 in position of model B.
-- Label: 1 if A won, 0 if B won, 0.5 if tie.
-
-That last label is valid only when the judge explicitly returned a usable tie.
-Malformed or missing verdict markers and provider failures are not games and
-are not coded as `0.5`. Verdict excludes them from the fit, reports them as
-coverage loss, and rejects unknown winner values before constructing the design
-matrix. Otherwise an outage could pull two models artificially toward equal
-ratings.
-
-Hand this to scikit-learn's `LogisticRegression(fit_intercept=False)` and you get back β coefficients. Those are the model strengths.
-
-### Confidence intervals via bootstrap
-
-A single point estimate of β isn't enough — you also need to know how confident you are. **Bootstrap**: resample your pairwise outcomes with replacement, fit BT each time, repeat N=1000 times. The 2.5th and 97.5th percentiles of each model's β give you a 95% confidence interval.
-
-### Translating to actionable numbers
-
-The β values themselves are abstract. Two more useful translations:
-
-- **Win rate vs. anchor**: pick one model as the reference (typically the customer's current production model). For each other model, P(other beats anchor) = 1 / (1 + e^(β_anchor − β_other)). This directly answers "would I be better off switching?"
-- **Per-cluster ranking**: fit BT separately for each intent cluster. The same model can win on coding-question traffic and lose on writing-question traffic. Per-cluster rankings surface this.
-
-### Where you've seen it
-
-LMSys's Chatbot Arena leaderboard. Every time someone votes "A is better" on https://lmarena.ai, that's a Bradley-Terry input. The headline numbers on the leaderboard are BT ratings with bootstrap confidence intervals.
-
-We use the same code structure (FastChat's `compute_elo.py`), except our voters are LLM judges instead of humans, and rankings are computed on the workload being evaluated.
-
----
-
-## 15. How it all fits together in Verdict
-
-Three flavors of question, three pipelines:
+Two product questions use these methods:
 
 ### Flavor 1: "Did this behavior change?"
 
@@ -642,49 +498,29 @@ coverage do not become no-alert results. This is implemented in
 
 ### Flavor 2: "Is our judge any good?"
 
-For a sample of MT-Bench pairs (or a customer's labeled subset):
+For customer-labeled PASS/FAIL examples:
 
-1. Run our pairwise judge with position-swap on each pair.
-2. Exclude invalid/error outputs, report their pair and component coverage, and
-   fail the evidence gate if the selected run is incomplete.
-3. Compare the remaining usable verdicts to the human ground truth.
-4. **Cohen's κ** → chance-corrected agreement (paradox-vulnerable on skewed marginals)
-5. **Gwet's AC1** → chance-corrected agreement for nominal categories (paradox-resistant; preferred for our data)
-6. **Non-tie agreement** → raw agreement on cases where humans had a clear winner
+1. Run the configured binary rubric judge.
+2. Keep `UNCLEAR` and execution errors outside the comparable denominator.
+3. Report raw exact-match agreement with a Wilson interval.
+4. Report **Gwet's AC1** as the chance-corrected agreement measure.
+5. Use a bootstrap confidence interval rather than trusting the point estimate.
 
-Both κ and AC1 are reported side by side. Workload-specific calibration should
-determine whether rankings are shown as decision support or treated as
-review-only.
-
-This is `scripts/verify_judge_alignment.py`.
-
-### Flavor 3: "Which LLM is best for my traffic?"
-
-For a customer who shadow-routes some traffic to multiple providers:
-
-1. For each shadow pair, the **pairwise judge** with **position-swap consistency** returns a usable winner/tie or an explicit invalid/error state.
-2. Across all pairs, fit **Bradley-Terry** logistic regression with **bootstrap confidence intervals**.
-3. Report per-cluster rankings + win-rate vs. anchor model.
-
-Only usable outcomes enter step 2. An invalid/error outcome must stop or fail the
-owning workflow's coverage gate; silently turning it into a tie changes the
-measurement rather than handling the failure.
-
-This is `packages/verdict_eval/src/verdict_eval/compare.py` plus `pairwise.py`.
+This is `scripts/verify_rubric_alignment.py` and the dashboard calibration flow.
 
 ### The cross-cutting concept
 
 Notice that every pipeline does the same three things in different ways:
 
 1. **Compare two distributions** (Fisher/Mann-Whitney, Cliff's δ, Wasserstein)
-2. **Quantify the disagreement** between observations (κ, AC1, BT win rate)
+2. **Quantify disagreement** between labels (raw agreement and AC1)
 3. **Correct for chance / multiple testing** (BH adjustment, chance-corrected agreement)
 
 That's basically all of frequentist statistics in three sentences.
 
 ---
 
-## 16. Quick reference card
+## 14. Quick reference card
 
 | You want to know | Use | Output |
 |---|---|---|
@@ -696,9 +532,7 @@ That's basically all of frequentist statistics in three sentences.
 | Is the distributional shift industry-significant? | PSI | < 0.1 stable, ≥ 0.25 shifted |
 | I ran many tests — am I just getting false positives? | Benjamini-Hochberg correction | adjusted p-values |
 | Did judge evaluability deteriorate? | Deterministic UNCLEAR-rate gate | ≥15-point increase with total-n floor |
-| Do two raters agree (chance-corrected)? | Cohen's κ | -1 to +1; ≥ 0.6 acceptable |
-| Same but doesn't break on skewed marginals? | Gwet's AC1 | same scale |
-| Turn pairwise wins into a ranking with CIs? | Bradley-Terry + bootstrap | per-model rating + CI |
+| Do two raters agree after chance correction? | Gwet's AC1 | -1 to +1; ≥ 0.6 acceptable |
 
 The most important point: **p-value and effect size answer different questions and you need both**. p-value alone lets trivial differences trigger alarms with enough data. Effect size alone lets random fluctuations look meaningful. Use them together.
 

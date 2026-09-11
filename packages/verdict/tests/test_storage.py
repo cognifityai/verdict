@@ -24,7 +24,6 @@ from verdict.schema import (
     Operation,
     SpanRecord,
     Trace,
-    UserSignalRecord,
     Verdict,
 )
 from verdict.storage.base import Storage
@@ -89,6 +88,30 @@ def test_insert_and_get_trace(storage):
     assert fetched.provider == "anthropic"
     assert fetched.input_tokens == 100
     assert fetched.parent_span_id == "span-parent"
+
+
+def test_sqlite_does_not_create_or_drop_retired_user_signal_data(tmp_path):
+    fresh_path = tmp_path / "fresh.db"
+    SQLiteStorage(str(fresh_path)).close()
+    connection = sqlite3.connect(fresh_path)
+    assert connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='user_signals'"
+    ).fetchone() is None
+    connection.close()
+
+    legacy_path = tmp_path / "legacy.db"
+    connection = sqlite3.connect(legacy_path)
+    connection.execute("CREATE TABLE user_signals (marker TEXT)")
+    connection.execute("INSERT INTO user_signals VALUES ('preserve-me')")
+    connection.commit()
+    connection.close()
+
+    SQLiteStorage(str(legacy_path)).close()
+    connection = sqlite3.connect(legacy_path)
+    assert connection.execute("SELECT marker FROM user_signals").fetchall() == [
+        ("preserve-me",)
+    ]
+    connection.close()
 
 
 def test_storage_redacts_sentence_final_ipv6_without_consuming_punctuation(storage):
@@ -1324,16 +1347,14 @@ def test_delete_trace_removes_trace_and_judgments(storage):
         dimensions=[DimensionScore(name="groundedness", verdict=Verdict.PASS)],
     )
     storage.insert_judgment(j)
-    # A span and a user signal hung off the same trace must also be removed.
+    # A span hung off the same trace must also be removed.
     storage.insert_span(SpanRecord(name="retrieval", trace_id=trace.trace_id))
-    storage.insert_user_signal(UserSignalRecord(trace_id=trace.trace_id, kind="thumbs_up"))
 
     storage.delete_trace(trace.trace_id)
 
     assert storage.get_trace(trace.trace_id) is None
     assert storage.list_judgments_for_cluster("cluster-del") == []
     assert storage.list_spans(trace_id=trace.trace_id) == []
-    assert [s for s in storage.list_user_signals() if s.trace_id == trace.trace_id] == []
 
 
 def test_memory_trace_cleanup_precomputes_retained_parent_ids() -> None:
@@ -1554,16 +1575,6 @@ def test_span_insert_list_round_trip_and_filter(storage):
     assert got.parent_name == "root"
     assert got.duration_ms == 12.5
     assert got.attributes == {"k": "v", "n": 3}
-
-
-def test_user_signal_insert_list_round_trip(storage):
-    sig = UserSignalRecord(trace_id="trace-9", kind="thumbs_down")
-    storage.insert_user_signal(sig)
-    fetched = storage.list_user_signals()
-    assert len(fetched) == 1
-    assert fetched[0].signal_id == sig.signal_id
-    assert fetched[0].trace_id == "trace-9"
-    assert fetched[0].kind == "thumbs_down"
 
 
 def test_sqlite_persists_across_reopens(tmp_path):

@@ -5,7 +5,7 @@ import {
 } from "recharts";
 import {
   Activity, AlertTriangle, ArrowRight, ArrowLeft, BarChart3, Boxes, CheckCircle2,
-  Code2, Database, GitBranch, Layers, Scale, Search, Shield, Signal,
+  Code2, Database, Layers, Scale, Search, Shield, Signal,
   TrendingDown, Github, Terminal, Gauge, FlaskConical, DollarSign,
   Filter, X, Sparkles, Eye, Network, RefreshCw, Info,
 } from "lucide-react";
@@ -16,6 +16,7 @@ import { Registry } from "./Registry.jsx";
 import { Runs } from "./Runs.jsx";
 import { Insights } from "./Insights.jsx";
 import { EvaluatorLab } from "./EvaluatorLab.jsx";
+import { InspectLab } from "./InspectLab.jsx";
 import { ControlCenter } from "./ControlCenter.jsx";
 import { SetupWizard } from "./SetupWizard.jsx";
 import { initialDashboardTab } from "./source-state.mjs";
@@ -446,7 +447,6 @@ function Landing({ onEnter }) {
     { icon: Layers, t: "Explore", d: "Start without grouping, compare factual provider/model facets, or review optional semantic cluster exemplars before activation." },
     { icon: Scale, t: "Evaluate", d: "Run a configured evidence-aware rubric only after previewing eligibility, egress, call count, and estimated maximum cost." },
     { icon: Signal, t: "Monitor", d: "Freeze an exact older reference and newer current cohort, then test eligible metrics with multiplicity and effect-size gates." },
-    { icon: GitBranch, t: "Compare", d: "Bradley-Terry pairwise ranking across providers on your own traffic, with bootstrap CIs." },
   ];
   const validation = [
     { k: "Capture", l: "Provider call tracing", d: "Instrument supported SDK calls and verify live capture with the release-check script.", icon: FlaskConical, color: C.green },
@@ -630,7 +630,7 @@ const TRUNCATION_LABELS = {
 const TAB_HELP = {
   overview: "What changed, what needs attention, and what evidence Verdict has. Reliability, performance, and behavior are judge-free views of the same captured data.",
   explore: "Inspect Agent Runs and genuine LLM calls, including their evidence and evaluation state. Provider comparison is descriptive unless traffic is matched.",
-  evaluate: "Configure evaluators, inspect stored judgments, and review labels. Missing evidence stays not evaluable rather than being scored as a failure.",
+  evaluate: "Configure evaluators, inspect stored judgments, analyze one-off JSON exports, and review labels. Missing evidence stays not evaluable rather than being scored as a failure.",
   monitor: "Compare historical cohorts, activate ongoing monitoring, and optionally review segments. Earlier fixed-window results remain available as read-only history.",
   settings: "Configure data sources, schedules, alert destinations, integrations, and privacy controls.",
 };
@@ -638,7 +638,7 @@ const TAB_HELP = {
 const WORKSPACE_SECTIONS = {
   overview: [["summary", "Summary"], ["reliability", "Reliability"], ["performance", "Performance"], ["behavior", "Behavior"]],
   explore: [["runs", "Agent Runs & Tools"], ["calls", "LLM Calls"], ["compare", "Compare"]],
-  evaluate: [["results", "Results"], ["lab", "Evaluator Lab"], ["review", "Review Queue"]],
+  evaluate: [["results", "Results"], ["lab", "Evaluator Lab"], ["inspect", "Inspect JSON"], ["review", "Review Queue"]],
   monitor: [["status", "Status"], ["history", "Compare History"], ["segments", "Segments"], ["schedule", "Schedule"], ["signals", "Legacy History"]],
   settings: [["sources", "Data Sources"], ["alerts", "Alerts"], ["integrations", "Integrations"], ["privacy", "Privacy"]],
 };
@@ -948,6 +948,7 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
         {tab === "explore" && route.section === "compare" && <Compare data={DATA} source={source} />}
         {tab === "evaluate" && route.section === "results" && <Judge data={DATA} onOpenOperations={operationsUrl ? () => commitRoute({ ...route, tab: "settings", section: "integrations" }) : null} />}
         {tab === "evaluate" && route.section === "lab" && <EvaluatorLab configUrl={mountedConfigUrl()} onOpenEvaluated={(evaluatorId) => { onEvaluatorChange?.(evaluatorId); commitRoute({ ...route, tab: "explore", section: "calls", evaluatorId, traceJudgeStatus: "judged", traceId: null }); }} />}
+        {tab === "evaluate" && route.section === "inspect" && <InspectLab configUrl={mountedConfigUrl()} />}
         {tab === "evaluate" && route.section === "review" && <ControlCenter section="review" configUrl={mountedConfigUrl()} onNavigate={(target) => navigateWorkflow(commitRoute, route, target)} />}
         {tab === "monitor" && route.section === "status" && <Monitor view="status" initialState={DATA.monitor} configUrl={mountedConfigUrl()} evaluation={data.evaluation} onChanged={onReload} />}
         {tab === "monitor" && route.section === "signals" && <DriftSignals data={DATA}

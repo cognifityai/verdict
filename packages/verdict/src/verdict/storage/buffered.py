@@ -78,7 +78,6 @@ from verdict.schema import (
     Judgment,
     SpanRecord,
     Trace,
-    UserSignalRecord,
 )
 
 
@@ -361,9 +360,6 @@ class BufferedStorage:
     def insert_span(self, span: SpanRecord) -> None:
         self._enqueue(self._inner.insert_span, span)
 
-    def insert_user_signal(self, sig: UserSignalRecord) -> None:
-        self._enqueue(self._inner.insert_user_signal, sig)
-
     def replace_agent_run_bundle(self, bundle: AgentRunBundle) -> None:
         self.replace_agent_capture(bundle)
 
@@ -612,9 +608,6 @@ class BufferedStorage:
 
     def list_spans(self, *, trace_id: str | None = None, limit: int = 100) -> list[SpanRecord]:
         return self._read(self._inner.list_spans, trace_id=trace_id, limit=limit)
-
-    def list_user_signals(self, *, limit: int = 1000) -> list[UserSignalRecord]:
-        return self._read(self._inner.list_user_signals, limit=limit)
 
     def load_cluster_registry(self, version: str) -> str | None:
         return self._read(self._inner.load_cluster_registry, version)

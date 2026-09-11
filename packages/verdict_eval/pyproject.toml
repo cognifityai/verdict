@@ -1,7 +1,7 @@
 [project]
 name = "cognifity-verdict-eval"
 version = "0.1.0a17"
-description = "Verdict eval engine: judge, drift detection, Bradley-Terry comparator, regression injector"
+description = "Verdict eval engine: binary judges, structural checks, semantic drift, and clustering"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"

@@ -60,7 +60,6 @@ export function ControlCenter({ configUrl, onNavigate = null, section = "all" })
   const proposals = documents.filter((item) => item.kind === "proposal");
   const reviews = new Set(documents.filter((item) => item.kind === "review" && item.state === "resolved").map((item) => item.documentId));
   const openReviews = (data?.reviewQueue || []).filter((item) => !reviews.has(reviewId(item)));
-  const signalText = Object.entries(data?.userSignals?.counts || {}).map(([name, count]) => `${name}: ${count}`).join(" · ") || "No user signals captured";
   const localAgentOperations = data?.dailyOperations?.mode === "local_agent";
 
   return <div className="max-w-6xl space-y-5">
@@ -97,8 +96,7 @@ export function ControlCenter({ configUrl, onNavigate = null, section = "all" })
       </section>}
     </div>}
 
-    {["all", "review"].includes(section) && <section className="border p-5" style={panel}><Heading icon={CheckCircle2} title="Review queue and user signals" />
-      <div className="text-sm" style={{ color: color.sub }}>{signalText}</div>
+    {["all", "review"].includes(section) && <section className="border p-5" style={panel}><Heading icon={CheckCircle2} title="Review queue" />
       <div className="mt-4 space-y-2">{openReviews.slice(0, 20).map((item) => <div key={reviewId(item)} className="border p-3 flex flex-wrap items-center gap-3 text-sm" style={{ borderColor: color.border }}><span className="font-mono">{item.traceId}</span><span>{item.dimension}: {item.verdict}</span><button className="ml-auto border px-3 py-1" onClick={() => save("review", reviewId(item), "resolved", { traceId: item.traceId, judgmentId: item.judgmentId, dimension: item.dimension, label: item.verdict })}>Confirm label</button></div>)}{!openReviews.length && <Small>No unresolved fail/unclear judge suggestions in the bounded queue.</Small>}</div>
     </section>}
 

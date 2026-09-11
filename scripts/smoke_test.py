@@ -3,7 +3,7 @@ scipy/sklearn. Run from repo root:
 
     python scripts/smoke_test.py
 
-For the full pytest suite (which exercises drift/clustering/Bradley-Terry too),
+For the full pytest suite (which exercises monitoring and clustering too),
 install the heavy deps: pip install -e packages/verdict packages/verdict_eval[dev]
 """
 # Imports intentionally appear beside the sequential stage they exercise.
@@ -116,38 +116,7 @@ async def aadd(a, b):
 assert asyncio.run(aadd(2, 3)) == 5
 print("✓ trace decorator")
 
-# ---- 5. injector -----------------------------------------------------------
-from verdict_eval.injector import (
-    CorruptionInjector,
-    CorruptionKind,
-    build_corruption_battery,
-)
-
-inj = CorruptionInjector(seed=1)
-out = inj.corrupt("What is 2+2?", "Four.", CorruptionKind.REFUSAL)
-assert "can't help" in out.corrupted_response.lower()
-
-out = inj.corrupt("Q", "Original.", CorruptionKind.TRUNCATION, strength=1.0)
-assert len(out.corrupted_response) < len("Original.")
-
-out = inj.corrupt("Q", "Original.", CorruptionKind.PROMPT_INJECTION_ECHO)
-assert "Ignore previous instructions" in out.corrupted_response
-
-# Deterministic
-a = CorruptionInjector(seed=99).corrupt("Q", "R", CorruptionKind.HALLUCINATION, 1.0)
-b = CorruptionInjector(seed=99).corrupt("Q", "R", CorruptionKind.HALLUCINATION, 1.0)
-assert a.corrupted_response == b.corrupted_response
-
-battery = build_corruption_battery(
-    [("What is 2+2?", "Four."), ("Capital of France?", "Paris.")],
-    strengths=[1.0],
-)
-assert len(battery) == 2 * (1 + 7)
-kinds = {s.kind for s in battery}
-assert CorruptionKind.NONE in kinds
-print(f"✓ injector ({len(battery)} samples across {len(kinds)} kinds)")
-
-# ---- 6. judge (using FakeProvider) ----------------------------------------
+# ---- 5. judge (using FakeProvider) ----------------------------------------
 from verdict_eval.judge import DEFAULT_RUBRIC, Judge, JudgeEnsemble
 from verdict_eval.providers import FakeProvider
 
@@ -194,7 +163,7 @@ j4 = ens.judge(query="Q", response="R")
 assert all(d.verdict == Verdict.PASS for d in j4.dimensions)
 print("✓ judge (ensemble majority)")
 
-# ---- 7. client lifecycle (no actual instrumentor install since no anthropic SDK) ----
+# ---- 6. client lifecycle (no actual instrumentor install since no anthropic SDK) ----
 from verdict.client import get_client, init, shutdown
 
 client = init(service_name="smoke", storage="memory://")

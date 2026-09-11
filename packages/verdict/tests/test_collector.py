@@ -40,7 +40,7 @@ from verdict.evidence import (
     PrivacyClassification,
     SourceSession,
 )
-from verdict.schema import SpanRecord, Trace, UserSignalRecord
+from verdict.schema import SpanRecord, Trace
 from verdict.storage.memory import InMemoryStorage
 
 TENANT = "collector-tenant"
@@ -179,14 +179,6 @@ def _standalone_records(tmp_path: Path) -> bytes:
     sink = FileCaptureSink(spool, redaction_mode="redact", redaction_secret=None)
     sink.capture_trace(Trace(trace_id="standalone", provider="openai", started_at=now))
     sink.capture_span(SpanRecord(span_id="span-1", name="work", started_at=now))
-    sink.capture_user_signal(
-        UserSignalRecord(
-            signal_id="signal-1",
-            trace_id="standalone",
-            kind="thumbs_up",
-            created_at=now,
-        )
-    )
     sink.close()
     [path] = spool.glob("verdict-agent-*.jsonl")
     return path.read_bytes()
@@ -241,7 +233,19 @@ def test_poison_records_are_terminal_without_blocking_valid_siblings(
 ) -> None:
     service, storage, _receipts = _service()
     valid = _agent_record(tmp_path)
-    body = b'{"schema":"wrong"}\n' + valid + _standalone_records(tmp_path)
+    retired_signal = json.dumps(
+        {
+            "schema": "verdict-capture-v1",
+            "kind": "signal",
+            "record": {"obsolete": True},
+        }
+    ).encode() + b"\n"
+    body = (
+        b'{"schema":"wrong"}\n'
+        + valid
+        + retired_signal
+        + _standalone_records(tmp_path)
+    )
 
     response = _decode(service.ingest("batch-mixed", "host-1", body))
 

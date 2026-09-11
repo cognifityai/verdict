@@ -20,6 +20,16 @@ privacy boundary described below.
 
 ## Usage
 
+In a full Verdict installation, the same one-off workflow is available under
+**Evaluate → Inspect JSON**. Paste JSON or choose a file, run the analysis, and
+download the result as JSON. The dashboard accepts at most 4 MiB per request,
+runs analysis on the Verdict host, does not write the upload or report to the
+Verdict store, and keeps semantic analysis and the external judge off until
+selected. Enabling the judge also requires an explicit data-egress confirmation.
+
+The command-line interface remains available for larger local exports and
+Markdown reports:
+
 ```bash
 # Auto-detect format
 verdict-inspect analyze ~/Downloads/conversations.json

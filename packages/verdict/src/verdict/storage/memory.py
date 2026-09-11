@@ -75,7 +75,6 @@ from verdict.schema import (
     SpanRecord,
     Trace,
     TraceClusterAssignment,
-    UserSignalRecord,
     cluster_candidate_digest,
     populate_trace_analysis_fields,
 )
@@ -124,7 +123,6 @@ class InMemoryStorage:
         self._cluster_v2_lock = threading.RLock()
         self._cluster_snapshot = threading.local()
         self._spans: dict[str, SpanRecord] = {}
-        self._user_signals: dict[str, UserSignalRecord] = {}
 
     def insert_trace(self, trace: Trace) -> None:
         sanitize_trace(trace)
@@ -712,9 +710,6 @@ class InMemoryStorage:
             for sid, s in self._spans.items()
             if s.trace_id != trace_id or sid in retained_parent_span_ids
         }
-        self._user_signals = {
-            sid: s for sid, s in self._user_signals.items() if s.trace_id != trace_id
-        }
 
     def prune_before(self, cutoff_iso: str) -> int:
         with self._agent_evidence_lock, self._cluster_v2_lock:
@@ -739,11 +734,6 @@ class InMemoryStorage:
             jid: judgment
             for jid, judgment in self._judgments.items()
             if judgment.trace_id not in doomed_set
-        }
-        self._user_signals = {
-            sid: signal
-            for sid, signal in self._user_signals.items()
-            if signal.trace_id not in doomed_set
         }
         for span_id, record in self._spans.items():
             if record.trace_id in doomed_set and span_id in retained_parent_span_ids:
@@ -977,13 +967,6 @@ class InMemoryStorage:
             if len(out) >= limit:
                 break
         return out
-
-    def insert_user_signal(self, sig: UserSignalRecord) -> None:
-        self._user_signals[sig.signal_id] = sig
-
-    def list_user_signals(self, *, limit: int = 1000) -> list[UserSignalRecord]:
-        items = sorted(self._user_signals.values(), key=lambda s: s.created_at, reverse=True)
-        return items[:limit]
 
     def save_cluster_registry(self, version: str, payload_json: str) -> None:
         self._cluster_registries[version] = payload_json
@@ -1545,4 +1528,3 @@ class InMemoryStorage:
         self._active_cluster_registries.clear()
         self._cluster_registry_events.clear()
         self._spans.clear()
-        self._user_signals.clear()

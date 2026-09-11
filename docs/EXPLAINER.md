@@ -98,7 +98,8 @@ For a visual overview, see `docs/architecture-current.svg`.
   `scripts/verify_rubric_alignment.py` to measure judge agreement on your own
   labeled examples. The sampler reapplies best-effort redaction when it writes
   JSONL so legacy database rows do not bypass the current storage sanitizer.
-- Use `verdict-inspect` or the dashboard to inspect stored traces and reports.
+- Use **Evaluate → Inspect JSON** or `verdict-inspect` for one-off exports; use
+  Trace Explorer and Monitor for evidence already in the Verdict store.
 - Run the test suite before changing instrumentation or evaluation behavior.
 
 ## What Verdict Is Good For

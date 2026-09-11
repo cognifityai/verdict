@@ -57,6 +57,13 @@ test("fixed-window signals have a refreshable route and legacy drift links open 
     "#tab=monitor&section=signals&evaluator=evaluator-2");
 });
 
+test("Inspect JSON is a stable Evaluate route", () => {
+  const route = parseDashboardRoute("#tab=evaluate&section=inspect");
+  assert.equal(route.tab, "evaluate");
+  assert.equal(route.section, "inspect");
+  assert.equal(serializeDashboardRoute(route), "#tab=evaluate&section=inspect");
+});
+
 test("legacy dashboard destinations redirect into five coherent workspaces", () => {
   const cases = [
     ["#tab=reliability", "overview", "reliability"],

@@ -31,7 +31,7 @@ Agent stream fails, it remains closed to prevent sequence gaps while later
 provider calls use the standalone Trace path.
 
 The default transport writes directly through the storage port. The same sink
-owns provider Traces, Agent evidence, manual spans, and user signals. An optional
+owns provider Traces, Agent evidence, and manual spans. An optional
 local file implementation writes redacted, versioned JSONL records with fixed
 record, segment, and directory byte limits. Files are process-owned and a
 producer uses its own spool directory. An append writes the complete record or
@@ -39,7 +39,8 @@ abandons that segment; completed appends bypass Python userspace buffering but
 are not synchronized against an operating-system or host failure. Import
 replays complete records idempotently through each canonical storage boundary.
 An incomplete final record is observable and ignored; a malformed complete
-record fails import. Quota and write failures increment a process-local
+record fails import. Signal records written by older alpha releases are ignored
+so they cannot block later supported records. Quota and write failures increment a process-local
 dropped-record counter and emit a bounded, non-sensitive warning without
 changing application behavior.
 

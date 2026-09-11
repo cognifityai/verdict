@@ -85,7 +85,6 @@ from verdict.schema import (
     SpanRecord,
     Trace,
     TraceClusterAssignment,
-    UserSignalRecord,
     Verdict,
     cluster_candidate_digest,
     populate_trace_analysis_fields,
@@ -615,14 +614,6 @@ CREATE TABLE IF NOT EXISTS spans (
 CREATE INDEX IF NOT EXISTS idx_spans_trace ON spans(trace_id);
 CREATE INDEX IF NOT EXISTS idx_spans_started ON spans(started_at);
 
-CREATE TABLE IF NOT EXISTS user_signals (
-    signal_id TEXT PRIMARY KEY,
-    trace_id TEXT NOT NULL,
-    kind TEXT,
-    created_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_user_signals_trace ON user_signals(trace_id);
-CREATE INDEX IF NOT EXISTS idx_user_signals_created ON user_signals(created_at);
 """
 
 
@@ -1799,7 +1790,6 @@ class SQLiteStorage:
             self._conn.execute("BEGIN IMMEDIATE")
             try:
                 self._conn.execute("DELETE FROM judgments WHERE trace_id = ?", (trace_id,))
-                self._conn.execute("DELETE FROM user_signals WHERE trace_id = ?", (trace_id,))
                 self._conn.execute(
                     "UPDATE agent_events SET trace_id = NULL WHERE trace_id = ?",
                     (trace_id,),
@@ -1840,7 +1830,6 @@ class SQLiteStorage:
                 ids = [r["trace_id"] for r in cur.fetchall()]
                 for tid in ids:
                     self._conn.execute("DELETE FROM judgments WHERE trace_id = ?", (tid,))
-                    self._conn.execute("DELETE FROM user_signals WHERE trace_id = ?", (tid,))
                     self._conn.execute(
                         "UPDATE agent_events SET trace_id = NULL WHERE trace_id = ?",
                         (tid,),
@@ -2405,39 +2394,6 @@ class SQLiteStorage:
             )
             rows = cur.fetchall()
         return [self._row_to_span(r) for r in rows]
-
-    # -- User signals ------------------------------------------------------
-
-    def insert_user_signal(self, sig: UserSignalRecord) -> None:
-        with self._lock:
-            self._conn.execute(
-                """INSERT OR REPLACE INTO user_signals (
-                    signal_id, trace_id, kind, created_at
-                ) VALUES (:signal_id, :trace_id, :kind, :created_at)""",
-                {
-                    "signal_id": sig.signal_id,
-                    "trace_id": sig.trace_id,
-                    "kind": sig.kind,
-                    "created_at": _iso(sig.created_at),
-                },
-            )
-
-    def list_user_signals(self, *, limit: int = 1000) -> list[UserSignalRecord]:
-        with self._lock:
-            cur = self._conn.execute(
-                "SELECT * FROM user_signals ORDER BY created_at DESC LIMIT ?",
-                (limit,),
-            )
-            rows = cur.fetchall()
-        return [
-            UserSignalRecord(
-                signal_id=r["signal_id"],
-                trace_id=r["trace_id"] or "",
-                kind=r["kind"] or "",
-                created_at=_parse_iso(r["created_at"]) or datetime.now(timezone.utc),
-            )
-            for r in rows
-        ]
 
     # -- Cluster registry --------------------------------------------------
 

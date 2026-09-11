@@ -113,14 +113,14 @@ verdict.init(transport="file", spool_directory="./verdict-capture")
 verdict-import agent-file ./verdict-capture --storage sqlite:///./verdict.db
 ```
 
-The same file transport carries provider Traces, Agent evidence, manual spans,
-and user signals. Use one spool directory per producer process. Manual import
+The same file transport carries provider Traces, Agent evidence, and manual
+spans. Use one spool directory per producer process. Manual import
 reads complete records from active, sealed, or rejected segments. For central
 PostgreSQL Agent ingestion, `verdict-collector` provides authenticated bounded
 batches and durable idempotent acknowledgements, while `verdict-shipper`
 uploads complete segment prefixes and deletes only sealed, fully accepted
 segments. Collector-rejected segments remain locally recoverable. Standalone
-Trace, Span, and UserSignal records still require direct or manual file import.
+Trace and Span records still require direct or manual file import.
 Use `verdict-shipper --spool-directory ./verdict-capture --status --json` to
 inspect local backlog without the collector or its key. Completed appends bypass
 Python userspace buffering but are not `fsync`-ed. If an Agent evidence stream
@@ -330,6 +330,13 @@ recorded; it does not report the application's current capture setting. Monitor
 previews show eligible evidence for the selected count-based or explicit
 event-time cohorts. Fixed-window results produced by older releases remain
 available only as read-only legacy history.
+
+For a one-off export that is not in the Verdict store, open **Evaluate →
+Inspect JSON**. Paste JSON or choose a local export file; both use the same
+bounded request path. Verdict does not save the upload or the resulting
+report. Analysis runs on the Verdict dashboard host; semantic analysis and the
+external judge are separate opt-ins. The judge also requires an explicit
+confirmation before any content is sent to its provider.
 
 Upgrade an existing synchronized `0.1.0a5` through `0.1.0a16` environment with
 `python -m pip install --upgrade`

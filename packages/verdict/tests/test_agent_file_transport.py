@@ -193,7 +193,9 @@ def test_file_transport_creates_no_segment_until_the_first_record(tmp_path: Path
     assert list(tmp_path.glob("verdict-agent-*.jsonl")) == []
 
 
-def test_file_transport_replays_spans_and_user_signals(tmp_path: Path) -> None:
+def test_file_transport_skips_retired_signals_and_replays_later_records(
+    tmp_path: Path,
+) -> None:
     spool = tmp_path / "spool"
     database = tmp_path / "verdict.db"
     client = verdict.init(
@@ -211,22 +213,31 @@ def test_file_transport_replays_spans_and_user_signals(tmp_path: Path) -> None:
     with verdict.trace_context(trace.trace_id):
         with verdict.span("retrieve alice@example.com", owner="alice@example.com"):
             pass
-    verdict.record_user_signal(trace.trace_id, "thumbs_up")
     verdict.shutdown()
+
+    [capture_file] = spool.glob("verdict-agent-*.jsonl")
+    lines = capture_file.read_bytes().splitlines(keepends=True)
+    retired_signal = json.dumps(
+        {
+            "schema": agent_transport.CAPTURE_SCHEMA,
+            "kind": "signal",
+            "record": {"obsolete": True},
+        },
+        separators=(",", ":"),
+    ).encode() + b"\n"
+    capture_file.write_bytes(lines[0] + retired_signal + b"".join(lines[1:]))
 
     storage = SQLiteStorage(str(database))
     try:
         first = agent_transport.import_capture_records(spool, storage)
         second = agent_transport.import_capture_records(spool, storage)
-        assert first.seen == first.stored == 3
-        assert second.seen == second.stored == 3
+        assert first.seen == 3
+        assert first.stored == 2
+        assert second == first
         [span] = storage.list_spans()
-        [signal] = storage.list_user_signals()
         assert span.trace_id == trace.trace_id
         assert span.name == "retrieve <EMAIL>"
         assert span.attributes == {"owner": "<EMAIL>"}
-        assert signal.trace_id == trace.trace_id
-        assert signal.kind == "thumbs_up"
     finally:
         storage.close()
 
@@ -303,29 +314,15 @@ def test_failed_first_write_removes_the_empty_segment(tmp_path: Path) -> None:
     assert list(tmp_path.glob("verdict-agent-*.jsonl")) == []
 
 
-@pytest.mark.parametrize(
-    "record",
-    [
-        {
-            "signal_id": "signal",
-            "trace_id": "trace",
-            "kind": "unknown",
-            "created_at": "2026-01-01T00:00:00+00:00",
-        },
-        {
-            "signal_id": "\ud800",
-            "trace_id": "trace",
-            "kind": "thumbs_up",
-            "created_at": "2026-01-01T00:00:00+00:00",
-        },
-    ],
-)
-def test_file_transport_rejects_malformed_user_signal_records(record: dict) -> None:
+def test_file_transport_ignores_retired_signal_payload_shape() -> None:
     raw = json.dumps(
-        {"schema": agent_transport.CAPTURE_SCHEMA, "kind": "signal", "record": record}
+        {
+            "schema": agent_transport.CAPTURE_SCHEMA,
+            "kind": "signal",
+            "record": {"any": "bounded legacy payload"},
+        }
     ).encode()
-    with pytest.raises(ValueError, match="user signal"):
-        agent_transport.decode_capture_record(raw)
+    assert agent_transport.decode_capture_record(raw) is None
 
 
 def test_file_transport_rejects_malformed_span_record() -> None:

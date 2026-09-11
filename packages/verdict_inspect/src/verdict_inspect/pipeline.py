@@ -161,7 +161,7 @@ def _make_embedder() -> tuple[object, str]:
 
 
 def _semantic_drift(windows: list[Window], embedder: object) -> list[SemanticDriftRow]:
-    """Run SemanticDriftDetector pairwise: each later window vs the early baseline."""
+    """Compare each later window with the early baseline."""
     if len(windows) < 2:
         return []
     from verdict_eval.semantic_drift import SemanticDriftDetector

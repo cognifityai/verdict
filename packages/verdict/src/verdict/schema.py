@@ -395,21 +395,6 @@ class SpanRecord:
 
 
 # ---------------------------------------------------------------------------
-# User signals — implicit/explicit feedback events tied to a trace
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class UserSignalRecord:
-    """A single user-feedback event attributed to a trace."""
-
-    signal_id: str = field(default_factory=_id)
-    trace_id: str = ""
-    kind: str = ""  # thumbs_up, thumbs_down, regenerate, retry, abandon, copy, accept, ...
-    created_at: datetime = field(default_factory=_now)
-
-
-# ---------------------------------------------------------------------------
 # Drift signals — output of the drift detector
 # ---------------------------------------------------------------------------
 

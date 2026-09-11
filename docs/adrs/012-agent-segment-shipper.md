@@ -37,14 +37,15 @@ not interpreted as zero backlog or successful delivery.
 
 The first collector accepts only full Agent records, including linked LLM
 Traces. A mixed segment can therefore deliver its Agent records, but the source
-segment is retained when standalone Trace, Span, or UserSignal records are
-rejected. Those records continue to use direct or manual file import.
+segment is retained when standalone Trace or Span records are rejected. Those
+records continue to use direct or manual file import.
 
 ## Compatibility
 
-The wire record schema and database schema do not change. Existing sealed JSONL
-segments remain importable and can be shipped after the producer is restarted
-on the new file lifecycle. Existing direct storage, local import, Claude/Codex,
+Existing sealed JSONL segments remain importable and can be shipped after the
+producer is restarted on the new file lifecycle. Local import ignores retired
+signal records written by earlier alpha releases and continues with later
+supported records. Existing direct storage, local import, Claude/Codex,
 telemetry, analysis, evaluator, cluster, and monitor paths are unchanged.
 
 ## Consequences

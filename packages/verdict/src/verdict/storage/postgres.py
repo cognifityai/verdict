@@ -92,7 +92,6 @@ from verdict.schema import (
     SpanRecord,
     Trace,
     TraceClusterAssignment,
-    UserSignalRecord,
     Verdict,
     cluster_candidate_digest,
     populate_trace_analysis_fields,
@@ -574,14 +573,6 @@ ALTER TABLE spans ADD COLUMN IF NOT EXISTS parent_name TEXT;
 CREATE INDEX IF NOT EXISTS idx_spans_trace   ON spans(trace_id);
 CREATE INDEX IF NOT EXISTS idx_spans_started ON spans(started_at DESC);
 
-CREATE TABLE IF NOT EXISTS user_signals (
-    signal_id    TEXT PRIMARY KEY,
-    trace_id     TEXT NOT NULL,
-    kind         TEXT,
-    created_at   TIMESTAMPTZ NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_user_signals_trace   ON user_signals(trace_id);
-CREATE INDEX IF NOT EXISTS idx_user_signals_created ON user_signals(created_at DESC);
 """
 
 
@@ -1747,15 +1738,14 @@ class PostgresStorage:
         return [self._row_to_trace(r) for r in rows]
 
     def delete_trace(self, trace_id: str) -> None:
-        # judgments cascade via ON DELETE CASCADE, but spans/user_signals do
-        # not declare an FK, so delete them explicitly for parity.
+        # Judgments cascade via ON DELETE CASCADE. Spans do not declare an FK,
+        # so remove or detach them explicitly for parity.
         with self._lock, self._pool.connection() as conn, conn.transaction():
             with conn.cursor() as cur:
                 # Cleanup decides whether spans are still referenced by retained
                 # traces. Serialize trace writers until that decision and all
                 # related deletes commit so a concurrent insert cannot interleave.
                 cur.execute("LOCK TABLE traces IN SHARE ROW EXCLUSIVE MODE")
-                cur.execute("DELETE FROM user_signals WHERE trace_id = %s", (trace_id,))
                 cur.execute("DELETE FROM judgments WHERE trace_id = %s", (trace_id,))
                 cur.execute(
                     "UPDATE agent_events SET trace_id = NULL WHERE trace_id = %s",
@@ -1793,7 +1783,6 @@ class PostgresStorage:
                 )
                 ids = [row[0] for row in cur.fetchall()]
                 if ids:
-                    cur.execute("DELETE FROM user_signals WHERE trace_id = ANY(%s)", (ids,))
                     cur.execute("DELETE FROM judgments WHERE trace_id = ANY(%s)", (ids,))
                     cur.execute(
                         "UPDATE agent_events SET trace_id = NULL WHERE trace_id = ANY(%s)",
@@ -2407,33 +2396,6 @@ class PostgresStorage:
             tuple(params),
         )
         return [self._row_to_span(r) for r in rows]
-
-    # -- User signals -----------------------------------------------------
-
-    def insert_user_signal(self, sig: UserSignalRecord) -> None:
-        self._exec(
-            """INSERT INTO user_signals (signal_id, trace_id, kind, created_at)
-               VALUES (%s,%s,%s,%s)
-               ON CONFLICT (signal_id) DO UPDATE SET
-                   kind = EXCLUDED.kind""",
-            (sig.signal_id, sig.trace_id, sig.kind, sig.created_at),
-        )
-
-    def list_user_signals(self, *, limit: int = 1000) -> list[UserSignalRecord]:
-        rows = self._fetchall(
-            """SELECT signal_id, trace_id, kind, created_at FROM user_signals
-               ORDER BY created_at DESC LIMIT %s""",
-            (limit,),
-        )
-        return [
-            UserSignalRecord(
-                signal_id=r[0],
-                trace_id=r[1] or "",
-                kind=r[2] or "",
-                created_at=r[3],
-            )
-            for r in rows
-        ]
 
     # -- Cluster registry --------------------------------------------------
 
