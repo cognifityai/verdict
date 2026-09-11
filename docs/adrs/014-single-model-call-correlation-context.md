@@ -28,9 +28,9 @@ Trace.
 | Application code cannot know a Verdict Trace ID before a provider call | `model_call_context()` generates and yields the ID before executing user code | Public context-manager value and stored model-call Trace ID |
 | Verdict injects a LiteLLM or vendor header | Verdict only reserves the Trace identity; a separate private gateway profile owns header construction | Provider request captured by a real gateway |
 | Two provider calls reuse one Trace ID | One context reservation is claimed atomically by at most one supported instrumented provider Trace | Storage uniqueness and ReadPort model-call collection |
-| Copied async/thread contexts race to use the reservation | Copied contexts share one small claim object protected by a lock; exactly one caller can claim it | Concurrent provider traces and stored Trace IDs |
+| Copied async/thread contexts race to use or outlive the reservation | Copied contexts share one small claim object protected by a lock; claim and close are mutually exclusive, so exactly one caller may claim it before the owning context exits | Concurrent provider traces and stored Trace IDs |
 | Nested contexts corrupt or consume one another | Every context has an independent reservation and restores the prior context on every exit | Inner and outer stored provider traces |
-| The context exits normally, raises, is cancelled, or is never consumed | The context-local reservation is always restored; an unused ID creates no Verdict record | Subsequent provider call and process context |
+| The context exits normally, raises, is cancelled, is cleared, or is never consumed | Exit atomically closes the shared reservation before restoring the prior context; an unused ID creates no Verdict record and delayed copied contexts cannot claim it | Subsequent provider call and process context |
 | A lazy stream is created inside the context but entered after it exits | Only a provider Trace actually constructed inside the context may claim the ID; object creation alone is not evidence of a request | Stream Trace and gateway request log |
 | A provider call fails before reaching the gateway | Verdict may capture the failed call under the reserved Trace ID, while the gateway join remains absent and therefore unmapped | ReadPort result and private correlation result |
 | Sampling or an unsampled Agent Run prevents persistence | The context reserves identity but does not promise persistence or override existing sampling decisions | Verdict store and ReadPort `None`/missing call |
@@ -73,16 +73,19 @@ characters, binds one pending reservation to the current logical context, and
 yields the identifier. The first supported Verdict provider instrumentor that
 constructs a Trace while the reservation is active atomically claims it and
 uses it as that Trace's `trace_id`. Later provider calls in the same context
-use their normal independently generated Trace IDs. On every exit, the prior
-reservation is restored.
+use their normal independently generated Trace IDs. On every exit, the shared
+reservation is atomically made unclaimable before the prior reservation is
+restored.
 
 An internal claim operation returns either the one reserved identifier or
-`None`. The reservation object holds only the identifier, a claimed flag, and
-a lock. A copied `contextvars` context intentionally shares that object so
-concurrent children cannot duplicate the ID. The lock is held only while
-checking and changing the in-memory flag; it spans no provider, storage, or
-network work. The operation is not public and does not expose mutable claim
-state.
+`None`. The reservation object holds only the identifier, one terminal state
+(`pending`, `claimed`, or `closed`), and a lock. A copied `contextvars` context
+intentionally shares that object so concurrent children cannot duplicate or
+outlive the reservation. Claim and close use the same lock: a race linearizes
+to either a claim before closure or closure without a Trace. Context exit and
+`clear_context()` close the shared reservation before resetting their local
+binding. The lock spans no provider, storage, or network work. The operation
+is not public and does not expose mutable claim state.
 
 Every supported provider Trace builder calls the same claim operation from the
 existing routing-context application point. A successful claim replaces only
@@ -95,9 +98,9 @@ The public value is operational metadata, not a credential or proof of
 authorization. Verdict does not log it. A caller may send it only to an
 authorized service and should avoid ordinary application logs. A gateway
 adapter must accept the identifier only through a fixed local API, not an
-arbitrary browser parameter, and must use a gateway-supported exact request-ID
-field. Gateway lookup, response minimization, tenant authorization, topology,
-and hardware evidence are outside Verdict.
+arbitrary browser parameter, and must use a gateway-supported correlation
+field. Gateway lookup, exact result matching, response minimization, tenant
+authorization, topology, and hardware evidence are outside Verdict.
 
 ## Exact meaning of correlation
 
@@ -121,8 +124,9 @@ labelled configured, correlated, sampled, or estimated as appropriate.
 The context owns one fixed-size identifier and one fixed-size claim object. It
 does no I/O, enumeration, persistence, serialization, or logging. Entry and
 claim are constant work. UUID generation failure propagates from context entry
-before any reservation is installed. Restoration happens in `finally` for
-ordinary exceptions and cancellation.
+before any reservation is installed. Closure and restoration happen in
+`finally` for ordinary exceptions and cancellation. `clear_context()` performs
+the same closure before clearing the current binding.
 
 This is an additive public API. Existing `set_context(trace_id=...)` and
 `trace_context(trace_id)` continue to govern manual-span links only and never
@@ -175,20 +179,21 @@ exact candidate:
    is actually built, and leave later calls independent.
 3. Storage and V1 ReadPort tests prove the value reaches the exact model-call
    `trace_id` without adding any DTO field or schema migration.
-4. A real installed OpenAI SDK calls the pinned real LiteLLM proxy with the
-   yielded value in LiteLLM's supported `x-litellm-trace-id` header. A
-   database-backed LiteLLM spend-log read returns that exact value as its
-   `session_id`, while Verdict's real capture/read path returns it as the
-   model-call Trace ID. The provider behind LiteLLM may be the repository's
-   deterministic local provider so the test spends no external model budget.
+4. Real installed supported provider SDKs exercise the public seam through
+   Verdict's provider instrumentation. Identity parity is proved through
+   memory, SQLite, buffered persistence, file capture/import, live PostgreSQL,
+   and V1 ReadPort paths without adding a gateway dependency to Verdict.
 5. Adversarial tests cover no instrumentation, unsampled success, provider
    failure before gateway evidence, two calls, concurrent copied contexts,
    lazy stream entry outside the context, and a persistence failure. They must
    make absence explicit rather than synthesize a join.
-6. Mutations that remove atomic claiming, permit a second claim, skip provider
-   Trace assignment, leak the reservation after exit, or couple the provider
-   Trace to `trace_context` fail the relevant last-sink tests.
-7. The full Verdict gate, cold built-wheel install, documentation search,
+6. Delayed copied-task/thread tests prove that normal, exception, cancellation,
+   and `clear_context()` exits close the shared reservation. A controlled
+   claim-versus-close race proves the two permitted linearized outcomes.
+7. Mutations that remove atomic claiming, permit a second claim, skip provider
+   Trace assignment, permit a post-close claim, or couple the provider Trace
+   to `trace_context` fail the relevant last-sink tests.
+8. The full Verdict gate, cold built-wheel install, documentation search,
    independent architecture/security review, and hosted CI pass for the exact
    immutable candidate.
 
@@ -201,3 +206,10 @@ adapters without reading Verdict tables. The cost is one additional explicit
 context around calls that require exact external correlation. Calls that do
 not use it keep today's behavior, and missing evidence remains visible rather
 than guessed.
+
+The private composition repository, not Verdict, owns the real
+LiteLLM/PostgreSQL proof. For the pinned profile it sends the value as
+`x-litellm-trace-id`, performs a bounded spend-log lookup, and exact-matches
+returned `session_id` values. LiteLLM's filter may return substring candidates
+or multiple retry/fallback rows; those are not exact joins and the private
+assessment must report them as conflicting or unavailable.
