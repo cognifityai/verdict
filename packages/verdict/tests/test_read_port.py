@@ -606,6 +606,60 @@ def test_analysis_v1_golden_finding_semantics() -> None:
     )
 
 
+def test_analysis_v1_golden_command_test_and_loop_semantics() -> None:
+    command_failure = AgentEvent(
+        "command-failed",
+        "turn-1",
+        0,
+        NOW,
+        AgentEventType.COMMAND,
+        ExecutionStatus.FAILED,
+        "test:command",
+        {"exit_code": 1},
+    )
+    test_failure = AgentEvent(
+        "test-failed",
+        "turn-1",
+        1,
+        NOW + timedelta(microseconds=1),
+        AgentEventType.TEST_RESULT,
+        ExecutionStatus.COMPLETED,
+        "test:suite",
+        {"failed": 1},
+    )
+    loop_calls = tuple(
+        AgentEvent(
+            f"tool-loop-{index}",
+            "turn-1",
+            index + 2,
+            NOW + timedelta(microseconds=index + 2),
+            AgentEventType.TOOL_CALL,
+            ExecutionStatus.COMPLETED,
+            "test:tool",
+            {"tool_name": "repeat", "arguments": {"value": 1}, "call_id": f"call-{index}"},
+            privacy_classification=PrivacyClassification.REDACTED,
+        )
+        for index in range(4)
+    )
+    value = StorageVerdictReadPort(
+        _StorageStub(_bundle(events=(command_failure, test_failure, *loop_calls)))
+    ).get_agent_run(tenant_id="tenant-included", run_id="run-included")
+
+    assert value is not None
+    assert value.analysis_version == "verdict.agent-analysis.v1"
+    assert value.finding_count == 3
+    assert value.findings_truncated is False
+    assert value.findings == (
+        FindingRead("command_failed", "error", ("command-failed",)),
+        FindingRead("test_failed", "error", ("test-failed",)),
+        FindingRead(
+            "possible_tool_loop",
+            "warning",
+            ("tool-loop-0", "tool-loop-1", "tool-loop-2", "tool-loop-3"),
+        ),
+    )
+
+
 def test_canonicalization_precedes_analysis_and_makes_storage_order_irrelevant(
     monkeypatch,
 ) -> None:
