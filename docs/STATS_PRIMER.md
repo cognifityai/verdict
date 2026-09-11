@@ -68,13 +68,11 @@ We ask: "are these two windows samples from the same underlying distribution, or
 
 That's what a two-sample test answers — Fisher's exact for binary PASS/FAIL data, Mann-Whitney U for continuous metrics.
 
-**Legacy pipeline implementation note:** `verdict-pipeline` places each judgment into
-these windows using the associated captured trace's `started_at` timestamp, not
-the later time when the judge happened to score it. Its defaults are a 24-hour
-current window and a 7-day baseline ending 24 hours before the analysis time.
-The reviewed Monitor UI is a separate policy lifecycle: it freezes either
-count-based or explicit event-time membership and the normalized counts used by
-the tests, then collects prospective non-overlapping cohorts. A selected
+**Monitor implementation note:** Monitor freezes either count-based or explicit
+event-time membership using the captured trace's event time, then collects
+prospective non-overlapping cohorts. Activation stores an event-time boundary
+and starts with an empty current bucket; an older event imported later is not
+reclassified as post-activation traffic. A selected
 evaluator may finalize its pending results while a fixed current cohort remains
 open; no comparison is made until those results are terminal. Changed or
 deleted pending evidence requires a new preview rather than rewriting frozen
@@ -82,9 +80,12 @@ facts. With a
 provider/model or reviewed-cluster facet, the tested family contains each
 eligible `(group, metric)` cell. Minimum sample counts apply inside each cell,
 and Benjamini-Hochberg correction covers the complete family for that look.
-New traffic is fully projected through the pinned cluster version before its
-monitor membership is saved, without refitting.
-Unassigned or new groups are coverage evidence, not pooled observations.
+New traffic is fully projected through a pinned cluster version before its
+monitor membership is saved, without refitting. Clustering is optional; without
+a facet, Monitor compares all eligible traffic. Unassigned or new groups are
+coverage evidence, not pooled observations. Fixed-window `DriftRun` and
+`DriftSignal` records created by older releases remain readable history, but
+`verdict-pipeline` no longer creates them.
 
 ---
 
@@ -285,7 +286,9 @@ These are everywhere in social-science literature, and people are familiar with 
 
 Our judge produces binary PASS/FAIL scores (0 or 1). Binary data is *not normally distributed* — it's about as un-normal as you can get. So Cohen's d's magnitude isn't trustworthy on our data. You'll see numbers like d = −1.08 when the underlying distribution change is much milder.
 
-That's why we report Cohen's d in our DriftSignal output but **gate on Cliff's δ instead**. Cohen's d is reported for readers familiar with the d scale; Cliff's δ is what we use for decisions.
+That is why the legacy fixed-window `DriftSignal` output reported Cohen's d but
+gated on Cliff's δ instead. Current Monitor comparisons use a directly
+interpretable rate difference for binary metrics.
 
 ### When Cohen's d would be appropriate
 
@@ -619,24 +622,23 @@ We use the same code structure (FastChat's `compute_elo.py`), except our voters 
 
 Three flavors of question, three pipelines:
 
-### Flavor 1: "Did this model drift?"
+### Flavor 1: "Did this behavior change?"
 
-For each (cluster, dimension):
+For each binary metric in an eligible Monitor group:
 
-1. **Fisher's exact test** (binary dimensions) / **Mann-Whitney U** (continuous) → p-value: is the current window distributionally different from the baseline?
-2. **Cliff's δ** → effect size: how big is the difference in non-parametric terms?
-3. **Wasserstein distance** → second-opinion effect size (on binary data this equals the pass-rate difference)
-4. **PSI** → distributional drift metric (binned by category for binary/discrete data)
-5. **Benjamini-Hochberg correction** across all simultaneous tests → adjusted p-values
-6. **Emit a DriftSignal** when BH-adjusted p < 0.01 AND |Cliff's δ| > 0.147
+1. freeze reference and current counts before comparing outcomes;
+2. use **Fisher's exact test** for the 2×2 table;
+3. report the current-minus-reference rate as the effect size;
+4. apply **Benjamini-Hochberg correction** across metrics in that look;
+5. for an ongoing monitor, spend the configured alpha across repeated looks with
+   the quadratic schedule; and
+6. alert only when both the adjusted p-value and minimum absolute rate-change
+   thresholds pass.
 
-Separately, Verdict tracks evaluability. `UNCLEAR` is excluded from PASS/FAIL,
-but an alert is emitted when the current UNCLEAR fraction rises by at least 15
-percentage points and both windows meet the total-sample floor. This is a
-deterministic coverage rule, not a p-value test, so the signal reports p-value
-and Cliff's δ as not applicable and stays outside the BH family.
-
-This is `packages/verdict_eval/src/verdict_eval/drift.py`.
+`UNCLEAR`, missing judgments, and judge errors remain explicit coverage states
+outside the PASS/FAIL denominator. Insufficient evidence and stale reference
+coverage do not become no-alert results. This is implemented in
+`packages/verdict/src/verdict/monitoring.py`.
 
 ### Flavor 2: "Is our judge any good?"
 

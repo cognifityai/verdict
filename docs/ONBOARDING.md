@@ -123,6 +123,11 @@ verdict-import local --storage sqlite:///./verdict.db
 verdict-dashboard --storage sqlite:///./verdict.db
 ```
 
+`verdict-pipeline` prepares optional clusters and judgments. It does not publish
+a separate drift result. In the dashboard, open **Monitor → Compare History**,
+preview all traffic or an optional facet, and activate the reviewed policy if
+new traffic will continue arriving.
+
 ## 3a. Instrument the surrounding agent execution
 
 Provider instrumentation captures the LLM calls. Add `agent_run` and `turn`
@@ -569,30 +574,22 @@ rule out behavior changes outside the anchor set. Any sentinel execution error
 prevents a `healthy` status: too few usable examples remain `insufficient_data`;
 otherwise the status is `degraded`. When the sentinel option is
 present, `degraded` or `insufficient_data` status is a hard gate: the command
-persists the health record, exits 2, and does not write production judgments or
-drift signals.
+persists the health record, exits 2, and does not write production judgments.
 
-The dashboard shows per-provider traffic (trace counts, error rate, latency,
-tokens, **estimated cost**), intent clusters, pass-rate by dimension, and the
-**drift signals** under **Monitor → Signals** — each with its dimension,
-direction, effect size (Cliff's δ),
-BH-adjusted p-value, sample sizes, a recommended action, and up to five current-
-window evidence trace IDs. For regressions, those examples prioritize failed
-traces; improvements prioritize passing traces; evaluability regressions
-prioritize `UNCLEAR` traces. That's the payoff:
-instead of "the model feels worse," you get "instruction_following on cluster 4
-dropped, p-adj 0.003, δ −0.31," and can act — roll back a model version, fix a
-prompt, or escalate.
+The dashboard shows per-provider traffic, optional intent clusters, and pass
+rates by rubric dimension. **Monitor → Compare History** previews a reviewed
+reference/current comparison; **Monitor → Status** shows the active prospective
+cohort. Each alert includes its metric, reference/current rates, adjusted
+p-value, sample counts, and optional facet. Clusters are not required.
 
 The dashboard reads SQLite or PostgreSQL directly. If more than one evaluator
-identity is in the database, select one before reading judgment or drift results. Identity
+identity is in the database, select one before reading judgment results or
+creating an evaluator-backed Monitor comparison. Identity
 includes provider, model list, rubric name/version, behavior-relevant config,
-expected dimensions, and a prompt/rubric fingerprint. Drift signals carry that
-fingerprint too. Historical drift rows without it are excluded and labeled
-unavailable rather than counted as zero drift. Completed analyses are persisted
-as atomic run snapshots, including explicit zero-signal runs. The dashboard
-shows only the latest completed snapshot for the selected evaluator; legacy
-signals without a run identity are excluded rather than presented as current.
+expected dimensions, and a prompt/rubric fingerprint. Fixed-window drift rows
+created by older releases remain under **Monitor → Legacy History**. They are
+read-only, excluded from Overview and current Monitor status, and never treated
+as a current zero or alert.
 If retention removes the last defining judgment, a retained run remains
 selectable by its fingerprint as a historical incomplete identity; unavailable
 provider, model, and rubric details are not reconstructed.
@@ -618,27 +615,21 @@ Each row uses its recorded UTC time plus relative age. A metadata-only row is
 described as a **historical metadata-only trace**: this means prompt and response
 were not captured when that trace was recorded, not that capture is currently
 disabled. Captured empty strings remain distinct from metadata-only history.
-Provider comparison badges are derived only from persisted signals in the
-selected completed drift run; provider identity alone never implies a regression.
+Provider comparison is descriptive and provider identity alone never implies a
+regression.
 When an authenticated FastAPI host injects
 `request.state.verdict_registry_tenant`, Overview, Trace Explorer, cluster
 pass-rate charts, and drift rows use that tenant's active-registry assignments
 and stable labels. Browser query parameters cannot select that projection.
 Standalone and legacy stores keep using each trace's stored `cluster_id`.
 
-Before a judge run exists, Evaluate reports live global content-bearing trace
-counts instead of rendering an empty chart as zero evidence. The legacy
-pipeline's displayed default current window is the latest 24 hours; its default
-baseline is the preceding 7 days after its 24-hour lag, with a global minimum of
-30 traces in each. Meeting those totals means only that the global trace minimum
-is met. The pipeline still checks judged-sample sufficiency for every eligible
-cluster and rubric dimension, and actual job flags may use different windows or
-sample floors.
-`No drift analysis has completed yet`, `Collecting n/target`,
-`Awaiting n evaluator results`, `Insufficient`,
-`Completed with no signals`, and `Completed with signals` are separate states.
-Only the latter two represent a persisted completed comparison. A mounted host that supplies the
-same-origin Operations adapter also exposes the action from the empty state.
+Before a judge run exists, Evaluate reports evaluator coverage instead of
+rendering an empty chart as zero evidence. Monitor separately distinguishes no
+configured comparison, an exploratory historical preview, prospective traffic
+collection, pending evaluator results, insufficient evidence, no alert, alert,
+and a stale reference. Only a closed prospective comparison can produce an
+active alert or no-alert decision. A mounted host that supplies the same-origin
+Operations adapter also exposes its action from the empty state.
 
 Set both `VERDICT_USER` and `VERDICT_PASS` before starting the server to require
 HTTP Basic authentication for the dashboard shells at `/` and `/dashboard` plus
@@ -662,23 +653,12 @@ the other captured workloads.
 
 **Two things to know so you don't think it's broken:**
 
-- **It's periodic, not real-time.** "Live results" means "run the pipeline, then
-  refresh the dashboard." The dashboard is a read view over the DB — as fresh as
-  your last pipeline run, not a streaming detector. Re-run `verdict-pipeline`
-  on a schedule (cron / CI) to keep it current.
-- **Legacy judge-based drift needs volume *and* elapsed time.** Its defaults want n ≥ 30
-  judgments per (cluster, dimension) and a current-vs-baseline split (24h current
-  vs a 7-day baseline with a 24h gap). Capturing a trickle for an afternoon gives
-  you capture stats and maybe structural/semantic drift, but **no judge drift
-  signals yet** — there simply isn't enough data for the statistics. That's
-  expected, not a failure. `verdict-pipeline --help` lists flags
-  (`--current-hours`, `--baseline-days`, `--min-sample-size`) if you want to
-  shorten the windows for a quick demo on smaller data.
-- **The effect-size gate is also a sensitivity floor.** The default Cliff's
-  delta threshold is 0.147, which equals a 14.7 percentage-point pass-rate
-  change on binary dimensions. Smaller changes do not alert regardless of
-  sample size. Use `--effect-size-threshold` only after choosing the smallest
-  operationally meaningful change for your workload.
+- **Monitoring is periodic, not streaming.** New evidence is captured
+  continuously, but a comparison advances when the monitor runs. Use
+  `verdict-service` or schedule `verdict-monitor run` to keep it current.
+- **Statistical comparisons need enough eligible evidence.** Minimum counts
+  apply to every tested metric and optional facet. Preview smaller operationally
+  meaningful thresholds only when they are defensible for the workload.
 - **Intent clustering needs workload validation.** MiniLM with a `0.50`
   cosine-distance threshold is a starting point. Check the cluster-health
   status for fragmentation or underpowered clusters. If you change the
@@ -724,18 +704,17 @@ the other captured workloads.
   authorized registry tenant rather than trusting a browser query parameter;
   that same value projects the active assignments and stable labels throughout
   the rest of the dashboard.
-- **Windows use capture time.** The pipeline places judgments into windows using
-  the associated trace's `started_at`, not the time the judgment was created.
-  Re-running the same hourly analysis bucket replaces that bucket's signals, so
-  a signal is removed if it no longer clears the gates after new evidence arrives.
-  The completed run marker and exact signal set are one atomic snapshot, and a
-  clean run is stored explicitly with zero signals. Consumers select the latest
-  completed snapshot instead of treating all historical signals as current.
-  A rerun uses the latest attempt per trace for one complete evaluator identity:
+- **Cohorts use event time.** Monitor uses the trace's captured event time, not
+  the time a judgment or import was written. A historical preview freezes its
+  selected membership and normalized facts. Activation records an event-time
+  boundary and opens an empty prospective bucket, so older imported events do
+  not become new traffic. A selected evaluator uses the latest attempt per trace
+  for one complete evaluator identity:
   provider, model list, rubric name/version, behavior-relevant configuration,
   expected dimensions, and immutable prompt/rubric fingerprint. A latest judge
   error is coverage failure rather than a PASS/FAIL score and is eligible for a
   future retry. Other evaluator definitions remain stored but are excluded.
+  Fixed-window rows created by older releases remain read-only legacy history.
 - **Legacy mode is single-tenant per store.** Registry `active` mode requires
   `--tenant-id` and fetches only that authorized trace scope, so an
   unrelated tenant in shared PostgreSQL does not block the run. `off` retains
@@ -766,12 +745,12 @@ the other captured workloads.
 | Capability | Provider key? |
 |---|---|
 | Capture (traces, tokens, latency, estimated cost, errors) | No |
-| Structural checks (refusal / JSON / length / latency drift) | No |
+| Structural cohort checks (provider error / empty response / refusal) | No |
 | Lexical embedding drift (built-in hash fallback) | No |
 | Semantic embedding drift (local MiniLM; extra install) | No |
 | Intent clustering | No |
 | `verdict-inspect` semantic + structural report | No |
-| Judge PASS/FAIL quality drift | Yes (BYOK) |
+| Judge PASS/FAIL quality monitoring | Yes (BYOK) |
 | Cross-model Bradley–Terry comparison | Yes (BYOK) |
 
 ## Honest expectations for this alpha

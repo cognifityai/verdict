@@ -6,6 +6,8 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from verdict.schema import (
     DimensionScore,
+    DriftRun,
+    DriftSignal,
     Judgment,
     JudgmentStatus,
     Trace,
@@ -25,13 +27,12 @@ from verdict_eval.judge import DEFAULT_RUBRIC, Judge
 from verdict_eval.providers import FakeProvider
 
 
-def test_pipeline_defaults_to_semantic_clustering_and_discloses_effect_floor():
+def test_pipeline_defaults_to_semantic_clustering():
     args = build_parser().parse_args([])
 
     assert args.embedder == "sentence-transformer"
     assert args.clustering_version == "v2"
     assert args.cluster_threshold == 0.50
-    assert args.effect_size_threshold == 0.147
     assert args.capture_judge_telemetry is False
 
 
@@ -125,15 +126,12 @@ def test_pipeline_sanitizes_storage_open_failure(monkeypatch, capsys):
     assert "secret-canary" not in output.out + output.err
 
 
-def test_real_pipeline_uses_trace_time_and_replaces_hourly_result(tmp_path, monkeypatch, capsys):
-    """Exercise the actual CLI entrypoint repeatedly over one SQLite store.
-
-    All judgments are created at the analysis time, while their traces belong
-    to distinct historical/current periods. The old judgment-time splitter
-    produced no baseline. A random signal ID also produced two persisted rows
-    on the second run. A third, deliberately stricter run verifies that a
-    signal which no longer clears the configured gate is removed.
-    """
+def test_real_pipeline_judges_without_replacing_legacy_drift_history(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    """The pipeline may prepare evidence, but Monitor owns all new drift results."""
     db_path = tmp_path / "pipeline.db"
     analysis_time = datetime(2026, 8, 11, 12, tzinfo=timezone.utc)
     evaluator_identity = Judge(
@@ -167,6 +165,22 @@ def test_real_pipeline_uses_trace_time_and_replaces_hourly_result(tmp_path, monk
                     **evaluator_identity,
                 )
             )
+    legacy_run = DriftRun(
+        run_id="legacy-run",
+        analysis_time=analysis_time - timedelta(days=1),
+        completed_at=analysis_time - timedelta(days=1),
+        evaluator_fingerprint=evaluator_identity["evaluator_fingerprint"],
+        signal_count=1,
+    )
+    legacy_signal = DriftSignal(
+        signal_id="legacy-signal",
+        detected_at=legacy_run.analysis_time,
+        cluster_id="c1",
+        dimension="completeness",
+        evaluator_fingerprint=legacy_run.evaluator_fingerprint,
+        run_id=legacy_run.run_id,
+    )
+    storage.replace_drift_run(legacy_run, [legacy_signal])
     storage.close()
 
     argv = [
@@ -184,6 +198,10 @@ def test_real_pipeline_uses_trace_time_and_replaces_hourly_result(tmp_path, monk
         analysis_time.isoformat(),
         "--min-sample-size",
         "30",
+        "--p-threshold",
+        "0.01",
+        "--effect-size-threshold",
+        "0.147",
         "--target-per-cluster",
         "40",
     ]
@@ -191,41 +209,20 @@ def test_real_pipeline_uses_trace_time_and_replaces_hourly_result(tmp_path, monk
 
     assert main() == 0
     first_output = capsys.readouterr().out
-    assert "Current windows:  1  (total n = 40)" in first_output
-    assert "Baseline windows: 1  (total n = 40)" in first_output
-    assert "Detected 1 drift signal(s)." in first_output
+    assert "Drift monitoring is configured and run from the Monitor workspace." in first_output
 
     assert main() == 0
     second_output = capsys.readouterr().out
     assert "Persisted 0 completed judgment(s) and 0 error record(s)." in second_output
-    assert "Detected 1 drift signal(s)." in second_output
+    assert "Drift monitoring is configured and run from the Monitor workspace." in second_output
 
     check = SQLiteStorage(str(db_path))
-    signals = check.list_drift_signals(limit=20)
+    snapshot = check.get_latest_drift_run_snapshot(evaluator_identity["evaluator_fingerprint"])
     judgments = check.list_judgments_for_cluster("c1", limit=1000)
     check.close()
 
     assert len(judgments) == 80
-    assert len(signals) == 1
-    assert signals[0].dimension == "completeness"
-    assert signals[0].evaluator_fingerprint == evaluator_identity["evaluator_fingerprint"]
-    assert signals[0].example_trace_ids
-    assert all(trace_id.startswith("current-") for trace_id in signals[0].example_trace_ids)
-
-    monkeypatch.setattr(sys, "argv", [*argv, "--effect-size-threshold", "1.1"])
-    assert main() == 0
-    third_output = capsys.readouterr().out
-    assert "Detected 0 drift signal(s)." in third_output
-
-    check = SQLiteStorage(str(db_path))
-    snapshot = check.get_latest_drift_run_snapshot(evaluator_identity["evaluator_fingerprint"])
-    historical_signals = check.list_drift_signals(limit=20)
-    check.close()
-
-    assert snapshot is not None
-    assert snapshot[0].signal_count == 0
-    assert snapshot[1] == []
-    assert len(historical_signals) == 1
+    assert snapshot == (legacy_run, [legacy_signal])
 
 
 def test_active_registry_pipeline_uses_versioned_assignments_without_trace_writeback(
@@ -496,12 +493,12 @@ def test_pipeline_keeps_judge_models_separate_and_uniform_reruns_do_not_duplicat
     assert main() == 0
     first_output = capsys.readouterr().out
     assert "Persisted 1 completed judgment(s) and 0 error record(s)." in first_output
-    assert "Current windows:  5  (total n = 5)" in first_output
+    assert "Drift monitoring is configured and run from the Monitor workspace." in first_output
 
     assert main() == 0
     second_output = capsys.readouterr().out
     assert "Persisted 0 completed judgment(s) and 0 error record(s)." in second_output
-    assert "Current windows:  5  (total n = 5)" in second_output
+    assert "Drift monitoring is configured and run from the Monitor workspace." in second_output
 
     check = SQLiteStorage(str(db_path))
     judgments = check.list_judgments_for_cluster("c1", limit=100)
@@ -720,7 +717,7 @@ def test_pipeline_persists_sentinel_health_separately_from_judgments(
     assert main() == 0
     output = capsys.readouterr().out
     assert "Judge health (support-v1): healthy" in output
-    assert "monitored separately from production drift" in output
+    assert "monitored separately from production traffic" in output
 
     check = SQLiteStorage(str(db_path))
     try:
@@ -786,7 +783,7 @@ def test_pipeline_stops_before_production_judging_when_sentinel_health_degraded(
     assert main() == 2
     output = capsys.readouterr().out
     assert "Judge health (degraded): degraded" in output
-    assert "production judging and drift detection are blocked" in output
+    assert "production judging is blocked" in output
 
     check = SQLiteStorage(str(db_path))
     try:

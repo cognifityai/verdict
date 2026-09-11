@@ -102,9 +102,9 @@ Areas under consideration:
   JavaScript and CSS are pre-built local assets, so rendering does not require
   public CDN access. Put TLS and authentication in front of it before any
   non-local deployment.
-- Quality judging and drift detection are periodic batch operations, not a
+- Quality judging and Monitor comparisons are periodic batch operations, not a
   streaming alert service.
-- The v0 drift runner supports one tenant scope per store and refuses to pool a
+- The current Monitor policy supports one tenant scope and refuses to pool a
   mixed-tenant database.
 - Cost values are estimates from a dated static base-price table; caching,
   long-context tiers, batch/priority modes, tools, regional uplifts, and

@@ -184,7 +184,9 @@ def advance_monitor(
     previous = storage.get_latest_monitor_snapshot(policy.policy_id)
     if previous is None:
         raise ValueError("monitor policy has no snapshot")
-    if monitor_requires_rebootstrap(policy, previous[0]):
+    if monitor_requires_rebootstrap(
+        policy, previous[0], active=expected_state == "active",
+    ):
         raise MonitorRebootstrapRequired("monitor requires re-bootstrap")
     units = load_monitor_units(storage, policy, tenant_id=tenant_id)
     manifest = plan_prospective_manifest(previous[0], units, policy)

@@ -5,7 +5,7 @@
 
 ## Context
 
-Verdict's drift signal depends on judging response quality. LLM judges can be
+Verdict's judge-derived quality comparisons depend on scoring response quality. LLM judges can be
 biased by response order, verbosity, style, and model family. The methodology
 therefore needs explicit choices about rubric shape, bias controls, and
 calibration.
@@ -28,8 +28,8 @@ means unavailable, not zero percent.
 The measuring instrument is a complete evaluator identity: provider, model
 list, rubric name/version, behavior-relevant configuration, expected dimensions,
 and a SHA-256 fingerprint over the effective rubric plus system/user prompt
-templates. Pipeline reuse, drift windows, persisted drift signals, correlator
-input, dashboard summaries, and sampled trace judgments must describe one such
+templates. Pipeline reuse, Monitor policies, correlator input, dashboard
+summaries, and sampled trace judgments must describe one such
 identity. Historical rows without complete fields stay labeled incomplete and
 are not combined with complete identities. The latest attempt per trace wins;
 a latest error is coverage failure and may be retried later.
@@ -81,7 +81,7 @@ An example is correct only when every declared label matches. The interval and
 health gate therefore use exact-match examples; label-level agreement is stored
 and displayed separately as a diagnostic. Legacy label-only health rows remain
 explicitly unavailable for health gating. When the caller supplies a sentinel set, a
-non-healthy aggregate is persisted and blocks production judging and drift with
+non-healthy aggregate is persisted and blocks production judging with
 exit status 2. This is an anchor, not a guarantee: unchanged sentinel agreement
 cannot exclude silent changes elsewhere in the provider's behavior.
 

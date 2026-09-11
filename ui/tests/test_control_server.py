@@ -6,7 +6,7 @@ import pytest
 from verdict.dashboard.app import create_app
 from verdict.dashboard.control_plane import ControlStore
 from verdict.evidence import AgentRun, AgentRunBundle, ExecutionStatus, SourceSession
-from verdict.schema import Trace
+from verdict.schema import DriftSignal, Trace
 from verdict.storage import SQLiteStorage
 
 
@@ -111,6 +111,7 @@ def test_control_api_reports_source_appropriate_daily_operations(tmp_path):
         trace_id="telemetry-trace", tenant_id="__verdict_local__", started_at=now,
         provider="openai", request_model="model", response_redacted="response",
     ))
+    storage.insert_drift_signal(DriftSignal(signal_id="legacy-drift-history"))
     storage.close()
 
     async def get_state():
@@ -127,6 +128,7 @@ def test_control_api_reports_source_appropriate_daily_operations(tmp_path):
         "mode": "telemetry",
         "localAgentSources": [],
     }
+    assert telemetry["notifications"] == []
 
     storage = SQLiteStorage(str(database))
     storage.replace_agent_run_bundle(AgentRunBundle(
@@ -199,8 +201,11 @@ def test_run_schedule_action_advances_active_monitor_once(tmp_path):
                 "/api/monitor/activate", headers=headers,
                 json={"policyId": policy_id, "expectedActivePolicyId": None},
             )
+            prospective_start = datetime.fromisoformat(
+                activation.json()["snapshot"]["manifest"]["prospective_start_at"]
+            )
             storage = SQLiteStorage(str(database))
-            observed = datetime(2026, 1, 2, tzinfo=timezone.utc)
+            observed = prospective_start + timedelta(microseconds=1)
             storage.insert_trace(Trace(
                 trace_id="new-trace", tenant_id="__verdict_local__",
                 started_at=observed, ended_at=observed, response_redacted="done",

@@ -247,15 +247,6 @@ class ControlRoutes:
                         "snapshotId": latest_alert[0].snapshot_id,
                     }
                 )
-        drift = writable.list_drift_signals(limit=100)
-        if drift:
-            notifications.append(
-                {
-                    "kind": "drift",
-                    "severity": "warning",
-                    "message": f"{len(drift)} stored drift signal(s) require evaluator-aware review",
-                }
-            )
         return notifications
 
     def _run_monitor(self, writable, enabled: bool):

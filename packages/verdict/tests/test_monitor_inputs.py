@@ -7,6 +7,7 @@ from verdict.monitoring import (
     MonitorStateConflict,
     compare_manifest,
     plan_historical_manifest,
+    plan_prospective_manifest,
 )
 from verdict.schema import (
     ClusterIdentity,
@@ -379,6 +380,16 @@ def test_losing_monitor_runner_returns_winner_without_advancing_another_cohort(
         )
         storage.save_monitor_candidate(
             policy, historical, compare_manifest(units, historical, policy),
+        )
+        prepared = plan_prospective_manifest(
+            historical, (), policy, prospective_start_at=NOW + timedelta(seconds=2),
+        )
+        storage.save_monitor_successor(
+            policy.policy_id,
+            historical.snapshot_id,
+            prepared,
+            compare_manifest((), prepared, policy),
+            expected_state="candidate",
         )
         storage.activate_monitor_policy(
             policy.scope_key, policy.policy_id, expected_active_policy_id=None,

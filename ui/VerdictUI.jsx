@@ -87,6 +87,53 @@ const SEED = (() => {
       id: "sample-run", analysisTime: "sample-data", completedAt: "sample-data",
       signalCount: 2,
     },
+    monitor: {
+      active: {
+        state: "active",
+        policyState: "active",
+        policy: {
+          prospective_target: 12,
+          grouping_mode: "none",
+          evaluator_fingerprint: "sample-evaluator",
+        },
+        snapshot: {
+          manifest: {
+            reference_unit_ids: [
+              "sample-reference-0", "sample-reference-1", "sample-reference-2", "sample-reference-3",
+              "sample-reference-4", "sample-reference-5", "sample-reference-6", "sample-reference-7",
+              "sample-reference-8", "sample-reference-9", "sample-reference-10", "sample-reference-11",
+            ],
+            current_unit_ids: [
+              "sample-current-0", "sample-current-1", "sample-current-2", "sample-current-3",
+              "sample-current-4", "sample-current-5", "sample-current-6", "sample-current-7",
+              "sample-current-8", "sample-current-9", "sample-current-10", "sample-current-11",
+            ],
+            pending_evaluator_units: [],
+            prospective_open: false,
+            comparison_index: 1,
+          },
+          comparison: {
+            status: "alert",
+            alpha_threshold: 0.03,
+            metrics: [{
+              metric: "judge.completeness.pass",
+              reference_value: 1,
+              current_value: 0.5,
+              effect: -0.5,
+              p_adjusted: 0.008,
+              reference_n: 12,
+              current_n: 12,
+              alert: true,
+            }],
+            metric_coverage: [],
+            groups: [],
+            unseen_group_share: 0,
+            unassigned_group_share: 0,
+          },
+        },
+      },
+      candidate: null,
+    },
     dimensionOverall: [
       { dim: 'groundedness', passRate: 96, pass: 46, fail: 2, unclear: 0, tot: 48 },
       { dim: 'relevance', passRate: 94, pass: 45, fail: 3, unclear: 0, tot: 48 },
@@ -333,55 +380,6 @@ function driftAnalysis(data) {
   };
 }
 
-function analysisHeadline(analysis) {
-  if (analysis.runStatus === "selection_required") return "Select an evaluator";
-  if (analysis.runStatus === "invalid_selection") return "Selected evaluator is unavailable";
-  if (analysis.runStatus === "completed_with_signals") return "Completed with signals";
-  if (analysis.runStatus === "completed_no_signals") return "Completed with no signals";
-  if (analysis.readinessStatus === "not_enough_baseline") return "Collecting baseline traces";
-  if (analysis.readinessStatus === "global_minimum_met") return "Global trace minimum met";
-  return "Collecting current traces";
-}
-
-function ReadinessSummary({ analysis }) {
-  const globalMinimumMet = analysis.readinessStatus === "global_minimum_met";
-  return (
-    <div className="mt-4">
-      <div className="grid sm:grid-cols-2 gap-3">
-        <div className="rounded-md p-3" style={{ background: C.panel2, border: `1px solid ${C.border}` }}>
-          <div className="text-xs" style={{ color: C.sub }}>Current global content-bearing traces</div>
-          <div className="font-semibold mt-0.5" style={{ fontSize: 17 }}>{`${analysis.current} / ${analysis.minimum}`}</div>
-        </div>
-        <div className="rounded-md p-3" style={{ background: C.panel2, border: `1px solid ${C.border}` }}>
-          <div className="text-xs" style={{ color: C.sub }}>Baseline global content-bearing traces</div>
-          <div className="font-semibold mt-0.5" style={{ fontSize: 17 }}>{`${analysis.baseline} / ${analysis.minimum}`}</div>
-        </div>
-      </div>
-      <div className="grid sm:grid-cols-3 gap-3 mt-3">
-        {[
-          ["Default current window", `Latest ${analysis.currentHours} hours`],
-          ["Default baseline lag", `${analysis.baselineLagHours} hours`],
-          ["Default baseline window", `Previous ${analysis.baselineDays} days`],
-        ].map(([label, value]) => (
-          <div key={label} className="rounded-md p-3" style={{ background: C.panel2, border: `1px solid ${C.border}` }}>
-            <div className="text-xs" style={{ color: C.sub }}>{label}</div>
-            <div className="font-semibold mt-0.5" style={{ fontSize: 15 }}>{value}</div>
-          </div>
-        ))}
-      </div>
-      <div className="text-xs mt-3" style={{ color: C.faint }}>
-        {globalMinimumMet
-          ? "Enough content-bearing traces exist across the overall default windows. The pipeline will still check whether each cluster and rubric dimension has enough judged traces."
-          : "These global counts show content availability only. They do not establish whether each cluster and rubric dimension has enough judged traces."}
-        {" "}Actual job flags may use different windows or sample floors.
-      </div>
-      <div className="text-xs mt-2" style={{ color: C.faint }}>
-        New traces cannot simultaneously be recent current data and historical baseline data. The baseline matures only after its {analysis.baselineLagHours}-hour lag.
-      </div>
-    </div>
-  );
-}
-
 function ChartTooltip({ active, payload, label, unit = "", title }) {
   if (!active || !payload || !payload.length) return null;
   return (
@@ -529,7 +527,7 @@ function Landing({ onEnter }) {
       </Section>
 
       {/* how it works */}
-      <Section title="How it works" subtitle="Capture → store → cluster → judge → detect drift → compare. Six stages, one pipeline.">
+      <Section title="How it works" subtitle="Capture → explore → evaluate → monitor. Grouping is optional.">
         <div className="grid md:grid-cols-3 gap-4">
           {steps.map((s, i) => (
             <Panel key={s.t} className="p-5">
@@ -591,7 +589,7 @@ client = <span style={{ color: C.blue }}>Anthropic</span>(){"\n"}
         <Panel className="p-8 text-center" style={{ background: C.panel2, color: C.text, borderColor: C.border }}>
           <div className="font-semibold" style={{ fontSize: 26, letterSpacing: 0 }}>Explore the sample dashboard</div>
           <div className="text-sm mt-2 max-w-xl mx-auto" style={{ color: C.sub }}>
-            Walk through synthetic sample data: drift signals, trace explorer, judge scores, and provider comparison. Connect the dashboard to a Verdict database for live data.
+            Walk through synthetic sample data: an active Monitor alert, trace explorer, judge scores, and provider comparison. Connect the dashboard to a Verdict database for live data.
           </div>
           <button onClick={onEnter} className="mt-5 inline-flex items-center gap-2 text-sm font-semibold px-5 py-2.5 rounded-md"
             style={{ background: C.accent, color: C.bg }}>
@@ -633,7 +631,7 @@ const TAB_HELP = {
   overview: "What changed, what needs attention, and what evidence Verdict has. Reliability, performance, and behavior are judge-free views of the same captured data.",
   explore: "Inspect Agent Runs and genuine LLM calls, including their evidence and evaluation state. Provider comparison is descriptive unless traffic is matched.",
   evaluate: "Configure evaluators, inspect stored judgments, and review labels. Missing evidence stays not evaluable rather than being scored as a failure.",
-  monitor: "Review persisted fixed-window drift signals, compare historical cohorts, activate prospective monitoring, and optionally review segments. Fixed-window signals and cohort alerts are reported separately.",
+  monitor: "Compare historical cohorts, activate ongoing monitoring, and optionally review segments. Earlier fixed-window results remain available as read-only history.",
   settings: "Configure data sources, schedules, alert destinations, integrations, and privacy controls.",
 };
 
@@ -641,7 +639,7 @@ const WORKSPACE_SECTIONS = {
   overview: [["summary", "Summary"], ["reliability", "Reliability"], ["performance", "Performance"], ["behavior", "Behavior"]],
   explore: [["runs", "Agent Runs & Tools"], ["calls", "LLM Calls"], ["compare", "Compare"]],
   evaluate: [["results", "Results"], ["lab", "Evaluator Lab"], ["review", "Review Queue"]],
-  monitor: [["status", "Status"], ["signals", "Signals"], ["history", "Compare History"], ["segments", "Segments"], ["schedule", "Schedule"]],
+  monitor: [["status", "Status"], ["history", "Compare History"], ["segments", "Segments"], ["schedule", "Schedule"], ["signals", "Legacy History"]],
   settings: [["sources", "Data Sources"], ["alerts", "Alerts"], ["integrations", "Integrations"], ["privacy", "Privacy"]],
 };
 
@@ -688,11 +686,8 @@ function WorkspaceNav({ tab, section, onSection }) {
 }
 
 function monitorAlertCount(monitor) {
-  return [monitor?.active, monitor?.candidate].reduce(
-    (total, response) => total
-      + (response?.snapshot?.comparison?.metrics || []).filter((metric) => metric.alert).length,
-    0,
-  );
+  return (monitor?.active?.snapshot?.comparison?.metrics || [])
+    .filter((metric) => metric.alert).length;
 }
 
 function driftSignalCount(data) {
@@ -711,7 +706,8 @@ function monitorAlertSummary(monitor) {
   if (!monitor?.active && !monitor?.candidate) return "not configured";
   const count = (response) => (response?.snapshot?.comparison?.metrics || [])
     .filter((metric) => metric.alert).length;
-  return `${count(monitor.active)} active · ${count(monitor.candidate)} preview`;
+  if (!monitor?.active) return `${count(monitor.candidate)} in historical preview`;
+  return `${count(monitor.active)} in the active monitor`;
 }
 
 function navigateWorkflow(commitRoute, route, target) {
@@ -813,7 +809,7 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
     { id: "overview", label: "Overview", icon: Gauge },
     { id: "explore", label: "Explore", icon: Search },
     { id: "evaluate", label: "Evaluate", icon: Scale },
-    { id: "monitor", label: "Monitor", icon: Signal, badge: monitorAlertCount(DATA.monitor) + driftSignalCount(DATA) },
+    { id: "monitor", label: "Monitor", icon: Signal, badge: monitorAlertCount(DATA.monitor) },
     { id: "settings", label: "Settings", icon: Terminal },
   ];
   return (
@@ -908,7 +904,7 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
             </span>
           </div>
         )}
-        {(["historical_unattributed", "historical_without_run", "inconsistent_run"].includes(evaluation.driftStatus) || evaluation.unattributedDriftSignals > 0) && (
+        {tab === "monitor" && route.section === "signals" && (["historical_unattributed", "historical_without_run", "inconsistent_run"].includes(evaluation.driftStatus) || evaluation.unattributedDriftSignals > 0) && (
           <div className="mb-5 px-3 py-3 border flex items-start gap-2 text-sm"
             style={{ borderColor: "#6b5529", background: C.amberBg, color: C.text, borderRadius: 3 }}>
             <AlertTriangle size={16} style={{ color: C.amber, marginTop: 1, flexShrink: 0 }} />
@@ -918,7 +914,7 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
                 : evaluation.driftStatus === "historical_without_run"
                   ? "Historical drift signals predate run snapshots. They are excluded because Verdict cannot prove that they belong to the latest completed analysis; this is unavailable evidence, not zero drift."
                   : evaluation.driftStatus === "inconsistent_run"
-                    ? "The latest drift run is incomplete or inconsistent. Its signals are excluded until the pipeline reruns successfully."
+                    ? "The latest legacy drift run is incomplete or inconsistent, so its signals are excluded."
                 : `${evaluation.unattributedDriftSignals} historical drift signal${evaluation.unattributedDriftSignals === 1 ? "" : "s"} without evaluator identity ${evaluation.unattributedDriftSignals === 1 ? "is" : "are"} excluded.`}
             </span>
           </div>
@@ -926,7 +922,7 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
         {tab === "overview" && route.section === "summary" && <div className="space-y-5">
           {MonitorOverview({ monitor: DATA.monitor })}
           <Insights url={mountedInsightsUrl()} onOpenRuns={openFindingRun} />
-          <Overview data={DATA} includeMonitor={false} onOpenSignals={() => commitRoute({ ...route, tab: "monitor", section: "signals" })} />
+          <Overview data={DATA} includeMonitor={false} />
         </div>}
         {tab === "overview" && route.section === "reliability" && <Insights url={mountedInsightsUrl()} onOpenRuns={openFindingRun} mode="reliability" />}
         {tab === "overview" && route.section === "performance" && <Insights url={mountedInsightsUrl()} onOpenRuns={openFindingRun} mode="performance" />}
@@ -1027,14 +1023,12 @@ function MonitorOverview({ monitor }) {
   </div>;
 }
 
-function Overview({ data = SEED, includeMonitor = true, onOpenSignals = null }) {
+function Overview({ data = SEED, includeMonitor = true }) {
   const DATA = data;
   const m = DATA.meta;
   const health = DATA.clusterHealth || { status: "empty", messages: [], minSampleSize: 30, clustersMeetingSampleFloor: 0, nClusters: 0 };
   const healthColor = health.status === "ready" ? C.green : health.status === "fragmented" ? C.red : C.amber;
   const healthLabel = health.status === "ready" ? "Ready" : health.status === "fragmented" ? "Fragmented" : "Needs volume";
-  const analysis = driftAnalysis(DATA);
-  const totalDriftSignals = driftSignalCount(DATA);
   const coverage = DATA.coverage || {};
   const deterministic = coverage.deterministicAnalysis || {
     status: "never_run", availableRuns: m.totalAgentRuns || 0, analyzedRuns: 0,
@@ -1045,8 +1039,6 @@ function Overview({ data = SEED, includeMonitor = true, onOpenSignals = null }) 
     notJudged: Math.max(0, (m.totalTraces || 0) - (m.totalJudged || 0)),
     judgeErrors: 0, completedCalls: m.totalJudged || 0, errorCalls: 0,
   };
-  const evaluatorSelectionNeeded = ["selection_required", "invalid_selection"].includes(analysis.runStatus);
-  const noCompletedRun = analysis.runStatus === "no_completed_run";
   const seriesColors = [C.accent, C.accent2, C.amber, C.green, C.blue, C.cyan];
   const providerSeries = DATA.providers.map((provider, index) => {
     const presentation = providerPresentation(
@@ -1063,11 +1055,10 @@ function Overview({ data = SEED, includeMonitor = true, onOpenSignals = null }) 
   const clusterMode = providerSeries.length === 1
     && DATA.clusters.length > 1
     && (DATA.clusterPassrate || []).length > 0;
-  const driftClusters = new Set(DATA.driftSignals.map((signal) => signal.clusterId).filter(Boolean));
   const clusterSeries = DATA.clusters.map((cluster, index) => ({
     key: cluster.cluster_id,
     label: cluster.display_name || cluster.cluster_id,
-    color: driftClusters.has(cluster.cluster_id) ? C.red : seriesColors[(index + 1) % seriesColors.length],
+    color: seriesColors[(index + 1) % seriesColors.length],
   }));
   const qualitySeries = clusterMode ? clusterSeries : providerSeries;
   const qualityRows = clusterMode ? DATA.clusterPassrate : DATA.passrate;
@@ -1090,17 +1081,10 @@ function Overview({ data = SEED, includeMonitor = true, onOpenSignals = null }) 
           <div><div className="font-semibold text-sm">Evidence and analysis coverage</div><div className="text-xs mt-1" style={{ color: C.faint }}>Capture, deterministic analysis, judge execution, and drift are reported independently.</div></div>
           <Pill color={deterministic.status === "completed" ? C.green : deterministic.status === "error" ? C.red : C.amber}>{deterministic.status.replaceAll("_", " ")}</Pill>
         </div>
-        <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-3 mt-4">
+        <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3 mt-4">
           <MetricCell label="Agent runs analyzed" value={`${deterministic.analyzedRuns}/${deterministic.availableRuns}`} sub={deterministic.complete ? "complete persisted snapshot" : "partial or not run"} />
           <MetricCell label="Traces analyzed" value={`${deterministic.analyzedTraces}/${deterministic.availableTraces}`} sub="deterministic, judge-free analysis" />
           <MetricCell label="Selected evaluator" value={`${evaluationCoverage.judged} judged`} sub={`${evaluationCoverage.notJudged} not judged · ${evaluationCoverage.judgeErrors} judge errors`} />
-          <button type="button" onClick={onOpenSignals || undefined} disabled={!onOpenSignals}
-            aria-label="Open evaluation drift signals" className="text-left disabled:cursor-default">
-            <MetricCell label="Evaluation drift signals"
-              value={evaluatorSelectionNeeded ? "Select evaluator" : noCompletedRun ? "Not run" : totalDriftSignals}
-              sub={evaluatorSelectionNeeded ? "choose one evaluator to attribute its run" : noCompletedRun ? "fixed-window analysis not run" : analysis.runStatus === "insufficient" ? "latest run was insufficient" : totalDriftSignals > DATA.driftSignals.length ? `latest run · showing ${DATA.driftSignals.length} of ${totalDriftSignals}` : "latest persisted fixed-window run"}
-              icon={Signal} accent={totalDriftSignals ? C.red : noCompletedRun || evaluatorSelectionNeeded ? C.amber : C.green} />
-          </button>
         </div>
       </Panel>
 
@@ -1232,7 +1216,7 @@ function DriftSignals({ data = SEED, onOpenTrace = null, onOpenOperations = null
   const unavailableReason = {
     historical_unattributed: "Stored signals have no evaluator identity, so Verdict cannot attribute them to the selected evaluator.",
     historical_without_run: "Stored signals predate an atomic run snapshot, so Verdict cannot prove that they belong to a completed analysis.",
-    inconsistent_run: "The latest run is incomplete or inconsistent. Its signals are hidden until the pipeline completes successfully.",
+    inconsistent_run: "The latest legacy run is incomplete or inconsistent, so its signals are hidden.",
   }[evaluation.driftStatus];
   const noCompletedRun = analysis.runStatus === "no_completed_run" || evaluatorSelectionNeeded || unavailableReason;
   const totalSignals = driftSignalCount(DATA);
@@ -1242,10 +1226,10 @@ function DriftSignals({ data = SEED, onOpenTrace = null, onOpenOperations = null
     <Panel className="p-5">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <div className="text-xs font-mono" style={{ color: C.accent }}>FIXED-WINDOW EVALUATION DRIFT</div>
-          <div className="font-semibold mt-1">Latest persisted pipeline result</div>
+          <div className="text-xs font-mono" style={{ color: C.amber }}>LEGACY FIXED-WINDOW HISTORY</div>
+          <div className="font-semibold mt-1">Read-only results from the retired drift pipeline</div>
           <div className="text-sm mt-1 max-w-3xl" style={{ color: C.sub }}>
-            These signals compare the pipeline&apos;s historical baseline and current window using the selected evaluator. They are separate from cohort monitor previews and prospective alerts.
+            These stored results remain available for audit and trace navigation. They are not current Monitor status, do not affect the Overview, and are no longer produced by verdict-pipeline.
           </div>
         </div>
         {!noCompletedRun && <Pill color={totalSignals ? C.red : C.green}>
@@ -1262,9 +1246,8 @@ function DriftSignals({ data = SEED, onOpenTrace = null, onOpenOperations = null
             {evaluatorSelectionNeeded ? "Select an evaluator to view drift signals" : unavailableReason || "No fixed-window drift analysis has completed"}
           </div>
           {!unavailableReason && !evaluatorSelectionNeeded && <div className="text-sm mt-1" style={{ color: C.sub }}>
-            {analysisHeadline(analysis)}. The pipeline needs separate content-bearing current and historical baseline windows before it can store a result.
+            No legacy result is available. New comparisons are created in Monitor → Compare History.
           </div>}
-          {!unavailableReason && <ReadinessSummary analysis={analysis} />}
           {onOpenOperations && <button type="button" onClick={onOpenOperations}
             className="mt-4 px-3 py-2 text-sm font-semibold" style={{ background: C.accent, color: C.bg, borderRadius: 3 }}>
             Open Operations
@@ -1634,8 +1617,8 @@ function Judge({ data = SEED, onOpenOperations = null }) {
     || coverageItems.some((item) => (item.value || 0) > 0)
     || DATA.dimensionOverall.length > 0;
   if (!hasJudgeEvidence) {
-    const analysis = driftAnalysis(DATA);
-    const evaluatorSelectionNeeded = ["selection_required", "invalid_selection"].includes(analysis.runStatus);
+    const evaluatorSelectionNeeded = ["selection_required", "invalid_selection"]
+      .includes(DATA.evaluation?.status);
     return (
       <div className="space-y-5">
         <div className="text-sm" style={{ color: C.sub }}>
@@ -1645,13 +1628,12 @@ function Judge({ data = SEED, onOpenOperations = null }) {
           <div className="flex items-start gap-3">
             <Scale size={18} style={{ color: C.amber, marginTop: 1 }} />
             <div className="flex-1">
-              <div className="font-semibold">{evaluatorSelectionNeeded ? "Select an evaluator to view judge results" : "No eligible evaluation pipeline run has completed yet"}</div>
+              <div className="font-semibold">{evaluatorSelectionNeeded ? "Select an evaluator to view judge results" : "No evaluator results have been stored yet"}</div>
               <div className="text-sm mt-1" style={{ color: C.sub }}>
                 {evaluatorSelectionNeeded
-                  ? "Choose an evaluator identity above to load its persisted judgments and completed runs."
-                  : "Judge charts appear only after an eligible run stores evaluator results. The availability summary uses the same default content-bearing trace windows as drift analysis."}
+                  ? "Choose an evaluator identity above to load its persisted judgments."
+                  : "Judge charts appear after Evaluator Lab stores results for an eligible trace set."}
               </div>
-              {ReadinessSummary({ analysis })}
               {onOpenOperations && (
                 <button onClick={onOpenOperations} className="mt-4 inline-flex items-center gap-2 text-sm font-semibold px-3 py-2"
                   style={{ background: C.accent, color: C.bg, borderRadius: 3 }}>

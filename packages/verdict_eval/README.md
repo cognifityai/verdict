@@ -2,11 +2,9 @@
 
 PyPI distribution: `cognifity-verdict-eval`. Python import: `verdict_eval`.
 
-The Verdict eval engine. LLM-as-judge with binary rubric, intent clustering,
-non-parametric drift detection per cluster per dimension (Fisher's exact test
-for binary PASS/FAIL dimensions, Mann-Whitney U for continuous metrics),
-Bradley-Terry pairwise comparator for cross-LLM evaluation, and a synthetic
-regression injector for verifying the pipeline catches what it should.
+The Verdict eval engine. LLM-as-judge with binary rubrics, optional intent
+clustering, statistical utilities, a Bradley-Terry pairwise comparator for
+cross-LLM evaluation, and a synthetic regression injector.
 
 ## Pairwise result contract
 
@@ -56,7 +54,8 @@ local `--model-path`. The dashboard can reuse its pinned cached revision or
 download that exact revision on first semantic use when the semantic extra is
 installed. Cache lookup follows `HF_HUB_CACHE`, then `HF_HOME`, then the
 default Hugging Face cache.
-The legacy trace clustering pipeline remains a separate methodology.
+The `verdict-pipeline` command can still prepare clusters and judgments for
+existing automation. It no longer publishes a separate fixed-window drift run.
 
 ### Supported explicit registry workflow
 
@@ -111,24 +110,23 @@ require a reviewed local `--model-path` and remain experimental.
 
 Registry shadow analysis is disabled pending the tenant-isolation correction in
 [issue #24](https://github.com/cognifityai/verdict/issues/24). Validate an
-inactive preview with `verdict-cluster validate`; do not analyze it through the
-drift pipeline before activation.
+inactive preview with `verdict-cluster validate` before using it as an optional
+Monitor facet.
 
-Drift is a batch comparison over each captured trace's `started_at` time. The
-runner defaults to a 24-hour current window and a 7-day baseline separated by a
-24-hour gap, with at least 30 judgments per `(cluster, dimension)` window. A
-signal must clear the BH-adjusted p-value gate and the Cliff's delta effect-size
-gate. On binary PASS/FAIL data the default `0.147` delta is a 14.7 percentage-
-point sensitivity floor. These defaults require workload-specific validation.
+Monitor owns current drift comparisons. It freezes either count-based or
+explicit event-time cohorts and uses Fisher's exact test with
+Benjamini-Hochberg correction for binary deterministic and selected-evaluator
+metrics. All traffic is the default; provider/model and reviewed clusters are
+optional facets. Activation records an event-time boundary, opens an empty
+prospective bucket, and excludes older events that arrive later.
 
 Pipeline reruns use the latest attempt per trace for one complete evaluator
 identity: provider, model list, rubric name/version, behavior-relevant
 configuration, expected dimensions, and effective prompt/rubric fingerprint. A
 latest error is excluded from PASS/FAIL and can be retried. Other evaluator
-definitions are retained but not pooled. Persisted drift signals carry the same
-fingerprint. Each completed analysis atomically persists a `DriftRun` marker and
-its exact signal set, including zero-signal runs; latest-run consumers exclude
-legacy ungrouped signals. Optional fixed human-labeled sentinel runs store independent judge-
+definitions are retained but not pooled. Fixed-window `DriftRun` and
+`DriftSignal` rows produced by earlier releases remain readable as legacy
+history and are not replaced by this command. Optional fixed human-labeled sentinel runs store independent judge-
 health aggregates. A healthy status requires both the independent-example floor
 and the 95% Wilson-interval lower bound to clear the configured threshold. An
 example passes only when every declared label matches; label agreement is a
@@ -136,8 +134,8 @@ separate diagnostic, not the gate's statistical unit. Legacy label-only records
 remain unavailable for health gating. Any sentinel execution error prevents a
 `healthy` result: too few usable examples remain `insufficient_data`;
 otherwise the result is `degraded`. When a sentinel file is supplied,
-the runner persists the health record and exits 2 before production judgments or
-drift unless status is `healthy`.
+the runner persists the health record and exits 2 before production judgments
+unless status is `healthy`.
 
 The user-signal correlator
 reports usable sample size, Wilson raw-agreement bounds, and deterministic

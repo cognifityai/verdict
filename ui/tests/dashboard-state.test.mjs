@@ -285,7 +285,7 @@ test("monitoring lifecycle is one top-level workspace", async () => {
   assert.doesNotMatch(labels, /Registry/);
 });
 
-test("Monitor exposes fixed-window signals as a distinct subpage", async () => {
+test("Monitor keeps fixed-window signals as clearly labeled legacy history", async () => {
   const ui = await loadUiModule();
   let pushed = null;
   globalThis.window = {
@@ -315,7 +315,8 @@ test("Monitor exposes fixed-window signals as a distinct subpage", async () => {
     assert.ok(page);
 
     const rendered = render(ui.DriftSignals, createHooks(), page.props);
-    assert.match(textOf(rendered), /Fixed-window evaluation drift/i);
+    assert.match(textOf(rendered), /Legacy fixed-window history/i);
+    assert.match(textOf(rendered), /read-only/i);
     assert.match(textOf(rendered), /Instruction.following/);
     assert.match(textOf(rendered), /Incident response/);
     assert.match(textOf(rendered), /OpenAI · test-model/);
@@ -331,7 +332,7 @@ test("Monitor exposes fixed-window signals as a distinct subpage", async () => {
   } finally { delete globalThis.window; }
 });
 
-test("overview reports fixed-window signals separately from cohort alerts", async () => {
+test("overview and navigation use only the active monitor as current drift", async () => {
   const ui = await loadUiModule();
   const data = bundle("judge-a", [], [{ id: "signal-1", direction: "regression" }]);
   data.driftRun = { id: "run-1", signalCount: 1 };
@@ -343,18 +344,37 @@ test("overview reports fixed-window signals separately from cohort alerts", asyn
     candidate: null,
   };
 
-  const tree = render(ui.Overview, createHooks(), { data, includeMonitor: false, onOpenSignals() {} });
+  const tree = render(ui.Overview, createHooks(), { data, includeMonitor: false });
   const metrics = findAll(tree,
     (node) => typeof node.type === "function" && node.type.name === "MetricCell");
   const byLabel = Object.fromEntries(metrics.map((node) => [node.props.label, node.props]));
   assert.equal(byLabel["Cohort monitor alerts"].value, 1);
-  assert.equal(byLabel["Evaluation drift signals"].value, 1);
+  assert.equal(byLabel["Evaluation drift signals"], undefined);
+
+  data.monitor.candidate = {
+    snapshot: { comparison: { metrics: [{ alert: true }] } },
+  };
+  const dashboard = render(ui.Dashboard, createHooks(), { data });
+  const monitorButton = findAll(dashboard,
+    (node) => node.type === "button" && textOf(node).includes("Monitor"))[0];
+  assert.equal(textOf(monitorButton).trim(), "Monitor 1");
 });
 
-test("fixed-window signal page distinguishes no run from a completed zero-signal run", async () => {
+test("bundled sample demonstrates the current Monitor instead of only legacy signals", async () => {
+  const ui = await loadUiModule();
+  const dashboard = render(ui.Dashboard, createHooks(), {});
+  const monitorButton = findAll(dashboard,
+    (node) => node.type === "button" && textOf(node).includes("Monitor"))[0];
+  assert.equal(textOf(monitorButton).trim(), "Monitor 1");
+  assert.match(textOf(dashboard), /Latest completed prospective comparison/i);
+});
+
+test("legacy signal history distinguishes no run from a completed zero-signal run", async () => {
   const ui = await loadUiModule();
   const noRun = textOf(render(ui.DriftSignals, createHooks(), { data: bundle("judge-a") }));
   assert.match(noRun, /No fixed-window drift analysis has completed/i);
+  assert.match(noRun, /New comparisons are created in Monitor → Compare History/i);
+  assert.doesNotMatch(noRun, /pipeline needs separate/i);
 
   const completed = bundle("judge-a");
   completed.driftRun = { id: "run-zero", signalCount: 0, completedAt: "2026-09-07T22:00:00Z" };
@@ -364,7 +384,7 @@ test("fixed-window signal page distinguishes no run from a completed zero-signal
   assert.doesNotMatch(zero, /No fixed-window drift analysis has completed/i);
 });
 
-test("an inconsistent hidden drift run does not advertise its stale signal count", async () => {
+test("an inconsistent legacy run does not advertise its stale signal count", async () => {
   const ui = await loadUiModule();
   const data = bundle("judge-a");
   data.driftRun = { id: "inconsistent-run", signalCount: 2 };
@@ -377,7 +397,7 @@ test("an inconsistent hidden drift run does not advertise its stale signal count
   const signalMetric = findAll(overview,
     (node) => typeof node.type === "function" && node.type.name === "MetricCell")
     .find((node) => node.props.label === "Evaluation drift signals");
-  assert.equal(signalMetric.props.value, "Not run");
+  assert.equal(signalMetric, undefined);
 
   const dashboard = render(ui.Dashboard, createHooks(), { data });
   const monitorButton = findAll(dashboard,
@@ -385,7 +405,7 @@ test("an inconsistent hidden drift run does not advertise its stale signal count
   assert.equal(textOf(monitorButton).trim(), "Monitor");
 });
 
-test("fixed-window signal totals remain truthful when cards are bounded", async () => {
+test("legacy fixed-window totals remain truthful when cards are bounded", async () => {
   const ui = await loadUiModule();
   const shownSignals = Array.from({ length: 40 }, (_, index) => ({
     id: `signal-${index}`, dimension: "relevance", direction: "regression",
@@ -402,13 +422,11 @@ test("fixed-window signal totals remain truthful when cards are bounded", async 
   assert.match(page, /60 signals/i);
   assert.match(page, /showing 40/i);
 
-  const overview = render(ui.Overview, createHooks(), {
-    data, includeMonitor: false, onOpenSignals() {},
-  });
+  const overview = render(ui.Overview, createHooks(), { data, includeMonitor: false });
   const signalMetric = findAll(overview,
     (node) => typeof node.type === "function" && node.type.name === "MetricCell")
     .find((node) => node.props.label === "Evaluation drift signals");
-  assert.equal(signalMetric.props.value, 60);
+  assert.equal(signalMetric, undefined);
 });
 
 test("fixed-window signal cards reject malformed unbounded evidence lists", async () => {
@@ -1277,7 +1295,7 @@ test("overview does not confuse legacy readiness with cohort monitor status", as
   assert.doesNotMatch(rendered, /No dimensions currently clear/);
 });
 
-test("judge scores explains the empty state using shared readiness", async () => {
+test("judge scores directs an empty store to Evaluator Lab without legacy windows", async () => {
   const ui = await loadUiModule();
   const data = bundle("evaluator-a");
   data.driftAnalysis.current = 16;
@@ -1285,12 +1303,12 @@ test("judge scores explains the empty state using shared readiness", async () =>
 
   const rendered = textOf(render(ui.Judge, createHooks(), { data })).replace(/\s+/g, " ");
 
-  assert.match(rendered, /No eligible evaluation pipeline run has completed yet/);
-  assert.match(rendered, /Current global content-bearing traces 16 \/ 30/);
-  assert.match(rendered, /Baseline global content-bearing traces 0 \/ 30/);
+  assert.match(rendered, /No evaluator results have been stored yet/);
+  assert.match(rendered, /Evaluator Lab stores results for an eligible trace set/);
+  assert.doesNotMatch(rendered, /global content-bearing traces/);
 });
 
-test("unresolved evaluator selection is not described as zero drift or a missing run", async () => {
+test("unresolved legacy evaluator selection is confined to legacy history", async () => {
   const ui = await loadUiModule();
   const data = bundle(null);
   data.evaluation.status = "selection_required";
@@ -1303,8 +1321,8 @@ test("unresolved evaluator selection is not described as zero drift or a missing
     (node) => typeof node.type === "function" && node.type.name === "MetricCell")
     .find((node) => node.props.label === "Evaluation drift signals");
 
-  assert.equal(signalMetric.props.value, "Select evaluator");
-  assert.doesNotMatch(overview, /Evaluation drift signals\s+0/);
+  assert.equal(signalMetric, undefined);
+  assert.doesNotMatch(overview, /Evaluation drift signals/);
   assert.match(judge, /Select an evaluator to view judge results/);
-  assert.doesNotMatch(judge, /No eligible evaluation pipeline run has completed yet/);
+  assert.doesNotMatch(judge, /No evaluator results have been stored yet/);
 });

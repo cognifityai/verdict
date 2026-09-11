@@ -23,12 +23,14 @@ from verdict.monitoring import (
     MonitorEvaluatorPending,
     MonitorPolicy,
     MonitorRebootstrapRequired,
+    MonitorStateConflict,
     WindowMode,
     compare_manifest,
     monitor_policy_to_json,
     monitor_requires_rebootstrap,
     monitor_snapshot_to_json,
     plan_historical_manifest,
+    plan_prospective_manifest,
 )
 
 TENANT = LOCAL_TENANT
@@ -62,6 +64,12 @@ def _prepared_activation_snapshot(historical, latest):
         or prepared.comparison_index != approved.comparison_index + 1
         or prepared.reference_unit_ids != approved.reference_unit_ids
         or prepared.reference_summary != approved.reference_summary
+        or prepared.current_unit_ids
+        or prepared.current_summary is None
+        or prepared.current_summary.unit_count != 0
+        or prepared.pending_evaluator_units
+        or not prepared.prospective_open
+        or prepared.prospective_start_at is None
         or prepared.consumed_unit_ids
         != (*approved.consumed_unit_ids, *prepared.current_unit_ids)
     ):
@@ -169,7 +177,7 @@ class MonitorRoutes:
         if snapshot is None:
             return {"policy": json.loads(monitor_policy_to_json(policy)), "state": state}
         policy_state = state
-        if monitor_requires_rebootstrap(policy, snapshot[0]):
+        if monitor_requires_rebootstrap(policy, snapshot[0], active=state == "active"):
             state = "requires_rebootstrap"
         return self.response(
             policy,
@@ -282,11 +290,36 @@ class MonitorRoutes:
                 latest = writable.get_latest_monitor_snapshot(policy_id)
                 if latest is None:
                     raise ValueError("candidate has no snapshot")
+                if monitor_requires_rebootstrap(stored[0], latest[0]):
+                    return JSONResponse(
+                        {"error": "monitor requires re-bootstrap"},
+                        status_code=409,
+                    )
                 prepared = _prepared_activation_snapshot(historical, latest)
                 if prepared is None:
-                    prepared = self.prospective(
-                        writable, stored[0], expected_state="candidate",
+                    manifest = plan_prospective_manifest(
+                        historical[0],
+                        (),
+                        stored[0],
+                        prospective_start_at=datetime.now(timezone.utc),
                     )
+                    comparison = compare_manifest((), manifest, stored[0])
+                    try:
+                        writable.save_monitor_successor(
+                            policy_id,
+                            historical[0].snapshot_id,
+                            manifest,
+                            comparison,
+                            expected_state="candidate",
+                        )
+                        prepared = (manifest, comparison)
+                    except MonitorStateConflict:
+                        latest = writable.get_latest_monitor_snapshot(policy_id)
+                        if latest is None:
+                            raise
+                        prepared = _prepared_activation_snapshot(historical, latest)
+                        if prepared is None:
+                            raise
                 policy = writable.activate_monitor_policy(
                     stored[0].scope_key,
                     policy_id,
@@ -325,7 +358,7 @@ class MonitorRoutes:
                 previous = writable.get_latest_monitor_snapshot(policy.policy_id)
                 if previous is None:
                     raise ValueError("active monitor has no snapshot")
-                if monitor_requires_rebootstrap(policy, previous[0]):
+                if monitor_requires_rebootstrap(policy, previous[0], active=True):
                     return JSONResponse(
                         {"error": "monitor requires re-bootstrap"},
                         status_code=409,

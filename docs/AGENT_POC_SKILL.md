@@ -91,8 +91,8 @@ migration.
 | Milestone | What must be proven | What it does not prove |
 |---|---|---|
 | Capture | A supported SDK call creates exactly one expected stored trace | Intent quality or regression detection |
-| Quality | Approved content is safe enough for the trial, clusters match the regression question, and the judge clears a customer-label gate | A baseline/current regression exists |
-| Regression | Independent windows meet the sample floor and the latest `DriftRun` is visible in the selected-store dashboard | Production readiness or outbound alerting |
+| Quality | Approved content is safe enough for the trial and the judge clears a customer-label gate; any optional grouping is reviewed | A baseline/current regression exists |
+| Regression | Reviewed Monitor cohorts meet the sample floor and the persisted comparison is visible in the selected-store dashboard | Production readiness or outbound alerting |
 
 The agent must stop at the last milestone that has evidence. It must not turn on
 content merely to make quality charts appear.

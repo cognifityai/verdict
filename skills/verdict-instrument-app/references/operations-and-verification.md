@@ -49,7 +49,7 @@ value.
 
 | Job | Purpose | Frequency basis | Final sink |
 |---|---|---|---|
-| Drift analysis | compare baseline/current quality | eligible volume, window length, delay, judge cost/latency | persisted latest `DriftRun` |
+| Monitor | compare frozen reference/current evidence | eligible volume, cohort target, delay, judge cost/latency | active `MonitorComparison` successor |
 | Retention | remove expired rows | retention boundary and operational load | rows older than cutoff absent |
 | Health check | confirm capture/dashboard dependencies | incident-detection need and noise budget | customer's existing monitor/log sink |
 
@@ -82,7 +82,7 @@ Do not place a credential-bearing storage URL in the command or logs. Supply it
 through the customer's protected `VERDICT_STORAGE` environment. The installed
 commands log only the selected backend name.
 
-## Drift pipeline gate
+## Monitor and evaluator gate
 
 ### Versioned registry gate
 
@@ -108,7 +108,7 @@ Before a live run prove:
 - cluster assignment and version are understood;
 - evaluator provider/model/rubric remain stable for comparisons;
 - the user approved credential, call count, spend, and rate-limit exposure; and
-- both no-signal and regression outcomes persist an atomic latest snapshot.
+- both no-alert and alert outcomes persist one expected-head Monitor successor.
 
 ### Validate the clustering feature, not only cluster size
 
@@ -158,7 +158,7 @@ privacy/parity/provenance checks and held-out judge calibration, or independentl
 labelled evidence validates a deliberately narrower rubric without that context.
 
 The dashboard must point to the resulting analysis store if that is where judgments
-and drift signals live. Keep the original capture store available for audit and
+and Monitor comparisons live. Keep the original capture store available for audit and
 rollback. A projection validated on one chat shape does not generalize to multiple
 user turns, tool-only calls, multimodal blocks, or another provider's message schema.
 
@@ -181,18 +181,18 @@ not live model-quality evidence. The fake judge proves wiring only.
 
 ## Dashboard gate
 
-Point the dashboard at the exact SQLite or PostgreSQL store containing the tested `DriftRun`.
+Point the dashboard at the exact SQLite or PostgreSQL store containing the tested
+Monitor policy and comparison.
 Bind loopback unless a secure remote boundary is approved. Verify:
 
 1. `/api/health` reports the expected database state;
-2. `/api/data` returns the latest run and signal count;
-3. the browser renders the regression signal and relevant metadata; and
-4. a later zero-signal run replaces stale dashboard evidence correctly.
+2. `/api/monitor` returns the intended active policy and latest successor;
+3. the browser renders the alert or no-alert result and relevant evidence; and
+4. a later no-alert successor replaces an earlier alert as current status.
 
 If auth is enabled, test both denied and allowed requests. Browser rendering is
 required when the user asks to see the dashboard; API success alone does not prove the
-visible UI. State that dashboard signals are not outbound notifications and that the
-UI does not configure schedules.
+visible UI. State that dashboard alerts are not outbound notifications.
 
 Basic authentication is enabled only when both `VERDICT_USER` and `VERDICT_PASS`
 are non-empty. Fail readiness when exactly one is set. Treat `/` and `/api/health`

@@ -148,9 +148,10 @@ The plan must name:
 The plan must also name which of these POC outcomes is in scope:
 
 - `capture`: metadata reaches the approved store;
-- `quality`: approved content, meaningful clusters, and a calibrated judge exist; or
-- `regression`: independent baseline/current windows reach the required sample floor
-  and produce a persisted latest run.
+- `quality`: approved content and a calibrated judge exist; reviewed grouping is
+  optional; or
+- `regression`: frozen reference/current cohorts reach the required sample floor
+  and produce a persisted latest Monitor comparison.
 
 Do not describe a capture-only POC as a regression POC.
 
@@ -241,11 +242,13 @@ outside the runner. Pin the distribution versions in the deployment lockfile.
 
 ### 9. Show regression evidence accurately
 
-The current dashboard signal is the latest persisted `DriftRun` in SQLite or
-PostgreSQL. Launch it locally by default, or mount `verdict.dashboard.create_app()`
-behind the host application's authentication, and verify `/api/health`, `/api/data`,
-and the rendered regression view. Do not promise outbound notifications
-unless the installed release actually supports them.
+The current dashboard result is the latest persisted comparison for the active
+Monitor policy in SQLite or PostgreSQL. Earlier `DriftRun` rows are read-only
+history and are not current status. Launch the dashboard locally by default, or
+mount `verdict.dashboard.create_app()` behind the host application's
+authentication, and verify `/api/health`, `/api/data`, `/api/monitor`, and the
+rendered Monitor view. Do not promise outbound notifications unless the
+installed release actually supports them.
 
 ## Stop instead of guessing
 

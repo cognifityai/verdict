@@ -6,6 +6,13 @@ from pathlib import Path
 
 import pytest
 from verdict.dashboard.app import build_bundle
+from verdict.monitor_inputs import load_monitor_units
+from verdict.monitoring import (
+    MonitorPolicy,
+    MonitorStatus,
+    compare_manifest,
+    plan_historical_manifest,
+)
 from verdict.storage.sqlite import SQLiteStorage
 from verdict.telemetry.files import iter_telemetry_file
 from verdict.telemetry.model import ImportContext
@@ -19,7 +26,7 @@ SOURCES = _GENERATOR["SOURCES"]
 generate_samples = _GENERATOR["generate_samples"]
 
 
-def test_every_generated_adapter_reaches_cluster_judge_drift_and_dashboard(
+def test_every_generated_adapter_reaches_cluster_judge_monitor_and_dashboard(
     tmp_path: Path,
 ) -> None:
     sample_dir = tmp_path / "samples"
@@ -104,17 +111,31 @@ def test_every_generated_adapter_reaches_cluster_judge_drift_and_dashboard(
         for judgment in judgments
         for dimension in judgment.dimensions
     )
-    snapshot = verified.get_latest_drift_run_snapshot(judgments[0].evaluator_fingerprint)
-    assert snapshot is not None
-    run, signals = snapshot
-    assert run.signal_count == 0
-    assert signals == []
+    assert verified.get_latest_drift_run_snapshot(judgments[0].evaluator_fingerprint) is None
+
+    policy = MonitorPolicy(
+        "telemetry-import-e2e-monitor",
+        "tenant-e2e:application:trace",
+        reference_ratio=0.5,
+        minimum_reference=30,
+        minimum_current=30,
+        prospective_target=30,
+        evaluator_fingerprint=judgments[0].evaluator_fingerprint,
+        evaluator_dimensions=tuple(judgments[0].expected_dimensions),
+    )
+    units = load_monitor_units(verified, policy, tenant_id="tenant-e2e")
+    monitor = plan_historical_manifest(units, policy, cutoff=analysis_time)
+    comparison = compare_manifest(units, monitor, policy)
+    verified.save_monitor_policy(policy)
+    verified.save_monitor_snapshot(policy.policy_id, monitor, comparison)
+    assert len(monitor.reference_unit_ids) == len(monitor.current_unit_ids) == 40
+    assert comparison.status is MonitorStatus.NO_ALERT
     verified.close()
 
     dashboard = build_bundle(storage_url)
     assert dashboard["meta"]["totalTraces"] == 80
     assert dashboard["meta"]["totalJudged"] == 80
-    assert dashboard["driftRun"]["signalCount"] == 0
+    assert dashboard["driftAnalysis"]["runStatus"] == "no_completed_run"
     assert len(dashboard["samples"]) == 30
     assert all(sample["input_tokens"] is not None for sample in dashboard["samples"])
     assert all(sample["output_tokens"] is not None for sample in dashboard["samples"])

@@ -32,6 +32,9 @@ present those states without treating missing evidence as success or failure.
 10. A monitor candidate policy and its initial comparison snapshot are persisted
     in one storage transaction. Candidate reads require that initial snapshot,
     so incomplete legacy records remain inert after a restart.
+11. Monitor is the only current drift workflow. Activation stores an immutable
+    event-time boundary and creates an empty prospective cohort; evidence whose
+    event time predates that boundary never enters a later current cohort.
 
 ## Data ownership
 
@@ -54,10 +57,12 @@ present those states without treating missing evidence as success or failure.
 - Agent Runs show source outcome, evidence coverage, deterministic findings,
   and selected-evaluator coverage separately.
 - Five top-level workspaces separate concerns: Overview, Explore, Evaluate,
-  Monitor, and Settings. Monitor contains current cohort status, fixed-window
-  evaluation signals, historical comparisons, optional segments, and schedules.
-- Fixed-window evaluation signals and prospective cohort-monitor alerts have
-  separate counts and detail views; neither is presented as the other.
+  Monitor, and Settings. Monitor contains current cohort status, historical
+  comparisons, optional segments, schedules, and read-only legacy history.
+- Fixed-window evaluation signals created by earlier releases remain readable
+  for audit and trace navigation. They are not current status, do not contribute
+  to Overview or navigation alert counts, and are not produced by the current
+  evaluation pipeline.
 - A prospective cohort distinguishes traffic collection from waiting for
   selected-evaluator results until a persisted comparison completes.
 - Generic change records are a decision log; typed workflows perform actual
@@ -85,6 +90,10 @@ receiver must honor the idempotency key for end-to-end deduplication.
   timestamp ties deterministically; existing rows are backfilled automatically.
   Older evaluator-backed monitors remain readable but require a new reviewed
   preview before execution.
+- Prospective monitor snapshots add an activation event-time boundary. Existing
+  active prospective monitors without it remain readable but require a new
+  reviewed preview before they can advance. No database schema migration is
+  required because the field is inside the existing snapshot document.
 - `/dashboard` remains the entry point; URL parameters provide deep links
   without adding a frontend router dependency.
 

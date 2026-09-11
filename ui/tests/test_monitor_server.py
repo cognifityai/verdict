@@ -4,7 +4,6 @@ from datetime import datetime, timedelta, timezone
 
 import httpx
 from verdict.dashboard.app import create_app
-from verdict.dashboard.monitor_routes import MonitorRoutes
 from verdict.monitoring import CohortManifest, MonitorComparison, MonitorPolicy, MonitorStatus
 from verdict.schema import (
     ClusterIdentity,
@@ -26,12 +25,20 @@ from verdict_eval.clustering_strategies import FitConfig
 NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
 
-def _insert_traces(path, count, *, start=0, errors_from=10_000, tenant="__verdict_local__"):
+def _insert_traces(
+    path, count, *, start=0, errors_from=10_000,
+    tenant="__verdict_local__", at=None,
+):
     storage = SQLiteStorage(str(path))
     for index in range(start, start + count):
+        started_at = (
+            at + timedelta(seconds=index - start)
+            if at is not None
+            else NOW + timedelta(days=index)
+        )
         storage.insert_trace(Trace(
-            trace_id=f"trace-{index:03d}", started_at=NOW + timedelta(days=index),
-            ended_at=NOW + timedelta(days=index, seconds=1), provider="openai",
+            trace_id=f"trace-{index:03d}", started_at=started_at,
+            ended_at=started_at + timedelta(seconds=1), provider="openai",
             request_model="model", prompt_redacted="request", response_redacted="ok",
             tenant_id=tenant,
             error="provider failed" if index >= errors_from else None,
@@ -116,8 +123,14 @@ def test_monitor_preview_activation_and_prospective_run(tmp_path):
     assert state.json()["state"] == "active"
     assert state.json()["active"]["snapshot"]["comparison"]["status"] == "insufficient"
     assert state.json()["active"]["approvedHistoricalSnapshot"] == preview.json()["snapshot"]
+    prospective_start = datetime.fromisoformat(
+        activate.json()["snapshot"]["manifest"]["prospective_start_at"]
+    )
 
-    _insert_traces(database, 3, start=50)
+    _insert_traces(
+        database, 3, start=50,
+        at=prospective_start + timedelta(microseconds=1),
+    )
 
     async def run_cycle():
         app = create_app(storage=f"sqlite:///{database}")
@@ -136,7 +149,10 @@ def test_monitor_preview_activation_and_prospective_run(tmp_path):
     assert len(cycle.json()["snapshot"]["manifest"]["current_unit_ids"]) == 3
     assert rejected.status_code == 403
 
-    _insert_traces(database, 2, start=53)
+    _insert_traces(
+        database, 2, start=53,
+        at=prospective_start + timedelta(seconds=3),
+    )
 
     async def finish_cycle_after_restart():
         app = create_app(storage=f"sqlite:///{database}")
@@ -155,6 +171,74 @@ def test_monitor_preview_activation_and_prospective_run(tmp_path):
         "trace-050", "trace-051", "trace-052", "trace-053", "trace-054",
     ]
     assert completed.json()["approvedHistoricalSnapshot"] == preview.json()["snapshot"]
+
+
+def test_monitor_activation_starts_empty_after_explicit_historical_preview(tmp_path):
+    database = tmp_path / "explicit-activation.db"
+    _insert_traces(database, 20)
+    storage = SQLiteStorage(str(database))
+    storage.insert_trace(Trace(
+        trace_id="future-dated-before-activation",
+        started_at=datetime(2100, 1, 1, tzinfo=timezone.utc),
+        ended_at=datetime(2100, 1, 1, 0, 0, 1, tzinfo=timezone.utc),
+        provider="openai",
+        request_model="model",
+        prompt_redacted="request",
+        response_redacted="ok",
+        tenant_id="__verdict_local__",
+    ))
+    storage.close()
+
+    async def request(path, *, payload=None):
+        app = create_app(storage=f"sqlite:///{database}")
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver",
+        ) as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            return await client.post(
+                path, headers={"X-Verdict-Setup": token}, json=payload,
+            )
+
+    preview = asyncio.run(request("/api/monitor/preview", payload={
+        "windowMode": "explicit",
+        "referenceStart": NOW.isoformat(),
+        "referenceEnd": (NOW + timedelta(days=5)).isoformat(),
+        "currentStart": (NOW + timedelta(days=10)).isoformat(),
+        "currentEnd": (NOW + timedelta(days=15)).isoformat(),
+        "minimumReference": 2,
+        "minimumCurrent": 2,
+        "prospectiveTarget": 1,
+    }))
+    assert preview.status_code == 200
+
+    activated = asyncio.run(request("/api/monitor/activate", payload={
+        "policyId": preview.json()["policy"]["policy_id"],
+        "expectedActivePolicyId": None,
+    }))
+    assert activated.status_code == 200
+    manifest = activated.json()["snapshot"]["manifest"]
+    assert manifest["current_unit_ids"] == []
+    activated_at = datetime.fromisoformat(manifest["prospective_start_at"])
+
+    storage = SQLiteStorage(str(database))
+    storage.insert_trace(Trace(
+        trace_id="post-activation",
+        started_at=activated_at + timedelta(microseconds=1),
+        ended_at=activated_at + timedelta(seconds=1),
+        provider="openai",
+        request_model="model",
+        prompt_redacted="request",
+        response_redacted="ok",
+        tenant_id="__verdict_local__",
+    ))
+    storage.close()
+
+    cycle = asyncio.run(request("/api/monitor/run"))
+    assert cycle.status_code == 200
+    current_ids = cycle.json()["snapshot"]["manifest"]["current_unit_ids"]
+    assert current_ids == ["post-activation"]
+    assert not any(trace_id.startswith("trace-") for trace_id in current_ids)
 
 
 def test_monitor_waits_for_late_judgments_then_alerts_on_same_members(tmp_path):
@@ -189,7 +273,13 @@ def test_monitor_waits_for_late_judgments_then_alerts_on_same_members(tmp_path):
         "expectedActivePolicyId": None,
     }))
     assert activated.status_code == 200
-    _insert_traces(database, 10, start=20)
+    prospective_start = datetime.fromisoformat(
+        activated.json()["snapshot"]["manifest"]["prospective_start_at"]
+    )
+    _insert_traces(
+        database, 10, start=20,
+        at=prospective_start + timedelta(microseconds=1),
+    )
 
     waiting = asyncio.run(request("/api/monitor/run"))
 
@@ -255,7 +345,13 @@ def test_monitor_run_names_rebootstrap_when_pending_evidence_disappears(tmp_path
     }))
     assert preview.status_code == activated.status_code == 200
 
-    _insert_traces(database, 1, start=2)
+    prospective_start = datetime.fromisoformat(
+        activated.json()["snapshot"]["manifest"]["prospective_start_at"]
+    )
+    _insert_traces(
+        database, 1, start=2,
+        at=prospective_start + timedelta(microseconds=1),
+    )
     waiting = asyncio.run(request("/api/monitor/run"))
     assert waiting.status_code == 200
     assert waiting.json()["snapshot"]["manifest"]["pending_evaluator_units"]
@@ -412,7 +508,7 @@ def test_monitor_activation_prepares_before_cas_and_reuses_retry(tmp_path, monke
     database = tmp_path / "verdict.db"
     _insert_traces(database, 20)
 
-    def fail_preparation(_storage, _policy):
+    def fail_preparation(*_args, **_kwargs):
         raise ValueError("projection unavailable")
 
     async def exercise():
@@ -441,9 +537,9 @@ def test_monitor_activation_prepares_before_cas_and_reuses_retry(tmp_path, monke
             second_id = second.json()["policy"]["policy_id"]
             with monkeypatch.context() as patch:
                 patch.setattr(
-                    MonitorRoutes,
-                    "prospective",
-                    staticmethod(fail_preparation),
+                    SQLiteStorage,
+                    "save_monitor_successor",
+                    fail_preparation,
                 )
                 preparation_failure = await client.post(
                     "/api/monitor/activate", headers=headers,
@@ -844,6 +940,9 @@ def test_active_monitor_uses_approved_judgment_facts_after_rejudge_and_delete(tm
 
     preview, activation = asyncio.run(approve())
     assert preview.status_code == activation.status_code == 200
+    prospective_start = datetime.fromisoformat(
+        activation.json()["snapshot"]["manifest"]["prospective_start_at"]
+    )
 
     storage = SQLiteStorage(str(database))
     storage.delete_trace("trace-000")
@@ -866,8 +965,8 @@ def test_active_monitor_uses_approved_judgment_facts_after_rejudge_and_delete(tm
             Trace(
                 trace_id=trace_id,
                 tenant_id=None,
-                started_at=NOW + timedelta(days=2, minutes=index),
-                ended_at=NOW + timedelta(days=2, minutes=index, seconds=1),
+                started_at=prospective_start + timedelta(minutes=index),
+                ended_at=prospective_start + timedelta(minutes=index, seconds=1),
                 prompt_redacted="request", response_redacted="ok",
             )
         )
@@ -969,6 +1068,9 @@ def test_cluster_monitor_projects_new_traffic_and_keeps_reviewed_label(tmp_path)
     preview, activation = asyncio.run(approve())
     assert preview.status_code == activation.status_code == 200
     assert preview.json()["snapshot"]["comparison"]["groups"][0]["label"] == "Billing questions"
+    prospective_start = datetime.fromisoformat(
+        activation.json()["snapshot"]["manifest"]["prospective_start_at"]
+    )
 
     storage = SQLiteStorage(str(database))
     for index in range(2):
@@ -976,8 +1078,8 @@ def test_cluster_monitor_projects_new_traffic_and_keeps_reviewed_label(tmp_path)
             Trace(
                 trace_id=f"new-{index}",
                 tenant_id=tenant,
-                started_at=NOW + timedelta(hours=2, minutes=index),
-                ended_at=NOW + timedelta(hours=2, minutes=index, seconds=1),
+                started_at=prospective_start + timedelta(minutes=index),
+                ended_at=prospective_start + timedelta(minutes=index, seconds=1),
                 response_redacted="ok",
                 tags={"verdict.intent_key": "billing"},
             )

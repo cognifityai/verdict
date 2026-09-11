@@ -1,18 +1,15 @@
-"""End-to-end drift pipeline runner.
+"""Trace clustering and evaluation runner.
 
 Reads traces from the configured storage, assigns stable intent clusters,
-runs the configured judge on a stratified or uniform sample, computes per-cluster
-per-dimension drift signals across a current-vs-baseline window split, and
-persists one atomic DriftRun snapshot and its exact DriftSignal set to storage,
-including a completed zero-signal run.
+runs the configured judge on a stratified or uniform sample, and persists the
+resulting judgments. Drift comparisons are configured and run through Monitor.
 
 This is the first script that wires the full pipeline together:
 
     Stored traces
         → StableIntentClusterer.assign (persists stable cluster IDs)
         → Judge (produces Judgment per selected trace)
-        → DriftDetector (compares current window vs baseline)
-        → DriftRun + exact DriftSignals persisted atomically
+        → Monitor consumes deterministic and selected-evaluator evidence
 
 Usage (offline, FakeProvider judge — runs without API keys):
     verdict-pipeline --storage sqlite:///./verdict.db \\
@@ -28,7 +25,6 @@ from __future__ import annotations
 import argparse
 import os
 from datetime import datetime, timezone
-from uuid import NAMESPACE_URL, uuid5
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -109,21 +105,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--min-sample-size",
         type=int,
         default=30,
-        help="Min judgments per (cluster, dimension) for stat test.",
+        help="Planning floor per cluster/time cell for sampling diagnostics.",
     )
-    p.add_argument(
-        "--p-threshold",
-        type=float,
-        default=0.01,
-        help="BH-adjusted p-value threshold for emitting a signal.",
-    )
-    p.add_argument(
-        "--effect-size-threshold",
-        type=float,
-        default=0.147,
-        help="Minimum absolute Cliff's delta. On PASS/FAIL data this "
-        "is the minimum detectable pass-rate change (default 0.147 = 14.7pp).",
-    )
+    # Accepted for command compatibility with releases that emitted fixed-window
+    # drift rows. Monitor now owns both thresholds.
+    p.add_argument("--p-threshold", type=float, default=None, help=argparse.SUPPRESS)
+    p.add_argument("--effect-size-threshold", type=float, default=None, help=argparse.SUPPRESS)
     p.add_argument(
         "--sampling",
         choices=["stratified", "uniform"],
@@ -137,8 +124,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--target-per-cluster",
         type=int,
         default=40,
-        help="Stratified target: judged traces per (cluster, window). "
-        "Default 40 (margin above min-sample-size=30 for UNCLEARs).",
+        help="Stratified target: judged traces per (cluster, time window). "
+        "Default 40 (margin above min-sample-size=30 for unavailable results).",
     )
     p.add_argument(
         "--sample-rate",
@@ -215,59 +202,6 @@ def _exclude_internal_workloads(traces):
     return target, len(traces) - len(target)
 
 
-def _drift_run_id(
-    args,
-    analysis_time: datetime,
-    tenant_scope: str,
-    evaluator_fingerprint: str,
-) -> str:
-    """Return the deterministic identity of one completed hourly snapshot."""
-    window_bucket = analysis_time.replace(minute=0, second=0, microsecond=0)
-    identity = "|".join(
-        [
-            "verdict-drift-run-v1",
-            tenant_scope,
-            evaluator_fingerprint,
-            args.clustering_version,
-            args.registry_mode,
-            args.embedder,
-            str(args.cluster_threshold),
-            str(args.recluster),
-            str(args.trust_existing_clusters),
-            args.sampling,
-            str(args.target_per_cluster),
-            str(args.sample_rate),
-            str(args.current_hours),
-            str(args.baseline_days),
-            str(args.baseline_lag_hours),
-            str(args.min_sample_size),
-            str(args.p_threshold),
-            str(args.effect_size_threshold),
-            window_bucket.isoformat(),
-        ]
-    )
-    return uuid5(NAMESPACE_URL, identity).hex
-
-
-def _signal_id_for_run(signal, run_id: str) -> str:
-    """Return a stable ID for one statistical cell within a run snapshot.
-
-    Run identity includes evaluator, scope, configuration, and analysis bucket,
-    so signals from distinct snapshots cannot overwrite one another.
-    """
-    identity = "|".join(
-        [
-            "verdict-drift-signal-v2",
-            run_id,
-            signal.cluster_id,
-            signal.dimension,
-            signal.direction.value,
-            signal.statistic_name,
-        ]
-    )
-    return uuid5(NAMESPACE_URL, identity).hex
-
-
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if not args.capture_judge_telemetry:
@@ -278,7 +212,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         verdict.init(
-            service_name="verdict-drift-pipeline",
+            service_name="verdict-evaluation-pipeline",
             environment=os.environ.get("VERDICT_ENVIRONMENT", "production"),
             storage=args.storage,
             capture_content=False,
@@ -339,7 +273,7 @@ def _run(args) -> int:
         shown = sorted("<unset>" if t is None else t for t in tenant_values)
         print(
             "ERROR: this database contains multiple tenant scopes "
-            f"({', '.join(shown)}). The v0 drift runner supports one tenant "
+            f"({', '.join(shown)}). The legacy clustering mode supports one tenant "
             "per store in registry mode=off; select a tenant-scoped v2 registry "
             "mode or use separate stores."
         )
@@ -411,10 +345,9 @@ def _run(args) -> int:
 
     # -- Step 2: cluster (stable, persistent, assignment-based) --------------
     # Identity is ASSIGNED against a persisted registry, not recomputed from
-    # scratch each run. A cluster keeps its ID forever, so the week-over-week
-    # comparison in Step 4 lines up matching buckets. Assignment happens on
-    # the first analysis run after capture: by default we only assign traces
-    # that lack a cluster_id and never overwrite an existing one (use
+    # scratch each run. A cluster keeps its ID forever for downstream analysis.
+    # Assignment happens on the first analysis run after capture: by default we
+    # only assign traces that lack a cluster_id and never overwrite an existing one (use
     # --recluster to override).
     from verdict_eval.clustering import (
         DeterministicHashEmbedder,
@@ -573,7 +506,7 @@ def _run(args) -> int:
 
     # A fixed human-labeled sentinel set is the independent anchor for judge
     # behavior. Its aggregate is stored in evaluator_health and never mixed into
-    # production judgments or target-model drift windows.
+    # production judgments or target-model monitoring cohorts.
     if args.judge_sentinel_file:
         from verdict_eval.judge_health import (
             evaluate_judge_health,
@@ -604,12 +537,12 @@ def _run(args) -> int:
             f"errors={health.error_count}."
         )
         print(
-            "  Sentinel agreement is monitored separately from production drift; "
+            "  Sentinel agreement is monitored separately from production traffic; "
             "it cannot rule out silent behavior changes outside the anchor set."
         )
         if health.status.value != "healthy":
             print(
-                "ERROR: production judging and drift detection are blocked because "
+                "ERROR: production judging is blocked because "
                 f"judge health is {health.status.value}, not healthy."
             )
             storage.close()
@@ -727,100 +660,8 @@ def _run(args) -> int:
             print(f"  WARN: judge failed for {t.trace_id}: {safe_error}")
     print(f"  Persisted {judged} completed judgment(s) and {judge_errors} error record(s).")
 
-    # -- Step 4: compute drift ----------------------------------------------
-    from verdict_eval.drift import (
-        DriftDetector,
-        split_windows_by_time,
-    )
-
-    print("Computing drift...")
-    # Reload judgments per cluster to feed the detector
-    latest_judgment_for_trace = {}
-    cluster_for_trace: dict[str, str] = {}
-    for cid in set(cluster_ids):
-        js = (
-            storage.list_judgments_for_registry_cluster(
-                args.tenant_id, registry_version, cid, limit=100_000
-            )
-            if args.registry_mode == "active"
-            else storage.list_judgments_for_cluster(cid, limit=100_000)
-        )
-        for j in js:
-            if not matches_current_evaluator(j):
-                continue
-            previous = latest_judgment_for_trace.get(j.trace_id)
-            if previous is None or (j.created_at, j.judgment_id) > (
-                previous.created_at,
-                previous.judgment_id,
-            ):
-                latest_judgment_for_trace[j.trace_id] = j
-                cluster_for_trace[j.trace_id] = cid
-    all_judgments = [
-        judgment
-        for judgment in latest_judgment_for_trace.values()
-        if judgment.status.value == "completed"
-    ]
-
-    cur_windows, base_windows = split_windows_by_time(
-        all_judgments,
-        cluster_for_trace,
-        {t.trace_id: t.started_at for t in traces},
-        current_hours=args.current_hours,
-        baseline_days=args.baseline_days,
-        baseline_lag_hours=args.baseline_lag_hours,
-        now=analysis_time,
-    )
-    print(f"  Current windows:  {len(cur_windows)}  (total n = {sum(w.n for w in cur_windows)})")
-    print(f"  Baseline windows: {len(base_windows)}  (total n = {sum(w.n for w in base_windows)})")
-
-    detector = DriftDetector(
-        min_sample_size=args.min_sample_size,
-        p_threshold=args.p_threshold,
-        effect_size_threshold=args.effect_size_threshold,
-    )
-    print(
-        f"  Sensitivity floor: {args.effect_size_threshold:.1%} absolute pass-rate "
-        "change for binary rubric dimensions (before significance gating)."
-    )
-    signals = detector.detect(current=cur_windows, baseline=base_windows)
-    for diagnostic in detector.last_diagnostics:
-        print(f"  WARN: {diagnostic}")
-    print(f"  Detected {len(signals)} drift signal(s).")
-
-    # Persist one completed snapshot even when no signal clears the gates. The
-    # adapter replaces its marker and exact signal set atomically.
-    from verdict.schema import DriftRun
-
-    evaluator_fingerprint = current_evaluator["evaluator_fingerprint"]
-    run_id = _drift_run_id(
-        args,
-        analysis_time,
-        tenant_scope,
-        evaluator_fingerprint,
-    )
-    for sig in signals:
-        sig.evaluator_fingerprint = evaluator_fingerprint
-        sig.run_id = run_id
-        sig.signal_id = _signal_id_for_run(sig, run_id)
-        sig.detected_at = analysis_time
-    storage.replace_drift_run(
-        DriftRun(
-            run_id=run_id,
-            analysis_time=analysis_time,
-            completed_at=datetime.now(timezone.utc),
-            evaluator_fingerprint=evaluator_fingerprint,
-            signal_count=len(signals),
-        ),
-        signals,
-    )
-    for sig in signals:
-        print(
-            f"    • cluster={sig.cluster_id} dim={sig.dimension} "
-            f"dir={sig.direction.value} delta={sig.effect_size_cliffs_delta:.3f} "
-            f"p_adj={sig.p_value_adjusted:.4f}"
-        )
-
-    print("\nDone. Inspect persisted signals with the Verdict dashboard or storage API.")
+    print("Drift monitoring is configured and run from the Monitor workspace.")
+    print("\nDone. Inspect persisted judgments in the Verdict dashboard or storage API.")
     return 0
 
 
