@@ -15,11 +15,13 @@ import hmac
 import logging
 import re
 import threading
+from _thread import LockType
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
+from uuid import uuid4
 
 from verdict.agent_transport import CaptureSink, FileCaptureSink, StorageCaptureSink
 from verdict.runtime_metrics import RuntimeMetrics
@@ -300,6 +302,30 @@ _ctx_intent_key: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "verdict_intent_key",
     default=None,
 )
+
+
+@dataclass(slots=True)
+class _ModelCallReservation:
+    correlation_id: str
+    _state: str = "pending"
+    _lock: LockType = field(default_factory=threading.Lock)
+
+    def claim(self) -> str | None:
+        with self._lock:
+            if self._state != "pending":
+                return None
+            self._state = "claimed"
+            return self.correlation_id
+
+    def close(self) -> None:
+        with self._lock:
+            if self._state == "pending":
+                self._state = "closed"
+
+
+_ctx_model_call_reservation: contextvars.ContextVar[_ModelCallReservation | None] = (
+    contextvars.ContextVar("verdict_model_call_reservation", default=None)
+)
 _WORKLOAD = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,63}")
 
 
@@ -387,6 +413,24 @@ def get_context_intent_key() -> str | None:
     return _ctx_intent_key.get()
 
 
+def _claim_model_call_correlation_id() -> str | None:
+    """Claim the active one-call reservation, if it is still pending."""
+    reservation = _ctx_model_call_reservation.get()
+    return reservation.claim() if reservation is not None else None
+
+
+@contextmanager
+def model_call_context() -> Iterator[str]:
+    """Reserve one generated Trace ID for the next instrumented model call."""
+    reservation = _ModelCallReservation(uuid4().hex)
+    token = _ctx_model_call_reservation.set(reservation)
+    try:
+        yield reservation.correlation_id
+    finally:
+        reservation.close()
+        _ctx_model_call_reservation.reset(token)
+
+
 @contextmanager
 def trace_context(trace_id: str | None) -> Iterator[None]:
     """Temporarily bind a trace ID and restore the prior value on every exit."""
@@ -421,6 +465,10 @@ def intent_context(intent_key: str) -> Iterator[None]:
 
 def clear_context() -> None:
     """Clear any per-request context (useful between requests / in tests)."""
+    reservation = _ctx_model_call_reservation.get()
+    if reservation is not None:
+        reservation.close()
+    _ctx_model_call_reservation.set(None)
     _ctx_session_id.set(None)
     _ctx_user_id_hash.set(None)
     _ctx_trace_id.set(None)

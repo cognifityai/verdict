@@ -26,6 +26,7 @@ from verdict.client import (  # noqa: F401
     get_client,
     get_context_trace_id,
     intent_context,
+    model_call_context,
     set_context,
     trace_context,
     workload_context,

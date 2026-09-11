@@ -51,11 +51,16 @@ def apply_routing_context(client: VerdictClient, trace: Trace) -> None:
         trace.tenant_id = getattr(client, "tenant_id", None)
         # Imported lazily to avoid an import cycle (client imports instrumentors).
         from verdict.client import (
+            _claim_model_call_correlation_id,
             get_context_intent_key,
             get_context_session_id,
             get_context_user_id_hash,
             get_context_workload,
         )
+
+        correlation_id = _claim_model_call_correlation_id()
+        if correlation_id is not None:
+            trace.trace_id = correlation_id
 
         sid = get_context_session_id()
         if sid is not None:

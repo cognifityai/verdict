@@ -629,6 +629,10 @@ source. See [`ADR-013`](docs/adrs/013-stable-dependent-package-read-port.md).
   existing stored trace with `verdict.trace_context(trace_id)` or
   `verdict.set_context(trace_id=...)`. Missing explicit trace IDs degrade to an
   unlinked span with `verdict.link_status=trace_not_found`, rather than an orphan.
+  `verdict.model_call_context()` is a separate one-call API: it yields a
+  generated ID before application code runs and assigns that ID to at most one
+  supported provider Trace. It injects no gateway header and does not by itself
+  prove gateway, deployment, backend, or hardware identity.
   Deletion and retention preserve old spans referenced by retained traces while
   removing expired standalone and orphan spans. SQL cleanup is transactional and
   serializes concurrent trace writers while shared-span ownership is evaluated.

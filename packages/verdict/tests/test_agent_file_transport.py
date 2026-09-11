@@ -36,7 +36,7 @@ def _reset_verdict() -> None:
     verdict.shutdown()
 
 
-def _capture_file_run(spool: Path) -> None:
+def _capture_file_run(spool: Path) -> str:
     client = verdict.init(
         transport="file",
         spool_directory=spool,
@@ -56,17 +56,19 @@ def _capture_file_run(spool: Path) -> None:
                 prompt_redacted="question",
                 response_redacted="answer",
             )
-            apply_routing_context(client, trace)
-            safe_persist_trace(client, trace)
+            with verdict.model_call_context() as correlation_id:
+                apply_routing_context(client, trace)
+                safe_persist_trace(client, trace)
             turn.record_command(command="true", exit_code=0)
             turn.set_output("done")
     verdict.shutdown()
+    return correlation_id
 
 
 def test_file_transport_replays_idempotently_into_sqlite(tmp_path: Path) -> None:
     spool = tmp_path / "spool"
     database = tmp_path / "verdict.db"
-    _capture_file_run(spool)
+    correlation_id = _capture_file_run(spool)
     files = list(spool.glob("verdict-agent-*.jsonl"))
     assert files
     assert all(path.stat().st_size <= 8 * 1024 * 1024 for path in files)
@@ -86,7 +88,7 @@ def test_file_transport_replays_idempotently_into_sqlite(tmp_path: Path) -> None
             AgentEventType.COMMAND,
         ]
         model_event = bundles[0].events[0]
-        assert model_event.trace_id is not None
+        assert model_event.trace_id == correlation_id
         assert storage.get_trace(model_event.trace_id) is not None
     finally:
         storage.close()

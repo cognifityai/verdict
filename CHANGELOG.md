@@ -8,6 +8,10 @@ the product is refined.
 
 ### Added
 
+- `verdict.model_call_context()` yields a generated pre-call identifier and
+  assigns it to at most one supported instrumented provider Trace. This lets a
+  separately owned gateway integration propagate the same identity without
+  adding gateway headers, dependencies, or storage fields to Verdict.
 - `verdict.read_port` provides trusted same-process dependent packages with one
   versioned, tenant-scoped Agent Run lookup. Its bounded immutable DTOs expose
   exact model-call event/Trace identity and deterministic finding facts without

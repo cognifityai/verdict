@@ -238,6 +238,26 @@ trace ID is recorded as an unlinked span with a link-status attribute rather
 than as an orphan; spans with no provider call or explicit context remain
 standalone.
 
+When trusted application code needs the ID before one model request, use the
+separate one-call reservation:
+
+```python
+with verdict.model_call_context() as correlation_id:
+    response = provider_client.chat.completions.create(
+        model="customer-model",
+        messages=messages,
+        extra_headers=gateway_profile.headers(correlation_id),
+    )
+```
+
+Verdict generates the 32-character ID and assigns it to the first supported
+instrumented provider Trace built inside the context. A second call gets its
+normal independent Trace ID, and an unused or exited context creates no
+record. Verdict does not inject a gateway header or make the ID proof of a
+deployment, backend, or hardware resource; that requires a separately
+authorized exact-ID source. `trace_context()` retains its existing manual-span
+link meaning and is not interchangeable with this API.
+
 Provider SDK unset sentinels and other non-primitive numeric metadata are
 normalized to unavailable (`None`) before a `Trace` reaches storage. A
 synchronous telemetry persistence failure never replaces the provider call's

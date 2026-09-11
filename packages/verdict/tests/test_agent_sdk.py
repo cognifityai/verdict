@@ -17,6 +17,7 @@ from verdict.evidence import (
     PrivacyClassification,
 )
 from verdict.instrumentors.base import apply_routing_context, safe_persist_trace
+from verdict.read_port import StorageVerdictReadPort
 from verdict.schema import Trace
 from verdict.storage.memory import InMemoryStorage
 
@@ -64,9 +65,10 @@ def test_full_agent_context_persists_typed_timeline_and_one_trace_owner() -> Non
         with run.turn(user_input="email alice@example.com") as turn:
             with turn.tool("search", arguments={"query": "alice@example.com"}) as tool:
                 tool.set_output({"document_count": 2})
-            trace = _completed_trace()
-            apply_routing_context(client, trace)
-            safe_persist_trace(client, trace)
+            with verdict.model_call_context() as correlation_id:
+                trace = _completed_trace()
+                apply_routing_context(client, trace)
+                safe_persist_trace(client, trace)
             turn.record_command(command="pytest -q", exit_code=0, cwd="/private/repo")
             turn.record_test(command="pytest -q", exit_code=0, passed=3, failed=0)
             turn.record_artifact(path="/private/repo/result.json", action="created")
@@ -111,10 +113,16 @@ def test_full_agent_context_persists_typed_timeline_and_one_trace_owner() -> Non
         event for event in bundle.events if event.event_type is AgentEventType.CONTEXT
     )
     assert model_event.trace_id == trace.trace_id
+    assert trace.trace_id == correlation_id
     assert context_event.privacy_classification.value == "redacted"
     assert "question" not in repr(model_event.attributes)
     assert "answer" not in repr(model_event.attributes)
     assert storage.get_trace(trace.trace_id).response_redacted == "answer"  # type: ignore[union-attr]
+    read = StorageVerdictReadPort(storage).get_agent_run(
+        tenant_id="tenant-a", run_id=bundle.run.run_id
+    )
+    assert read is not None
+    assert read.model_calls[0].trace_id == correlation_id
 
 
 @pytest.mark.parametrize(
