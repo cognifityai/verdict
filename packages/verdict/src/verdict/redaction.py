@@ -73,27 +73,26 @@ _ASSIGNMENT_CANDIDATE = re.compile(
     r"(?:(?:Basic|Bearer)\s+)?[A-Za-z0-9._~+/=:-]+)"
 )
 _SENSITIVE_KEY_SUFFIXES = (
-    ("password",),
-    ("passwd",),
-    ("pwd",),
-    ("passphrase",),
-    ("authorization",),
-    ("api", "key"),
-    ("apikey",),
-    ("access", "token"),
-    ("auth", "token"),
-    ("bearer", "token"),
-    ("refresh", "token"),
-    ("session", "token"),
-    ("identity", "token"),
-    ("id", "token"),
-    ("github", "token"),
-    ("client", "secret"),
-    ("private", "key"),
-    ("secret", "access", "key"),
-    ("secret",),
-    ("credential",),
-    ("credentials",),
+    "password",
+    "passwd",
+    "pwd",
+    "passphrase",
+    "authorization",
+    "apikey",
+    "accesstoken",
+    "authtoken",
+    "bearertoken",
+    "refreshtoken",
+    "sessiontoken",
+    "identitytoken",
+    "idtoken",
+    "githubtoken",
+    "clientsecret",
+    "privatekey",
+    "secretaccesskey",
+    "secret",
+    "credential",
+    "credentials",
 )
 
 _PATTERNS = {
@@ -138,19 +137,9 @@ _PATTERNS = {
 }
 
 
-def _key_words(key: str) -> tuple[str, ...]:
-    """Normalize a field name without using broad substring matching."""
-    acronym_separated = re.sub(r"(?<=[A-Z])(?=[A-Z][a-z])", "_", key)
-    camel_separated = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", acronym_separated)
-    return tuple(part for part in re.split(r"[^A-Za-z0-9]+", camel_separated.lower()) if part)
-
-
 def _is_sensitive_key(key: str) -> bool:
-    words = _key_words(key)
-    return any(
-        len(words) >= len(suffix) and words[-len(suffix) :] == suffix
-        for suffix in _SENSITIVE_KEY_SUFFIXES
-    )
+    normalized = "".join(re.findall(r"[A-Za-z0-9]+", key)).lower()
+    return any(normalized.endswith(suffix) for suffix in _SENSITIVE_KEY_SUFFIXES)
 
 
 def _secret_value(
