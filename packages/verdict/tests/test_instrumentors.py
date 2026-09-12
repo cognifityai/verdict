@@ -215,6 +215,58 @@ def test_provider_exception_content_is_redacted_before_storage():
     assert "<EMAIL>" in trace.error
 
 
+@pytest.mark.parametrize(
+    ("instrumentor_module", "instrumentor_name", "invoke", "request_kwargs"),
+    [
+        (
+            "verdict.instrumentors.anthropic",
+            "AnthropicInstrumentor",
+            "_wrap_create_sync",
+            {"model": "claude-test", "max_tokens": 8, "messages": []},
+        ),
+        (
+            "verdict.instrumentors.openai",
+            "OpenAIInstrumentor",
+            "_wrap_create_sync",
+            {"model": "gpt-test", "messages": []},
+        ),
+        (
+            "verdict.instrumentors.google",
+            "GoogleInstrumentor",
+            "_wrap_genai_generate",
+            {"model": "gemini-test", "contents": []},
+        ),
+    ],
+)
+def test_provider_exception_details_are_omitted_when_content_capture_is_disabled(
+    instrumentor_module: str,
+    instrumentor_name: str,
+    invoke: str,
+    request_kwargs: dict,
+) -> None:
+    import importlib
+
+    from verdict.client import VerdictClient
+    from verdict.storage.memory import InMemoryStorage
+
+    storage = InMemoryStorage()
+    module = importlib.import_module(instrumentor_module)
+    instrumentor = getattr(module, instrumentor_name)(
+        VerdictClient(storage=storage, capture_content=False)
+    )
+    canary = "opaque-provider-exception-canary"
+
+    def raises(*args, **kwargs):
+        raise RuntimeError(f"provider rejected input_value={canary}")
+
+    with pytest.raises(RuntimeError, match=canary):
+        getattr(instrumentor, invoke)(raises, None, (), request_kwargs)
+
+    [trace] = storage.list_traces()
+    assert trace.error == "RuntimeError"
+    assert canary not in repr(trace)
+
+
 def test_anthropic_flatten_handles_list_content():
     from verdict.instrumentors.anthropic import _flatten_content
 

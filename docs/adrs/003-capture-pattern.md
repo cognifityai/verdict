@@ -157,9 +157,11 @@ target deployment before relying on them.
   to the captured `Trace`; every storage adapter applies a second boundary so a
   manually constructed record cannot bypass it. Dashboard/export paths reapply
   redaction for historical rows written before that boundary existed.
-- The best-effort pattern pass includes common Anthropic/OpenAI/Google/AWS key
-  shapes, bearer tokens, and secret assignments in addition to PII patterns.
-  It remains defense in depth, not a complete secret scanner.
+- The best-effort pass includes common Anthropic/OpenAI/Google/AWS and GitHub
+  key shapes, Bearer and Basic authorization, and secret assignments in
+  addition to PII patterns. Supported credential field names are normalized
+  across case, separators, and camel case; their complete opaque values are
+  removed. It remains defense in depth, not a complete secret scanner.
 - Provider message persistence uses an allowlist of supported top-level fields.
   Every string key and value in their JSON-compatible nested structures is
   sanitized recursively, including OpenAI tool arguments and Anthropic-style
@@ -170,6 +172,9 @@ target deployment before relying on them.
   collide after redaction receive deterministic suffixes so no value is lost.
 - Judge reasoning/errors and manual-span names, errors, and nested attributes are
   sanitized at persistence as well.
+- Content is sanitized before content-size bounds. With content capture
+  disabled, provider and manual-span failures retain only an error category;
+  provider-supplied exception message text is not stored.
 - Redaction uses linear candidate scanning for emails plus regex discovery and
   format-specific validation for other patterns. The email scanner anchors at
   each `@` and advances monotonically, avoiding pathological backtracking on

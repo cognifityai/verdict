@@ -399,6 +399,45 @@ def test_metadata_only_agent_capture_omits_every_content_field() -> None:
     )
 
 
+def test_agent_tool_fields_are_field_aware_redacted_before_storage() -> None:
+    storage = InMemoryStorage()
+    verdict.init(storage=storage, tenant_id="tenant-a", instrumentors=[])
+    canary = "opaque-agent-secret-canary"
+
+    with verdict.agent_run(name="agent") as run:
+        with run.turn(user_input="hello") as turn:
+            with turn.tool(
+                "lookup",
+                arguments={"password": canary, "input_tokens": 12345678},
+            ) as tool:
+                tool.set_output({"Authorization": f"Basic {canary}"})
+            turn.set_output("done")
+
+    [bundle] = storage.list_agent_run_bundles("tenant-a")
+    encoded = repr(bundle)
+    assert canary not in encoded
+    assert bundle.events[0].privacy_classification is PrivacyClassification.REDACTED
+    assert bundle.events[0].attributes["arguments"]["input_tokens"] == 12345678
+    verdict.shutdown()
+
+
+def test_agent_tool_exception_is_redacted_before_its_message_limit() -> None:
+    storage = InMemoryStorage()
+    verdict.init(storage=storage, tenant_id="tenant-a", instrumentors=[])
+    token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789"
+    message = f"{'x' * 1015} {token}"
+
+    with pytest.raises(RuntimeError, match="ghp_"):
+        with verdict.agent_run(name="agent") as run:
+            with run.turn(user_input="hello") as turn:
+                with turn.tool("lookup"):
+                    raise RuntimeError(message)
+
+    [bundle] = storage.list_agent_run_bundles("tenant-a")
+    assert "ghp_" not in repr(bundle)
+    verdict.shutdown()
+
+
 def test_direct_verdict_client_remains_a_supported_trace_sink() -> None:
     storage = InMemoryStorage()
     client = VerdictClient(storage=storage)

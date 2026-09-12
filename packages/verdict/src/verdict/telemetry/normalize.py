@@ -7,6 +7,7 @@ import math
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from verdict.redaction import redact
 from verdict.schema import Operation, Trace, normalize_optional_float, normalize_optional_integer
 from verdict.telemetry.model import ImportContext, MappingResult, safe_routing_id
 
@@ -179,10 +180,17 @@ def _bounded_text(value: object, maximum: int) -> str | None:
     return normalized[:maximum]
 
 
+def _bounded_content(value: object, maximum: int) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.encode("utf-8", errors="replace").decode("utf-8")
+    return (redact(normalized) or "")[:maximum]
+
+
 def _text_content(value: object) -> str | None:
     value = parse_json_value(value)
     if isinstance(value, str):
-        return _bounded_text(value, _MAX_CONTENT_CHARS)
+        return _bounded_content(value, _MAX_CONTENT_CHARS)
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         return str(value)
     if isinstance(value, list):
@@ -202,7 +210,7 @@ def _text_content(value: object) -> str | None:
             else:
                 continue
             remaining = _MAX_CONTENT_CHARS - character_count
-            bounded = _bounded_text(text, remaining)
+            bounded = _bounded_content(text, remaining)
             if bounded:
                 parts.append(bounded)
                 character_count += len(bounded)
@@ -259,7 +267,7 @@ def messages_from(value: object, *, default_role: str) -> list[dict[str, str]]:
         nonlocal character_count
         if len(messages) >= _MAX_MESSAGES or character_count >= _MAX_CONTENT_CHARS:
             return
-        bounded = _bounded_text(content, _MAX_CONTENT_CHARS - character_count)
+        bounded = _bounded_content(content, _MAX_CONTENT_CHARS - character_count)
         if not bounded:
             return
         messages.append({"role": role, "content": bounded})
@@ -348,7 +356,7 @@ def make_trace(
     selected_model = response_name or request_name
     input_messages = messages_from(input_value, default_role="user")
     output_messages = messages_from(output_value, default_role="assistant")
-    normalized_error = _bounded_text(error, 10_000)
+    normalized_error = _bounded_content(error, 10_000)
     normalized_finish = _bounded_text(finish_reason, 256)
     trace = Trace(
         trace_id=context.trace_id(external_id, external_trace),

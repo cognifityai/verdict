@@ -1208,7 +1208,7 @@ def test_real_openai_responses_helper_records_application_block_error(tmp_path):
 
         [trace] = storage.list_traces()
         assert trace.tags["verdict.stream_completion"] == "error"
-        assert trace.error == "RuntimeError: application block failed for <EMAIL>"
+        assert trace.error == "RuntimeError"
 
 
 def test_real_openai_responses_helper_binds_routing_context_on_entry(tmp_path):
@@ -2218,8 +2218,7 @@ def test_real_openai_responses_provider_error_is_persisted_when_sampled_out(tmp_
             provider.responses.create(model="gpt-4o-mini", input="hi")
 
         [trace] = storage.list_traces()
-        assert "error@example.com" not in (trace.error or "")
-        assert "<EMAIL>" in (trace.error or "")
+        assert trace.error == "InternalServerError"
 
 
 def test_real_openai_responses_iteration_error_persists_partial_content_as_error(
@@ -3201,7 +3200,7 @@ def test_real_anthropic_messages_stream_helper_block_error_persists_once(tmp_pat
 
         [trace] = storage.list_traces()
         assert trace.tags["verdict.stream_completion"] == "error"
-        assert trace.error == "RuntimeError: application block failed for <EMAIL>"
+        assert trace.error == "RuntimeError"
 
 
 def test_real_anthropic_messages_stream_helper_ignores_persistence_failure(caplog):
