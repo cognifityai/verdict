@@ -408,7 +408,11 @@ def test_agent_tool_fields_are_field_aware_redacted_before_storage() -> None:
         with run.turn(user_input="hello") as turn:
             with turn.tool(
                 "lookup",
-                arguments={"password": canary, "input_tokens": 12345678},
+                arguments={
+                    "password": canary,
+                    "AWSSECRETACCESSKEY": canary,
+                    "input_tokens": 12345678,
+                },
             ) as tool:
                 tool.set_output({"Authorization": f"Basic {canary}"})
             turn.set_output("done")
