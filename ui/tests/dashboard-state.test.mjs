@@ -328,8 +328,8 @@ function bundle(evaluator, samples = [], driftSignals = []) {
         { date: "2026-09-10", calls: 4, totalTokens: 500, tokenKnownCalls: 4 },
       ] },
       applications: { availableRows: 2, shownRows: 2, rows: [
-        { name: "orders-api", environments: ["production"], providers: ["openai"], models: ["gpt-5-mini"], calls: 24, successfulCalls: 24, failedCalls: 0, successRatePct: 100, inputTokens: 2400, outputTokens: 600, totalTokens: 3000, tokenKnownCalls: 24, costUsd: 0.024, costKnownCalls: 24, averageLatencyMs: 900, latencyKnownCalls: 24 },
-        { name: "billing-worker", environments: ["staging"], providers: ["custom-provider"], models: ["custom-model-v1"], calls: 4, successfulCalls: 3, failedCalls: 1, successRatePct: 75, inputTokens: 400, outputTokens: 100, totalTokens: 500, tokenKnownCalls: 4, costUsd: 0.004, costKnownCalls: 3, averageLatencyMs: 1600, latencyKnownCalls: 2 },
+        { name: "orders-api", environment: "production", attributed: true, calls: 24, successfulCalls: 24, failedCalls: 0, successRatePct: 100, inputTokens: 2400, outputTokens: 600, totalTokens: 3000, tokenKnownCalls: 24, costUsd: 0.024, costKnownCalls: 24, averageLatencyMs: 900, latencyKnownCalls: 24 },
+        { name: "billing-worker", environment: "staging", attributed: true, calls: 4, successfulCalls: 3, failedCalls: 1, successRatePct: 75, inputTokens: 400, outputTokens: 100, totalTokens: 500, tokenKnownCalls: 4, costUsd: 0.004, costKnownCalls: 3, averageLatencyMs: 1600, latencyKnownCalls: 2 },
       ] },
       models: { availableRows: 2, shownRows: 2, rows: [
         { provider: "openai", model: "gpt-5-mini", calls: 24, successfulCalls: 24, failedCalls: 0, successRatePct: 100, inputTokens: 2400, outputTokens: 600, totalTokens: 3000, tokenKnownCalls: 24, costUsd: 0.024, costKnownCalls: 24, averageLatencyMs: 900, latencyKnownCalls: 24 },
@@ -465,7 +465,7 @@ test("management report exposes labeled daily volume and application-level table
   assert.match(text, /Sep 08/);
   assert.match(text, /Sep 10/);
   assert.match(text, /24/);
-  assert.match(text, /Application-level LLM utilization/);
+  assert.match(text, /Application LLM utilization by environment/);
   assert.match(text, /orders-api/);
   assert.match(text, /Model performance and throughput/);
   assert.match(text, /gpt-5-mini/);

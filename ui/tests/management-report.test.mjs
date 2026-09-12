@@ -5,6 +5,16 @@ import {
   buildManagementReport, managementReportCsv, managementReportHtml,
 } from "../management-report.mjs";
 
+function metric(calls, failedCalls, inputTokens, outputTokens,
+  costUsd, costKnownCalls, averageLatencyMs, latencyKnownCalls) {
+  return {
+    calls, successfulCalls: calls - failedCalls, failedCalls,
+    successRatePct: Math.round(1000 * (calls - failedCalls) / calls) / 10,
+    inputTokens, outputTokens, totalTokens: inputTokens + outputTokens,
+    tokenKnownCalls: calls, costUsd, costKnownCalls, averageLatencyMs, latencyKnownCalls,
+  };
+}
+
 function bundle() {
   return {
     managementReport: {
@@ -43,55 +53,25 @@ function bundle() {
         shownRows: 2,
         rows: [{
           name: '=HYPERLINK("https://invalid.test")<img src=x>',
-          environments: ["production"],
-          providers: ["openai"],
-          models: ["gpt-5-mini"],
-          calls: 24,
-          successfulCalls: 24,
-          failedCalls: 0,
-          successRatePct: 100,
-          inputTokens: 2400,
-          outputTokens: 600,
-          totalTokens: 3000,
-          tokenKnownCalls: 24,
-          averageLatencyMs: 900,
-          latencyKnownCalls: 24,
-          costUsd: 0.024,
-          costKnownCalls: 24,
+          environment: "production",
+          attributed: true,
+          ...metric(24, 0, 2400, 600, 0.024, 24, 900, 24),
         }, {
           name: "billing-worker",
-          environments: ["staging"],
-          providers: ["custom-provider"],
-          models: ["custom-model-v1"],
-          calls: 4,
-          successfulCalls: 3,
-          failedCalls: 1,
-          successRatePct: 75,
-          inputTokens: 400,
-          outputTokens: 100,
-          totalTokens: 500,
-          tokenKnownCalls: 4,
-          averageLatencyMs: 1600,
-          latencyKnownCalls: 2,
-          costUsd: 0.004,
-          costKnownCalls: 3,
+          environment: "staging",
+          attributed: true,
+          ...metric(4, 1, 400, 100, 0.004, 3, 1600, 2),
         }],
       },
       models: {
         availableRows: 2,
         shownRows: 2,
         rows: [{
-          provider: "openai", model: "gpt-5-mini", calls: 24,
-          successfulCalls: 24, failedCalls: 0, successRatePct: 100,
-          inputTokens: 2400, outputTokens: 600, totalTokens: 3000,
-          tokenKnownCalls: 24, averageLatencyMs: 900, latencyKnownCalls: 24,
-          costUsd: 0.024, costKnownCalls: 24,
+          provider: "openai", model: "gpt-5-mini",
+          ...metric(24, 0, 2400, 600, 0.024, 24, 900, 24),
         }, {
-          provider: "custom-provider", model: "custom-model-v1", calls: 4,
-          successfulCalls: 3, failedCalls: 1, successRatePct: 75,
-          inputTokens: 400, outputTokens: 100, totalTokens: 500,
-          tokenKnownCalls: 4, averageLatencyMs: 1600, latencyKnownCalls: 2,
-          costUsd: 0.004, costKnownCalls: 3,
+          provider: "custom-provider", model: "custom-model-v1",
+          ...metric(4, 1, 400, 100, 0.004, 3, 1600, 2),
         }],
       },
     },
@@ -115,7 +95,8 @@ test("report presents one consistent application-only executive summary", () => 
   assert.deepEqual(report.kpis.map((item) => item.value), [
     "28", "3,500", "2", "900 ms",
   ]);
-  assert.equal(report.kpis[3].note, "p95 1,800 ms · 26 of 28 calls captured");
+  assert.equal(report.kpis[3].note,
+    "p95 1,800 ms · newest 26 of 26 known latencies");
   assert.equal(report.timeline.scope, "2 active UTC dates");
   assert.deepEqual(report.timeline.rows.map(({ date, calls }) => ({ date, calls })), [
     { date: "2026-09-08", calls: 24 },
@@ -140,17 +121,32 @@ test("chart and exports retain dates while excluding sensitive trace fields", ()
   assert.match(exportedHtml, /LLM request volume/);
   assert.match(exportedHtml, /Sep 08/);
   assert.match(exportedHtml, />24</);
-  assert.match(exportedHtml, /Application-level LLM utilization/);
+  assert.match(exportedHtml, /Application LLM utilization by environment/);
   assert.match(exportedHtml, /Model performance and throughput/);
   assert.doesNotMatch(exportedHtml, /simulator|type="range"/i);
   assert.match(exportedHtml,
     /<section><h2>LLM request volume[\s\S]*<\/section><section><h2>Report scope/);
   assert.match(exportedHtml, /&lt;img src=x&gt;/);
   assert.doesNotMatch(exportedHtml, /<img src=x>/);
+  assert.match(exportedHtml, /<small>production<\/small>/);
+  assert.match(exportedHtml, /<small>staging<\/small>/);
   assert.match(csv, /"'=HYPERLINK/);
   assert.match(csv, /billing-worker/);
+  assert.match(csv, /"environment","attributed"/);
   assert.doesNotMatch(csv, /prompt|response|trace_id|session_id|user_id/i);
   assert.doesNotMatch(exportedHtml, /prompt_redacted|response_redacted|trace_id|session_id/);
+});
+
+test("latency coverage stays distinct from the bounded percentile sample", () => {
+  const input = bundle();
+  input.managementReport.scope.calls = 100000;
+  input.managementReport.scope.latencyKnownCalls = 100000;
+  input.managementReport.scope.latencySampledCalls = 10000;
+  const report = buildManagementReport(input);
+
+  assert.equal(report.kpis[3].note,
+    "p95 1,800 ms · newest 10,000 of 100,000 known latencies");
+  assert.equal(report.summary.latencyCoverage, "100,000 of 100,000 calls");
 });
 
 test("empty and malformed report evidence remains unavailable instead of zero", () => {

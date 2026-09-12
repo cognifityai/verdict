@@ -83,8 +83,9 @@ receiver must honor the idempotency key for end-to-end deduplication.
 - Schema initialization is additive for supported SQLite and PostgreSQL
   installations. Legacy serialized agent bundles migrate transactionally into
   normalized source/run/turn/event rows and remain available only for rollback.
-- Existing Trace, SpanRecord, Judgment, DriftSignal, and AgentRunBundle public
-  constructors remain unchanged.
+- Existing public constructors remain backward compatible. Trace appends
+  optional `service_name` and `environment` fields after its published
+  positional fields; the other constructors are unchanged.
 - Existing dashboard response fields remain available while explicit status and
   coverage fields are added.
 - Monitor snapshot JSON adds evaluator-finalization state. PostgreSQL schema

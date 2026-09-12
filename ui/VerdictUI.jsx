@@ -69,8 +69,8 @@ const SEED = /* @__PURE__ */ (() => {
         })),
       },
       applications: { availableRows: 2, shownRows: 2, rows: [
-        { name: "support-assistant", environments: ["production"], providers: ["anthropic", "openai"], models: ["sample-model-a", "sample-model-b"], ...metric(60, 1, 4500, 17600, 0.27, 2380) },
-        { name: "engineering-copilot", environments: ["production"], providers: ["google"], models: ["sample-model-c"], ...metric(36, 0, 2730, 10600, 0.15, 2860) },
+        { name: "support-assistant", environment: "production", attributed: true, ...metric(60, 1, 4500, 17600, 0.27, 2380) },
+        { name: "engineering-copilot", environment: "production", attributed: true, ...metric(36, 0, 2730, 10600, 0.15, 2860) },
       ] },
       models: { availableRows: 3, shownRows: 3, rows: [
         { provider: "anthropic", model: "sample-model-a", ...metric(32, 0, 2400, 9600, 0.19, 2250) },

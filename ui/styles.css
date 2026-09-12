@@ -71,6 +71,10 @@ button {
     break-inside: avoid;
   }
 
+  .verdict-report-print table {
+    min-width: 0 !important;
+  }
+
   .verdict-report-print div {
     background-color: transparent !important;
   }

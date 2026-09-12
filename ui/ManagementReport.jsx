@@ -89,9 +89,9 @@ function UtilizationTable({ rows, kind }) {
       <tbody>{rows.length ? rows.map((row) => {
         const name = application ? row.name : row.model;
         const detail = application
-          ? [row.environments.join(" · "), row.providers.join(" · "), row.models.join(" · ")].filter(Boolean).join(" | ")
+          ? [row.environment, row.attributed ? "" : "Service identity missing"].filter(Boolean).join(" · ")
           : row.provider;
-        return <tr key={application ? row.name : `${row.provider}:${row.model}`} className="border-t" style={{ borderColor: C.border }}>
+        return <tr key={application ? `${row.attributed}:${row.name}:${row.environment}` : `${row.provider}:${row.model}`} className="border-t" style={{ borderColor: C.border }}>
           <td className="p-2"><div className="font-medium">{name}</div><div className="text-xs mt-0.5" style={{ color: C.faint }}>{detail}</div></td>
           <td className="text-right p-2 tabular-nums">{formatNumber(row.calls)}</td>
           <td className="text-right p-2 tabular-nums" style={{ color: row.failedCalls ? C.amber : undefined }}>{formatPercent(row.successRatePct)}</td>
@@ -147,8 +147,8 @@ export function ManagementReport({ data, source }) {
     </section>
 
     <section className="border rounded-lg p-5" style={{ borderColor: C.border, background: C.panel }}>
-      <h2 className="font-semibold">Application-level LLM utilization</h2>
-      <p className="text-xs mt-1" style={{ color: C.sub }}>{report.applications.scope}. Historical traces without service identity appear as Unattributed.</p>
+      <h2 className="font-semibold">Application LLM utilization by environment</h2>
+      <p className="text-xs mt-1" style={{ color: C.sub }}>{report.applications.scope}. Traces without explicit service identity appear as Unattributed.</p>
       <UtilizationTable rows={report.applications.rows} kind="application" />
     </section>
 

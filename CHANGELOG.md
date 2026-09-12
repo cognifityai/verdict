@@ -36,10 +36,11 @@ the product is refined.
 - Evaluate now includes a one-off Inspect JSON view. It uploads or accepts
   pasted supported conversation exports, keeps analysis out of the Verdict
   store, and offers an in-browser JSON report download.
-- Report adds daily application-only utilization, application/model summaries,
-  aggregate-only HTML and CSV downloads, and browser Print/Save PDF output. New
-  instrumented traces persist configured service and
-  environment identity; historical rows remain compatible and unattributed.
+- Report adds daily application-only utilization, bounded service/environment
+  and model summaries, aggregate-only HTML and CSV downloads, and browser
+  Print/Save PDF output. New instrumented traces persist configured service and
+  environment identity; historical and default-client rows remain compatible
+  and unattributed. Latency percentiles use the newest 10,000 known values.
 
 ### Changed
 

@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 
+from verdict.client import VerdictClient
 from verdict.dashboard.app import build_bundle
 from verdict.schema import Trace
 from verdict.storage import SQLiteStorage
@@ -100,7 +101,8 @@ def test_management_report_aggregates_daily_application_evidence(tmp_path):
         ("orders-api", 24),
         ("billing-worker", 4),
     ]
-    assert report["applications"]["rows"][1]["environments"] == ["staging"]
+    assert report["applications"]["rows"][1]["environment"] == "staging"
+    assert report["applications"]["rows"][1]["attributed"] is True
     assert report["models"]["rows"][1]["provider"] == "custom-provider"
     assert report["models"]["rows"][1]["model"] == "custom-model-v1"
 
@@ -132,6 +134,8 @@ def test_management_report_keeps_unknown_and_partial_evidence_explicit(tmp_path)
     assert report["scope"]["latencyKnownCalls"] == 0
     assert report["scope"]["p50LatencyMs"] is None
     assert report["applications"]["rows"][0]["name"] == "Unattributed"
+    assert report["applications"]["rows"][0]["environment"] == "Unspecified"
+    assert report["applications"]["rows"][0]["attributed"] is False
     assert report["models"]["rows"][0]["provider"] == "Unknown provider"
     assert report["models"]["rows"][0]["model"] == "Unknown model"
 
@@ -195,3 +199,53 @@ def test_management_report_bounds_dates_and_uses_effective_response_model(tmp_pa
             "latencyKnownCalls": 35,
         }
     ]
+
+
+def test_management_report_normalizes_default_service_without_name_collision(tmp_path):
+    path = tmp_path / "service-identity.db"
+    storage = SQLiteStorage(str(path))
+    started_at = datetime(2026, 9, 11, tzinfo=timezone.utc)
+    for trace_id, service_name in (
+        ("default", VerdictClient(storage=None).service_name),
+        ("blank", "  "),
+        ("literal", "Unattributed"),
+    ):
+        storage.insert_trace(_trace(
+            trace_id, started_at, service_name=service_name, environment="production"
+        ))
+    storage.close()
+
+    report = build_bundle(path)["managementReport"]
+
+    assert report["scope"]["identifiedApplications"] == 1
+    assert report["scope"]["unattributedCalls"] == 2
+    rows = [
+        (row["name"], row["attributed"], row["calls"])
+        for row in report["applications"]["rows"]
+    ]
+    assert rows == [("Unattributed", False, 2), ("Unattributed", True, 1)]
+
+
+def test_management_report_bounds_high_cardinality_dimensions(tmp_path):
+    path = tmp_path / "high-cardinality.db"
+    storage = SQLiteStorage(str(path))
+    started_at = datetime(2026, 9, 11, tzinfo=timezone.utc)
+    for index in range(10_050):
+        storage.insert_trace(_trace(
+            f"trace-{index}",
+            started_at + timedelta(microseconds=index),
+            environment=f"environment-{index}",
+            provider="custom-provider",
+            model=f"model-{index}",
+        ))
+    storage.close()
+
+    report = build_bundle(path)["managementReport"]
+
+    assert report["scope"]["latencyKnownCalls"] == 10_050
+    assert report["scope"]["latencySampledCalls"] == 10_000
+    for table in ("applications", "models"):
+        assert report[table]["availableRows"] == 10_050
+        assert report[table]["shownRows"] == 20
+    forbidden = {"environments", "providers", "models"}
+    assert all(set(row).isdisjoint(forbidden) for row in report["applications"]["rows"])

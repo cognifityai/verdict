@@ -1973,7 +1973,7 @@ def _build(
     )
     management_scope = _empty_management_metric()
     management_days: dict[str, dict[str, Any]] = {}
-    management_applications: dict[str, dict[str, Any]] = {}
+    management_applications: dict[tuple[str | None, str], dict[str, Any]] = {}
     management_models: dict[tuple[str, str], dict[str, Any]] = {}
     management_services: set[str] = set()
     management_unattributed = 0
@@ -2035,28 +2035,23 @@ def _build(
             management_latest = max(management_latest, started_at) if management_latest else started_at
             service = r["service_name"] if isinstance(r["service_name"], str) else ""
             service = service.strip()
-            application_name = service or "Unattributed"
+            if service == "unknown-service":
+                service = ""
             if service:
                 management_services.add(service)
             else:
                 management_unattributed += 1
-            application = management_applications.setdefault(
-                application_name,
-                {**_empty_management_metric(), "environments": set(),
-                 "providers": set(), "models": set()},
-            )
             provider = str(r["provider"] or "").strip() or "Unknown provider"
             model = str(r["response_model"] or r["request_model"] or "").strip()
             model = model or "Unknown model"
             environment = (
                 r["environment"].strip()
                 if isinstance(r["environment"], str) and r["environment"].strip()
-                else ""
+                else "Unspecified"
             )
-            if environment:
-                application["environments"].add(environment)
-            application["providers"].add(provider)
-            application["models"].add(model)
+            application = management_applications.setdefault(
+                (service or None, environment), _empty_management_metric()
+            )
             _record_management_metric(application, r)
             model_metric = management_models.setdefault(
                 (provider, model), _empty_management_metric()
@@ -2684,15 +2679,16 @@ def _build(
     )
     application_rows = [
         {
-            "name": name,
-            "environments": sorted(metric["environments"]),
-            "providers": sorted(metric["providers"]),
-            "models": sorted(metric["models"]),
+            "name": service or "Unattributed",
+            "environment": environment,
+            "attributed": service is not None,
             **_finish_management_metric(metric),
         }
-        for name, metric in management_applications.items()
+        for (service, environment), metric in management_applications.items()
     ]
-    application_rows.sort(key=lambda row: (-row["calls"], row["name"].casefold()))
+    application_rows.sort(key=lambda row: (
+        -row["calls"], row["name"].casefold(), row["environment"].casefold()
+    ))
     model_rows = [
         {
             "provider": provider,
