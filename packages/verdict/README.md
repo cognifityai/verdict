@@ -129,9 +129,14 @@ write failures increment the process-local `capture.dropped_records` metric and
 produce a bounded warning.
 
 The Monitor UI previews an immutable count-based (older 80% / newer 20% by
-default) or explicit-date policy before activation. Each metric has its own
-eligible denominator, Fisher's exact p-value, Benjamini-Hochberg adjustment,
-and effect-size gate. With provider/model or reviewed-cluster grouping, Verdict
+default) or explicit-date policy before activation. Each session contributes
+one Boolean result by default; an agent run can be selected instead. Every
+eligible trace must carry the selected `session_id` or
+`verdict.agent_run_id`; Verdict does not silently fall back to per-trace
+inference. Operational failures roll up with “any,” while a judge dimension
+passes only when every evaluable member passes. Each metric has its own eligible
+denominator, Fisher's exact p-value, Benjamini-Hochberg adjustment, and
+effect-size gate. With provider/model or reviewed-cluster grouping, Verdict
 computes separate group-by-metric comparisons and adjusts across the complete
 tested family; it does not pool the selected groups. The Measurement selector
 defaults to deterministic trace checks and can explicitly add stored PASS/FAIL
@@ -149,7 +154,9 @@ non-overlapping; late arrivals are counted and included in the next open cohort
 rather than silently discarded. An evaluator-backed cohort fixes membership
 and waits for stored results needed by its tested metric cells before
 comparing; changed or deleted pending evidence requires a new reviewed preview.
-An activated policy starts with an empty prospective bucket, and repeated looks
+An activated policy starts with an empty prospective bucket. A durable trace
+ingestion watermark excludes everything already stored, regardless of its event
+timestamp; newly ingested backdated traffic is still eligible. Repeated looks
 use a summable quadratic alpha-spending rule.
 `insufficient` and `reference_stale` are first-class results; unassigned or new
 groups are reported rather than pooled into a comparison. `verdict-monitor` is
@@ -157,9 +164,11 @@ a one-shot idempotent runner. It and `verdict-service` use the same stored
 evaluator, dimensions, grouping version, and trace selection as the dashboard.
 `verdict-service` executes the dashboard's saved schedule once or continuously.
 The approved baseline membership and normalized metric counts are immutable.
-Grouped monitors are limited to 250 distinct groups. Older stored monitors
-without frozen cohort facts, or without evaluator-finalization state when an
-evaluator is selected, require a new reviewed preview before execution.
+Grouped monitors are limited to 250 distinct groups. A session/run spanning
+multiple groups is reported as unassigned rather than split into correlated
+observations. Older stored trace/turn monitors and monitors without frozen
+cohort facts, an ingestion watermark, or evaluator-finalization state when an
+evaluator is selected require a new reviewed preview before execution.
 
 The dashboard reads key-free findings from immutable analysis snapshots rather
 than recomputing them on every page load. It reports provider outcome,

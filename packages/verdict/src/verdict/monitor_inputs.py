@@ -81,11 +81,15 @@ def _evaluator_judgments(
 
 def load_monitor_units(storage, policy: MonitorPolicy, *, tenant_id: str):
     """Load one bounded, evaluator- and grouping-aware monitor input set."""
-    traces = storage.list_traces(
+    sequenced_traces = storage.list_traces_with_ingest_sequence(
         tenant_id=tenant_id, limit=MAX_MONITOR_INPUTS + 1,
     )
-    if len(traces) > MAX_MONITOR_INPUTS:
+    if len(sequenced_traces) > MAX_MONITOR_INPUTS:
         raise ValueError("monitor exceeds bounded trace limit")
+    traces = [trace for trace, _sequence in sequenced_traces]
+    ingest_sequences = {
+        trace.trace_id: sequence for trace, sequence in sequenced_traces
+    }
 
     judgments_by_trace = None
     if policy.evaluator_fingerprint is not None:
@@ -163,6 +167,8 @@ def load_monitor_units(storage, policy: MonitorPolicy, *, tenant_id: str):
 
     return trace_monitor_units(
         traces,
+        analysis_unit=policy.analysis_unit,
+        ingest_sequences=ingest_sequences,
         grouping_mode=policy.grouping_mode,
         cluster_assignments=assignments,
         judgments_by_trace=judgments_by_trace,

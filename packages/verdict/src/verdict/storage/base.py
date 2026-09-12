@@ -224,6 +224,16 @@ class Storage(Protocol):
         limit: int = 100,
     ) -> list[Trace]: ...
 
+    def list_traces_with_ingest_sequence(
+        self,
+        *,
+        tenant_id: str | None = None,
+        cluster_id: str | None = None,
+        limit: int = 100,
+    ) -> list[tuple[Trace, int]]: ...
+
+    def trace_ingest_watermark(self) -> int: ...
+
     def delete_trace(self, trace_id: str) -> None: ...
 
     def prune_before(self, cutoff_iso: str) -> int: ...

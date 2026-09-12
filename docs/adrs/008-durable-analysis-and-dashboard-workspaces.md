@@ -32,9 +32,10 @@ present those states without treating missing evidence as success or failure.
 10. A monitor candidate policy and its initial comparison snapshot are persisted
     in one storage transaction. Candidate reads require that initial snapshot,
     so incomplete legacy records remain inert after a restart.
-11. Monitor is the only current drift workflow. Activation stores an immutable
-    event-time boundary and creates an empty prospective cohort; evidence whose
-    event time predates that boundary never enters a later current cohort.
+11. Monitor is the only current drift workflow. Each session or agent run is
+    one statistical observation. Activation stores an immutable trace-ingestion
+    watermark and creates an empty prospective cohort; traces already present
+    at activation never enter it, regardless of their event timestamps.
 
 ## Data ownership
 
@@ -85,15 +86,17 @@ receiver must honor the idempotency key for end-to-end deduplication.
   constructors remain unchanged.
 - Existing dashboard response fields remain available while explicit status and
   coverage fields are added.
-- Monitor snapshot JSON adds evaluator-finalization state. PostgreSQL schema
-  initialization also adds a generated snapshot write sequence to resolve
-  timestamp ties deterministically; existing rows are backfilled automatically.
-  Older evaluator-backed monitors remain readable but require a new reviewed
-  preview before execution.
-- Prospective monitor snapshots add an activation event-time boundary. Existing
-  active prospective monitors without it remain readable but require a new
-  reviewed preview before they can advance. No database schema migration is
-  required because the field is inside the existing snapshot document.
+- Monitor snapshot JSON adds evaluator-finalization state and a prospective
+  trace-ingestion watermark. PostgreSQL schema initialization also adds a
+  generated snapshot write sequence to resolve timestamp ties deterministically;
+  existing rows are backfilled automatically. Older evaluator-backed monitors
+  remain readable but require a new reviewed preview before execution.
+- Memory, SQLite, and PostgreSQL storage assign each trace a monotonic
+  first-ingestion sequence. SQLite and PostgreSQL initialization add and
+  backfill the corresponding ordering table. Rewriting a trace preserves its
+  original sequence. Existing active prospective monitors without a watermark,
+  or configured with trace/turn analysis units, remain readable but require a
+  new reviewed preview before they can advance.
 - `/dashboard` remains the entry point; URL parameters provide deep links
   without adding a frontend router dependency.
 

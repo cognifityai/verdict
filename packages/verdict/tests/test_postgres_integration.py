@@ -147,6 +147,63 @@ def test_live_postgres_local_scope_includes_only_tenantless_and_local_traces():
         ) == {"tenantless", "explicit-local"}
 
 
+def test_live_postgres_trace_ingest_sequence_is_stable_and_monotonic():
+    now = datetime.now(timezone.utc)
+    with _isolated_postgres_storage() as storage:
+        storage.insert_trace(Trace(
+            trace_id="first", tenant_id="tenant-a",
+            started_at=now + timedelta(days=365),
+        ))
+        [(first, first_sequence)] = storage.list_traces_with_ingest_sequence(
+            tenant_id="tenant-a",
+        )
+        barrier = storage.trace_ingest_watermark()
+        storage.insert_trace(Trace(
+            trace_id="first", tenant_id="tenant-a",
+            started_at=now + timedelta(days=365),
+            ended_at=now + timedelta(days=365, seconds=1),
+        ))
+        storage.insert_trace(Trace(
+            trace_id="second", tenant_id="tenant-a",
+            started_at=now - timedelta(days=365),
+        ))
+        sequenced = {
+            trace.trace_id: sequence
+            for trace, sequence in storage.list_traces_with_ingest_sequence(
+                tenant_id="tenant-a",
+            )
+        }
+
+        assert first.trace_id == "first"
+        assert first_sequence == barrier
+        assert sequenced["first"] == first_sequence
+        assert sequenced["second"] > barrier
+        assert storage.trace_ingest_watermark() == sequenced["second"]
+
+
+def test_live_postgres_backfills_ingest_order_for_existing_traces():
+    with isolated_test_dsn(DSN) as scoped_dsn:
+        legacy = PostgresStorage(scoped_dsn, min_pool=1, max_pool=2)
+        try:
+            legacy.insert_trace(Trace(
+                trace_id="legacy", tenant_id="tenant-a",
+                started_at=datetime.now(timezone.utc),
+            ))
+            legacy._exec("DROP TABLE trace_ingest_order", ())
+        finally:
+            legacy.close()
+
+        upgraded = PostgresStorage(scoped_dsn, min_pool=1, max_pool=2)
+        try:
+            [(trace, sequence)] = upgraded.list_traces_with_ingest_sequence(
+                tenant_id="tenant-a",
+            )
+            assert trace.trace_id == "legacy"
+            assert sequence == upgraded.trace_ingest_watermark() == 1
+        finally:
+            upgraded.close()
+
+
 def test_live_postgres_analysis_and_delivery_contracts():
     suffix = uuid4().hex
     tenant = f"analysis-{suffix}"

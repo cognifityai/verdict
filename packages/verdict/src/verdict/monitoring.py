@@ -65,6 +65,7 @@ class AnalysisUnitRecord:
     group_model: str | None = None
     evaluator_state: str = "not_requested"
     evaluator_evidence_digest: str | None = None
+    ingest_sequence: int | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.unit_id, str) or not self.unit_id:
@@ -111,6 +112,12 @@ class AnalysisUnitRecord:
             or any(character not in "0123456789abcdef" for character in digest)
         ):
             raise ValueError("evaluator evidence digest must be a SHA-256 digest")
+        if self.ingest_sequence is not None and (
+            isinstance(self.ingest_sequence, bool)
+            or not isinstance(self.ingest_sequence, int)
+            or self.ingest_sequence < 1
+        ):
+            raise ValueError("ingest_sequence must be a positive integer")
 
 
 @dataclass(frozen=True, slots=True)
@@ -373,6 +380,7 @@ class CohortManifest:
     pending_evaluator_units: tuple[FrozenPendingEvaluatorUnit, ...] = ()
     evidence_finalization_version: int = 0
     prospective_start_at: datetime | None = None
+    prospective_start_sequence: int | None = None
 
     def __post_init__(self) -> None:
         for name in ("snapshot_id", "policy_fingerprint"):
@@ -418,6 +426,12 @@ class CohortManifest:
             raise ValueError("unsupported evidence finalization version")
         if self.prospective_start_at is not None:
             _aware(self.prospective_start_at, "prospective_start_at")
+        if self.prospective_start_sequence is not None and (
+            isinstance(self.prospective_start_sequence, bool)
+            or not isinstance(self.prospective_start_sequence, int)
+            or self.prospective_start_sequence < 0
+        ):
+            raise ValueError("prospective_start_sequence must be a non-negative integer")
 
 
 @dataclass(frozen=True, slots=True)
@@ -835,6 +849,7 @@ def _manifest(
     pending_evaluator_units: tuple[FrozenPendingEvaluatorUnit, ...] = (),
     evidence_finalization_version: int = EVIDENCE_FINALIZATION_VERSION,
     prospective_start_at: datetime | None = None,
+    prospective_start_sequence: int | None = None,
 ) -> CohortManifest:
     if reference_summary is None:
         reference_summary = _freeze_cohort(
@@ -893,6 +908,8 @@ def _manifest(
     }
     if prospective_start_at is not None:
         identity_payload["prospective_start_at"] = prospective_start_at.isoformat()
+    if prospective_start_sequence is not None:
+        identity_payload["prospective_start_sequence"] = prospective_start_sequence
     identity = json.dumps(
         identity_payload,
         sort_keys=True,
@@ -913,6 +930,7 @@ def _manifest(
         pending_evaluator_units,
         evidence_finalization_version,
         prospective_start_at,
+        prospective_start_sequence,
     )
 
 
@@ -977,7 +995,11 @@ def monitor_requires_rebootstrap(
         )
         or (
             (active or manifest.comparison_index > 0)
-            and manifest.prospective_start_at is None
+            and (
+                manifest.prospective_start_at is None
+                or manifest.prospective_start_sequence is None
+                or policy.analysis_unit not in {"session", "run"}
+            )
         )
     )
 
@@ -988,6 +1010,7 @@ def plan_prospective_manifest(
     policy: MonitorPolicy,
     *,
     prospective_start_at: datetime | None = None,
+    prospective_start_sequence: int | None = None,
 ) -> CohortManifest:
     """Freeze the next non-overlapping current bucket against one reference."""
     if previous.policy_fingerprint != policy.fingerprint:
@@ -1006,12 +1029,35 @@ def plan_prospective_manifest(
     else:
         start_at = prospective_start_at or previous.cutoff
     _aware(start_at, "prospective_start_at")
+    if previous.prospective_start_sequence is not None:
+        if (
+            prospective_start_sequence is not None
+            and prospective_start_sequence != previous.prospective_start_sequence
+        ):
+            raise ValueError("prospective ingest boundary cannot change")
+        start_sequence = previous.prospective_start_sequence
+    else:
+        start_sequence = prospective_start_sequence
+    if start_sequence is not None and (
+        isinstance(start_sequence, bool)
+        or not isinstance(start_sequence, int)
+        or start_sequence < 0
+    ):
+        raise ValueError("prospective_start_sequence must be a non-negative integer")
     used = set(previous.consumed_unit_ids)
     rows = _ordered(units)
     units_by_id = {unit.unit_id: unit for unit in rows}
-    unseen_rows = [
-        unit for unit in rows if unit.unit_id not in used and unit.event_time >= start_at
-    ]
+    if start_sequence is None:
+        unseen_rows = [
+            unit for unit in rows if unit.unit_id not in used and unit.event_time >= start_at
+        ]
+    else:
+        if any(unit.ingest_sequence is None for unit in rows):
+            raise ValueError("prospective monitor input is missing ingestion order")
+        unseen_rows = [
+            unit for unit in rows
+            if unit.unit_id not in used and unit.ingest_sequence > start_sequence
+        ]
     tested_group_ids = (
         {item.group_id for item in previous.reference_summary.groups}
         if policy.grouping_mode != "none"
@@ -1073,6 +1119,7 @@ def plan_prospective_manifest(
         current_ids,
         tuple(pending),
         prospective_start_at=start_at,
+        prospective_start_sequence=start_sequence,
     )
 
 
@@ -1306,9 +1353,117 @@ def _provider_model_group(provider: object, model: object) -> tuple[str, str, st
     )
 
 
+def _monitor_analysis_identity(trace: object, analysis_unit: str) -> str:
+    if analysis_unit == "session":
+        value = getattr(trace, "session_id", None)
+    elif analysis_unit == "run":
+        value = getattr(trace, "tags", {}).get("verdict.agent_run_id")
+    else:
+        return trace.trace_id
+    if (
+        not isinstance(value, str)
+        or not value
+        or "\x00" in value
+        or len(value.encode("utf-8")) > 256
+    ):
+        raise ValueError(f"eligible trace is missing a valid {analysis_unit} identity")
+    return value
+
+
+def _aggregate_monitor_units(
+    projected: list[tuple[str, AnalysisUnitRecord]],
+    *,
+    analysis_unit: str,
+) -> tuple[AnalysisUnitRecord, ...]:
+    by_identity: dict[str, list[AnalysisUnitRecord]] = {}
+    for identity, unit in projected:
+        by_identity.setdefault(identity, []).append(unit)
+    aggregated = []
+    for identity, members in by_identity.items():
+        members = sorted(members, key=lambda item: (item.event_time, item.unit_id))
+        group_ids = {item.group_id for item in members}
+        if len(group_ids) == 1:
+            group_id = members[0].group_id
+            group_label = members[0].group_label
+            group_provider = members[0].group_provider
+            group_model = members[0].group_model
+        else:
+            group_id = group_label = group_provider = group_model = None
+
+        metric_states: dict[str, str] = {}
+        metrics: dict[str, bool] = {}
+        metric_names = sorted(set().union(*(
+            set(item.metrics) | set(item.metric_states or {}) for item in members
+        )))
+        for name in metric_names:
+            states = [
+                item.metric_states[name]
+                for item in members
+                if name in (item.metric_states or {})
+            ]
+            if states:
+                state = next(
+                    candidate
+                    for candidate in ("fail", "error", "unclear", "missing", "pass")
+                    if candidate in states
+                )
+                metric_states[name] = state
+                if state in {"pass", "fail"}:
+                    metrics[name] = state == "pass"
+            else:
+                values = [item.metrics[name] for item in members if name in item.metrics]
+                if values:
+                    metrics[name] = any(values)
+
+        evaluator_states = {item.evaluator_state for item in members}
+        if evaluator_states == {"not_requested"}:
+            evaluator_state = "not_requested"
+            evaluator_evidence_digest = None
+        else:
+            evaluator_state = next(
+                state
+                for state in ("error", "pending", "completed", "not_evaluable")
+                if state in evaluator_states
+            )
+            evidence = [
+                [item.unit_id, item.evaluator_evidence_digest]
+                for item in members
+                if item.evaluator_evidence_digest is not None
+            ]
+            evaluator_evidence_digest = hashlib.sha256(
+                json.dumps(evidence, separators=(",", ":")).encode()
+            ).hexdigest()
+
+        sequences = [item.ingest_sequence for item in members]
+        ingest_sequence = min(sequences) if all(
+            item is not None for item in sequences
+        ) else None
+        unit_identity = hashlib.sha256(json.dumps(
+            [analysis_unit, identity],
+            ensure_ascii=True,
+            separators=(",", ":"),
+        ).encode()).hexdigest()
+        aggregated.append(AnalysisUnitRecord(
+            f"{analysis_unit}:{unit_identity}",
+            members[0].event_time,
+            metrics,
+            group_id,
+            metric_states,
+            group_label,
+            group_provider,
+            group_model,
+            evaluator_state,
+            evaluator_evidence_digest,
+            ingest_sequence,
+        ))
+    return tuple(sorted(aggregated, key=lambda item: (item.event_time, item.unit_id)))
+
+
 def trace_monitor_units(
     traces,
     *,
+    analysis_unit: str = "trace",
+    ingest_sequences: Mapping[str, int] | None = None,
     grouping_mode: str = "none",
     cluster_assignments: Mapping[str, str] | None = None,
     judgments_by_trace: Mapping[str, object] | None = None,
@@ -1320,7 +1475,9 @@ def trace_monitor_units(
     from verdict.structural import is_refusal
     from verdict.trace_facts import trace_evidence_reason, trace_judge_evidence_digest
 
-    units = []
+    if analysis_unit not in {"trace", "session", "run"}:
+        raise ValueError("analysis_unit is unsupported")
+    projected = []
     for trace in traces:
         if (
             trace.ended_at is None
@@ -1378,8 +1535,9 @@ def trace_monitor_units(
             group_provider = group_model = None
         else:
             raise ValueError("grouping_mode is unsupported")
-        units.append(
-            AnalysisUnitRecord(
+        identity = _monitor_analysis_identity(trace, analysis_unit)
+        projected.append(
+            (identity, AnalysisUnitRecord(
                 trace.trace_id,
                 trace.started_at,
                 metrics,
@@ -1390,9 +1548,12 @@ def trace_monitor_units(
                 group_model,
                 evaluator_state,
                 evaluator_evidence_digest,
-            )
+                (ingest_sequences or {}).get(trace.trace_id),
+            ))
         )
-    return tuple(units)
+    if analysis_unit == "trace":
+        return tuple(unit for _identity, unit in projected)
+    return _aggregate_monitor_units(projected, analysis_unit=analysis_unit)
 
 
 def judgment_metric_states(
@@ -1513,6 +1674,10 @@ def monitor_snapshot_to_json(
         payload["manifest"]["current_summary"] = _serialized_summary(manifest.current_summary)
     if manifest.prospective_start_at is not None:
         payload["manifest"]["prospective_start_at"] = manifest.prospective_start_at.isoformat()
+    if manifest.prospective_start_sequence is not None:
+        payload["manifest"]["prospective_start_sequence"] = (
+            manifest.prospective_start_sequence
+        )
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     if not 2 <= len(encoded.encode("utf-8")) <= MAX_MONITOR_SNAPSHOT_BYTES:
         raise ValueError("monitor snapshot exceeds the 4 MiB storage contract")
@@ -1555,6 +1720,7 @@ def monitor_snapshot_from_json(
                 if manifest_data.get("prospective_start_at") is not None
                 else None
             ),
+            manifest_data.get("prospective_start_sequence"),
         )
         comparison = MonitorComparison(
             MonitorStatus(comparison_data["status"]),

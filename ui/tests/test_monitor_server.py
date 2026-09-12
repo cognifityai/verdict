@@ -38,6 +38,7 @@ def _insert_traces(
         )
         storage.insert_trace(Trace(
             trace_id=f"trace-{index:03d}", started_at=started_at,
+            session_id=f"session-{index:03d}",
             ended_at=started_at + timedelta(seconds=1), provider="openai",
             request_model="model", prompt_redacted="request", response_redacted="ok",
             tenant_id=tenant,
@@ -87,6 +88,53 @@ def test_monitor_preview_includes_default_tenantless_sdk_traces(tmp_path):
     manifest = response.json()["snapshot"]["manifest"]
     assert len(manifest["reference_unit_ids"]) == 10
     assert len(manifest["current_unit_ids"]) == 10
+
+
+def test_monitor_defaults_to_sessions_and_rejects_trace_level_inference(tmp_path):
+    database = tmp_path / "independent-units.db"
+    storage = SQLiteStorage(str(database))
+    for index, session_id in enumerate(("shared", "shared", "independent")):
+        observed = NOW + timedelta(seconds=index)
+        storage.insert_trace(Trace(
+            trace_id=f"trace-{index}", tenant_id="__verdict_local__",
+            session_id=session_id, started_at=observed,
+            ended_at=observed + timedelta(milliseconds=1), response_redacted="ok",
+        ))
+    storage.close()
+
+    async def preview(payload):
+        app = create_app(storage=f"sqlite:///{database}")
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver",
+        ) as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            return await client.post(
+                "/api/monitor/preview",
+                headers={"X-Verdict-Setup": token},
+                json={
+                    "referenceRatio": 0.5,
+                    "minimumReference": 1,
+                    "minimumCurrent": 1,
+                    **payload,
+                },
+            )
+
+    default = asyncio.run(preview({}))
+    trace = asyncio.run(preview({"analysisUnit": "trace"}))
+
+    assert default.status_code == 200
+    assert default.json()["policy"]["analysis_unit"] == "session"
+    manifest = default.json()["snapshot"]["manifest"]
+    assert len(manifest["reference_unit_ids"]) == 1
+    assert len(manifest["current_unit_ids"]) == 1
+    assert trace.status_code == 400
+    assert trace.json() == {
+        "error": (
+            "Monitor requires session or run units so correlated calls are not "
+            "counted as independent evidence."
+        )
+    }
 
 
 def test_monitor_preview_activation_and_prospective_run(tmp_path):
@@ -167,9 +215,11 @@ def test_monitor_preview_activation_and_prospective_run(tmp_path):
     assert completed.status_code == 200
     completed_snapshot = completed.json()["snapshot"]
     assert completed_snapshot["comparison"]["status"] == "no_alert"
-    assert completed_snapshot["manifest"]["current_unit_ids"] == [
-        "trace-050", "trace-051", "trace-052", "trace-053", "trace-054",
-    ]
+    assert len(completed_snapshot["manifest"]["current_unit_ids"]) == 5
+    assert all(
+        unit_id.startswith("session:")
+        for unit_id in completed_snapshot["manifest"]["current_unit_ids"]
+    )
     assert completed.json()["approvedHistoricalSnapshot"] == preview.json()["snapshot"]
 
 
@@ -179,6 +229,7 @@ def test_monitor_activation_starts_empty_after_explicit_historical_preview(tmp_p
     storage = SQLiteStorage(str(database))
     storage.insert_trace(Trace(
         trace_id="future-dated-before-activation",
+        session_id="future-dated-before-activation-session",
         started_at=datetime(2100, 1, 1, tzinfo=timezone.utc),
         ended_at=datetime(2100, 1, 1, 0, 0, 1, tzinfo=timezone.utc),
         provider="openai",
@@ -221,11 +272,16 @@ def test_monitor_activation_starts_empty_after_explicit_historical_preview(tmp_p
     assert manifest["current_unit_ids"] == []
     activated_at = datetime.fromisoformat(manifest["prospective_start_at"])
 
+    before_new_traffic = asyncio.run(request("/api/monitor/run"))
+    assert before_new_traffic.status_code == 200
+    assert before_new_traffic.json()["snapshot"]["manifest"]["current_unit_ids"] == []
+
     storage = SQLiteStorage(str(database))
     storage.insert_trace(Trace(
         trace_id="post-activation",
-        started_at=activated_at + timedelta(microseconds=1),
-        ended_at=activated_at + timedelta(seconds=1),
+        session_id="post-activation-session",
+        started_at=activated_at - timedelta(days=365),
+        ended_at=activated_at - timedelta(days=365) + timedelta(seconds=1),
         provider="openai",
         request_model="model",
         prompt_redacted="request",
@@ -237,8 +293,9 @@ def test_monitor_activation_starts_empty_after_explicit_historical_preview(tmp_p
     cycle = asyncio.run(request("/api/monitor/run"))
     assert cycle.status_code == 200
     current_ids = cycle.json()["snapshot"]["manifest"]["current_unit_ids"]
-    assert current_ids == ["post-activation"]
-    assert not any(trace_id.startswith("trace-") for trace_id in current_ids)
+    assert len(current_ids) == 1
+    assert current_ids[0].startswith("session:")
+    assert cycle.json()["snapshot"]["manifest"]["late_unit_count"] == 1
 
 
 def test_monitor_waits_for_late_judgments_then_alerts_on_same_members(tmp_path):
@@ -285,9 +342,11 @@ def test_monitor_waits_for_late_judgments_then_alerts_on_same_members(tmp_path):
 
     assert waiting.status_code == 200
     waiting_manifest = waiting.json()["snapshot"]["manifest"]
-    assert waiting_manifest["current_unit_ids"] == [
-        f"trace-{index:03d}" for index in range(20, 30)
-    ]
+    assert len(waiting_manifest["current_unit_ids"]) == 10
+    assert all(
+        unit_id.startswith("session:")
+        for unit_id in waiting_manifest["current_unit_ids"]
+    )
     assert len(waiting_manifest["pending_evaluator_units"]) == 10
     assert waiting_manifest["prospective_open"] is True
     assert waiting.json()["snapshot"]["comparison"]["status"] == "insufficient"
@@ -754,6 +813,7 @@ def test_monitor_compares_existing_judgments_without_mixing_evaluators_or_tenant
         ))
     storage.insert_trace(Trace(
         trace_id="trace-019", tenant_id=None,
+        session_id="session-019",
         started_at=NOW + timedelta(days=19),
         ended_at=NOW + timedelta(days=19, seconds=1),
         prompt_redacted="request", response_redacted=None,
@@ -761,6 +821,7 @@ def test_monitor_compares_existing_judgments_without_mixing_evaluators_or_tenant
     for index in range(20):
         storage.insert_trace(Trace(
             trace_id=f"foreign-{index:03d}", tenant_id="foreign",
+            session_id=f"foreign-session-{index:03d}",
             started_at=NOW + timedelta(days=100 + index),
             ended_at=NOW + timedelta(days=100 + index, seconds=1),
             error="foreign failure",
@@ -843,6 +904,7 @@ def test_monitor_explains_group_cardinality_limit(tmp_path):
             Trace(
                 trace_id=f"trace-{index}",
                 tenant_id="__verdict_local__",
+                session_id=f"session-{index}",
                 started_at=NOW + timedelta(seconds=index),
                 ended_at=NOW + timedelta(seconds=index + 1),
                 provider=f"provider-{index}",
@@ -892,6 +954,7 @@ def test_active_monitor_uses_approved_judgment_facts_after_rejudge_and_delete(tm
             Trace(
                 trace_id=trace_id,
                 tenant_id=None,
+                session_id=f"session-{index:03d}",
                 started_at=NOW + timedelta(minutes=index),
                 ended_at=NOW + timedelta(minutes=index, seconds=1),
                 prompt_redacted="request", response_redacted="ok",
@@ -965,6 +1028,7 @@ def test_active_monitor_uses_approved_judgment_facts_after_rejudge_and_delete(tm
             Trace(
                 trace_id=trace_id,
                 tenant_id=None,
+                session_id=f"session-{index:03d}",
                 started_at=prospective_start + timedelta(minutes=index),
                 ended_at=prospective_start + timedelta(minutes=index, seconds=1),
                 prompt_redacted="request", response_redacted="ok",
@@ -1013,6 +1077,7 @@ def test_cluster_monitor_projects_new_traffic_and_keeps_reviewed_label(tmp_path)
             Trace(
                 trace_id=f"historical-{index}",
                 tenant_id=tenant,
+                session_id=f"historical-session-{index}",
                 started_at=NOW + timedelta(minutes=index),
                 ended_at=NOW + timedelta(minutes=index, seconds=1),
                 response_redacted="ok",
@@ -1078,6 +1143,7 @@ def test_cluster_monitor_projects_new_traffic_and_keeps_reviewed_label(tmp_path)
             Trace(
                 trace_id=f"new-{index}",
                 tenant_id=tenant,
+                session_id=f"new-session-{index}",
                 started_at=prospective_start + timedelta(minutes=index),
                 ended_at=prospective_start + timedelta(minutes=index, seconds=1),
                 response_redacted="ok",

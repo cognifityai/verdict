@@ -67,12 +67,15 @@ We ask: "are these two windows samples from the same underlying distribution, or
 
 That's what a two-sample test answers — Fisher's exact for binary PASS/FAIL data, Mann-Whitney U for continuous metrics.
 
-**Monitor implementation note:** Monitor freezes either count-based or explicit
-event-time membership using the captured trace's event time, then collects
-prospective non-overlapping cohorts. Activation stores an event-time boundary
-and starts with an empty current bucket; an older event imported later is not
-reclassified as post-activation traffic. A selected
-evaluator may finalize its pending results while a fixed current cohort remains
+**Monitor implementation note:** Monitor uses one session by default or one
+agent run when selected, rather than treating correlated calls as independent.
+For operational event metrics, any member event makes the unit true; a judge
+PASS metric is true only when every evaluable member passes. The unit's earliest
+trace event time determines count-based or explicit historical membership.
+Activation stores a durable trace-ingestion watermark and starts with an empty
+current bucket. Existing rows cannot cross that boundary because of skewed
+future timestamps, while newly ingested backdated rows remain eligible. A
+selected evaluator may finalize its pending results while a fixed current cohort remains
 open; no comparison is made until those results are terminal. Changed or
 deleted pending evidence requires a new preview rather than rewriting frozen
 facts. With a

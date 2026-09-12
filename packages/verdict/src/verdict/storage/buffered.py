@@ -539,6 +539,23 @@ class BufferedStorage:
             limit=limit,
         )
 
+    def list_traces_with_ingest_sequence(
+        self,
+        *,
+        tenant_id: str | None = None,
+        cluster_id: str | None = None,
+        limit: int = 100,
+    ) -> list[tuple[Trace, int]]:
+        return self._read(
+            self._inner.list_traces_with_ingest_sequence,
+            tenant_id=tenant_id,
+            cluster_id=cluster_id,
+            limit=limit,
+        )
+
+    def trace_ingest_watermark(self) -> int:
+        return self._read(self._inner.trace_ingest_watermark)
+
     def list_judgments_for_cluster(
         self,
         cluster_id: str,

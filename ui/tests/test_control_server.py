@@ -175,6 +175,7 @@ def test_run_schedule_action_advances_active_monitor_once(tmp_path):
         observed = now + timedelta(minutes=index)
         storage.insert_trace(Trace(
             trace_id=f"historical-{index}", tenant_id="__verdict_local__",
+            session_id=f"historical-session-{index}",
             started_at=observed, ended_at=observed, response_redacted="ok",
         ))
     storage.close()
@@ -208,6 +209,7 @@ def test_run_schedule_action_advances_active_monitor_once(tmp_path):
             observed = prospective_start + timedelta(microseconds=1)
             storage.insert_trace(Trace(
                 trace_id="new-trace", tenant_id="__verdict_local__",
+                session_id="new-session",
                 started_at=observed, ended_at=observed, response_redacted="done",
             ))
             storage.close()

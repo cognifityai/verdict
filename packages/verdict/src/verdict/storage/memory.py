@@ -95,6 +95,8 @@ class InMemoryStorage:
 
     def __init__(self) -> None:
         self._traces: dict[str, Trace] = {}
+        self._trace_ingest_sequences: dict[str, int] = {}
+        self._trace_ingest_watermark = 0
         self._import_sources: dict[tuple[str, str], SourceSession] = {}
         self._agent_runs: dict[tuple[str, str], AgentRun] = {}
         self._agent_turns: dict[tuple[str, str, str], AgentTurn] = {}
@@ -157,6 +159,9 @@ class InMemoryStorage:
             if trace.parent_span_id is None and existing.parent_span_id is not None:
                 trace.parent_span_id = existing.parent_span_id
         with self._cluster_v2_lock:
+            if trace.trace_id not in self._trace_ingest_sequences:
+                self._trace_ingest_watermark += 1
+                self._trace_ingest_sequences[trace.trace_id] = self._trace_ingest_watermark
             self._traces[trace.trace_id] = trace
 
     def _agent_bundle(self, tenant_id: str, run_id: str) -> AgentRunBundle | None:
@@ -340,6 +345,11 @@ class InMemoryStorage:
             require_same_tenant_linked_traces(tenant_id, tuple(linked_trace_ids), trace_tenants)
             with self._cluster_v2_lock:
                 for trace in prepared_traces:
+                    if trace.trace_id not in self._trace_ingest_sequences:
+                        self._trace_ingest_watermark += 1
+                        self._trace_ingest_sequences[trace.trace_id] = (
+                            self._trace_ingest_watermark
+                        )
                     self._traces[trace.trace_id] = trace
             self._import_sources[source_key] = copy.deepcopy(source)
             self._agent_runs[run_key] = copy.deepcopy(run)
@@ -687,11 +697,31 @@ class InMemoryStorage:
         out.sort(key=lambda t: t.started_at, reverse=True)
         return out[:limit]
 
+    def list_traces_with_ingest_sequence(
+        self,
+        *,
+        tenant_id: str | None = None,
+        cluster_id: str | None = None,
+        limit: int = 100,
+    ) -> list[tuple[Trace, int]]:
+        with self._cluster_v2_lock:
+            traces = self.list_traces(
+                tenant_id=tenant_id, cluster_id=cluster_id, limit=limit,
+            )
+            return [
+                (trace, self._trace_ingest_sequences[trace.trace_id]) for trace in traces
+            ]
+
+    def trace_ingest_watermark(self) -> int:
+        with self._cluster_v2_lock:
+            return self._trace_ingest_watermark
+
     def delete_trace(self, trace_id: str) -> None:
         # Registry activation holds this lock while proving candidate coverage.
         # Make source-row removal participate in the same atomic boundary.
         with self._agent_evidence_lock, self._cluster_v2_lock:
             self._traces.pop(trace_id, None)
+            self._trace_ingest_sequences.pop(trace_id, None)
             self._agent_events = {
                 key: replace(event, trace_id=None) if event.trace_id == trace_id else event
                 for key, event in self._agent_events.items()

@@ -39,6 +39,10 @@ the product is refined.
 
 ### Changed
 
+- New Monitor policies use one session by default, or one explicitly selected
+  agent run, as each independent Boolean observation. Missing selected
+  identities fail closed, mixed-group units remain unassigned, and existing
+  trace/turn monitors require a new reviewed preview.
 - Retained Anthropic and Google bound methods and lazy stream managers now
   remain pass-through after Verdict shutdown; they cannot resume Trace capture
   or consume a pending one-call correlation reservation.
@@ -63,10 +67,11 @@ the product is refined.
   provider/model or reviewed clusters are optional facets. The evaluation CLI
   continues to prepare judgments but no longer writes fixed-window drift runs;
   existing rows remain available as read-only legacy history.
-- Activating a Monitor policy records an immutable event-time boundary and
-  starts an empty prospective cohort, preventing older imported history from
-  being presented as new post-activation traffic. Existing active monitors
-  without that boundary require a new reviewed preview.
+- Activating a Monitor policy records an immutable trace-ingestion watermark
+  and starts an empty prospective cohort. Admission uses first-ingestion order,
+  so pre-existing traces with future timestamps stay out while newly ingested
+  backdated traces enter. Existing active monitors without that watermark, or
+  with trace/turn analysis units, require a new reviewed preview.
 - Local Claude Code and Codex capture now retains source-identified child
   histories as separate linked runs, keeps final-response previews up to 64 KiB
   with explicit truncation state, and stores source-reported turn usage. Codex
