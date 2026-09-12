@@ -56,9 +56,11 @@ present those states without treating missing evidence as success or failure.
   not evaluated, judge error, pass, fail, and unclear.
 - Agent Runs show source outcome, evidence coverage, deterministic findings,
   and selected-evaluator coverage separately.
-- Five top-level workspaces separate concerns: Overview, Explore, Evaluate,
-  Monitor, and Settings. Monitor contains current cohort status, historical
-  comparisons, optional segments, schedules, and read-only legacy history.
+- Six top-level workspaces separate concerns: Overview, Explore, Evaluate,
+  Monitor, Report, and Settings. Report summarizes application calls separately
+  from evaluator traffic and emits aggregate-only management exports. Monitor
+  contains current cohort status, historical comparisons, optional segments,
+  schedules, and read-only legacy history.
 - Fixed-window evaluation signals created by earlier releases remain readable
   for audit and trace navigation. They are not current status, do not contribute
   to Overview or navigation alert counts, and are not produced by the current

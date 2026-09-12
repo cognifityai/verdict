@@ -80,7 +80,11 @@ def test_all_storage_adapters_match_protocol_parameter_kinds_and_defaults():
 
 
 def test_insert_and_get_trace(storage):
-    t = _trace(parent_span_id="span-parent")
+    t = _trace(
+        parent_span_id="span-parent",
+        service_name="orders-api",
+        environment="staging",
+    )
     storage.insert_trace(t)
     fetched = storage.get_trace(t.trace_id)
     assert fetched is not None
@@ -88,6 +92,8 @@ def test_insert_and_get_trace(storage):
     assert fetched.provider == "anthropic"
     assert fetched.input_tokens == 100
     assert fetched.parent_span_id == "span-parent"
+    assert fetched.service_name == "orders-api"
+    assert fetched.environment == "staging"
 
 
 def test_sqlite_does_not_create_or_drop_retired_user_signal_data(tmp_path):
@@ -133,6 +139,20 @@ def test_storage_redacts_sentence_final_ipv6_without_consuming_punctuation(stora
     assert fetched.tags["peer"] == "<IPV6>."
 
 
+def test_storage_sanitizes_application_identity_used_by_reports(storage):
+    trace = _trace(
+        service_name="orders-export-secret@example.com",
+        environment="x" * 257,
+    )
+
+    storage.insert_trace(trace)
+    fetched = storage.get_trace(trace.trace_id)
+
+    assert fetched is not None
+    assert fetched.service_name == "<EMAIL>"
+    assert fetched.environment == ""
+
+
 def test_sqlite_migrates_trace_parent_span_link(tmp_path):
     path = tmp_path / "legacy-traces.db"
     connection = sqlite3.connect(path)
@@ -166,6 +186,8 @@ def test_sqlite_migrates_trace_parent_span_link(tmp_path):
         storage.close()
 
     assert legacy is not None and legacy.parent_span_id is None
+    assert legacy.service_name == ""
+    assert legacy.environment == ""
     assert round_trip is not None and round_trip.parent_span_id == "span-1"
 
 
@@ -1236,6 +1258,16 @@ def test_drift_signal_columns_cover_all_stat_fields():
     n_cols = len([c for c in pg.PostgresStorage._SIGNAL_COLUMNS.split(",")])
     assert n_cols == 20, f"expected 20 drift-signal columns, got {n_cols}"
 
+
+def test_postgres_trace_columns_include_application_identity():
+    from verdict.storage import postgres as pg
+
+    columns = [column.strip() for column in pg.PostgresStorage._TRACE_COLUMNS.split(",")]
+    assert len(columns) == 30
+    assert columns[-2:] == ["service_name", "environment"]
+    assert "service_name TEXT NOT NULL DEFAULT ''" in pg._SCHEMA
+    assert "environment TEXT NOT NULL DEFAULT ''" in pg._SCHEMA
+
     # DB-free guard only: the live Postgres path still needs integration
     # coverage in an environment that provides a Postgres instance.
     import inspect
@@ -1251,7 +1283,7 @@ def test_postgres_trace_columns_include_stable_parent_span_link():
 
     assert "parent_span_id" in pg._SCHEMA
     assert "parent_span_id" in pg.PostgresStorage._TRACE_COLUMNS
-    assert len(pg.PostgresStorage._TRACE_COLUMNS.split(",")) == 28
+    assert len(pg.PostgresStorage._TRACE_COLUMNS.split(",")) == 30
     insert_source = inspect.getsource(pg.PostgresStorage._insert_trace_cursor)
     assert "INSERT INTO traces (" in insert_source
     assert "COALESCE(" in insert_source

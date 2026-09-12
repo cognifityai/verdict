@@ -132,7 +132,9 @@ CREATE TABLE IF NOT EXISTS traces (
     analysis_started_at_us INTEGER,
     analysis_started_at_state TEXT NOT NULL DEFAULT 'pending',
     analysis_raw_messages_utf8_bytes INTEGER,
-    analysis_raw_messages_state TEXT NOT NULL DEFAULT 'pending'
+    analysis_raw_messages_state TEXT NOT NULL DEFAULT 'pending',
+    service_name TEXT NOT NULL DEFAULT '',
+    environment TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_traces_cluster ON traces(cluster_id);
 CREATE INDEX IF NOT EXISTS idx_traces_tenant ON traces(tenant_id);
@@ -680,6 +682,8 @@ class SQLiteStorage:
                     ("analysis_started_at_state", "TEXT NOT NULL DEFAULT 'pending'"),
                     ("analysis_raw_messages_utf8_bytes", "INTEGER"),
                     ("analysis_raw_messages_state", "TEXT NOT NULL DEFAULT 'pending'"),
+                    ("service_name", "TEXT NOT NULL DEFAULT ''"),
+                    ("environment", "TEXT NOT NULL DEFAULT ''"),
                 ):
                     if column not in trace_columns:
                         self._conn.execute(f"ALTER TABLE traces ADD COLUMN {column} {ddl}")
@@ -1157,7 +1161,7 @@ class SQLiteStorage:
                     tenant_id, session_id, user_id_hash, cluster_id,
                     tags_json, cost_usd, analysis_started_at_us,
                     analysis_started_at_state, analysis_raw_messages_utf8_bytes,
-                    analysis_raw_messages_state
+                    analysis_raw_messages_state, service_name, environment
                 ) VALUES (
                     :trace_id, :parent_span_id, :started_at, :ended_at, :provider, :operation,
                     :request_model, :response_model, :input_tokens, :output_tokens,
@@ -1166,7 +1170,7 @@ class SQLiteStorage:
                     :tenant_id, :session_id, :user_id_hash, :cluster_id,
                     :tags_json, :cost_usd, :analysis_started_at_us,
                     :analysis_started_at_state, :analysis_raw_messages_utf8_bytes,
-                    :analysis_raw_messages_state
+                    :analysis_raw_messages_state, :service_name, :environment
                 ) ON CONFLICT(trace_id) DO UPDATE SET
                     ended_at          = excluded.ended_at,
                     response_model    = excluded.response_model,
@@ -1213,6 +1217,8 @@ class SQLiteStorage:
                     "analysis_started_at_state": trace.analysis_started_at_state,
                     "analysis_raw_messages_utf8_bytes": (trace.analysis_raw_messages_utf8_bytes),
                     "analysis_raw_messages_state": trace.analysis_raw_messages_state,
+                    "service_name": trace.service_name,
+                    "environment": trace.environment,
                 },
             )
 
@@ -1246,6 +1252,8 @@ class SQLiteStorage:
             analysis_started_at_state=row["analysis_started_at_state"],
             analysis_raw_messages_utf8_bytes=row["analysis_raw_messages_utf8_bytes"],
             analysis_raw_messages_state=row["analysis_raw_messages_state"],
+            service_name=row["service_name"],
+            environment=row["environment"],
         )
 
     def replace_agent_capture(

@@ -37,3 +37,49 @@ button {
     transform: rotate(360deg);
   }
 }
+
+@media print {
+  body * {
+    visibility: hidden;
+  }
+
+  .verdict-report-print,
+  .verdict-report-print * {
+    visibility: visible;
+  }
+
+  .verdict-report-print {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    color: #18201d;
+    background: #fff;
+    print-color-adjust: exact;
+    -webkit-print-color-adjust: exact;
+  }
+
+  .verdict-report-print section,
+  .verdict-report-print table,
+  .verdict-report-print tr,
+  .verdict-report-print div {
+    border-color: #ccd5d1 !important;
+  }
+
+  .verdict-report-print section {
+    color: #18201d !important;
+    background: #fff !important;
+    break-inside: avoid;
+  }
+
+  .verdict-report-print div {
+    background-color: transparent !important;
+  }
+
+  .verdict-report-print [data-report-bar] {
+    background-color: #18a978 !important;
+  }
+
+  .verdict-no-print {
+    display: none !important;
+  }
+}

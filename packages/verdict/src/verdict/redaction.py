@@ -583,6 +583,17 @@ def sanitize_trace(
     trace.prompt_redacted = redact(trace.prompt_redacted, mode=mode, secret=secret)
     trace.response_redacted = redact(trace.response_redacted, mode=mode, secret=secret)
     trace.error = redact(trace.error, mode=mode, secret=secret)
+    for field_name in ("service_name", "environment"):
+        value = getattr(trace, field_name, "")
+        try:
+            valid = isinstance(value, str) and len(value.encode("utf-8")) <= 256
+        except UnicodeEncodeError:
+            valid = False
+        setattr(
+            trace,
+            field_name,
+            (redact(value, mode=mode, secret=secret) or "") if valid else "",
+        )
     if trace.raw_messages is not None:
         trace.raw_messages = redact_messages(trace.raw_messages, mode=mode, secret=secret)
     sanitized_tags = redact_structure(trace.tags, mode=mode, secret=secret)

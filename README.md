@@ -76,13 +76,20 @@ rescan them; that durable schedule is configuration, not captured evidence.
 When the source records child execution identity, local capture retains it as a
 separate child run instead of folding its turns into the parent.
 
-The findings-first dashboard has five top-level workspaces: **Overview**,
-**Explore**, **Evaluate**, **Monitor**, and **Settings**. Overview contains
-Summary, Reliability, Performance, and Behavior. Monitor contains current
+The findings-first dashboard has six top-level workspaces: **Overview**,
+**Explore**, **Evaluate**, **Monitor**, **Report**, and **Settings**. Overview
+contains Summary, Reliability, Performance, and Behavior. Monitor contains current
 cohort status, historical comparisons, optional segments, schedules, and a
 read-only view of results created by the retired fixed-window pipeline. Cluster and
 monitor activation are explicit transitions; a stored historical candidate is
 shown separately from the active prospective monitor and survives page reload.
+Report presents application-only request, token, latency, cost, service, and
+model summaries; Verdict judge calls are excluded. It shows the newest 31
+active UTC dates and at most 20 application and model rows, then exports
+aggregate-only HTML, CSV, or browser Print/Save PDF output. New instrumented
+traces retain the configured `service_name` and `environment`; historical
+traces without that identity appear as **Unattributed**. Report exports never
+include prompts or responses.
 Evaluate includes a one-off Inspect view for uploaded or pasted ChatGPT,
 Claude.ai, Cowork, and OpenAI JSON/JSONL. Analysis runs on the Verdict dashboard
 host and does not add the source export or report to the Verdict store.

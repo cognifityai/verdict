@@ -89,7 +89,10 @@ def test_file_transport_replays_idempotently_into_sqlite(tmp_path: Path) -> None
         ]
         model_event = bundles[0].events[0]
         assert model_event.trace_id == correlation_id
-        assert storage.get_trace(model_event.trace_id) is not None
+        trace = storage.get_trace(model_event.trace_id)
+        assert trace is not None
+        assert trace.service_name == "worker"
+        assert trace.environment == "production"
     finally:
         storage.close()
 
@@ -323,6 +326,28 @@ def test_file_transport_ignores_retired_signal_payload_shape() -> None:
         }
     ).encode()
     assert agent_transport.decode_capture_record(raw) is None
+
+
+def test_file_transport_reads_trace_records_created_before_service_identity() -> None:
+    trace = Trace(
+        trace_id="legacy-trace",
+        started_at=datetime(2026, 9, 1, tzinfo=timezone.utc),
+        provider="openai",
+    )
+    payload = agent_transport._trace_to_payload(trace)
+    payload.pop("service_name")
+    payload.pop("environment")
+    raw = json.dumps({
+        "schema": agent_transport.CAPTURE_SCHEMA,
+        "kind": "trace",
+        "record": payload,
+    }).encode()
+
+    decoded = agent_transport.decode_capture_record(raw)
+
+    assert decoded is not None and decoded.trace is not None
+    assert decoded.trace.service_name == ""
+    assert decoded.trace.environment == ""
 
 
 def test_file_transport_rejects_malformed_span_record() -> None:

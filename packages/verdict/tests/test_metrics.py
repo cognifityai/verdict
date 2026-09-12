@@ -99,4 +99,8 @@ def test_extended_core_dataclasses_append_fields_after_published_constructors():
     ]
 
     assert [field.name for field in fields(Trace)[:23]] == published_trace_fields
+    assert [field.name for field in fields(Trace)[-2:]] == [
+        "service_name",
+        "environment",
+    ]
     assert [field.name for field in fields(DriftSignal)[:18]] == published_drift_fields

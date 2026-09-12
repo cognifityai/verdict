@@ -167,8 +167,13 @@ evaluation status, finding severity, and drift comparison independently.
 `not evaluated` and `judge error` are explicit Trace states. A prospective
 monitor distinguishes traffic collection from a full cohort awaiting selected
 evaluator results.
-The dashboard has five top-level workspaces: Overview, Explore, Evaluate,
-Monitor, and Settings. Monitor is the current drift workflow: it shows reviewed
+The dashboard has six top-level workspaces: Overview, Explore, Evaluate,
+Monitor, Report, and Settings. Report summarizes non-judge application calls
+across the newest 31 active UTC dates and the top 20 applications and models.
+Configured `service_name` and `environment` values are persisted on new
+instrumented traces; historical traces without service identity appear as
+**Unattributed**. HTML, CSV, and browser Print/Save PDF outputs contain
+aggregates only. Monitor is the current drift workflow: it shows reviewed
 historical comparisons, the active prospective policy, and optional facets.
 Results created by older fixed-window pipeline releases remain available under
 **Monitor → Legacy History** but are read-only and do not affect current status.

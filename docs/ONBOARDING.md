@@ -590,7 +590,13 @@ present, `degraded` or `insufficient_data` status is a hard gate: the command
 persists the health record, exits 2, and does not write production judgments.
 
 The dashboard shows per-provider traffic, optional intent clusters, and pass
-rates by rubric dimension. **Monitor → Compare History** previews a reviewed
+rates by rubric dimension. **Report** shows application-only request, token,
+latency, cost, service, and model summaries; evaluator calls are excluded. The
+timeline contains the newest 31 active UTC dates and tables contain at most 20
+rows. New instrumented traces use the `service_name` and `environment` passed to
+`verdict.init`; historical traces without service identity appear as
+**Unattributed**. HTML, CSV, and browser Print/Save PDF exports contain
+aggregates only. **Monitor → Compare History** previews a reviewed
 reference/current comparison; **Monitor → Status** shows the active prospective
 cohort. Each alert includes its metric, reference/current rates, adjusted
 p-value, sample counts, and optional facet. Clusters are not required.
