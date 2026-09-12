@@ -510,8 +510,13 @@ def _tool_name(payload: dict[str, object]) -> str:
 
 def _bounded_redacted_content(value: object) -> str:
     try:
-        text = value if isinstance(value, str) else str(value)
-        return (redact(text) or "")[:_MAX_CONTENT_CHARS]
+        sanitized = redact(value) if isinstance(value, str) else redact_structure(value)
+        text = (
+            sanitized
+            if isinstance(sanitized, str)
+            else json.dumps(sanitized, ensure_ascii=False, separators=(",", ":"))
+        )
+        return text[:_MAX_CONTENT_CHARS]
     except Exception:
         return "<REDACTED>"
 

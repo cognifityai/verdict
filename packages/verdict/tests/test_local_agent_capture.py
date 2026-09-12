@@ -1627,10 +1627,17 @@ def test_codex_command_and_result_redaction_precede_content_limits(tmp_path: Pat
     root = tmp_path / "codex"
     records = _codex_records()
     token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789"
+    opaque = "opaque-nested-result-canary"
     crossing_value = f"{'x' * 994} {token}"
     records[4]["payload"]["arguments"] = json.dumps({"cmd": crossing_value})
     records[5]["payload"]["output"] = json.dumps(
-        {"exit_code": 1, "output": crossing_value}
+        {
+            "exit_code": 1,
+            "output": {
+                "password": {"nested": opaque},
+                "stdout": crossing_value,
+            },
+        }
     )
     _write_jsonl(root / "session.jsonl", records)
     database = tmp_path / "verdict.db"
@@ -1641,6 +1648,7 @@ def test_codex_command_and_result_redaction_precede_content_limits(tmp_path: Pat
     [bundle] = storage.list_agent_run_bundles("local")
     storage.close()
     assert "ghp_" not in repr(bundle)
+    assert opaque not in repr(bundle)
 
 
 def test_claude_trace_redaction_precedes_the_preview_boundary(tmp_path: Path) -> None:

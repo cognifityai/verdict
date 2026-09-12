@@ -69,7 +69,7 @@ _ASSIGNMENT_CANDIDATE = re.compile(
     r"(?i)(?<![A-Za-z0-9_])"
     r"(?P<key_quote>[\"']?)(?P<key>[A-Za-z][A-Za-z0-9_.-]{0,127})(?P=key_quote)"
     r"(?P<separator>\s*[:=]\s*)"
-    r"(?P<value>\"[^\"\r\n]*\"|'[^'\r\n]*'|"
+    r"(?P<value>\"(?:\\.|[^\"\\\r\n])*\"|'(?:\\.|[^'\\\r\n])*'|"
     r"(?:(?:Basic|Bearer)\s+)?[A-Za-z0-9._~+/=:-]+)"
 )
 _SENSITIVE_KEY_SUFFIXES = (
@@ -140,7 +140,8 @@ _PATTERNS = {
 
 def _key_words(key: str) -> tuple[str, ...]:
     """Normalize a field name without using broad substring matching."""
-    camel_separated = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", key)
+    acronym_separated = re.sub(r"(?<=[A-Z])(?=[A-Z][a-z])", "_", key)
+    camel_separated = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", acronym_separated)
     return tuple(part for part in re.split(r"[^A-Za-z0-9]+", camel_separated.lower()) if part)
 
 

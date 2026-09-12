@@ -718,6 +718,9 @@ def test_common_provider_keys_and_secret_assignments_are_redacted() -> None:
         "x-api-key",
         "AWS_SECRET_ACCESS_KEY",
         "github_token",
+        "GITHUBToken",
+        "AWSSecretAccessKey",
+        "HTTPAuthorization",
         "Authorization",
         "proxy-authorization",
         "credentials",
@@ -773,6 +776,7 @@ def test_flat_github_and_basic_authorization_credentials_are_redacted() -> None:
     text = (
         f'GITHUB_TOKEN="{opaque} with spaces" '
         f"AWS_SECRET_ACCESS_KEY='{opaque}' "
+        f'password="prefix\\\"{opaque}" '
         f"Authorization: Basic {basic} direct={github}"
     )
 
