@@ -195,12 +195,14 @@ The bundled dashboard's analytics reads do not rewrite trace or judgment
 history. Setup/import and Monitor controls are explicit write paths and create
 their additive tables when used. Install `cognifity-verdict[dashboard]` for SQLite or
 `cognifity-verdict[dashboard,postgres]` for PostgreSQL, then run
-`verdict-dashboard --storage ...`. A FastAPI host can mount
+`verdict-dashboard --storage ...`. If capture/import used an explicit tenant,
+pass the same `--tenant-id` or set `VERDICT_TENANT_ID`. A FastAPI host can mount
 `verdict.dashboard.create_app()` so its authenticated application and the
 packaged Verdict UI run together. A host-authorized
 `request.state.verdict_registry_tenant` makes the active registry the cluster
 source for Overview, Trace Explorer, pass-rate charts, and drift labels;
-standalone and legacy stores retain their stored trace cluster IDs.
+the standalone dashboard does the same for its configured tenant. Without an
+active registry, stored trace cluster IDs remain the fallback.
 The mount accepts an optional same-origin `operations_url`. When configured,
 the same packaged UI adds an Operations view for normalized host telemetry and
 job controls. Collection, authorization, CSRF, and execution stay in the host;

@@ -325,6 +325,11 @@ python -m pip install "cognifity-verdict[dashboard]==0.1.0a17"
 verdict-dashboard --storage sqlite:///./verdict.db
 ```
 
+If capture/import used an explicit tenant, pass the same `--tenant-id` to the
+dashboard or set `VERDICT_TENANT_ID`. The default remains
+`__verdict_local__`; selecting another tenant requires no data migration and
+does not relabel existing rows.
+
 Add the `postgres` extra for a PostgreSQL store. Verdict requires PostgreSQL
 databases to use UTF-8 encoding. Legacy SQL_ASCII databases are not supported.
 Dashboard analytics are read-only; the setup/import and Monitor controls are
@@ -384,15 +389,18 @@ NUL-free session IDs of at most 256 bytes. Their time-to-readiness value is a
 diagnostic estimate at the documented default windows/floor, not activation
 or drift decisions; fragmentation/dominant-cluster warnings likewise require
 operator inspection. The full 250-cluster list remains visible while nested
-evidence is limited to the 20 highest-volume clusters. Standalone use selects the reserved local scope and
-uses its same-origin setup capability for mutations. A mounted host can
+evidence is limited to the 20 highest-volume clusters. Standalone use selects
+the reserved local scope by default, or the explicit `--tenant-id`, and uses
+that same scope for Agent Run and registry reads plus its in-process mutations.
+A mounted host can
 instead set `request.state.verdict_registry_tenant`; that authorization-owned
 value wins over query input. Mounted mutation buttons use the same-origin
 Operations adapter. Semantic and hybrid fallback retain their experimental
 disclosure. When a mounted host supplies that authorized tenant, Overview,
 Trace Explorer, cluster pass-rate charts, and drift rows project assignments
 and stable labels from the same active registry. Standalone and legacy stores
-without an authorized active registry continue to use `Trace.cluster_id`.
+without an active registry for the selected tenant continue to use
+`Trace.cluster_id`.
 
 For published release `0.1.0a17`, the bounded POC entry points include Anthropic
 `messages.create(...)` (including `stream=True`), OpenAI

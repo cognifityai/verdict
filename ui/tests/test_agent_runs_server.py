@@ -85,6 +85,30 @@ def test_agent_runs_api_exposes_typed_analysis_without_raw_envelopes(tmp_path):
     assert "payload_json" not in json.dumps(direct)
 
 
+def test_configured_dashboard_tenant_is_the_default_agent_run_scope(tmp_path):
+    path = tmp_path / "configured-runs.db"
+    storage = SQLiteStorage(str(path))
+    now = datetime(2026, 8, 31, tzinfo=timezone.utc)
+    storage.replace_agent_run_bundle(_bundle("customer-a", now, with_turn=True))
+    storage.replace_agent_run_bundle(_bundle("customer-b", now, with_turn=True))
+    storage.close()
+
+    async def request_runs():
+        app = create_app(storage=f"sqlite:///{path}", tenant_id="customer-a")
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
+            return await client.get("/api/data"), await client.get("/api/runs")
+
+    dashboard, runs = asyncio.run(request_runs())
+
+    assert dashboard.status_code == 200
+    assert dashboard.json()["meta"]["totalAgentRuns"] == 1
+    assert runs.json()["summary"] == {"available": 1, "shown": 1}
+    assert [item["runId"] for item in runs.json()["runs"]] == ["r-customer-a"]
+
+
 def test_agent_run_detail_exposes_ordered_bounded_events_and_trace_links(tmp_path):
     path = tmp_path / "runs.db"
     storage = SQLiteStorage(str(path))

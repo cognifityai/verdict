@@ -53,8 +53,10 @@ from verdict.dashboard.registry import (
 from verdict.dashboard.storage_url import is_postgres_storage
 from verdict.evidence import EvidenceState
 from verdict.metrics import ScoreCounts, verdict_label
+from verdict.monitor_inputs import LOCAL_TENANT
 from verdict.normalized_evidence import agent_turn_from_row, normalized_bundle_digest
 from verdict.redaction import redact, redact_structure
+from verdict.telemetry.model import safe_routing_id
 from verdict.trace_facts import deterministic_trace_facts
 
 HERE = Path(__file__).resolve().parent
@@ -2863,6 +2865,7 @@ def create_app(
     storage: str | os.PathLike[str] | None = None,
     operations_url: str | None = None,
     allowed_hosts: list[str] | None = None,
+    tenant_id: str = LOCAL_TENANT,
 ):
     import base64
     import secrets
@@ -2874,6 +2877,9 @@ def create_app(
     from starlette.middleware.trustedhost import TrustedHostMiddleware
 
     configured_storage = resolve_storage(storage)
+    if tenant_id != LOCAL_TENANT and safe_routing_id(tenant_id) is None:
+        raise ValueError("tenant_id must be a non-sensitive bounded routing identifier")
+    configured_tenant = tenant_id
     if operations_url is not None:
         parsed_operations = urlsplit(operations_url)
         if (
@@ -2888,6 +2894,7 @@ def create_app(
     backend = "postgresql" if _is_postgres(configured_storage) else "sqlite"
     setup_token = secrets.token_urlsafe(32)
     app = FastAPI(title="Verdict Dashboard", version="0.1.0")
+    app.state.verdict_tenant_id = configured_tenant
     configured_hosts = allowed_hosts or [
         host.strip()
         for host in os.environ.get(
@@ -2978,11 +2985,13 @@ def create_app(
 
     @app.get("/api/config")
     def config():
-        return {"operationsUrl": operations_url}
+        return {"operationsUrl": operations_url, "tenantId": configured_tenant}
 
     from verdict.dashboard.setup_routes import SetupRoutes
 
-    setup_routes = SetupRoutes(configured_storage, setup_token)
+    setup_routes = SetupRoutes(
+        configured_storage, setup_token, tenant_id=configured_tenant
+    )
     setup_routes.register(app)
     _setup_authorized = setup_routes.authorized
 
@@ -3021,7 +3030,7 @@ def create_app(
                     request.state,
                     "verdict_registry_tenant",
                     None,
-                ),
+                ) or configured_tenant,
                 trace_offset=trace_offset,
                 trace_judge_status=trace_judge_status,
                 trace_id=trace_id,
@@ -3053,7 +3062,7 @@ def create_app(
             request.state,
             "verdict_registry_tenant",
             None,
-        ) or tenant or "__verdict_local__"
+        ) or tenant or configured_tenant
         try:
             tenant_bytes = authorized_tenant.encode("utf-8")
         except (AttributeError, UnicodeError):
@@ -3092,7 +3101,7 @@ def create_app(
     ):
         authorized_tenant = getattr(
             request.state, "verdict_registry_tenant", None,
-        ) or tenant or "__verdict_local__"
+        ) or tenant or configured_tenant
         try:
             requested_run_ids = request.query_params.getlist("run_ids")
             selected_run_ids = tuple(requested_run_ids) if requested_run_ids else None
@@ -3126,7 +3135,7 @@ def create_app(
     ):
         authorized_tenant = getattr(
             request.state, "verdict_registry_tenant", None,
-        ) or tenant or "__verdict_local__"
+        ) or tenant or configured_tenant
         try:
             return build_agent_run_detail(
                 configured_storage,
@@ -3152,7 +3161,7 @@ def create_app(
     def agent_insights(request, tenant: str | None = None):
         authorized_tenant = getattr(
             request.state, "verdict_registry_tenant", None,
-        ) or tenant or "__verdict_local__"
+        ) or tenant or configured_tenant
         try:
             return read_latest_analysis(
                 configured_storage,
@@ -3173,7 +3182,7 @@ def create_app(
             return JSONResponse({"error": "analysis authorization required"}, status_code=403)
         authorized_tenant = getattr(
             request.state, "verdict_registry_tenant", None,
-        ) or tenant or "__verdict_local__"
+        ) or tenant or configured_tenant
         try:
             return run_analysis(
                 configured_storage,
@@ -3211,15 +3220,25 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Serve the Verdict dashboard.")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument(
+        "--tenant-id",
+        default=os.environ.get("VERDICT_TENANT_ID", LOCAL_TENANT),
+        help="Tenant scope to read and mutate (default: VERDICT_TENANT_ID or local)",
+    )
     parser.add_argument("--open-browser", action="store_true", help=argparse.SUPPRESS)
     source = parser.add_mutually_exclusive_group()
     source.add_argument("--storage", help="SQLite URL/path or PostgreSQL DSN")
     source.add_argument("--db", help="legacy SQLite path")
     args = parser.parse_args(argv)
+    if args.tenant_id != LOCAL_TENANT and safe_routing_id(args.tenant_id) is None:
+        parser.error(
+            "--tenant-id must be a non-sensitive bounded routing identifier"
+        )
     configured_storage = resolve_storage(args.storage or args.db)
     backend = "postgresql" if _is_postgres(configured_storage) else "sqlite"
     print(f"Verdict dashboard → http://{args.host}:{args.port}")
     print(f"Reading storage   → {backend}")
+    print(f"Tenant scope      → {args.tenant_id}")
 
     if args.host not in ("127.0.0.1", "localhost", "::1"):
         if not (os.environ.get("VERDICT_USER") and os.environ.get("VERDICT_PASS")):
@@ -3239,7 +3258,7 @@ def main(argv: list[str] | None = None) -> int:
             0.5, webbrowser.open, args=(f"http://{args.host}:{args.port}/dashboard",),
         ).start()
     uvicorn.run(
-        create_app(storage=configured_storage),
+        create_app(storage=configured_storage, tenant_id=args.tenant_id),
         host=args.host,
         port=args.port,
     )
