@@ -90,6 +90,35 @@ def test_insert_and_get_trace(storage):
     assert fetched.parent_span_id == "span-parent"
 
 
+def test_trace_ingest_sequence_is_monotonic_and_stable_across_rewrites(storage):
+    first = _trace(trace_id="first", started_at=datetime(2100, 1, 1, tzinfo=timezone.utc))
+    storage.insert_trace(first)
+    [(stored_first, first_sequence)] = storage.list_traces_with_ingest_sequence(
+        tenant_id="tenant-a",
+    )
+    first_watermark = storage.trace_ingest_watermark()
+
+    storage.insert_trace(_trace(
+        trace_id="first", started_at=first.started_at,
+        ended_at=first.started_at + timedelta(seconds=1),
+    ))
+    storage.insert_trace(_trace(
+        trace_id="second", started_at=datetime(2000, 1, 1, tzinfo=timezone.utc),
+    ))
+    sequenced = {
+        trace.trace_id: sequence
+        for trace, sequence in storage.list_traces_with_ingest_sequence(
+            tenant_id="tenant-a",
+        )
+    }
+
+    assert stored_first.trace_id == "first"
+    assert first_sequence == first_watermark
+    assert sequenced["first"] == first_sequence
+    assert sequenced["second"] > first_sequence
+    assert storage.trace_ingest_watermark() == sequenced["second"]
+
+
 def test_sqlite_does_not_create_or_drop_retired_user_signal_data(tmp_path):
     fresh_path = tmp_path / "fresh.db"
     SQLiteStorage(str(fresh_path)).close()
@@ -159,6 +188,9 @@ def test_sqlite_migrates_trace_parent_span_link(tmp_path):
     storage = SQLiteStorage(str(path))
     try:
         legacy = storage.get_trace("legacy")
+        [(sequenced_legacy, legacy_sequence)] = (
+            storage.list_traces_with_ingest_sequence()
+        )
         linked = _trace(trace_id="linked", parent_span_id="span-1")
         storage.insert_trace(linked)
         round_trip = storage.get_trace("linked")
@@ -166,6 +198,8 @@ def test_sqlite_migrates_trace_parent_span_link(tmp_path):
         storage.close()
 
     assert legacy is not None and legacy.parent_span_id is None
+    assert sequenced_legacy.trace_id == "legacy"
+    assert legacy_sequence == 1
     assert round_trip is not None and round_trip.parent_span_id == "span-1"
 
 

@@ -22,6 +22,7 @@ def test_monitor_cli_runs_one_idempotent_durable_cycle(tmp_path, capsys) -> None
         trace_id = f"trace-{index}"
         storage.insert_trace(Trace(
             trace_id=trace_id, started_at=now + timedelta(days=index),
+            session_id=f"session-{index}",
             ended_at=now + timedelta(days=index, seconds=1),
             provider="openai", request_model="model",
             prompt_redacted="request", response_redacted="ok",
@@ -36,6 +37,7 @@ def test_monitor_cli_runs_one_idempotent_durable_cycle(tmp_path, capsys) -> None
         "policy", "__verdict_local__:application:trace", reference_ratio=0.8,
         minimum_reference=2, minimum_current=2, prospective_target=2,
         p_threshold=1.0, minimum_effect=0.5, grouping_mode="provider_model",
+        analysis_unit="session",
         evaluator_fingerprint=fingerprint, evaluator_dimensions=("quality",),
     )
     units = load_monitor_units(storage, policy, tenant_id="__verdict_local__")
@@ -45,6 +47,7 @@ def test_monitor_cli_runs_one_idempotent_durable_cycle(tmp_path, capsys) -> None
                                   compare_manifest(units, manifest, policy))
     prepared = plan_prospective_manifest(
         manifest, (), policy, prospective_start_at=now + timedelta(days=10),
+        prospective_start_sequence=storage.trace_ingest_watermark(),
     )
     storage.save_monitor_successor(
         policy.policy_id,
@@ -60,6 +63,7 @@ def test_monitor_cli_runs_one_idempotent_durable_cycle(tmp_path, capsys) -> None
         trace_id = f"trace-{index}"
         storage.insert_trace(Trace(
             trace_id=trace_id, started_at=now + timedelta(days=index),
+            session_id=f"session-{index}",
             ended_at=now + timedelta(days=index, seconds=1),
             provider="openai", request_model="model",
             prompt_redacted="request", response_redacted="ok",

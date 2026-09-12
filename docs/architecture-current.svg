@@ -124,7 +124,7 @@
 
   <rect x="780" y="420" width="200" height="100" rx="10" fill="#FFFFFF" stroke="#0B1730" stroke-width="1.5"/>
   <text x="880" y="445" class="node-title" text-anchor="middle">Monitor comparison</text>
-  <text x="880" y="463" class="node-sub" text-anchor="middle">frozen reviewed cohorts · Fisher</text>
+  <text x="880" y="463" class="node-sub" text-anchor="middle">one session/run outcome · Fisher</text>
   <text x="880" y="478" class="node-sub" text-anchor="middle">all traffic or reviewed facets</text>
   <text x="880" y="493" class="node-sub" text-anchor="middle">Benjamini-Hochberg adj</text>
   <text x="880" y="508" class="node-sub" text-anchor="middle">minimum rate-change gate</text>
@@ -168,7 +168,7 @@
 
   <rect x="600" y="680" width="220" height="80" rx="10" fill="#FFFFFF" stroke="#0B1730" stroke-width="1.5"/>
   <text x="710" y="705" class="node-title" text-anchor="middle">Monitor contracts</text>
-  <text x="710" y="723" class="node-sub" text-anchor="middle">frozen cohorts · evaluator identity</text>
+  <text x="710" y="723" class="node-sub" text-anchor="middle">ingest watermark · evaluator identity</text>
   <text x="710" y="738" class="node-sub" text-anchor="middle">SQLite + PostgreSQL parity</text>
 
   <rect x="840" y="680" width="340" height="80" rx="10" fill="#FFFFFF" stroke="#0B1730" stroke-width="1.5"/>

@@ -6,12 +6,12 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 from verdict.dashboard.control_plane import ControlStore
+from verdict.monitor_inputs import load_monitor_units
 from verdict.monitoring import (
     MonitorPolicy,
     compare_manifest,
     plan_historical_manifest,
     plan_prospective_manifest,
-    trace_monitor_units,
 )
 from verdict.schema import DimensionScore, Judgment, Trace, Verdict
 from verdict.service import TENANT, _finding_source_id, _notify, _schedule, run_cycle
@@ -163,6 +163,7 @@ def test_scheduled_monitor_uses_the_frozen_evaluator_and_dimensions(tmp_path) ->
         trace_id = f"historical-{index:03d}"
         storage.insert_trace(Trace(
                 trace_id=trace_id, tenant_id=TENANT,
+                session_id=f"historical-session-{index:03d}",
                 started_at=now + timedelta(minutes=index),
                 prompt_redacted="request", response_redacted="ok",
             ended_at=now + timedelta(minutes=index, seconds=1),
@@ -178,38 +179,34 @@ def test_scheduled_monitor_uses_the_frozen_evaluator_and_dimensions(tmp_path) ->
         "policy", "__verdict_local__:application:trace",
         reference_ratio=0.5, minimum_reference=5, minimum_current=5,
         prospective_target=10, minimum_effect=0.5,
+        analysis_unit="session",
         evaluator_fingerprint=selected, evaluator_dimensions=("quality",),
     )
-    judgments = {
-        row.trace_id: row
-        for row in storage.list_latest_judgments_for_evaluator(
-            TENANT, selected, limit=100,
-        )
-    }
-    historical_units = trace_monitor_units(
-        storage.list_traces(tenant_id=TENANT, limit=100),
-        judgments_by_trace=judgments, evaluator_dimensions=("quality",),
-    )
+    historical_units = load_monitor_units(storage, policy, tenant_id=TENANT)
     historical = plan_historical_manifest(
         historical_units, policy, cutoff=now + timedelta(hours=1),
     )
-    storage.save_monitor_policy(policy)
-    storage.save_monitor_snapshot(
-        policy.policy_id, historical,
+    storage.save_monitor_candidate(
+        policy, historical,
         compare_manifest(historical_units, historical, policy),
+    )
+    collecting = plan_prospective_manifest(
+        historical, (), policy,
+        prospective_start_at=now + timedelta(hours=1),
+        prospective_start_sequence=storage.trace_ingest_watermark(),
+    )
+    storage.save_monitor_successor(
+        policy.policy_id, historical.snapshot_id, collecting,
+        compare_manifest((), collecting, policy), expected_state="candidate",
     )
     storage.activate_monitor_policy(
         policy.scope_key, policy.policy_id, expected_active_policy_id=None,
-    )
-    collecting = plan_prospective_manifest(historical, historical_units, policy)
-    storage.save_monitor_snapshot(
-        policy.policy_id, collecting,
-        compare_manifest(historical_units, collecting, policy),
     )
     for index in range(10):
         trace_id = f"current-{index:03d}"
         storage.insert_trace(Trace(
                 trace_id=trace_id, tenant_id=TENANT,
+                session_id=f"current-session-{index:03d}",
                 started_at=now + timedelta(hours=2, minutes=index),
                 ended_at=now + timedelta(hours=2, minutes=index, seconds=1),
                 prompt_redacted="request", response_redacted="ok",

@@ -190,10 +190,13 @@ Restart an older producer with the upgraded SDK before enabling shipping;
 shipping itself does not run analysis, judges, clustering, or monitors. See
 [`examples/agent_sdk.py`](examples/agent_sdk.py) for a runnable local example.
 
-An initial monitor proposal uses exact event-time membership. The count-mode
-default is an older 80% reference and newer 20% current cohort; explicit date
-ranges are also supported. Membership and the normalized metric counts used by
-the comparison are frozen together. In-flight traces are excluded. An ongoing
+An initial monitor proposal uses sessions by default; agent runs are also
+supported. It never treats multiple calls from the same selected unit as
+independent evidence. The count-mode default is an older 80% reference and
+newer 20% current cohort; explicit date ranges are also supported. Historical
+membership uses the unit's earliest trace event time. Membership and the
+normalized metric counts used by the comparison are frozen together. In-flight
+traces are excluded. An ongoing
 cohort that uses a selected evaluator keeps its membership fixed while it waits
 for stored evaluator results needed by like-for-like metric cells; it cannot
 report “no drift” while those results are pending. Unassigned and new groups
@@ -215,8 +218,10 @@ visible as reference-coverage risk.
 Grouped monitors support at most 250 distinct groups and reject larger
 comparisons before saving a snapshot.
 Activating a reviewed preview freezes its reference but starts an empty
-prospective current bucket; the preview itself can never become an
-authoritative alert. Scheduled looks use a summable
+prospective current bucket. A durable ingestion watermark, not a trace's
+possibly skewed or backfilled event time, separates pre-activation history from
+new traffic; the preview itself can never become an authoritative alert.
+Scheduled looks use a summable
 quadratic alpha-spending rule in addition to within-look Benjamini-Hochberg
 correction. After activating one reviewed policy, schedule
 the idempotent one-shot runner with cron or your existing scheduler:
@@ -230,7 +235,8 @@ service all construct monitor inputs from the same frozen evaluator and grouping
 identity. They use stored judgments only and never invoke a judge implicitly.
 Stored monitors that predate frozen cohort facts remain readable but must be
 re-created from a reviewed preview before they can run again. The same applies
-to older evaluator-backed monitors that cannot represent pending finalization.
+to trace/turn monitors, monitors without an ingestion watermark, and older
+evaluator-backed monitors that cannot represent pending finalization.
 
 ## Runs key-free; add a key for the judge (BYOK)
 
@@ -675,9 +681,10 @@ source. See [`ADR-013`](docs/adrs/013-stable-dependent-package-read-port.md).
   charts, and drift rows. Semantic/hybrid rows keep the experimental disclosure
   above.
 - Monitor freezes a reviewed historical comparison, then records an immutable
-  activation event time and starts an empty prospective bucket. Older events
-  imported later are excluded from that bucket. Historical and prospective
-  comparisons use the same result contract, all traffic is the default, and
+  ingestion watermark and starts an empty prospective bucket. Traces already
+  stored at activation are excluded even when their event time is in the
+  future; newly stored backdated traces remain eligible. Historical and
+  prospective comparisons use the same result contract, all traffic is the default, and
   provider/model or reviewed clusters are optional facets. Existing
   fixed-window `DriftRun` and `DriftSignal` rows are read-only legacy history.
   Evaluator requests are sequenced and cancelled; a failed switch explicitly

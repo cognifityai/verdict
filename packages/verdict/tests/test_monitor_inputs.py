@@ -196,6 +196,23 @@ def test_internal_judge_and_replay_traces_are_not_monitor_units(storage) -> None
     ) == ()
 
 
+def test_canonical_input_projection_counts_one_unit_per_session(storage) -> None:
+    for index in range(2):
+        storage.insert_trace(Trace(
+            trace_id=f"trace-{index}", tenant_id=TENANT,
+            session_id="shared-session", started_at=NOW + timedelta(seconds=index),
+            ended_at=NOW + timedelta(seconds=index + 1),
+            response_redacted="ok" if index == 0 else "",
+        ))
+    policy = MonitorPolicy("session-policy", "scope", analysis_unit="session")
+
+    [unit] = load_monitor_units(storage, policy, tenant_id=TENANT)
+
+    assert unit.unit_id.startswith("session:")
+    assert unit.metrics["response_empty"] is True
+    assert unit.ingest_sequence == 1
+
+
 def test_cluster_monitor_projects_new_traces_through_its_pinned_version(storage) -> None:
     storage.insert_trace(
         Trace(
@@ -367,11 +384,13 @@ def test_losing_monitor_runner_returns_winner_without_advancing_another_cohort(
         policy = MonitorPolicy(
             "policy", "scope", reference_ratio=0.5,
             minimum_reference=1, minimum_current=1, prospective_target=1,
+            analysis_unit="session",
         )
         for index in range(2):
             started = NOW + timedelta(seconds=index)
             storage.insert_trace(Trace(
                 trace_id=f"historical-{index}", tenant_id=TENANT,
+                session_id=f"historical-session-{index}",
                 started_at=started, ended_at=started + timedelta(milliseconds=1),
             ))
         units = load_monitor_units(storage, policy, tenant_id=TENANT)
@@ -383,6 +402,7 @@ def test_losing_monitor_runner_returns_winner_without_advancing_another_cohort(
         )
         prepared = plan_prospective_manifest(
             historical, (), policy, prospective_start_at=NOW + timedelta(seconds=2),
+            prospective_start_sequence=storage.trace_ingest_watermark(),
         )
         storage.save_monitor_successor(
             policy.policy_id,
@@ -396,9 +416,11 @@ def test_losing_monitor_runner_returns_winner_without_advancing_another_cohort(
         )
         storage.insert_trace(Trace(
             trace_id="new", tenant_id=TENANT,
+            session_id="new-session",
             started_at=NOW + timedelta(seconds=3),
             ended_at=NOW + timedelta(seconds=4),
         ))
+        expected_unit_id = load_monitor_units(storage, policy, tenant_id=TENANT)[-1].unit_id
         save_successor = storage.save_monitor_successor
 
         def lose_to_equivalent_winner(*args, **kwargs):
@@ -409,7 +431,7 @@ def test_losing_monitor_runner_returns_winner_without_advancing_another_cohort(
 
         manifest, _comparison = advance_monitor(storage, policy, tenant_id=TENANT)
 
-        assert manifest.current_unit_ids == ("new",)
+        assert manifest.current_unit_ids == (expected_unit_id,)
         assert manifest.prospective_open is False
         assert storage.get_latest_monitor_snapshot(policy.policy_id)[0] == manifest
     finally:

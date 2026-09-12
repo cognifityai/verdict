@@ -328,7 +328,12 @@ like the source telemetry store.
 
 After import, open **Monitor**. Preview either count cohorts (older 80% versus
 newer 20% by default) or explicit event-time ranges. Verdict freezes exact
-membership before computing outcomes. Under **Measurement**, keep the
+membership before computing outcomes. Choose **Session** (the default) or
+**Agent run** as the analysis unit. Every eligible trace must have the selected
+`session_id` or `verdict.agent_run_id`; Verdict will not count missing identities
+as separate calls. A session/run contributes one Boolean result per metric:
+any operational failure fails it, and every evaluable member must pass for a
+judge dimension to pass. Under **Measurement**, keep the
 deterministic trace checks or select one existing complete evaluator. Selecting
 an evaluator compares its already-stored per-dimension PASS/FAIL results; it
 does not invoke the judge. UNCLEAR, missing, and error results are shown as
@@ -350,8 +355,10 @@ cell has enough eligible completed LLM calls, Verdict reports
 support threshold, it reports `reference_stale`.
 Previewed comparisons remain exploratory until explicitly activated.
 Activation does not promote the historical preview result: it freezes the
-reference and opens an empty prospective current bucket. In-flight traces are
-excluded from monitor evidence.
+reference and opens an empty prospective current bucket. The boundary is a
+durable ingestion watermark, so a future-dated trace already in storage stays
+historical and a newly ingested backdated trace remains eligible. In-flight
+traces are excluded from monitor evidence.
 
 To run the active policy from cron, systemd, Kubernetes, or another scheduler:
 
@@ -717,11 +724,13 @@ the other captured workloads.
   authorized registry tenant rather than trusting a browser query parameter;
   that same value projects the active assignments and stable labels throughout
   the rest of the dashboard.
-- **Cohorts use event time.** Monitor uses the trace's captured event time, not
-  the time a judgment or import was written. A historical preview freezes its
-  selected membership and normalized facts. Activation records an event-time
-  boundary and opens an empty prospective bucket, so older imported events do
-  not become new traffic. A selected evaluator uses the latest attempt per trace
+- **Historical cohorts use event time; activation uses ingestion order.** A
+  historical preview assigns each session/run by its earliest captured event
+  time and freezes its selected membership and normalized facts. Activation
+  records the current durable trace-ingestion watermark and opens an empty
+  prospective bucket. Only units first ingested after that watermark can enter,
+  regardless of their event timestamps. A selected evaluator uses the latest
+  attempt per trace
   for one complete evaluator identity:
   provider, model list, rubric name/version, behavior-relevant configuration,
   expected dimensions, and immutable prompt/rubric fingerprint. A latest judge

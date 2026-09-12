@@ -37,6 +37,10 @@ TENANT = LOCAL_TENANT
 SCOPE = LOCAL_TRACE_SCOPE
 
 _BOUNDED_MONITOR_ERRORS = {
+    "monitor analysis unit must be session or run": (
+        "Monitor requires session or run units so correlated calls are not counted "
+        "as independent evidence."
+    ),
     "monitor grouping exceeds 250 groups": (
         "Monitor supports at most 250 groups. Choose no grouping or reduce the "
         "number of provider/model or cluster groups."
@@ -49,7 +53,14 @@ _BOUNDED_MONITOR_ERRORS = {
 
 
 def _error_response(exc: Exception, fallback: str) -> JSONResponse:
-    message = _BOUNDED_MONITOR_ERRORS.get(str(exc), fallback)
+    detail = str(exc)
+    message = _BOUNDED_MONITOR_ERRORS.get(detail, fallback)
+    if "missing a valid session identity" in detail:
+        message = "Session monitoring requires session_id on every eligible trace."
+    elif "missing a valid run identity" in detail:
+        message = (
+            "Run monitoring requires verdict.agent_run_id on every eligible trace."
+        )
     return JSONResponse({"error": message}, status_code=400)
 
 
@@ -70,6 +81,7 @@ def _prepared_activation_snapshot(historical, latest):
         or prepared.pending_evaluator_units
         or not prepared.prospective_open
         or prepared.prospective_start_at is None
+        or prepared.prospective_start_sequence is None
         or prepared.consumed_unit_ids
         != (*approved.consumed_unit_ids, *prepared.current_unit_ids)
     ):
@@ -93,6 +105,9 @@ class MonitorRoutes:
         cluster_registry_version_id: str | None = None,
     ) -> MonitorPolicy:
         mode = WindowMode(payload.get("windowMode", "count"))
+        analysis_unit = payload.get("analysisUnit", "session")
+        if analysis_unit not in {"session", "run"}:
+            raise ValueError("monitor analysis unit must be session or run")
         values: dict[str, Any] = {
             "policy_id": policy_id,
             "scope_key": SCOPE,
@@ -104,7 +119,7 @@ class MonitorRoutes:
             "p_threshold": float(payload.get("pThreshold", 0.05)),
             "minimum_effect": float(payload.get("minimumEffect", 0.1)),
             "maximum_unseen_group_share": float(payload.get("maximumUnseenShare", 0.2)),
-            "analysis_unit": payload.get("analysisUnit", "trace"),
+            "analysis_unit": analysis_unit,
             "grouping_mode": payload.get("groupingMode", "none"),
             "evaluator_fingerprint": evaluator_fingerprint,
             "evaluator_dimensions": evaluator_dimensions,
@@ -279,6 +294,8 @@ class MonitorRoutes:
                 stored = writable.get_monitor_policy(policy_id)
                 if stored is None or stored[1] != "candidate":
                     raise ValueError("unknown policy")
+                if stored[0].analysis_unit not in {"session", "run"}:
+                    raise ValueError("monitor analysis unit must be session or run")
                 historical = writable.get_initial_monitor_snapshot(policy_id)
                 if historical is None:
                     raise ValueError("candidate has no snapshot")
@@ -302,6 +319,7 @@ class MonitorRoutes:
                         (),
                         stored[0],
                         prospective_start_at=datetime.now(timezone.utc),
+                        prospective_start_sequence=writable.trace_ingest_watermark(),
                     )
                     comparison = compare_manifest((), manifest, stored[0])
                     try:

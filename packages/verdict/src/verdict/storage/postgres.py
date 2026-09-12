@@ -147,6 +147,14 @@ CREATE INDEX IF NOT EXISTS idx_traces_cluster  ON traces(cluster_id);
 CREATE INDEX IF NOT EXISTS idx_traces_tenant   ON traces(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_traces_started  ON traces(started_at);
 
+CREATE TABLE IF NOT EXISTS trace_ingest_order (
+    ingest_sequence BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    trace_id TEXT NOT NULL UNIQUE REFERENCES traces(trace_id) ON DELETE CASCADE
+);
+INSERT INTO trace_ingest_order(trace_id)
+    SELECT trace_id FROM traces ORDER BY started_at, trace_id
+    ON CONFLICT(trace_id) DO NOTHING;
+
 CREATE TABLE IF NOT EXISTS agent_run_bundles (
     tenant_id TEXT NOT NULL CHECK(octet_length(tenant_id) BETWEEN 1 AND 256),
     run_id TEXT NOT NULL CHECK(octet_length(run_id) BETWEEN 1 AND 256),
@@ -794,6 +802,11 @@ class PostgresStorage:
                 trace.analysis_raw_messages_utf8_bytes,
                 trace.analysis_raw_messages_state,
             ),
+        )
+        cur.execute(
+            "INSERT INTO trace_ingest_order(trace_id) VALUES (%s) "
+            "ON CONFLICT(trace_id) DO NOTHING",
+            (trace.trace_id,),
         )
 
     def insert_trace(self, trace: Trace) -> None:
@@ -1736,6 +1749,36 @@ class PostgresStorage:
             tuple(params),
         )
         return [self._row_to_trace(r) for r in rows]
+
+    def list_traces_with_ingest_sequence(
+        self,
+        *,
+        tenant_id: str | None = None,
+        cluster_id: str | None = None,
+        limit: int = 100,
+    ) -> list[tuple[Trace, int]]:
+        clauses, params = [], []
+        if tenant_id is not None:
+            clauses.append(_trace_tenant_clause(tenant_id, "traces.tenant_id"))
+            params.append(tenant_id)
+        if cluster_id is not None:
+            clauses.append("traces.cluster_id = %s")
+            params.append(cluster_id)
+        where = "WHERE " + " AND ".join(clauses) if clauses else ""
+        params.append(limit)
+        rows = self._fetchall(
+            f"SELECT {self._TRACE_COLUMNS}, trace_ingest_order.ingest_sequence "
+            "FROM traces JOIN trace_ingest_order USING(trace_id) "
+            f"{where} ORDER BY traces.started_at DESC LIMIT %s",
+            tuple(params),
+        )
+        return [(self._row_to_trace(row), int(row[-1])) for row in rows]
+
+    def trace_ingest_watermark(self) -> int:
+        row = self._fetchone(
+            "SELECT COALESCE(MAX(ingest_sequence), 0) FROM trace_ingest_order", (),
+        )
+        return int(row[0])
 
     def delete_trace(self, trace_id: str) -> None:
         # Judgments cascade via ON DELETE CASCADE. Spans do not declare an FK,

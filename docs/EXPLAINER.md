@@ -75,11 +75,13 @@ does not duplicate it.
    Evaluator Lab runs display activity and elapsed time while completed results
    are stored.
 5. **Monitor**: preview count-based or explicit event-time reference/current
-   cohorts, then optionally activate the reviewed policy. Activation opens an
-   empty prospective bucket at a stored event-time boundary, so older imported
-   history cannot become new traffic. Fisher's exact test, practical-effect
-   thresholds, and multiple-testing correction are applied to eligible binary
-   metrics. Grouping is optional.
+   cohorts, then optionally activate the reviewed policy. Each session or agent
+   run contributes one binary outcome per metric. Activation opens an empty
+   prospective bucket at a stored trace-ingestion watermark, so traffic already
+   present cannot be misclassified as new merely because its timestamp is in
+   the future. Fisher's
+   exact test, practical-effect thresholds, and multiple-testing correction are
+   applied to eligible binary metrics. Grouping is optional.
 6. **Inspect**: use the CLI, Python APIs, or dashboard to review traces, scores,
    clusters, and drift reports.
 

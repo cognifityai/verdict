@@ -155,6 +155,13 @@ CREATE INDEX IF NOT EXISTS idx_traces_tenant_analysis_pending_v2
     WHERE analysis_started_at_state='pending'
        OR analysis_raw_messages_state='pending';
 
+CREATE TABLE IF NOT EXISTS trace_ingest_order (
+    ingest_sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    trace_id TEXT NOT NULL UNIQUE REFERENCES traces(trace_id) ON DELETE CASCADE
+);
+INSERT OR IGNORE INTO trace_ingest_order(trace_id)
+    SELECT trace_id FROM traces ORDER BY rowid;
+
 CREATE TABLE IF NOT EXISTS agent_run_bundles (
     tenant_id TEXT NOT NULL CHECK(length(CAST(tenant_id AS BLOB)) BETWEEN 1 AND 256),
     run_id TEXT NOT NULL CHECK(length(CAST(run_id AS BLOB)) BETWEEN 1 AND 256),
@@ -1215,6 +1222,10 @@ class SQLiteStorage:
                     "analysis_raw_messages_state": trace.analysis_raw_messages_state,
                 },
             )
+            self._conn.execute(
+                "INSERT OR IGNORE INTO trace_ingest_order(trace_id) VALUES (?)",
+                (trace.trace_id,),
+            )
 
     def _row_to_trace(self, row: sqlite3.Row) -> Trace:
         return Trace(
@@ -1784,6 +1795,39 @@ class SQLiteStorage:
             )
             rows = cur.fetchall()
         return [self._row_to_trace(r) for r in rows]
+
+    def list_traces_with_ingest_sequence(
+        self,
+        *,
+        tenant_id: str | None = None,
+        cluster_id: str | None = None,
+        limit: int = 100,
+    ) -> list[tuple[Trace, int]]:
+        clauses = []
+        params: list[object] = []
+        if tenant_id is not None:
+            clauses.append(_trace_tenant_clause(tenant_id, "traces.tenant_id"))
+            params.append(tenant_id)
+        if cluster_id is not None:
+            clauses.append("traces.cluster_id = ?")
+            params.append(cluster_id)
+        where = "WHERE " + " AND ".join(clauses) if clauses else ""
+        params.append(limit)
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT traces.*, trace_ingest_order.ingest_sequence "
+                "FROM traces JOIN trace_ingest_order USING(trace_id) "
+                f"{where} ORDER BY traces.started_at DESC LIMIT ?",
+                params,
+            ).fetchall()
+        return [(self._row_to_trace(row), row["ingest_sequence"]) for row in rows]
+
+    def trace_ingest_watermark(self) -> int:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COALESCE(MAX(ingest_sequence), 0) FROM trace_ingest_order"
+            ).fetchone()
+        return int(row[0])
 
     def delete_trace(self, trace_id: str) -> None:
         with self._lock:

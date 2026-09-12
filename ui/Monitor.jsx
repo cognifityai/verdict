@@ -102,7 +102,7 @@ export function Monitor({ configUrl, evaluation = {}, initialState = null, view 
   const [form, setForm] = useState({
     windowMode: "count", referenceRatio: 0.8, minimumReference: 30,
     minimumCurrent: 30, prospectiveTarget: 30, minimumEffect: 0.1,
-    analysisUnit: "trace", groupingMode: "none",
+    analysisUnit: "session", groupingMode: "none",
     evaluatorFingerprint: "",
     referenceStart: "", referenceEnd: "", currentStart: "", currentEnd: "",
   });
@@ -143,11 +143,11 @@ export function Monitor({ configUrl, evaluation = {}, initialState = null, view 
     {view === "history" && <section className="border p-5" style={box}>
       <div className="text-xs font-mono" style={{ color: "#4ee1aa" }}>POLICY LIFECYCLE</div>
       <h2 className="text-lg font-semibold mt-1">Explore first, then activate one immutable monitor</h2>
-      <p className="text-sm mt-2" style={{ color: "#94a39d" }}>Membership is chosen from event time before metric outcomes are compared. No clustering is required. Preview is exploratory; only an activated policy can become authoritative.</p>
+      <p className="text-sm mt-2" style={{ color: "#94a39d" }}>Each session or run contributes one result. Event time orders historical cohorts; stored ingestion order separates traffic seen before and after activation. Preview is exploratory; only an activated policy can become authoritative.</p>
       <div className="grid sm:grid-cols-2 gap-4 mt-5">
         <label className="text-sm">Window mode<select value={form.windowMode} onChange={(event) => update("windowMode", event.target.value)} className="block w-full mt-1 border p-2 bg-transparent"><option value="count">Count cohorts</option><option value="explicit">Explicit date ranges</option></select></label>
         {form.windowMode === "count" && <label className="text-sm">Reference share<input type="number" min="0.5" max="0.95" step="0.05" value={form.referenceRatio} onChange={(event) => update("referenceRatio", Number(event.target.value))} className="block w-full mt-1 border p-2 bg-transparent" /></label>}
-        <label className="text-sm">Analysis unit<select value={form.analysisUnit} onChange={(event) => update("analysisUnit", event.target.value)} className="block w-full mt-1 border p-2 bg-transparent"><option value="trace">Genuine model call</option></select></label>
+        <label className="text-sm">Analysis unit<select value={form.analysisUnit} onChange={(event) => update("analysisUnit", event.target.value)} className="block w-full mt-1 border p-2 bg-transparent"><option value="session">Session (recommended)</option><option value="run">Agent run</option></select></label>
         <label className="text-sm">Measurement<select value={form.evaluatorFingerprint} onChange={(event) => update("evaluatorFingerprint", event.target.value)} className="block w-full mt-1 border p-2 bg-transparent"><option value="">Deterministic trace checks only</option>{evaluators.map((identity) => <option key={identity.fingerprint} value={identity.fingerprint}>{identity.label}</option>)}</select><span className="block text-xs mt-1" style={{ color: "#94a39d" }}>{form.evaluatorFingerprint ? "Compares existing stored judgments; this monitor makes no judge calls." : "Compares provider errors, empty responses, and refusal-like language."}</span></label>
         <label className="text-sm">Comparison facet<select value={form.groupingMode} onChange={(event) => update("groupingMode", event.target.value)} className="block w-full mt-1 border p-2 bg-transparent"><option value="none">All eligible calls (recommended)</option><option value="provider_model">Provider and model</option><option value="cluster">Active reviewed cluster</option></select></label>
         {form.windowMode === "explicit" && ["referenceStart", "referenceEnd", "currentStart", "currentEnd"].map((name) => <label key={name} className="text-sm">{name.replace(/([A-Z])/g, " $1")}<input type="datetime-local" value={form[name]} onChange={(event) => update(name, event.target.value)} className="block w-full mt-1 border p-2 bg-transparent" /></label>)}

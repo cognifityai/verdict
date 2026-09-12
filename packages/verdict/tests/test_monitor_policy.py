@@ -17,7 +17,7 @@ from verdict.monitoring import (
     plan_prospective_manifest,
     trace_monitor_units,
 )
-from verdict.schema import Trace
+from verdict.schema import DimensionScore, Judgment, Trace, Verdict
 
 NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
@@ -365,6 +365,57 @@ def test_prospective_activation_boundary_is_inclusive_and_survives_round_trip() 
     assert restored.current_unit_ids == ("at",)
     assert completed.current_unit_ids == ("at", "delayed")
     assert "before" not in completed.consumed_unit_ids
+
+
+def test_ingest_sequence_not_event_time_defines_the_prospective_boundary() -> None:
+    policy = MonitorPolicy(
+        "p", "scope", reference_ratio=0.5,
+        minimum_reference=1, minimum_current=1, prospective_target=2,
+    )
+    historical = plan_historical_manifest(
+        (
+            AnalysisUnitRecord(
+                "historical-1", NOW, {"failed": False}, ingest_sequence=1,
+            ),
+            AnalysisUnitRecord(
+                "historical-2", NOW + timedelta(seconds=1), {"failed": False},
+                ingest_sequence=2,
+            ),
+        ),
+        policy,
+        cutoff=NOW + timedelta(seconds=2),
+    )
+    activated_at = NOW + timedelta(days=10)
+    rows = (
+        AnalysisUnitRecord(
+            "preexisting-future-event",
+            activated_at + timedelta(days=365),
+            {"failed": True},
+            ingest_sequence=2,
+        ),
+        AnalysisUnitRecord(
+            "post-activation-backfill",
+            activated_at - timedelta(days=365),
+            {"failed": False},
+            ingest_sequence=3,
+        ),
+    )
+
+    manifest = plan_prospective_manifest(
+        historical,
+        rows,
+        policy,
+        prospective_start_at=activated_at,
+        prospective_start_sequence=2,
+    )
+    restored, _ = monitor_snapshot_from_json(
+        monitor_snapshot_to_json(manifest, compare_manifest(rows, manifest, policy))
+    )
+
+    assert manifest.current_unit_ids == ("post-activation-backfill",)
+    assert "preexisting-future-event" not in manifest.consumed_unit_ids
+    assert manifest.late_unit_count == 1
+    assert restored.prospective_start_sequence == 2
 
 
 def test_post_activation_trace_can_arrive_after_a_newer_cohort() -> None:
@@ -966,6 +1017,183 @@ def test_provider_model_group_identity_is_unambiguous_and_bounded() -> None:
     assert units[0].group_model == "c"
     assert units[3].group_id != units[4].group_id
     assert units[3].group_model == units[4].group_model == "unknown"
+
+
+def test_session_analysis_rolls_correlated_traces_into_one_boolean_unit() -> None:
+    traces = (
+        Trace(
+            trace_id="first", session_id="session-a", started_at=NOW,
+            ended_at=NOW + timedelta(seconds=1), response_redacted="ok",
+        ),
+        Trace(
+            trace_id="second", session_id="session-a",
+            started_at=NOW + timedelta(seconds=2),
+            ended_at=NOW + timedelta(seconds=3), response_redacted="",
+            error="provider failed",
+        ),
+        Trace(
+            trace_id="third", session_id="session-b",
+            started_at=NOW + timedelta(seconds=4),
+            ended_at=NOW + timedelta(seconds=5), response_redacted="ok",
+        ),
+    )
+    sequences = {"first": 3, "second": 4, "third": 5}
+
+    units = trace_monitor_units(
+        reversed(traces), analysis_unit="session", ingest_sequences=sequences,
+    )
+
+    assert len(units) == 2
+    first_session = min(units, key=lambda unit: unit.event_time)
+    assert first_session.metrics == {
+        "provider_error": True,
+        "refusal_signature": False,
+        "response_empty": True,
+    }
+    assert first_session.ingest_sequence == 3
+    assert units == trace_monitor_units(
+        traces, analysis_unit="session", ingest_sequences=sequences,
+    )
+
+
+def test_session_and_run_analysis_fail_closed_without_the_selected_identity() -> None:
+    trace = Trace(
+        trace_id="missing", started_at=NOW,
+        ended_at=NOW + timedelta(seconds=1), response_redacted="ok",
+    )
+
+    with pytest.raises(ValueError, match="session identity"):
+        trace_monitor_units((trace,), analysis_unit="session")
+    with pytest.raises(ValueError, match="run identity"):
+        trace_monitor_units((trace,), analysis_unit="run")
+
+
+def test_session_judge_pass_requires_every_evaluable_trace_to_pass() -> None:
+    traces = tuple(
+        Trace(
+            trace_id=f"trace-{index}", session_id="session-a",
+            started_at=NOW + timedelta(seconds=index),
+            ended_at=NOW + timedelta(seconds=index + 1),
+            prompt_redacted="request", response_redacted="ok",
+        )
+        for index in range(2)
+    )
+    judgments = {
+        trace.trace_id: Judgment(
+            judgment_id=f"judgment-{index}", trace_id=trace.trace_id,
+            evaluator_provider="anthropic", judge_models=["judge"],
+            evaluator_fingerprint="a" * 64, expected_dimensions=["quality"],
+            dimensions=[DimensionScore(
+                "quality", Verdict.PASS if index == 0 else Verdict.FAIL,
+            )],
+        )
+        for index, trace in enumerate(traces)
+    }
+
+    [unit] = trace_monitor_units(
+        traces, analysis_unit="session", judgments_by_trace=judgments,
+        evaluator_dimensions=("quality",),
+    )
+
+    assert unit.metrics["judge.quality.pass"] is False
+    assert unit.metric_states["judge.quality.pass"] == "fail"
+
+
+def test_run_analysis_uses_agent_run_identity_and_unassigns_mixed_groups() -> None:
+    traces = (
+        Trace(
+            trace_id="first", started_at=NOW,
+            ended_at=NOW + timedelta(seconds=1), provider="openai",
+            request_model="model-a", response_redacted="ok",
+            tags={"verdict.agent_run_id": "run-a"},
+        ),
+        Trace(
+            trace_id="second", started_at=NOW + timedelta(seconds=2),
+            ended_at=NOW + timedelta(seconds=3), provider="anthropic",
+            request_model="model-b", response_redacted="ok",
+            tags={"verdict.agent_run_id": "run-a"},
+        ),
+    )
+
+    [unit] = trace_monitor_units(
+        traces, analysis_unit="run", grouping_mode="provider_model",
+    )
+
+    assert unit.unit_id.startswith("run:")
+    assert unit.group_id is None
+    assert unit.group_label is None
+
+
+def test_one_long_failing_session_cannot_masquerade_as_many_independent_failures() -> None:
+    reference = tuple(
+        Trace(
+            trace_id=f"reference-{index}",
+            session_id=f"reference-session-{index}",
+            started_at=NOW + timedelta(minutes=index),
+            ended_at=NOW + timedelta(minutes=index, seconds=1),
+            response_redacted="ok",
+        )
+        for index in range(30)
+    )
+    current_healthy = tuple(
+        Trace(
+            trace_id=f"current-{index}",
+            session_id=f"current-session-{index}",
+            started_at=NOW + timedelta(days=2, minutes=index),
+            ended_at=NOW + timedelta(days=2, minutes=index, seconds=1),
+            response_redacted="ok",
+        )
+        for index in range(29)
+    )
+    correlated_failures = tuple(
+        Trace(
+            trace_id=f"correlated-{index}", session_id="one-failing-session",
+            started_at=NOW + timedelta(days=2, hours=1, seconds=index),
+            ended_at=NOW + timedelta(days=2, hours=1, seconds=index + 1),
+            response_redacted="error", error="provider failed",
+        )
+        for index in range(100)
+    )
+    traces = (*reference, *current_healthy, *correlated_failures)
+    boundaries = {
+        "window_mode": WindowMode.EXPLICIT,
+        "reference_start": NOW,
+        "reference_end": NOW + timedelta(days=1),
+        "current_start": NOW + timedelta(days=2),
+        "current_end": NOW + timedelta(days=3),
+        "minimum_reference": 20,
+        "minimum_current": 20,
+        "minimum_effect": 0.1,
+    }
+    trace_policy = MonitorPolicy("trace", "scope", analysis_unit="trace", **boundaries)
+    session_policy = MonitorPolicy(
+        "session", "scope", analysis_unit="session", **boundaries,
+    )
+    trace_units = trace_monitor_units(traces)
+    session_units = trace_monitor_units(traces, analysis_unit="session")
+
+    trace_result = compare_manifest(
+        trace_units,
+        plan_historical_manifest(
+            trace_units, trace_policy, cutoff=NOW + timedelta(days=4),
+        ),
+        trace_policy,
+    )
+    session_result = compare_manifest(
+        session_units,
+        plan_historical_manifest(
+            session_units, session_policy, cutoff=NOW + timedelta(days=4),
+        ),
+        session_policy,
+    )
+
+    assert trace_result.status is MonitorStatus.ALERT
+    assert session_result.status is MonitorStatus.NO_ALERT
+    [session_error] = [
+        metric for metric in session_result.metrics if metric.metric == "provider_error"
+    ]
+    assert session_error.reference_n == session_error.current_n == 30
+    assert session_error.current_value == pytest.approx(1 / 30)
 
 
 def test_grouped_monitor_rejects_cardinality_before_result_expansion() -> None:
