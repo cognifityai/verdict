@@ -3,12 +3,13 @@ const SECTIONS = {
   explore: new Set(["runs", "calls", "compare"]),
   evaluate: new Set(["results", "lab", "inspect", "review"]),
   monitor: new Set(["status", "signals", "history", "segments", "schedule"]),
+  report: new Set(["management"]),
   settings: new Set(["sources", "alerts", "integrations", "privacy"]),
 };
 
 const DEFAULT_SECTION = {
   overview: "summary", explore: "runs", evaluate: "results",
-  monitor: "status", settings: "sources",
+  monitor: "status", report: "management", settings: "sources",
 };
 
 const LEGACY_ROUTES = {

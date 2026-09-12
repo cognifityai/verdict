@@ -17,6 +17,7 @@ import { Runs } from "./Runs.jsx";
 import { Insights } from "./Insights.jsx";
 import { EvaluatorLab } from "./EvaluatorLab.jsx";
 import { InspectLab } from "./InspectLab.jsx";
+import { ManagementReport } from "./ManagementReport.jsx";
 import { ControlCenter } from "./ControlCenter.jsx";
 import { SetupWizard } from "./SetupWizard.jsx";
 import { initialDashboardTab } from "./source-state.mjs";
@@ -29,7 +30,7 @@ import { formatCaptureRange, formatLatency, timelineTick } from "./presentation-
 // Embedded synthetic sample data. This keeps the static dashboard renderable when
 // no live API is reachable. It is not a benchmark, experiment result, or claim
 // about any provider.
-const SEED = (() => {
+const SEED = /* @__PURE__ */ (() => {
   const tsRows = [
     { hour: 0, anthropic_lat: 2.1, anthropic_err: 0, anthropic_n: 12, openai_lat: 2.4, openai_err: 0, openai_n: 12, google_lat: 2.8, google_err: 0, google_n: 12 },
     { hour: 1, anthropic_lat: 2.0, anthropic_err: 0, anthropic_n: 12, openai_lat: 2.5, openai_err: 0, openai_n: 12, google_lat: 2.9, google_err: 0, google_n: 12 },
@@ -40,11 +41,42 @@ const SEED = (() => {
     { hour: 6, anthropic_lat: 2.4, anthropic_err: 0, anthropic_n: 12, openai_lat: 2.6, openai_err: 0, openai_n: 12, google_lat: 3.1, google_err: 0, google_n: 12 },
     { hour: 7, anthropic_lat: 2.3, anthropic_err: 0, anthropic_n: 12, openai_lat: 2.5, openai_err: 0, openai_n: 12, google_lat: 3.0, google_err: 0, google_n: 12 },
   ];
+  const metric = (calls, failedCalls, inputTokens, outputTokens, costUsd, averageLatencyMs) => ({
+    calls, successfulCalls: calls - failedCalls, failedCalls,
+    successRatePct: Math.round((calls - failedCalls) / calls * 1000) / 10,
+    inputTokens, outputTokens, totalTokens: inputTokens + outputTokens,
+    tokenKnownCalls: calls, costUsd, costKnownCalls: calls,
+    averageLatencyMs, latencyKnownCalls: calls,
+  });
   return {
     meta: {
       runStart: 'sample-data', durationHours: 8, totalTraces: 96, totalJudged: 48,
       totalCost: 0.42, totalCostStatus: 'complete', regressionHour: null,
       providers: 3, clusters: 4, workload: 'sample-service',
+    },
+    managementReport: {
+      schema: "management-report-v1",
+      scope: {
+        firstCapturedAt: "2026-09-04T08:00:00+00:00", latestCapturedAt: "2026-09-11T20:00:00+00:00",
+        ...metric(96, 1, 7230, 28200, 0.42, 2560),
+        latencySampledCalls: 96, p50LatencyMs: 2480, p95LatencyMs: 3220,
+        identifiedApplications: 2, unattributedCalls: 0,
+      },
+      timeline: { availableDates: 8, shownDates: 8, rows:
+        [6, 9, 12, 10, 15, 17, 11, 16].map((calls, index) => ({
+          date: `2026-09-${String(index + 4).padStart(2, "0")}`, calls,
+          totalTokens: calls * 369 + (index === 7 ? 6 : 0), tokenKnownCalls: calls,
+        })),
+      },
+      applications: { availableRows: 2, shownRows: 2, rows: [
+        { name: "support-assistant", environment: "production", attributed: true, ...metric(60, 1, 4500, 17600, 0.27, 2380) },
+        { name: "engineering-copilot", environment: "production", attributed: true, ...metric(36, 0, 2730, 10600, 0.15, 2860) },
+      ] },
+      models: { availableRows: 3, shownRows: 3, rows: [
+        { provider: "anthropic", model: "sample-model-a", ...metric(32, 0, 2400, 9600, 0.19, 2250) },
+        { provider: "openai", model: "sample-model-b", ...metric(32, 0, 2380, 8200, 0.08, 2480) },
+        { provider: "google", model: "sample-model-c", ...metric(32, 1, 2450, 10400, 0.15, 2960) },
+      ] },
     },
     driftAnalysis: {
       runStatus: 'completed_with_signals', readinessStatus: 'global_minimum_met',
@@ -632,6 +664,7 @@ const TAB_HELP = {
   explore: "Inspect Agent Runs and genuine LLM calls, including their evidence and evaluation state. Provider comparison is descriptive unless traffic is matched.",
   evaluate: "Configure evaluators, inspect stored judgments, analyze one-off JSON exports, and review labels. Missing evidence stays not evaluable rather than being scored as a failure.",
   monitor: "Compare historical cohorts, activate ongoing monitoring, and optionally review segments. Earlier fixed-window results remain available as read-only history.",
+  report: "A management-level view of utilization, reliability, quality evidence, and current Monitor state. Exports contain aggregates only.",
   settings: "Configure data sources, schedules, alert destinations, integrations, and privacy controls.",
 };
 
@@ -640,6 +673,7 @@ const WORKSPACE_SECTIONS = {
   explore: [["runs", "Agent Runs & Tools"], ["calls", "LLM Calls"], ["compare", "Compare"]],
   evaluate: [["results", "Results"], ["lab", "Evaluator Lab"], ["inspect", "Inspect JSON"], ["review", "Review Queue"]],
   monitor: [["status", "Status"], ["history", "Compare History"], ["segments", "Segments"], ["schedule", "Schedule"], ["signals", "Legacy History"]],
+  report: [["management", "Management Report"]],
   settings: [["sources", "Data Sources"], ["alerts", "Alerts"], ["integrations", "Integrations"], ["privacy", "Privacy"]],
 };
 
@@ -676,6 +710,7 @@ function TabHelp({ tab, label, text }) {
 }
 
 function WorkspaceNav({ tab, section, onSection }) {
+  if (WORKSPACE_SECTIONS[tab].length === 1) return null;
   return <nav aria-label={`${tab} sections`} className="mb-5 flex overflow-x-auto border-b" style={{ borderColor: C.border }}>
     {WORKSPACE_SECTIONS[tab].map(([id, label]) => <button key={id} onClick={() => onSection(id)}
       className="px-4 py-3 text-sm border-b-2 shrink-0"
@@ -810,6 +845,7 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
     { id: "explore", label: "Explore", icon: Search },
     { id: "evaluate", label: "Evaluate", icon: Scale },
     { id: "monitor", label: "Monitor", icon: Signal, badge: monitorAlertCount(DATA.monitor) },
+    { id: "report", label: "Report", icon: BarChart3 },
     { id: "settings", label: "Settings", icon: Terminal },
   ];
   return (
@@ -957,6 +993,7 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
         {tab === "monitor" && route.section === "history" && <Monitor view="history" initialState={DATA.monitor} configUrl={mountedConfigUrl()} evaluation={data.evaluation} onChanged={onReload} />}
         {tab === "monitor" && route.section === "segments" && <Registry url={mountedRegistryUrl()} operationsUrl={operationsUrl} configUrl={mountedConfigUrl()} />}
         {tab === "monitor" && route.section === "schedule" && <ControlCenter section="schedule" configUrl={mountedConfigUrl()} />}
+        {tab === "report" && route.section === "management" && <ManagementReport data={DATA} source={source} />}
         {tab === "settings" && route.section === "sources" && <SetupWizard configUrl={mountedConfigUrl()} agentSummary={DATA.meta} onRefresh={onReload} onNavigate={(destination) => navigateSetup(commitRoute, route, destination)} onComplete={(setupSource) => { onReload(); commitRoute({ ...route, tab: setupSource === "local" ? "explore" : "overview", section: setupSource === "local" ? "runs" : "summary" }); }} />}
         {tab === "settings" && route.section === "alerts" && <ControlCenter section="alerts" configUrl={mountedConfigUrl()} />}
         {tab === "settings" && route.section === "privacy" && <ControlCenter section="privacy" configUrl={mountedConfigUrl()} />}

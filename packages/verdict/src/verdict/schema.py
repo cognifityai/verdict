@@ -172,6 +172,11 @@ class Trace:
     analysis_raw_messages_utf8_bytes: int | None = None
     analysis_raw_messages_state: str = "pending"
 
+    # Configured application identity. Appended after every published field so
+    # historical positional Trace construction remains compatible.
+    service_name: str = ""
+    environment: str = ""
+
     def __post_init__(self) -> None:
         """Normalize enum and scalar values supplied at the public boundary."""
         self.normalize_scalars()

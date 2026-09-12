@@ -167,8 +167,15 @@ evaluation status, finding severity, and drift comparison independently.
 `not evaluated` and `judge error` are explicit Trace states. A prospective
 monitor distinguishes traffic collection from a full cohort awaiting selected
 evaluator results.
-The dashboard has five top-level workspaces: Overview, Explore, Evaluate,
-Monitor, and Settings. Monitor is the current drift workflow: it shows reviewed
+The dashboard has six top-level workspaces: Overview, Explore, Evaluate,
+Monitor, Report, and Settings. Report summarizes non-judge application calls
+across the newest 31 active UTC dates, the top 20 service/environment rows, and
+the top 20 models. Latency coverage uses every known value; p50/p95 use the
+newest 10,000 known latencies. Configured `service_name` and `environment`
+values are persisted on new instrumented traces; historical and default-client
+traces without an explicit service identity appear as **Unattributed**. HTML,
+CSV, and browser Print/Save PDF outputs contain aggregates only. Monitor is the
+current drift workflow: it shows reviewed
 historical comparisons, the active prospective policy, and optional facets.
 Results created by older fixed-window pipeline releases remain available under
 **Monitor → Legacy History** but are read-only and do not affect current status.
@@ -176,8 +183,8 @@ Results created by older fixed-window pipeline releases remain available under
 The Verdict Python SDK. Auto-instruments your LLM calls via `wrapt` and
 captures them into a vendor-neutral `Trace` schema (attribute *names* follow
 the OpenTelemetry GenAI semantic conventions, but no OTel spans are emitted).
-The same package also imports existing OTLP and vendor telemetry into that
-unchanged schema with the `verdict-import` command.
+The same package also imports existing OTLP and vendor telemetry into the same
+vendor-neutral schema with the `verdict-import` command.
 Traces are written to SQLite by default (or any `Storage` adapter). Content
 capture (prompts/completions) is **on by default** and can be disabled with
 `capture_content=False`; captured content is run through built-in

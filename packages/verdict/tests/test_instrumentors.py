@@ -12,7 +12,12 @@ import random
 from types import SimpleNamespace
 
 import pytest
-from verdict.instrumentors.base import decide_persist, normalize_finish_reason
+from verdict.instrumentors.base import (
+    apply_routing_context,
+    decide_persist,
+    normalize_finish_reason,
+)
+from verdict.schema import Trace
 
 # ---------------------------------------------------------------------------
 # normalize_finish_reason
@@ -77,6 +82,20 @@ def test_errors_are_never_dropped_by_sampling():
     should_persist, is_error = decide_persist(raised=True, should_sample=False)
     assert should_persist is True
     assert is_error is True
+
+
+def test_routing_context_stamps_configured_service_identity():
+    client = SimpleNamespace(
+        tenant_id="tenant-a",
+        service_name="orders-api",
+        environment="staging",
+    )
+    trace = Trace()
+
+    apply_routing_context(client, trace)
+
+    assert trace.service_name == "orders-api"
+    assert trace.environment == "staging"
 
 
 # ---------------------------------------------------------------------------

@@ -28,7 +28,7 @@ function componentStub(names) {
 }
 
 async function loadUiModule() {
-  const source = `${await readFile(UI_SOURCE, "utf8")}\nexport { Dashboard, Overview, DriftSignals, Traces, TraceDetail, TabHelp, Judge, Compare, mountedApiUrl };\nexport { useOperations } from "./Operations.jsx";\nexport { RegistryView } from "./Registry.jsx";\nexport { EvaluatorLab } from "./EvaluatorLab.jsx";\nexport { Runs } from "./Runs.jsx";`;
+  const source = `${await readFile(UI_SOURCE, "utf8")}\nexport { Dashboard, Overview, DriftSignals, Traces, TraceDetail, TabHelp, Judge, Compare, ManagementReport, mountedApiUrl };\nexport { useOperations } from "./Operations.jsx";\nexport { RegistryView } from "./Registry.jsx";\nexport { EvaluatorLab } from "./EvaluatorLab.jsx";\nexport { Runs } from "./Runs.jsx";`;
   const result = await build({
     stdin: {
       contents: source,
@@ -311,6 +311,31 @@ function dashboardElement(tree) {
 function bundle(evaluator, samples = [], driftSignals = []) {
   return {
     meta: { totalTraces: samples.length, totalJudged: 0, workload: null },
+    managementReport: {
+      schema: "management-report-v1",
+      scope: {
+        firstCapturedAt: "2026-09-08T00:00:00+00:00",
+        latestCapturedAt: "2026-09-10T00:03:00+00:00",
+        calls: 28, successfulCalls: 27, failedCalls: 1, successRatePct: 96.4,
+        inputTokens: 2800, outputTokens: 700, totalTokens: 3500,
+        tokenKnownCalls: 28, costUsd: 0.028, costKnownCalls: 27,
+        averageLatencyMs: 1000, latencyKnownCalls: 26,
+        latencySampledCalls: 26, p50LatencyMs: 900, p95LatencyMs: 1800,
+        identifiedApplications: 2, unattributedCalls: 0,
+      },
+      timeline: { availableDates: 2, shownDates: 2, rows: [
+        { date: "2026-09-08", calls: 24, totalTokens: 3000, tokenKnownCalls: 24 },
+        { date: "2026-09-10", calls: 4, totalTokens: 500, tokenKnownCalls: 4 },
+      ] },
+      applications: { availableRows: 2, shownRows: 2, rows: [
+        { name: "orders-api", environment: "production", attributed: true, calls: 24, successfulCalls: 24, failedCalls: 0, successRatePct: 100, inputTokens: 2400, outputTokens: 600, totalTokens: 3000, tokenKnownCalls: 24, costUsd: 0.024, costKnownCalls: 24, averageLatencyMs: 900, latencyKnownCalls: 24 },
+        { name: "billing-worker", environment: "staging", attributed: true, calls: 4, successfulCalls: 3, failedCalls: 1, successRatePct: 75, inputTokens: 400, outputTokens: 100, totalTokens: 500, tokenKnownCalls: 4, costUsd: 0.004, costKnownCalls: 3, averageLatencyMs: 1600, latencyKnownCalls: 2 },
+      ] },
+      models: { availableRows: 2, shownRows: 2, rows: [
+        { provider: "openai", model: "gpt-5-mini", calls: 24, successfulCalls: 24, failedCalls: 0, successRatePct: 100, inputTokens: 2400, outputTokens: 600, totalTokens: 3000, tokenKnownCalls: 24, costUsd: 0.024, costKnownCalls: 24, averageLatencyMs: 900, latencyKnownCalls: 24 },
+        { provider: "custom-provider", model: "custom-model-v1", calls: 4, successfulCalls: 3, failedCalls: 1, successRatePct: 75, inputTokens: 400, outputTokens: 100, totalTokens: 500, tokenKnownCalls: 4, costUsd: 0.004, costKnownCalls: 3, averageLatencyMs: 1600, latencyKnownCalls: 2 },
+      ] },
+    },
     evaluation: { selectedId: evaluator, availableIdentities: [] },
     driftAnalysis: {
       runStatus: "no_completed_run", readinessStatus: "not_enough_current",
@@ -371,6 +396,82 @@ test("monitoring lifecycle is one top-level workspace", async () => {
   assert.doesNotMatch(labels, /Drift/);
   assert.doesNotMatch(labels, /Drift signals/);
   assert.doesNotMatch(labels, /Registry/);
+});
+
+test("management reporting is one top-level workspace backed by the current bundle", async () => {
+  const ui = await loadUiModule();
+  globalThis.window = {
+    location: { hash: "#tab=report&section=management", pathname: "/dashboard" },
+    history: { pushState() {}, replaceState() {} },
+    addEventListener() {}, removeEventListener() {},
+  };
+  try {
+    const tree = render(ui.Dashboard, createHooks(), { data: bundle("judge-a"), source: "live" });
+    const navigation = findAll(tree, (node) => node.type === "nav")[0];
+    assert.match(textOf(navigation), /Report/);
+    assert.equal(findAll(
+      tree,
+      (node) => typeof node.type === "function" && node.type.name === "ManagementReport",
+    ).length, 1);
+  } finally { delete globalThis.window; }
+});
+
+test("management report actions emit aggregate downloads and invoke browser printing", async () => {
+  const ui = await loadUiModule();
+  const downloads = [];
+  let printed = false;
+  const originalDocument = globalThis.document;
+  const originalWindow = globalThis.window;
+  const originalCreate = URL.createObjectURL;
+  const originalRevoke = URL.revokeObjectURL;
+  URL.createObjectURL = (blob) => { downloads.push(blob); return `blob:report-${downloads.length}`; };
+  URL.revokeObjectURL = () => {};
+  globalThis.document = {
+    body: { appendChild() {} },
+    createElement: () => ({ click() {}, remove() {} }),
+  };
+  globalThis.window = { print: () => { printed = true; }, setTimeout: (callback) => callback() };
+  try {
+    const tree = render(ui.ManagementReport, createHooks(), { data: bundle("judge-a"), source: "live" });
+    const buttons = findAll(tree, (node) => node.type === "button");
+    buttons.find((button) => textOf(button).includes("Export HTML")).props.onClick();
+    buttons.find((button) => textOf(button).includes("Download CSV")).props.onClick();
+    buttons.find((button) => textOf(button).includes("Print / Save PDF")).props.onClick();
+    assert.equal(downloads.length, 2);
+    assert.equal(downloads[0].type, "text/html;charset=utf-8");
+    assert.equal(downloads[1].type, "text/csv;charset=utf-8");
+    assert.equal(printed, true);
+  } finally {
+    globalThis.document = originalDocument;
+    globalThis.window = originalWindow;
+    URL.createObjectURL = originalCreate;
+    URL.revokeObjectURL = originalRevoke;
+  }
+});
+
+test("management report exposes labeled daily volume and application-level tables", async () => {
+  const ui = await loadUiModule();
+  const tree = render(ui.ManagementReport, createHooks(), {
+    data: bundle("judge-a"), source: "live",
+  });
+  const chartNode = findAll(tree,
+    (node) => typeof node.type === "function" && node.type.name === "VolumeChart")[0];
+  const tableNodes = findAll(tree,
+    (node) => typeof node.type === "function" && node.type.name === "UtilizationTable");
+  const text = [textOf(tree), textOf(render(chartNode.type, createHooks(), chartNode.props)),
+    ...tableNodes.map((node) => textOf(render(node.type, createHooks(), node.props)))].join(" ");
+
+  assert.match(text, /LLM request volume/);
+  assert.match(text, /Sep 08/);
+  assert.match(text, /Sep 10/);
+  assert.match(text, /24/);
+  assert.match(text, /Application LLM utilization by environment/);
+  assert.match(text, /orders-api/);
+  assert.match(text, /Model performance and throughput/);
+  assert.match(text, /gpt-5-mini/);
+  assert.match(text, /Report scope/);
+  assert.doesNotMatch(text, /Capacity & Cost Simulator/);
+  assert.doesNotMatch(text, /Recent LLM activity/);
 });
 
 test("Monitor keeps fixed-window signals as clearly labeled legacy history", async () => {
@@ -534,13 +635,13 @@ test("fixed-window signal cards reject malformed unbounded evidence lists", asyn
     (node) => node.type === "button" && node.props.title?.startsWith("trace-")).length, 5);
 });
 
-test("dashboard exposes only the five product workspaces", async () => {
+test("dashboard exposes only the six product workspaces", async () => {
   const ui = await loadUiModule();
   const tree = render(ui.Dashboard, createHooks(), { data: bundle("judge-a") });
   const navigation = findAll(tree, (node) => node.type === "nav")[0];
   const labels = textOf(navigation);
 
-  for (const label of ["Overview", "Explore", "Evaluate", "Monitor", "Settings"]) {
+  for (const label of ["Overview", "Explore", "Evaluate", "Monitor", "Report", "Settings"]) {
     assert.match(labels, new RegExp(label));
   }
   for (const oldLabel of ["Findings", "Reliability", "Performance", "Behavior", "Agent runs", "Trace explorer", "Judge scores", "Evaluators", "Compare LLMs"]) {

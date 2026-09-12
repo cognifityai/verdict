@@ -977,8 +977,9 @@ def test_composite_presentation_limits_stay_below_redaction_budget(tmp_path):
     assert len(bundle["haikuDim"]) == 100
     assert len(bundle["driftSignals"]) == 40
     assert len(bundle["samples"]) == 30
-    # The bounded page now includes ten scalar deterministic facts per sample.
-    assert count_nodes(bundle) < 9300
+    # Keep headroom below the 10,000-node redaction boundary after including
+    # bounded management application/model summaries.
+    assert count_nodes(bundle) < 9500
 
 
 def test_bundle_filters_drift_by_selected_evaluator_and_excludes_historical_rows(tmp_path):

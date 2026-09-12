@@ -35,7 +35,7 @@ CAPTURE_SCHEMA = "verdict-capture-v1"
 DEFAULT_SEGMENT_BYTES = 8 * 1024 * 1024
 DEFAULT_DIRECTORY_BYTES = 128 * 1024 * 1024
 MAX_RECORD_BYTES = 4 * 1024 * 1024
-_TRACE_TRANSPORT_FIELDS = frozenset(
+_TRACE_TRANSPORT_V1_FIELDS = frozenset(
     {
         "trace_id",
         "parent_span_id",
@@ -63,6 +63,7 @@ _TRACE_TRANSPORT_FIELDS = frozenset(
         "cost_usd",
     }
 )
+_TRACE_TRANSPORT_FIELDS = _TRACE_TRANSPORT_V1_FIELDS | {"service_name", "environment"}
 _SPAN_TRANSPORT_FIELDS = frozenset(
     {
         "span_id",
@@ -187,9 +188,15 @@ def _trace_to_payload(trace: Trace) -> dict[str, Any]:
 
 
 def _trace_from_payload(payload: object) -> Trace:
-    if not isinstance(payload, dict) or set(payload) != _TRACE_TRANSPORT_FIELDS:
+    if (
+        not isinstance(payload, dict)
+        or not _TRACE_TRANSPORT_V1_FIELDS.issubset(payload)
+        or not set(payload).issubset(_TRACE_TRANSPORT_FIELDS)
+    ):
         raise ValueError("agent capture Trace has an invalid shape")
     values = dict(payload)
+    values.setdefault("service_name", "")
+    values.setdefault("environment", "")
     try:
         started_at = datetime.fromisoformat(values.pop("started_at"))
         ended_raw = values.pop("ended_at")

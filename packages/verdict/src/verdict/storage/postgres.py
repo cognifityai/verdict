@@ -139,7 +139,9 @@ CREATE TABLE IF NOT EXISTS traces (
     analysis_started_at_us BIGINT,
     analysis_started_at_state TEXT NOT NULL DEFAULT 'pending',
     analysis_raw_messages_utf8_bytes BIGINT,
-    analysis_raw_messages_state TEXT NOT NULL DEFAULT 'pending'
+    analysis_raw_messages_state TEXT NOT NULL DEFAULT 'pending',
+    service_name TEXT NOT NULL DEFAULT '',
+    environment TEXT NOT NULL DEFAULT ''
 );
 ALTER TABLE traces ADD COLUMN IF NOT EXISTS cluster_id TEXT;
 ALTER TABLE traces ADD COLUMN IF NOT EXISTS parent_span_id TEXT;
@@ -649,6 +651,8 @@ class PostgresStorage:
                     ("analysis_started_at_state", "TEXT NOT NULL DEFAULT 'pending'"),
                     ("analysis_raw_messages_utf8_bytes", "BIGINT"),
                     ("analysis_raw_messages_state", "TEXT NOT NULL DEFAULT 'pending'"),
+                    ("service_name", "TEXT NOT NULL DEFAULT ''"),
+                    ("environment", "TEXT NOT NULL DEFAULT ''"),
                 ]:
                     cur.execute(f"ALTER TABLE traces ADD COLUMN IF NOT EXISTS {col} {ddl}")
                 for col, ddl in [
@@ -739,7 +743,8 @@ class PostgresStorage:
         latency_ms, prompt_redacted, response_redacted, raw_messages,
         tenant_id, session_id, user_id_hash, cluster_id, tags, cost_usd,
         analysis_started_at_us, analysis_started_at_state,
-        analysis_raw_messages_utf8_bytes, analysis_raw_messages_state"""
+        analysis_raw_messages_utf8_bytes, analysis_raw_messages_state,
+        service_name, environment"""
 
     def _insert_trace_cursor(self, cur, trace: Trace) -> None:
         # Only the fixed, class-owned column list is interpolated; every trace
@@ -747,7 +752,7 @@ class PostgresStorage:
         sql = (
             f"INSERT INTO traces ({self._TRACE_COLUMNS}) VALUES ("  # nosec B608
             "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,"
-            "%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s,%s) "
+            "%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s,%s,%s,%s) "
             "ON CONFLICT (trace_id) DO UPDATE SET "
             "ended_at = EXCLUDED.ended_at, "
             "response_model = EXCLUDED.response_model, "
@@ -793,6 +798,8 @@ class PostgresStorage:
                 trace.analysis_started_at_state,
                 trace.analysis_raw_messages_utf8_bytes,
                 trace.analysis_raw_messages_state,
+                trace.service_name,
+                trace.environment,
             ),
         )
 
@@ -834,6 +841,8 @@ class PostgresStorage:
             analysis_started_at_state=row[25],
             analysis_raw_messages_utf8_bytes=row[26],
             analysis_raw_messages_state=row[27],
+            service_name=row[28],
+            environment=row[29],
         )
 
     @staticmethod

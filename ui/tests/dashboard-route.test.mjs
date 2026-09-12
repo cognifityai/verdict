@@ -64,7 +64,14 @@ test("Inspect JSON is a stable Evaluate route", () => {
   assert.equal(serializeDashboardRoute(route), "#tab=evaluate&section=inspect");
 });
 
-test("legacy dashboard destinations redirect into five coherent workspaces", () => {
+test("Management Report is a stable top-level route", () => {
+  const route = parseDashboardRoute("#tab=report&section=management");
+  assert.equal(route.tab, "report");
+  assert.equal(route.section, "management");
+  assert.equal(serializeDashboardRoute(route), "#tab=report&section=management");
+});
+
+test("legacy dashboard destinations redirect into the current workspaces", () => {
   const cases = [
     ["#tab=reliability", "overview", "reliability"],
     ["#tab=performance", "overview", "performance"],

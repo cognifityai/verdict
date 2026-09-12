@@ -56,9 +56,11 @@ present those states without treating missing evidence as success or failure.
   not evaluated, judge error, pass, fail, and unclear.
 - Agent Runs show source outcome, evidence coverage, deterministic findings,
   and selected-evaluator coverage separately.
-- Five top-level workspaces separate concerns: Overview, Explore, Evaluate,
-  Monitor, and Settings. Monitor contains current cohort status, historical
-  comparisons, optional segments, schedules, and read-only legacy history.
+- Six top-level workspaces separate concerns: Overview, Explore, Evaluate,
+  Monitor, Report, and Settings. Report summarizes application calls separately
+  from evaluator traffic and emits aggregate-only management exports. Monitor
+  contains current cohort status, historical comparisons, optional segments,
+  schedules, and read-only legacy history.
 - Fixed-window evaluation signals created by earlier releases remain readable
   for audit and trace navigation. They are not current status, do not contribute
   to Overview or navigation alert counts, and are not produced by the current
@@ -81,8 +83,9 @@ receiver must honor the idempotency key for end-to-end deduplication.
 - Schema initialization is additive for supported SQLite and PostgreSQL
   installations. Legacy serialized agent bundles migrate transactionally into
   normalized source/run/turn/event rows and remain available only for rollback.
-- Existing Trace, SpanRecord, Judgment, DriftSignal, and AgentRunBundle public
-  constructors remain unchanged.
+- Existing public constructors remain backward compatible. Trace appends
+  optional `service_name` and `environment` fields after its published
+  positional fields; the other constructors are unchanged.
 - Existing dashboard response fields remain available while explicit status and
   coverage fields are added.
 - Monitor snapshot JSON adds evaluator-finalization state. PostgreSQL schema

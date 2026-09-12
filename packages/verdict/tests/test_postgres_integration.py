@@ -1497,6 +1497,8 @@ def test_live_postgres_migrates_legacy_tables_before_creating_indexes():
             assert legacy_trace is not None
             assert legacy_trace.tags["verdict.intent_key"] == "billing.v1"
             assert legacy_trace.analysis_started_at_state == "valid"
+            assert legacy_trace.service_name == ""
+            assert legacy_trace.environment == ""
 
             [legacy_health] = storage.list_evaluator_health(
                 evaluator_fingerprint="legacy-evaluator"
@@ -1548,6 +1550,8 @@ def test_live_postgres_round_trip_and_mutation_contracts():
             tenant_id=f"{prefix}-tenant",
             session_id=f"{prefix}-session",
             cluster_id=f"{prefix}-cluster",
+            service_name="orders-api",
+            environment="staging",
             tags={
                 "source": "integration",
                 "peer": "2001:db8:ac1d:5eed::cafe: unavailable",
@@ -1558,6 +1562,8 @@ def test_live_postgres_round_trip_and_mutation_contracts():
         fetched = storage.get_trace(trace_id)
         assert fetched is not None
         assert fetched.parent_span_id == trace.parent_span_id
+        assert fetched.service_name == "orders-api"
+        assert fetched.environment == "staging"
         assert fetched.tags == {"source": "integration", "peer": "<IPV6>: unavailable"}
         assert fetched.prompt_redacted == "Prompt from <IPV6>: timeout"
         assert fetched.response_redacted == "Response to <IPV6>:54321"

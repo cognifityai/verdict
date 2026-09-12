@@ -14,6 +14,7 @@ The aggregation is shared across storage dialects so the browser sees one DTO.
 from __future__ import annotations
 
 import hashlib
+import heapq
 import json
 import logging
 import math
@@ -108,6 +109,9 @@ MAX_DRIFT_SIGNAL_LAYERS = 12
 MAX_DRIFT_SIGNAL_EXAMPLE_TRACES = 5
 MAX_DRIFT_SIGNAL_ACTION_CHARS = 1000
 MAX_PROVIDER_MODELS = 20
+MAX_MANAGEMENT_REPORT_ROWS = 20
+MAX_MANAGEMENT_TIMELINE_DATES = 31
+MAX_MANAGEMENT_LATENCY_SAMPLES = 10_000
 MAX_TRACE_SAMPLES = 30
 # Run detail has stricter record/page bounds than the generic redaction API.
 # These endpoint-only limits cover the maximum valid 50-turn/200-event page
@@ -1538,6 +1542,22 @@ def _empty_bundle(*, agent_runs: dict[str, Any] | None = None) -> dict:
         "focusProviderLabel": None,
         "samples": [],
         "providerDimension": [],
+        "managementReport": {
+            "schema": "management-report-v1",
+            "scope": {
+                **_finish_management_metric(_empty_management_metric()),
+                "firstCapturedAt": None,
+                "latestCapturedAt": None,
+                "latencySampledCalls": 0,
+                "p50LatencyMs": None,
+                "p95LatencyMs": None,
+                "identifiedApplications": 0,
+                "unattributedCalls": 0,
+            },
+            "timeline": {"availableDates": 0, "shownDates": 0, "rows": []},
+            "applications": {"availableRows": 0, "shownRows": 0, "rows": []},
+            "models": {"availableRows": 0, "shownRows": 0, "rows": []},
+        },
         "truncation": truncation,
     }
 
@@ -1645,6 +1665,81 @@ def _trace_samples(
         }
         samples.append(sample)
     return samples, filtered_trace_ids
+
+
+def _empty_management_metric() -> dict[str, Any]:
+    return {
+        "calls": 0,
+        "successfulCalls": 0,
+        "failedCalls": 0,
+        "inputTokens": 0,
+        "outputTokens": 0,
+        "tokenKnownCalls": 0,
+        "costUsd": 0.0,
+        "costKnownCalls": 0,
+        "latencyTotalMs": 0.0,
+        "latencyKnownCalls": 0,
+    }
+
+
+def _nonnegative_number(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) and number >= 0 else None
+
+
+def _record_management_metric(metric: dict[str, Any], row: Mapping[str, Any]) -> None:
+    metric["calls"] += 1
+    if row["error"]:
+        metric["failedCalls"] += 1
+    else:
+        metric["successfulCalls"] += 1
+    input_tokens = _nonnegative_number(row["input_tokens"])
+    output_tokens = _nonnegative_number(row["output_tokens"])
+    if input_tokens is not None:
+        metric["inputTokens"] += int(input_tokens)
+    if output_tokens is not None:
+        metric["outputTokens"] += int(output_tokens)
+    if input_tokens is not None and output_tokens is not None:
+        metric["tokenKnownCalls"] += 1
+    cost = _nonnegative_number(row["cost_usd"])
+    if cost is not None:
+        metric["costUsd"] += cost
+        metric["costKnownCalls"] += 1
+    latency = _nonnegative_number(row["latency_ms"])
+    if latency is not None:
+        metric["latencyTotalMs"] += latency
+        metric["latencyKnownCalls"] += 1
+
+
+def _finish_management_metric(metric: Mapping[str, Any]) -> dict[str, Any]:
+    calls = int(metric["calls"])
+    known_latency = int(metric["latencyKnownCalls"])
+    return {
+        "calls": calls,
+        "successfulCalls": int(metric["successfulCalls"]),
+        "failedCalls": int(metric["failedCalls"]),
+        "successRatePct": round(100 * metric["successfulCalls"] / calls, 1)
+        if calls else None,
+        "inputTokens": int(metric["inputTokens"]),
+        "outputTokens": int(metric["outputTokens"]),
+        "totalTokens": int(metric["inputTokens"] + metric["outputTokens"]),
+        "tokenKnownCalls": int(metric["tokenKnownCalls"]),
+        "costUsd": round(metric["costUsd"], 9) if metric["costKnownCalls"] else None,
+        "costKnownCalls": int(metric["costKnownCalls"]),
+        "averageLatencyMs": round(metric["latencyTotalMs"] / known_latency, 1)
+        if known_latency else None,
+        "latencyKnownCalls": known_latency,
+    }
+
+
+def _nearest_rank(values: list[float], percentile: float) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    index = max(0, math.ceil(percentile * len(ordered)) - 1)
+    return round(ordered[index], 1)
 
 
 def _time_series_read_model(
@@ -1867,6 +1962,24 @@ def _build(
     tags_column = "tags_json" if "tags_json" in trace_columns else (
         "tags" if "tags" in trace_columns else "NULL"
     )
+    service_column = (
+        "service_name" if "service_name" in trace_columns else "'' AS service_name"
+    )
+    response_model_column = (
+        "response_model" if "response_model" in trace_columns else "'' AS response_model"
+    )
+    environment_column = (
+        "environment" if "environment" in trace_columns else "'' AS environment"
+    )
+    management_scope = _empty_management_metric()
+    management_days: dict[str, dict[str, Any]] = {}
+    management_applications: dict[tuple[str | None, str], dict[str, Any]] = {}
+    management_models: dict[tuple[str, str], dict[str, Any]] = {}
+    management_services: set[str] = set()
+    management_unattributed = 0
+    management_first: datetime | None = None
+    management_latest: datetime | None = None
+    management_latencies: list[tuple[datetime, str, float]] = []
     cost_counts = {
         name: {"traces": 0, "priced": 0, "cost": 0.0}
         for name in ("agent", "judge", "unclassified")
@@ -1893,8 +2006,11 @@ def _build(
     for r in cur.execute(
         # ``cluster_select`` is selected from the two literals above; it never
         # contains request data or a database value.
-        "SELECT trace_id, provider, request_model, started_at, cost_usd, "
+        "SELECT trace_id, provider, request_model, "
+        f"{response_model_column}, started_at, "  # nosec B608
+        "input_tokens, output_tokens, error, latency_ms, cost_usd, "
         f"{cluster_select}, {tags_column} AS workload_tags, "  # nosec B608
+        f"{service_column}, {environment_column}, "  # nosec B608
         f"CASE WHEN {content_bearing_predicate} "  # nosec B608
         "THEN 1 ELSE 0 END AS content_bearing FROM traces"
     ):
@@ -1913,6 +2029,55 @@ def _build(
         group = workload if workload in {"agent", "judge"} else "unclassified"
         if workload != "judge":
             explorer_trace_ids.append(r["trace_id"])
+            _record_management_metric(management_scope, r)
+            started_at = _dt(r["started_at"])
+            management_first = min(management_first, started_at) if management_first else started_at
+            management_latest = max(management_latest, started_at) if management_latest else started_at
+            service = r["service_name"] if isinstance(r["service_name"], str) else ""
+            service = service.strip()
+            if service == "unknown-service":
+                service = ""
+            if service:
+                management_services.add(service)
+            else:
+                management_unattributed += 1
+            provider = str(r["provider"] or "").strip() or "Unknown provider"
+            model = str(r["response_model"] or r["request_model"] or "").strip()
+            model = model or "Unknown model"
+            environment = (
+                r["environment"].strip()
+                if isinstance(r["environment"], str) and r["environment"].strip()
+                else "Unspecified"
+            )
+            application = management_applications.setdefault(
+                (service or None, environment), _empty_management_metric()
+            )
+            _record_management_metric(application, r)
+            model_metric = management_models.setdefault(
+                (provider, model), _empty_management_metric()
+            )
+            _record_management_metric(model_metric, r)
+            date = started_at.date().isoformat()
+            day = management_days.setdefault(
+                date, {"date": date, "calls": 0, "totalTokens": 0,
+                       "tokenKnownCalls": 0}
+            )
+            day["calls"] += 1
+            input_tokens = _nonnegative_number(r["input_tokens"])
+            output_tokens = _nonnegative_number(r["output_tokens"])
+            if input_tokens is not None:
+                day["totalTokens"] += int(input_tokens)
+            if output_tokens is not None:
+                day["totalTokens"] += int(output_tokens)
+            if input_tokens is not None and output_tokens is not None:
+                day["tokenKnownCalls"] += 1
+            latency = _nonnegative_number(r["latency_ms"])
+            if latency is not None:
+                latency_entry = (started_at, str(r["trace_id"]), latency)
+                if len(management_latencies) < MAX_MANAGEMENT_LATENCY_SAMPLES:
+                    heapq.heappush(management_latencies, latency_entry)
+                elif latency_entry[:2] > management_latencies[0][:2]:
+                    heapq.heapreplace(management_latencies, latency_entry)
         displayable_workload = (
             isinstance(workload, str)
             and workload != "judge"
@@ -2512,6 +2677,61 @@ def _build(
         judgment_status_by_trace=judgment_status_by_trace,
         selected_evaluator_id=selected_id,
     )
+    application_rows = [
+        {
+            "name": service or "Unattributed",
+            "environment": environment,
+            "attributed": service is not None,
+            **_finish_management_metric(metric),
+        }
+        for (service, environment), metric in management_applications.items()
+    ]
+    application_rows.sort(key=lambda row: (
+        -row["calls"], row["name"].casefold(), row["environment"].casefold()
+    ))
+    model_rows = [
+        {
+            "provider": provider,
+            "model": model,
+            **_finish_management_metric(metric),
+        }
+        for (provider, model), metric in management_models.items()
+    ]
+    model_rows.sort(key=lambda row: (
+        -row["calls"], row["provider"].casefold(), row["model"].casefold()
+    ))
+    all_dates = sorted(management_days)
+    shown_dates = all_dates[-MAX_MANAGEMENT_TIMELINE_DATES:]
+    scope = _finish_management_metric(management_scope)
+    latency_values = [entry[2] for entry in management_latencies]
+    scope.update({
+        "firstCapturedAt": management_first.isoformat() if management_first else None,
+        "latestCapturedAt": management_latest.isoformat() if management_latest else None,
+        "latencySampledCalls": len(latency_values),
+        "p50LatencyMs": _nearest_rank(latency_values, 0.50),
+        "p95LatencyMs": _nearest_rank(latency_values, 0.95),
+        "identifiedApplications": len(management_services),
+        "unattributedCalls": management_unattributed,
+    })
+    management_report = {
+        "schema": "management-report-v1",
+        "scope": scope,
+        "timeline": {
+            "availableDates": len(all_dates),
+            "shownDates": len(shown_dates),
+            "rows": [management_days[date] for date in shown_dates],
+        },
+        "applications": {
+            "availableRows": len(application_rows),
+            "shownRows": min(len(application_rows), MAX_MANAGEMENT_REPORT_ROWS),
+            "rows": application_rows[:MAX_MANAGEMENT_REPORT_ROWS],
+        },
+        "models": {
+            "availableRows": len(model_rows),
+            "shownRows": min(len(model_rows), MAX_MANAGEMENT_REPORT_ROWS),
+            "rows": model_rows[:MAX_MANAGEMENT_REPORT_ROWS],
+        },
+    }
     return {
         "meta": {
             "runStart": t0.isoformat(),
@@ -2573,6 +2793,7 @@ def _build(
         "focusProviderLabel": series["focusProviderLabel"],
         "samples": samples,
         "providerDimension": providerDimension,
+        "managementReport": management_report,
         "truncation": truncation,
     }
 

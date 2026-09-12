@@ -49,6 +49,8 @@ def apply_routing_context(client: VerdictClient, trace: Trace) -> None:
     """
     try:
         trace.tenant_id = getattr(client, "tenant_id", None)
+        trace.service_name = getattr(client, "service_name", "")
+        trace.environment = getattr(client, "environment", "")
         # Imported lazily to avoid an import cycle (client imports instrumentors).
         from verdict.client import (
             _claim_model_call_correlation_id,
