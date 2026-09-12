@@ -205,6 +205,67 @@ def test_setup_uses_canonical_historical_file_import(tmp_path):
     storage.close()
 
 
+def test_configured_tenant_owns_setup_import_evaluator_and_dashboard_reads(tmp_path):
+    database = tmp_path / "configured-tenant.db"
+    export = tmp_path / "voice.json"
+    export.write_text(json.dumps({
+        "conversation_id": "conversation",
+        "turns": [
+            {"role": "user", "content": "help", "timestamp": "2026-07-01T00:00:00Z"},
+            {"role": "assistant", "content": "done", "status": "completed",
+             "timestamp": "2026-07-01T00:00:01Z"},
+        ],
+    }))
+
+    async def setup():
+        app = create_app(storage=f"sqlite:///{database}", tenant_id="customer-a")
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
+            config = await client.get("/api/config")
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            headers = {"X-Verdict-Setup": token}
+            await client.post(
+                "/api/setup/import/preview", headers=headers,
+                json={"path": str(export), "format": "voice"},
+            )
+            imported = await client.post(
+                "/api/setup/import", headers=headers,
+                json={"path": str(export), "format": "voice"},
+            )
+            evaluator = await client.post(
+                "/api/evaluators/preview",
+                headers=headers,
+                json={
+                    "provider": "anthropic", "model": "claude-haiku-4-5",
+                    "maxCalls": "all", "maxOutputTokens": 256,
+                    "rubric": {
+                        "name": "poc", "version": "1",
+                        "dimensions": [{
+                            "name": "relevance",
+                            "description": "Directly answers the request.",
+                        }],
+                    },
+                },
+            )
+            dashboard = await client.get("/api/data")
+            return config, imported, evaluator, dashboard
+
+    config, imported, evaluator, dashboard = asyncio.run(setup())
+
+    assert config.json()["tenantId"] == "customer-a"
+    assert imported.status_code == 200
+    assert evaluator.status_code == 200
+    assert evaluator.json()["availableTraces"] == 1
+    assert dashboard.json()["meta"]["totalTraces"] == 1
+    storage = SQLiteStorage(str(database))
+    [trace] = storage.list_traces(tenant_id="customer-a", limit=10)
+    assert trace.tenant_id == "customer-a"
+    assert storage.list_traces(tenant_id="__verdict_local__", limit=10) == []
+    storage.close()
+
+
 def test_evaluator_preview_explains_when_every_dimension_requires_context(tmp_path):
     async def preview():
         app = create_app(storage=f"sqlite:///{tmp_path / 'verdict.db'}")

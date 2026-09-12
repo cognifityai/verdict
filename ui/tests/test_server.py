@@ -623,7 +623,10 @@ def test_mounted_dashboard_exposes_only_a_same_origin_operations_path(tmp_path):
     response = asyncio.run(request_config())
 
     assert response.status_code == 200
-    assert response.json() == {"operationsUrl": "/api/admin/operations"}
+    assert response.json() == {
+        "operationsUrl": "/api/admin/operations",
+        "tenantId": "__verdict_local__",
+    }
 
 
 def test_dashboard_rejects_cross_origin_operations_urls(tmp_path):
@@ -635,6 +638,64 @@ def test_dashboard_rejects_cross_origin_operations_urls(tmp_path):
             storage=f"sqlite:///{path}",
             operations_url="https://attacker.example/collect",
         )
+
+
+def test_dashboard_rejects_invalid_tenant_routing_identifiers(tmp_path):
+    path = tmp_path / "invalid-tenant.db"
+    SQLiteStorage(str(path)).close()
+
+    with pytest.raises(ValueError, match="bounded routing identifier"):
+        create_app(storage=f"sqlite:///{path}", tenant_id="customer name")
+
+
+def test_dashboard_cli_passes_the_selected_tenant_to_the_app(
+    tmp_path, monkeypatch,
+):
+    captured = {}
+
+    def run(app, **kwargs):
+        captured["app"] = app
+        captured["kwargs"] = kwargs
+
+    monkeypatch.setattr("uvicorn.run", run)
+
+    status = server_module.main([
+        "--storage", f"sqlite:///{tmp_path / 'tenant.db'}",
+        "--tenant-id", "customer-a",
+        "--port", "8123",
+    ])
+
+    assert status == 0
+    assert captured["app"].state.verdict_tenant_id == "customer-a"
+    assert captured["kwargs"]["port"] == 8123
+
+
+def test_dashboard_cli_rejects_an_invalid_tenant_before_starting(monkeypatch):
+    monkeypatch.setattr(
+        "uvicorn.run",
+        lambda *_args, **_kwargs: pytest.fail("server must not start"),
+    )
+
+    with pytest.raises(SystemExit) as error:
+        server_module.main(["--tenant-id", "customer name"])
+
+    assert error.value.code == 2
+
+
+def test_dashboard_cli_reads_the_tenant_environment_default(tmp_path, monkeypatch):
+    captured = {}
+    monkeypatch.setenv("VERDICT_TENANT_ID", "customer-from-env")
+    monkeypatch.setattr(
+        "uvicorn.run",
+        lambda app, **_kwargs: captured.setdefault("app", app),
+    )
+
+    status = server_module.main([
+        "--storage", f"sqlite:///{tmp_path / 'tenant.db'}",
+    ])
+
+    assert status == 0
+    assert captured["app"].state.verdict_tenant_id == "customer-from-env"
 
 
 def test_large_store_api_returns_a_bounded_truthful_bundle(monkeypatch, tmp_path):

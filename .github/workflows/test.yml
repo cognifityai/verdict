@@ -289,6 +289,7 @@ jobs:
             --limit 1000
           /tmp/verdict-wheel-venv/bin/verdict-dashboard \
             --storage sqlite:////tmp/verdict-a15-telemetry.db \
+            --tenant-id release-e2e \
             --host 127.0.0.1 \
             --port 18773 \
             >/tmp/verdict-a15-dashboard.log 2>&1 &
@@ -329,6 +330,10 @@ jobs:
                   time.sleep(0.05)
           else:
               raise AssertionError("installed dashboard did not become healthy")
+
+          with urlopen(f"{base_url}/api/config", timeout=10) as response:
+              assert response.status == 200
+              assert json.load(response)["tenantId"] == "release-e2e"
 
           pages = []
           for offset in (0, 30, 60):

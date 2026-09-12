@@ -41,9 +41,16 @@ def _sqlite_path(storage_url: str) -> Path:
 class SetupRoutes:
     """Register setup routes and expose their shared authorization boundary."""
 
-    def __init__(self, storage_url: str, setup_token: str) -> None:
+    def __init__(
+        self,
+        storage_url: str,
+        setup_token: str,
+        *,
+        tenant_id: str = LOCAL_SCOPE,
+    ) -> None:
         self.storage_url = storage_url
         self.setup_token = setup_token
+        self.tenant_id = tenant_id
         self._previewed_local_roots: set[tuple[str | None, str | None]] = set()
         self._previewed_imports: set[tuple[str, str]] = set()
 
@@ -196,7 +203,7 @@ class SetupRoutes:
                 try:
                     summary = capture_local_agents(
                         writable,
-                        tenant_id=LOCAL_SCOPE,
+                        tenant_id=self.tenant_id,
                         claude_root=claude_root,
                         codex_root=codex_root,
                         capture_content=capture_content,
@@ -273,7 +280,7 @@ class SetupRoutes:
                         context = ImportContext(
                             adapter="file",
                             source_scope=str(candidate.resolve()),
-                            tenant_id=LOCAL_SCOPE,
+                            tenant_id=self.tenant_id,
                         )
                         summary = import_into_storage(
                             iter_telemetry_file(
@@ -312,10 +319,10 @@ class SetupRoutes:
 
         return run_analysis(
             self.storage_url,
-            tenant=LOCAL_SCOPE,
+            tenant=self.tenant_id,
             build=lambda: build_agent_insights_bundle(
                 self.storage_url,
-                tenant=LOCAL_SCOPE,
+                tenant=self.tenant_id,
                 _include_input_fingerprint=True,
             ),
         )

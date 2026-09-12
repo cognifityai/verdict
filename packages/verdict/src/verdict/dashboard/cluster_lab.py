@@ -38,13 +38,14 @@ def _service(
     storage: object,
     payload: dict[str, Any],
     *,
+    tenant_id: str = TENANT,
     version_id: str | None = None,
     strategy: str | None = None,
     allow_download: bool = False,
 ):
     model_path = payload.get("modelPath")
     version = (
-        storage.get_cluster_registry_version(TENANT, version_id)
+        storage.get_cluster_registry_version(tenant_id, version_id)
         if version_id is not None
         else None
     )
@@ -63,7 +64,11 @@ def _service(
 
 
 def execute_cluster_action(
-    storage: object, *, action: str, payload: dict[str, Any]
+    storage: object,
+    *,
+    action: str,
+    payload: dict[str, Any],
+    tenant_id: str = TENANT,
 ) -> dict[str, object]:
     """Execute one bounded, auditable registry transition."""
     if action not in {"fit", "refit", "validate", "activate", "replay", "rollback", "rename"}:
@@ -79,6 +84,7 @@ def execute_cluster_action(
         service = _service(
             storage,
             payload,
+            tenant_id=tenant_id,
             strategy=strategy,
             allow_download=strategy != "explicit",
         )
@@ -88,7 +94,7 @@ def execute_cluster_action(
         cutoff_value = payload.get("cutoff")
         if cutoff_value is None:
             count, _earliest_us, latest_us = storage.cluster_trace_time_bounds(
-                TENANT, target_workload=workload
+                tenant_id, target_workload=workload
             )
             if count == 0 or latest_us is None:
                 raise ValueError("no eligible traces are available for clustering")
@@ -96,7 +102,7 @@ def execute_cluster_action(
         else:
             cutoff = _instant(cutoff_value)
         version = service.fit(
-            TENANT,
+            tenant_id,
             actor=ACTOR,
             strategy=strategy,
             cutoff=cutoff,
@@ -108,14 +114,15 @@ def execute_cluster_action(
         )
         return {"action": action, "versionId": version.version_id, "status": "candidate"}
     if action == "refit":
-        active = storage.get_active_cluster_registry(TENANT)
+        active = storage.get_active_cluster_registry(tenant_id)
         service = _service(
             storage,
             payload,
+            tenant_id=tenant_id,
             version_id=active.version_id if active is not None else None,
         )
         version = service.refit(
-            TENANT, actor=ACTOR,
+            tenant_id, actor=ACTOR,
             cutoff=_instant(payload.get("cutoff"), default_now=True),
         )
         return {"action": action, "versionId": version.version_id, "status": "candidate"}
@@ -124,17 +131,17 @@ def execute_cluster_action(
         cluster_id = _bounded_text(payload.get("clusterId"), "cluster id")
         display_name = _bounded_text(payload.get("displayName"), "display name", 80)
         service = cluster_registry_service(storage, strategy="explicit")
-        service.rename(TENANT, cluster_id, display_name, actor=ACTOR)
+        service.rename(tenant_id, cluster_id, display_name, actor=ACTOR)
         return {"action": action, "clusterId": cluster_id}
 
     version_id = _bounded_text(payload.get("versionId"), "version id")
-    service = _service(storage, payload, version_id=version_id)
+    service = _service(storage, payload, tenant_id=tenant_id, version_id=version_id)
     if action == "validate":
-        report = service.validate(TENANT, version_id, actor=ACTOR)
+        report = service.validate(tenant_id, version_id, actor=ACTOR)
         return {"action": action, "versionId": version_id, "report": report}
     if action == "replay":
         assigned = service.assign(
-            TENANT, version_id,
+            tenant_id, version_id,
             through_cutoff=_instant(payload.get("throughCutoff"), default_now=True),
         )
         return {"action": action, "versionId": version_id, "assigned": assigned}
@@ -143,11 +150,11 @@ def execute_cluster_action(
         raise ValueError("invalid expected generation")
     if action == "activate":
         pointer = service.activate(
-            TENANT, version_id, expected_generation=generation, actor=ACTOR,
+            tenant_id, version_id, expected_generation=generation, actor=ACTOR,
         )
     else:
         pointer = service.rollback(
-            TENANT, version_id, expected_generation=generation, actor=ACTOR,
+            tenant_id, version_id, expected_generation=generation, actor=ACTOR,
             through_cutoff=(
                 _instant(payload["throughCutoff"])
                 if payload.get("throughCutoff") is not None else None

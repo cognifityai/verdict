@@ -228,9 +228,10 @@ verdict-shipper \
   --status --json
 ```
 
-The stock
-single-tenant dashboard reads `__verdict_local__`; an authenticated host may
-supply a different authorized dashboard tenant as documented below.
+The stock single-tenant dashboard reads `__verdict_local__` by default. Pass
+`--tenant-id ID` or set `VERDICT_TENANT_ID` to use the same explicit tenant as
+capture/import. An authenticated host may supply a different authorized
+dashboard tenant as documented below.
 
 ## 3b. Existing conversation export with Inspect
 
@@ -276,9 +277,15 @@ verdict-import file ./traces.ndjson --format auto \
   --storage sqlite:///./verdict.db --tenant-id my-team
 
 verdict-pipeline --storage sqlite:///./verdict.db \
-  --judge-provider anthropic --judge-model claude-haiku-4-5
-verdict-dashboard --storage sqlite:///./verdict.db
+  --tenant-id my-team --judge-provider anthropic \
+  --judge-model claude-haiku-4-5
+verdict-dashboard --storage sqlite:///./verdict.db --tenant-id my-team
 ```
+
+Keep the tenant identical across import, pipeline, and dashboard commands. A
+non-default `verdict-import local --tenant-id` run prints this requirement. The
+dashboard default remains `__verdict_local__`, and selecting another tenant
+does not migrate or relabel stored rows.
 
 Use an explicit format (`otlp`, `langfuse`, `langsmith`, `datadog`, `phoenix`,
 `opik`, `mlflow`, or `voice`) when auto-detection is ambiguous. The hosted API
@@ -646,7 +653,9 @@ When an authenticated FastAPI host injects
 `request.state.verdict_registry_tenant`, Overview, Trace Explorer, cluster
 pass-rate charts, and drift rows use that tenant's active-registry assignments
 and stable labels. Browser query parameters cannot select that projection.
-Standalone and legacy stores keep using each trace's stored `cluster_id`.
+The standalone dashboard projects the active registry for its configured
+tenant (`--tenant-id` or `VERDICT_TENANT_ID`); without one, it keeps using each
+trace's stored `cluster_id`.
 
 Before a judge run exists, Evaluate reports evaluator coverage instead of
 rendering an empty chart as zero evidence. Monitor separately distinguishes no

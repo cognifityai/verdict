@@ -446,6 +446,20 @@ Open the dashboard for a local SQLite store:
 verdict-dashboard --storage sqlite:///./verdict.db
 ```
 
+If capture or import used an explicit tenant, use the same value for the
+dashboard. The dashboard also reads `VERDICT_TENANT_ID` when the flag is
+omitted:
+
+```bash
+verdict-import local --storage sqlite:///./verdict.db --tenant-id support
+verdict-dashboard --storage sqlite:///./verdict.db --tenant-id support
+```
+
+The selected tenant is one standalone workspace boundary for Agent Run reads,
+setup/import, Evaluator Lab, clusters, Monitor, and control actions. The
+reserved default remains `__verdict_local__`; changing the selection does not
+move or rewrite existing rows.
+
 The Overview and explorer APIs do not mutate trace/judgment history. Setup,
 capture, import, and Monitor actions are explicit write operations; do not
 expose the standalone server beyond loopback without an authenticated host.
@@ -470,7 +484,9 @@ mount path, so the packaged UI and server stay on the same version. When the
 authenticated host supplies `request.state.verdict_registry_tenant`, Overview,
 Trace Explorer, cluster pass-rate charts, and drift rows use the assignments and
 stable labels from that tenant's active registry. Standalone and legacy stores
-continue to use the trace's stored `cluster_id`.
+use the dashboard's configured tenant and project its active registry when one
+exists; without an active registry, they continue to use the trace's stored
+`cluster_id`.
 
 Content capture is **on by default** and is a PII surface. Verdict recursively sanitizes supported
 JSON-compatible message fields, including nested tool inputs/results and OpenAI

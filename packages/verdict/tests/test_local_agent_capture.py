@@ -1867,6 +1867,39 @@ def test_local_cli_captures_both_sources_without_echoing_content(tmp_path: Path,
     assert "DO_NOT_ECHO" not in output.out + output.err
 
 
+def test_local_cli_explains_how_to_open_a_non_default_tenant(tmp_path: Path, capsys) -> None:
+    codex = tmp_path / "codex"
+    _write_jsonl(codex / "session.jsonl", _codex_records())
+
+    status = main([
+        "local",
+        "--storage", f"sqlite:///{tmp_path / 'verdict.db'}",
+        "--codex-root", str(codex),
+        "--claude-root", str(tmp_path / "missing-claude"),
+        "--tenant-id", "customer-a",
+    ])
+
+    output = capsys.readouterr()
+    assert status == 0
+    assert "start verdict-dashboard with the same --tenant-id" in output.err
+    assert "customer-a" in output.err
+
+
+def test_local_cli_rejects_a_tenant_the_dashboard_cannot_select(
+    tmp_path: Path, capsys,
+) -> None:
+    status = main([
+        "local",
+        "--storage", f"sqlite:///{tmp_path / 'verdict.db'}",
+        "--tenant-id", "customer name",
+    ])
+
+    output = capsys.readouterr()
+    assert status == 2
+    assert "bounded routing identifier" in output.err
+    assert not (tmp_path / "verdict.db").exists()
+
+
 def test_large_session_is_bounded_and_marks_omitted_events(tmp_path: Path) -> None:
     root = tmp_path / "codex"
     records = _codex_records()

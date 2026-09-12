@@ -89,6 +89,42 @@ def test_monitor_preview_includes_default_tenantless_sdk_traces(tmp_path):
     assert len(manifest["current_unit_ids"]) == 10
 
 
+def test_monitor_uses_the_configured_dashboard_tenant_and_scope(tmp_path):
+    database = tmp_path / "configured-monitor.db"
+    _insert_traces(database, 20, tenant="customer-a")
+    _insert_traces(database, 20, start=100, tenant="__verdict_local__")
+
+    async def preview():
+        app = create_app(storage=f"sqlite:///{database}", tenant_id="customer-a")
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            response = await client.post(
+                "/api/monitor/preview",
+                headers={"X-Verdict-Setup": token},
+                json={
+                    "windowMode": "count",
+                    "referenceRatio": 0.5,
+                    "minimumReference": 5,
+                    "minimumCurrent": 5,
+                },
+            )
+            return response, await client.get("/api/monitor")
+
+    response, state = asyncio.run(preview())
+
+    assert response.status_code == 200
+    assert response.json()["policy"]["scope_key"] == "customer-a:application:trace"
+    manifest = response.json()["snapshot"]["manifest"]
+    assert len(manifest["reference_unit_ids"]) == 10
+    assert len(manifest["current_unit_ids"]) == 10
+    assert state.json()["candidate"]["policy"]["scope_key"] == (
+        "customer-a:application:trace"
+    )
+
+
 def test_monitor_preview_activation_and_prospective_run(tmp_path):
     database = tmp_path / "verdict.db"
     _insert_traces(database, 50, errors_from=40)

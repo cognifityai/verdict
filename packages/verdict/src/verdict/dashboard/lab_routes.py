@@ -32,7 +32,7 @@ def register_lab_routes(app, setup: SetupRoutes) -> None:
 
             writable = setup.writable_storage()
             return preview_evaluation(
-                writable, tenant_id="__verdict_local__", config=payload
+                writable, tenant_id=setup.tenant_id, config=payload
             )
         except ValueError as exc:
             if str(exc) == "no rubric dimensions are evaluable without context":
@@ -67,7 +67,7 @@ def register_lab_routes(app, setup: SetupRoutes) -> None:
             writable = setup.writable_storage()
             return execute_evaluation(
                 writable,
-                tenant_id="__verdict_local__",
+                tenant_id=setup.tenant_id,
                 config=payload,
                 confirm_external_egress=payload.get("confirmExternalEgress") is True,
             )
@@ -206,7 +206,12 @@ def register_lab_routes(app, setup: SetupRoutes) -> None:
             from verdict.dashboard.cluster_lab import execute_cluster_action
 
             writable = setup.writable_storage()
-            return execute_cluster_action(writable, action=action, payload=payload)
+            return execute_cluster_action(
+                writable,
+                action=action,
+                payload=payload,
+                tenant_id=setup.tenant_id,
+            )
         except ValueError as exc:
             _log.exception("cluster action failed")
             known = {

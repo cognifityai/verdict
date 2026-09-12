@@ -83,6 +83,36 @@ def test_control_api_requires_capability_and_exposes_no_secret_values(tmp_path):
     assert "secret-value" not in snapshot.text
 
 
+def test_control_documents_use_the_configured_dashboard_tenant(tmp_path):
+    database = tmp_path / "configured-control.db"
+
+    async def scenario():
+        app = create_app(storage=f"sqlite:///{database}", tenant_id="customer-a")
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            saved = await client.post(
+                "/api/control/settings/default",
+                headers={"X-Verdict-Setup": token},
+                json={
+                    "state": "active",
+                    "payload": {"captureContent": True},
+                    "expectedRevision": None,
+                },
+            )
+            return saved, await client.get("/api/control")
+
+    saved, state = asyncio.run(scenario())
+
+    assert saved.status_code == 200
+    assert len(state.json()["documents"]) == 1
+    store = ControlStore(f"sqlite:///{database}")
+    assert len(store.list_current("customer-a")) == 1
+    assert store.list_current("__verdict_local__") == []
+
+
 def test_cluster_actions_are_capability_gated_and_reject_unapproved_semantic_model(tmp_path):
     async def scenario():
         transport = httpx.ASGITransport(
