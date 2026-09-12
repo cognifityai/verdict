@@ -23,7 +23,6 @@ from verdict.schema import (
     Judgment,
     SpanRecord,
     Trace,
-    UserSignalRecord,
 )
 
 
@@ -311,11 +310,5 @@ class Storage(Protocol):
         trace_id: str | None = None,
         limit: int = 100,
     ) -> list[SpanRecord]: ...
-
-    # -- User signals (thumbs/regenerate/abandon, for the correlator) -------
-
-    def insert_user_signal(self, sig: UserSignalRecord) -> None: ...
-
-    def list_user_signals(self, *, limit: int = 1000) -> list[UserSignalRecord]: ...
 
     def close(self) -> None: ...

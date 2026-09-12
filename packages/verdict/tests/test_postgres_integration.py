@@ -57,7 +57,6 @@ from verdict.schema import (
     SpanRecord,
     Trace,
     TraceClusterAssignment,
-    UserSignalRecord,
     Verdict,
     cluster_candidate_digest,
     datetime_to_utc_us,
@@ -1672,17 +1671,6 @@ def test_live_postgres_round_trip_and_mutation_contracts():
             item.signal_id != signal.signal_id for item in storage.list_drift_signals()
         )
 
-        user_signal = UserSignalRecord(
-            signal_id=f"{prefix}-user-signal",
-            trace_id=trace_id,
-            kind="thumbs_down",
-        )
-        storage.insert_user_signal(user_signal)
-        assert any(
-            item.signal_id == user_signal.signal_id
-            for item in storage.list_user_signals()
-        )
-
         storage.save_cluster_registry(registry_version, '{"clusters": []}')
         assert storage.load_cluster_registry(registry_version) == '{"clusters": []}'
 
@@ -1698,7 +1686,6 @@ def test_live_postgres_round_trip_and_mutation_contracts():
             ("cluster_registries", "version", registry_version),
             ("drift_signals", "evaluator_fingerprint", fingerprint),
             ("drift_runs", "evaluator_fingerprint", fingerprint),
-            ("user_signals", "trace_id", trace_id),
             ("spans", "trace_id", trace_id),
             ("judgments", "trace_id", trace_id),
             ("traces", "trace_id", trace_id),

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import math
 import os
@@ -37,6 +38,7 @@ def evaluator_environment() -> dict[str, Any]:
         available = False
     return {
         "evalPackageAvailable": available,
+        "inspectPackageAvailable": importlib.util.find_spec("verdict_inspect") is not None,
         "providers": [
             {
                 "provider": provider,

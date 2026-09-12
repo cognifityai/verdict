@@ -94,7 +94,7 @@ class CollectorService:
                 except (RecursionError, ValueError):
                     error = "invalid_record"
                 else:
-                    if record.kind != "agent":
+                    if record is None or record.kind != "agent":
                         error = "unsupported_record_kind"
                     else:
                         assert record.batch is not None

@@ -48,7 +48,7 @@ acknowledged offsets, and deletes only sealed fully accepted segments.
 Planned agent-level work includes centralized producer-backlog health,
 receipt-triggered analysis, maintained framework adapters, run-level
 cohort comparisons, application-specific outcome calibration, and an automated
-delivery path for standalone Trace, Span, and UserSignal records.
+delivery path for standalone Trace and Span records.
 
 ### Plan-Adherence Scoring
 
@@ -86,7 +86,7 @@ Areas under consideration:
 
 - Centralized host-backlog and dropped-record health plus a durable
   receipt-to-analysis cursor
-- Tenant-safe remote ingestion for standalone Trace, Span, and UserSignal
+- Tenant-safe remote ingestion for standalone Trace and Span
   records; the current authenticated collector accepts full Agent records
 - OpenTelemetry and OpenInference-compatible export paths
 - Additional source contracts through maintained OSS packages when they reduce
@@ -131,7 +131,7 @@ Areas under consideration:
 - Direct PostgreSQL capture still connects from each instrumented process
   through a process-local driver pool. The separate authenticated collector
   and host shipper remove database credentials from file-transport Agent
-  producers. Remote standalone Trace, Span, and UserSignal ingestion is not yet
+  producers. Remote standalone Trace and Span ingestion is not yet
   included.
 
 ## Prioritized Product Follow-ups
@@ -149,7 +149,7 @@ and an approved design before implementation.
    provider rate-limit handling, cancellation, deterministic output, and load
    tests. This reduces wall time, not token spend.
 4. **Remote ingestion expansion (large effort, high production-deployment
-   value):** add remote standalone Trace/Span/UserSignal support, OTLP mapping,
+   value):** add remote standalone Trace/Span support, OTLP mapping,
    centralized producer health, receipt-triggered analysis, and separate
    schema-migration credentials around the current Agent collector. Keep direct
    SQLite/PostgreSQL storage as the simple local and embedded option.

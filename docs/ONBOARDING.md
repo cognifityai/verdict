@@ -202,7 +202,7 @@ verdict-collector --host 0.0.0.0 --port 8765
 
 Terminate TLS before the collector. It accepts bounded `verdict-capture-v1`
 NDJSON batches containing full `agent` records and returns durable replay-safe
-acknowledgements. Standalone Trace, Span, and UserSignal records continue to use
+acknowledgements. Standalone Trace and Span records continue to use
 the direct or local-file import path. On each producer host, start the shipper
 with the same protected secret:
 
@@ -232,11 +232,16 @@ The stock
 single-tenant dashboard reads `__verdict_local__`; an authenticated host may
 supply a different authorized dashboard tenant as documented below.
 
-## 3b. Existing conversation export with `verdict-inspect`
+## 3b. Existing conversation export with Inspect
 
 This is the fastest way to see Verdict find something real, with **no
-instrumentation and no code changes**. Point it at a ChatGPT or Claude.ai data
-export (or any OpenAI-format message dump) and it runs locally:
+instrumentation and no code changes**. In the dashboard, open **Evaluate →
+Inspect JSON**, upload or paste the export, and choose the format. The result is
+returned to the browser and can be downloaded as JSON. Analysis runs on the
+Verdict dashboard host; neither the source nor the report is added to the
+Verdict store.
+
+The same analysis remains available from the `verdict-inspect` CLI:
 
 ```bash
 verdict-inspect analyze ~/Downloads/conversations.json
@@ -764,7 +769,7 @@ the other captured workloads.
 | Intent clustering | No |
 | `verdict-inspect` semantic + structural report | No |
 | Judge PASS/FAIL quality monitoring | Yes (BYOK) |
-| Cross-model Bradley–Terry comparison | Yes (BYOK) |
+| Optional `verdict-inspect` judge sample | Yes (Anthropic BYOK) |
 
 ## Honest expectations for this alpha
 
@@ -772,8 +777,6 @@ the other captured workloads.
   substitute for workload-specific calibration.
 - Calibrate the judge on your own labeled traces before relying on quality
   alerts.
-- Pairwise model rankings and PASS/FAIL drift scoring are different tasks; use
-  the included alignment scripts to verify the mode you plan to rely on.
 - Local Claude Code/Codex capture and explicit application SDK contexts produce
   typed, bounded source/run/turn/event rows. SDK provider calls can establish
   genuine LLM `Trace` links; other facts remain unavailable unless the source

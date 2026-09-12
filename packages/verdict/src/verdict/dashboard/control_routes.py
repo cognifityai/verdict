@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections import Counter
 from typing import Any
 
 from fastapi import Request
@@ -34,7 +33,6 @@ class ControlRoutes:
             writable = self.setup.writable_storage()
             try:
                 documents = ControlStore(self.storage_url).list_current(TENANT)
-                signals = writable.list_user_signals(limit=10_001)
                 attempts = writable.list_notification_delivery_attempts_for_tenant(
                     TENANT, limit=100
                 )
@@ -53,7 +51,6 @@ class ControlRoutes:
                 return {
                     "schema": "product-control-v1",
                     "documents": documents,
-                    "userSignals": self._user_signals(signals),
                     "reviewQueue": self._review_queue(writable, traces[:500]),
                     "reviewQueueScope": {
                         "tracesAnalyzed": min(len(traces), 500),
@@ -184,15 +181,6 @@ class ControlRoutes:
         # Starlette matches routes in registration order. Keep literal actions
         # ahead of the parameterized document endpoint.
         app.post("/api/control/{kind}/{document_id}")(control_put)
-
-    @staticmethod
-    def _user_signals(signals) -> dict[str, object]:
-        counts = Counter(signal.kind for signal in signals[:10_000])
-        return {
-            "counts": dict(sorted(counts.items())),
-            "analyzed": min(len(signals), 10_000),
-            "complete": len(signals) <= 10_000,
-        }
 
     @staticmethod
     def _review_queue(writable, traces) -> list[dict[str, object]]:

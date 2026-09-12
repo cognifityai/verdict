@@ -60,10 +60,8 @@ def test_skill_distinguishes_install_upgrade_current_and_repair_states() -> None
 
 
 def test_documented_pipeline_flags_match_the_released_parser() -> None:
-    if not (REPO_ROOT / "scripts" / "run_drift_pipeline.py").is_file():
-        pytest.skip("repository-only parser integration")
     result = subprocess.run(
-        [sys.executable, str(REPO_ROOT / "scripts" / "run_drift_pipeline.py"), "--help"],
+        [sys.executable, "-m", "verdict_eval.cli.pipeline", "--help"],
         check=False,
         capture_output=True,
         text=True,

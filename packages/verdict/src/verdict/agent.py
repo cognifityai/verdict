@@ -32,7 +32,6 @@ from verdict.evidence import (
 )
 from verdict.redaction import redact, redact_structure
 from verdict.schema import Trace
-from verdict.signals import VALID_SIGNAL_KINDS
 
 log = logging.getLogger("verdict.agent")
 _LOCAL_TENANT = "__verdict_local__"
@@ -40,6 +39,19 @@ _PROVENANCE = "verdict:sdk"
 _MAX_CONTENT_BYTES = 4096
 _MAX_VALUE_NODES = 128
 _MAX_VALUE_DEPTH = 4
+_VALID_FEEDBACK_KINDS = frozenset(
+    {
+        "thumbs_up",
+        "thumbs_down",
+        "copy",
+        "regenerate",
+        "retry",
+        "abandon",
+        "accept",
+        "follow_up_question",
+        "no_signal",
+    }
+)
 _active_run: contextvars.ContextVar[AgentRunContext | None] = contextvars.ContextVar(
     "verdict_active_agent_run", default=None
 )
@@ -576,7 +588,7 @@ class TurnContext:
         )
 
     def record_feedback(self, *, kind: str, value: object = True) -> None:
-        if kind not in VALID_SIGNAL_KINDS:
+        if kind not in _VALID_FEEDBACK_KINDS:
             raise ValueError(f"unknown feedback kind {kind!r}")
         self._record(AgentEventType.FEEDBACK, {"kind": kind, "value": value})
 

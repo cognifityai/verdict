@@ -27,7 +27,6 @@ from verdict.schema import (
     Operation,
     SpanRecord,
     Trace,
-    UserSignalRecord,
     populate_trace_analysis_fields,
 )
 from verdict.storage.base import Storage
@@ -77,8 +76,7 @@ _SPAN_TRANSPORT_FIELDS = frozenset(
         "error",
     }
 )
-_SIGNAL_TRANSPORT_FIELDS = frozenset({"signal_id", "trace_id", "kind", "created_at"})
-CaptureKind = Literal["trace", "agent", "span", "signal"]
+CaptureKind = Literal["trace", "agent", "span"]
 _SEGMENT_NAME = re.compile(
     r"^verdict-agent-(?P<producer>[A-Za-z0-9][A-Za-z0-9._:-]{0,127})-"
     r"(?P<sequence>[0-9]{6,12})\.(?P<state>open|jsonl|rejected)$"
@@ -138,8 +136,6 @@ class CaptureSink(Protocol):
 
     def capture_span(self, span: SpanRecord) -> SpanRecord: ...
 
-    def capture_user_signal(self, signal: UserSignalRecord) -> None: ...
-
     def close(self) -> None: ...
 
 
@@ -177,9 +173,6 @@ class StorageCaptureSink:
                 prepared.attributes.setdefault("verdict.link_status", "trace_not_found")
         self.storage.insert_span(prepared)
         return prepared
-
-    def capture_user_signal(self, signal: UserSignalRecord) -> None:
-        self.storage.insert_user_signal(signal)
 
     def close(self) -> None:
         pass
@@ -269,34 +262,6 @@ def _span_from_payload(payload: object) -> SpanRecord:
     return span
 
 
-def _signal_to_payload(signal: UserSignalRecord) -> dict[str, Any]:
-    payload = asdict(signal)
-    payload["created_at"] = signal.created_at.isoformat()
-    return payload
-
-
-def _signal_from_payload(payload: object) -> UserSignalRecord:
-    if not isinstance(payload, dict) or set(payload) != _SIGNAL_TRANSPORT_FIELDS:
-        raise ValueError("capture user signal has an invalid shape")
-    values = dict(payload)
-    try:
-        created_at = datetime.fromisoformat(values.pop("created_at"))
-        signal = UserSignalRecord(created_at=created_at, **values)
-    except (TypeError, ValueError) as exc:
-        raise ValueError("capture user signal has invalid typed fields") from exc
-    from verdict.signals import VALID_SIGNAL_KINDS
-
-    for name in ("signal_id", "trace_id", "kind"):
-        _require_transport_text(
-            getattr(signal, name),
-            field=f"user signal {name}",
-            maximum=256,
-        )
-    if signal.kind not in VALID_SIGNAL_KINDS or signal.created_at.tzinfo is None:
-        raise ValueError("capture user signal has invalid typed fields")
-    return signal
-
-
 @dataclass(frozen=True)
 class CaptureRecord:
     kind: CaptureKind
@@ -304,7 +269,6 @@ class CaptureRecord:
     batch: AgentCaptureBatch | None = None
     traces: tuple[Trace, ...] = ()
     span: SpanRecord | None = None
-    user_signal: UserSignalRecord | None = None
 
 
 def _record_bytes(kind: CaptureKind, record: object) -> bytes:
@@ -325,7 +289,7 @@ def _record_bytes(kind: CaptureKind, record: object) -> bytes:
     return encoded + b"\n"
 
 
-def decode_capture_record(raw: bytes) -> CaptureRecord:
+def decode_capture_record(raw: bytes) -> CaptureRecord | None:
     if len(raw) > MAX_RECORD_BYTES:
         raise ValueError("agent capture record exceeds the local transport limit")
     try:
@@ -336,19 +300,18 @@ def decode_capture_record(raw: bytes) -> CaptureRecord:
         raise ValueError("capture record has an invalid shape")
     kind = payload["kind"]
     record = payload["record"]
-    if payload["schema"] != CAPTURE_SCHEMA or kind not in {
-        "trace",
-        "agent",
-        "span",
-        "signal",
-    }:
+    if payload["schema"] != CAPTURE_SCHEMA:
+        raise ValueError("capture record has an unsupported schema")
+    # Alpha releases wrote user-feedback records into the same spool. The
+    # feature is retired, but those records must not block later trace replay.
+    if kind == "signal":
+        return None
+    if kind not in {"trace", "agent", "span"}:
         raise ValueError("capture record has an unsupported schema")
     if kind == "trace":
         return CaptureRecord(kind="trace", trace=_trace_from_payload(record))
     if kind == "span":
         return CaptureRecord(kind="span", span=_span_from_payload(record))
-    if kind == "signal":
-        return CaptureRecord(kind="signal", user_signal=_signal_from_payload(record))
     if not isinstance(record, dict) or set(record) != {"batch", "traces"}:
         raise ValueError("agent evidence capture record is invalid")
     traces_payload = record["traces"]
@@ -539,9 +502,6 @@ class FileCaptureSink:
         self._append(_record_bytes("span", _span_to_payload(prepared)))
         return prepared
 
-    def capture_user_signal(self, signal: UserSignalRecord) -> None:
-        self._append(_record_bytes("signal", _signal_to_payload(signal)))
-
     def close(self) -> None:
         with self._lock:
             if self._pid != os.getpid():
@@ -556,7 +516,7 @@ def iter_capture_records(
     path: str | Path,
     *,
     on_incomplete: Callable[[], None] | None = None,
-) -> Iterator[CaptureRecord]:
+) -> Iterator[CaptureRecord | None]:
     root = Path(path).expanduser()
     files = capture_segment_paths(root) if root.is_dir() else [root]
     if not files:
@@ -596,6 +556,8 @@ def import_capture_records(path: str | Path, storage: Storage) -> CaptureImportS
     sink = StorageCaptureSink(storage)
     for record in iter_capture_records(path, on_incomplete=mark_incomplete):
         seen += 1
+        if record is None:
+            continue
         if record.kind == "trace":
             assert record.trace is not None
             sink.capture_trace(record.trace)
@@ -605,8 +567,5 @@ def import_capture_records(path: str | Path, storage: Storage) -> CaptureImportS
         elif record.kind == "span":
             assert record.span is not None
             sink.capture_span(record.span)
-        else:
-            assert record.user_signal is not None
-            sink.capture_user_signal(record.user_signal)
         stored += 1
     return CaptureImportSummary(seen=seen, stored=stored, incomplete=incomplete)

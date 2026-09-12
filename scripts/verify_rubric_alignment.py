@@ -1,14 +1,12 @@
-"""Binary-rubric alignment — judge PASS/FAIL vs YOUR PASS/FAIL (the drift path).
+"""Binary-rubric alignment — judge PASS/FAIL vs YOUR PASS/FAIL.
 
 This measures the number that actually decides Verdict's CORE product. The
 drift detector runs the judge in BINARY mode: for one response, does each rubric
-dimension PASS or FAIL? That is a different, easier, more objective task than the
-pairwise MT-Bench RANKING measured by verify_judge_alignment.py. A weak ranking
-number does NOT condemn this path — you must measure it directly.
+dimension PASS or FAIL? This script measures that behavior directly.
 
 It answers: on a set of real (query, response) examples that YOU labeled PASS/FAIL
 per dimension, how often does the judge's PASS/FAIL agree with yours? Reported as
-per-dimension and pooled Cohen's κ / Gwet's AC1 with 95% bootstrap CIs.
+per-dimension and pooled raw agreement / Gwet's AC1 with 95% bootstrap CIs.
 
 Why the bar here can be lower than "κ ≥ 0.6 vs humans": drift measures CHANGE vs a
 baseline, so a judge that is consistently biased but STABLE still detects a real
@@ -49,11 +47,40 @@ sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent / "packages" / "verdict" / "src"))
 sys.path.insert(0, str(HERE.parent / "packages" / "verdict_eval" / "src"))
 
-# Reuse the tested metric functions from the ranking harness (single source).
 from verdict.statistics import gwet_ac1  # noqa: E402
-from verify_judge_alignment import bootstrap_ci  # noqa: E402
 
 DIMENSIONS = ["groundedness", "relevance", "completeness", "safety", "instruction_following"]
+
+
+def bootstrap_ci(
+    pairs: list[tuple[int, int]],
+    metric_fn,
+    n_categories: int,
+    *,
+    iters: int = 2000,
+    seed: int = 0,
+) -> tuple[float, float]:
+    """Return a deterministic 95% bootstrap interval for an agreement metric."""
+    import random
+
+    if len(pairs) < 2:
+        return 0.0, 0.0
+    rng = random.Random(seed)
+    values: list[float] = []
+    for _ in range(iters):
+        sample = [pairs[rng.randrange(len(pairs))] for _ in pairs]
+        values.append(
+            metric_fn(
+                [pair[0] for pair in sample],
+                [pair[1] for pair in sample],
+                n_categories,
+            )
+        )
+    values.sort()
+    return (
+        values[int(0.025 * len(values))],
+        values[min(len(values) - 1, int(0.975 * len(values)))],
+    )
 
 
 def _bit(label) -> int | None:
@@ -153,8 +180,7 @@ def textwrap_notes() -> str:
     import textwrap
     return textwrap.dedent("""
         Honesty notes:
-          - This is the number that matters for DRIFT (binary rubric), unlike the
-            pairwise-ranking number in verify_judge_alignment.py.
+          - This measures the binary rubric behavior used by Verdict evaluation.
           - Measure it on YOUR data. A public number would not be your number.
           - Small label sets give wide CIs. "Cleared the bar" = CI lower bound
             cleared it, not the point estimate. Aim for >= ~50-100 labeled pairs

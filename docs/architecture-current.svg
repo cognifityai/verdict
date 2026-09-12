@@ -19,7 +19,7 @@
 
   <rect width="1300" height="900" fill="#F5F7FA"/>
   <text x="40" y="44" class="title">Verdict v0 — Current Architecture</text>
-  <text x="40" y="66" class="subtitle">SDK capture, authenticated Agent collection, or existing-telemetry import → canonical evidence → storage, eval, drift, and dashboard.</text>
+  <text x="40" y="66" class="subtitle">SDK capture, authenticated Agent collection, existing telemetry, or one-off exports → storage, evaluation, Monitor, and dashboard.</text>
 
   <!-- USER LAYER -->
   <text x="40" y="80" class="plane">USER APPLICATION</text>
@@ -109,11 +109,11 @@
   <text x="220" y="508" class="node-sub" text-anchor="middle">sentinel health · ensemble option</text>
 
   <rect x="340" y="420" width="200" height="100" rx="10" fill="#FFFFFF" stroke="#0B1730" stroke-width="1.5"/>
-  <text x="440" y="445" class="node-title" text-anchor="middle">PairwiseJudge</text>
-  <text x="440" y="463" class="node-sub" text-anchor="middle">Arena-Hard methodology</text>
-  <text x="440" y="478" class="node-sub" text-anchor="middle">position-swap consistency</text>
-  <text x="440" y="493" class="node-sub" text-anchor="middle">[[A]] / [[B]] / [[C]] verdicts</text>
-  <text x="440" y="508" class="node-sub" text-anchor="middle">PairwiseJudgeEnsemble</text>
+  <text x="440" y="445" class="node-title" text-anchor="middle">Structural + semantic</text>
+  <text x="440" y="463" class="node-sub" text-anchor="middle">refusal · apology · hedge checks</text>
+  <text x="440" y="478" class="node-sub" text-anchor="middle">embedding distribution shift</text>
+  <text x="440" y="493" class="node-sub" text-anchor="middle">permutation significance</text>
+  <text x="440" y="508" class="node-sub" text-anchor="middle">lexical fallback is labeled</text>
 
   <rect x="560" y="420" width="200" height="100" rx="10" fill="#FFFFFF" stroke="#0B1730" stroke-width="1.5"/>
   <text x="660" y="445" class="node-title" text-anchor="middle">Stable cluster registry</text>
@@ -123,18 +123,18 @@
   <text x="660" y="508" class="node-sub" text-anchor="middle">per-cluster comparison</text>
 
   <rect x="780" y="420" width="200" height="100" rx="10" fill="#FFFFFF" stroke="#0B1730" stroke-width="1.5"/>
-  <text x="880" y="445" class="node-title" text-anchor="middle">DriftDetector</text>
-  <text x="880" y="463" class="node-sub" text-anchor="middle">trace-time windows · Fisher / MWU</text>
-  <text x="880" y="478" class="node-sub" text-anchor="middle">(cluster, dimension)</text>
+  <text x="880" y="445" class="node-title" text-anchor="middle">Monitor comparison</text>
+  <text x="880" y="463" class="node-sub" text-anchor="middle">frozen reviewed cohorts · Fisher</text>
+  <text x="880" y="478" class="node-sub" text-anchor="middle">all traffic or reviewed facets</text>
   <text x="880" y="493" class="node-sub" text-anchor="middle">Benjamini-Hochberg adj</text>
-  <text x="880" y="508" class="node-sub" text-anchor="middle">Cliff's δ effect-size gate</text>
+  <text x="880" y="508" class="node-sub" text-anchor="middle">minimum rate-change gate</text>
 
   <rect x="1000" y="420" width="180" height="100" rx="10" fill="#FFFFFF" stroke="#0B1730" stroke-width="1.5"/>
-  <text x="1090" y="445" class="node-title" text-anchor="middle">BradleyTerryComparator</text>
-  <text x="1090" y="463" class="node-sub" text-anchor="middle">cross-LLM pairwise</text>
-  <text x="1090" y="478" class="node-sub" text-anchor="middle">logreg fit · bootstrap CI</text>
-  <text x="1090" y="493" class="node-sub" text-anchor="middle">position-swap drop</text>
-  <text x="1090" y="508" class="node-sub" text-anchor="middle">anchor win-rate</text>
+  <text x="1090" y="445" class="node-title" text-anchor="middle">Verdict Inspect</text>
+  <text x="1090" y="463" class="node-sub" text-anchor="middle">upload or paste JSON / JSONL</text>
+  <text x="1090" y="478" class="node-sub" text-anchor="middle">structural · optional semantic</text>
+  <text x="1090" y="493" class="node-sub" text-anchor="middle">optional confirmed judge sample</text>
+  <text x="1090" y="508" class="node-sub" text-anchor="middle">in-memory report · no store write</text>
 
   <!-- LLM PROVIDER PORT -->
   <text x="40" y="570" class="plane">PROVIDER PORT · 3 ADAPTERS</text>
@@ -157,19 +157,19 @@
   <!-- VERIFICATION HARNESS -->
   <text x="40" y="670" class="plane">VERIFICATION HARNESS</text>
   <rect x="120" y="680" width="220" height="80" rx="10" fill="#FFFFFF" stroke="#0B1730" stroke-width="1.5"/>
-  <text x="230" y="705" class="node-title" text-anchor="middle">Regression Injector</text>
-  <text x="230" y="723" class="node-sub" text-anchor="middle">7 corruption categories</text>
-  <text x="230" y="738" class="node-sub" text-anchor="middle">F1 / precision / recall per kind</text>
+  <text x="230" y="705" class="node-title" text-anchor="middle">Rubric calibration</text>
+  <text x="230" y="723" class="node-sub" text-anchor="middle">held-out PASS / FAIL labels</text>
+  <text x="230" y="738" class="node-sub" text-anchor="middle">agreement + confidence intervals</text>
 
   <rect x="360" y="680" width="220" height="80" rx="10" fill="#FFFFFF" stroke="#0B1730" stroke-width="1.5"/>
-  <text x="470" y="705" class="node-title" text-anchor="middle">MT-Bench Alignment</text>
-  <text x="470" y="723" class="node-sub" text-anchor="middle">vs real human judgments</text>
-  <text x="470" y="738" class="node-sub" text-anchor="middle">3-way + binarized Cohen's κ / Gwet's AC1</text>
+  <text x="470" y="705" class="node-title" text-anchor="middle">Capture compatibility</text>
+  <text x="470" y="723" class="node-sub" text-anchor="middle">real SDK + transport paths</text>
+  <text x="470" y="738" class="node-sub" text-anchor="middle">old signal rows skipped safely</text>
 
   <rect x="600" y="680" width="220" height="80" rx="10" fill="#FFFFFF" stroke="#0B1730" stroke-width="1.5"/>
-  <text x="710" y="705" class="node-title" text-anchor="middle">Multi-run validation</text>
-  <text x="710" y="723" class="node-sub" text-anchor="middle">12 runs · stable IDs · n≥30/cell</text>
-  <text x="710" y="738" class="node-sub" text-anchor="middle">planted regressions + clean controls</text>
+  <text x="710" y="705" class="node-title" text-anchor="middle">Monitor contracts</text>
+  <text x="710" y="723" class="node-sub" text-anchor="middle">frozen cohorts · evaluator identity</text>
+  <text x="710" y="738" class="node-sub" text-anchor="middle">SQLite + PostgreSQL parity</text>
 
   <rect x="840" y="680" width="340" height="80" rx="10" fill="#FFFFFF" stroke="#0B1730" stroke-width="1.5"/>
   <text x="1010" y="705" class="node-title" text-anchor="middle">Test suite</text>

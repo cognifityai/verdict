@@ -21,7 +21,7 @@ the product is refined.
   handoff, feedback, and outcome events; and automatic links from supported
   provider calls to genuine LLM Traces.
 - A bounded local file transport writes redacted, process-owned versioned JSONL
-  segments for provider Traces, Agent evidence, manual spans, and user signals.
+  segments for provider Traces, Agent evidence, and manual spans.
   `verdict-import agent-file` replays them idempotently through their canonical
   storage boundaries. Completed records bypass Python userspace buffering;
   rejected records are counted and warnings are deduplicated without affecting
@@ -33,12 +33,22 @@ the product is refined.
   with bounded retry, validates every acknowledged record, checkpoints accepted
   offsets, deletes only sealed fully accepted segments, and preserves rejected
   segments for recovery.
+- Evaluate now includes a one-off Inspect JSON view. It uploads or accepts
+  pasted supported conversation exports, keeps analysis out of the Verdict
+  store, and offers an in-browser JSON report download.
 
 ### Changed
 
 - Retained Anthropic and Google bound methods and lazy stream managers now
   remain pass-through after Verdict shutdown; they cannot resume Trace capture
   or consume a pending one-call correlation reservation.
+- Removed the unused pairwise ranking, regression injection, user-signal
+  correlation, older fixed-window detector/source adapters, and their
+  source-only validation wrappers. Current Monitor, rubric judging, clustering,
+  semantic/structural analysis, and the `cognifity-verdict-inspect` package
+  remain. Existing `user_signals` tables are left untouched, and old signal
+  records in capture spools are skipped so later supported records still import.
+
 - Shared Fisher exact, Benjamini-Hochberg, Wilson-interval, and Gwet agreement
   calculations now use one dependency-free implementation. Agreement reports
   correctly identify the existing nominal statistic as Gwet's AC1; versioned

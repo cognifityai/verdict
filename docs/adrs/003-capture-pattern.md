@@ -135,8 +135,8 @@ by provider, storage type, and exception type.
 
 There is **no OpenTelemetry/OpenInference span emission today.** Verdict can
 receive/import those formats through ADR-006. Internally, both paths use a
-**vendor-neutral schema** (`Trace`, `Judgment`, `SpanRecord`,
-`DriftSignal`, `UserSignalRecord`) defined in `verdict/schema.py` and written to
+**vendor-neutral schema** (`Trace`, `Judgment`, `SpanRecord`, and
+`DriftSignal`) defined in `verdict/schema.py` and written to
 storage. Field names are our own and are stable within v0.
 
 **Planned:** an optional outbound exporter that maps the internal

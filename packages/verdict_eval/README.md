@@ -2,66 +2,44 @@
 
 PyPI distribution: `cognifity-verdict-eval`. Python import: `verdict_eval`.
 
-The Verdict eval engine. LLM-as-judge with binary rubrics, optional intent
-clustering, statistical utilities, a Bradley-Terry pairwise comparator for
-cross-LLM evaluation, and a synthetic regression injector.
+Verdict's evaluation engine provides binary rubric judging, structural checks,
+semantic drift analysis, sampling, and versioned intent clustering. Current
+cohort comparisons live in the core Verdict Monitor workflow.
 
-## Pairwise result contract
+## Binary judge
 
-`PairwiseJudge.compare()` separates preference from execution state. A usable
-`PairwiseJudgment` has `status == PairwiseStatus.VALID`, `is_usable == True`,
-and a verdict of `A_BETTER`, `B_BETTER`, `TIE`, or `INCONSISTENT`. Exactly one
-complete `[[A]]`, `[[B]]`, or `[[C]]` marker is required in each position-swap
-round. Missing, empty, truncated, repeated, or conflicting markers produce
-`PairwiseStatus.INVALID`; provider failures produce `PairwiseStatus.ERROR`.
-Both unusable states carry `verdict=None` and must not be converted to ties.
+`Judge` evaluates one response against a configurable PASS/FAIL rubric. PASS
+rate is `PASS / (PASS + FAIL)`. `UNCLEAR`, missing dimensions, and judge errors
+remain visible as coverage states and do not enter that denominator.
 
-Ensembles preserve one component record per configured judge and vote using
-only usable components. An aggregate can remain usable when at least one
-component is usable, but failed components remain visible in
-`component_judgments`. A total component failure is unusable. The alignment
-harness reports pair and component coverage separately and fails its evidence
-gate when either is incomplete.
-
-This does not change captured traces, spans, or storage schemas. Existing
-successful 0.1.0a3 positional construction retains its original field order;
-the status fields were appended. Consumers should check `is_usable` before
-reading `verdict`:
+The evaluator identity includes the provider, model, rubric name/version,
+behavior-relevant configuration, expected dimensions, and an effective
+prompt/rubric fingerprint. Results from different identities are never pooled.
 
 ```python
-from verdict_eval import PairwiseJudge, PairwiseStatus
+from verdict_eval import DEFAULT_RUBRIC, Judge
+from verdict_eval.providers import AnthropicAdapter
 
-judgment = PairwiseJudge(provider=provider, model=model).compare(
-    query=query,
-    response_a=response_a,
-    response_b=response_b,
+judge = Judge(
+    provider=AnthropicAdapter(),
+    model="claude-haiku-4-5-20251001",
+    rubric=DEFAULT_RUBRIC,
 )
-if judgment.status is not PairwiseStatus.VALID:
-    raise RuntimeError("pairwise comparison was not usable")
-winner = judgment.verdict
+result = judge.judge(query="...", response="...")
 ```
 
-The versioned registry requires a deliberate `verdict-cluster fit --strategy`
-choice; no registry strategy is silently selected. Exact-key `explicit`
-clustering is supported. Automatic `semantic` clustering and the semantic
-fallback inside `hybrid` are experimental opt-in alpha features. Their frozen
-quality evaluation missed one preregistered fragmentation gate (largest
-nonoutlier cluster `30.1047%`, maximum `30%`) and must not be described as
-generally validated. `verdict-cluster inspect` reports the strategy and this
-experimental status. Local semantic work uses the frozen
-`sentence-transformers/all-MiniLM-L6-v2` model. CLI commands require an explicit
-local `--model-path`. The dashboard can reuse its pinned cached revision or
-download that exact revision on first semantic use when the semantic extra is
-installed. Cache lookup follows `HF_HUB_CACHE`, then `HF_HOME`, then the
-default Hugging Face cache.
-The `verdict-pipeline` command can still prepare clusters and judgments for
-existing automation. It no longer publishes a separate fixed-window drift run.
+Dimensions marked `requires_context=True` can be skipped when a caller enables
+`skip_context_dependent_when_missing`. If every dimension requires unavailable
+context, evaluation fails before a provider call.
 
-### Supported explicit registry workflow
+## Clustering and semantic analysis
 
-Stamp a bounded, redaction-safe routing key around the provider request that
-owns the intent. The context is token-restoring and the raw key is stored only
-as the existing trace routing tag:
+The versioned registry requires an explicit `verdict-cluster fit --strategy`
+choice. Exact-key `explicit` clustering is supported. Automatic `semantic`
+clustering and the semantic fallback in `hybrid` remain experimental opt-ins.
+Local semantic work uses the pinned
+`sentence-transformers/all-MiniLM-L6-v2` model; the built-in hash embedder is a
+lexical fallback and is labeled as such.
 
 ```python
 import verdict
@@ -70,26 +48,16 @@ with verdict.intent_context("billing.v1"):
     response = provider.messages.create(...)
 ```
 
-Use the real tenant ID for tenant-owned traces. For tenantless Memory/SQLite
-stores only, use the reserved local scope `__verdict_local__`; that literal is
-not a customer tenant ID. Existing a7 databases start with pending derived
-analysis fields, so normalize bounded pages until the JSON result says
-`"complete": true`:
+The registry lifecycle is `normalize`, `fit`, `assign`, `validate`, then
+`activate`. Current analysis can then use the tenant's active immutable version:
 
 ```bash
 verdict-cluster --storage sqlite:///verdict.db --tenant tenant-a --actor ops \
   normalize --limit 1000
 verdict-cluster --storage sqlite:///verdict.db --tenant tenant-a --actor ops \
-  fit --strategy explicit --target-workload agent \
-  --cutoff 2026-08-22T00:00:00Z
-```
-
-Take `version_id` from the fit result, then assign and validate the immutable
-preview before activation:
-
-```bash
+  fit --strategy explicit --target-workload agent
 verdict-cluster --storage sqlite:///verdict.db --tenant tenant-a --actor ops \
-  assign --version "$VERSION" --through-cutoff 2026-08-22T00:00:00Z
+  assign --version "$VERSION"
 verdict-cluster --storage sqlite:///verdict.db --tenant tenant-a --actor ops \
   validate --version "$VERSION"
 verdict-cluster --storage sqlite:///verdict.db --tenant tenant-a --actor ops \
@@ -98,71 +66,24 @@ verdict-pipeline --storage sqlite:///verdict.db --registry-mode active \
   --tenant-id tenant-a
 ```
 
-Active mode is always pinned to the tenant's active pointer. `inspect` returns
-bounded version, cluster, stable display-name, assignment, and event data plus
-truncation flags; its `--*-limit` and `--*-offset` options page immutable detail
-within hard output ceilings. `rename` changes only a stable display name; `rollback`
-requires a previously activated version and the current expected generation.
-CLI failures use a closed safe code such as `analysis_index_pending`,
-`model_unavailable`, `validation_failed`, or `generation_conflict`; raw storage
-and provider exception text is not printed. Semantic and hybrid commands also
-require a reviewed local `--model-path` and remain experimental.
+The pipeline prepares clusters and judgments. It does not publish a separate
+fixed-window drift run. Monitor owns current reviewed cohort comparisons;
+fixed-window rows written by older releases remain readable as legacy history.
 
-Registry shadow analysis is disabled pending the tenant-isolation correction in
-[issue #24](https://github.com/cognifityai/verdict/issues/24). Validate an
-inactive preview with `verdict-cluster validate` before using it as an optional
-Monitor facet.
+## Calibration
 
-Monitor owns current drift comparisons. It freezes either count-based or
-explicit event-time cohorts and uses Fisher's exact test with
-Benjamini-Hochberg correction for binary deterministic and selected-evaluator
-metrics. All traffic is the default; provider/model and reviewed clusters are
-optional facets. Activation records an event-time boundary, opens an empty
-prospective bucket, and excludes older events that arrive later.
-
-Pipeline reruns use the latest attempt per trace for one complete evaluator
-identity: provider, model list, rubric name/version, behavior-relevant
-configuration, expected dimensions, and effective prompt/rubric fingerprint. A
-latest error is excluded from PASS/FAIL and can be retried. Other evaluator
-definitions are retained but not pooled. Fixed-window `DriftRun` and
-`DriftSignal` rows produced by earlier releases remain readable as legacy
-history and are not replaced by this command. Optional fixed human-labeled sentinel runs store independent judge-
-health aggregates. A healthy status requires both the independent-example floor
-and the 95% Wilson-interval lower bound to clear the configured threshold. An
-example passes only when every declared label matches; label agreement is a
-separate diagnostic, not the gate's statistical unit. Legacy label-only records
-remain unavailable for health gating. Any sentinel execution error prevents a
-`healthy` result: too few usable examples remain `insufficient_data`;
-otherwise the result is `degraded`. When a sentinel file is supplied,
-the runner persists the health record and exits 2 before production judgments
-unless status is `healthy`.
-
-`RubricDimension(requires_context=True)` is enforced when a `Judge` enables
-`skip_context_dependent_when_missing`. With missing or whitespace-only context,
-those dimensions are excluded from the effective rubric and its evaluator
-identity. If every dimension requires context, `evaluator_identity()` and
-`judge()` raise before a provider call instead of evaluating an unsupported
-rubric. Leaving the skip option disabled preserves the published alpha API for
-callers that deliberately define a different no-context interpretation.
-
-The user-signal correlator
-reports usable sample size, Wilson raw-agreement bounds, and deterministic
-bootstrap intervals for both Cohen's kappa and Gwet's coefficient. It refuses to
-call low-data output calibrated, excludes `UNCLEAR` judge results from its binary
-confusion matrix, and requires an explicit evaluator selection when identities
-are mixed. Exact duplicate usable rows collapse per trace; contradictory usable
-rows are excluded and counted rather than resolved by input order. Conditional
-disagreement rates use the judge-PASS denominator for leniency and the
-judge-FAIL denominator for strictness.
+Calibrate judges on held-out examples from the workload where they will be
+used. `scripts/verify_rubric_alignment.py` reports binary rubric agreement and
+bootstrap confidence intervals. Optional sentinel runs persist only aggregate
+health, evaluator identity, and label-set identity. Any sentinel execution
+error prevents a healthy result.
 
 ```python
 from verdict_eval import (
     DEFAULT_RUBRIC,
-    CorruptionInjector,
-    DriftDetector,
     Judge,
-    PairwiseJudge,
-    PairwiseStatus,
+    SemanticDriftDetector,
+    StructuralChecker,
 )
 ```
 

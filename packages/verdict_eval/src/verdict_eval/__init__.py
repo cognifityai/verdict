@@ -12,12 +12,14 @@ from typing import TYPE_CHECKING
 __version__ = "0.1.0a17"
 
 if TYPE_CHECKING:
-    from verdict_eval.compare import BradleyTerryComparator, PairwiseResult
-    from verdict_eval.drift import DriftDetector, DriftWindow
-    from verdict_eval.injector import CorruptionInjector, CorruptionKind
     from verdict_eval.judge import DEFAULT_RUBRIC, Judge, Rubric
-    from verdict_eval.pairwise import PairwiseJudge, PairwiseJudgeEnsemble, PairwiseStatus
     from verdict_eval.providers import LLMProvider
+    from verdict_eval.semantic_drift import SemanticDriftDetector, SemanticDriftSignal
+    from verdict_eval.structural import (
+        StructuralChecker,
+        StructuralDriftSignal,
+        StructuralSignal,
+    )
 
 
 def __getattr__(name: str):
@@ -28,32 +30,10 @@ def __getattr__(name: str):
     if name == "LLMProvider":
         from verdict_eval.providers import LLMProvider
         return LLMProvider
-    if name in {"DriftDetector", "DriftWindow"}:
-        from verdict_eval.drift import DriftDetector, DriftWindow
-        return {"DriftDetector": DriftDetector, "DriftWindow": DriftWindow}[name]
     if name in {"SemanticDriftDetector", "SemanticDriftSignal"}:
         from verdict_eval.semantic_drift import SemanticDriftDetector, SemanticDriftSignal
         return {"SemanticDriftDetector": SemanticDriftDetector,
                 "SemanticDriftSignal": SemanticDriftSignal}[name]
-    if name in {"BradleyTerryComparator", "PairwiseResult"}:
-        from verdict_eval.compare import BradleyTerryComparator, PairwiseResult
-        return {"BradleyTerryComparator": BradleyTerryComparator, "PairwiseResult": PairwiseResult}[name]
-    if name in {"PairwiseJudge", "PairwiseJudgeEnsemble", "PairwiseStatus"}:
-        from verdict_eval.pairwise import PairwiseJudge, PairwiseJudgeEnsemble, PairwiseStatus
-        return {
-            "PairwiseJudge": PairwiseJudge,
-            "PairwiseJudgeEnsemble": PairwiseJudgeEnsemble,
-            "PairwiseStatus": PairwiseStatus,
-        }[name]
-    if name in {"CorruptionInjector", "CorruptionKind"}:
-        from verdict_eval.injector import CorruptionInjector, CorruptionKind
-        return {"CorruptionInjector": CorruptionInjector, "CorruptionKind": CorruptionKind}[name]
-    if name == "FaithfulnessGain":
-        from verdict_eval.information_gain import FaithfulnessGain
-        return FaithfulnessGain
-    if name == "LangfuseSource":
-        from verdict_eval.langfuse_source import LangfuseSource
-        return LangfuseSource
     if name in {"StructuralChecker", "StructuralSignal", "StructuralDriftSignal"}:
         from verdict_eval.structural import (
             StructuralChecker,
@@ -65,39 +45,18 @@ def __getattr__(name: str):
             "StructuralSignal": StructuralSignal,
             "StructuralDriftSignal": StructuralDriftSignal,
         }[name]
-    if name in {"UserSignalCorrelator", "CorrelationPair", "CorrelationReport"}:
-        from verdict_eval.correlator import (
-            CorrelationPair,
-            CorrelationReport,
-            UserSignalCorrelator,
-        )
-        return {
-            "UserSignalCorrelator": UserSignalCorrelator,
-            "CorrelationPair": CorrelationPair,
-            "CorrelationReport": CorrelationReport,
-        }[name]
     raise AttributeError(name)
 
 
 __all__ = [
     "DEFAULT_RUBRIC",
-    "BradleyTerryComparator",
-    "CorrelationPair",
-    "CorrelationReport",
-    "CorruptionInjector",
-    "CorruptionKind",
-    "DriftDetector",
-    "DriftWindow",
     "Judge",
     "LLMProvider",
-    "PairwiseJudge",
-    "PairwiseJudgeEnsemble",
-    "PairwiseResult",
-    "PairwiseStatus",
     "Rubric",
+    "SemanticDriftDetector",
+    "SemanticDriftSignal",
     "StructuralChecker",
     "StructuralDriftSignal",
     "StructuralSignal",
-    "UserSignalCorrelator",
     "__version__",
 ]

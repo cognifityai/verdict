@@ -7,6 +7,7 @@ from typing import Any
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
+from starlette.concurrency import run_in_threadpool
 
 from verdict.dashboard.setup_routes import SetupRoutes
 
@@ -128,6 +129,72 @@ def register_lab_routes(app, setup: SetupRoutes) -> None:
 
     evaluator_calibration_run.__annotations__["request"] = Request
     app.post("/api/evaluators/calibration/run")(evaluator_calibration_run)
+
+    async def evaluator_inspect(request: Request):
+        if not setup.authorized(request):
+            return JSONResponse(
+                {"error": "evaluator authorization required"}, status_code=403
+            )
+        from verdict.dashboard.inspect_lab import MAX_INSPECT_BYTES
+
+        content = bytearray()
+        async for chunk in request.stream():
+            content.extend(chunk)
+            if len(content) > MAX_INSPECT_BYTES:
+                return JSONResponse(
+                    {"error": "Inspect input exceeds the 4 MiB limit."}, status_code=413
+                )
+        params = request.query_params
+        for name in ("semantic", "judge", "confirm_external_egress"):
+            if params.get(name, "0") not in {"0", "1"}:
+                return JSONResponse(
+                    {"error": f"{name} must be 0 or 1."}, status_code=400
+                )
+        enable_judge = params.get("judge", "0") == "1"
+        confirm_egress = params.get("confirm_external_egress", "0") == "1"
+        if enable_judge and not confirm_egress:
+            return JSONResponse(
+                {"error": "Confirm external judge egress before analysis."},
+                status_code=400,
+            )
+        try:
+            from verdict.dashboard.inspect_lab import inspect_export
+
+            return await run_in_threadpool(
+                inspect_export,
+                bytes(content),
+                format_name=params.get("format", "auto"),
+                enable_semantic=params.get("semantic", "0") == "1",
+                enable_judge=enable_judge,
+                judge_model=params.get("judge_model", "claude-haiku-4-5-20251001"),
+                confirm_external_egress=confirm_egress,
+            )
+        except ImportError:
+            return JSONResponse(
+                {
+                    "error": (
+                        "Install cognifity-verdict-inspect and any selected "
+                        "optional dependencies to analyze exports."
+                    )
+                },
+                status_code=503,
+            )
+        except RuntimeError as exc:
+            if str(exc) == "another inspect analysis is already running":
+                return JSONResponse(
+                    {"error": "Another Inspect analysis is already running."},
+                    status_code=409,
+                )
+            return JSONResponse(
+                {"error": "The export could not be analyzed."}, status_code=400
+            )
+        except (OSError, TypeError, UnicodeError, ValueError):
+            return JSONResponse(
+                {"error": "The export is empty, malformed, or unsupported."},
+                status_code=400,
+            )
+
+    app.post("/api/evaluators/inspect")(evaluator_inspect)
 
     def cluster_action(request, action: str, payload: dict[str, Any]):
         if not setup.authorized(request):

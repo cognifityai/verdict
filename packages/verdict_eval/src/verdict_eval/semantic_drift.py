@@ -1,18 +1,8 @@
-"""Semantic drift detector — embedding-based distribution monitoring.
+"""Embedding-based response-distribution diagnostics.
 
-This is the embedding-based layer of the eval pipeline. Where the judge-based
-drift detector in `drift.py`
-operates on PASS/FAIL scores (catching quality regressions the judge can detect),
-the semantic drift detector operates on **response embeddings** (catching
-distributional shifts in what the model is actually producing, even when the
-judge doesn't flag them).
-
-Two complementary signals from the same observation:
-
-- Judge-based drift catches "the model is producing lower-quality responses"
-- Semantic drift catches "the model is producing structurally different
-  responses" — different topics, different lengths, different formats — even
-  if the judge can't articulate why it's bad.
+Semantic drift complements rubric monitoring by detecting changes in what the
+model produces, even when a configured quality dimension does not describe the
+change.
 
 Methodology:
 
@@ -67,7 +57,7 @@ class SemanticDriftSignal:
 @dataclass
 class SemanticDriftDetector:
     """Embedding-based drift detector. Operates on response embeddings, NOT
-    on judge scores. Complementary signal to the judge-based DriftDetector.
+    on judge scores. This is a standalone embedding-distribution diagnostic.
 
     **Methodology (v2).** The old detector triggered whenever an absolute
     centroid distance / Wasserstein / PSI crossed a hand-picked threshold.

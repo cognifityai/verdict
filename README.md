@@ -38,7 +38,6 @@ On top of that capture Verdict also retains its existing monitoring stack:
 - **Structural checks** (no LLM needed): provider errors, empty responses, and refusal-like language can be compared across reviewed cohorts.
 - **Embedding drift** (no API key): MiniLM detects semantic distribution shifts; the built-in hash fallback is lexical only and is labeled as such.
 - **Judge-based quality monitoring** (needs a provider key — see BYOK below): an LLM judge scores each response PASS/FAIL on a rubric; Monitor compares reviewed count-based or explicit event-time cohorts with Fisher's exact test and Benjamini–Hochberg correction. Comparisons cover all traffic by default; provider/model or reviewed clusters are optional facets.
-- **Cross-model comparison** (Bradley–Terry) and a **synthetic regression injector** for verifying the pipeline catches known corruptions.
 
 Verdict is **not a better judge** than the model you point it at. Missing
 evidence produces an unavailable/not-evaluable result before any optional judge
@@ -84,6 +83,9 @@ cohort status, historical comparisons, optional segments, schedules, and a
 read-only view of results created by the retired fixed-window pipeline. Cluster and
 monitor activation are explicit transitions; a stored historical candidate is
 shown separately from the active prospective monitor and survives page reload.
+Evaluate includes a one-off Inspect view for uploaded or pasted ChatGPT,
+Claude.ai, Cowork, and OpenAI JSON/JSONL. Analysis runs on the Verdict dashboard
+host and does not add the source export or report to the Verdict store.
 A Trace reports execution success/error
 separately from evaluation states: `not evaluated`, `judge error`, `pass`,
 `fail`, or `unclear`. No drift conclusion is shown until a comparison is
@@ -156,8 +158,8 @@ verdict-import agent-file /var/spool/verdict/worker-1 \
 
 Use a separate spool directory per producer process and retain files until the
 import completes. This local transport has hard segment, record, and directory
-bounds and carries provider Traces, Agent evidence, manual spans, and user
-signals through the same selected transport. Completed appends bypass Python
+bounds and carries provider Traces, Agent evidence, and manual spans through
+the same selected transport. Completed appends bypass Python
 userspace buffering, but are not `fsync`-ed against an operating-system or host
 failure. If an Agent evidence stream fails, it stays closed to prevent sequence
 gaps while later provider calls fall back to standalone Trace records. Quota or
@@ -165,7 +167,7 @@ write failures increment the process-local `capture.dropped_records` metric and
 emit one bounded warning per failure class. For a central PostgreSQL deployment,
 `verdict-collector` accepts authenticated, bounded batches of full `agent`
 records and returns durable idempotent acknowledgements. Agent records include
-their genuinely linked model-call Traces. Standalone Trace, Span, and UserSignal
+their genuinely linked model-call Traces. Standalone Trace and Span
 records remain on the direct and manual file-import paths. Run the host shipper
 beside each producer spool:
 
@@ -244,7 +246,7 @@ Verdict never ships with anyone's API key. It reads **your** provider key from t
 | Semantic embedding drift (local MiniLM; extra install) | **No** |
 | Intent clustering | **No** |
 | Judge-based PASS/FAIL quality drift | **Yes** (your key) |
-| Cross-model Bradley–Terry comparison | **Yes** (your key) |
+| Optional `verdict-inspect` judge sample | **Yes** (Anthropic BYOK) |
 
 After installation, capture and structural checks can run without a provider key. The built-in hash embedder can report lexical embedding-distribution changes, but it is not a semantic model and may split paraphrases into separate intent clusters. Install the local `sentence-transformers/all-MiniLM-L6-v2` extra shown below for semantic intent clustering and semantic drift. Capture never invokes a judge automatically. A provider-backed judge run requires that provider's key; `verdict-inspect` skips its optional Anthropic judge when no Anthropic key is set.
 
@@ -316,8 +318,10 @@ uses. The upgrade reuses existing SQLite files and PostgreSQL tables in place;
 it does not delete or rewrite traces, judgments, calibration records, drift
 runs, or dashboard history. It does not move SQLite data to PostgreSQL or upgrade
 a PostgreSQL server. Preserve the existing backend unless a separate migration is
-approved. The retained `scripts/run_drift_pipeline.py` and `ui/server.py` source
-entry points continue as wrappers after the workspace packages are installed.
+approved. Installed deployments use the `verdict-pipeline` and
+`verdict-dashboard` commands rather than source-tree wrappers.
+If an older alpha created a `user_signals` table, the upgrade leaves it in place
+as unread legacy data; no destructive migration is run.
 Back up the store and lockfile before any alpha upgrade, then run the pipeline
 and dashboard smoke checks against a non-production copy.
 When upgrading a shared store to normalized agent evidence, stop and upgrade
@@ -487,28 +491,6 @@ deliberately narrow:
 
 What this repo includes:
 
-- A synthetic regression battery for checking that the capture -> judge -> score
-  path catches known injected failures (`scripts/run_regression_injection.py`).
-- A multi-run validation that exercises stable cluster assignment, trace-time
-  windows, the n>=30 cell floor, planted regressions, clean controls, and
-  `UNCLEAR`-rate drift across 12 separate runs (`scripts/validate_multirun.py`).
-- A pairwise judge-alignment harness for comparing model-ranking judgments
-  against human-labeled public data (`scripts/verify_judge_alignment.py`). Pass
-  `--json-output <path>` for its versioned machine-readable result. The
-  four-judge `scripts/run_alignment_sweep.sh` writes one JSON and text report
-  per judge. The wrapper never sources repository environment files; inject
-  provider keys into the process from a managed secret store or OS credential
-  manager. It builds `SUMMARY.md` from JSON rather than formatted prose and
-  exits non-zero if any run fails, is incomplete, produces an invalid result,
-  or does not clear the binarized-AC1 confidence-interval gate. Online runs
-  require at least 50 requested pairs, pin the public MT-Bench dataset revision,
-  and record scored/available coverage, invalid judge output, provider errors,
-  incomplete ensemble components, the verdict, Gwet's AC1, Cohen's κ, and their
-  95% confidence intervals. Invalid/error rows are excluded from diagnostic
-  agreement metrics and force the evidence gate to fail; they are never counted
-  as ties. Offline rows are labeled `SYNTHETIC WIRING ONLY` inside the headline
-  table and always use a fixed 120-pair synthetic fixture; they are not
-  judge-quality evidence.
 - A rubric-alignment harness for measuring PASS/FAIL judge consistency against
   your own labeled traces (`scripts/verify_rubric_alignment.py`).
 
@@ -755,7 +737,7 @@ Apache 2.0 — see [LICENSE](LICENSE).
   partial-release recovery, and the immutable rollback boundary.
 - [`docs/POC_RELEASE_PROFILE.md`](docs/POC_RELEASE_PROFILE.md) — the exact
   provider, persistence, privacy, and evidence boundaries for customer POCs.
-- [`docs/STATS_PRIMER.md`](docs/STATS_PRIMER.md) — plain-language explanation of every statistical method Verdict uses (Fisher's exact, Cliff's δ, Wasserstein, PSI, Benjamini-Hochberg, Cohen's κ / Gwet's AC1, Bradley-Terry) and *why* each was chosen.
+- [`docs/STATS_PRIMER.md`](docs/STATS_PRIMER.md) — plain-language explanation of the statistical methods Verdict uses for monitoring, semantic drift, and calibration.
 - [`docs/EXPLAINER.md`](docs/EXPLAINER.md) — how the pipeline works end to end.
 - [`docs/adrs/`](docs/adrs/) — architecture decision records.
 - [`docs/v1-roadmap.md`](docs/v1-roadmap.md) — known limits and follow-up work.

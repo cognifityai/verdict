@@ -28,7 +28,6 @@ from verdict.evidence import (
     stable_evidence_id,
 )
 from verdict.schema import DriftRun, DriftSignal, Judgment, Trace
-from verdict.signals import record_user_signal
 from verdict.trace import (
     clear_context,
     current_span,
@@ -69,7 +68,6 @@ __all__ = [
     "init",
     "intent_context",
     "model_call_context",
-    "record_user_signal",
     "set_context",
     "shutdown",
     "span",
