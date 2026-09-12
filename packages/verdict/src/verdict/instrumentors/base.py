@@ -7,7 +7,7 @@ import logging
 import time
 from typing import TYPE_CHECKING
 
-from verdict.redaction import sanitize_trace
+from verdict.redaction import sanitize_error_text, sanitize_trace
 from verdict.schema import Trace
 
 if TYPE_CHECKING:
@@ -159,6 +159,12 @@ def safe_persist_trace(client: VerdictClient, trace: Trace) -> None:
     started = time.perf_counter()
     failed = False
     try:
+        trace.error = sanitize_error_text(
+            trace.error,
+            capture_content=client.capture_content,
+            mode=client.redaction_mode,  # type: ignore[arg-type]
+            secret=client.redaction_secret,
+        )
         sanitize_trace(
             trace,
             mode=client.redaction_mode,  # type: ignore[arg-type]

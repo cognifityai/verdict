@@ -124,6 +124,23 @@ def test_error_span_is_persisted_with_error_and_parent():
         client_mod.shutdown()
 
 
+def test_metadata_only_span_omits_exception_details() -> None:
+    storage = InMemoryStorage()
+    client_mod.shutdown()
+    client_mod.init(storage=storage, capture_content=False)
+    canary = "opaque-span-exception-canary"
+    try:
+        with pytest.raises(RuntimeError, match=canary):
+            with span("failing-operation"):
+                raise RuntimeError(canary)
+
+        [record] = storage.list_spans()
+        assert record.error == "RuntimeError"
+        assert canary not in repr(record)
+    finally:
+        client_mod.shutdown()
+
+
 def test_span_is_noop_without_client():
     # No client initialized -> span() must not raise and must not require storage.
     client_mod.shutdown()

@@ -178,7 +178,7 @@ def _terminal_status(error: BaseException | None) -> ExecutionStatus:
     return ExecutionStatus.FAILED
 
 
-def _exception_evidence(error: BaseException) -> dict[str, str]:
+def _exception_evidence(client: Any, error: BaseException) -> dict[str, str]:
     try:
         message = str(error)
         message.encode("utf-8")
@@ -186,7 +186,7 @@ def _exception_evidence(error: BaseException) -> dict[str, str]:
         message = "<UNAVAILABLE>"
     return {
         "error_type": type(error).__name__,
-        "message": _truncate_utf8(message, 1024),
+        "message": _truncate_utf8(_content(client, message) or "<UNAVAILABLE>", 1024),
     }
 
 
@@ -354,7 +354,7 @@ class ToolContext:
         self._closed = True
         output = self._output
         if exc is not None:
-            output = _exception_evidence(exc)
+            output = _exception_evidence(self._turn._state.owner.client, exc)
         event = self._turn._state._event(
             AgentEventType.TOOL_RESULT,
             {

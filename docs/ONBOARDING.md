@@ -414,8 +414,12 @@ client = Anthropic()
 ```
 
 Content capture is **on by default** (PII surface). Supported JSON-compatible message fields
-are recursively sanitized before `Trace` assignment and again at storage. This
+are recursively sanitized before content limits, `Trace` assignment, and storage. This
 includes nested OpenAI tool arguments and Anthropic-style tool inputs/results.
+Supported credential field names such as `password`, `api_key`,
+`authorization`, and `client_secret` cause the complete opaque value to be
+removed; flat GitHub, Bearer, Basic-auth, and common provider credentials are
+also recognized.
 Unknown top-level provider fields are dropped; malformed, cyclic, non-JSON, and
 excessively deep or large values fail closed. Repeated container references fail
 closed at every occurrence so sanitized output cannot alias caller-owned data;
@@ -427,7 +431,8 @@ clock value such as `12:34:56` is not classified as IPv6. Email discovery uses
 a linear `@`-anchored scanner to keep malformed and long inputs bounded. It
 remains best effort, not a compliance control, and opaque metadata such as
 tenant/session/cluster IDs must be non-sensitive. Set `capture_content=False`
-when the approved customer boundary is metadata-only. The `0.1.0a17` POC profile also keeps
+when the approved customer boundary is metadata-only; error categories remain
+available, but provider and manual-span exception messages are omitted. The `0.1.0a17` POC profile also keeps
 `buffered_writes=False`; buffered mode requires an explicit `shutdown()`
 imported from `verdict.client` before process exit.
 

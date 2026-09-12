@@ -4,7 +4,7 @@ from copy import deepcopy
 
 import pytest
 import verdict.redaction as redaction_module
-from verdict.redaction import redact, redact_messages, redact_structure
+from verdict.redaction import redact, redact_messages, redact_structure, sanitize_error_text
 
 
 def test_redact_messages_string_content():
@@ -154,6 +154,26 @@ def test_openai_json_tool_arguments_remain_valid_after_url_redaction():
     arguments = out[0]["tool_calls"][0]["function"]["arguments"]
 
     assert json.loads(arguments) == {"url": "<URL>", "count": 2}
+
+
+def test_json_tool_arguments_apply_sensitive_field_semantics() -> None:
+    messages = [{
+        "role": "assistant",
+        "tool_calls": [{
+            "type": "function",
+            "function": {
+                "name": "login",
+                "arguments": json.dumps({
+                    "password": "opaque-json-canary",
+                    "input_tokens": 12,
+                }),
+            },
+        }],
+    }]
+
+    output = redact_messages(messages)
+    arguments = output[0]["tool_calls"][0]["function"]["arguments"]
+    assert json.loads(arguments) == {"password": "<SECRET>", "input_tokens": 12}
 
 
 def test_recursive_redaction_fuzzes_arbitrary_json_shapes_without_mutation():
@@ -688,3 +708,100 @@ def test_common_provider_keys_and_secret_assignments_are_redacted() -> None:
     assert "correct-horse-battery-staple" not in output
     assert "AKIAABCDEFGHIJKLMNOP" not in output
     assert "<PROVIDER_KEY>" in output
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "password",
+        "clientSecret",
+        "x-api-key",
+        "AWS_SECRET_ACCESS_KEY",
+        "github_token",
+        "Authorization",
+        "proxy-authorization",
+        "credentials",
+    ],
+)
+def test_sensitive_mapping_fields_redact_the_entire_opaque_value(field: str) -> None:
+    canary = "opaque-field-canary-value"
+
+    output = redact_structure({"outer": {field: canary}})
+
+    assert canary not in json.dumps(output)
+    assert output["outer"][field].startswith("<")
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "session_id",
+        "trace_id",
+        "token_count",
+        "input_tokens",
+        "max_tokens",
+        "public_key",
+        "key",
+        "fingerprint",
+    ],
+)
+def test_sensitive_field_matching_preserves_identifiers_and_metrics(field: str) -> None:
+    assert redact_structure({field: "ordinary-value"}) == {field: "ordinary-value"}
+
+
+def test_field_aware_hash_mode_is_deterministic_without_cleartext() -> None:
+    value = {"password": "opaque-field-canary-value"}
+
+    first = redact_structure(value, mode="hash", secret="first-secret")
+    repeated = redact_structure(value, mode="hash", secret="first-secret")
+    different = redact_structure(value, mode="hash", secret="second-secret")
+
+    assert first == repeated
+    assert first != different
+    assert "opaque-field-canary-value" not in json.dumps(first)
+    assert redact_structure(first) == first
+    assert redact_structure(first, mode="hash", secret="first-secret") == first
+    assignment = redact('password="opaque-field-canary-value"', mode="hash", secret="first-secret")
+    assert redact(assignment) == assignment
+    assert redact(assignment, mode="hash", secret="first-secret") == assignment
+
+
+def test_flat_github_and_basic_authorization_credentials_are_redacted() -> None:
+    github = "ghp_abcdefghijklmnopqrstuvwxyz0123456789"
+    basic = "QWxhZGRpbjpPcGVuU2VzYW1lMTIz"
+    opaque = "opaque-assignment-canary"
+    text = (
+        f'GITHUB_TOKEN="{opaque} with spaces" '
+        f"AWS_SECRET_ACCESS_KEY='{opaque}' "
+        f"Authorization: Basic {basic} direct={github}"
+    )
+
+    output = redact(text)
+
+    assert output is not None
+    assert opaque not in output
+    assert basic not in output
+    assert github not in output
+
+    short = redact("password=x Authorization: Bearer y")
+    assert short == "password=<SECRET> Authorization: <SECRET>"
+
+
+def test_flat_credential_near_misses_are_not_redacted() -> None:
+    text = (
+        "input_tokens=12345678 max_tokens=87654321 "
+        "public_key=ordinary-public-key Basic programming "
+        "ghp_short github_pat_short"
+    )
+
+    assert redact(text) == text
+
+
+def test_content_off_error_category_never_accepts_an_untyped_secret() -> None:
+    token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789"
+
+    assert sanitize_error_text(token, capture_content=False) == "provider_error"
+    assert (
+        sanitize_error_text(f"RuntimeError: {token}", capture_content=False)
+        == "RuntimeError"
+    )

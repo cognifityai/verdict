@@ -196,6 +196,36 @@ def test_file_transport_creates_no_segment_until_the_first_record(tmp_path: Path
     assert list(tmp_path.glob("verdict-agent-*.jsonl")) == []
 
 
+def test_file_transport_redacts_sensitive_fields_before_spool_and_import(tmp_path: Path) -> None:
+    from verdict.dashboard.app import build_agent_run_detail
+
+    spool = tmp_path / "spool"
+    database = tmp_path / "verdict.db"
+    canary = "opaque-file-transport-canary"
+    verdict.init(
+        transport="file",
+        spool_directory=spool,
+        tenant_id="tenant-file",
+        instrumentors=[],
+    )
+    with verdict.agent_run(name="file-agent") as run:
+        with run.turn(user_input="question") as turn:
+            with turn.tool("lookup", arguments={"password": canary}) as tool:
+                tool.set_output({"Authorization": f"Basic {canary}"})
+            turn.set_output("done")
+    verdict.shutdown()
+
+    assert canary.encode() not in b"".join(path.read_bytes() for path in spool.glob("*.jsonl"))
+    storage = SQLiteStorage(str(database))
+    try:
+        agent_transport.import_capture_records(spool, storage)
+        [bundle] = storage.list_agent_run_bundles("tenant-file")
+    finally:
+        storage.close()
+    detail = build_agent_run_detail(database, tenant="tenant-file", run_id=bundle.run.run_id)
+    assert canary not in json.dumps(detail)
+
+
 def test_file_transport_skips_retired_signals_and_replays_later_records(
     tmp_path: Path,
 ) -> None:
