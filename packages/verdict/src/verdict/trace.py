@@ -148,7 +148,7 @@ def _persist_span(sp: Span) -> None:
         return
     try:
         from verdict.agent_transport import StorageCaptureSink
-        from verdict.redaction import sanitize_span
+        from verdict.redaction import sanitize_error_text, sanitize_span
         from verdict.schema import SpanRecord
 
         record = SpanRecord(
@@ -161,6 +161,12 @@ def _persist_span(sp: Span) -> None:
             duration_ms=sp.duration_ms,
             attributes=dict(sp.attributes),
             error=sp.error,
+        )
+        record.error = sanitize_error_text(
+            record.error,
+            capture_content=client.capture_content,
+            mode=client.redaction_mode,  # type: ignore[arg-type]
+            secret=client.redaction_secret,
         )
         sanitize_span(
             record,
