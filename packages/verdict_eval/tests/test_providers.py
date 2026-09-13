@@ -256,7 +256,7 @@ def test_retry_classifier_reads_response_status() -> None:
     assert _is_retryable_error(exc)
 
 
-@pytest.mark.parametrize("status_code", [408, 429, 500, 502, 503, 504])
+@pytest.mark.parametrize("status_code", [408, 429, 500, 502, 503, 504, 529])
 def test_retry_classifier_accepts_only_known_transient_http_statuses(
     status_code: int,
 ) -> None:
@@ -284,3 +284,32 @@ def test_retry_classifier_prefers_direct_status_over_conflicting_response() -> N
     )
 
     assert not _is_retryable_error(exc)
+
+
+def test_retry_classifier_accepts_real_anthropic_sdk_errors() -> None:
+    anthropic = pytest.importorskip("anthropic")
+    httpx = pytest.importorskip("httpx")
+    from verdict_eval.providers import _is_retryable_error
+
+    request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+    overloaded = anthropic.InternalServerError(
+        "overloaded",
+        response=httpx.Response(529, request=request),
+        body={"type": "error"},
+    )
+
+    assert _is_retryable_error(anthropic.APIConnectionError(request=request))
+    assert _is_retryable_error(anthropic.APITimeoutError(request))
+    assert overloaded.status_code == 529
+    assert _is_retryable_error(overloaded)
+
+
+def test_retry_classifier_accepts_real_openai_sdk_transport_errors() -> None:
+    openai = pytest.importorskip("openai")
+    httpx = pytest.importorskip("httpx")
+    from verdict_eval.providers import _is_retryable_error
+
+    request = httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
+
+    assert _is_retryable_error(openai.APIConnectionError(request=request))
+    assert _is_retryable_error(openai.APITimeoutError(request))

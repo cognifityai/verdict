@@ -197,7 +197,7 @@ class LiteLLMAdapter:
         )
 
 
-_RETRYABLE_HTTP_STATUS_CODES = frozenset({408, 429, 500, 502, 503, 504})
+_RETRYABLE_HTTP_STATUS_CODES = frozenset({408, 429, 500, 502, 503, 504, 529})
 _TRANSPORT_EXCEPTION_BASES = {
     "anthropic": frozenset({"APIConnectionError"}),
     "httpcore": frozenset({"NetworkError", "TimeoutException"}),
@@ -288,7 +288,8 @@ class GoogleAdapter:
     or GEMINI_API_KEY env var, or pass api_key explicitly.
 
     Includes automatic exponential-backoff retry on transient errors
-    (408 timeout, 429 rate limit, 500/502/503/504, and transport failures).
+    (408 timeout, 429 rate limit, 500/502/503/504, provider overload 529,
+    and transport failures).
     Gemini AI Studio's
     free tier shows ~10% transient 503s on sustained traffic; retries
     bring effective error rate to under 1%.
