@@ -112,6 +112,7 @@ MAX_PROVIDER_MODELS = 20
 MAX_MANAGEMENT_REPORT_ROWS = 20
 MAX_MANAGEMENT_TIMELINE_DATES = 31
 MAX_MANAGEMENT_LATENCY_SAMPLES = 10_000
+REPORT_PERIOD_DAYS = {0, 7, 30, 90}
 MAX_TRACE_SAMPLES = 30
 # Run detail has stricter record/page bounds than the generic redaction API.
 # These endpoint-only limits cover the maximum valid 50-turn/200-event page
@@ -157,6 +158,18 @@ def _dt(ts: str | datetime) -> datetime:
 
 def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _report_period(report_days: int, now: datetime) -> tuple[datetime | None, datetime, dict]:
+    end = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+    if report_days == 0:
+        return None, end, {"days": 0, "startDate": None, "endDate": None}
+    start = end - timedelta(days=report_days)
+    return start, end, {
+        "days": report_days,
+        "startDate": start.date().isoformat(),
+        "endDate": (end - timedelta(days=1)).date().isoformat(),
+    }
 
 
 def _label_for(provider: str, model: str) -> str:
@@ -414,7 +427,10 @@ def build_bundle(
     trace_offset: int = 0,
     trace_judge_status: str = "all",
     trace_id: str | None = None,
+    report_days: int = 0,
 ) -> dict:
+    if type(report_days) is not int or report_days not in REPORT_PERIOD_DAYS:
+        raise ValueError("report_days must be 0, 7, 30, or 90")
     if (
         not isinstance(trace_offset, int)
         or isinstance(trace_offset, bool)
@@ -438,6 +454,7 @@ def build_bundle(
             trace_offset=trace_offset,
             trace_judge_status=trace_judge_status,
             trace_id=trace_id,
+            report_days=report_days,
         )
     path = _sqlite_path(configured)
     try:
@@ -448,6 +465,7 @@ def build_bundle(
             trace_offset=trace_offset,
             trace_judge_status=trace_judge_status,
             trace_id=trace_id,
+            report_days=report_days,
         )
     except sqlite3.OperationalError as exc:
         if "unable to open database file" not in str(exc).lower():
@@ -467,6 +485,7 @@ def build_bundle(
             trace_offset=trace_offset,
             trace_judge_status=trace_judge_status,
             trace_id=trace_id,
+            report_days=report_days,
         )
 
 
@@ -1357,6 +1376,7 @@ def _build_from_connection(
     trace_offset: int = 0,
     trace_judge_status: str = "all",
     trace_id: str | None = None,
+    report_days: int = 0,
 ) -> dict:
     con.row_factory = sqlite3.Row
     try:
@@ -1370,6 +1390,7 @@ def _build_from_connection(
             trace_offset=trace_offset,
             trace_judge_status=trace_judge_status,
             trace_id=trace_id,
+            report_days=report_days,
         )
         if not isinstance(bundle, dict):
             raise DashboardBundleLimitError(
@@ -1392,6 +1413,7 @@ def _build_from_postgres(
     trace_offset: int = 0,
     trace_judge_status: str = "all",
     trace_id: str | None = None,
+    report_days: int = 0,
 ) -> dict:
     try:
         import psycopg
@@ -1412,6 +1434,7 @@ def _build_from_postgres(
                 trace_offset=trace_offset,
                 trace_judge_status=trace_judge_status,
                 trace_id=trace_id,
+                report_days=report_days,
             )
 
 
@@ -1423,6 +1446,7 @@ def _redacted_bundle(
     trace_offset: int,
     trace_judge_status: str,
     trace_id: str | None,
+    report_days: int,
 ) -> dict:
     bundle = redact_structure(
         _build(
@@ -1432,6 +1456,7 @@ def _redacted_bundle(
             trace_offset=trace_offset,
             trace_judge_status=trace_judge_status,
             trace_id=trace_id,
+            report_days=report_days,
         )
     )
     if not isinstance(bundle, dict):
@@ -1469,11 +1494,15 @@ def _agent_run_metadata(cur: _QuerySession, tenant: str) -> dict[str, Any]:
     return agent_evidence_queries.source_metadata(cur, tenant)
 
 
-def _empty_bundle(*, agent_runs: dict[str, Any] | None = None) -> dict:
+def _empty_bundle(
+    *, agent_runs: dict[str, Any] | None = None, report_days: int = 0,
+    analysis_time: datetime | None = None,
+) -> dict:
     run_metadata = agent_runs or {
         "available": 0, "sources": [], "sourcesTruncated": False,
         "lastCapturedAt": None,
     }
+    period = _report_period(report_days, analysis_time or _now_utc())[2]
     truncation = _truncation_metadata({
         "providers": _resource_limit(0, 0, MAX_DASHBOARD_PROVIDERS),
         "providerModels": _resource_limit(0, 0, MAX_PROVIDER_MODELS),
@@ -1544,6 +1573,7 @@ def _empty_bundle(*, agent_runs: dict[str, Any] | None = None) -> dict:
         "providerDimension": [],
         "managementReport": {
             "schema": "management-report-v1",
+            "period": period,
             "scope": {
                 **_finish_management_metric(_empty_management_metric()),
                 "firstCapturedAt": None,
@@ -1553,6 +1583,8 @@ def _empty_bundle(*, agent_runs: dict[str, Any] | None = None) -> dict:
                 "p95LatencyMs": None,
                 "identifiedApplications": 0,
                 "unattributedCalls": 0,
+                "judgedCalls": 0,
+                "judgeErrorCalls": 0,
             },
             "timeline": {"availableDates": 0, "shownDates": 0, "rows": []},
             "applications": {"availableRows": 0, "shownRows": 0, "rows": []},
@@ -1942,14 +1974,21 @@ def _build(
     trace_offset: int = 0,
     trace_judge_status: str = "all",
     trace_id: str | None = None,
+    report_days: int = 0,
 ) -> dict:
     requested_trace_id = trace_id
     agent_runs = _agent_run_metadata(cur, registry_tenant or "__verdict_local__")
+    analysis_time = _now_utc()
+    report_start, report_end, report_period = _report_period(report_days, analysis_time)
     if not _table_exists(cur, "traces"):
-        return _empty_bundle(agent_runs=agent_runs)
+        return _empty_bundle(
+            agent_runs=agent_runs, report_days=report_days, analysis_time=analysis_time
+        )
     t0row = cur.execute("SELECT MIN(started_at) m, MAX(started_at) x FROM traces").fetchone()
     if not t0row or not t0row["m"]:
-        return _empty_bundle(agent_runs=agent_runs)
+        return _empty_bundle(
+            agent_runs=agent_runs, report_days=report_days, analysis_time=analysis_time
+        )
     t0, tmax = _dt(t0row["m"]), _dt(t0row["x"])
     trace_columns = cur.columns("traces")
     cluster_select = (
@@ -1980,6 +2019,7 @@ def _build(
     management_first: datetime | None = None
     management_latest: datetime | None = None
     management_latencies: list[tuple[datetime, str, float]] = []
+    management_trace_ids: list[str] = []
     cost_counts = {
         name: {"traces": 0, "priced": 0, "cost": 0.0}
         for name in ("agent", "judge", "unclassified")
@@ -1987,7 +2027,6 @@ def _build(
     total_cost = 0.0
     priced_traces = 0
 
-    analysis_time = _now_utc()
     current_start = analysis_time - timedelta(hours=DRIFT_CURRENT_HOURS)
     baseline_end = analysis_time - timedelta(hours=DRIFT_BASELINE_LAG_HOURS)
     baseline_start = baseline_end - timedelta(days=DRIFT_BASELINE_DAYS)
@@ -2029,6 +2068,10 @@ def _build(
         group = workload if workload in {"agent", "judge"} else "unclassified"
         if workload != "judge":
             explorer_trace_ids.append(r["trace_id"])
+        if workload != "judge" and (
+            report_start is None or report_start <= _dt(r["started_at"]) < report_end
+        ):
+            management_trace_ids.append(r["trace_id"])
             _record_management_metric(management_scope, r)
             started_at = _dt(r["started_at"])
             management_first = min(management_first, started_at) if management_first else started_at
@@ -2712,9 +2755,23 @@ def _build(
         "p95LatencyMs": _nearest_rank(latency_values, 0.95),
         "identifiedApplications": len(management_services),
         "unattributedCalls": management_unattributed,
+        "judgedCalls": sum(
+            judgment_status_by_trace.get(trace_id) not in {None, "judge_error"}
+            for trace_id in management_trace_ids
+        ),
+        "judgeErrorCalls": sum(
+            judgment_status_by_trace.get(trace_id) == "judge_error"
+            for trace_id in management_trace_ids
+        ),
     })
+    if report_days == 0:
+        report_period.update({
+            "startDate": management_first.date().isoformat() if management_first else None,
+            "endDate": management_latest.date().isoformat() if management_latest else None,
+        })
     management_report = {
         "schema": "management-report-v1",
+        "period": report_period,
         "scope": scope,
         "timeline": {
             "availableDates": len(all_dates),
@@ -2944,7 +3001,10 @@ def create_app(
         trace_offset: int = Query(default=0, ge=0),
         trace_judge_status: str = "all",
         trace_id: str | None = None,
+        report_days: int = 30,
     ):
+        if report_days not in REPORT_PERIOD_DAYS:
+            return JSONResponse({"error": "report_days must be 0, 7, 30, or 90"}, status_code=422)
         if not _is_postgres(configured_storage) and not _sqlite_path(
             configured_storage
         ).exists():
@@ -2965,6 +3025,7 @@ def create_app(
                 trace_offset=trace_offset,
                 trace_judge_status=trace_judge_status,
                 trace_id=trace_id,
+                report_days=report_days,
             )
             bundle["monitor"] = monitor_routes.read_state()
             return bundle

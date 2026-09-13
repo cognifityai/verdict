@@ -308,11 +308,12 @@ function dashboardElement(tree) {
   )[0];
 }
 
-function bundle(evaluator, samples = [], driftSignals = []) {
+function bundle(evaluator, samples = [], driftSignals = [], reportDays = 30) {
   return {
     meta: { totalTraces: samples.length, totalJudged: 0, workload: null },
     managementReport: {
       schema: "management-report-v1",
+      period: { days: reportDays, startDate: "2026-08-13", endDate: "2026-09-11" },
       scope: {
         firstCapturedAt: "2026-09-08T00:00:00+00:00",
         latestCapturedAt: "2026-09-10T00:03:00+00:00",
@@ -322,6 +323,7 @@ function bundle(evaluator, samples = [], driftSignals = []) {
         averageLatencyMs: 1000, latencyKnownCalls: 26,
         latencySampledCalls: 26, p50LatencyMs: 900, p95LatencyMs: 1800,
         identifiedApplications: 2, unattributedCalls: 0,
+        judgedCalls: 20, judgeErrorCalls: 1,
       },
       timeline: { availableDates: 2, shownDates: 2, rows: [
         { date: "2026-09-08", calls: 24, totalTokens: 3000, tokenKnownCalls: 24 },
@@ -432,7 +434,14 @@ test("management report actions emit aggregate downloads and invoke browser prin
   };
   globalThis.window = { print: () => { printed = true; }, setTimeout: (callback) => callback() };
   try {
-    const tree = render(ui.ManagementReport, createHooks(), { data: bundle("judge-a"), source: "live" });
+    let selectedPeriod = null;
+    const tree = render(ui.ManagementReport, createHooks(), {
+      data: bundle("judge-a"), source: "live",
+      onPeriodChange: (days) => { selectedPeriod = days; },
+    });
+    const period = findAll(tree, (node) => node.type === "select" && node.props["aria-label"] === "Report period")[0];
+    assert.deepEqual(findAll(period, (node) => node.type === "option").map((node) => node.props.value), [7, 30, 90, 0]);
+    period.props.onChange({ target: { value: "7" } });
     const buttons = findAll(tree, (node) => node.type === "button");
     buttons.find((button) => textOf(button).includes("Export HTML")).props.onClick();
     buttons.find((button) => textOf(button).includes("Download CSV")).props.onClick();
@@ -441,6 +450,11 @@ test("management report actions emit aggregate downloads and invoke browser prin
     assert.equal(downloads[0].type, "text/html;charset=utf-8");
     assert.equal(downloads[1].type, "text/csv;charset=utf-8");
     assert.equal(printed, true);
+    assert.equal(selectedPeriod, 7);
+    const allTime = render(ui.ManagementReport, createHooks(), {
+      data: bundle("judge-a", [], [], 0), source: "live", onPeriodChange: () => {},
+    });
+    assert.equal(findAll(allTime, (node) => node.type === "select")[0].props.value, 0);
   } finally {
     globalThis.document = originalDocument;
     globalThis.window = originalWindow;
@@ -462,7 +476,7 @@ test("management report exposes labeled daily volume and application-level table
     ...tableNodes.map((node) => textOf(render(node.type, createHooks(), node.props)))].join(" ");
 
   assert.match(text, /LLM request volume/);
-  assert.match(text, /Sep 08/);
+  assert.match(text, /Sep 8/);
   assert.match(text, /Sep 10/);
   assert.match(text, /24/);
   assert.match(text, /Application LLM utilization by environment/);
@@ -1105,6 +1119,22 @@ test("an older evaluator response cannot overwrite the newest confirmed snapshot
   dashboard = dashboardElement(render(ui.DashboardRoot, hooks));
   dashboard.props.onReload();
   assert.match(requests[2].url, /evaluator=evaluator-b(?:&|$)/);
+});
+
+test("report period selection reloads the real API and survives refresh", async () => {
+  const ui = await loadUiModule();
+  const hooks = createHooks();
+  const requests = deferredFetches();
+  let dashboard = dashboardElement(render(ui.DashboardRoot, hooks));
+
+  dashboard.props.onReload(7);
+  assert.match(requests[0].url, /report_days=7(?:&|$)/);
+  await resolveJson(requests[0], bundle("evaluator-a", [], [], 7));
+
+  dashboard = dashboardElement(render(ui.DashboardRoot, hooks));
+  assert.equal(dashboard.props.data.managementReport.period.days, 7);
+  dashboard.props.onReload();
+  assert.match(requests[1].url, /report_days=7(?:&|$)/);
 });
 
 test("an older operations response cannot overwrite a newer refresh", async () => {

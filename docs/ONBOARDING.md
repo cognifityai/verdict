@@ -592,13 +592,17 @@ persists the health record, exits 2, and does not write production judgments.
 The dashboard shows per-provider traffic, optional intent clusters, and pass
 rates by rubric dimension. **Report** shows application-only request, token,
 latency, cost, service, and model summaries; evaluator calls are excluded. The
-timeline contains the newest 31 active UTC dates; tables contain at most 20
-service/environment rows and 20 model rows. Latency coverage uses every known
-value, while p50/p95 use the newest 10,000 known latencies. New instrumented
+default period is the last 30 UTC calendar days; 7-day, 90-day, and all-time
+choices are available. The timeline contains up to 31 active dates in the
+selected period; tables contain at most 20 service/environment rows and 20 model
+rows. Latency coverage uses every known value in the period, while p50/p95 use
+the newest 10,000 known latencies. New instrumented
 traces use the `service_name` and `environment` passed to `verdict.init`;
 historical and default-client traces without an explicit service identity
 appear as **Unattributed**. HTML, CSV, and browser Print/Save PDF exports
-contain aggregates only. **Monitor → Compare History** previews a reviewed
+use the selected period and contain aggregates only. Dates are displayed in a
+readable format: period boundaries use UTC, while capture and generation times
+use the browser's local time. **Monitor → Compare History** previews a reviewed
 reference/current comparison; **Monitor → Status** shows the active prospective
 cohort. Each alert includes its metric, reference/current rates, adjusted
 p-value, sample counts, and optional facet. Clusters are not required.

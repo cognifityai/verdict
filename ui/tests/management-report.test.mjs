@@ -19,6 +19,7 @@ function bundle() {
   return {
     managementReport: {
       schema: "management-report-v1",
+      period: { days: 30, startDate: "2026-08-13", endDate: "2026-09-11" },
       scope: {
         firstCapturedAt: "2026-09-08T00:00:00Z",
         latestCapturedAt: "2026-09-10T00:03:00Z",
@@ -39,6 +40,8 @@ function bundle() {
         p95LatencyMs: 1800,
         identifiedApplications: 2,
         unattributedCalls: 0,
+        judgedCalls: 20,
+        judgeErrorCalls: 1,
       },
       timeline: {
         availableDates: 2,
@@ -104,6 +107,12 @@ test("report presents one consistent application-only executive summary", () => 
   ]);
   assert.equal(report.summary.success, "96.4% · 27 of 28 calls");
   assert.equal(report.summary.cost, "$0.0280 · partial (27 of 28 calls priced)");
+  assert.equal(report.quality.evaluationCoverage, "20 of 28 application calls judged");
+  assert.equal(report.range, "Aug 13, 2026 – Sep 11, 2026 · UTC");
+  for (const timestamp of [report.generatedAt, report.summary.firstCapture, report.summary.latestCapture]) {
+    assert.match(timestamp, /2026/);
+    assert.doesNotMatch(timestamp, /T\d|Z$|\+00:00/);
+  }
   assert.equal(report.applications.rows.length, 2);
   assert.equal(report.models.rows[1].provider, "custom-provider");
   assert.match(report.attention.join(" "), /1 failed application call/);
@@ -119,7 +128,7 @@ test("chart and exports retain dates while excluding sensitive trace fields", ()
   const exportedHtml = managementReportHtml(report);
 
   assert.match(exportedHtml, /LLM request volume/);
-  assert.match(exportedHtml, /Sep 08/);
+  assert.match(exportedHtml, /Sep 8/);
   assert.match(exportedHtml, />24</);
   assert.match(exportedHtml, /Application LLM utilization by environment/);
   assert.match(exportedHtml, /Model performance and throughput/);
@@ -133,6 +142,8 @@ test("chart and exports retain dates while excluding sensitive trace fields", ()
   assert.match(csv, /"'=HYPERLINK/);
   assert.match(csv, /billing-worker/);
   assert.match(csv, /"environment","attributed"/);
+  assert.match(csv, /"period_start","period_end"/);
+  assert.match(csv, /"2026-08-13","2026-09-11"/);
   assert.doesNotMatch(csv, /prompt|response|trace_id|session_id|user_id/i);
   assert.doesNotMatch(exportedHtml, /prompt_redacted|response_redacted|trace_id|session_id/);
 });

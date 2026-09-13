@@ -44,6 +44,9 @@ the product is refined.
 
 ### Changed
 
+- Report now defaults to the last 30 UTC calendar days, offers 7-day, 90-day,
+  and all-time choices, keeps exports on the selected period, and displays
+  concise dates instead of raw ISO timestamps.
 - Retained Anthropic and Google bound methods and lazy stream managers now
   remain pass-through after Verdict shutdown; they cannot resume Trace capture
   or consume a pending one-call correlation reservation.

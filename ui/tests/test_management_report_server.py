@@ -1,8 +1,10 @@
 from datetime import datetime, timedelta, timezone
 
+import pytest
+import verdict.dashboard.app as dashboard_app
 from verdict.client import VerdictClient
-from verdict.dashboard.app import build_bundle
-from verdict.schema import Trace
+from verdict.dashboard.app import build_bundle, create_app
+from verdict.schema import DimensionScore, Judgment, Trace, Verdict
 from verdict.storage import SQLiteStorage
 
 
@@ -88,6 +90,8 @@ def test_management_report_aggregates_daily_application_evidence(tmp_path):
         "p95LatencyMs": 1000.0,
         "identifiedApplications": 2,
         "unattributedCalls": 0,
+        "judgedCalls": 0,
+        "judgeErrorCalls": 0,
     }
     assert report["timeline"] == {
         "availableDates": 2,
@@ -155,8 +159,11 @@ def test_management_report_keeps_empty_and_judge_only_stores_at_zero(tmp_path):
             )
         storage.close()
 
-        report = build_bundle(path)["managementReport"]
+        report = build_bundle(path, report_days=7 if name == "empty" else 0)[
+            "managementReport"
+        ]
         assert report["scope"]["calls"] == 0
+        assert report["period"]["days"] == (7 if name == "empty" else 0)
         assert report["timeline"]["rows"] == []
         assert report["applications"]["rows"] == []
         assert report["models"]["rows"] == []
@@ -249,3 +256,99 @@ def test_management_report_bounds_high_cardinality_dimensions(tmp_path):
         assert report[table]["shownRows"] == 20
     forbidden = {"environments", "providers", "models"}
     assert all(set(row).isdisjoint(forbidden) for row in report["applications"]["rows"])
+
+
+def test_management_report_period_filters_every_aggregate(tmp_path, monkeypatch):
+    path = tmp_path / "period.db"
+    storage = SQLiteStorage(str(path))
+    for trace_id, started_at, service in (
+        ("before", datetime(2026, 8, 13, 23, 59, tzinfo=timezone.utc), "old-api"),
+        ("first", datetime(2026, 8, 14, tzinfo=timezone.utc), "orders-api"),
+        ("latest", datetime(2026, 9, 12, 23, 59, tzinfo=timezone.utc), "orders-api"),
+        ("future", datetime(2026, 9, 13, tzinfo=timezone.utc), "future-api"),
+    ):
+        storage.insert_trace(_trace(trace_id, started_at, service_name=service))
+    for trace_id in ("before", "first"):
+        storage.insert_judgment(Judgment(
+            trace_id=trace_id,
+            dimensions=[DimensionScore(name="quality", verdict=Verdict.PASS)],
+        ))
+    storage.close()
+    monkeypatch.setattr(
+        dashboard_app, "_now_utc",
+        lambda: datetime(2026, 9, 12, 12, tzinfo=timezone.utc),
+    )
+
+    report = build_bundle(path, report_days=30)["managementReport"]
+
+    assert report["period"] == {
+        "days": 30, "startDate": "2026-08-14", "endDate": "2026-09-12",
+    }
+    assert report["scope"]["calls"] == 2
+    assert report["scope"]["firstCapturedAt"] == "2026-08-14T00:00:00+00:00"
+    assert report["scope"]["latestCapturedAt"] == "2026-09-12T23:59:00+00:00"
+    assert [row["date"] for row in report["timeline"]["rows"]] == [
+        "2026-08-14", "2026-09-12",
+    ]
+    assert [(row["name"], row["calls"]) for row in report["applications"]["rows"]] == [
+        ("orders-api", 2),
+    ]
+    assert report["models"]["rows"][0]["calls"] == 2
+    assert report["scope"]["judgedCalls"] == 1
+    assert report["scope"]["judgeErrorCalls"] == 0
+
+    monkeypatch.setattr(
+        dashboard_app, "_now_utc",
+        lambda: datetime(2026, 10, 12, 12, tzinfo=timezone.utc),
+    )
+    empty = build_bundle(path, report_days=7)["managementReport"]
+    assert empty["scope"]["calls"] == 0
+    assert empty["timeline"]["rows"] == []
+    assert empty["applications"]["rows"] == []
+    assert empty["models"]["rows"] == []
+
+
+@pytest.mark.parametrize("report_days", [-1, 1, 31, 365, True, None])
+def test_management_report_rejects_unsupported_periods(tmp_path, report_days):
+    with pytest.raises(ValueError, match="report_days"):
+        build_bundle(tmp_path / "unused.db", report_days=report_days)
+
+
+def test_management_report_api_defaults_to_30_days_and_validates_selection(
+    tmp_path, monkeypatch,
+):
+    import asyncio
+
+    import httpx
+
+    path = tmp_path / "api-period.db"
+    storage = SQLiteStorage(str(path))
+    for index, started_at in enumerate((
+        datetime(2026, 8, 14, tzinfo=timezone.utc),
+        datetime(2026, 9, 5, tzinfo=timezone.utc),
+        datetime(2026, 9, 12, tzinfo=timezone.utc),
+    )):
+        storage.insert_trace(_trace(f"trace-{index}", started_at))
+    storage.close()
+    monkeypatch.setattr(
+        dashboard_app, "_now_utc",
+        lambda: datetime(2026, 9, 12, 12, tzinfo=timezone.utc),
+    )
+    app = create_app(storage=str(path))
+
+    async def requests():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            return await asyncio.gather(
+                client.get("/api/data"),
+                client.get("/api/data?report_days=7"),
+                client.get("/api/data?report_days=0"),
+                client.get("/api/data?report_days=31"),
+            )
+
+    default, seven_days, all_time, invalid = asyncio.run(requests())
+    assert default.json()["managementReport"]["scope"]["calls"] == 3
+    assert default.json()["managementReport"]["period"]["days"] == 30
+    assert seven_days.json()["managementReport"]["scope"]["calls"] == 1
+    assert all_time.json()["managementReport"]["scope"]["calls"] == 3
+    assert invalid.status_code == 422

@@ -82,8 +82,9 @@ does not duplicate it.
    metrics. Grouping is optional.
 6. **Inspect**: use the CLI, Python APIs, or dashboard to review traces, scores,
    clusters, and drift reports.
-7. **Report**: review bounded, application-only utilization and available
-   evaluation/change status, then export aggregate-only HTML, CSV, or browser
+7. **Report**: review application-only utilization and evaluation coverage over
+   a selectable 7-day, 30-day, 90-day, or all-time period alongside current
+   monitor/change status, then export aggregate-only HTML, CSV, or browser
    Print/Save PDF output. Verdict evaluator calls stay outside utilization.
 
 For a visual overview, see `docs/architecture-current.svg`.
