@@ -327,8 +327,10 @@ verdict-dashboard --storage sqlite:///./verdict.db
 If capture/import used an explicit tenant, pass the same `--tenant-id` to the
 dashboard or set `VERDICT_TENANT_ID`. The default remains
 `__verdict_local__`; selecting another tenant requires no data migration and
-does not relabel existing rows. Explicit tenant IDs contain at most 128 ASCII
-letters, digits, `.`, `_`, `:`, or `-` and begin with a letter or digit.
+does not relabel existing rows. Dashboard-selectable tenant IDs contain at most
+128 ASCII letters, digits, `.`, `_`, `:`, or `-` and begin with a letter or
+digit. Existing telemetry imports retain the published 256-character routing
+boundary; use at most 128 characters for a new standalone dashboard workspace.
 Browser `tenant=` parameters do not select a workspace.
 
 Add the `postgres` extra for a PostgreSQL store. Verdict requires PostgreSQL

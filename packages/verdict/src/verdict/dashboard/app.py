@@ -2215,8 +2215,18 @@ def _build(
     # run; keep that fingerprint selectable as an explicitly incomplete identity.
     identity_rows: list[tuple[dict, Mapping[str, Any]]] = []
     identity_by_id: dict[str, dict] = {}
+    judgment_scope, judgment_scope_params = _trace_tenant_scope(
+        registry_tenant,
+        trace_columns,
+        alias="t",
+    )
     judgment_rows = (
-        cur.execute("SELECT * FROM judgments")
+        cur.execute(
+            "SELECT j.* FROM judgments AS j "
+            "JOIN traces AS t ON t.trace_id=j.trace_id "
+            f"WHERE {judgment_scope}",  # nosec B608 -- fixed tenant predicate
+            judgment_scope_params,
+        )
         if _table_exists(cur, "judgments")
         else ()
     )
