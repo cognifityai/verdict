@@ -106,13 +106,16 @@ jobs:
             pytest pytest-asyncio "anthropic==0.30.0"
           python -m pip install --disable-pip-version-check \
             -e packages/verdict
+          python -m pip install --disable-pip-version-check --no-deps \
+            -e packages/verdict_eval
 
       - name: Exercise both resource layouts and stream lifecycles
         run: >-
           python -m pytest -v --tb=short
           packages/verdict/tests/test_provider_scalar_persistence.py
           packages/verdict/tests/test_instrumentor_wrap_guard.py
-          -k 'messages_stream_helper or raw_stream_surface or complete_supported_surface'
+          packages/verdict_eval/tests/test_providers.py
+          -k 'messages_stream_helper or raw_stream_surface or complete_supported_surface or retry_classifier_accepts_real_anthropic_sdk_errors'
 
   openai-compat:
     name: OpenAI declared minimum SDK
@@ -134,13 +137,16 @@ jobs:
             pytest pytest-asyncio "openai==1.56.2"
           python -m pip install --disable-pip-version-check \
             -e "packages/verdict[openai]"
+          python -m pip install --disable-pip-version-check --no-deps \
+            -e packages/verdict_eval
 
       - name: Exercise Chat capture without the optional Responses resource
         run: >-
           python -m pytest -v --tb=short
           packages/verdict/tests/test_provider_scalar_persistence.py
           packages/verdict/tests/test_instrumentor_wrap_guard.py
-          -k 'openai_chat_create_stream or openai_minimum_default_client_constructor or complete_supported_surface'
+          packages/verdict_eval/tests/test_providers.py
+          -k 'openai_chat_create_stream or openai_minimum_default_client_constructor or complete_supported_surface or retry_classifier_accepts_real_openai_sdk_transport_errors'
 
   postgres:
     name: PostgreSQL adapter round trip
