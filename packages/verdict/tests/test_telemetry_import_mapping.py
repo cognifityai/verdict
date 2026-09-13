@@ -268,6 +268,36 @@ def test_otlp_keeps_real_response_text_beside_a_tool_call() -> None:
     assert mapped.trace.response_redacted == "I will look that up."
 
 
+def test_otlp_redacts_content_before_the_import_limit() -> None:
+    from verdict.storage.memory import InMemoryStorage
+
+    token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789"
+    response = f"{'x' * 99_994} {token}"
+    payload = {
+        "resourceSpans": [{"scopeSpans": [{"spans": [{
+            "traceId": "f" * 32,
+            "spanId": "6" * 16,
+            "name": "chat model",
+            "startTimeUnixNano": "1788264000000000000",
+            "attributes": _otel_attributes({
+                "gen_ai.operation.name": "chat",
+                "gen_ai.request.model": "model",
+                "gen_ai.output.messages": json.dumps([{
+                    "role": "assistant",
+                    "content": response,
+                }]),
+            }),
+        }]}]}],
+    }
+
+    [mapped] = map_otlp_payload(payload, _context("otlp"))
+    assert mapped.trace is not None
+    storage = InMemoryStorage()
+    storage.insert_trace(mapped.trace)
+    [stored] = storage.list_traces()
+    assert "ghp_" not in repr(stored)
+
+
 def test_otlp_skips_non_llm_and_missing_identity_instead_of_inventing_records() -> None:
     payload = {
         "resourceSpans": [

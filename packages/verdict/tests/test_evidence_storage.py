@@ -71,6 +71,7 @@ def _bundle(
             "result": {
                 "email": "customer@example.com" if include_pii else "redacted",
                 "status": "found",
+                **({"password": "opaque-storage-canary"} if include_pii else {}),
             },
             "is_error": False,
         },
@@ -438,7 +439,9 @@ def test_storage_redacts_nested_agent_evidence_before_persistence(evidence_stora
     assert loaded is not None
     assert loaded.turns[0].user_request_redacted == "test account <EMAIL>"
     assert loaded.events[0].attributes["result"]["email"] == "<EMAIL>"
+    assert loaded.events[0].attributes["result"]["password"] == "<SECRET>"
     assert "customer@example.com" not in repr(loaded)
+    assert "opaque-storage-canary" not in repr(loaded)
 
 
 def test_read_bundle_is_detached_from_stored_state(evidence_storage) -> None:

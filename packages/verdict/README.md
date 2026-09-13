@@ -191,9 +191,12 @@ vendor-neutral schema with the `verdict-import` command.
 Traces are written to SQLite by default (or any `Storage` adapter). Content
 capture (prompts/completions) is **on by default** and can be disabled with
 `capture_content=False`; captured content is run through built-in
-pattern redaction, including common provider/API credentials, recursively
-across supported JSON-compatible message and tool
-structures before `Trace` assignment and again at storage. Card candidates use
+pattern and field-aware redaction, including common provider/API credentials,
+GitHub tokens, and authorization headers, recursively across supported
+JSON-compatible message and tool structures before content limits, `Trace`
+assignment, and storage. Opaque values under supported credential field names
+are removed without relying on their text shape. Metadata-only capture retains
+error categories but not provider or manual-span exception messages. Card candidates use
 Luhn validation; IPv6 candidates use standard-library address validation so
 trailing text that is not part of the validated address remains outside it
 while clock values such as `12:34:56` remain intact. Email candidates use a

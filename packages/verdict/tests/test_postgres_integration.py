@@ -394,6 +394,24 @@ def test_live_postgres_agent_run_bundle_is_atomic_redacted_and_tenant_scoped():
                 response_truncated=True,
             ),
         ),
+        events=(
+            verdict.AgentEvent(
+                event_id=f"event-{suffix}",
+                turn_id=f"turn-{suffix}",
+                sequence=0,
+                occurred_at=now,
+                event_type=verdict.AgentEventType.TOOL_RESULT,
+                status=verdict.ExecutionStatus.COMPLETED,
+                provenance="test:tool_result",
+                attributes={
+                    "tool_name": "lookup",
+                    "call_id": "call-1",
+                    "result": {"password": "opaque-postgres-canary"},
+                    "is_error": False,
+                },
+                privacy_classification=verdict.PrivacyClassification.REDACTED,
+            ),
+        ),
     )
     storage = PostgresStorage(DSN, min_pool=1, max_pool=2)
     try:
@@ -406,6 +424,8 @@ def test_live_postgres_agent_run_bundle_is_atomic_redacted_and_tenant_scoped():
         assert loaded.turns[0].total_tokens == 12
         assert loaded.turns[0].cached_input_tokens == 4
         assert loaded.turns[0].response_truncated is True
+        assert loaded.events[0].attributes["result"]["password"] == "<SECRET>"
+        assert "opaque-postgres-canary" not in repr(loaded)
         assert storage.get_agent_run_bundle(f"other-{tenant}", bundle.run.run_id) is None
         assert storage.list_agent_run_bundles(tenant, limit=10) == [loaded]
         assert storage.has_agent_run_source_kind(tenant, "unknown-agent") is True

@@ -6,6 +6,14 @@ the product is refined.
 
 ## [Unreleased]
 
+### Fixed
+
+- Structured Agent, tool, provider, span, and telemetry evidence now removes
+  opaque values under supported credential field names and recognizes GitHub
+  tokens and Basic authorization. Redaction runs before content limits, and
+  metadata-only provider/manual-span failures no longer retain exception
+  message content.
+
 ### Added
 
 - `verdict.model_call_context()` yields a generated pre-call identifier and

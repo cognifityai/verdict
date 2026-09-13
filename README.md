@@ -474,13 +474,16 @@ continue to use the trace's stored `cluster_id`.
 
 Content capture is **on by default** and is a PII surface. Verdict recursively sanitizes supported
 JSON-compatible message fields, including nested tool inputs/results and OpenAI
-tool arguments, before `Trace` assignment and again at storage. The detector is
-best-effort pattern matching with common provider/API credential patterns,
+tool arguments, before content limits, `Trace` assignment, and storage. Opaque
+values under supported credential fields such as `password`, `api_key`,
+`authorization`, and `client_secret` are removed using the field name. The detector is
+best-effort pattern matching with common provider/API, GitHub, Bearer, and Basic-auth patterns,
 Luhn card checks, and standard-library IP
 address validation, not a compliance control; names, addresses, many
 international identifiers, and opaque application metadata are not guaranteed
 to be found. Set `capture_content=False` when that residual risk is
-unacceptable. IPv6 validation preserves trailing text that is not part of the
+unacceptable; provider and manual-span failures then retain an error category
+without exception message content. IPv6 validation preserves trailing text that is not part of the
 validated address; clock values such as `12:34:56` are not treated as IPv6. Use
 non-sensitive tenant/session/cluster IDs. `sample_rate`
 controls what fraction of supported calls is retained. The `0.1.0a17` POC

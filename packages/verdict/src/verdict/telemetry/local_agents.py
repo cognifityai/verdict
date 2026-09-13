@@ -508,16 +508,29 @@ def _tool_name(payload: dict[str, object]) -> str:
     return _bounded_utf8(value, 256) if isinstance(value, str) and value else "unknown"
 
 
+def _bounded_redacted_content(value: object) -> str:
+    try:
+        sanitized = redact(value) if isinstance(value, str) else redact_structure(value)
+        text = (
+            sanitized
+            if isinstance(sanitized, str)
+            else json.dumps(sanitized, ensure_ascii=False, separators=(",", ":"))
+        )
+        return text[:_MAX_CONTENT_CHARS]
+    except Exception:
+        return "<REDACTED>"
+
+
 def _command_from_arguments(value: object) -> str:
     if isinstance(value, dict):
         command = value.get("cmd") or value.get("command")
-        return command[:_MAX_CONTENT_CHARS] if isinstance(command, str) else ""
+        return _bounded_redacted_content(command) if isinstance(command, str) else ""
     if not isinstance(value, str):
         return ""
     try:
         decoded = json.loads(value)
     except (json.JSONDecodeError, RecursionError):
-        return value[:_MAX_CONTENT_CHARS]
+        return _bounded_redacted_content(value)
     return _command_from_arguments(decoded)
 
 
@@ -527,9 +540,9 @@ def _result_details(value: object) -> tuple[int | None, bool | None, str]:
         try:
             decoded = json.loads(value)
         except (json.JSONDecodeError, RecursionError):
-            return None, None, value[:_MAX_CONTENT_CHARS]
+            return None, None, _bounded_redacted_content(value)
     if not isinstance(decoded, dict):
-        return None, None, str(decoded)[:_MAX_CONTENT_CHARS]
+        return None, None, _bounded_redacted_content(decoded)
     exit_code = decoded.get("exit_code")
     if (
         isinstance(exit_code, bool)
@@ -541,7 +554,7 @@ def _result_details(value: object) -> tuple[int | None, bool | None, str]:
     if not isinstance(is_error, bool):
         is_error = exit_code != 0 if exit_code is not None else None
     output = decoded.get("output") or decoded.get("result") or decoded.get("stdout") or ""
-    return exit_code, is_error, str(output)[:_MAX_CONTENT_CHARS]
+    return exit_code, is_error, _bounded_redacted_content(output)
 
 
 def _event(

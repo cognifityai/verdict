@@ -29,6 +29,7 @@ _REDACTED = "<REDACTED>"
 _MAX_NESTING_DEPTH = 64
 _MAX_STRUCTURE_NODES = 10_000
 _MAX_STRUCTURE_CHARACTERS = 1_000_000
+_MAX_ERROR_BYTES = 10_000
 
 # Longest textual IPv6 address:
 # ``ffff:ffff:ffff:ffff:ffff:ffff:255.255.255.255``. Bounding each candidate
@@ -64,15 +65,47 @@ _MESSAGE_FIELDS = (
 # phone numbers, and most non-US formats. Do not treat regex-only redaction as a
 # compliance guarantee. A deeper entity-aware pass (e.g. Presidio) is a possible
 # future addition but is NOT wired in today.
+_ASSIGNMENT_CANDIDATE = re.compile(
+    r"(?i)(?<![A-Za-z0-9_])"
+    r"(?P<key_quote>[\"']?)(?P<key>[A-Za-z][A-Za-z0-9_.-]{0,127})(?P=key_quote)"
+    r"(?P<separator>\s*[:=]\s*)"
+    r"(?P<value>\"(?:\\.|[^\"\\\r\n])*\"|'(?:\\.|[^'\\\r\n])*'|"
+    r"(?:(?:Basic|Bearer)\s+)?[A-Za-z0-9._~+/=:-]+)"
+)
+_SENSITIVE_KEY_SUFFIXES = (
+    "password",
+    "passwd",
+    "pwd",
+    "passphrase",
+    "authorization",
+    "apikey",
+    "accesstoken",
+    "authtoken",
+    "bearertoken",
+    "refreshtoken",
+    "sessiontoken",
+    "identitytoken",
+    "idtoken",
+    "githubtoken",
+    "clientsecret",
+    "privatekey",
+    "secretaccesskey",
+    "secret",
+    "credential",
+    "credentials",
+)
+
 _PATTERNS = {
     "PROVIDER_KEY": re.compile(
         r"\b(?:sk-ant-[A-Za-z0-9_-]{16,}|sk-(?:proj-)?[A-Za-z0-9_-]{20,}|"
         r"AKIA[A-Z0-9]{16}|AIza[A-Za-z0-9_-]{30,})\b"
     ),
+    "GITHUB_TOKEN": re.compile(
+        r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b"
+    ),
     "BEARER_TOKEN": re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{16,}"),
-    "SECRET_ASSIGNMENT": re.compile(
-        r"(?i)\b(?:api[_-]?key|access[_-]?token|auth[_-]?token|password|secret|token)"
-        r"\s*[:=]\s*[\"']?[A-Za-z0-9._~+/=:-]{8,}[\"']?"
+    "BASIC_AUTH": re.compile(
+        r"(?i)\b(?:proxy[-_ ]+)?authorization\s*:\s*Basic\s+[A-Za-z0-9+/=]{8,}"
     ),
     # Email candidates are handled by the linear at-sign scanner below before
     # this mapping, so an email embedded in a URL is still classified as EMAIL.
@@ -102,6 +135,48 @@ _PATTERNS = {
     "IP": re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b"),
     "PHONE": re.compile(r"(?:\+\d{1,3}[ -]?)?(?:\(\d{3}\)[ -]?|\d{3}[ -])\d{3}[ -]?\d{4}\b"),
 }
+
+
+def _is_sensitive_key(key: str) -> bool:
+    normalized = "".join(re.findall(r"[A-Za-z0-9]+", key)).lower()
+    return any(normalized.endswith(suffix) for suffix in _SENSITIVE_KEY_SUFFIXES)
+
+
+def _secret_value(
+    value: Any,
+    mode: RedactionMode,
+    secret: str | None,
+) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, str) and (
+        value == "<SECRET>" or re.fullmatch(r"<SECRET:[0-9a-f]{12}>", value)
+    ):
+        return value
+    if mode == "hash" and isinstance(value, str):
+        return _hash_match(value, "SECRET", secret)
+    return "<SECRET>"
+
+
+def _secret_assignment_repl(
+    match: re.Match[str],
+    mode: RedactionMode,
+    secret: str | None,
+) -> str:
+    if not _is_sensitive_key(match.group("key")):
+        return match.group(0)
+    raw_value = match.group("value")
+    quote = raw_value[:1] if raw_value[:1] in {"\"", "'"} else ""
+    value = raw_value[1:-1] if quote else raw_value
+    if value == "<SECRET>" or re.fullmatch(r"<SECRET:[0-9a-f]{12}>", value):
+        return match.group(0)
+    replacement = (
+        _hash_match(value, "SECRET", secret) if mode == "hash" else "<SECRET>"
+    )
+    start = match.start("value") - match.start()
+    end = match.end("value") - match.start()
+    matched = match.group(0)
+    return f"{matched[:start]}{quote}{replacement}{quote}{matched[end:]}"
 
 
 def _is_word_character(character: str) -> bool:
@@ -207,6 +282,10 @@ def redact(
 
     # Email discovery is first for classification stability in URL contexts.
     out = _redact_emails(text, mode, secret)
+    out = _ASSIGNMENT_CANDIDATE.sub(
+        lambda match: _secret_assignment_repl(match, mode, secret),
+        out,
+    )
     for label, pat in _PATTERNS.items():
         if label == "CREDIT_CARD":
             # Gate on Luhn + valid length so non-card digit runs survive intact.
@@ -236,6 +315,29 @@ def redact(
         else:  # redact
             out = pat.sub(f"<{label}>", out)
     return out
+
+
+def sanitize_error_text(
+    error: str | None,
+    *,
+    capture_content: bool,
+    mode: RedactionMode = "redact",
+    secret: str | None = None,
+) -> str | None:
+    """Sanitize captured exception evidence without changing control flow."""
+    if error is None:
+        return None
+    if not isinstance(error, str):
+        return _REDACTED
+    if not capture_content:
+        category, separator, _detail = error.partition(":")
+        category = category.strip()
+        if separator and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]{0,127}", category):
+            return category
+        return "provider_error"
+    sanitized = redact(error, mode=mode, secret=secret) or ""
+    encoded = sanitized.encode("utf-8", errors="replace")
+    return encoded[:_MAX_ERROR_BYTES].decode("utf-8", errors="ignore")
 
 
 # Valid PAN lengths in circulation (digits only): 13 (older Visa), 14 (Diners),
@@ -434,6 +536,11 @@ def redact_structure(
                 if not isinstance(key, str):
                     return _REDACTED
                 sanitized_key = redact(key, mode=mode, secret=secret) or _REDACTED
+                if _is_sensitive_key(key):
+                    entries.append(
+                        (sanitized_key, key, _secret_value(child, mode, secret))
+                    )
+                    continue
                 if key == "arguments" and isinstance(child, str):
                     try:
                         parsed_arguments = json.loads(child)
