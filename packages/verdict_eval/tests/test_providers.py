@@ -6,6 +6,23 @@ import sys
 import time
 from types import SimpleNamespace
 
+import pytest
+
+
+class _ProviderError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        code: int | None = None,
+        response: object | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.code = code
+        self.response = response
+
 
 def _fake_google_types():
     class Part:
@@ -152,7 +169,10 @@ def test_litellm_adapter_retries_transient_errors(monkeypatch) -> None:
     def completion(**_kwargs):
         attempts.append(1)
         if len(attempts) == 1:
-            raise RuntimeError("503 service unavailable")
+            raise _ProviderError(
+                "429 Too Many Requests. Limit 40000 tokens; request req-404abc",
+                status_code=429,
+            )
         return {
             "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
             "usage": {"prompt_tokens": 3, "completion_tokens": 2},
@@ -177,7 +197,10 @@ def test_litellm_adapter_does_not_retry_fatal_errors(monkeypatch) -> None:
 
     def completion(**_kwargs):
         attempts.append(1)
-        raise RuntimeError("401 unauthorized")
+        raise _ProviderError(
+            "429 rate limit temporarily unavailable",
+            status_code=401,
+        )
 
     monkeypatch.setitem(sys.modules, "litellm", SimpleNamespace(completion=completion))
 
@@ -185,8 +208,79 @@ def test_litellm_adapter_does_not_retry_fatal_errors(monkeypatch) -> None:
     try:
         adapter.complete(CompletionRequest(model="custom/model", messages=[]))
     except RuntimeError as exc:
-        assert "401" in str(exc)
+        assert "rate limit" in str(exc)
     else:  # pragma: no cover - the adapter must propagate fatal errors
         raise AssertionError("fatal LiteLLM error was swallowed")
 
     assert len(attempts) == 1
+
+
+def test_litellm_adapter_does_not_infer_http_status_from_message_digits(
+    monkeypatch,
+) -> None:
+    from verdict_eval.providers import CompletionRequest, LiteLLMAdapter
+
+    attempts = []
+
+    def completion(**_kwargs):
+        attempts.append(1)
+        raise RuntimeError("429 rate limit exceeded for org-1400")
+
+    monkeypatch.setitem(sys.modules, "litellm", SimpleNamespace(completion=completion))
+
+    adapter = LiteLLMAdapter(max_retries=4)
+    try:
+        adapter.complete(CompletionRequest(model="custom/model", messages=[]))
+    except RuntimeError as exc:
+        assert "org-1400" in str(exc)
+    else:  # pragma: no cover - the adapter must propagate unclassified errors
+        raise AssertionError("unstructured LiteLLM error was swallowed")
+
+    assert len(attempts) == 1
+
+
+def test_retry_classifier_accepts_typed_timeout() -> None:
+    from verdict_eval.providers import _is_retryable_error
+
+    assert _is_retryable_error(TimeoutError("request deadline exceeded"))
+
+
+def test_retry_classifier_reads_response_status() -> None:
+    from verdict_eval.providers import _is_retryable_error
+
+    exc = _ProviderError(
+        "opaque provider error",
+        response=SimpleNamespace(status_code=503),
+    )
+
+    assert _is_retryable_error(exc)
+
+
+@pytest.mark.parametrize("status_code", [408, 429, 500, 502, 503, 504])
+def test_retry_classifier_accepts_only_known_transient_http_statuses(
+    status_code: int,
+) -> None:
+    from verdict_eval.providers import _is_retryable_error
+
+    assert _is_retryable_error(_ProviderError("opaque provider error", code=status_code))
+
+
+@pytest.mark.parametrize("status_code", [400, 401, 403, 404, 409, 422, 501, 505])
+def test_retry_classifier_rejects_nontransient_http_statuses(status_code: int) -> None:
+    from verdict_eval.providers import _is_retryable_error
+
+    assert not _is_retryable_error(
+        _ProviderError("429 rate limit temporarily unavailable", status_code=status_code)
+    )
+
+
+def test_retry_classifier_prefers_direct_status_over_conflicting_response() -> None:
+    from verdict_eval.providers import _is_retryable_error
+
+    exc = _ProviderError(
+        "provider error",
+        status_code=401,
+        response=SimpleNamespace(status_code=503),
+    )
+
+    assert not _is_retryable_error(exc)
