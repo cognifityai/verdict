@@ -8,6 +8,10 @@ the product is refined.
 
 ### Added
 
+- `verdict-dashboard` accepts `--tenant-id` (or `VERDICT_TENANT_ID`) so a
+  standalone dashboard can read and operate on the same explicit tenant used
+  by local capture or telemetry import. The selected tenant is also reported
+  by `/api/config`.
 - `verdict.model_call_context()` yields a generated pre-call identifier and
   assigns it to at most one supported instrumented provider Trace. This lets a
   separately owned gateway integration propagate the same identity without
@@ -47,6 +51,16 @@ the product is refined.
 - Report now defaults to the last 30 UTC calendar days, offers 7-day, 90-day,
   and all-time choices, keeps exports on the selected period, and displays
   concise dates instead of raw ISO timestamps.
+- Standalone setup/import, evaluator, cluster, Monitor, control, Agent Run, and
+  active-registry projection paths now share the dashboard's configured tenant.
+  Overview totals, reports, trace samples, judgments, and deterministic analysis
+  use the same scope; browser `tenant=` parameters can no longer override it.
+  Tenant selectors consistently accept at most 128 safe ASCII characters, and
+  unowned legacy fixed-window drift rows are suppressed rather than mixed across
+  tenant workspaces.
+  The default remains `__verdict_local__`, existing stores need no migration,
+  and a non-default `verdict-import local --tenant-id` run prints the matching
+  dashboard requirement instead of silently leaving the data undiscoverable.
 - Retained Anthropic and Google bound methods and lazy stream managers now
   remain pass-through after Verdict shutdown; they cannot resume Trace capture
   or consume a pending one-call correlation reservation.

@@ -11,10 +11,11 @@ from pathlib import Path
 
 from verdict.agent_transport import import_capture_records
 from verdict.client import _resolve_storage
+from verdict.monitor_inputs import LOCAL_TENANT
 from verdict.telemetry.files import SUPPORTED_FORMATS, iter_telemetry_file
 from verdict.telemetry.http import JsonHttpClient
 from verdict.telemetry.local_agents import capture_local_agents
-from verdict.telemetry.model import ImportContext
+from verdict.telemetry.model import ImportContext, safe_tenant_id
 from verdict.telemetry.normalize import parse_datetime
 from verdict.telemetry.receiver import OtlpHttpReceiver
 from verdict.telemetry.runner import ImportRunError, import_into_storage
@@ -190,11 +191,17 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         if args.command == "local":
+            tenant_id = args.tenant_id or LOCAL_TENANT
+            if safe_tenant_id(tenant_id) is None:
+                raise ValueError(
+                    "tenant_id must be a non-sensitive bounded routing identifier "
+                    "of at most 128 ASCII characters"
+                )
             storage = _open_storage(args.storage)
             try:
                 local_summary = capture_local_agents(
                     storage,
-                    tenant_id=args.tenant_id or "__verdict_local__",
+                    tenant_id=tenant_id,
                     claude_root=args.claude_root.expanduser(),
                     codex_root=args.codex_root.expanduser(),
                     capture_content=args.capture_content,
@@ -202,6 +209,13 @@ def main(argv: list[str] | None = None) -> int:
             finally:
                 storage.close()
             print(json.dumps(local_summary.as_dict(), sort_keys=True))
+            if args.tenant_id and args.tenant_id != LOCAL_TENANT:
+                print(
+                    "NOTICE: this import uses tenant "
+                    f"{args.tenant_id!r}; start verdict-dashboard with the same "
+                    "--tenant-id to view it.",
+                    file=sys.stderr,
+                )
             return 0
         if args.command == "agent-file":
             storage = _open_storage(args.storage)

@@ -312,11 +312,9 @@ def test_registry_api_uses_host_authorized_tenant_and_explains_terminal_membersh
     )
     assert tenant_a_sample["cluster_id"] == cluster_id
     assert tenant_a_sample["cluster_label"] == "Billing requests 100"
-    tenantless_sample = next(
-        item for item in data_payload["samples"] if item["trace_id"] == "tenantless-private"
-    )
-    assert tenantless_sample["cluster_id"] is None
-    assert tenantless_sample["cluster_label"] is None
+    assert "tenantless-private" not in {
+        item["trace_id"] for item in data_payload["samples"]
+    }
 
     with sqlite3.connect(path) as partial:
         partial.execute("DROP TABLE cluster_registry_versions")
@@ -353,8 +351,64 @@ def test_registry_api_is_additive_for_old_stores_and_requires_explicit_shared_sc
         "reason": "registry_not_installed",
     }
     assert tenant_response.status_code == 200
-    assert tenant_response.json()["tenant"] == "tenant-a"
+    assert tenant_response.json()["tenant"] == "__verdict_local__"
     assert tenant_response.json()["status"] == "unavailable"
+
+
+def test_configured_standalone_tenant_owns_cluster_actions_and_data_projection(
+    tmp_path,
+) -> None:
+    path = tmp_path / "configured-registry.db"
+    storage = SQLiteStorage(str(path))
+    cutoff = datetime(2026, 9, 2, tzinfo=timezone.utc)
+    storage.insert_trace(_trace("customer-a", "customer-trace", cutoff, "billing"))
+    storage.insert_trace(_trace("__verdict_local__", "local-trace", cutoff, "local"))
+    storage.close()
+
+    async def lifecycle():
+        app = create_app(storage=f"sqlite:///{path}", tenant_id="customer-a")
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            headers = {"X-Verdict-Setup": token}
+            fitted = await client.post(
+                "/api/clusters/fit", headers=headers, json={"strategy": "explicit"}
+            )
+            version_id = fitted.json()["versionId"]
+            validated = await client.post(
+                "/api/clusters/validate", headers=headers, json={"versionId": version_id}
+            )
+            activated = await client.post(
+                "/api/clusters/activate",
+                headers=headers,
+                json={"versionId": version_id, "expectedGeneration": 0},
+            )
+            return (
+                fitted,
+                validated,
+                activated,
+                await client.get("/api/registry"),
+                await client.get("/api/data"),
+            )
+
+    fitted, validated, activated, registry, dashboard = asyncio.run(lifecycle())
+
+    assert fitted.status_code == 200
+    assert validated.json()["report"]["passed"] is True
+    assert activated.status_code == 200
+    assert registry.json()["tenant"] == "customer-a"
+    customer_sample = next(
+        sample for sample in dashboard.json()["samples"]
+        if sample["trace_id"] == "customer-trace"
+    )
+    assert customer_sample["cluster_id"] is not None
+    assert customer_sample["cluster_label"] == "billing"
+    storage = SQLiteStorage(str(path))
+    assert storage.get_active_cluster_registry("customer-a") is not None
+    assert storage.get_active_cluster_registry("__verdict_local__").version_id is None
+    storage.close()
 
 
 def test_registry_read_model_bounds_representatives_and_reports_semantic_health(
@@ -593,7 +647,7 @@ def test_registry_maximum_cluster_shape_stays_within_api_redaction_budget(tmp_pa
     )
     storage.insert_cluster_preview(version, identities, clusters, assignments)
     storage.close()
-    app = create_app(storage=f"sqlite:///{path}")
+    app = create_app(storage=f"sqlite:///{path}", tenant_id=tenant)
 
     async def request_registry():
         transport = httpx.ASGITransport(app=app)

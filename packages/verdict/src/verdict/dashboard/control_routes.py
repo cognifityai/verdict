@@ -9,7 +9,7 @@ from fastapi.responses import JSONResponse
 
 from verdict.dashboard.analysis_service import run_analysis
 from verdict.dashboard.control_plane import ControlStore
-from verdict.dashboard.monitor_routes import SCOPE, TENANT, MonitorRoutes
+from verdict.dashboard.monitor_routes import MonitorRoutes
 from verdict.dashboard.setup_routes import SetupRoutes
 from verdict.telemetry.local_agents import capture_local_agents
 
@@ -26,21 +26,23 @@ class ControlRoutes:
         self.storage_url = storage_url
         self.setup = setup
         self.monitor = monitor
+        self.tenant_id = setup.tenant_id
+        self.scope = monitor.scope
 
     def register(self, app) -> None:
         @app.get("/api/control")
         def control_state():
             writable = self.setup.writable_storage()
             try:
-                documents = ControlStore(self.storage_url).list_current(TENANT)
+                documents = ControlStore(self.storage_url).list_current(self.tenant_id)
                 attempts = writable.list_notification_delivery_attempts_for_tenant(
-                    TENANT, limit=100
+                    self.tenant_id, limit=100
                 )
-                traces = writable.list_traces(tenant_id=TENANT, limit=501)
+                traces = writable.list_traces(tenant_id=self.tenant_id, limit=501)
                 local_sources = sorted(
                     source_kind
                     for source_kind in ("claude-code", "codex")
-                    if writable.has_agent_run_source_kind(TENANT, source_kind)
+                    if writable.has_agent_run_source_kind(self.tenant_id, source_kind)
                 )
                 has_local_schedule = any(
                     item["kind"] == "schedule"
@@ -97,7 +99,7 @@ class ControlRoutes:
                 if not isinstance(body, dict):
                     raise ValueError("invalid control payload")
                 return ControlStore(self.storage_url).append(
-                    TENANT,
+                    self.tenant_id,
                     kind=kind,
                     document_id=document_id,
                     state=payload.get("state"),
@@ -120,7 +122,7 @@ class ControlRoutes:
                 )
             try:
                 return ControlStore(self.storage_url).rollback(
-                    TENANT,
+                    self.tenant_id,
                     kind=kind,
                     document_id=document_id,
                     target_revision=int(payload["targetRevision"]),
@@ -147,7 +149,7 @@ class ControlRoutes:
                 try:
                     summary = capture_local_agents(
                         writable,
-                        tenant_id=TENANT,
+                        tenant_id=self.tenant_id,
                         claude_root=claude_root,
                         codex_root=codex_root,
                         capture_content=True,
@@ -161,10 +163,10 @@ class ControlRoutes:
 
                 analysis = run_analysis(
                     self.storage_url,
-                    tenant=TENANT,
+                    tenant=self.tenant_id,
                     build=lambda: build_agent_insights_bundle(
                         self.storage_url,
-                        tenant=TENANT,
+                        tenant=self.tenant_id,
                         _include_input_fingerprint=True,
                     ),
                 )
@@ -204,10 +206,9 @@ class ControlRoutes:
                         return queue
         return queue
 
-    @staticmethod
-    def _notifications(writable) -> list[dict[str, object]]:
+    def _notifications(self, writable) -> list[dict[str, object]]:
         notifications: list[dict[str, object]] = []
-        active = writable.get_active_monitor_policy(SCOPE)
+        active = writable.get_active_monitor_policy(self.scope)
         if active is not None:
             snapshot = writable.get_latest_monitor_snapshot(active.policy_id)
             if snapshot is not None and snapshot[1].status.value in {
@@ -240,7 +241,7 @@ class ControlRoutes:
     def _run_monitor(self, writable, enabled: bool):
         if not enabled:
             return None
-        policy = writable.get_active_monitor_policy(SCOPE)
+        policy = writable.get_active_monitor_policy(self.scope)
         if policy is None:
             return None
         manifest, comparison = self.monitor.prospective(writable, policy)

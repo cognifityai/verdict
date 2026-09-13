@@ -195,12 +195,22 @@ The bundled dashboard's analytics reads do not rewrite trace or judgment
 history. Setup/import and Monitor controls are explicit write paths and create
 their additive tables when used. Install `cognifity-verdict[dashboard]` for SQLite or
 `cognifity-verdict[dashboard,postgres]` for PostgreSQL, then run
-`verdict-dashboard --storage ...`. A FastAPI host can mount
+`verdict-dashboard --storage ...`. If capture/import used an explicit tenant,
+pass the same `--tenant-id` or set `VERDICT_TENANT_ID`; explicit values use at
+most 128 safe ASCII characters. Browser `tenant=` parameters cannot change that
+selection. A FastAPI host can mount
 `verdict.dashboard.create_app()` so its authenticated application and the
 packaged Verdict UI run together. A host-authorized
-`request.state.verdict_registry_tenant` makes the active registry the cluster
-source for Overview, Trace Explorer, pass-rate charts, and drift labels;
-standalone and legacy stores retain their stored trace cluster IDs.
+`request.state.verdict_registry_tenant` scopes dashboard data, Registry, Agent
+Run, and deterministic-analysis requests, including the Monitor summary
+embedded in `/api/data`; the standalone dashboard uses its configured tenant.
+Without an active registry, stored trace cluster IDs remain the fallback. Every
+trace-derived total, report, sample, and judgment uses that same tenant. Older
+fixed-window drift rows are suppressed because they have no tenant owner; the
+current Monitor data remains tenant-scoped. Request state does not make one
+mounted app a dynamic multi-tenant control plane: setup, Evaluator Lab, Monitor
+lifecycle, and control routes remain bound to the configured tenant. Mount one
+app instance per tenant for those mutable workflows.
 The mount accepts an optional same-origin `operations_url`. When configured,
 the same packaged UI adds an Operations view for normalized host telemetry and
 job controls. Collection, authorization, CSRF, and execution stay in the host;
@@ -211,7 +221,7 @@ gates the dashboard shells at `/` and `/dashboard` plus `/api/data`, while
 `/api/health` remains public. Chart series contain observed bins only. The response keeps full-store
 totals while bounding presentation data to the latest 100 chart points, 8
 providers, 20 usable intent clusters, 12 dimensions, 20 evaluator identities,
-40 legacy drift-history rows, 20 models per displayed provider, and one 30-row page of
+20 models per displayed provider and one 30-row page of
 non-judge application traces. Trace Explorer can page through the remaining
 application traces. The non-intent `unclustered` bucket is outside the cluster chart
 and cap counts;

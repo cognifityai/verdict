@@ -79,8 +79,9 @@ separate child run instead of folding its turns into the parent.
 The findings-first dashboard has six top-level workspaces: **Overview**,
 **Explore**, **Evaluate**, **Monitor**, **Report**, and **Settings**. Overview
 contains Summary, Reliability, Performance, and Behavior. Monitor contains current
-cohort status, historical comparisons, optional segments, schedules, and a
-read-only view of results created by the retired fixed-window pipeline. Cluster and
+cohort status, historical comparisons, optional segments, and schedules. Legacy
+fixed-window rows have no tenant owner, so the tenant-scoped dashboard does not
+display them. Cluster and
 monitor activation are explicit transitions; a stored historical candidate is
 shown separately from the active prospective monitor and survives page reload.
 Report presents application-only request, token, latency, cost, service, and
@@ -446,6 +447,32 @@ Open the dashboard for a local SQLite store:
 verdict-dashboard --storage sqlite:///./verdict.db
 ```
 
+If capture or import used an explicit tenant, use the same value for the
+dashboard. The dashboard also reads `VERDICT_TENANT_ID` when the flag is
+omitted. Explicit tenant IDs use 1–128 ASCII letters, digits, `.`, `_`, `:`, or
+`-`, beginning with a letter or digit:
+
+```bash
+verdict-import local --storage sqlite:///./verdict.db --tenant-id support
+verdict-dashboard --storage sqlite:///./verdict.db --tenant-id support
+```
+
+The process-selected tenant is one standalone workspace boundary for dashboard
+totals, reports, trace/judgment samples, Agent Run reads, setup/import,
+Evaluator Lab, clusters, Monitor, and control actions. Browser `tenant=`
+parameters are ignored. The reserved default remains `__verdict_local__` and
+includes historical tenantless traces; changing the selection does not move or
+rewrite existing rows. Legacy fixed-window drift rows are hidden because their
+schema does not record a tenant; use the current tenant-scoped Monitor workflow.
+
+An authenticated FastAPI host may set
+`request.state.verdict_registry_tenant` to choose the authorized tenant for
+dashboard data, Registry, Agent Run, and deterministic-analysis requests. That
+state also scopes the Monitor summary embedded in `/api/data`. It is not a
+dynamic multi-tenant control plane: setup, Evaluator Lab, Monitor lifecycle,
+and control routes remain bound to the process-selected tenant. Mount one app
+instance per tenant when those mutable workflows must be tenant-specific.
+
 The Overview and explorer APIs do not mutate trace/judgment history. Setup,
 capture, import, and Monitor actions are explicit write operations; do not
 expose the standalone server beyond loopback without an authenticated host.
@@ -467,10 +494,12 @@ The same command accepts a PostgreSQL URL when the `postgres` extra is
 installed. Applications can instead mount `verdict.dashboard.create_app()`
 inside an existing FastAPI service; the browser API resolves relative to the
 mount path, so the packaged UI and server stay on the same version. When the
-authenticated host supplies `request.state.verdict_registry_tenant`, Overview,
-Trace Explorer, cluster pass-rate charts, and drift rows use the assignments and
-stable labels from that tenant's active registry. Standalone and legacy stores
-continue to use the trace's stored `cluster_id`.
+authenticated host supplies `request.state.verdict_registry_tenant`, dashboard
+data, Registry, Agent Run, and deterministic-analysis requests use that tenant,
+including assignments and stable labels from its active registry. Standalone
+and legacy stores use the dashboard's configured tenant and project its active
+registry when one exists; without an active registry, they continue to use the
+trace's stored `cluster_id`.
 
 Content capture is **on by default** and is a PII surface. Verdict recursively sanitizes supported
 JSON-compatible message fields, including nested tool inputs/results and OpenAI
@@ -682,16 +711,16 @@ source. See [`ADR-013`](docs/adrs/013-stable-dependent-package-read-port.md).
   highest-volume clusters so the final redaction sink stays bounded. Standalone
   mode uses its same-origin setup capability for mutations; an authenticated
   host can instead supply the Operations adapter and owns tenant authorization.
-  The active registry also
-  drives cluster labels and assignments in Overview, Trace Explorer, pass-rate
-  charts, and drift rows. Semantic/hybrid rows keep the experimental disclosure
+  The active registry also drives cluster labels and assignments in Overview,
+  Trace Explorer, and pass-rate charts. Semantic/hybrid rows keep the experimental disclosure
   above.
 - Monitor freezes a reviewed historical comparison, then records an immutable
   activation event time and starts an empty prospective bucket. Older events
   imported later are excluded from that bucket. Historical and prospective
   comparisons use the same result contract, all traffic is the default, and
   provider/model or reviewed clusters are optional facets. Existing
-  fixed-window `DriftRun` and `DriftSignal` rows are read-only legacy history.
+  fixed-window `DriftRun` and `DriftSignal` rows are read-only legacy records;
+  the tenant-scoped dashboard suppresses them because they have no tenant owner.
   Evaluator requests are sequenced and cancelled; a failed switch explicitly
   retains and names the last confirmed snapshot, and detail selections are
   re-derived from that snapshot rather than retaining stale objects.

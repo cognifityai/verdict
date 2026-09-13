@@ -82,9 +82,11 @@ class MonitorRoutes:
 
     def __init__(self, setup: SetupRoutes) -> None:
         self.setup = setup
+        self.tenant_id = setup.tenant_id
+        self.scope = f"{self.tenant_id}:application:trace"
 
-    @staticmethod
     def policy(
+        self,
         payload: dict[str, Any],
         policy_id: str,
         *,
@@ -95,7 +97,7 @@ class MonitorRoutes:
         mode = WindowMode(payload.get("windowMode", "count"))
         values: dict[str, Any] = {
             "policy_id": policy_id,
-            "scope_key": SCOPE,
+            "scope_key": self.scope,
             "window_mode": mode,
             "reference_ratio": float(payload.get("referenceRatio", 0.8)),
             "minimum_reference": int(payload.get("minimumReference", 30)),
@@ -128,11 +130,10 @@ class MonitorRoutes:
                 )
         return MonitorPolicy(**values)
 
-    @staticmethod
-    def cluster_registry_selection(writable, payload: dict[str, Any]):
+    def cluster_registry_selection(self, writable, payload: dict[str, Any]):
         if payload.get("groupingMode", "none") != "cluster":
             return None
-        active = writable.get_active_cluster_registry(TENANT)
+        active = writable.get_active_cluster_registry(self.tenant_id)
         if active is None or active.version_id is None:
             raise ValueError("cluster grouping requires an active registry")
         return active.version_id
@@ -162,14 +163,15 @@ class MonitorRoutes:
             )
         return result
 
-    @staticmethod
-    def bounded_units(writable, policy):
-        return load_monitor_units(writable, policy, tenant_id=TENANT)
+    def bounded_units(self, writable, policy):
+        return load_monitor_units(writable, policy, tenant_id=self.tenant_id)
 
-    @staticmethod
-    def prospective(writable, policy, *, expected_state="active"):
+    def prospective(self, writable, policy, *, expected_state="active"):
         return advance_monitor(
-            writable, policy, tenant_id=TENANT, expected_state=expected_state,
+            writable,
+            policy,
+            tenant_id=self.tenant_id,
+            expected_state=expected_state,
         )
 
     def _stored_response(self, writable, policy, state):
@@ -191,12 +193,13 @@ class MonitorRoutes:
             ),
         )
 
-    def read_state(self) -> dict[str, object]:
+    def read_state(self, tenant_id: str | None = None) -> dict[str, object]:
         """Return the one durable read model used by every monitor surface."""
         writable = self.setup.writable_storage()
         try:
-            active_policy = writable.get_active_monitor_policy(SCOPE)
-            candidate_policy = writable.get_latest_monitor_candidate(SCOPE)
+            scope = f"{tenant_id or self.tenant_id}:application:trace"
+            active_policy = writable.get_active_monitor_policy(scope)
+            candidate_policy = writable.get_latest_monitor_candidate(scope)
             active = (
                 self._stored_response(writable, active_policy, "active")
                 if active_policy else None
@@ -223,7 +226,7 @@ class MonitorRoutes:
                 writable = self.setup.writable_storage()
                 fingerprint, dimensions = select_monitor_evaluator(
                     writable,
-                    tenant_id=TENANT,
+                    tenant_id=self.tenant_id,
                     evaluator_fingerprint=payload.get("evaluatorFingerprint"),
                 )
                 cluster_version = self.cluster_registry_selection(writable, payload)
@@ -352,7 +355,7 @@ class MonitorRoutes:
             writable = None
             try:
                 writable = self.setup.writable_storage()
-                policy = writable.get_active_monitor_policy(SCOPE)
+                policy = writable.get_active_monitor_policy(self.scope)
                 if policy is None:
                     return JSONResponse({"error": "no active monitor"}, status_code=409)
                 previous = writable.get_latest_monitor_snapshot(policy.policy_id)

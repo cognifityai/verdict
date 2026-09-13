@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 import httpx
 import verdict
+from fastapi import FastAPI, Request
 from verdict.analysis_records import AnalysisRunStatus, DeterministicAnalysisRun
 from verdict.capture import AgentCaptureService
 from verdict.dashboard import agent_evidence_queries
@@ -73,7 +74,9 @@ def test_agent_runs_api_exposes_typed_analysis_without_raw_envelopes(tmp_path):
     direct = build_agent_runs_bundle(path, tenant="local")
 
     async def request_runs():
-        transport = httpx.ASGITransport(app=create_app(storage=f"sqlite:///{path}"))
+        transport = httpx.ASGITransport(
+            app=create_app(storage=f"sqlite:///{path}", tenant_id="local")
+        )
         async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
             return await client.get("/api/runs?tenant=local")
 
@@ -83,6 +86,140 @@ def test_agent_runs_api_exposes_typed_analysis_without_raw_envelopes(tmp_path):
     assert direct["summary"] == {"available": 1, "shown": 1}
     assert "turns" not in direct["runs"][0]
     assert "payload_json" not in json.dumps(direct)
+
+
+def test_configured_dashboard_tenant_is_the_default_agent_run_scope(tmp_path):
+    path = tmp_path / "configured-runs.db"
+    storage = SQLiteStorage(str(path))
+    now = datetime(2026, 8, 31, tzinfo=timezone.utc)
+    storage.replace_agent_run_bundle(_bundle("customer-a", now, with_turn=True))
+    storage.replace_agent_run_bundle(_bundle("customer-b", now, with_turn=True))
+    storage.close()
+
+    async def request_runs():
+        app = create_app(storage=f"sqlite:///{path}", tenant_id="customer-a")
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
+            return await client.get("/api/data"), await client.get("/api/runs")
+
+    dashboard, runs = asyncio.run(request_runs())
+
+    assert dashboard.status_code == 200
+    assert dashboard.json()["meta"]["totalAgentRuns"] == 1
+    assert runs.json()["summary"] == {"available": 1, "shown": 1}
+    assert [item["runId"] for item in runs.json()["runs"]] == ["r-customer-a"]
+
+
+def test_request_tenant_parameters_cannot_override_configured_workspace(tmp_path):
+    path = tmp_path / "configured-authority.db"
+    storage = SQLiteStorage(str(path))
+    now = datetime(2026, 8, 31, tzinfo=timezone.utc)
+    storage.replace_agent_run_bundle(_bundle("customer-a", now, with_turn=True))
+    storage.replace_agent_run_bundle(_bundle("customer-b", now, with_turn=True))
+    storage.close()
+
+    async def requests():
+        app = create_app(storage=f"sqlite:///{path}", tenant_id="customer-a")
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            return (
+                await client.get("/api/runs", params={"tenant": "customer-b"}),
+                await client.get(
+                    "/api/runs/r-customer-b", params={"tenant": "customer-b"}
+                ),
+                await client.get("/api/registry", params={"tenant": "customer-b"}),
+                await client.get("/api/insights", params={"tenant": "customer-b"}),
+                await client.post(
+                    "/api/insights/run",
+                    params={"tenant": "customer-b"},
+                    headers={"X-Verdict-Setup": token},
+                ),
+            )
+
+    runs, detail, registry, before, analysis = asyncio.run(requests())
+
+    assert [item["runId"] for item in runs.json()["runs"]] == ["r-customer-a"]
+    assert detail.status_code == 404
+    assert registry.json()["tenant"] == "customer-a"
+    assert before.json()["analysisState"]["status"] == "never_run"
+    assert analysis.status_code == 200
+    storage = SQLiteStorage(str(path))
+    assert storage.get_latest_deterministic_analysis_run(
+        "customer-a", "agent-and-trace"
+    ) is not None
+    assert storage.get_latest_deterministic_analysis_run(
+        "customer-b", "agent-and-trace"
+    ) is None
+    storage.close()
+
+
+def test_trusted_host_tenant_state_overrides_process_configuration(tmp_path):
+    path = tmp_path / "host-authority.db"
+    storage = SQLiteStorage(str(path))
+    now = datetime(2026, 8, 31, tzinfo=timezone.utc)
+    storage.replace_agent_run_bundle(_bundle("customer-a", now, with_turn=True))
+    storage.replace_agent_run_bundle(_bundle("customer-b", now, with_turn=True))
+    storage.close()
+
+    host = FastAPI()
+
+    @host.middleware("http")
+    async def authorize_tenant(request: Request, call_next):
+        request.state.verdict_registry_tenant = "customer-b"
+        return await call_next(request)
+
+    host.mount(
+        "/verdict",
+        create_app(storage=f"sqlite:///{path}", tenant_id="customer-a"),
+    )
+
+    async def request_runs():
+        transport = httpx.ASGITransport(app=host)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
+            return await client.get(
+                "/verdict/api/runs", params={"tenant": "customer-a"}
+            )
+
+    response = asyncio.run(request_runs())
+
+    assert response.status_code == 200
+    assert [item["runId"] for item in response.json()["runs"]] == ["r-customer-b"]
+
+
+def test_invalid_trusted_host_tenant_is_rejected_consistently(tmp_path):
+    path = tmp_path / "invalid-host-authority.db"
+    SQLiteStorage(str(path)).close()
+    host = FastAPI()
+
+    @host.middleware("http")
+    async def authorize_tenant(request: Request, call_next):
+        request.state.verdict_registry_tenant = "a" * 129
+        return await call_next(request)
+
+    host.mount("/verdict", create_app(storage=f"sqlite:///{path}"))
+
+    async def requests():
+        transport = httpx.ASGITransport(app=host)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
+            return await asyncio.gather(
+                client.get("/verdict/api/data"),
+                client.get("/verdict/api/registry"),
+                client.get("/verdict/api/runs"),
+                client.get("/verdict/api/insights"),
+            )
+
+    responses = asyncio.run(requests())
+
+    assert [response.status_code for response in responses] == [400, 400, 400, 400]
 
 
 def test_agent_run_detail_exposes_ordered_bounded_events_and_trace_links(tmp_path):
@@ -120,7 +257,9 @@ def test_agent_run_detail_exposes_ordered_bounded_events_and_trace_links(tmp_pat
     direct = build_agent_run_detail(path, tenant="local", run_id="r-local")
 
     async def request_detail():
-        transport = httpx.ASGITransport(app=create_app(storage=f"sqlite:///{path}"))
+        transport = httpx.ASGITransport(
+            app=create_app(storage=f"sqlite:///{path}", tenant_id="local")
+        )
         async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
             return (
                 await client.get("/api/runs/r-local?tenant=local&event_limit=1"),
@@ -185,7 +324,9 @@ def test_agent_run_detail_serves_multiple_maximum_size_turn_previews(tmp_path):
     storage.close()
 
     async def request_detail():
-        transport = httpx.ASGITransport(app=create_app(storage=f"sqlite:///{path}"))
+        transport = httpx.ASGITransport(
+            app=create_app(storage=f"sqlite:///{path}", tenant_id="local")
+        )
         async with httpx.AsyncClient(
             transport=transport, base_url="http://testserver"
         ) as client:
@@ -233,7 +374,9 @@ def test_agent_run_detail_reads_existing_schema_without_running_migrations(tmp_p
         connection.execute("ALTER TABLE old_agent_turns RENAME TO agent_turns")
 
     async def request_detail():
-        transport = httpx.ASGITransport(app=create_app(storage=f"sqlite:///{path}"))
+        transport = httpx.ASGITransport(
+            app=create_app(storage=f"sqlite:///{path}", tenant_id="local")
+        )
         async with httpx.AsyncClient(
             transport=transport, base_url="http://testserver"
         ) as client:
@@ -329,7 +472,9 @@ def test_agent_insights_reports_dataset_wide_evidence_and_findings(tmp_path):
     report = build_agent_insights_bundle(path, tenant="local")
 
     async def request_insights():
-        transport = httpx.ASGITransport(app=create_app(storage=f"sqlite:///{path}"))
+        transport = httpx.ASGITransport(
+            app=create_app(storage=f"sqlite:///{path}", tenant_id="local")
+        )
         async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
             before = await client.get("/api/insights?tenant=local")
             token = (await client.get("/api/setup/token")).json()["setupToken"]
@@ -518,7 +663,7 @@ def test_insights_marks_missing_responses_not_evaluable(tmp_path):
 
     async def request_insights():
         transport = httpx.ASGITransport(
-            app=create_app(storage=f"sqlite:///{path}")
+            app=create_app(storage=f"sqlite:///{path}", tenant_id="local")
         )
         async with httpx.AsyncClient(
             transport=transport, base_url="http://testserver"
@@ -691,7 +836,7 @@ def test_agent_runs_can_filter_multiple_affected_runs_beyond_default_page(tmp_pa
 
     async def request_filtered_runs():
         transport = httpx.ASGITransport(
-            app=create_app(storage=f"sqlite:///{path}")
+            app=create_app(storage=f"sqlite:///{path}", tenant_id="local")
         )
         async with httpx.AsyncClient(
             transport=transport, base_url="http://testserver"
@@ -738,7 +883,7 @@ def test_agent_runs_pages_all_runs_in_stable_newest_first_order(tmp_path):
 
     async def request_second_page():
         transport = httpx.ASGITransport(
-            app=create_app(storage=f"sqlite:///{path}")
+            app=create_app(storage=f"sqlite:///{path}", tenant_id="local")
         )
         async with httpx.AsyncClient(
             transport=transport, base_url="http://testserver"
@@ -829,7 +974,9 @@ def test_agent_runs_api_is_tenant_scoped_and_bounded(tmp_path):
     storage.close()
 
     async def request_runs():
-        transport = httpx.ASGITransport(app=create_app(storage=f"sqlite:///{path}"))
+        transport = httpx.ASGITransport(
+            app=create_app(storage=f"sqlite:///{path}", tenant_id="a")
+        )
         async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
             return (
                 await client.get("/api/runs?tenant=a&limit=1"),
