@@ -194,14 +194,21 @@ pattern and field-aware redaction, including common provider/API credentials,
 GitHub tokens, and authorization headers, recursively across supported
 JSON-compatible message and tool structures before content limits, `Trace`
 assignment, and storage. Opaque values under supported credential field names
-are removed without relying on their text shape. Metadata-only capture retains
+such as `password`, `api_key`, `token`, `secret_key`, `cookie`, and `passcode`
+are removed without relying on their text shape. Complete quoted, unquoted, and
+embedded serialized assignment values are removed; existing Verdict
+redaction/hash placeholders remain terminal across repeated storage passes.
+Agent Run names and descriptive service, version, and environment fields cross
+the same boundary while routing IDs remain unchanged.
+Metadata-only capture retains
 error categories but not provider or manual-span exception messages. Card candidates use
 Luhn validation; IPv6 candidates use standard-library address validation so
 trailing text that is not part of the validated address remains outside it
 while clock values such as `12:34:56` remain intact. Email candidates use a
 linear `@`-anchored scanner so malformed or very long input cannot trigger
 regex backtracking. Unsupported objects fail closed.
-Traversal is bounded by node and character budgets, and cycles or repeated
+Traversal is bounded by node, character, and recursive-key depth budgets, and
+cycles or repeated
 container references fail closed at every occurrence so sanitized output never
 retains caller-owned aliases. Redacted mapping-key collisions keep every value
 under deterministic suffixed keys rather than overwriting one entry.

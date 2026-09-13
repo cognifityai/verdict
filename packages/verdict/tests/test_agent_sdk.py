@@ -125,6 +125,54 @@ def test_full_agent_context_persists_typed_timeline_and_one_trace_owner() -> Non
     assert read.model_calls[0].trace_id == correlation_id
 
 
+def test_agent_redacted_event_contains_no_credential_canary_after_storage() -> None:
+    storage = InMemoryStorage()
+    canary = "opaque-agent-credential"
+    verdict.init(
+        storage=storage,
+        tenant_id="tenant-a",
+        service_name=f"api_key={canary}",
+        environment=f"password={canary}",
+        instrumentors=[],
+        redaction_mode="hash",
+        redaction_secret="first-secret",
+    )
+
+    with verdict.agent_run(
+        name=f"token={canary}",
+        version=f"secret={canary}",
+        session_id="routing-session",
+    ) as run:
+        with run.turn(user_input="hello") as turn:
+            with turn.tool(
+                "lookup",
+                arguments={
+                    "token": canary,
+                    "message": f"retrying with api_key={canary}",
+                },
+            ):
+                pass
+            turn.set_output("done")
+
+    bundle = storage.list_agent_run_bundles("tenant-a")[0]
+    tool_event = next(
+        event
+        for event in bundle.events
+        if event.event_type is AgentEventType.TOOL_CALL
+    )
+    serialized = repr(bundle)
+
+    assert tool_event.privacy_classification is PrivacyClassification.REDACTED
+    assert canary not in serialized
+    assert bundle.run.agent_name == "token=<SECRET>"
+    assert bundle.run.agent_version == "secret=<SECRET>"
+    assert bundle.run.service_name == "api_key=<SECRET>"
+    assert bundle.run.environment == "password=<SECRET>"
+    assert bundle.run.session_id == "routing-session"
+    assert tool_event.attributes["arguments"]["token"].startswith("<SECRET:")
+    assert "api_key=<SECRET:" in tool_event.attributes["arguments"]["message"]
+
+
 @pytest.mark.parametrize(
     ("error", "expected"),
     [

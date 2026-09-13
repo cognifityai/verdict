@@ -425,15 +425,20 @@ client = Anthropic()
 Content capture is **on by default** (PII surface). Supported JSON-compatible message fields
 are recursively sanitized before content limits, `Trace` assignment, and storage. This
 includes nested OpenAI tool arguments and Anthropic-style tool inputs/results.
-Supported credential field names such as `password`, `api_key`,
-`authorization`, and `client_secret` cause the complete opaque value to be
-removed; flat GitHub, Bearer, Basic-auth, and common provider credentials are
-also recognized.
+Supported credential field names such as `password`, `api_key`, `token`,
+`secret_key`, `cookie`, `passcode`, `authorization`, and `client_secret` cause
+the complete opaque value to be removed. This includes quoted, unquoted, and
+embedded assignments in serialized text. Existing Verdict redaction and hash
+placeholders remain terminal when capture and storage apply the boundary more
+than once. Agent Run names and descriptive service, version, and environment
+fields use the same boundary while routing IDs remain unchanged; flat GitHub,
+Bearer, Basic-auth, and common provider credentials are also recognized.
 Unknown top-level provider fields are dropped; malformed, cyclic, non-JSON, and
 excessively deep or large values fail closed. Repeated container references fail
 closed at every occurrence so sanitized output cannot alias caller-owned data;
 redacted mapping-key collisions preserve every value under deterministic
-suffixed keys. The pattern detector uses Luhn validation
+suffixed keys. Recursive Unicode key decoding uses the same nesting budget and
+fails closed beyond it. The pattern detector uses Luhn validation
 for card candidates and standard-library validation for IP candidates, so
 trailing text that is not part of a validated IPv6 address is preserved while a
 clock value such as `12:34:56` is not classified as IPv6. Email discovery uses

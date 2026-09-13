@@ -1,10 +1,17 @@
 import json
 import random
+import string
 from copy import deepcopy
 
 import pytest
 import verdict.redaction as redaction_module
-from verdict.redaction import redact, redact_messages, redact_structure, sanitize_error_text
+from verdict.redaction import (
+    redact,
+    redact_messages,
+    redact_structure,
+    sanitize_error_text,
+    sanitize_trace,
+)
 
 
 def test_redact_messages_string_content():
@@ -550,6 +557,22 @@ def test_redact_is_linear_on_pathological_text():
         )
 
 
+def test_assignment_scan_is_linear_on_pathological_escaping():
+    import time
+
+    probes = (
+        ("a" + "\\" * 512) * 1000,
+        "api_key" + "\\" * 256_000 + '"' + ":" + "\\" * 256_000,
+    )
+    for probe in probes:
+        start = time.perf_counter()
+        redact(probe)
+        elapsed = time.perf_counter() - start
+        assert elapsed < 2.0, (
+            f"redact() took {elapsed:.1f}s on {len(probe)} escaped characters"
+        )
+
+
 def test_colon_free_text_never_enters_ipv6_candidate_search(monkeypatch):
     """A necessary delimiter must gate the permissive IPv6 candidate regex."""
 
@@ -711,6 +734,132 @@ def test_common_provider_keys_and_secret_assignments_are_redacted() -> None:
 
 
 @pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("password=P@ssw0rd!", "password=<SECRET>"),
+        ("_api_key=opaquecredential123", "_api_key=<SECRET>"),
+        (r"api\u005fkey=opaquecredential123", r"api\u005fkey=<SECRET>"),
+        (
+            r'{"api\u005fkey":"opaquecredential123"}',
+            r'{"api\u005fkey":"<SECRET>"}',
+        ),
+        (
+            r'{"\u0061pi_key":"opaquecredential123"}',
+            r'{"\u0061pi_key":"<SECRET>"}',
+        ),
+        (
+            r'{"\u0061\u0070\u0069\u005f\u006b\u0065\u0079":"opaquecredential123"}',
+            r'{"\u0061\u0070\u0069\u005f\u006b\u0065\u0079":"<SECRET>"}',
+        ),
+        (
+            r'"{\"api\u005cu005fkey\":\"opaquecredential123\"}"',
+            r'"{\"api\u005cu005fkey\":\"<SECRET>\"}"',
+        ),
+        ("password: correct horse battery staple", "password: <SECRET>"),
+        (
+            "password=hunter2!Xq#9$z status=ok",
+            "password=<SECRET> status=ok",
+        ),
+        (
+            '{"msg":"retrying with api_key=opaquecredential123"}',
+            '{"msg":"retrying with api_key=<SECRET>"}',
+        ),
+    ],
+)
+def test_sensitive_assignments_remove_the_complete_value(
+    text: str,
+    expected: str,
+) -> None:
+    assert redact(text) == expected
+
+
+@pytest.mark.parametrize("punctuation", string.punctuation)
+def test_unquoted_sensitive_values_do_not_leak_after_punctuation(
+    punctuation: str,
+) -> None:
+    canary = f"opaqueA{punctuation}opaqueB"
+
+    output = redact(f"password={canary} status=ok")
+
+    assert output == "password=<SECRET> status=ok"
+    assert "opaqueA" not in output
+    assert "opaqueB" not in output
+
+
+@pytest.mark.parametrize("encoding_depth", [1, 2, 3, 8])
+def test_sensitive_assignment_inside_serialized_json_strings_is_redacted(
+    encoding_depth: int,
+) -> None:
+    canary = "opaque-serialized-canary"
+    serialized: object = {"msg": f"retrying with api_key={canary}"}
+    for _ in range(encoding_depth):
+        serialized = json.dumps(serialized)
+
+    redacted: object = redact(serialized)
+
+    assert isinstance(redacted, str)
+    assert canary not in redacted
+    for _ in range(encoding_depth):
+        redacted = json.loads(redacted)
+    assert redacted == {"msg": "retrying with api_key=<SECRET>"}
+
+
+@pytest.mark.parametrize(
+    "encoded_key",
+    [
+        r"\u0061pi_key",
+        r"\u0061\u0070\u0069\u005f\u006b\u0065\u0079",
+    ],
+)
+def test_deeply_serialized_unicode_escaped_leading_key_is_redacted(
+    encoded_key: str,
+) -> None:
+    canary = "opaque-deep-leading-key-canary"
+    serialized = rf'{{"{encoded_key}":"{canary}"}}'
+    for _ in range(7):
+        serialized = json.dumps(serialized)
+
+    redacted: object = redact(serialized)
+
+    assert isinstance(redacted, str)
+    assert canary not in redacted
+    for _ in range(7):
+        redacted = json.loads(redacted)
+    assert redacted == rf'{{"{encoded_key}":"<SECRET>"}}'
+
+
+def test_excessively_recursive_unicode_key_fails_closed_in_bounded_time() -> None:
+    import time
+
+    layers = 200_000
+    canary = "opaque-recursive-key-canary"
+    key = r"\u005c" + "u005c" * (layers - 1) + "u0074oken"
+    probe = f"{key}={canary}"
+
+    started = time.perf_counter()
+    output = redact(probe)
+    elapsed = time.perf_counter() - started
+
+    assert canary not in output
+    assert output.endswith("=<SECRET>")
+    assert elapsed < 2.0, (
+        f"redact() took {elapsed:.1f}s on a {len(probe)}-character recursive key"
+    )
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "<OPAQUE_CREDENTIAL>",
+        "<OPAQUE_CREDENTIAL:deadbeefcafe>",
+        "<REDACTED:deadbeefcafe>",
+    ],
+)
+def test_arbitrary_placeholder_shaped_credential_is_not_trusted(value: str) -> None:
+    assert redact(f"password={value}") == "password=<SECRET>"
+
+
+@pytest.mark.parametrize(
     "field",
     [
         "password",
@@ -728,6 +877,11 @@ def test_common_provider_keys_and_secret_assignments_are_redacted() -> None:
         "Authorization",
         "proxy-authorization",
         "credentials",
+        "token",
+        "secret_key",
+        "cookie",
+        "passcode",
+        "HF_TOKEN",
     ],
 )
 def test_sensitive_mapping_fields_redact_the_entire_opaque_value(field: str) -> None:
@@ -745,6 +899,11 @@ def test_sensitive_mapping_fields_redact_the_entire_opaque_value(field: str) -> 
         "session_id",
         "trace_id",
         "token_count",
+        "input_token",
+        "output_token",
+        "max_token",
+        "prompt_token",
+        "completion_token",
         "input_tokens",
         "max_tokens",
         "public_key",
@@ -771,6 +930,72 @@ def test_field_aware_hash_mode_is_deterministic_without_cleartext() -> None:
     assignment = redact('password="opaque-field-canary-value"', mode="hash", secret="first-secret")
     assert redact(assignment) == assignment
     assert redact(assignment, mode="hash", secret="first-secret") == assignment
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+        "sk-ant-abcdefghijklmnopqrstuvwxyz012345",
+        "Bearer abcdefghijklmnopqrstuvwxyz012345",
+        "user@example.com",
+        "https://example.com/private",
+        "123-45-6789",
+        "4111111111111111",
+        "203.0.113.42",
+        "2001:db8::1",
+    ],
+)
+def test_pattern_hash_placeholders_are_terminal_across_repeated_redaction(
+    value: str,
+) -> None:
+    first = redact(value, mode="hash", secret="first-secret")
+
+    assert first is not None
+    assert value not in first
+    assert redact(first) == first
+    assert redact(first, mode="hash", secret="first-secret") == first
+
+
+def test_pattern_hash_placeholder_survives_the_storage_redaction_pass() -> None:
+    from verdict.schema import Trace
+    from verdict.storage.memory import InMemoryStorage
+
+    storage = InMemoryStorage()
+    trace = Trace(
+        provider="github-test",
+        request_model="test-model",
+        prompt_redacted="ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+    )
+    sanitize_trace(trace, mode="hash", secret="first-secret")
+    captured_placeholder = trace.prompt_redacted
+
+    storage.insert_trace(trace)
+    stored = storage.get_trace(trace.trace_id)
+
+    assert captured_placeholder is not None
+    assert stored is not None
+    assert stored.prompt_redacted == captured_placeholder
+
+
+def test_deeply_serialized_credential_is_removed_from_raw_messages_storage() -> None:
+    from verdict.schema import Trace
+    from verdict.storage.memory import InMemoryStorage
+
+    canary = "opaque-raw-message-canary"
+    serialized = json.dumps(json.dumps(json.dumps({"_api_key": canary})))
+    storage = InMemoryStorage()
+    trace = Trace(
+        provider="test",
+        request_model="test-model",
+        raw_messages=[{"role": "user", "metadata": {"body": serialized}}],
+    )
+
+    storage.insert_trace(trace)
+    stored = storage.get_trace(trace.trace_id)
+
+    assert stored is not None
+    assert canary not in repr(stored.raw_messages)
 
 
 def test_flat_github_and_basic_authorization_credentials_are_redacted() -> None:
@@ -803,6 +1028,26 @@ def test_flat_credential_near_misses_are_not_redacted() -> None:
     )
 
     assert redact(text) == text
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (
+            r"password=hunter2 \u0074oken_count=123 trace_id=abc",
+            r"password=<SECRET> \u0074oken_count=123 trace_id=abc",
+        ),
+        (
+            r"password=hunter2 \u0074race_id=abc status=ok",
+            r"password=<SECRET> \u0074race_id=abc status=ok",
+        ),
+    ],
+)
+def test_sensitive_value_stops_before_unicode_escaped_follow_on_assignment(
+    text: str,
+    expected: str,
+) -> None:
+    assert redact(text) == expected
 
 
 def test_content_off_error_category_never_accepts_an_untyped_secret() -> None:
