@@ -64,7 +64,7 @@ function VolumeChart({ timeline }) {
       <div className="h-44 grid items-end border-b relative" style={{ borderColor: C.border, gridTemplateColumns: `repeat(${rows.length}, minmax(26px, 1fr))` }} aria-label="Daily application LLM requests">
         <div className="absolute inset-x-0 top-0 border-t" style={{ borderColor: C.grid }} />
         <div className="absolute inset-x-0 top-[50%] border-t" style={{ borderColor: C.grid }} />
-        {rows.map((point) => <div key={point.date} className="h-full px-1 grid relative" style={{ gridTemplateRows: "18px 1fr 28px" }} title={`${point.date}: ${point.calls} application calls`}>
+        {rows.map((point) => <div key={point.date} className="h-full px-1 grid relative" style={{ gridTemplateRows: "18px 1fr 28px" }} title={`${point.label}: ${point.calls} application calls`}>
           <b className="text-[10px] text-center tabular-nums z-10" style={{ color: C.green }}>{formatNumber(point.calls)}</b>
           <div className="flex items-end min-h-0">
             <div data-report-bar className="w-full rounded-t-sm" style={{ height: `${Math.max(4, Math.round(point.calls / max * 100))}%`, background: C.green }} />
@@ -104,7 +104,7 @@ function UtilizationTable({ rows, kind }) {
   </div>;
 }
 
-export function ManagementReport({ data, source }) {
+export function ManagementReport({ data, source, onPeriodChange }) {
   const report = buildManagementReport(data, { source });
   const facts = [
     ["Success rate", report.summary.success], ["Estimated cost", report.summary.cost],
@@ -113,18 +113,26 @@ export function ManagementReport({ data, source }) {
   ];
   const status = [
     ["Evaluator", report.quality.evaluator], ["Evaluation coverage", report.quality.evaluationCoverage],
-    ["Current monitor", report.quality.monitor], ["Deterministic analysis", report.quality.deterministicAnalysis],
-    ["Legacy change history", report.quality.legacyChange],
+    ["Current monitor (as of now)", report.quality.monitor], ["Deterministic analysis (as of now)", report.quality.deterministicAnalysis],
+    ["Legacy change history (as of now)", report.quality.legacyChange],
   ];
   return <article className="verdict-report-print space-y-4">
     <header className="border-b pb-5 flex flex-col xl:flex-row xl:items-start justify-between gap-5" style={{ borderColor: C.border }}>
       <div>
         <div className="text-[11px] uppercase tracking-wide font-mono" style={{ color: C.green }}>{report.source}</div>
         <h2 className="text-2xl font-semibold mt-1">{report.title}</h2>
-        <div className="text-xs mt-2" style={{ color: C.sub }}>{report.range}</div>
-        <div className="text-xs mt-1" style={{ color: C.faint }}>Generated {report.generatedAt}</div>
+        <div className="text-xs mt-2" style={{ color: C.sub }}>{report.range} · Generated {report.generatedAt}</div>
       </div>
       <div className="verdict-no-print flex flex-wrap gap-2">
+        <select aria-label="Report period" value={report.period.days} disabled={!onPeriodChange}
+          onChange={(event) => onPeriodChange(Number(event.target.value))}
+          className="border rounded px-3 py-2 text-sm"
+          style={{ borderColor: C.border, background: C.panel }}>
+          <option value={7}>Last 7 days</option>
+          <option value={30}>Last 30 days</option>
+          <option value={90}>Last 90 days</option>
+          <option value={0}>All time</option>
+        </select>
         <button className="border rounded px-3 py-2 text-sm" style={{ borderColor: C.green, color: C.green }} onClick={() => download("verdict-management-report.html", managementReportHtml(report), "text/html;charset=utf-8")}>Export HTML</button>
         <button className="border rounded px-3 py-2 text-sm" style={{ borderColor: C.border }} onClick={() => download("verdict-management-report.csv", managementReportCsv(report), "text/csv;charset=utf-8")}>Download CSV</button>
         <button className="border rounded px-3 py-2 text-sm" style={{ borderColor: C.border }} onClick={() => window.print()}>Print / Save PDF</button>
@@ -137,7 +145,7 @@ export function ManagementReport({ data, source }) {
 
     <section className="border rounded-lg p-5 min-w-0" style={{ borderColor: C.border, background: C.panel }}>
       <h2 className="font-semibold">LLM request volume</h2>
-      <p className="text-xs mt-1" style={{ color: C.sub }}>{report.timeline.scope} · application calls only · UTC</p>
+      <p className="text-xs mt-1" style={{ color: C.sub }}>{report.timeline.scope} · application calls only</p>
       <VolumeChart timeline={report.timeline} />
     </section>
 

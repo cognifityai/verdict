@@ -84,13 +84,17 @@ read-only view of results created by the retired fixed-window pipeline. Cluster 
 monitor activation are explicit transitions; a stored historical candidate is
 shown separately from the active prospective monitor and survives page reload.
 Report presents application-only request, token, latency, cost, service, and
-model summaries; Verdict judge calls are excluded. It shows the newest 31
-active UTC dates, at most 20 service/environment rows, and at most 20 model
-rows. Latency coverage uses every known value; p50/p95 use the newest 10,000
+model summaries; Verdict judge calls are excluded. It defaults to the last 30
+UTC calendar days, with 7-day, 90-day, and all-time choices. The chart shows up
+to 31 active dates in that period; tables contain at most 20 service/environment
+rows and 20 model rows. Latency coverage uses every known value in the period;
+p50/p95 use the newest 10,000
 known latencies. New instrumented traces retain the configured `service_name`
 and `environment`; historical and default-client traces without an explicit
 service identity appear as **Unattributed**. Aggregate-only HTML, CSV, and
-browser Print/Save PDF exports never include prompts or responses.
+browser Print/Save PDF exports use the selected period and never include prompts
+or responses. Period boundaries use UTC dates; capture and generation times use
+the browser's readable local format.
 Evaluate includes a one-off Inspect view for uploaded or pasted ChatGPT,
 Claude.ai, Cowork, and OpenAI JSON/JSONL. Analysis runs on the Verdict dashboard
 host and does not add the source export or report to the Verdict store.

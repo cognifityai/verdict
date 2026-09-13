@@ -169,12 +169,15 @@ monitor distinguishes traffic collection from a full cohort awaiting selected
 evaluator results.
 The dashboard has six top-level workspaces: Overview, Explore, Evaluate,
 Monitor, Report, and Settings. Report summarizes non-judge application calls
-across the newest 31 active UTC dates, the top 20 service/environment rows, and
-the top 20 models. Latency coverage uses every known value; p50/p95 use the
-newest 10,000 known latencies. Configured `service_name` and `environment`
+over the last 30 UTC calendar days by default, with 7-day, 90-day, and all-time
+choices. Its chart shows up to 31 active dates in the selected period, plus the
+top 20 service/environment rows and top 20 models. Latency coverage uses every
+known value in the period; p50/p95 use the newest 10,000 known latencies.
+Configured `service_name` and `environment`
 values are persisted on new instrumented traces; historical and default-client
 traces without an explicit service identity appear as **Unattributed**. HTML,
-CSV, and browser Print/Save PDF outputs contain aggregates only. Monitor is the
+CSV, and browser Print/Save PDF outputs use the selected period and contain
+aggregates only. Monitor is the
 current drift workflow: it shows reviewed
 historical comparisons, the active prospective policy, and optional facets.
 Results created by older fixed-window pipeline releases remain available under

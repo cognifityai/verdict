@@ -56,11 +56,12 @@ const SEED = /* @__PURE__ */ (() => {
     },
     managementReport: {
       schema: "management-report-v1",
+      period: { days: 30, startDate: "2026-08-13", endDate: "2026-09-11" },
       scope: {
         firstCapturedAt: "2026-09-04T08:00:00+00:00", latestCapturedAt: "2026-09-11T20:00:00+00:00",
         ...metric(96, 1, 7230, 28200, 0.42, 2560),
         latencySampledCalls: 96, p50LatencyMs: 2480, p95LatencyMs: 3220,
-        identifiedApplications: 2, unattributedCalls: 0,
+        identifiedApplications: 2, unattributedCalls: 0, judgedCalls: 48, judgeErrorCalls: 0,
       },
       timeline: { availableDates: 8, shownDates: 8, rows:
         [6, 9, 12, 10, 15, 17, 11, 16].map((calls, index) => ({
@@ -275,14 +276,14 @@ function useOperationsConfig() {
 
 const API_URL = mountedApiUrl();
 
-function apiUrlForEvaluator(evaluatorId, traceOffset = 0, traceJudgeStatus = "all", traceId = null) {
+function apiUrlForEvaluator(evaluatorId, traceOffset = 0, traceJudgeStatus = "all", traceId = null, reportDays = 30) {
   const params = new URLSearchParams();
   if (evaluatorId) params.set("evaluator", evaluatorId);
   if (traceOffset > 0) params.set("trace_offset", String(traceOffset));
   if (traceJudgeStatus !== "all") params.set("trace_judge_status", traceJudgeStatus);
   if (traceId) params.set("trace_id", traceId);
-  const query = params.toString();
-  return query ? `${API_URL}?${query}` : API_URL;
+  params.set("report_days", String(reportDays));
+  return `${API_URL}?${params.toString()}`;
 }
 
 function useDashboardData() {
@@ -298,7 +299,7 @@ function useDashboardData() {
   const requestSequence = useRef(0);
   const activeController = useRef(null);
 
-  const load = React.useCallback(async (evaluatorId = null, traceOffset = 0, traceJudgeStatus = "all", traceId = null) => {
+  const load = React.useCallback(async (evaluatorId = null, traceOffset = 0, traceJudgeStatus = "all", traceId = null, reportDays = 30) => {
     const requestId = requestSequence.current + 1;
     requestSequence.current = requestId;
     if (activeController.current) activeController.current.abort();
@@ -306,7 +307,7 @@ function useDashboardData() {
     activeController.current = controller;
     setState((current) => ({ ...current, loading: true, error: null }));
     try {
-      const response = await fetch(apiUrlForEvaluator(evaluatorId, traceOffset, traceJudgeStatus, traceId), {
+      const response = await fetch(apiUrlForEvaluator(evaluatorId, traceOffset, traceJudgeStatus, traceId, reportDays), {
         headers: { Accept: "application/json" },
         signal: controller.signal,
       });
@@ -345,12 +346,13 @@ function useDashboardData() {
     };
   }, [load]);
 
+  const reportDays = state.snapshot.managementReport?.period?.days ?? 30;
   return {
     ...state,
-    load: (evaluatorId) => load(evaluatorId, 0, state.traceJudgeStatus, state.traceId),
-    loadTracePage: (traceOffset) => load(state.snapshot.evaluation?.selectedId || null, traceOffset, state.traceJudgeStatus, state.traceId),
-    loadTraceFilter: (traceJudgeStatus, traceId = null) => load(state.snapshot.evaluation?.selectedId || null, 0, traceJudgeStatus, traceId),
-    reload: () => load(state.snapshot.evaluation?.selectedId || null, state.traceOffset, state.traceJudgeStatus, state.traceId),
+    load: (evaluatorId) => load(evaluatorId, 0, state.traceJudgeStatus, state.traceId, reportDays),
+    loadTracePage: (traceOffset) => load(state.snapshot.evaluation?.selectedId || null, traceOffset, state.traceJudgeStatus, state.traceId, reportDays),
+    loadTraceFilter: (traceJudgeStatus, traceId = null) => load(state.snapshot.evaluation?.selectedId || null, 0, traceJudgeStatus, traceId, reportDays),
+    reload: (days = reportDays) => load(state.snapshot.evaluation?.selectedId || null, state.traceOffset, state.traceJudgeStatus, state.traceId, days),
   };
 }
 
@@ -877,7 +879,7 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
               <span className="hidden sm:inline">{sourceLabel}</span>
             </span>
             <span className="hidden xl:inline font-mono" style={{ color: C.faint }}>{(DATA.meta.totalAgentRuns || 0).toLocaleString()} agent runs · {DATA.meta.totalTraces.toLocaleString()} LLM traces</span>
-            <button onClick={onReload} disabled={reloading} title="Refresh from API"
+            <button onClick={() => onReload()} disabled={reloading} title="Refresh from API"
               className="w-8 h-8 inline-flex items-center justify-center border"
               style={{ borderColor: C.border, borderRadius: 3, color: C.sub, opacity: reloading ? 0.5 : 1 }}>
               <RefreshCw size={14} style={{ animation: reloading ? "vspin 0.8s linear infinite" : "none" }} />
@@ -993,7 +995,7 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
         {tab === "monitor" && route.section === "history" && <Monitor view="history" initialState={DATA.monitor} configUrl={mountedConfigUrl()} evaluation={data.evaluation} onChanged={onReload} />}
         {tab === "monitor" && route.section === "segments" && <Registry url={mountedRegistryUrl()} operationsUrl={operationsUrl} configUrl={mountedConfigUrl()} />}
         {tab === "monitor" && route.section === "schedule" && <ControlCenter section="schedule" configUrl={mountedConfigUrl()} />}
-        {tab === "report" && route.section === "management" && <ManagementReport data={DATA} source={source} />}
+        {tab === "report" && route.section === "management" && <ManagementReport data={DATA} source={source} onPeriodChange={onReload} />}
         {tab === "settings" && route.section === "sources" && <SetupWizard configUrl={mountedConfigUrl()} agentSummary={DATA.meta} onRefresh={onReload} onNavigate={(destination) => navigateSetup(commitRoute, route, destination)} onComplete={(setupSource) => { onReload(); commitRoute({ ...route, tab: setupSource === "local" ? "explore" : "overview", section: setupSource === "local" ? "runs" : "summary" }); }} />}
         {tab === "settings" && route.section === "alerts" && <ControlCenter section="alerts" configUrl={mountedConfigUrl()} />}
         {tab === "settings" && route.section === "privacy" && <ControlCenter section="privacy" configUrl={mountedConfigUrl()} />}
