@@ -9,10 +9,14 @@ the product is refined.
 ### Fixed
 
 - Structured Agent, tool, provider, span, and telemetry evidence now removes
-  opaque values under supported credential field names and recognizes GitHub
-  tokens and Basic authorization. Redaction runs before content limits, and
-  metadata-only provider/manual-span failures no longer retain exception
-  message content.
+  complete quoted or unquoted opaque values under supported credential field
+  names, including token, secret-key, cookie, and passcode variants. Embedded
+  assignments are inspected inside ordinary serialized fields, existing
+  redaction/hash placeholders remain terminal across repeated storage passes,
+  Agent Run names and descriptive service/version/environment fields cross the
+  same boundary, and GitHub tokens and Basic authorization are recognized. Redaction runs
+  before content limits, and metadata-only provider/manual-span failures no
+  longer retain exception message content.
 
 ### Added
 

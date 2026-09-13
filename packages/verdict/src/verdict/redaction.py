@@ -65,12 +65,21 @@ _MESSAGE_FIELDS = (
 # phone numbers, and most non-US formats. Do not treat regex-only redaction as a
 # compliance guarantee. A deeper entity-aware pass (e.g. Presidio) is a possible
 # future addition but is NOT wired in today.
-_ASSIGNMENT_CANDIDATE = re.compile(
-    r"(?i)(?<![A-Za-z0-9_])"
-    r"(?P<key_quote>[\"']?)(?P<key>[A-Za-z][A-Za-z0-9_.-]{0,127})(?P=key_quote)"
-    r"(?P<separator>\s*[:=]\s*)"
-    r"(?P<value>\"(?:\\.|[^\"\\\r\n])*\"|'(?:\\.|[^'\\\r\n])*'|"
-    r"(?:(?:Basic|Bearer)\s+)?[A-Za-z0-9._~+/=:-]+)"
+_HASHABLE_PLACEHOLDER_LABELS = (
+    "SECRET|EMAIL|PROVIDER_KEY|GITHUB_TOKEN|BEARER_TOKEN|BASIC_AUTH|URL|"
+    "SSN|CREDIT_CARD|IPV6|IP|PHONE"
+)
+_PLACEHOLDER_TEXT = (
+    rf"(?:<REDACTED>|<(?:{_HASHABLE_PLACEHOLDER_LABELS})(?::[0-9a-f]{{12}})?>)"
+)
+_PLACEHOLDER = re.compile(_PLACEHOLDER_TEXT)
+_REDACTION_TOKEN = re.compile(
+    rf"(?P<placeholder>{_PLACEHOLDER_TEXT})|"
+    r"(?P<assignment>"
+    r"(?<![A-Za-z0-9_\\])"
+    r"(?:[A-Za-z_]|\\+u[0-9A-Fa-f]{4})"
+    r")",
+    re.IGNORECASE,
 )
 _SENSITIVE_KEY_SUFFIXES = (
     "password",
@@ -87,13 +96,50 @@ _SENSITIVE_KEY_SUFFIXES = (
     "identitytoken",
     "idtoken",
     "githubtoken",
+    "token",
     "clientsecret",
     "privatekey",
     "secretaccesskey",
+    "secretkey",
     "secret",
     "credential",
     "credentials",
+    "cookie",
+    "passcode",
 )
+_NON_SENSITIVE_TOKEN_FIELDS = frozenset(
+    {
+        "cachecreationinputtoken",
+        "cachecreationinputtokens",
+        "cachereadinputtoken",
+        "cachereadinputtokens",
+        "cachewriteinputtoken",
+        "cachewriteinputtokens",
+        "cachedinputtoken",
+        "cachedinputtokens",
+        "completiontoken",
+        "completiontokens",
+        "inputtoken",
+        "inputtokens",
+        "maxcompletiontoken",
+        "maxcompletiontokens",
+        "maxoutputtoken",
+        "maxoutputtokens",
+        "maxtoken",
+        "maxtokens",
+        "outputtoken",
+        "outputtokens",
+        "prompttoken",
+        "prompttokens",
+        "reasoningoutputtoken",
+        "reasoningoutputtokens",
+        "tokencount",
+        "tokencounts",
+        "totaltoken",
+        "totaltokens",
+    }
+)
+_JSON_UNICODE_KEY_ESCAPE = re.compile(r"\\u([0-9A-Fa-f]{4})", re.IGNORECASE)
 
 _PATTERNS = {
     "PROVIDER_KEY": re.compile(
@@ -138,7 +184,22 @@ _PATTERNS = {
 
 
 def _is_sensitive_key(key: str) -> bool:
+    for _ in range(_MAX_NESTING_DEPTH):
+        decoded = _JSON_UNICODE_KEY_ESCAPE.sub(
+            lambda match: chr(int(match.group(1), 16)),
+            key,
+        )
+        if decoded == key:
+            break
+        key = decoded
+    else:
+        # A recursively encoded key beyond the shared structure-depth budget is
+        # attacker-controlled ambiguity. Fail closed without rescanning it an
+        # unbounded number of times.
+        return True
     normalized = "".join(re.findall(r"[A-Za-z0-9]+", key)).lower()
+    if normalized in _NON_SENSITIVE_TOKEN_FIELDS:
+        return False
     return any(normalized.endswith(suffix) for suffix in _SENSITIVE_KEY_SUFFIXES)
 
 
@@ -158,25 +219,224 @@ def _secret_value(
     return "<SECRET>"
 
 
-def _secret_assignment_repl(
-    match: re.Match[str],
+def _preceding_backslashes(text: str, index: int) -> int:
+    count = 0
+    index -= 1
+    while index >= 0 and text[index] == "\\":
+        count += 1
+        index -= 1
+    return count
+
+
+def _assignment_prefix(text: str, start: int) -> tuple[str | None, int]:
+    cursor = start
+    while cursor < len(text) and (
+        text[cursor].isascii()
+        and (text[cursor].isalnum() or text[cursor] in "_.-\\")
+    ):
+        cursor += 1
+    key = text[start:cursor]
+    if cursor < len(text) and text[cursor] in {"\"", "'"}:
+        cursor += 1
+    while cursor < len(text) and text[cursor].isspace():
+        cursor += 1
+    if cursor >= len(text) or text[cursor] not in ":=":
+        return None, cursor
+    cursor += 1
+    while cursor < len(text) and text[cursor].isspace():
+        cursor += 1
+    return key, cursor
+
+
+def _quoted_assignment_value(
+    text: str,
+    start: int,
+    *,
+    quote_prefix_length: int,
+) -> tuple[int, int, int, str, str]:
+    quote_index = start + quote_prefix_length
+    quote = text[quote_index]
+    content_start = quote_index + 1
+    cursor = content_start
+    while cursor < len(text):
+        if text[cursor] != quote:
+            cursor += 1
+            continue
+        backslashes = _preceding_backslashes(text, cursor)
+        closes_value = (
+            backslashes == quote_prefix_length
+            if quote_prefix_length
+            else backslashes % 2 == 0
+        )
+        if closes_value:
+            closing_start = cursor - quote_prefix_length
+            closing_end = cursor + 1
+            quote_token = text[start:content_start]
+            return (
+                content_start,
+                closing_start,
+                closing_end,
+                quote_token,
+                text[closing_start:closing_end],
+            )
+        cursor += 1
+    # A malformed unterminated value is sensitive through the line boundary.
+    line_end = len(text)
+    for delimiter in ("\r", "\n"):
+        candidate = text.find(delimiter, content_start)
+        if candidate >= 0:
+            line_end = min(line_end, candidate)
+    return content_start, line_end, line_end, "", ""
+
+
+def _assignment_follows(text: str, start: int) -> bool:
+    cursor = start
+    quote_index = cursor
+    while quote_index < len(text) and text[quote_index] == "\\":
+        quote_index += 1
+    if quote_index < len(text) and text[quote_index] in {"\"", "'"}:
+        cursor = quote_index + 1
+    match = _REDACTION_TOKEN.match(text, cursor)
+    if match is None or match.group("assignment") is None:
+        return False
+    key, _ = _assignment_prefix(text, match.start())
+    return key is not None
+
+
+def _unquoted_assignment_value_end(text: str, start: int) -> int:
+    cursor = start
+    while cursor < len(text):
+        character = text[cursor]
+        if character in "\r\n":
+            return cursor
+        if character.isspace():
+            next_token = cursor
+            while next_token < len(text) and text[next_token].isspace():
+                if text[next_token] in "\r\n":
+                    return cursor
+                next_token += 1
+            if _assignment_follows(text, next_token):
+                return cursor
+            cursor = next_token
+            continue
+        if character in ",;&":
+            next_token = cursor + 1
+            while next_token < len(text) and text[next_token].isspace():
+                next_token += 1
+            if _assignment_follows(text, next_token):
+                return cursor
+        if character in {"\"", "'"}:
+            next_token = cursor + 1
+            while next_token < len(text) and text[next_token].isspace():
+                next_token += 1
+            if next_token == len(text) or text[next_token] in ",}]":
+                return cursor
+        if character == "\\":
+            quote_index = cursor
+            while quote_index < len(text) and text[quote_index] == "\\":
+                quote_index += 1
+            if (
+                quote_index < len(text)
+                and text[quote_index] in {"\"", "'"}
+                and (quote_index - cursor) % 2 == 1
+            ):
+                next_token = quote_index + 1
+                while next_token < len(text) and text[next_token].isspace():
+                    next_token += 1
+                if next_token == len(text) or text[next_token] in ",}]":
+                    return cursor
+            cursor = quote_index
+            continue
+        cursor += 1
+    return cursor
+
+
+def _assignment_value_span(
+    text: str,
+    start: int,
+) -> tuple[int, int, int, str, str] | None:
+    if start >= len(text) or text[start] in "\r\n":
+        return None
+    quote_index = start
+    while (
+        quote_index < len(text)
+        and text[quote_index] == "\\"
+    ):
+        quote_index += 1
+    quote_prefix_length = quote_index - start
+    if (
+        quote_index < len(text)
+        and text[quote_index] in {"\"", "'"}
+        and (quote_prefix_length == 0 or quote_prefix_length % 2 == 1)
+    ):
+        return _quoted_assignment_value(
+            text,
+            start,
+            quote_prefix_length=quote_prefix_length,
+        )
+    end = _unquoted_assignment_value_end(text, start)
+    if end == start:
+        return None
+    return start, end, end, "", ""
+
+
+def _redact_secret_assignments(
+    text: str,
     mode: RedactionMode,
     secret: str | None,
 ) -> str:
-    if not _is_sensitive_key(match.group("key")):
-        return match.group(0)
-    raw_value = match.group("value")
-    quote = raw_value[:1] if raw_value[:1] in {"\"", "'"} else ""
-    value = raw_value[1:-1] if quote else raw_value
-    if value == "<SECRET>" or re.fullmatch(r"<SECRET:[0-9a-f]{12}>", value):
-        return match.group(0)
-    replacement = (
-        _hash_match(value, "SECRET", secret) if mode == "hash" else "<SECRET>"
-    )
-    start = match.start("value") - match.start()
-    end = match.end("value") - match.start()
-    matched = match.group(0)
-    return f"{matched[:start]}{quote}{replacement}{quote}{matched[end:]}"
+    output: list[str] = []
+    output_cursor = 0
+    search_cursor = 0
+    while True:
+        match = _REDACTION_TOKEN.search(text, search_cursor)
+        if match is None:
+            break
+        if match.group("placeholder") is not None:
+            search_cursor = match.end()
+            continue
+        key, value_start = _assignment_prefix(text, match.start())
+        if key is None:
+            search_cursor = max(match.end(), value_start)
+            continue
+        if not _is_sensitive_key(key):
+            # Stop only at the prefix so assignments embedded in an ordinary
+            # quoted field remain discoverable on the next search.
+            search_cursor = value_start
+            continue
+        value_span = _assignment_value_span(text, value_start)
+        if value_span is None:
+            search_cursor = value_start
+            continue
+        content_start, content_end, value_end, opening, closing = value_span
+        value = text[content_start:content_end]
+        if _PLACEHOLDER.fullmatch(value) is not None:
+            search_cursor = value_end
+            continue
+        replacement = (
+            _hash_match(value, "SECRET", secret)
+            if mode == "hash"
+            else "<SECRET>"
+        )
+        output.append(text[output_cursor:value_start])
+        output.append(f"{opening}{replacement}{closing}")
+        output_cursor = value_end
+        search_cursor = value_end
+    if not output:
+        return text
+    output.append(text[output_cursor:])
+    return "".join(output)
+
+
+def _sub_outside_placeholders(text: str, pattern: re.Pattern[str], replacement) -> str:
+    output: list[str] = []
+    cursor = 0
+    for placeholder in _PLACEHOLDER.finditer(text):
+        output.append(pattern.sub(replacement, text[cursor:placeholder.start()]))
+        output.append(placeholder.group(0))
+        cursor = placeholder.end()
+    output.append(pattern.sub(replacement, text[cursor:]))
+    return "".join(output)
 
 
 def _is_word_character(character: str) -> bool:
@@ -282,16 +542,14 @@ def redact(
 
     # Email discovery is first for classification stability in URL contexts.
     out = _redact_emails(text, mode, secret)
-    out = _ASSIGNMENT_CANDIDATE.sub(
-        lambda match: _secret_assignment_repl(match, mode, secret),
-        out,
-    )
+    out = _redact_secret_assignments(out, mode, secret)
     for label, pat in _PATTERNS.items():
         if label == "CREDIT_CARD":
             # Gate on Luhn + valid length so non-card digit runs survive intact.
-            out = pat.sub(
-                lambda m, lbl=label: _credit_card_repl(m.group(0), lbl, mode, secret),
+            out = _sub_outside_placeholders(
                 out,
+                pat,
+                lambda m, lbl=label: _credit_card_repl(m.group(0), lbl, mode, secret),
             )
         elif label == "IPV6":
             # A colon is required by every IPv6 spelling.  Avoid entering the
@@ -300,7 +558,9 @@ def redact(
             # position before proving that no candidate exists.
             if ":" not in out:
                 continue
-            out = pat.sub(
+            out = _sub_outside_placeholders(
+                out,
+                pat,
                 lambda m, lbl=label: _ipv6_repl(
                     m.group(0),
                     lbl,
@@ -308,12 +568,15 @@ def redact(
                     secret,
                     following=m.string[m.end() : m.end() + 1],
                 ),
-                out,
             )
         elif mode == "hash":
-            out = pat.sub(lambda m, lbl=label: _hash_match(m.group(0), lbl, secret), out)
+            out = _sub_outside_placeholders(
+                out,
+                pat,
+                lambda m, lbl=label: _hash_match(m.group(0), lbl, secret),
+            )
         else:  # redact
-            out = pat.sub(f"<{label}>", out)
+            out = _sub_outside_placeholders(out, pat, f"<{label}>")
     return out
 
 
@@ -754,6 +1017,13 @@ def _sanitize_agent_capture(
 ) -> AgentRunBundle | AgentCaptureBatch:
     """Return detached agent evidence with every content field sanitized."""
 
+    run = replace(
+        capture.run,
+        agent_name=redact(capture.run.agent_name, mode=mode, secret=secret) or "",
+        agent_version=redact(capture.run.agent_version, mode=mode, secret=secret) or "",
+        service_name=redact(capture.run.service_name, mode=mode, secret=secret) or "",
+        environment=redact(capture.run.environment, mode=mode, secret=secret) or "",
+    )
     turns = tuple(
         replace(
             turn,
@@ -771,7 +1041,7 @@ def _sanitize_agent_capture(
         events.append(replace(event, attributes=attributes))
     return type(capture)(
         session=capture.session,
-        run=capture.run,
+        run=run,
         turns=turns,
         events=tuple(events),
     )

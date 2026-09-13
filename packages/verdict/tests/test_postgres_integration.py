@@ -373,6 +373,10 @@ def test_live_postgres_agent_run_bundle_is_atomic_redacted_and_tenant_scoped():
             started_at=now,
             ended_at=now,
             status=verdict.ExecutionStatus.COMPLETED,
+            agent_name="api_key=opaque-postgres-canary",
+            agent_version="token=opaque-postgres-canary",
+            service_name="password=opaque-postgres-canary",
+            environment="secret=opaque-postgres-canary",
         ),
         turns=(
             verdict.AgentTurn(
@@ -425,6 +429,10 @@ def test_live_postgres_agent_run_bundle_is_atomic_redacted_and_tenant_scoped():
         assert loaded.turns[0].cached_input_tokens == 4
         assert loaded.turns[0].response_truncated is True
         assert loaded.events[0].attributes["result"]["password"] == "<SECRET>"
+        assert loaded.run.agent_name == "api_key=<SECRET>"
+        assert loaded.run.agent_version == "token=<SECRET>"
+        assert loaded.run.service_name == "password=<SECRET>"
+        assert loaded.run.environment == "secret=<SECRET>"
         assert "opaque-postgres-canary" not in repr(loaded)
         assert storage.get_agent_run_bundle(f"other-{tenant}", bundle.run.run_id) is None
         assert storage.list_agent_run_bundles(tenant, limit=10) == [loaded]

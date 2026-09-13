@@ -32,8 +32,12 @@ does not duplicate it.
   `messages.stream(...)` and OpenAI Responses create, parse, and helper paths.
 - Stores traces in SQLite by default, with Postgres support for deployments that
   need a server database.
-- Recursively redacts common sensitive patterns and opaque values under
-  supported credential field names in JSON-compatible message and tool data.
+- Recursively redacts common sensitive patterns and complete opaque values
+  under supported credential field names in JSON-compatible message and tool
+  data, including embedded assignments in serialized text. Repeated storage
+  sanitation preserves existing Verdict redaction and hash placeholders.
+  Agent Run names and descriptive service, version, and environment fields are
+  also sanitized without rewriting routing IDs.
   Redaction runs before content limits; metadata-only capture retains error
   categories without provider or manual-span exception messages.
 - Scores responses with a configurable judge model and rubric dimensions such as

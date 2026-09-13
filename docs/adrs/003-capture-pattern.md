@@ -160,12 +160,20 @@ target deployment before relying on them.
 - The best-effort pass includes common Anthropic/OpenAI/Google/AWS and GitHub
   key shapes, Bearer and Basic authorization, and secret assignments in
   addition to PII patterns. Supported credential field names are normalized
-  across case, separators, and camel case; their complete opaque values are
-  removed. It remains defense in depth, not a complete secret scanner.
+  across case, separators, and camel case; password, API-key, token,
+  secret-key, cookie, passcode, authorization, and credential variants remove
+  their complete quoted, unquoted, or embedded serialized values. Existing
+  Verdict redaction and hash placeholders are terminal across repeated capture
+  and storage passes. Agent Run names and descriptive service, version, and
+  environment fields cross the same boundary without changing routing IDs. It
+  remains defense in depth, not a complete secret
+  scanner.
 - Provider message persistence uses an allowlist of supported top-level fields.
   Every string key and value in their JSON-compatible nested structures is
   sanitized recursively, including OpenAI tool arguments and Anthropic-style
-  tool inputs/results. Traversal has node and character budgets. Cycles, repeated
+  tool inputs/results. Traversal has node and character budgets. Recursive
+  Unicode key decoding uses the same nesting budget and fails closed beyond it.
+  Cycles, repeated
   container references, excessive depth/size, non-finite numbers, non-string
   object keys, and unsupported objects fail closed rather than being copied.
   Sanitized structures never retain caller-owned aliases, and mapping keys that

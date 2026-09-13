@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import runpy
 import subprocess
 import sys
@@ -202,20 +203,41 @@ def test_file_transport_redacts_sensitive_fields_before_spool_and_import(tmp_pat
     spool = tmp_path / "spool"
     database = tmp_path / "verdict.db"
     canary = "opaque-file-transport-canary"
+    github_token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789"
     verdict.init(
         transport="file",
         spool_directory=spool,
         tenant_id="tenant-file",
+        service_name=f"api_key={canary}",
+        environment=f"password={canary}",
         instrumentors=[],
+        redaction_mode="hash",
+        redaction_secret="first-secret",
     )
-    with verdict.agent_run(name="file-agent") as run:
+    with verdict.agent_run(
+        name=f"token={canary}",
+        version=f"secret={canary}",
+        session_id="routing-session",
+    ) as run:
         with run.turn(user_input="question") as turn:
-            with turn.tool("lookup", arguments={"password": canary}) as tool:
+            with turn.tool(
+                "lookup",
+                arguments={
+                    "token": canary,
+                    "message": github_token,
+                    "detail": f"retrying with api_key={canary}",
+                },
+            ) as tool:
                 tool.set_output({"Authorization": f"Basic {canary}"})
             turn.set_output("done")
     verdict.shutdown()
 
-    assert canary.encode() not in b"".join(path.read_bytes() for path in spool.glob("*.jsonl"))
+    capture_bytes = b"".join(path.read_bytes() for path in spool.glob("*.jsonl"))
+    assert canary.encode() not in capture_bytes
+    assert github_token.encode() not in capture_bytes
+    marker_match = re.search(rb"<GITHUB_TOKEN:[0-9a-f]{12}>", capture_bytes)
+    assert marker_match is not None
+    captured_marker = marker_match.group(0).decode()
     storage = SQLiteStorage(str(database))
     try:
         agent_transport.import_capture_records(spool, storage)
@@ -223,7 +245,15 @@ def test_file_transport_redacts_sensitive_fields_before_spool_and_import(tmp_pat
     finally:
         storage.close()
     detail = build_agent_run_detail(database, tenant="tenant-file", run_id=bundle.run.run_id)
-    assert canary not in json.dumps(detail)
+    encoded_detail = json.dumps(detail)
+    assert canary not in encoded_detail
+    assert github_token not in encoded_detail
+    assert captured_marker in encoded_detail
+    assert bundle.run.agent_name.startswith("token=<SECRET:")
+    assert bundle.run.agent_version.startswith("secret=<SECRET:")
+    assert bundle.run.service_name.startswith("api_key=<SECRET:")
+    assert bundle.run.environment.startswith("password=<SECRET:")
+    assert bundle.run.session_id == "routing-session"
 
 
 def test_file_transport_skips_retired_signals_and_replays_later_records(
