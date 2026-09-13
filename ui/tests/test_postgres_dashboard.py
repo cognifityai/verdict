@@ -420,6 +420,11 @@ def test_live_postgres_and_sqlite_registry_dashboard_shapes_match(tmp_path) -> N
         tenantless_trace.tenant_id = None
         tenantless_trace.session_id = "tenantless-private-session"
         tenantless_trace.prompt_redacted = "TENANTLESS PRIVATE PROMPT"
+        foreign_trace = deepcopy(trace)
+        foreign_trace.trace_id = "registry-dashboard-foreign-private"
+        foreign_trace.tenant_id = "another-tenant"
+        foreign_trace.session_id = "foreign-private-session"
+        foreign_trace.prompt_redacted = "FOREIGN PRIVATE PROMPT"
         boundary_traces: list[Trace] = []
         for window, started_at, valid_count in (
             ("baseline", now - timedelta(days=2), 29),
@@ -469,6 +474,7 @@ def test_live_postgres_and_sqlite_registry_dashboard_shapes_match(tmp_path) -> N
                 expected_candidate_digest=cluster_candidate_digest([trace.trace_id]),
             )
             storage.insert_trace(deepcopy(tenantless_trace))
+            storage.insert_trace(deepcopy(foreign_trace))
             for boundary_trace in boundary_traces:
                 storage.insert_trace(deepcopy(boundary_trace))
             storage.insert_trace_cluster_assignments(
@@ -529,6 +535,9 @@ def test_live_postgres_and_sqlite_registry_dashboard_shapes_match(tmp_path) -> N
         assert postgres_bundle["clusters"] == sqlite_bundle["clusters"]
         assert postgres_bundle["assignments"] == sqlite_bundle["assignments"]
         assert postgres_data == sqlite_data
+        assert postgres_data["meta"]["totalTraces"] == 64
+        assert "FOREIGN PRIVATE PROMPT" not in json.dumps(postgres_data)
+        assert "TENANTLESS PRIVATE PROMPT" not in json.dumps(postgres_data)
         assert postgres_data["clusters"] == [
             {
                 "cluster_id": identity.cluster_id,
@@ -536,7 +545,8 @@ def test_live_postgres_and_sqlite_registry_dashboard_shapes_match(tmp_path) -> N
                 "n": 64,
             }
         ]
-        assert postgres_data["driftSignals"][0]["clusterLabel"] == identity.display_name
+        assert postgres_data["driftSignals"] == []
+        assert postgres_data["driftRun"] is None
     finally:
         if sqlite is not None:
             sqlite.close()

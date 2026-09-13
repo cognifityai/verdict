@@ -3,6 +3,7 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 
 import httpx
+from fastapi import FastAPI, Request
 from verdict.dashboard.app import create_app
 from verdict.monitoring import CohortManifest, MonitorComparison, MonitorPolicy, MonitorStatus
 from verdict.schema import (
@@ -122,6 +123,60 @@ def test_monitor_uses_the_configured_dashboard_tenant_and_scope(tmp_path):
     assert len(manifest["current_unit_ids"]) == 10
     assert state.json()["candidate"]["policy"]["scope_key"] == (
         "customer-a:application:trace"
+    )
+
+
+def test_dashboard_data_uses_the_host_authorized_monitor_scope(tmp_path):
+    database = tmp_path / "host-authorized-monitor.db"
+    _insert_traces(database, 20, tenant="customer-b")
+
+    async def preview_customer_b():
+        app = create_app(storage=f"sqlite:///{database}", tenant_id="customer-b")
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            return await client.post(
+                "/api/monitor/preview",
+                headers={"X-Verdict-Setup": token},
+                json={
+                    "windowMode": "count",
+                    "referenceRatio": 0.5,
+                    "minimumReference": 5,
+                    "minimumCurrent": 5,
+                },
+            )
+
+    preview = asyncio.run(preview_customer_b())
+    assert preview.status_code == 200
+
+    host = FastAPI()
+
+    @host.middleware("http")
+    async def authorize_tenant(request: Request, call_next):
+        request.state.verdict_registry_tenant = "customer-b"
+        return await call_next(request)
+
+    host.mount(
+        "/verdict",
+        create_app(storage=f"sqlite:///{database}", tenant_id="customer-a"),
+    )
+
+    async def request_dashboard():
+        transport = httpx.ASGITransport(app=host)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
+            return await client.get(
+                "/verdict/api/data", params={"tenant": "customer-a"}
+            )
+
+    response = asyncio.run(request_dashboard())
+
+    assert response.status_code == 200
+    assert response.json()["monitor"]["candidate"]["policy"]["scope_key"] == (
+        "customer-b:application:trace"
     )
 
 

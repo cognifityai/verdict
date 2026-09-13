@@ -13,11 +13,21 @@ from verdict.schema import Trace
 _TRACE_NAMESPACE = UUID("bd452b3a-451e-5bb5-b4c5-b0057976227a")
 _ADAPTER_RE = re.compile(r"[a-z][a-z0-9_-]{0,31}\Z")
 _ROUTING_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,255}\Z")
+_TENANT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
 
 
 def safe_routing_id(value: object) -> str | None:
     """Return a bounded non-content routing identifier or ``None``."""
     if not isinstance(value, str) or _ROUTING_RE.fullmatch(value) is None:
+        return None
+    return value
+
+
+def safe_tenant_id(value: object) -> str | None:
+    """Return one dashboard-compatible tenant identifier or ``None``."""
+    if not isinstance(value, str):
+        return None
+    if value != "__verdict_local__" and _TENANT_RE.fullmatch(value) is None:
         return None
     return value
 
@@ -46,10 +56,12 @@ class ImportContext:
             raise ValueError("source_scope must be a non-empty UTF-8 value of at most 512 bytes")
         if (
             self.tenant_id is not None
-            and self.tenant_id != "__verdict_local__"
-            and safe_routing_id(self.tenant_id) is None
+            and safe_tenant_id(self.tenant_id) is None
         ):
-            raise ValueError("tenant_id must be a non-sensitive bounded routing identifier")
+            raise ValueError(
+                "tenant_id must be a non-sensitive bounded routing identifier "
+                "of at most 128 ASCII characters"
+            )
 
     @property
     def scope_digest(self) -> str:

@@ -230,8 +230,9 @@ verdict-shipper \
 
 The stock single-tenant dashboard reads `__verdict_local__` by default. Pass
 `--tenant-id ID` or set `VERDICT_TENANT_ID` to use the same explicit tenant as
-capture/import. An authenticated host may supply a different authorized
-dashboard tenant as documented below.
+capture/import. Explicit IDs use 1–128 safe ASCII characters. An authenticated
+host may supply a different authorized dashboard read/analysis tenant as
+documented below.
 
 ## 3b. Existing conversation export with Inspect
 
@@ -285,7 +286,8 @@ verdict-dashboard --storage sqlite:///./verdict.db --tenant-id my-team
 Keep the tenant identical across import, pipeline, and dashboard commands. A
 non-default `verdict-import local --tenant-id` run prints this requirement. The
 dashboard default remains `__verdict_local__`, and selecting another tenant
-does not migrate or relabel stored rows.
+does not migrate or relabel stored rows. Browser `tenant=` parameters cannot
+change the configured workspace.
 
 Use an explicit format (`otlp`, `langfuse`, `langsmith`, `datadog`, `phoenix`,
 `opik`, `mlflow`, or `voice`) when auto-detection is ambiguous. The hosted API
@@ -619,9 +621,9 @@ identity is in the database, select one before reading judgment results or
 creating an evaluator-backed Monitor comparison. Identity
 includes provider, model list, rubric name/version, behavior-relevant config,
 expected dimensions, and a prompt/rubric fingerprint. Fixed-window drift rows
-created by older releases remain under **Monitor → Legacy History**. They are
-read-only, excluded from Overview and current Monitor status, and never treated
-as a current zero or alert.
+created by older releases have no tenant owner, so the tenant-scoped dashboard
+suppresses them. They remain read-only in storage and are never treated as a
+current zero or alert.
 If retention removes the last defining judgment, a retained run remains
 selectable by its fingerprint as a historical incomplete identity; unavailable
 provider, model, and rubric details are not reconstructed.
@@ -650,9 +652,13 @@ disabled. Captured empty strings remain distinct from metadata-only history.
 Provider comparison is descriptive and provider identity alone never implies a
 regression.
 When an authenticated FastAPI host injects
-`request.state.verdict_registry_tenant`, Overview, Trace Explorer, cluster
-pass-rate charts, and drift rows use that tenant's active-registry assignments
-and stable labels. Browser query parameters cannot select that projection.
+`request.state.verdict_registry_tenant`, dashboard data, Registry, Agent Run,
+and deterministic-analysis requests use that tenant; the Monitor summary
+embedded in `/api/data` uses the same scope. Browser query parameters cannot
+select that projection. Request state does not make one mounted app a dynamic
+multi-tenant control plane: setup, Evaluator Lab, Monitor lifecycle, and control
+routes remain bound to the configured tenant. Mount one app instance per tenant
+for those mutable workflows.
 The standalone dashboard projects the active registry for its configured
 tenant (`--tenant-id` or `VERDICT_TENANT_ID`); without one, it keeps using each
 trace's stored `cluster_id`.
@@ -734,10 +740,10 @@ the other captured workloads.
   250-cluster identity list remains visible while nested evidence is limited to
   the 20 highest-volume clusters. Standalone dashboards use the same-origin
   setup capability for typed registry actions; mounted deployments may instead
-  expose mutations through their authenticated Operations adapter. The host must inject the
-  authorized registry tenant rather than trusting a browser query parameter;
-  that same value projects the active assignments and stable labels throughout
-  the rest of the dashboard.
+  expose mutations through their authenticated Operations adapter. The host must
+  inject the authorized registry tenant rather than trusting a browser query
+  parameter; that same value projects active assignments and stable labels
+  throughout the tenant-scoped views.
 - **Cohorts use event time.** Monitor uses the trace's captured event time, not
   the time a judgment or import was written. A historical preview freezes its
   selected membership and normalized facts. Activation records an event-time
@@ -748,7 +754,9 @@ the other captured workloads.
   expected dimensions, and immutable prompt/rubric fingerprint. A latest judge
   error is coverage failure rather than a PASS/FAIL score and is eligible for a
   future retry. Other evaluator definitions remain stored but are excluded.
-  Fixed-window rows created by older releases remain read-only legacy history.
+  Fixed-window rows created by older releases remain read-only legacy records.
+  They have no tenant owner and are therefore suppressed by the tenant-scoped
+  dashboard; use the current Monitor workflow instead.
 - **Legacy mode is single-tenant per store.** Registry `active` mode requires
   `--tenant-id` and fetches only that authorized trace scope, so an
   unrelated tenant in shared PostgreSQL does not block the run. `off` retains

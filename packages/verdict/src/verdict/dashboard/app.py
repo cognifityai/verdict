@@ -56,7 +56,7 @@ from verdict.metrics import ScoreCounts, verdict_label
 from verdict.monitor_inputs import LOCAL_TENANT
 from verdict.normalized_evidence import agent_turn_from_row, normalized_bundle_digest
 from verdict.redaction import redact, redact_structure
-from verdict.telemetry.model import safe_routing_id
+from verdict.telemetry.model import safe_tenant_id
 from verdict.trace_facts import deterministic_trace_facts
 
 HERE = Path(__file__).resolve().parent
@@ -416,6 +416,26 @@ def _sqlite_path(storage: str) -> Path:
 
 def _is_postgres(storage: str) -> bool:
     return is_postgres_storage(storage)
+
+
+def _trace_tenant_scope(
+    tenant: str | None,
+    trace_columns: set[str],
+    *,
+    alias: str = "traces",
+) -> tuple[str, tuple[str, ...]]:
+    """Return the one SQL predicate used by every trace-derived dashboard view."""
+    if tenant is None:
+        return "1=1", ()
+    if "tenant_id" not in trace_columns:
+        return ("1=1", ()) if tenant == LOCAL_TENANT else ("1=0", ())
+    if tenant == LOCAL_TENANT:
+        return (
+            f"({alias}.tenant_id=? OR {alias}.tenant_id IS NULL "
+            f"OR {alias}.tenant_id='')",
+            (tenant,),
+        )
+    return f"{alias}.tenant_id=?", (tenant,)
 
 
 # --------------------------------------------------------------------------- #
@@ -1779,6 +1799,8 @@ def _nearest_rank(values: list[float], percentile: float) -> float | None:
 def _time_series_read_model(
     cur: _QuerySession,
     *,
+    trace_scope: str,
+    trace_scope_params: tuple[str, ...],
     keys: list[str],
     t0: datetime,
     judg_by_trace: dict[str, dict[str, Any]],
@@ -1795,7 +1817,11 @@ def _time_series_read_model(
     """Build bounded operational and evaluator time-series projections."""
     bin_seconds = 30 * 60
     bins = defaultdict(lambda: defaultdict(lambda: {"n": 0, "err": 0, "lat": []}))
-    for row in cur.execute("SELECT provider, started_at, latency_ms, error FROM traces"):
+    for row in cur.execute(
+        "SELECT provider, started_at, latency_ms, error FROM traces "
+        f"WHERE {trace_scope}",  # nosec B608 -- fixed tenant predicate
+        trace_scope_params,
+    ):
         provider_key = _provider_key(row["provider"])
         if provider_key not in keys:
             continue
@@ -1986,13 +2012,20 @@ def _build(
         return _empty_bundle(
             agent_runs=agent_runs, report_days=report_days, analysis_time=analysis_time
         )
-    t0row = cur.execute("SELECT MIN(started_at) m, MAX(started_at) x FROM traces").fetchone()
+    trace_columns = cur.columns("traces")
+    trace_scope, trace_scope_params = _trace_tenant_scope(
+        registry_tenant, trace_columns
+    )
+    t0row = cur.execute(
+        "SELECT MIN(started_at) m, MAX(started_at) x FROM traces "
+        f"WHERE {trace_scope}",  # nosec B608 -- fixed tenant predicate
+        trace_scope_params,
+    ).fetchone()
     if not t0row or not t0row["m"]:
         return _empty_bundle(
             agent_runs=agent_runs, report_days=report_days, analysis_time=analysis_time
         )
     t0, tmax = _dt(t0row["m"]), _dt(t0row["x"])
-    trace_columns = cur.columns("traces")
     cluster_select = (
         "cluster_id" if "cluster_id" in trace_columns else "NULL AS cluster_id"
     )
@@ -2053,7 +2086,9 @@ def _build(
         f"{cluster_select}, {tags_column} AS workload_tags, "  # nosec B608
         f"{service_column}, {environment_column}, "  # nosec B608
         f"CASE WHEN {content_bearing_predicate} "  # nosec B608
-        "THEN 1 ELSE 0 END AS content_bearing FROM traces"
+        "THEN 1 ELSE 0 END AS content_bearing FROM traces "
+        f"WHERE {trace_scope}",  # nosec B608 -- fixed tenant predicate
+        trace_scope_params,
     ):
         provider_key = _provider_key(r["provider"])
         tp[r["trace_id"]] = provider_key
@@ -2166,8 +2201,12 @@ def _build(
                 for trace_id in tcluster
             }
 
-    has_drift_table = _table_exists(cur, "drift_signals")
-    has_drift_run_table = _table_exists(cur, "drift_runs")
+    # Legacy fixed-window drift records predate tenant ownership. Keep them for
+    # the unscoped direct read model, but never guess ownership in a configured
+    # tenant workspace. Current Monitor records are tenant-scoped separately.
+    legacy_drift_enabled = registry_tenant is None
+    has_drift_table = legacy_drift_enabled and _table_exists(cur, "drift_signals")
+    has_drift_run_table = legacy_drift_enabled and _table_exists(cur, "drift_runs")
     drift_columns = cur.columns("drift_signals") if has_drift_table else set()
 
     # Group persisted judgments by evaluator identity before calculating any
@@ -2182,6 +2221,8 @@ def _build(
         else ()
     )
     for row in judgment_rows:
+        if row["trace_id"] not in ttime:
+            continue
         identity = evaluator_identity(row)
         identity_by_id.setdefault(identity["id"], identity)
         identity_rows.append((identity, row))
@@ -2475,8 +2516,8 @@ def _build(
                       AVG(latency_ms) lat, SUM(input_tokens) it, SUM(output_tokens) ot,
                       SUM(cost_usd) cost,
                       SUM(CASE WHEN cost_usd IS NULL THEN 1 ELSE 0 END) cost_unknown
-               FROM traces WHERE """ + provider_where,  # nosec B608
-            provider_params,
+               FROM traces WHERE """ + trace_scope + " AND " + provider_where,  # nosec B608
+            (*trace_scope_params, *provider_params),
         ).fetchone()
         provider_counts = Counter()
         for c in prov_dim[p].values():
@@ -2627,6 +2668,8 @@ def _build(
 
     series = _time_series_read_model(
         cur,
+        trace_scope=trace_scope,
+        trace_scope_params=trace_scope_params,
         keys=keys,
         t0=t0,
         judg_by_trace=judg_by_trace,
@@ -2877,8 +2920,11 @@ def create_app(
     from starlette.middleware.trustedhost import TrustedHostMiddleware
 
     configured_storage = resolve_storage(storage)
-    if tenant_id != LOCAL_TENANT and safe_routing_id(tenant_id) is None:
-        raise ValueError("tenant_id must be a non-sensitive bounded routing identifier")
+    if safe_tenant_id(tenant_id) is None:
+        raise ValueError(
+            "tenant_id must be a non-sensitive bounded routing identifier "
+            "of at most 128 ASCII characters"
+        )
     configured_tenant = tenant_id
     if operations_url is not None:
         parsed_operations = urlsplit(operations_url)
@@ -3004,6 +3050,15 @@ def create_app(
     monitor_routes.register(app)
     ControlRoutes(configured_storage, setup_routes, monitor_routes).register(app)
 
+    def _authorized_tenant(request: Request) -> str:
+        host_tenant = getattr(request.state, "verdict_registry_tenant", None)
+        authorized_tenant = (
+            host_tenant if host_tenant is not None else configured_tenant
+        )
+        if safe_tenant_id(authorized_tenant) is None:
+            raise ValueError("invalid tenant")
+        return authorized_tenant
+
     def data(
         request: Request,
         evaluator: str | None = None,
@@ -3023,20 +3078,20 @@ def create_app(
             _log.warning("dashboard data unavailable: SQLite database not found")
             return JSONResponse({"error": "data unavailable"}, status_code=503)
         try:
+            authorized_tenant = _authorized_tenant(request)
+        except ValueError:
+            return JSONResponse({"error": "invalid data request"}, status_code=400)
+        try:
             bundle = build_bundle(
                 configured_storage,
                 evaluator_id=evaluator,
-                registry_tenant=getattr(
-                    request.state,
-                    "verdict_registry_tenant",
-                    None,
-                ) or configured_tenant,
+                registry_tenant=authorized_tenant,
                 trace_offset=trace_offset,
                 trace_judge_status=trace_judge_status,
                 trace_id=trace_id,
                 report_days=report_days,
             )
-            bundle["monitor"] = monitor_routes.read_state()
+            bundle["monitor"] = monitor_routes.read_state(tenant_id=authorized_tenant)
             return bundle
         except DashboardBundleLimitError:
             _log.exception("dashboard bundle exceeded its safety budget")
@@ -3053,23 +3108,12 @@ def create_app(
 
     def registry(
         request,
-        tenant: str | None = None,
         version: str | None = None,
         assignment_limit: int = 50,
         assignment_offset: int = 0,
     ):
-        authorized_tenant = getattr(
-            request.state,
-            "verdict_registry_tenant",
-            None,
-        ) or tenant or configured_tenant
         try:
-            tenant_bytes = authorized_tenant.encode("utf-8")
-        except (AttributeError, UnicodeError):
-            return JSONResponse({"error": "invalid tenant"}, status_code=400)
-        if not tenant_bytes or len(tenant_bytes) > 128:
-            return JSONResponse({"error": "invalid tenant"}, status_code=400)
-        try:
+            authorized_tenant = _authorized_tenant(request)
             return build_registry_bundle(
                 configured_storage,
                 tenant=authorized_tenant,
@@ -3093,16 +3137,13 @@ def create_app(
 
     def agent_runs(
         request,
-        tenant: str | None = None,
         limit: int = Query(default=30, ge=1, le=100),
         offset: int = Query(default=0, ge=0, le=100_000),
         run_id: str | None = None,
         evaluator_fingerprint: str | None = None,
     ):
-        authorized_tenant = getattr(
-            request.state, "verdict_registry_tenant", None,
-        ) or tenant or configured_tenant
         try:
+            authorized_tenant = _authorized_tenant(request)
             requested_run_ids = request.query_params.getlist("run_ids")
             selected_run_ids = tuple(requested_run_ids) if requested_run_ids else None
             return build_agent_runs_bundle(
@@ -3126,17 +3167,14 @@ def create_app(
     def agent_run_detail(
         run_id: str,
         request,
-        tenant: str | None = None,
         event_limit: int = Query(default=100, ge=1, le=200),
         event_offset: int = Query(default=0, ge=0),
         turn_limit: int = Query(default=20, ge=1, le=50),
         turn_offset: int = Query(default=0, ge=0),
         event_id: str | None = None,
     ):
-        authorized_tenant = getattr(
-            request.state, "verdict_registry_tenant", None,
-        ) or tenant or configured_tenant
         try:
+            authorized_tenant = _authorized_tenant(request)
             return build_agent_run_detail(
                 configured_storage,
                 tenant=authorized_tenant,
@@ -3158,11 +3196,9 @@ def create_app(
     agent_run_detail.__annotations__["request"] = Request
     app.get("/api/runs/{run_id}")(agent_run_detail)
 
-    def agent_insights(request, tenant: str | None = None):
-        authorized_tenant = getattr(
-            request.state, "verdict_registry_tenant", None,
-        ) or tenant or configured_tenant
+    def agent_insights(request):
         try:
+            authorized_tenant = _authorized_tenant(request)
             return read_latest_analysis(
                 configured_storage,
                 tenant=authorized_tenant,
@@ -3177,13 +3213,11 @@ def create_app(
     agent_insights.__annotations__["request"] = Request
     app.get("/api/insights")(agent_insights)
 
-    def run_agent_insights(request, tenant: str | None = None):
+    def run_agent_insights(request):
         if not _setup_authorized(request):
             return JSONResponse({"error": "analysis authorization required"}, status_code=403)
-        authorized_tenant = getattr(
-            request.state, "verdict_registry_tenant", None,
-        ) or tenant or configured_tenant
         try:
+            authorized_tenant = _authorized_tenant(request)
             return run_analysis(
                 configured_storage,
                 tenant=authorized_tenant,
@@ -3230,9 +3264,10 @@ def main(argv: list[str] | None = None) -> int:
     source.add_argument("--storage", help="SQLite URL/path or PostgreSQL DSN")
     source.add_argument("--db", help="legacy SQLite path")
     args = parser.parse_args(argv)
-    if args.tenant_id != LOCAL_TENANT and safe_routing_id(args.tenant_id) is None:
+    if safe_tenant_id(args.tenant_id) is None:
         parser.error(
-            "--tenant-id must be a non-sensitive bounded routing identifier"
+            "--tenant-id must be a non-sensitive bounded routing identifier "
+            "of at most 128 ASCII characters"
         )
     configured_storage = resolve_storage(args.storage or args.db)
     backend = "postgresql" if _is_postgres(configured_storage) else "sqlite"

@@ -312,11 +312,9 @@ def test_registry_api_uses_host_authorized_tenant_and_explains_terminal_membersh
     )
     assert tenant_a_sample["cluster_id"] == cluster_id
     assert tenant_a_sample["cluster_label"] == "Billing requests 100"
-    tenantless_sample = next(
-        item for item in data_payload["samples"] if item["trace_id"] == "tenantless-private"
-    )
-    assert tenantless_sample["cluster_id"] is None
-    assert tenantless_sample["cluster_label"] is None
+    assert "tenantless-private" not in {
+        item["trace_id"] for item in data_payload["samples"]
+    }
 
     with sqlite3.connect(path) as partial:
         partial.execute("DROP TABLE cluster_registry_versions")
@@ -353,7 +351,7 @@ def test_registry_api_is_additive_for_old_stores_and_requires_explicit_shared_sc
         "reason": "registry_not_installed",
     }
     assert tenant_response.status_code == 200
-    assert tenant_response.json()["tenant"] == "tenant-a"
+    assert tenant_response.json()["tenant"] == "__verdict_local__"
     assert tenant_response.json()["status"] == "unavailable"
 
 
@@ -649,7 +647,7 @@ def test_registry_maximum_cluster_shape_stays_within_api_redaction_budget(tmp_pa
     )
     storage.insert_cluster_preview(version, identities, clusters, assignments)
     storage.close()
-    app = create_app(storage=f"sqlite:///{path}")
+    app = create_app(storage=f"sqlite:///{path}", tenant_id=tenant)
 
     async def request_registry():
         transport = httpx.ASGITransport(app=app)
