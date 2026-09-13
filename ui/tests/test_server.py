@@ -648,6 +648,149 @@ def test_dashboard_rejects_invalid_tenant_routing_identifiers(tmp_path):
         create_app(storage=f"sqlite:///{path}", tenant_id="customer name")
 
 
+def test_dashboard_tenant_boundary_matches_registry_limit(tmp_path):
+    path = tmp_path / "tenant-boundary.db"
+    SQLiteStorage(str(path)).close()
+
+    accepted = "a" * 128
+    assert create_app(
+        storage=f"sqlite:///{path}", tenant_id=accepted
+    ).state.verdict_tenant_id == accepted
+
+    with pytest.raises(ValueError, match="128"):
+        create_app(storage=f"sqlite:///{path}", tenant_id="a" * 129)
+
+
+def test_configured_dashboard_tenant_scopes_every_trace_derived_view(tmp_path):
+    import httpx
+
+    path = tmp_path / "tenant-scoped-dashboard.db"
+    storage = SQLiteStorage(str(path))
+    now = datetime(2026, 9, 11, tzinfo=timezone.utc)
+    trace_a = Trace(
+        trace_id="trace-a",
+        tenant_id="customer-a",
+        started_at=now,
+        ended_at=now,
+        provider="anthropic",
+        request_model="model-a",
+        response_model="model-a",
+        service_name="service-a",
+        prompt_redacted="A prompt",
+        response_redacted="A response",
+        input_tokens=10,
+        output_tokens=5,
+        latency_ms=100,
+        cost_usd=0.01,
+    )
+    trace_b = Trace(
+        trace_id="trace-b",
+        tenant_id="customer-b",
+        started_at=now + timedelta(seconds=1),
+        ended_at=now + timedelta(seconds=1),
+        provider="openai",
+        request_model="model-b",
+        response_model="model-b",
+        service_name="service-b",
+        prompt_redacted="B_PRIVATE_PROMPT",
+        response_redacted="B_PRIVATE_RESPONSE",
+        input_tokens=100,
+        output_tokens=50,
+        latency_ms=900,
+        cost_usd=9.99,
+    )
+    for trace in (trace_a, trace_b):
+        storage.insert_trace(trace)
+        storage.insert_judgment(Judgment(
+            trace_id=trace.trace_id,
+            evaluator_provider="fake",
+            evaluator_config={"temperature": 0},
+            evaluator_fingerprint="a" * 64,
+            expected_dimensions=["relevance"],
+            judge_models=["shared-judge"],
+            dimensions=[DimensionScore(name="relevance", verdict=Verdict.PASS)],
+        ))
+    _persist_drift_snapshot(storage, DriftSignal(
+        signal_id="legacy-b-signal",
+        cluster_id="customer-b-cluster",
+        dimension="relevance",
+        evaluator_fingerprint="a" * 64,
+        example_trace_ids=[trace_b.trace_id],
+        recommended_action="Review customer B.",
+    ))
+    storage.close()
+
+    async def request_data():
+        app = create_app(
+            storage=f"sqlite:///{path}", tenant_id="customer-a"
+        )
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
+            return await client.get(
+                "/api/data", params={"report_days": 0, "trace_id": "trace-b"}
+            )
+
+    response = asyncio.run(request_data())
+    payload = response.json()
+
+    assert response.status_code == 200
+    assert payload["meta"]["totalTraces"] == 1
+    assert payload["meta"]["totalJudged"] == 1
+    assert payload["meta"]["totalCost"] == 0.01
+    assert [sample["trace_id"] for sample in payload["samples"]] == ["trace-a"]
+    assert [(item["rawProvider"], item["n"]) for item in payload["providers"]] == [
+        ("anthropic", 1)
+    ]
+    assert payload["managementReport"]["scope"]["calls"] == 1
+    assert payload["managementReport"]["applications"]["rows"][0]["name"] == "service-a"
+    assert [
+        identity["fingerprint"]
+        for identity in payload["evaluation"]["availableIdentities"]
+    ] == ["a" * 64]
+    assert payload["driftSignals"] == []
+    assert payload["driftRun"] is None
+    assert "B_PRIVATE" not in json.dumps(payload)
+
+
+def test_local_dashboard_includes_legacy_tenantless_traces_only(tmp_path):
+    import httpx
+
+    path = tmp_path / "local-tenant-scope.db"
+    storage = SQLiteStorage(str(path))
+    for trace_id, tenant_id in (
+        ("legacy-local", None),
+        ("explicit-local", "__verdict_local__"),
+        ("other-tenant", "customer-b"),
+    ):
+        storage.insert_trace(Trace(
+            trace_id=trace_id,
+            tenant_id=tenant_id,
+            provider="anthropic",
+            request_model="test-model",
+            prompt_redacted=trace_id,
+        ))
+    storage.close()
+
+    async def request_data():
+        transport = httpx.ASGITransport(
+            app=create_app(storage=f"sqlite:///{path}")
+        )
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
+            return await client.get("/api/data", params={"report_days": 0})
+
+    response = asyncio.run(request_data())
+
+    assert response.status_code == 200
+    assert response.json()["meta"]["totalTraces"] == 2
+    assert {item["trace_id"] for item in response.json()["samples"]} == {
+        "legacy-local", "explicit-local",
+    }
+
+
 def test_dashboard_cli_passes_the_selected_tenant_to_the_app(
     tmp_path, monkeypatch,
 ):
@@ -670,14 +813,17 @@ def test_dashboard_cli_passes_the_selected_tenant_to_the_app(
     assert captured["kwargs"]["port"] == 8123
 
 
-def test_dashboard_cli_rejects_an_invalid_tenant_before_starting(monkeypatch):
+@pytest.mark.parametrize("tenant_id", ["customer name", "a" * 129])
+def test_dashboard_cli_rejects_an_invalid_tenant_before_starting(
+    tenant_id, monkeypatch,
+):
     monkeypatch.setattr(
         "uvicorn.run",
         lambda *_args, **_kwargs: pytest.fail("server must not start"),
     )
 
     with pytest.raises(SystemExit) as error:
-        server_module.main(["--tenant-id", "customer name"])
+        server_module.main(["--tenant-id", tenant_id])
 
     assert error.value.code == 2
 

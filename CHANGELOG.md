@@ -53,6 +53,11 @@ the product is refined.
   concise dates instead of raw ISO timestamps.
 - Standalone setup/import, evaluator, cluster, Monitor, control, Agent Run, and
   active-registry projection paths now share the dashboard's configured tenant.
+  Overview totals, reports, trace samples, judgments, and deterministic analysis
+  use the same scope; browser `tenant=` parameters can no longer override it.
+  Tenant selectors consistently accept at most 128 safe ASCII characters, and
+  unowned legacy fixed-window drift rows are suppressed rather than mixed across
+  tenant workspaces.
   The default remains `__verdict_local__`, existing stores need no migration,
   and a non-default `verdict-import local --tenant-id` run prints the matching
   dashboard requirement instead of silently leaving the data undiscoverable.

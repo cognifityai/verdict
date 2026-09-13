@@ -15,7 +15,7 @@ from verdict.monitor_inputs import LOCAL_TENANT
 from verdict.telemetry.files import SUPPORTED_FORMATS, iter_telemetry_file
 from verdict.telemetry.http import JsonHttpClient
 from verdict.telemetry.local_agents import capture_local_agents
-from verdict.telemetry.model import ImportContext, safe_routing_id
+from verdict.telemetry.model import ImportContext, safe_tenant_id
 from verdict.telemetry.normalize import parse_datetime
 from verdict.telemetry.receiver import OtlpHttpReceiver
 from verdict.telemetry.runner import ImportRunError, import_into_storage
@@ -192,9 +192,10 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "local":
             tenant_id = args.tenant_id or LOCAL_TENANT
-            if tenant_id != LOCAL_TENANT and safe_routing_id(tenant_id) is None:
+            if safe_tenant_id(tenant_id) is None:
                 raise ValueError(
-                    "tenant_id must be a non-sensitive bounded routing identifier"
+                    "tenant_id must be a non-sensitive bounded routing identifier "
+                    "of at most 128 ASCII characters"
                 )
             storage = _open_storage(args.storage)
             try:

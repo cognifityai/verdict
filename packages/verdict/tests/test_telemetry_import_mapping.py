@@ -22,6 +22,18 @@ def _context(adapter: str) -> ImportContext:
     return ImportContext(adapter=adapter, source_scope="project-a", tenant_id="tenant-a")
 
 
+def test_import_context_uses_the_registry_tenant_boundary() -> None:
+    accepted = "a" * 128
+
+    assert ImportContext(
+        adapter="otlp", source_scope="project-a", tenant_id=accepted
+    ).tenant_id == accepted
+    with pytest.raises(ValueError, match="128"):
+        ImportContext(
+            adapter="otlp", source_scope="project-a", tenant_id="a" * 129
+        )
+
+
 def _otel_attributes(values: dict[str, object]) -> list[dict[str, object]]:
     attributes = []
     for key, value in values.items():

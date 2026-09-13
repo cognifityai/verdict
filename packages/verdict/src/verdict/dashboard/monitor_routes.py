@@ -193,12 +193,13 @@ class MonitorRoutes:
             ),
         )
 
-    def read_state(self) -> dict[str, object]:
+    def read_state(self, tenant_id: str | None = None) -> dict[str, object]:
         """Return the one durable read model used by every monitor surface."""
         writable = self.setup.writable_storage()
         try:
-            active_policy = writable.get_active_monitor_policy(self.scope)
-            candidate_policy = writable.get_latest_monitor_candidate(self.scope)
+            scope = f"{tenant_id or self.tenant_id}:application:trace"
+            active_policy = writable.get_active_monitor_policy(scope)
+            candidate_policy = writable.get_latest_monitor_candidate(scope)
             active = (
                 self._stored_response(writable, active_policy, "active")
                 if active_policy else None
