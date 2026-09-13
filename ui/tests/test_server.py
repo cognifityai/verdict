@@ -754,6 +754,68 @@ def test_configured_dashboard_tenant_scopes_every_trace_derived_view(tmp_path):
     assert "B_PRIVATE" not in json.dumps(payload)
 
 
+def test_tenant_bundle_never_materializes_foreign_judgments(tmp_path, monkeypatch):
+    path = tmp_path / "tenant-judgment-query.db"
+    storage = SQLiteStorage(str(path))
+    now = datetime(2026, 9, 11, tzinfo=timezone.utc)
+    for tenant_id, trace_id in (
+        ("customer-a", "trace-a"),
+        ("customer-b", "trace-b"),
+    ):
+        storage.insert_trace(Trace(
+            trace_id=trace_id,
+            tenant_id=tenant_id,
+            started_at=now,
+            ended_at=now,
+            provider="anthropic",
+            request_model="model-a",
+            prompt_redacted="prompt",
+            response_redacted="response",
+        ))
+        storage.insert_judgment(Judgment(
+            judgment_id=f"judgment-{trace_id}",
+            trace_id=trace_id,
+            evaluator_provider="fake",
+            evaluator_fingerprint="a" * 64,
+            expected_dimensions=["relevance"],
+            judge_models=["shared-judge"],
+            dimensions=[DimensionScore(name="relevance", verdict=Verdict.PASS)],
+        ))
+    storage.close()
+
+    real_execute = server_module._SQLiteSession.execute
+
+    class GuardedJudgmentCursor:
+        def __init__(self, cursor):
+            self._cursor = cursor
+
+        def __iter__(self):
+            for row in self._cursor:
+                if row["trace_id"] == "trace-b":
+                    raise AssertionError("foreign judgment reached the dashboard process")
+                yield row
+
+        def __getattr__(self, name):
+            return getattr(self._cursor, name)
+
+    def execute_without_foreign_judgments(session, query, params=()):
+        cursor = real_execute(session, query, params)
+        if "FROM judgments" in query and "WHERE trace_id=?" not in query:
+            return GuardedJudgmentCursor(cursor)
+        return cursor
+
+    monkeypatch.setattr(
+        server_module._SQLiteSession,
+        "execute",
+        execute_without_foreign_judgments,
+    )
+
+    bundle = build_bundle(path, registry_tenant="customer-a")
+
+    assert bundle["meta"]["totalTraces"] == 1
+    assert bundle["meta"]["totalJudged"] == 1
+
+
 def test_local_dashboard_includes_legacy_tenantless_traces_only(tmp_path):
     import httpx
 

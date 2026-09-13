@@ -449,8 +449,10 @@ verdict-dashboard --storage sqlite:///./verdict.db
 
 If capture or import used an explicit tenant, use the same value for the
 dashboard. The dashboard also reads `VERDICT_TENANT_ID` when the flag is
-omitted. Explicit tenant IDs use 1–128 ASCII letters, digits, `.`, `_`, `:`, or
-`-`, beginning with a letter or digit:
+omitted. Dashboard-selectable tenant IDs use 1–128 ASCII letters, digits, `.`,
+`_`, `:`, or `-`, beginning with a letter or digit. Existing telemetry import
+APIs continue to accept the published 256-character routing boundary; use at
+most 128 characters for a new standalone dashboard workspace:
 
 ```bash
 verdict-import local --storage sqlite:///./verdict.db --tenant-id support

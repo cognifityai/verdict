@@ -196,9 +196,11 @@ history. Setup/import and Monitor controls are explicit write paths and create
 their additive tables when used. Install `cognifity-verdict[dashboard]` for SQLite or
 `cognifity-verdict[dashboard,postgres]` for PostgreSQL, then run
 `verdict-dashboard --storage ...`. If capture/import used an explicit tenant,
-pass the same `--tenant-id` or set `VERDICT_TENANT_ID`; explicit values use at
-most 128 safe ASCII characters. Browser `tenant=` parameters cannot change that
-selection. A FastAPI host can mount
+pass the same `--tenant-id` or set `VERDICT_TENANT_ID`; dashboard-selectable
+values use at most 128 safe ASCII characters. Existing telemetry import APIs
+retain their published 256-character routing boundary, but new standalone
+dashboard workspaces should use at most 128 characters. Browser `tenant=`
+parameters cannot change that selection. A FastAPI host can mount
 `verdict.dashboard.create_app()` so its authenticated application and the
 packaged Verdict UI run together. A host-authorized
 `request.state.verdict_registry_tenant` scopes dashboard data, Registry, Agent

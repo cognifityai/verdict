@@ -55,12 +55,14 @@ the product is refined.
   active-registry projection paths now share the dashboard's configured tenant.
   Overview totals, reports, trace samples, judgments, and deterministic analysis
   use the same scope; browser `tenant=` parameters can no longer override it.
-  Tenant selectors consistently accept at most 128 safe ASCII characters, and
-  unowned legacy fixed-window drift rows are suppressed rather than mixed across
-  tenant workspaces.
+  Dashboard and Registry tenant selectors consistently accept at most 128 safe
+  ASCII characters, while existing telemetry-import tenant identifiers retain
+  their published 256-character compatibility boundary. Unowned legacy
+  fixed-window drift rows are suppressed rather than mixed across tenant
+  workspaces, and judgments are filtered inside the database tenant boundary.
   The default remains `__verdict_local__`, existing stores need no migration,
-  and a non-default `verdict-import local --tenant-id` run prints the matching
-  dashboard requirement instead of silently leaving the data undiscoverable.
+  and a non-default `verdict-import local --tenant-id` run prints whether the
+  selected identifier can be opened as a standalone dashboard workspace.
 - Retained Anthropic and Google bound methods and lazy stream managers now
   remain pass-through after Verdict shutdown; they cannot resume Trace capture
   or consume a pending one-call correlation reservation.

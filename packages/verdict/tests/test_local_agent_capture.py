@@ -1885,8 +1885,28 @@ def test_local_cli_explains_how_to_open_a_non_default_tenant(tmp_path: Path, cap
     assert "customer-a" in output.err
 
 
-@pytest.mark.parametrize("tenant_id", ["customer name", "a" * 129])
-def test_local_cli_rejects_a_tenant_the_dashboard_cannot_select(
+def test_local_cli_preserves_a_256_character_import_tenant(
+    tmp_path: Path, capsys,
+) -> None:
+    codex = tmp_path / "codex"
+    _write_jsonl(codex / "session.jsonl", _codex_records())
+    tenant_id = "a" * 256
+
+    status = main([
+        "local",
+        "--storage", f"sqlite:///{tmp_path / 'verdict.db'}",
+        "--codex-root", str(codex),
+        "--claude-root", str(tmp_path / "missing-claude"),
+        "--tenant-id", tenant_id,
+    ])
+
+    output = capsys.readouterr()
+    assert status == 0
+    assert "dashboard tenant selectors are limited to 128" in output.err
+
+
+@pytest.mark.parametrize("tenant_id", ["customer name", "a" * 257])
+def test_local_cli_rejects_an_invalid_import_tenant(
     tmp_path: Path, capsys, tenant_id: str,
 ) -> None:
     status = main([

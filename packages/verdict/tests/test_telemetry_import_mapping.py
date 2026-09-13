@@ -22,15 +22,15 @@ def _context(adapter: str) -> ImportContext:
     return ImportContext(adapter=adapter, source_scope="project-a", tenant_id="tenant-a")
 
 
-def test_import_context_uses_the_registry_tenant_boundary() -> None:
-    accepted = "a" * 128
+def test_import_context_preserves_the_published_routing_boundary() -> None:
+    accepted = "a" * 256
 
     assert ImportContext(
         adapter="otlp", source_scope="project-a", tenant_id=accepted
     ).tenant_id == accepted
-    with pytest.raises(ValueError, match="128"):
+    with pytest.raises(ValueError, match="256"):
         ImportContext(
-            adapter="otlp", source_scope="project-a", tenant_id="a" * 129
+            adapter="otlp", source_scope="project-a", tenant_id="a" * 257
         )
 
 

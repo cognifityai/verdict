@@ -15,7 +15,7 @@ from verdict.monitor_inputs import LOCAL_TENANT
 from verdict.telemetry.files import SUPPORTED_FORMATS, iter_telemetry_file
 from verdict.telemetry.http import JsonHttpClient
 from verdict.telemetry.local_agents import capture_local_agents
-from verdict.telemetry.model import ImportContext, safe_tenant_id
+from verdict.telemetry.model import ImportContext, safe_routing_id, safe_tenant_id
 from verdict.telemetry.normalize import parse_datetime
 from verdict.telemetry.receiver import OtlpHttpReceiver
 from verdict.telemetry.runner import ImportRunError, import_into_storage
@@ -192,10 +192,13 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "local":
             tenant_id = args.tenant_id or LOCAL_TENANT
-            if safe_tenant_id(tenant_id) is None:
+            if (
+                tenant_id != LOCAL_TENANT
+                and safe_routing_id(tenant_id) is None
+            ):
                 raise ValueError(
                     "tenant_id must be a non-sensitive bounded routing identifier "
-                    "of at most 128 ASCII characters"
+                    "of at most 256 ASCII characters"
                 )
             storage = _open_storage(args.storage)
             try:
@@ -209,11 +212,23 @@ def main(argv: list[str] | None = None) -> int:
             finally:
                 storage.close()
             print(json.dumps(local_summary.as_dict(), sort_keys=True))
-            if args.tenant_id and args.tenant_id != LOCAL_TENANT:
+            if (
+                args.tenant_id
+                and args.tenant_id != LOCAL_TENANT
+                and safe_tenant_id(args.tenant_id) is not None
+            ):
                 print(
                     "NOTICE: this import uses tenant "
                     f"{args.tenant_id!r}; start verdict-dashboard with the same "
                     "--tenant-id to view it.",
+                    file=sys.stderr,
+                )
+            elif args.tenant_id and safe_tenant_id(args.tenant_id) is None:
+                print(
+                    "NOTICE: this legacy-compatible import tenant was accepted, "
+                    "but dashboard tenant selectors are limited to 128 safe ASCII "
+                    "characters; use a tenant of at most 128 characters for a new "
+                    "standalone dashboard workspace.",
                     file=sys.stderr,
                 )
             return 0
