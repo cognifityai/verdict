@@ -197,34 +197,59 @@ class LiteLLMAdapter:
         )
 
 
-def _is_retryable_error(exc: Exception) -> bool:
-    """Identify transient errors worth retrying.
+_RETRYABLE_HTTP_STATUS_CODES = frozenset({408, 429, 500, 502, 503, 504})
+_TRANSPORT_EXCEPTION_BASES = {
+    "anthropic": frozenset({"APIConnectionError"}),
+    "httpcore": frozenset({"NetworkError", "TimeoutException"}),
+    "httpcore2": frozenset({"NetworkError", "TimeoutException"}),
+    "httpx": frozenset({"NetworkError", "TimeoutException"}),
+    "httpx2": frozenset({"NetworkError", "TimeoutException"}),
+    "litellm": frozenset({"APIConnectionError", "Timeout"}),
+    "openai": frozenset({"APIConnectionError"}),
+    "requests": frozenset({"ConnectionError", "Timeout"}),
+}
 
-    Catches: 503 UNAVAILABLE (capacity), 429 (rate limit), 500/502/504 (transient),
-    connection timeouts, connection resets. Does NOT retry on 4xx auth errors
-    or model-not-found errors — those won't get better with a wait.
-    """
-    msg = str(exc).lower()
-    # Common transient indicators across SDKs
-    transient_signals = [
-        "503", "unavailable",
-        "429", "rate limit", "ratelimit", "too many requests",
-        "500", "502", "504",
-        "timeout", "timed out",
-        "connection reset", "connection error",
-        "temporarily", "try again",
-        "high demand",
-    ]
-    # Hard-fail signals (don't retry)
-    fatal_signals = [
-        "401", "unauthorized",
-        "403", "permission_denied",
-        "404", "not_found", "model not found",
-        "400", "invalid_argument",
-    ]
-    if any(s in msg for s in fatal_signals):
-        return False
-    return any(s in msg for s in transient_signals)
+
+def _safe_attribute(value: object, name: str) -> object | None:
+    try:
+        return getattr(value, name, None)
+    except Exception:
+        return None
+
+
+def _structured_http_status(exc: Exception) -> int | None:
+    response = _safe_attribute(exc, "response")
+    candidates = (
+        _safe_attribute(exc, "status_code"),
+        _safe_attribute(response, "status_code") if response is not None else None,
+        _safe_attribute(exc, "code"),
+    )
+    for candidate in candidates:
+        if (
+            isinstance(candidate, int)
+            and not isinstance(candidate, bool)
+            and 100 <= candidate <= 599
+        ):
+            return candidate
+    return None
+
+
+def _is_transport_error(exc: Exception) -> bool:
+    if isinstance(exc, (ConnectionError, TimeoutError)):
+        return True
+    for cls in type(exc).__mro__:
+        package = cls.__module__.partition(".")[0]
+        if cls.__name__ in _TRANSPORT_EXCEPTION_BASES.get(package, ()):
+            return True
+    return False
+
+
+def _is_retryable_error(exc: Exception) -> bool:
+    """Identify transient failures from status fields or exception types."""
+    status_code = _structured_http_status(exc)
+    if status_code is not None:
+        return status_code in _RETRYABLE_HTTP_STATUS_CODES
+    return _is_transport_error(exc)
 
 
 def _with_retry(fn, *args, max_attempts: int = 4, base_delay: float = 1.5, **kwargs):
@@ -263,7 +288,8 @@ class GoogleAdapter:
     or GEMINI_API_KEY env var, or pass api_key explicitly.
 
     Includes automatic exponential-backoff retry on transient errors
-    (503 UNAVAILABLE, 429 rate limit, 5xx, timeouts). Gemini AI Studio's
+    (408 timeout, 429 rate limit, 500/502/503/504, and transport failures).
+    Gemini AI Studio's
     free tier shows ~10% transient 503s on sustained traffic; retries
     bring effective error rate to under 1%.
     """

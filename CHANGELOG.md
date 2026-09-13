@@ -113,6 +113,8 @@ the product is refined.
 
 ### Fixed
 
+- Judge adapters classify retryable failures from structured provider status
+  fields and transport exception types instead of error-message text.
 - Provider auto-instrumentation now disables and rolls back partially patched
   SDK surfaces when installation fails, and Google async entry cancellation
   persists the already-claimed error Trace before re-raising cancellation.
