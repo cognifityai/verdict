@@ -408,7 +408,7 @@ def test_live_postgres_agent_run_bundle_is_atomic_redacted_and_tenant_scoped():
                 status=verdict.ExecutionStatus.COMPLETED,
                 provenance="test:context",
                 attributes={
-                    "name": "api_key",
+                    "name": "OIDCIDTokens",
                     "value": "opaque-postgres-canary",
                     "source": "application",
                 },
@@ -429,6 +429,8 @@ def test_live_postgres_agent_run_bundle_is_atomic_redacted_and_tenant_scoped():
                         "password": "opaque-postgres-canary",
                         "api_keys": ["opaque-postgres-canary"],
                         "passwords": {"primary": "opaque-postgres-canary"},
+                        "AWSSECRETACCESSKEYS": ["opaque-postgres-canary"],
+                        "XAPIKeys": ["opaque-postgres-canary"],
                         "input_tokens": 12345678,
                     },
                     "is_error": False,
@@ -452,6 +454,11 @@ def test_live_postgres_agent_run_bundle_is_atomic_redacted_and_tenant_scoped():
         assert loaded.events[1].attributes["result"]["password"] == "<SECRET>"
         assert loaded.events[1].attributes["result"]["api_keys"] == "<SECRET>"
         assert loaded.events[1].attributes["result"]["passwords"] == "<SECRET>"
+        assert (
+            loaded.events[1].attributes["result"]["AWSSECRETACCESSKEYS"]
+            == "<SECRET>"
+        )
+        assert loaded.events[1].attributes["result"]["XAPIKeys"] == "<SECRET>"
         assert loaded.events[1].attributes["result"]["input_tokens"] == 12345678
         assert loaded.run.agent_name == "api_key=<SECRET>"
         assert loaded.run.agent_version == "token=<SECRET>"
@@ -468,7 +475,7 @@ def test_live_postgres_agent_run_bundle_is_atomic_redacted_and_tenant_scoped():
             (
                 json.dumps(
                     {
-                        "name": "password",
+                        "name": "USERIDTOKENS",
                         "value": "opaque-historical-postgres-canary",
                     }
                 ),

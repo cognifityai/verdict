@@ -226,6 +226,8 @@ def test_file_transport_redacts_sensitive_fields_before_spool_and_import(tmp_pat
                     "token": canary,
                     "api_keys": [canary],
                     "passwords": {"primary": canary},
+                    "AWSSECRETACCESSKEYS": [canary],
+                    "XAPIKeys": [canary],
                     "input_tokens": 12345678,
                     "message": github_token,
                     "detail": f"retrying with api_key={canary}",
@@ -234,6 +236,7 @@ def test_file_transport_redacts_sensitive_fields_before_spool_and_import(tmp_pat
                 tool.set_output({"Authorization": f"Basic {canary}"})
             turn.record_instruction(name="password", text=canary)
             turn.record_context(name="api_key", value=canary)
+            turn.record_context(name="OIDCIDTokens", value=canary)
             turn.record_outcome("access_token", canary)
             turn.set_output("done")
     verdict.shutdown()
@@ -264,6 +267,8 @@ def test_file_transport_redacts_sensitive_fields_before_spool_and_import(tmp_pat
     )
     assert tool_call.attributes["arguments"]["api_keys"] == "<SECRET>"
     assert tool_call.attributes["arguments"]["passwords"] == "<SECRET>"
+    assert tool_call.attributes["arguments"]["AWSSECRETACCESSKEYS"] == "<SECRET>"
+    assert tool_call.attributes["arguments"]["XAPIKeys"] == "<SECRET>"
     assert tool_call.attributes["arguments"]["input_tokens"] == 12345678
     assert bundle.run.session_id == "routing-session"
 

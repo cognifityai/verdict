@@ -132,7 +132,17 @@ _SENSITIVE_KEY_PLURAL_WORD_SUFFIXES = (
     ("passcodes",),
 )
 _SENSITIVE_KEY_PLURAL_EXACT_NAMES = frozenset(
-    "".join(words) for words in _SENSITIVE_KEY_PLURAL_WORD_SUFFIXES
+    {"".join(words) for words in _SENSITIVE_KEY_PLURAL_WORD_SUFFIXES}
+    | {
+        # Unseparated scoped plural names have no recoverable word boundary.
+        # Keep supported aliases exact instead of restoring collision-prone
+        # plural suffix matching (for example, ``valid_tokens`` vs ``id_tokens``).
+        "awssecretaccesskeys",
+        "oidcidtokens",
+        "useridtokens",
+        "xapikeys",
+        "xidtokens",
+    }
 )
 _AGENT_SEMANTIC_CONTENT_FIELDS = {
     "instruction": frozenset({"text"}),
