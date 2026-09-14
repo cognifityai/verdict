@@ -33,6 +33,61 @@ function bounded(value, maximum) {
     && new TextEncoder().encode(value).length <= maximum ? value : null;
 }
 
+function selectionId(value) {
+  return typeof value === "string" && !value.includes("\0")
+    ? bounded(value, 256) : null;
+}
+
+function exactSelectionParams(params, allowed) {
+  const keys = [...params.keys()];
+  return keys.every((key) => allowed.has(key))
+    && [...allowed].every((key) => key === "event_id" || params.getAll(key).length === 1)
+    && keys.every((key) => params.getAll(key).length === 1);
+}
+
+export function parseDashboardSelection(search) {
+  if (typeof search !== "string" || search === "" || search === "?") {
+    return { state: "none", route: null };
+  }
+  const source = search.replace(/^\?/, "");
+  try {
+    decodeURIComponent(source.replaceAll("+", "%20"));
+  } catch {
+    return { state: "invalid", route: null };
+  }
+  const params = new URLSearchParams(source);
+  const view = params.get("view");
+  if (view === "traces"
+      && exactSelectionParams(params, new Set(["view", "trace_id"]))) {
+    const traceId = selectionId(params.get("trace_id"));
+    if (traceId) return {
+      state: "valid",
+      route: {
+        tab: "explore", section: "calls", explicit: true,
+        findingCode: null, runIds: [], selectedRunId: null,
+        runIdsTruncated: false, traceJudgeStatus: "all",
+        traceId, evaluatorId: null,
+      },
+    };
+  }
+  if (view === "agent-runs"
+      && exactSelectionParams(params, new Set(["view", "run_id", "event_id"]))) {
+    const runId = selectionId(params.get("run_id"));
+    const eventValue = params.get("event_id");
+    const eventId = eventValue === null ? null : selectionId(eventValue);
+    if (runId && (eventValue === null || eventId)) return {
+      state: "valid",
+      route: {
+        tab: "explore", section: "runs", explicit: true,
+        findingCode: null, runIds: [runId], selectedRunId: runId,
+        runIdsTruncated: false, traceJudgeStatus: "all",
+        traceId: null, evaluatorId: null, eventId,
+      },
+    };
+  }
+  return { state: "invalid", route: null };
+}
+
 function normalizedDestination(params, fallbackTab) {
   const requested = params.get("tab");
   if (SECTIONS[requested]) {

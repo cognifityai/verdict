@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  canonicalDashboardHash, parseDashboardRoute, serializeDashboardRoute,
+  canonicalDashboardHash, parseDashboardRoute, parseDashboardSelection,
+  serializeDashboardRoute,
 } from "../dashboard-route.mjs";
 
 test("finding routes preserve every bounded affected run and the selected run", () => {
@@ -95,4 +96,48 @@ test("legacy dashboard destinations redirect into the current workspaces", () =>
     );
   }
   assert.equal(canonicalDashboardHash("#tab=overview&section=summary"), null);
+});
+
+test("public trace and agent links select only their exact bounded destination", () => {
+  assert.deepEqual(
+    parseDashboardSelection("?view=traces&trace_id=trace%2Fone"),
+    {
+      state: "valid",
+      route: {
+        tab: "explore", section: "calls", explicit: true,
+        findingCode: null, runIds: [], selectedRunId: null,
+        runIdsTruncated: false, traceJudgeStatus: "all",
+        traceId: "trace/one", evaluatorId: null,
+      },
+    },
+  );
+  assert.deepEqual(
+    parseDashboardSelection("?view=agent-runs&run_id=run-one&event_id=event-one"),
+    {
+      state: "valid",
+      route: {
+        tab: "explore", section: "runs", explicit: true,
+        findingCode: null, runIds: ["run-one"], selectedRunId: "run-one",
+        runIdsTruncated: false, traceJudgeStatus: "all",
+        traceId: null, evaluatorId: null, eventId: "event-one",
+      },
+    },
+  );
+});
+
+test("unknown duplicate malformed and oversized public selections fail closed", () => {
+  assert.deepEqual(parseDashboardSelection(""), { state: "none", route: null });
+  for (const search of [
+    "?view=traces",
+    "?view=traces&trace_id=one&trace_id=two",
+    "?view=traces&trace_id=one&secret=two",
+    "?view=agent-runs&event_id=event-one",
+    "?view=agent-runs&run_id=run-one&event_id=event-one&event_id=event-two",
+    "?view=unknown&trace_id=trace-one",
+    "?view=traces&trace_id=%E0%A4%A",
+    `?view=traces&trace_id=${"x".repeat(257)}`,
+    "?view=traces&trace_id=%00",
+  ]) {
+    assert.deepEqual(parseDashboardSelection(search), { state: "invalid", route: null }, search);
+  }
 });

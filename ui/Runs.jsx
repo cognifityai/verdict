@@ -11,7 +11,7 @@ const RUN_PAGE_SIZE = 30;
 export function Runs({
   url, focusRunIds = [], selectedRunId: routedRunId = null,
   findingCode = null, runIdsTruncated = false, onSelectRun = null, onShowAll = null,
-  evaluatorFingerprint = null, onOpenTrace = null,
+  evaluatorFingerprint = null, routedEventId = null, onOpenTrace = null,
 }) {
   const [state, setState] = useState({ loading: true, error: null, data: null });
   const [selected, setSelected] = useState(null);
@@ -52,9 +52,10 @@ export function Runs({
 
   useEffect(() => {
     setSelected(routedRunId);
+    setFocusEventId(routedEventId);
     setEventOffset(0);
     setTurnOffset(0);
-  }, [routedRunId]);
+  }, [routedEventId, routedRunId]);
 
   const runs = state.data?.runs || [];
   const page = state.data?.page || {
@@ -93,7 +94,10 @@ export function Runs({
   if (state.error) return <Notice icon={AlertTriangle} text={`Runs unavailable: ${state.error}`} />;
   if (!state.data) return <Notice icon={RefreshCw} text="Loading agent runs…" />;
   if (!runs.length && page.available === 0) {
-    return <Notice icon={CheckCircle2} text="No agent runs captured yet. Capture local history or an SDK Agent Run, then refresh." />;
+    return <Notice icon={focusRunIds.length ? AlertTriangle : CheckCircle2}
+      text={focusRunIds.length
+        ? "The requested agent run is unavailable in this tenant."
+        : "No agent runs captured yet. Capture local history or an SDK Agent Run, then refresh."} />;
   }
   return (
     <div className="grid lg:grid-cols-[360px_minmax(0,1fr)] gap-4">
@@ -243,6 +247,8 @@ function RunDetail({ run, detail, onEventPage, onTurnPage, onFocusEvent, focusEv
       {detail.data?.producerCount > 1 && <div className="text-xs mt-1" style={{ color: color.sub }}>Events are placed by timestamp. Sequence is authoritative only within each named producer.</div>}
       {detail.loading && <div className="text-sm mt-2" style={{ color: color.sub }}>Loading ordered evidence…</div>}
       {detail.error && <div role="alert" className="text-sm mt-2" style={{ color: color.red }}>{detail.error}</div>}
+      {detail.data && focusEventId && !detail.data.events.some((event) => event.eventId === focusEventId)
+        && <div role="status" className="text-sm mt-2" style={{ color: color.amber }}>The requested agent event is unavailable in this run.</div>}
       {detail.data && <div className="mt-2 space-y-2">
         {detail.data.events.map((event) => <EventRow key={event.eventId} event={event} focused={event.eventId === (detail.data.focusEventId || focusEventId)} onOpenTrace={onOpenTrace} />)}
         {!detail.data.events.length && <div className="text-sm" style={{ color: color.sub }}>No normalized events were captured for this run.</div>}

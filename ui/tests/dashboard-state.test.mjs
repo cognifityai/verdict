@@ -410,6 +410,32 @@ test("the full-page Operations link appears only at the exact configured path", 
   } finally { delete globalThis.window; }
 });
 
+test("public query links select exact traces, runs, and events at the browser sink", async () => {
+  const ui = await loadUiModule();
+  const renderSelection = (search) => {
+    globalThis.window = {
+      location: { hash: "", pathname: "/dashboard", search },
+      history: { pushState() {}, replaceState() {} },
+      addEventListener() {}, removeEventListener() {},
+    };
+    return render(ui.Dashboard, createHooks(), { data: bundle("judge-a"), source: "live" });
+  };
+  try {
+    const traceTree = renderSelection("?view=traces&trace_id=trace-1");
+    const traceView = findAll(traceTree, (node) => node.type?.name === "Traces")[0];
+    assert.equal(traceView.props.selectedTraceId, "trace-1");
+
+    const runTree = renderSelection("?view=agent-runs&run_id=run-1&event_id=event-1");
+    const runView = findAll(runTree, (node) => node.type?.name === "Runs")[0];
+    assert.equal(runView.props.selectedRunId, "run-1");
+    assert.equal(runView.props.routedEventId, "event-1");
+
+    const invalidTree = renderSelection("?view=traces&trace_id=one&trace_id=two");
+    assert.match(textOf(invalidTree), /requested Verdict link is invalid/);
+    assert.doesNotMatch(textOf(invalidTree), /trace one|trace two/);
+  } finally { delete globalThis.window; }
+});
+
 test("monitoring lifecycle is one top-level workspace", async () => {
   const ui = await loadUiModule();
   const tree = render(ui.Dashboard, createHooks(), { data: bundle("judge-a") });
