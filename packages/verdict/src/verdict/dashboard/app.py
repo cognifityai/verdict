@@ -55,7 +55,7 @@ from verdict.evidence import EvidenceState
 from verdict.metrics import ScoreCounts, verdict_label
 from verdict.monitor_inputs import LOCAL_TENANT
 from verdict.normalized_evidence import agent_turn_from_row, normalized_bundle_digest
-from verdict.redaction import redact, redact_structure
+from verdict.redaction import redact, redact_structure, sanitize_agent_event_attributes
 from verdict.telemetry.model import safe_tenant_id
 from verdict.trace_facts import deterministic_trace_facts
 
@@ -934,7 +934,9 @@ def build_agent_run_detail(
                 "producerSequence": event["producer_sequence"],
                 "parentEventId": event["parent_event_id"],
                 "judgment": judgment_summaries.get(event["trace_id"]),
-                "attributes": _json_value(event["attributes_json"], {}),
+                "attributes": sanitize_agent_event_attributes(
+                    event["event_type"], _json_value(event["attributes_json"], {})
+                ),
             } for index, event in enumerate(shown)],
             "page": {
                 "available": available,

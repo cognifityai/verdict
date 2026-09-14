@@ -6,6 +6,14 @@ the product is refined.
 
 ## [Unreleased]
 
+### Fixed
+
+- Field-aware redaction now removes complete values from explicit plural
+  credential containers such as `api_keys` and `passwords`. Typed Agent
+  instruction, context, and outcome events also treat paired `text` or `value`
+  content as sensitive when their semantic `name` is a supported credential
+  field.
+
 ## [0.1.0a18] - 2026-09-13
 
 ### Fixed

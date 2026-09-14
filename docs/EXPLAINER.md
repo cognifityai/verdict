@@ -34,8 +34,10 @@ does not duplicate it.
   need a server database.
 - Recursively redacts common sensitive patterns and complete opaque values
   under supported credential field names in JSON-compatible message and tool
-  data, including embedded assignments in serialized text. Repeated storage
-  sanitation preserves existing Verdict redaction and hash placeholders.
+  data, including explicit plural credential containers and embedded
+  assignments in serialized text. Typed Agent instruction, context, and
+  outcome events use their semantic names to protect paired content. Repeated
+  storage sanitation preserves existing Verdict redaction and hash placeholders.
   Agent Run names and descriptive service, version, and environment fields are
   also sanitized without rewriting routing IDs.
   Redaction runs before content limits; metadata-only capture retains error

@@ -128,6 +128,8 @@ def test_full_agent_context_persists_typed_timeline_and_one_trace_owner() -> Non
 def test_agent_redacted_event_contains_no_credential_canary_after_storage() -> None:
     storage = InMemoryStorage()
     canary = "opaque-agent-credential"
+    first_long_secret = "x" * 1_024 + "first"
+    second_long_secret = "x" * 1_024 + "second"
     verdict.init(
         storage=storage,
         tenant_id="tenant-a",
@@ -152,6 +154,8 @@ def test_agent_redacted_event_contains_no_credential_canary_after_storage() -> N
                 },
             ):
                 pass
+            turn.record_context(name="password", value=first_long_secret)
+            turn.record_context(name="api_key", value=second_long_secret)
             turn.set_output("done")
 
     bundle = storage.list_agent_run_bundles("tenant-a")[0]
@@ -171,6 +175,15 @@ def test_agent_redacted_event_contains_no_credential_canary_after_storage() -> N
     assert bundle.run.session_id == "routing-session"
     assert tool_event.attributes["arguments"]["token"].startswith("<SECRET:")
     assert "api_key=<SECRET:" in tool_event.attributes["arguments"]["message"]
+    context_values = [
+        event.attributes["value"]
+        for event in bundle.events
+        if event.event_type is AgentEventType.CONTEXT
+    ]
+    assert all(value.startswith("<SECRET:") for value in context_values)
+    assert len(set(context_values)) == 2
+    assert first_long_secret not in serialized
+    assert second_long_secret not in serialized
 
 
 @pytest.mark.parametrize(
@@ -470,6 +483,45 @@ def test_agent_tool_fields_are_field_aware_redacted_before_storage() -> None:
     assert canary not in encoded
     assert bundle.events[0].privacy_classification is PrivacyClassification.REDACTED
     assert bundle.events[0].attributes["arguments"]["input_tokens"] == 12345678
+    verdict.shutdown()
+
+
+def test_agent_semantic_names_redact_paired_content_before_storage() -> None:
+    storage = InMemoryStorage()
+    verdict.init(storage=storage, tenant_id="tenant-a", instrumentors=[])
+    canary = "opaque-agent-semantic-canary"
+
+    with verdict.agent_run(name="agent") as run:
+        with run.turn(user_input="hello") as turn:
+            turn.record_instruction(name="password", text=canary)
+            turn.record_context(name="api_key", value=canary)
+            turn.record_outcome("access_token", canary)
+            turn.record_context(name="input_tokens", value=12345678)
+            turn.set_output("done")
+
+    [bundle] = storage.list_agent_run_bundles("tenant-a")
+    assert canary not in repr(bundle)
+    assert [event.attributes for event in bundle.events] == [
+        {
+            "available": True,
+            "name": "password",
+            "source": "application",
+            "text": "<SECRET>",
+        },
+        {
+            "available": True,
+            "name": "api_key",
+            "source": "application",
+            "value": "<SECRET>",
+        },
+        {"name": "access_token", "source": "application", "value": "<SECRET>"},
+        {
+            "available": True,
+            "name": "input_tokens",
+            "source": "application",
+            "value": 12345678,
+        },
+    ]
     verdict.shutdown()
 
 

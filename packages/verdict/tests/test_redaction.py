@@ -9,6 +9,7 @@ from verdict.redaction import (
     redact,
     redact_messages,
     redact_structure,
+    sanitize_agent_event_attributes,
     sanitize_error_text,
     sanitize_trace,
 )
@@ -863,6 +864,28 @@ def test_arbitrary_placeholder_shaped_credential_is_not_trusted(value: str) -> N
     "field",
     [
         "password",
+        "passwords",
+        "passphrases",
+        "api_keys",
+        r"api\u005fkeys",
+        "x-api-keys",
+        "api_tokens",
+        "access_tokens",
+        "auth_tokens",
+        "bearer_tokens",
+        "refresh_tokens",
+        "session_tokens",
+        "id_tokens",
+        "x-id-tokens",
+        "oidc_id_tokens",
+        "user_id_tokens",
+        "githubTokens",
+        "client_secrets",
+        "private_keys",
+        "AWS_SECRET_ACCESS_KEYS",
+        "secret_keys",
+        "cookies",
+        "passcodes",
         "clientSecret",
         "x-api-key",
         "AWS_SECRET_ACCESS_KEY",
@@ -906,6 +929,16 @@ def test_sensitive_mapping_fields_redact_the_entire_opaque_value(field: str) -> 
         "completion_token",
         "input_tokens",
         "max_tokens",
+        "token_counts",
+        "tokens",
+        "valid_tokens",
+        "invalid_tokens",
+        "paid_tokens",
+        "void_tokens",
+        "bypass_words",
+        "compass_phrases",
+        "compass_codes",
+        "public_keys",
         "public_key",
         "key",
         "fingerprint",
@@ -930,6 +963,88 @@ def test_field_aware_hash_mode_is_deterministic_without_cleartext() -> None:
     assignment = redact('password="opaque-field-canary-value"', mode="hash", secret="first-secret")
     assert redact(assignment) == assignment
     assert redact(assignment, mode="hash", secret="first-secret") == assignment
+
+
+@pytest.mark.parametrize(
+    ("event_type", "value"),
+    [
+        ("instruction", {"name": "password", "text": "opaque-semantic-canary"}),
+        ("context", {"name": "api_key", "value": "opaque-semantic-canary"}),
+        (
+            "context",
+            {
+                "name": "PASSWORD",
+                "text": "opaque-semantic-canary",
+                "value": "opaque-semantic-canary",
+            },
+        ),
+        ("outcome", {"name": "accessToken", "value": ["opaque-semantic-canary"]}),
+        ("context", {"name": "user_id_tokens", "value": "opaque-semantic-canary"}),
+    ],
+)
+def test_sensitive_agent_semantic_name_redacts_its_paired_content(
+    event_type: str, value: dict[str, object]
+) -> None:
+    output = sanitize_agent_event_attributes(event_type, value)
+
+    assert "opaque-semantic-canary" not in json.dumps(output)
+    assert output["name"] == value["name"]
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "input_tokens",
+        "valid_tokens",
+        "invalid_tokens",
+        "paid_tokens",
+        "void_tokens",
+        "bypass_words",
+        "compass_phrases",
+        "compass_codes",
+    ],
+)
+def test_ordinary_semantic_name_preserves_its_paired_value(name: str) -> None:
+    value = {"name": name, "value": 12345678}
+
+    assert sanitize_agent_event_attributes("context", value) == value
+
+
+def test_arbitrary_name_value_mapping_is_not_reinterpreted_as_agent_evidence() -> None:
+    value = {"name": "password", "value": "ordinary-provider-schema-value"}
+
+    assert redact_structure(value) == value
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "passwords",
+        "api_keys",
+        "access_tokens",
+        "client_secrets",
+        "secret_keys",
+        "x-id-tokens",
+    ],
+)
+def test_plural_sensitive_assignments_remove_the_complete_value(field: str) -> None:
+    canary = "opaque-plural-assignment-canary"
+
+    output = redact(f"{field}={canary} status=ok")
+
+    assert output == f"{field}=<SECRET> status=ok"
+    assert canary not in output
+
+
+def test_sensitive_agent_semantic_hash_is_terminal_across_storage_passes() -> None:
+    value = {"name": "password", "value": "opaque-semantic-hash-canary"}
+
+    first = sanitize_agent_event_attributes("context", value, mode="hash", secret="key")
+    repeated = sanitize_agent_event_attributes("context", first, mode="hash", secret="key")
+
+    assert first == repeated
+    assert first["value"].startswith("<SECRET:")
+    assert "opaque-semantic-hash-canary" not in json.dumps(first)
 
 
 @pytest.mark.parametrize(

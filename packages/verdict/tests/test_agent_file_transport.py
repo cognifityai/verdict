@@ -224,11 +224,17 @@ def test_file_transport_redacts_sensitive_fields_before_spool_and_import(tmp_pat
                 "lookup",
                 arguments={
                     "token": canary,
+                    "api_keys": [canary],
+                    "passwords": {"primary": canary},
+                    "input_tokens": 12345678,
                     "message": github_token,
                     "detail": f"retrying with api_key={canary}",
                 },
             ) as tool:
                 tool.set_output({"Authorization": f"Basic {canary}"})
+            turn.record_instruction(name="password", text=canary)
+            turn.record_context(name="api_key", value=canary)
+            turn.record_outcome("access_token", canary)
             turn.set_output("done")
     verdict.shutdown()
 
@@ -253,6 +259,12 @@ def test_file_transport_redacts_sensitive_fields_before_spool_and_import(tmp_pat
     assert bundle.run.agent_version.startswith("secret=<SECRET:")
     assert bundle.run.service_name.startswith("api_key=<SECRET:")
     assert bundle.run.environment.startswith("password=<SECRET:")
+    tool_call = next(
+        event for event in bundle.events if event.event_type is AgentEventType.TOOL_CALL
+    )
+    assert tool_call.attributes["arguments"]["api_keys"] == "<SECRET>"
+    assert tool_call.attributes["arguments"]["passwords"] == "<SECRET>"
+    assert tool_call.attributes["arguments"]["input_tokens"] == 12345678
     assert bundle.run.session_id == "routing-session"
 
 

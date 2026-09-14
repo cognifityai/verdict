@@ -27,6 +27,7 @@ from verdict.redaction import (
     RedactionMode,
     redact,
     sanitize_agent_capture_batch,
+    sanitize_agent_event_attributes,
     sanitize_agent_run_bundle,
     sanitize_trace,
 )
@@ -856,15 +857,18 @@ def agent_turn_from_row(row: Mapping[str, object]) -> AgentTurn:
 
 
 def agent_event_from_row(row: Mapping[str, object]) -> AgentEvent:
+    event_type = AgentEventType(str(row["event_type"]))
     return AgentEvent(
         event_id=str(row["event_id"]),
         turn_id=str(row["turn_id"]),
         sequence=int(row["sequence"]),
         occurred_at=_datetime(row["occurred_at"]),  # type: ignore[arg-type]
-        event_type=AgentEventType(str(row["event_type"])),
+        event_type=event_type,
         status=ExecutionStatus(str(row["status"])),
         provenance=str(row["provenance"]),
-        attributes=_json_object(row["attributes_json"]),
+        attributes=sanitize_agent_event_attributes(
+            event_type, _json_object(row["attributes_json"])
+        ),
         privacy_classification=PrivacyClassification(str(row["privacy_classification"])),
         omission_reason=(
             str(row["omission_reason"]) if row["omission_reason"] is not None else None

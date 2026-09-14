@@ -510,7 +510,10 @@ JSON-compatible message fields, including nested tool inputs/results and OpenAI
 tool arguments, before content limits, `Trace` assignment, and storage. Opaque
 values under supported credential fields such as `password`, `api_key`,
 `token`, `secret_key`, `cookie`, `passcode`, `authorization`, and
-`client_secret` are removed using the field name. Quoted, unquoted, and
+`client_secret`, including explicit plural containers such as `passwords` and
+`api_keys`, are removed using the field name. Typed Agent instruction,
+context, and outcome events treat paired content as sensitive when their
+semantic `name` is a supported credential field. Quoted, unquoted, and
 embedded serialized assignments consume the complete sensitive value, and
 existing Verdict redaction/hash placeholders remain unchanged when storage
 reapplies the boundary. Agent Run names and descriptive service, version, and
