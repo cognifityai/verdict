@@ -869,6 +869,8 @@ def test_arbitrary_placeholder_shaped_credential_is_not_trusted(value: str) -> N
         "api_keys",
         r"api\u005fkeys",
         "x-api-keys",
+        "XAPIKeys",
+        "XAPIKEYS",
         "api_tokens",
         "access_tokens",
         "auth_tokens",
@@ -877,12 +879,20 @@ def test_arbitrary_placeholder_shaped_credential_is_not_trusted(value: str) -> N
         "session_tokens",
         "id_tokens",
         "x-id-tokens",
+        "XIDTokens",
+        "XIDTOKENS",
         "oidc_id_tokens",
+        "OIDCIDTokens",
+        "OIDCIDTOKENS",
+        r"OIDC\u0049DTokens",
         "user_id_tokens",
+        "USERIDTokens",
+        "USERIDTOKENS",
         "githubTokens",
         "client_secrets",
         "private_keys",
         "AWS_SECRET_ACCESS_KEYS",
+        "AWSSECRETACCESSKEYS",
         "secret_keys",
         "cookies",
         "passcodes",
@@ -935,10 +945,18 @@ def test_sensitive_mapping_fields_redact_the_entire_opaque_value(field: str) -> 
         "invalid_tokens",
         "paid_tokens",
         "void_tokens",
+        "VALIDTOKENS",
+        "INVALIDTOKENS",
+        "PAIDTOKENS",
+        "VOIDTOKENS",
         "bypass_words",
         "compass_phrases",
         "compass_codes",
         "public_keys",
+        "BYPASSWORDS",
+        "COMPASSPHRASES",
+        "COMPASSCODES",
+        "PUBLICKEYS",
         "public_key",
         "key",
         "fingerprint",
@@ -980,6 +998,8 @@ def test_field_aware_hash_mode_is_deterministic_without_cleartext() -> None:
         ),
         ("outcome", {"name": "accessToken", "value": ["opaque-semantic-canary"]}),
         ("context", {"name": "user_id_tokens", "value": "opaque-semantic-canary"}),
+        ("context", {"name": "OIDCIDTokens", "value": "opaque-semantic-canary"}),
+        ("context", {"name": "USERIDTOKENS", "value": "opaque-semantic-canary"}),
     ],
 )
 def test_sensitive_agent_semantic_name_redacts_its_paired_content(
@@ -1025,6 +1045,12 @@ def test_arbitrary_name_value_mapping_is_not_reinterpreted_as_agent_evidence() -
         "client_secrets",
         "secret_keys",
         "x-id-tokens",
+        "XAPIKeys",
+        "XIDTokens",
+        "OIDCIDTokens",
+        r"OIDC\u0049DTokens",
+        "USERIDTokens",
+        "AWSSECRETACCESSKEYS",
     ],
 )
 def test_plural_sensitive_assignments_remove_the_complete_value(field: str) -> None:
@@ -1037,7 +1063,7 @@ def test_plural_sensitive_assignments_remove_the_complete_value(field: str) -> N
 
 
 def test_sensitive_agent_semantic_hash_is_terminal_across_storage_passes() -> None:
-    value = {"name": "password", "value": "opaque-semantic-hash-canary"}
+    value = {"name": "OIDCIDTokens", "value": "opaque-semantic-hash-canary"}
 
     first = sanitize_agent_event_attributes("context", value, mode="hash", secret="key")
     repeated = sanitize_agent_event_attributes("context", first, mode="hash", secret="key")
@@ -1138,6 +1164,9 @@ def test_flat_github_and_basic_authorization_credentials_are_redacted() -> None:
 def test_flat_credential_near_misses_are_not_redacted() -> None:
     text = (
         "input_tokens=12345678 max_tokens=87654321 "
+        "VALIDTOKENS=12345678 BYPASSWORDS=ordinary-value "
+        "COMPASSPHRASES=ordinary-value COMPASSCODES=ordinary-value "
+        "PUBLICKEYS=ordinary-value "
         "public_key=ordinary-public-key Basic programming "
         "ghp_short github_pat_short"
     )

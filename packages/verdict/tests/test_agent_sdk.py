@@ -472,6 +472,8 @@ def test_agent_tool_fields_are_field_aware_redacted_before_storage() -> None:
                 arguments={
                     "password": canary,
                     "AWSSECRETACCESSKEY": canary,
+                    "AWSSECRETACCESSKEYS": [canary],
+                    "XAPIKeys": [canary],
                     "input_tokens": 12345678,
                 },
             ) as tool:
@@ -495,6 +497,8 @@ def test_agent_semantic_names_redact_paired_content_before_storage() -> None:
         with run.turn(user_input="hello") as turn:
             turn.record_instruction(name="password", text=canary)
             turn.record_context(name="api_key", value=canary)
+            turn.record_context(name="OIDCIDTokens", value=canary)
+            turn.record_context(name="USERIDTOKENS", value=canary)
             turn.record_outcome("access_token", canary)
             turn.record_context(name="input_tokens", value=12345678)
             turn.set_output("done")
@@ -511,6 +515,18 @@ def test_agent_semantic_names_redact_paired_content_before_storage() -> None:
         {
             "available": True,
             "name": "api_key",
+            "source": "application",
+            "value": "<SECRET>",
+        },
+        {
+            "available": True,
+            "name": "OIDCIDTokens",
+            "source": "application",
+            "value": "<SECRET>",
+        },
+        {
+            "available": True,
+            "name": "USERIDTOKENS",
             "source": "application",
             "value": "<SECRET>",
         },

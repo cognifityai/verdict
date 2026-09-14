@@ -313,9 +313,11 @@ def test_agent_run_detail_redacts_historical_semantic_and_plural_credentials(tmp
                 "context",
                 json.dumps(
                     {
-                        "name": "password",
+                        "name": "OIDCIDTokens",
                         "value": canary,
                         "api_keys": [canary],
+                        "AWSSECRETACCESSKEYS": [canary],
+                        "XAPIKeys": [canary],
                         "source": "historical",
                     }
                 ),
@@ -340,8 +342,10 @@ def test_agent_run_detail_redacts_historical_semantic_and_plural_credentials(tmp
     assert canary not in response.text
     event = next(item for item in response.json()["events"] if item["eventId"] == "event-2")
     assert event["attributes"] == {
+        "AWSSECRETACCESSKEYS": "<SECRET>",
+        "XAPIKeys": "<SECRET>",
         "api_keys": "<SECRET>",
-        "name": "password",
+        "name": "OIDCIDTokens",
         "source": "historical",
         "value": "<SECRET>",
     }

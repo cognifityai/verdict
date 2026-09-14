@@ -452,7 +452,7 @@ def test_storage_redacts_semantic_pairs_and_plural_credentials(evidence_storage)
     semantic_event = replace(
         original.events[0],
         event_type=AgentEventType.CONTEXT,
-        attributes={"name": "password", "value": canary, "source": "custom"},
+        attributes={"name": "OIDCIDTokens", "value": canary, "source": "custom"},
     )
     plural_event = replace(
         original.events[0],
@@ -464,6 +464,8 @@ def test_storage_redacts_semantic_pairs_and_plural_credentials(evidence_storage)
             "result": {
                 "api_keys": [canary],
                 "passwords": {"primary": canary},
+                "AWSSECRETACCESSKEYS": [canary],
+                "XAPIKeys": [canary],
                 "input_tokens": 12345678,
             },
             "is_error": False,
@@ -481,6 +483,8 @@ def test_storage_redacts_semantic_pairs_and_plural_credentials(evidence_storage)
     result = loaded.events[1].attributes["result"]
     assert result["api_keys"] == "<SECRET>"
     assert result["passwords"] == "<SECRET>"
+    assert result["AWSSECRETACCESSKEYS"] == "<SECRET>"
+    assert result["XAPIKeys"] == "<SECRET>"
     assert result["input_tokens"] == 12345678
 
 
@@ -496,7 +500,7 @@ def test_sqlite_reads_redact_historical_semantic_credentials(tmp_path) -> None:
             "WHERE tenant_id=? AND run_id=? AND event_id=?",
             (
                 "context",
-                json.dumps({"name": "password", "value": canary}),
+                json.dumps({"name": "USERIDTOKENS", "value": canary}),
                 "tenant-a",
                 "run_1",
                 "event_1",
@@ -509,7 +513,7 @@ def test_sqlite_reads_redact_historical_semantic_credentials(tmp_path) -> None:
 
         assert loaded is not None
         assert loaded.events[0].attributes == {
-            "name": "password",
+            "name": "USERIDTOKENS",
             "value": "<SECRET>",
         }
         assert canary not in agent_run_bundle_to_json(loaded)
