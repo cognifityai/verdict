@@ -21,8 +21,8 @@ Verify:
 - exactly one stored trace for one sampled call;
 - persisted provider, model, timing, status, finish reason, and token fields expected
   for the exercised path;
-- active service/environment configuration separately, while stating that release
-  `0.1.0a18` does not persist those two labels on `Trace` rows;
+- persisted service/environment labels on newly instrumented traces, while
+  identifying historical and default-client rows that remain unattributed;
 - request and response behavior is unchanged;
 - supported sync, async, and streaming variants used by the customer;
 - provider exception/cancellation semantics;

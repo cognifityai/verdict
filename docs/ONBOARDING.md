@@ -187,11 +187,8 @@ process-local `capture.dropped_records` runtime metric for records rejected by a
 full or failed spool; equivalent failures produce one bounded warning per
 failure class.
 
-For a central PostgreSQL deployment, start the authenticated collector:
-
-The collector is currently available from a source build newer than the
-published `0.1.0a18` packages. Install the core package with its `postgres`
-extra when the next release containing this command is published.
+For a central PostgreSQL deployment, install `0.1.0a18` with its `postgres`
+extra and start the authenticated collector:
 
 ```bash
 export VERDICT_STORAGE='postgresql://verdict@db/verdict'
