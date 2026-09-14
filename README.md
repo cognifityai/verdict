@@ -278,12 +278,12 @@ you use:
 
 ```bash
 python -m pip install \
-  "cognifity-verdict[anthropic,openai,google,dashboard]==0.1.0a17" \
-  "cognifity-verdict-eval[semantic]==0.1.0a17" \
-  "cognifity-verdict-inspect==0.1.0a17"
+  "cognifity-verdict[anthropic,openai,google,dashboard]==0.1.0a18" \
+  "cognifity-verdict-eval[semantic]==0.1.0a18" \
+  "cognifity-verdict-inspect==0.1.0a18"
 ```
 
-For a customer proof of concept on `0.1.0a17`, follow the bounded
+For a customer proof of concept on `0.1.0a18`, follow the bounded
 [`POC release profile`](docs/POC_RELEASE_PROFILE.md). It names the provider
 entry points exercised for this release, keeps persistence synchronous, and
 separates a workflow demonstration from a production-readiness claim.
@@ -302,9 +302,9 @@ PostgreSQL store:
 
 ```bash
 python -m pip install \
-  "cognifity-verdict[dashboard,postgres]==0.1.0a17" \
-  "cognifity-verdict-eval==0.1.0a17" \
-  "cognifity-verdict-inspect==0.1.0a17"
+  "cognifity-verdict[dashboard,postgres]==0.1.0a18" \
+  "cognifity-verdict-eval==0.1.0a18" \
+  "cognifity-verdict-inspect==0.1.0a18"
 ```
 
 The `all` extra preserves its existing provider-and-storage dependency set; it
@@ -318,9 +318,9 @@ do not delete or reclone it:
 
 ```bash
 python -m pip install --upgrade \
-  "cognifity-verdict[anthropic,openai,google,dashboard]==0.1.0a17" \
-  "cognifity-verdict-eval[semantic]==0.1.0a17" \
-  "cognifity-verdict-inspect==0.1.0a17"
+  "cognifity-verdict[anthropic,openai,google,dashboard]==0.1.0a18" \
+  "cognifity-verdict-eval[semantic]==0.1.0a18" \
+  "cognifity-verdict-inspect==0.1.0a18"
 
 python -m pip check
 python -c "import verdict, verdict_eval, verdict_inspect; print(verdict.__version__, verdict_eval.__version__, verdict_inspect.__version__)"
@@ -351,7 +351,7 @@ API remains `import verdict`.
 Minimal install without the local semantic model:
 
 ```bash
-python -m pip install "cognifity-verdict-eval==0.1.0a17"  # lexical hash fallback
+python -m pip install "cognifity-verdict-eval==0.1.0a18"  # lexical hash fallback
 ```
 
 The full test suite also needs pytest and the dashboard's HTTP test dependency:
@@ -378,7 +378,7 @@ Install the `telemetry` extra when accepting OTLP protobuf; it is optional for
 JSON files and API readers:
 
 ```bash
-python -m pip install "cognifity-verdict[telemetry,postgres]==0.1.0a17"
+python -m pip install "cognifity-verdict[telemetry,postgres]==0.1.0a18"
 
 # JSON, JSONL, or NDJSON; use --format auto or name the source explicitly.
 verdict-import file ./langsmith-runs.jsonl --format langsmith \
@@ -523,7 +523,7 @@ unacceptable; provider and manual-span failures then retain an error category
 without exception message content. IPv6 validation preserves trailing text that is not part of the
 validated address; clock values such as `12:34:56` are not treated as IPv6. Use
 non-sensitive tenant/session/cluster IDs. `sample_rate`
-controls what fraction of supported calls is retained. The `0.1.0a17` POC
+controls what fraction of supported calls is retained. The `0.1.0a18` POC
 profile keeps `buffered_writes=False`, so a normal process exit cannot strand
 queued telemetry. `buffered_writes=True` moves writes to a background batched
 writer but requires an explicit `shutdown()` imported from `verdict.client`
@@ -601,7 +601,7 @@ source. See [`ADR-013`](docs/adrs/013-stable-dependent-package-read-port.md).
 - Agent Run exploration pages through every stored run in 30-row pages while
   retaining bounded event and turn detail. Finding links continue to show the
   exact affected-run set rather than applying list offsets to it.
-- **Published capture coverage in `0.1.0a17`:** the bounded POC profile names
+- **Published capture coverage in `0.1.0a18`:** the bounded POC profile names
   Anthropic
   `messages.create(...)` (including `stream=True`), OpenAI
   `chat.completions.create(...)` and its stream helper, and Google
@@ -750,7 +750,7 @@ source. See [`ADR-013`](docs/adrs/013-stable-dependent-package-read-port.md).
   agreement remains a separate diagnostic. Any sentinel execution error
   prevents a `healthy` status: too few usable examples remain
   `insufficient_data`; otherwise the result is `degraded`.
-- The `0.1.0a17` POC drift demonstration assumes independently sampled calls.
+- The `0.1.0a18` POC drift demonstration assumes independently sampled calls.
   Do not treat repeated turns from the same conversation as independent
   evidence or use that profile for a production decision.
 - The current local Monitor scope is tenant-bound and rejects mixed-tenant
