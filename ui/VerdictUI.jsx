@@ -259,19 +259,26 @@ function mountedInsightsUrl() {
 }
 
 function useOperationsConfig() {
-  const [operationsUrl, setOperationsUrl] = useState(null);
+  const [operations, setOperations] = useState({
+    operationsUrl: null,
+    operationsPageUrl: null,
+  });
   useEffect(() => {
     let active = true;
     fetch(mountedConfigUrl(), { credentials: "same-origin", headers: { Accept: "application/json" } })
       .then((response) => response.ok ? response.json() : null)
       .then((config) => {
-        const value = config?.operationsUrl;
-        if (active && typeof value === "string" && value.startsWith("/") && !value.startsWith("//")) setOperationsUrl(value);
+        const adapter = config?.operationsUrl;
+        const page = config?.operationsPageUrl;
+        if (active) setOperations({
+          operationsUrl: typeof adapter === "string" && adapter.startsWith("/") && !adapter.startsWith("//") ? adapter : null,
+          operationsPageUrl: page === "/operations" ? page : null,
+        });
       })
       .catch(() => {});
     return () => { active = false; };
   }, []);
-  return operationsUrl;
+  return operations;
 }
 
 const API_URL = mountedApiUrl();
@@ -764,7 +771,7 @@ function navigateSetup(commitRoute, route, destination) {
   commitRoute({ ...route, tab: target[0], section: target[1] });
 }
 
-function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluatorChange, onTracePageChange, onTraceFilterChange, traceOffset = 0, reloading, loadError, operationsUrl = null }) {
+function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluatorChange, onTracePageChange, onTraceFilterChange, traceOffset = 0, reloading, loadError, operationsUrl = null, operationsPageUrl = null }) {
   const DATA = data;
   const initialRoute = useRef(parseDashboardRoute(
     typeof window === "undefined" ? "" : window.location.hash,
@@ -872,6 +879,14 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
                 </button>
               );
             })}
+            {operationsPageUrl === "/operations" && (
+              <a href={operationsPageUrl}
+                className="h-11 sm:h-16 shrink-0 flex items-center gap-2 px-3 text-xs sm:text-sm border-b-2"
+                style={{ color: C.sub, borderColor: "transparent", fontWeight: 450 }}>
+                <Activity size={15} style={{ color: C.faint }} />
+                Operations
+              </a>
+            )}
           </nav>
           <div className="ml-auto flex items-center gap-2 text-xs">
             <span className="flex items-center gap-1.5 px-1 sm:px-2 py-1" title={sourceLabel} style={{ color: sourceColor }}>
@@ -1886,7 +1901,7 @@ function MiniBar({ title, data, fmt }) {
 }
 
 /* ------------------------------------------------------------------- APP */
-function App({ data = SEED, source = "sample", onReload, onEvaluatorChange, onTracePageChange, onTraceFilterChange, traceOffset = 0, reloading, loadError, operationsUrl = null }) {
+function App({ data = SEED, source = "sample", onReload, onEvaluatorChange, onTracePageChange, onTraceFilterChange, traceOffset = 0, reloading, loadError, operationsUrl = null, operationsPageUrl = null }) {
   const [mode, setMode] = useState("landing");
   return (
     <div style={{ fontFamily: "ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif", height: "100%", background: C.bg }}>
@@ -1895,7 +1910,7 @@ function App({ data = SEED, source = "sample", onReload, onEvaluatorChange, onTr
         : <Dashboard data={data} onExit={() => setMode("landing")} source={source} onReload={onReload}
           onEvaluatorChange={onEvaluatorChange} onTracePageChange={onTracePageChange} onTraceFilterChange={onTraceFilterChange} traceOffset={traceOffset}
           reloading={reloading} loadError={loadError}
-          operationsUrl={operationsUrl} />}
+          operationsUrl={operationsUrl} operationsPageUrl={operationsPageUrl} />}
     </div>
   );
 }
@@ -1910,22 +1925,22 @@ export function LandingRoot() {
 
 export function DashboardRoot() {
   const data = useDashboardData();
-  const operationsUrl = useOperationsConfig();
+  const { operationsUrl, operationsPageUrl } = useOperationsConfig();
   return (
     <div style={{ fontFamily: "ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif", minHeight: "100%", background: C.bg }}>
       <Dashboard data={data.snapshot} onExit={() => { window.location.href = "/"; }} source={data.source}
         onReload={data.reload} onEvaluatorChange={data.load} onTracePageChange={data.loadTracePage}
         onTraceFilterChange={data.loadTraceFilter}
         traceOffset={data.traceOffset} reloading={data.loading}
-        loadError={data.error} operationsUrl={operationsUrl} />
+        loadError={data.error} operationsUrl={operationsUrl} operationsPageUrl={operationsPageUrl} />
     </div>
   );
 }
 
 export default function Root() {
   const data = useDashboardData();
-  const operationsUrl = useOperationsConfig();
+  const { operationsUrl, operationsPageUrl } = useOperationsConfig();
   return <App data={data.snapshot} source={data.source} onReload={data.reload}
     onEvaluatorChange={data.load} onTracePageChange={data.loadTracePage} onTraceFilterChange={data.loadTraceFilter} traceOffset={data.traceOffset}
-    reloading={data.loading} loadError={data.error} operationsUrl={operationsUrl} />;
+    reloading={data.loading} loadError={data.error} operationsUrl={operationsUrl} operationsPageUrl={operationsPageUrl} />;
 }

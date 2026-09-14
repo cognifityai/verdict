@@ -388,6 +388,28 @@ test("operations appears inside Settings only when the host configures an adapte
   } finally { delete globalThis.window; }
 });
 
+test("the full-page Operations link appears only at the exact configured path", async () => {
+  const ui = await loadUiModule();
+  globalThis.window = {
+    location: { hash: "#tab=overview&section=summary", pathname: "/dashboard" },
+    history: { pushState() {}, replaceState() {} },
+    addEventListener() {}, removeEventListener() {},
+  };
+  try {
+    const withoutPage = render(ui.Dashboard, createHooks(), {
+      data: bundle("judge-a"), operationsPageUrl: null,
+    });
+    const withPage = render(ui.Dashboard, createHooks(), {
+      data: bundle("judge-a"), operationsPageUrl: "/operations",
+    });
+
+    assert.equal(findAll(withoutPage, (node) => node.type === "a" && node.props?.href === "/operations").length, 0);
+    const links = findAll(withPage, (node) => node.type === "a" && node.props?.href === "/operations");
+    assert.equal(links.length, 1);
+    assert.match(textOf(links[0]), /Operations/);
+  } finally { delete globalThis.window; }
+});
+
 test("monitoring lifecycle is one top-level workspace", async () => {
   const ui = await loadUiModule();
   const tree = render(ui.Dashboard, createHooks(), { data: bundle("judge-a") });
