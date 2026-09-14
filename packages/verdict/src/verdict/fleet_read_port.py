@@ -261,6 +261,31 @@ class VerdictFleetReadPortV1(Protocol):
     ) -> TraceWindowReadV1: ...
 
 
+class PostgresVerdictFleetReadPortV1:
+    """PostgreSQL Fleet ReadPort with one bounded, read-only connection."""
+
+    def __init__(self, database_url: str, *, tenant_id: str) -> None:
+        from verdict._fleet_postgres import FleetPostgresAdapter
+
+        self._adapter = FleetPostgresAdapter(database_url, tenant_id=tenant_id)
+
+    def read_trace_window(
+        self,
+        *,
+        tenant_id: str,
+        window_start: datetime,
+        window_end: datetime,
+    ) -> TraceWindowReadV1:
+        return self._adapter.read_trace_window(
+            tenant_id=tenant_id,
+            window_start=window_start,
+            window_end=window_end,
+        )
+
+    def close(self) -> None:
+        self._adapter.close()
+
+
 def _rfc3339(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat(timespec="auto").replace("+00:00", "Z")
 
@@ -323,11 +348,49 @@ def trace_window_read_to_json(value: TraceWindowReadV1) -> str:
     return encoded
 
 
+def main(argv: list[str] | None = None) -> int:
+    """Prepare or disable the explicit PostgreSQL Fleet ReadPort boundary."""
+
+    import argparse
+    import os
+    import sys
+
+    from verdict._fleet_postgres import FleetPostgresConfigurationError, configure_fleet
+
+    parser = argparse.ArgumentParser(prog="python -m verdict.fleet_read_port")
+    subparsers = parser.add_subparsers(dest="action", required=True)
+    for action in ("prepare", "disable"):
+        command = subparsers.add_parser(action)
+        command.add_argument("--reader-role", required=True)
+        command.add_argument("--tenant-id", required=True)
+    args = parser.parse_args(argv)
+    database_url = os.environ.get("VERDICT_DATABASE_URL")
+    if not database_url:
+        print("VERDICT_DATABASE_URL is required", file=sys.stderr)
+        return 2
+    try:
+        configure_fleet(
+            database_url,
+            action=args.action,
+            reader_role=args.reader_role,
+            tenant_id=args.tenant_id,
+        )
+    except (FleetPostgresConfigurationError, VerdictFleetReadError, ValueError):
+        print(f"fleet {args.action} failed", file=sys.stderr)
+        return 1
+    return 0
+
+
 __all__ = [
     "VERDICT_FLEET_READ_SCHEMA_VERSION",
+    "PostgresVerdictFleetReadPortV1",
     "TraceContributionReadV1",
     "TraceWindowReadV1",
     "VerdictFleetReadError",
     "VerdictFleetReadPortV1",
     "trace_window_read_to_json",
 ]
+
+
+if __name__ == "__main__":  # pragma: no cover - exercised through the module CLI
+    raise SystemExit(main())

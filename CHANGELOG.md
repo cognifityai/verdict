@@ -6,6 +6,17 @@ the product is refined.
 
 ## [Unreleased]
 
+### Added
+
+- PostgreSQL deployments can explicitly prepare a bounded, tenant-scoped Fleet
+  ReadPort V1 for trusted same-process integrations. Its immutable DTOs expose
+  only allowlisted trace metrics and exact Agent Run links; ordinary Verdict
+  startup, SQLite, and metadata/content capture remain unchanged.
+- Authenticated hosts can advertise a private full-page `/operations` mount
+  through `operations_page_url`, and Verdict trace/Agent Run pages accept
+  bounded same-origin selection links. The existing Settings-level
+  `operations_url` adapter remains unchanged.
+
 ## [0.1.0a18] - 2026-09-13
 
 ### Fixed

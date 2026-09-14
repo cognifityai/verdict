@@ -9,10 +9,12 @@ from typing import get_type_hints
 import pytest
 from verdict.fleet_read_port import (
     VERDICT_FLEET_READ_SCHEMA_VERSION,
+    PostgresVerdictFleetReadPortV1,
     TraceContributionReadV1,
     TraceWindowReadV1,
     VerdictFleetReadError,
     VerdictFleetReadPortV1,
+    main,
     trace_window_read_to_json,
 )
 
@@ -99,7 +101,65 @@ def test_public_fleet_v1_contract_has_exact_fields_and_signatures() -> None:
     assert list(signature.parameters) == ["self", "tenant_id", "window_start", "window_end"]
     assert signature.parameters["tenant_id"].kind is inspect.Parameter.KEYWORD_ONLY
     assert list(inspect.signature(trace_window_read_to_json).parameters) == ["value"]
+    constructor = inspect.signature(PostgresVerdictFleetReadPortV1)
+    assert list(constructor.parameters) == ["database_url", "tenant_id"]
+    assert constructor.parameters["tenant_id"].kind is inspect.Parameter.KEYWORD_ONLY
+    read_signature = inspect.signature(PostgresVerdictFleetReadPortV1.read_trace_window)
+    assert list(read_signature.parameters) == [
+        "self",
+        "tenant_id",
+        "window_start",
+        "window_end",
+    ]
+    assert list(inspect.signature(PostgresVerdictFleetReadPortV1.close).parameters) == ["self"]
     assert VERDICT_FLEET_READ_SCHEMA_VERSION == "verdict.trace-window-read.v1"
+
+
+def test_postgres_adapter_rejects_non_postgres_and_invalid_tenant_before_import(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import builtins
+
+    imports: list[str] = []
+    real_import = builtins.__import__
+
+    def observed_import(name, *args, **kwargs):
+        imports.append(name)
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", observed_import)
+
+    with pytest.raises(VerdictFleetReadError, match="unsupported_backend"):
+        PostgresVerdictFleetReadPortV1("sqlite:///private.db", tenant_id="tenant-a")
+    with pytest.raises(ValueError, match="non-local"):
+        PostgresVerdictFleetReadPortV1(
+            "postgresql://private-credential-canary@localhost/db",
+            tenant_id="local",
+        )
+
+    assert "psycopg_pool" not in imports
+
+
+def test_fleet_operator_cli_requires_owner_url_and_emits_only_stable_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.delenv("VERDICT_DATABASE_URL", raising=False)
+    assert main(["prepare", "--reader-role", "reader-a", "--tenant-id", "tenant-a"]) == 2
+    missing = capsys.readouterr()
+    assert missing.out == ""
+    assert missing.err == "VERDICT_DATABASE_URL is required\n"
+
+    monkeypatch.setenv(
+        "VERDICT_DATABASE_URL",
+        "postgresql://private-password-canary@127.0.0.1:1/private-database-canary",
+    )
+    assert main(["prepare", "--reader-role", "reader-a", "--tenant-id", "tenant-a"]) == 1
+    failed = capsys.readouterr()
+    assert failed.out == ""
+    assert failed.err == "fleet prepare failed\n"
+    assert "private-password-canary" not in failed.err
+    assert "private-database-canary" not in failed.err
 
 
 def test_fleet_read_error_has_stable_public_shape() -> None:
@@ -268,6 +328,55 @@ def test_serializer_rejects_response_larger_than_limit(monkeypatch: pytest.Monke
 
     with pytest.raises(VerdictFleetReadError, match="response_limit_exceeded"):
         trace_window_read_to_json(_window())
+
+
+def test_serializer_accepts_exact_byte_limit_and_rejects_next_byte(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import verdict.fleet_read_port as fleet_read_port
+
+    value = _window()
+    encoded_size = len(trace_window_read_to_json(value).encode("utf-8"))
+    monkeypatch.setattr(fleet_read_port, "_MAX_RESPONSE_BYTES", encoded_size)
+    assert trace_window_read_to_json(value)
+
+    monkeypatch.setattr(fleet_read_port, "_MAX_RESPONSE_BYTES", encoded_size - 1)
+    with pytest.raises(VerdictFleetReadError, match="response_limit_exceeded"):
+        trace_window_read_to_json(value)
+
+
+def test_prepare_deadline_is_recomputed_before_every_database_statement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import verdict._fleet_postgres as fleet_postgres
+
+    class RecordingCursor:
+        def __init__(self) -> None:
+            self.calls: list[tuple[object, object]] = []
+
+        def execute(self, query, params=None):
+            self.calls.append((query, params))
+            return self
+
+    times = iter((10.0, 10.5, 11.0))
+    monkeypatch.setattr(fleet_postgres.time, "monotonic", lambda: next(times))
+    cursor = RecordingCursor()
+    bounded = fleet_postgres._DeadlineCursor(cursor, 11.0)
+
+    bounded.execute("SELECT first")
+    bounded.execute("SELECT second")
+    with pytest.raises(
+        fleet_postgres.FleetPostgresConfigurationError,
+        match="fleet_deadline_exceeded",
+    ):
+        bounded.execute("SELECT too_late")
+
+    assert cursor.calls == [
+        ("SELECT set_config('statement_timeout',%s,false)", ("1000",)),
+        ("SELECT first", None),
+        ("SELECT set_config('statement_timeout',%s,false)", ("500",)),
+        ("SELECT second", None),
+    ]
 
 
 def test_replacing_valid_window_with_mutated_exact_item_is_rejected() -> None:

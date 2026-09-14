@@ -235,8 +235,11 @@ rejects any call tenant that does not byte-match it before pool access.
 `PostgresVerdictFleetReadPortV1` is the only default adapter. It lazily imports
 the existing PostgreSQL extra and owns one connection pool with min/max size one.
 Startup opens the pool within two seconds, validates PostgreSQL 16, exact view
-columns/version, the session-user tenant mapping, read-only role/search path,
-zero memberships, and lack of direct protected-table rights. Runtime pool
+columns/version and grants, a read-only role/search path, zero memberships,
+lack of direct protected-relation rights, and no visible tenant other than the
+tenant bound at construction. The security-barrier views enforce the
+session-user mapping; every runtime query also requires that bound tenant
+byte-for-byte before pool access. Runtime pool
 acquisition is at most 250 ms. One repeatable-read,
 read-only transaction sets a 1,500 ms local statement timeout and performs one
 parameterized joined query ordered by `(started_at,trace_id)` with `LIMIT 2001`.
@@ -249,7 +252,7 @@ through DTO construction and final byte measurement. A late result is discarded
 as `read_unavailable`; the transaction is read-only and cannot perform a late
 write. The adapter has no retry, background thread, queue, or page cursor. Close
 stops admission, gives an admitted read at most the same two-second call
-deadline, then closes the sole pool within a separate two-second close bound. A
+deadline, then closes the sole pool within that same two-second close bound. A
 late read is discarded, a database session is never returned as success after
 close, and a post-close call fails with `read_unavailable`.
 
