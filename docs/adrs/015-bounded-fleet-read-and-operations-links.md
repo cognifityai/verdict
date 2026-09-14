@@ -1,6 +1,6 @@
 # ADR-015: Bounded fleet read and authenticated Operations links
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-09-14
 **Decider:** Cognifity AI
 
