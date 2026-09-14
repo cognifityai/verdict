@@ -307,8 +307,10 @@ python -m pip install \
   "cognifity-verdict-inspect==0.1.0a18"
 ```
 
-The `all` extra preserves its existing provider-and-storage dependency set; it
-does not add the optional dashboard server.
+The dashboard server is part of the core distribution because the core
+`verdict` command launches it. The `dashboard` extra is retained as an empty
+compatibility selector; `all` adds provider, PostgreSQL, telemetry, and eval
+dependencies on top of that core runtime.
 
 ### Upgrade from an earlier synchronized alpha
 

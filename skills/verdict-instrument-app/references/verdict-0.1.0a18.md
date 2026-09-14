@@ -43,12 +43,25 @@ run the same synchronized command with `--upgrade`. The command also replaces
 editable older installs with published wheels; it does not require deleting or
 recloning the old checkout.
 
-The package upgrade reuses existing SQLite files and PostgreSQL tables. Task 5
-adds registry tables and bounded analysis projections without rewriting existing
-traces or evaluation history. Run the tenant-scoped `verdict-cluster normalize`
-workflow before fitting a registry against upgraded rows. Verify package
-versions, `python -m pip check`, installed commands, record counts, and the
-dashboard against a non-production copy before restarting.
+The package upgrade reuses existing SQLite files and PostgreSQL tables. Existing
+registry and analysis tables remain readable without rewriting existing traces
+or evaluation history. On first open, `0.1.0a18` transactionally migrates
+`0.1.0a17` Agent Run bundles into normalized source, run, turn, and event
+tables. After that migration, older Agent writers are rejected. Restore the
+pre-upgrade backup rather than pointing `0.1.0a17` at the upgraded store. Run
+the tenant-scoped `verdict-cluster normalize` workflow before fitting a
+registry against upgraded rows. Verify package versions, `python -m pip check`,
+installed commands, record counts, and the dashboard against a non-production
+copy before restarting.
+
+## Optional Agent evidence transport
+
+`0.1.0a18` includes the Agent Run SDK, process-owned JSONL capture segments,
+the authenticated PostgreSQL collector, and `verdict-shipper`. Do not add that
+transport merely to instrument supported provider calls; direct storage remains
+the smallest local path. Introduce the collector only for an approved remote or
+multi-process requirement, with its authentication, TLS termination, spool,
+retry, rejection, and retention ownership explicitly tested.
 
 ## Registry strategy boundary
 
@@ -67,6 +80,8 @@ pinned to the authorized tenant's active version.
 - Use an absolute SQLite path for a local single-host trial.
 - Use the same protected PostgreSQL DSN for shared or multi-instance capture and
   the dashboard; install the `postgres` extra.
+- Keep a POC store and standalone dashboard single-tenant. Evaluator-health
+  records are not tenant-owned in this release (GitHub #78).
 - Moving SQLite data to PostgreSQL is a separate migration, not a package upgrade.
 - The Registry tab is a bounded read-only view. When a mounted host injects its
   authorized registry tenant, that active registry also supplies Overview,
@@ -77,3 +92,10 @@ pinned to the authorized tenant's active version.
 latency summaries without prompts, responses, storage URLs, or exception text.
 Workload labels distinguish `agent`, `judge`, and unclassified costs without
 rewriting historical records.
+
+## Known privacy limitations
+
+Best-effort redaction is not a compliance boundary. Agent semantic name/value
+pairs and plural credential containers require caller-side sanitization in this
+release (GitHub #79 and #80). Use only approved non-sensitive data and verify
+synthetic canaries at the final store and dashboard sinks.

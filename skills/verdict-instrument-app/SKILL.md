@@ -138,8 +138,8 @@ The plan must name:
 
 1. files, the current package state, exact dependency transition, and required extras;
 2. one initialization owner per process, before the first supported provider call;
-3. storage URI source, permissions, retention, dashboard data path, and
-   service/environment isolation because those labels are not persisted on trace rows;
+3. storage URI source, permissions, retention, dashboard data path,
+   service/environment attribution, and handling of historical unattributed rows;
 4. capture/redaction settings and known residual privacy risk;
 5. each job's command, trigger, lock, timeout, logs, credentials, and rollback;
 6. expected provider/judge volume and cost boundary; and

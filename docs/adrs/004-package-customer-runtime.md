@@ -39,7 +39,8 @@ Ship one canonical dashboard implementation inside `cognifity-verdict`:
 - a small public application factory accepting a storage URL;
 - read-only SQLite and PostgreSQL query sessions feeding one aggregation path;
 - only the compiled dashboard HTML, JavaScript, and CSS required at runtime;
-- optional dashboard/server dependencies; and
+- dashboard/server dependencies in the core distribution because the core
+  `verdict` command launches the dashboard; and
 - a thin repository wrapper for the historical source-checkout command.
 
 The explicit sample experience remains available in the development UI, but
@@ -67,15 +68,16 @@ single-service use cases.
 ### Publish a fourth dashboard distribution
 
 Deferred. It avoids a small static-asset addition to the core wheel but adds a
-package and coordinated release surface. The optional dependency group keeps
-capture-only installations lightweight without that operational cost.
+package and coordinated release surface. The current core distribution owns
+the server runtime; the empty `dashboard` extra remains only as a compatible
+installation selector.
 
 ## Consequences
 
 - Installed applications can mount the dashboard supplied by their pinned
   Verdict version.
 - PostgreSQL becomes a real dashboard backend without changing stored schemas.
-- The wheel grows by the compressed dashboard runtime assets; server and
-  PostgreSQL dependencies remain opt-in.
+- The wheel includes the compressed dashboard runtime assets and server
+  dependencies; PostgreSQL remains opt-in.
 - A dashboard release now requires SQLite/PostgreSQL parity, cold-wheel, and
   mounted-browser verification.

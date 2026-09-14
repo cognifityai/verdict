@@ -54,8 +54,9 @@ window takes days to fill, report that detection limit.
 Unless the customer approves otherwise, propose:
 
 - one non-production environment and one supported provider path;
-- one service/environment scope per store because those init labels are not persisted
-  on trace rows in `0.1.0a18`;
+- one service/environment scope for the initial trial; new instrumented traces
+  persist those labels, while historical and default-client rows can remain
+  unattributed;
 - `capture_content=False`;
 - `buffered_writes=False`;
 - a customer-owned absolute SQLite path;
