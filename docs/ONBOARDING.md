@@ -74,6 +74,12 @@ Claude Code may record one provider response across multiple history rows.
 Verdict coalesces those rows into one model-call Trace and fills later response
 text without changing its evidence identity; a genuine tool-only call remains
 visible as textless rather than being presented as a missing capture.
+For the standard `~/.codex/sessions` directory, the preview also shows the
+sibling `~/.codex/logs_2.sqlite` source when it exists. Approval reads that
+database directly; no Codex export is required. Each supported completed-call
+marker becomes a metadata-only OpenAI Trace with its model and observed
+response time. Verdict never stores the diagnostic body or raw Codex source
+identifiers.
 
 Successful capture opens **Overview**. Local execution evidence is under
 **Explore → Agent Runs & Tools** and genuine model calls are under
@@ -108,6 +114,15 @@ response has complete input/output usage. Missing or malformed counters display
 as unavailable, not zero.
 Verdict therefore leaves cost unavailable for Claude Code and Codex history
 instead of applying API list prices to desktop or subscription activity.
+Codex diagnostic traces include input/output tokens only when one valid usage
+event from the same session matches the completion timestamp. Prompt,
+response, latency, and cost remain unavailable, and the traces are not
+evaluator inputs. Codex controls diagnostic and session retention
+independently, so Agent Run, model-call, and token-covered totals can differ;
+an unknown diagnostic schema is skipped and reported as unavailable.
+When that matched event also contains a valid cached-input count, Report shows
+cached and uncached input separately and reports the number of calls covered by
+the breakdown. Missing or impossible cache counts remain unavailable.
 
 Opted-in content remains bounded and recursively redacted. Each turn and event
 is bounded independently. Turn request and final-response text is redacted
@@ -609,9 +624,11 @@ present, `degraded` or `insufficient_data` status is a hard gate: the command
 persists the health record, exits 2, and does not write production judgments.
 
 The dashboard shows per-provider traffic, optional intent clusters, and pass
-rates by rubric dimension. **Report** shows application-only request, token,
-latency, cost, service, and model summaries; evaluator calls are excluded. The
-default period is the last 30 UTC calendar days; 7-day, 90-day, and all-time
+rates by rubric dimension. **Report** shows application-only request, tokens
+processed, latency, cost, service, and model summaries; evaluator calls are
+excluded. Where exact cache evidence exists, Report separates cached and
+uncached input and states the covered call count. The default period is the
+last 30 UTC calendar days; 7-day, 90-day, and all-time
 choices are available. The timeline contains up to 31 active dates in the
 selected period; tables contain at most 20 service/environment rows and 20 model
 rows. Latency coverage uses every known value in the period, while p50/p95 use

@@ -57,15 +57,26 @@ function normalizeMetric(row) {
   const successfulCalls = Math.min(calls, whole(row?.successfulCalls) ?? 0);
   const failedCalls = Math.min(calls - successfulCalls, whole(row?.failedCalls) ?? 0);
   const tokenKnownCalls = Math.min(calls, whole(row?.tokenKnownCalls) ?? 0);
+  const rawCachedInputTokens = whole(row?.cachedInputTokens);
+  const rawUncachedInputTokens = whole(row?.uncachedInputTokens);
+  const rawBreakdownKnownCalls = Math.min(calls,
+    whole(row?.inputBreakdownKnownCalls) ?? 0);
+  const inputTokens = whole(row?.inputTokens) ?? 0;
+  const validInputBreakdown = rawBreakdownKnownCalls > 0
+    && rawCachedInputTokens != null && rawUncachedInputTokens != null
+    && rawCachedInputTokens + rawUncachedInputTokens <= inputTokens;
   const costKnownCalls = Math.min(calls, whole(row?.costKnownCalls) ?? 0);
   const latencyKnownCalls = Math.min(calls, whole(row?.latencyKnownCalls) ?? 0);
   return {
     calls, successfulCalls, failedCalls,
     successRatePct: nonnegative(row?.successRatePct),
-    inputTokens: whole(row?.inputTokens) ?? 0,
+    inputTokens,
     outputTokens: whole(row?.outputTokens) ?? 0,
     totalTokens: whole(row?.totalTokens) ?? 0,
     tokenKnownCalls,
+    cachedInputTokens: validInputBreakdown ? rawCachedInputTokens : 0,
+    uncachedInputTokens: validInputBreakdown ? rawUncachedInputTokens : 0,
+    inputBreakdownKnownCalls: validInputBreakdown ? rawBreakdownKnownCalls : 0,
     costUsd: nonnegative(row?.costUsd), costKnownCalls,
     averageLatencyMs: nonnegative(row?.averageLatencyMs), latencyKnownCalls,
   };
@@ -205,7 +216,7 @@ export function buildManagementReport(data = {}, { source = "live", generatedAt 
       : "No application telemetry captured")} · UTC`,
     kpis: [
       { label: "Application LLM requests", value: valid ? formatNumber(calls) : "No data", note: "Verdict judge calls excluded" },
-      { label: "Total token consumption", value: valid && (!calls || scope.tokenKnownCalls) ? formatNumber(scope.totalTokens) : "Unavailable", note: calls && scope.tokenKnownCalls === calls ? "Complete token coverage" : calls ? `${formatNumber(scope?.tokenKnownCalls ?? 0)} of ${formatNumber(calls)} calls complete` : valid ? "No calls captured" : "No token evidence" },
+      { label: "Tokens processed", value: valid && (!calls || scope.tokenKnownCalls) ? formatNumber(scope.totalTokens) : "Unavailable", note: calls && scope.tokenKnownCalls === calls ? "Complete token coverage" : calls ? `${formatNumber(scope?.tokenKnownCalls ?? 0)} of ${formatNumber(calls)} calls complete` : valid ? "No calls captured" : "No token evidence" },
       { label: "Identified applications", value: valid && identifiedApplications != null ? formatNumber(identifiedApplications) : "Unavailable", note: unattributedCalls ? `${formatNumber(unattributedCalls)} calls unattributed` : calls ? "All calls attributed" : valid ? "No calls captured" : "No application evidence" },
       { label: "Latency profile", value: calls && p50LatencyMs != null ? formatMs(p50LatencyMs) : "Unavailable", note: p50LatencyMs != null ? `p95 ${formatMs(p95LatencyMs)} · newest ${formatNumber(sampledLatency)} of ${formatNumber(scope.latencyKnownCalls)} known latencies` : calls ? "Latency not captured" : "No latency evidence" },
     ],
@@ -221,6 +232,9 @@ export function buildManagementReport(data = {}, { source = "live", generatedAt 
         ? `${formatMoney(scope.costUsd)} · ${scope.costKnownCalls === calls ? "complete" : `partial (${formatNumber(scope.costKnownCalls)} of ${formatNumber(calls)} calls priced)`}`
         : "Unavailable",
       tokenCoverage: calls ? `${formatNumber(scope.tokenKnownCalls)} of ${formatNumber(calls)} calls` : "Unavailable",
+      inputBreakdown: calls && scope.inputBreakdownKnownCalls
+        ? `${formatNumber(scope.uncachedInputTokens)} uncached input · ${formatNumber(scope.cachedInputTokens)} cached input · ${formatNumber(scope.inputBreakdownKnownCalls)} calls with breakdown`
+        : "Unavailable",
       latencyCoverage: calls ? `${formatNumber(scope.latencyKnownCalls)} of ${formatNumber(calls)} calls` : "Unavailable",
       firstCapture: first,
       latestCapture: latest,
@@ -241,14 +255,21 @@ function csvCell(value) {
 }
 
 export function managementReportCsv(report) {
-  const header = ["application", "environment", "attributed", "requests", "successful_requests", "failed_requests", "success_rate_pct", "input_tokens", "output_tokens", "total_tokens", "token_complete_calls", "average_latency_ms", "latency_known_calls", "cost_usd", "cost_known_calls", "period_start", "period_end"];
-  const rows = report.applications.rows.map((row) => [
-    row.name, row.environment, row.attributed,
-    row.calls, row.successfulCalls, row.failedCalls, row.successRatePct, row.inputTokens,
-    row.outputTokens, row.totalTokens, row.tokenKnownCalls, row.averageLatencyMs,
-    row.latencyKnownCalls, row.costUsd, row.costKnownCalls,
-    report.period.startDate, report.period.endDate,
-  ]);
+  const header = ["application", "environment", "attributed", "requests", "successful_requests", "failed_requests", "success_rate_pct", "input_tokens", "uncached_input_tokens", "cached_input_tokens", "input_breakdown_known_calls", "output_tokens", "total_tokens", "token_complete_calls", "average_latency_ms", "latency_known_calls", "cost_usd", "cost_known_calls", "period_start", "period_end"];
+  const rows = report.applications.rows.map((row) => {
+    const tokens = row.tokenKnownCalls
+      ? [row.inputTokens, row.outputTokens, row.totalTokens]
+      : [null, null, null];
+    return [
+      row.name, row.environment, row.attributed,
+      row.calls, row.successfulCalls, row.failedCalls, row.successRatePct, tokens[0],
+      row.inputBreakdownKnownCalls ? row.uncachedInputTokens : null,
+      row.inputBreakdownKnownCalls ? row.cachedInputTokens : null,
+      row.inputBreakdownKnownCalls, tokens[1], tokens[2],
+      row.tokenKnownCalls, row.averageLatencyMs, row.latencyKnownCalls,
+      row.costUsd, row.costKnownCalls, report.period.startDate, report.period.endDate,
+    ];
+  });
   return [header, ...rows].map((row) => row.map(csvCell).join(",")).join("\r\n");
 }
 
@@ -265,9 +286,16 @@ function htmlTable(rows, kind) {
     const detail = kind === "application"
       ? [row.environment, row.attributed ? "" : "Service identity missing"].filter(Boolean).join(" · ")
       : row.provider;
-    return `<tr><td><b>${html(name)}</b><small>${html(detail)}</small></td><td>${formatNumber(row.calls)}</td><td>${html(formatPercent(row.successRatePct))}</td><td>${formatNumber(row.totalTokens)}</td><td>${html(formatMs(row.averageLatencyMs))}</td><td>${html(formatMoney(row.costUsd))}${row.costKnownCalls < row.calls ? '<small>partial</small>' : ""}</td></tr>`;
+    const tokens = row.tokenKnownCalls ? formatNumber(row.totalTokens) : "Unavailable";
+    const tokenCoverage = row.tokenKnownCalls > 0 && row.tokenKnownCalls < row.calls
+      ? `<small>partial (${formatNumber(row.tokenKnownCalls)} of ${formatNumber(row.calls)} calls)</small>`
+      : "";
+    const inputBreakdown = row.inputBreakdownKnownCalls
+      ? `<small>${formatNumber(row.uncachedInputTokens)} uncached input · ${formatNumber(row.cachedInputTokens)} cached input</small>`
+      : "";
+    return `<tr><td><b>${html(name)}</b><small>${html(detail)}</small></td><td>${formatNumber(row.calls)}</td><td>${html(formatPercent(row.successRatePct))}</td><td>${tokens}${inputBreakdown}${tokenCoverage}</td><td>${html(formatMs(row.averageLatencyMs))}</td><td>${html(formatMoney(row.costUsd))}${row.costKnownCalls < row.calls ? '<small>partial</small>' : ""}</td></tr>`;
   }).join("");
-  return `<table><thead><tr><th>${identity}</th><th>Requests</th><th>Success</th><th>Tokens</th><th>Avg latency</th><th>Cost</th></tr></thead><tbody>${body || '<tr><td colspan="6">No data available</td></tr>'}</tbody></table>`;
+  return `<table><thead><tr><th>${identity}</th><th>Requests</th><th>Success</th><th>Tokens processed</th><th>Avg latency</th><th>Cost</th></tr></thead><tbody>${body || '<tr><td colspan="6">No data available</td></tr>'}</tbody></table>`;
 }
 
 export function managementReportHtml(report) {
@@ -275,7 +303,7 @@ export function managementReportHtml(report) {
   const maxCalls = Math.max(1, ...report.timeline.rows.map((point) => point.calls));
   const bars = report.timeline.rows.map((point) => `<div class="bar-cell" title="${html(`${readableDate(point.date)}: ${point.calls} calls, ${point.totalTokens} captured tokens`)}"><b>${formatNumber(point.calls)}</b><div class="bar" style="height:${Math.max(4, Math.round(100 * point.calls / maxCalls))}%"></div><small>${html(point.label)}</small></div>`).join("");
   const cards = report.kpis.map((item) => `<div class="card"><small>${html(item.label)}</small><strong>${html(item.value)}</strong><span>${html(item.note)}</span></div>`).join("");
-  const facts = [["Success rate", report.summary.success], ["Estimated cost", report.summary.cost], ["Token coverage", report.summary.tokenCoverage], ["Latency coverage", report.summary.latencyCoverage], ["First capture", report.summary.firstCapture], ["Latest capture", report.summary.latestCapture]].map(([label, value]) => `<div><small>${label}</small><b>${html(value)}</b></div>`).join("");
+  const facts = [["Success rate", report.summary.success], ["Estimated cost", report.summary.cost], ["Input token breakdown", report.summary.inputBreakdown], ["Token coverage", report.summary.tokenCoverage], ["Latency coverage", report.summary.latencyCoverage], ["First capture", report.summary.firstCapture], ["Latest capture", report.summary.latestCapture]].map(([label, value]) => `<div><small>${label}</small><b>${html(value)}</b></div>`).join("");
   const status = [["Evaluator", report.quality.evaluator], ["Evaluation coverage", report.quality.evaluationCoverage], ["Current monitor (as of now)", report.quality.monitor], ["Deterministic analysis (as of now)", report.quality.deterministicAnalysis], ["Legacy change history (as of now)", report.quality.legacyChange]].map(([label, value]) => `<div><small>${label}</small><b>${html(value)}</b></div>`).join("");
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${html(report.title)}</title><style>:root{color-scheme:light}*{box-sizing:border-box}body{margin:0;background:#f4f7f5;color:#17211d;font:14px system-ui,sans-serif}main{max-width:1180px;margin:auto;padding:32px}header{display:flex;justify-content:space-between;gap:24px;align-items:start;border-bottom:1px solid #d8e0dd;padding-bottom:22px}.eyebrow,small{color:#687871}h1{margin:4px 0 8px;font-size:28px}.actions a{display:inline-block;background:#176b52;color:white;padding:10px 14px;text-decoration:none}.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:24px 0}.card,section{background:white;border:1px solid #d8e0dd;border-radius:8px;padding:18px}.card strong{display:block;font-size:26px;margin:8px 0}.card span{font-size:12px;color:#687871}section{margin:14px 0}h2{font-size:17px;margin:0 0 5px}.chart{height:190px;display:grid;grid-template-columns:36px 1fr;gap:8px;margin-top:18px}.axis{display:flex;flex-direction:column;justify-content:space-between;text-align:right;color:#7b8983;font-size:11px;padding-bottom:24px}.bars{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(28px,1fr);align-items:end;border-bottom:1px solid #cbd6d1;gap:5px;overflow-x:auto}.bar-cell{height:100%;display:grid;grid-template-rows:18px 1fr 22px;align-items:end;text-align:center;font-size:10px}.bar-cell>b{color:#176b52;font-size:10px}.bar{background:#20b486;min-height:4px;border-radius:3px 3px 0 0}.bar-cell small{font-size:9px;white-space:nowrap}.facts{display:grid;grid-template-columns:1fr;gap:11px}.facts div{border-top:1px solid #e2e9e6;padding-top:8px}.facts b{display:block;margin-top:3px}table{border-collapse:collapse;width:100%;margin-top:14px}th,td{text-align:right;border-top:1px solid #e2e9e6;padding:10px}th:first-child,td:first-child{text-align:left}td small{display:block;margin-top:3px}ul{margin-bottom:0;padding-left:20px}li{margin:7px 0}@media(max-width:760px){main{padding:16px}.grid{grid-template-columns:1fr 1fr}header{display:block}.actions{margin-top:16px}section{overflow-x:auto}table{min-width:720px}}@media print{body{background:white}main{padding:0}.actions{display:none}.card,section{break-inside:avoid}}</style></head><body><main><header><div><div class="eyebrow">${html(report.source)}</div><h1>${html(report.title)}</h1><div class="eyebrow">${html(report.range)} · generated ${html(report.generatedAt)}</div></div><div class="actions"><a download="verdict-management-report.csv" href="${csvUrl}">Download CSV</a></div></header><div class="grid">${cards}</div><section><h2>LLM request volume</h2><small>${html(report.timeline.scope)} · application calls only</small><div class="chart"><div class="axis"><span>${formatNumber(maxCalls)}</span><span>${formatNumber(Math.round(maxCalls / 2))}</span><span>0</span></div><div class="bars">${bars || "No application activity"}</div></div></section><section><h2>Report scope</h2><div class="facts">${facts}</div></section><section><h2>Application LLM utilization by environment</h2><small>${html(report.applications.scope)}</small>${htmlTable(report.applications.rows, "application")}</section><section><h2>Model performance and throughput</h2><small>${html(report.models.scope)}</small>${htmlTable(report.models.rows, "model")}</section><section><h2>Verdict status</h2><div class="facts">${status}</div></section><section><h2>Management attention</h2><ul>${report.attention.map((item) => `<li>${html(item)}</li>`).join("")}</ul></section></main></body></html>`;
 }

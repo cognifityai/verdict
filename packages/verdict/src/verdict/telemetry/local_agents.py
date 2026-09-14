@@ -3,7 +3,8 @@
 The source session is an ``AgentRun``. User interactions are ``AgentTurn``
 records and observable source facts are typed events. Claude assistant messages
 with an explicit provider response boundary are also projected into genuine
-LLM ``Trace`` records; an agent turn or session is never promoted into a trace.
+LLM ``Trace`` records. Codex response-completion diagnostics are projected as
+metadata-only traces. An agent turn or session is never promoted into a trace.
 """
 
 from __future__ import annotations
@@ -33,6 +34,12 @@ from verdict.normalized_evidence import _LegacyLocalTextUpgrade
 from verdict.redaction import redact, redact_structure
 from verdict.schema import Operation, Trace
 from verdict.storage.base import Storage
+from verdict.telemetry.model import ImportContext, ImportSummary
+from verdict.telemetry.runner import ImportRunError, import_into_storage
+from verdict.telemetry.sources.codex import (
+    codex_diagnostic_path,
+    iter_codex_diagnostic_calls,
+)
 
 _AMBIENT_BLOCK = re.compile(
     r"\A\s*<(environment_context|in-app-browser-context)\b[^>]*>.*?</\1>\s*",
@@ -54,18 +61,37 @@ class LocalCaptureSummary:
     stored: int = 0
     skipped: int = 0
     skip_reasons: dict[str, int] = field(default_factory=dict)
+    codex_model_calls: ImportSummary | None = None
+    codex_model_call_error: str | None = None
 
     def add_skip(self, reason: str) -> None:
         self.skipped += 1
         self.skip_reasons[reason] = self.skip_reasons.get(reason, 0) + 1
 
     def as_dict(self) -> dict[str, object]:
-        return {
+        result: dict[str, object] = {
             "files": self.files,
             "stored": self.stored,
             "skipped": self.skipped,
             "skip_reasons": dict(sorted(self.skip_reasons.items())),
         }
+        if self.codex_model_calls is not None:
+            calls = self.codex_model_calls
+            result["codex_model_calls"] = {
+                "status": (
+                    "complete"
+                    if self.codex_model_call_error is None
+                    else "partial"
+                    if calls.stored
+                    else "unavailable"
+                ),
+                "seen": calls.seen,
+                "stored": calls.stored,
+                "skipped": calls.skipped,
+                "skip_reasons": dict(sorted(calls.skip_reasons.items())),
+                "error": self.codex_model_call_error,
+            }
+        return result
 
 
 @dataclass
@@ -96,9 +122,9 @@ class _RawTurn:
     token_usage: dict[str, int] = field(default_factory=dict)
     token_usage_basis: str = ""
     usage_invalid: bool = False
-    codex_usage_snapshots: list[tuple[dict[str, int], dict[str, int]]] = field(
-        default_factory=list
-    )
+    codex_usage_snapshots: list[
+        tuple[datetime | None, dict[str, int], dict[str, int]]
+    ] = field(default_factory=list)
     codex_latest_boundary: dict[str, int] | None = None
     claude_usage_by_response_id: dict[str, dict[str, int]] = field(default_factory=dict)
     claude_invalid_response_ids: set[str] = field(default_factory=set)
@@ -260,7 +286,11 @@ def _provider_response_id(value: object) -> str | None:
         return None
 
 
-def _record_codex_usage(turn: _RawTurn, info: object) -> None:
+def _record_codex_usage(
+    turn: _RawTurn,
+    info: object,
+    occurred_at: datetime | None,
+) -> None:
     mapped = _mapping(info)
     if mapped is None:
         turn.codex_latest_boundary = None
@@ -300,7 +330,7 @@ def _record_codex_usage(turn: _RawTurn, info: object) -> None:
         turn.usage_invalid = True
         return
     if last and total and not boundary_invalid:
-        turn.codex_usage_snapshots.append((last, total))
+        turn.codex_usage_snapshots.append((occurred_at, last, total))
 
 
 def _finalize_codex_usage(
@@ -322,8 +352,8 @@ def _finalize_codex_usage(
         and len(turn.codex_usage_snapshots) < 2
     ):
         return safe_boundary
-    first_last, first_total = turn.codex_usage_snapshots[0]
-    final_total = turn.codex_usage_snapshots[-1][1]
+    _, first_last, first_total = turn.codex_usage_snapshots[0]
+    final_total = turn.codex_usage_snapshots[-1][2]
     if any(
         name in first_last
         and name in first_total
@@ -333,7 +363,7 @@ def _finalize_codex_usage(
         turn.usage_invalid = True
         return safe_boundary
     previous_total = first_total
-    for _, total in turn.codex_usage_snapshots[1:]:
+    for _, _, total in turn.codex_usage_snapshots[1:]:
         if any(
             name in previous_total and name in total and total[name] < previous_total[name]
             for name in _TOKEN_FIELDS
@@ -368,6 +398,33 @@ def _finalize_codex_usage(
         turn.token_usage = usage
         turn.token_usage_basis = "codex_turn_delta"
     return safe_boundary
+
+
+def _codex_model_usage(
+    parsed: _ParsedHistory,
+) -> list[tuple[float, int, int, int | None]]:
+    """Return timestamped per-response usage, excluding repeated snapshots."""
+    usage: list[tuple[float, int, int, int | None]] = []
+    previous_total: dict[str, int] | None = None
+    for turn in parsed.turns:
+        for occurred_at, last, total in turn.codex_usage_snapshots:
+            if total == previous_total:
+                continue
+            previous_total = total
+            input_tokens = last.get("input_tokens")
+            output_tokens = last.get("output_tokens")
+            total_tokens = last.get("total_tokens")
+            if occurred_at is None or input_tokens is None or output_tokens is None:
+                continue
+            if total_tokens is not None and total_tokens != input_tokens + output_tokens:
+                continue
+            cached_input_tokens = last.get("cached_input_tokens")
+            if cached_input_tokens is not None and cached_input_tokens > input_tokens:
+                cached_input_tokens = None
+            usage.append(
+                (occurred_at.timestamp(), input_tokens, output_tokens, cached_input_tokens)
+            )
+    return usage
 
 
 def _record_claude_usage(
@@ -757,7 +814,7 @@ def _parse_codex(path: Path, *, home: Path | None) -> _ParsedHistory:
             active.legacy_response = response.legacy_value
             active.response_truncated = response.truncated
         elif outer == "event_msg" and inner == "token_count":
-            _record_codex_usage(active, payload.get("info"))
+            _record_codex_usage(active, payload.get("info"), occurred_at)
         elif outer == "event_msg" and inner == "turn_aborted":
             active.status = ExecutionStatus.CANCELLED
             active.ended_at = occurred_at
@@ -1342,6 +1399,7 @@ def capture_local_agents(
     sources = (("claude-code", claude_root, _parse_claude), ("codex", codex_root, _parse_codex))
     summary = LocalCaptureSummary()
     capture_service = AgentCaptureService(storage)
+    codex_usage_by_thread: dict[str, list[tuple[float, int, int, int | None]]] = {}
     for source_kind, root, parser in sources:
         if root is None:
             continue
@@ -1352,6 +1410,10 @@ def capture_local_agents(
                 summary.files += 1
                 try:
                     parsed = parser(path, home=home)
+                    if source_kind == "codex":
+                        codex_usage_by_thread.setdefault(parsed.session_id, []).extend(
+                            _codex_model_usage(parsed)
+                        )
                     bundle = _bundle(
                         source_kind=source_kind,
                         source_scope=source_scope,
@@ -1387,4 +1449,28 @@ def capture_local_agents(
                 summary.stored += 1
         except ValueError as exc:
             summary.add_skip(str(exc))
+    if codex_root is not None and (diagnostic_path := codex_diagnostic_path(codex_root)):
+        try:
+            context = ImportContext(
+                adapter="codex",
+                source_scope=hashlib.sha256(str(codex_root.resolve()).encode()).hexdigest(),
+                tenant_id=tenant_id,
+            )
+            summary.codex_model_calls = import_into_storage(
+                iter_codex_diagnostic_calls(
+                    diagnostic_path,
+                    context=context,
+                    token_usage_by_thread={
+                        thread_id: sorted(set(usage), key=lambda item: item[0])
+                        for thread_id, usage in codex_usage_by_thread.items()
+                    },
+                ),
+                storage,
+            )
+        except ImportRunError as exc:
+            summary.codex_model_calls = exc.summary
+            summary.codex_model_call_error = f"{exc.stage}_error"
+        except (OSError, UnicodeError, ValueError):
+            summary.codex_model_calls = ImportSummary()
+            summary.codex_model_call_error = "source_error"
     return summary

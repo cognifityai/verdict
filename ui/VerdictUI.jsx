@@ -1813,7 +1813,7 @@ function Compare({ data = SEED, source = "sample" }) {
           ? "Bundled synthetic sample: the same prompt set is shown across three providers to demonstrate comparison views. Connect live data before drawing provider conclusions."
           : "Unmatched traffic · descriptive only. These provider/model rows summarize the calls each provider actually received; they are not a controlled head-to-head comparison."}
       </div>
-      {source === "live" && codexRuns > 0 && <Panel className="p-4"><div className="text-sm" style={{ color: C.sub }}><span style={{ color: C.text }}>{codexRuns.toLocaleString()} Codex agent runs were captured.</span> Local Codex history does not expose genuine LLM request/response boundaries, so those runs are analyzed in Agent runs and are not included in LLM trace comparisons. Verdict does not invent model calls.</div></Panel>}
+      {source === "live" && codexRuns > 0 && <Panel className="p-4"><div className="text-sm" style={{ color: C.sub }}><span style={{ color: C.text }}>{codexRuns.toLocaleString()} Codex agent runs were captured.</span> When Codex completion diagnostics are available, their metadata-only model calls appear below with token usage where a matching session event exists, but without prompt, response, latency, or cost data. Agent-run and model-call counts can differ.</div></Panel>}
 
       <div className="grid md:grid-cols-3 gap-4">
         {provs.map((p) => (

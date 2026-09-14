@@ -83,7 +83,7 @@ function UtilizationTable({ rows, kind }) {
       <thead><tr className="text-xs" style={{ color: C.faint }}>
         <th className="text-left p-2">{application ? "Application / service" : "Model / provider"}</th>
         <th className="text-right p-2">Requests</th><th className="text-right p-2">Success</th>
-        <th className="text-right p-2">Tokens</th><th className="text-right p-2">Avg latency</th>
+        <th className="text-right p-2">Tokens processed</th><th className="text-right p-2">Avg latency</th>
         <th className="text-right p-2">Cost</th>
       </tr></thead>
       <tbody>{rows.length ? rows.map((row) => {
@@ -95,7 +95,7 @@ function UtilizationTable({ rows, kind }) {
           <td className="p-2"><div className="font-medium">{name}</div><div className="text-xs mt-0.5" style={{ color: C.faint }}>{detail}</div></td>
           <td className="text-right p-2 tabular-nums">{formatNumber(row.calls)}</td>
           <td className="text-right p-2 tabular-nums" style={{ color: row.failedCalls ? C.amber : undefined }}>{formatPercent(row.successRatePct)}</td>
-          <td className="text-right p-2 tabular-nums">{formatNumber(row.totalTokens)}{row.tokenKnownCalls < row.calls ? <div className="text-[10px]" style={{ color: C.amber }}>partial</div> : null}</td>
+          <td data-report-token className="text-right p-2 tabular-nums">{row.tokenKnownCalls ? formatNumber(row.totalTokens) : "—"}{row.inputBreakdownKnownCalls ? <div className="text-[10px]" style={{ color: C.faint }}>{formatNumber(row.uncachedInputTokens)} uncached in · {formatNumber(row.cachedInputTokens)} cached in</div> : null}{row.tokenKnownCalls > 0 && row.tokenKnownCalls < row.calls ? <div className="text-[10px]" style={{ color: C.amber }}>partial</div> : null}</td>
           <td className="text-right p-2 tabular-nums">{formatLatency(row.averageLatencyMs)}</td>
           <td className="text-right p-2 tabular-nums">{formatCost(row)}</td>
         </tr>;
@@ -108,6 +108,7 @@ export function ManagementReport({ data, source, onPeriodChange }) {
   const report = buildManagementReport(data, { source });
   const facts = [
     ["Success rate", report.summary.success], ["Estimated cost", report.summary.cost],
+    ["Input token breakdown", report.summary.inputBreakdown],
     ["Token coverage", report.summary.tokenCoverage], ["Latency coverage", report.summary.latencyCoverage],
     ["First capture", report.summary.firstCapture], ["Latest capture", report.summary.latestCapture],
   ];

@@ -8,6 +8,13 @@ the product is refined.
 
 ### Fixed
 
+- Local capture now includes completed Codex model calls in LLM reports by
+  matching the standard sibling `logs_2.sqlite` completion markers with
+  same-session usage events. These traces contain model, observed response
+  time, input/output tokens, and valid cached-input metadata when the match is
+  unambiguous. Management reporting labels the total as tokens processed and
+  separates cached from uncached input where that evidence exists; diagnostic
+  bodies and raw source identifiers are not stored.
 - Field-aware redaction now removes complete values from explicit plural
   credential containers such as `api_keys` and `passwords`. Typed Agent
   instruction, context, and outcome events also treat paired `text` or `value`

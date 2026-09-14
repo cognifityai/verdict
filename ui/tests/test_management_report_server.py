@@ -18,8 +18,11 @@ def _trace(
     model: str = "gpt-5-mini",
     error: str | None = None,
     workload: str | None = None,
+    cached_input_tokens: object | None = None,
 ) -> Trace:
     tags = {"verdict.workload": workload} if workload else {}
+    if cached_input_tokens is not None:
+        tags["verdict.cached_input_tokens"] = str(cached_input_tokens)
     return Trace(
         trace_id=trace_id,
         started_at=started_at,
@@ -81,6 +84,9 @@ def test_management_report_aggregates_daily_application_evidence(tmp_path):
         "outputTokens": 700,
         "totalTokens": 3500,
         "tokenKnownCalls": 28,
+        "cachedInputTokens": 0,
+        "uncachedInputTokens": 0,
+        "inputBreakdownKnownCalls": 0,
         "costUsd": 0.028,
         "costKnownCalls": 28,
         "averageLatencyMs": 1000.0,
@@ -200,12 +206,50 @@ def test_management_report_bounds_dates_and_uses_effective_response_model(tmp_pa
             "outputTokens": 875,
             "totalTokens": 4375,
             "tokenKnownCalls": 35,
+            "cachedInputTokens": 0,
+            "uncachedInputTokens": 0,
+            "inputBreakdownKnownCalls": 0,
             "costUsd": 0.035,
             "costKnownCalls": 35,
             "averageLatencyMs": 1000.0,
             "latencyKnownCalls": 35,
         }
     ]
+
+
+def test_management_report_aggregates_only_valid_input_token_breakdowns(tmp_path):
+    path = tmp_path / "input-breakdown.db"
+    storage = SQLiteStorage(str(path))
+    started_at = datetime(2026, 9, 11, tzinfo=timezone.utc)
+    for trace_id, cached in (
+        ("cached", 80),
+        ("observed-zero", 0),
+        ("missing", None),
+        ("malformed", "many"),
+        ("greater-than-input", 101),
+    ):
+        storage.insert_trace(_trace(
+            trace_id,
+            started_at,
+            service_name="codex",
+            model="gpt-5.6-sol",
+            cached_input_tokens=cached,
+        ))
+    storage.close()
+
+    report = build_bundle(path)["managementReport"]
+
+    for metric in (
+        report["scope"],
+        report["applications"]["rows"][0],
+        report["models"]["rows"][0],
+    ):
+        assert metric["inputTokens"] == 500
+        assert metric["outputTokens"] == 125
+        assert metric["totalTokens"] == 625
+        assert metric["cachedInputTokens"] == 80
+        assert metric["uncachedInputTokens"] == 120
+        assert metric["inputBreakdownKnownCalls"] == 2
 
 
 def test_management_report_normalizes_default_service_without_name_collision(tmp_path):

@@ -12,6 +12,9 @@ function metric(calls, failedCalls, inputTokens, outputTokens,
     successRatePct: Math.round(1000 * (calls - failedCalls) / calls) / 10,
     inputTokens, outputTokens, totalTokens: inputTokens + outputTokens,
     tokenKnownCalls: calls, costUsd, costKnownCalls, averageLatencyMs, latencyKnownCalls,
+    cachedInputTokens: Math.round(inputTokens * 0.8),
+    uncachedInputTokens: Math.round(inputTokens * 0.2),
+    inputBreakdownKnownCalls: calls,
   };
 }
 
@@ -31,6 +34,9 @@ function bundle() {
         outputTokens: 700,
         totalTokens: 3500,
         tokenKnownCalls: 28,
+        cachedInputTokens: 2240,
+        uncachedInputTokens: 560,
+        inputBreakdownKnownCalls: 28,
         costUsd: 0.028,
         costKnownCalls: 27,
         averageLatencyMs: 1000,
@@ -98,6 +104,7 @@ test("report presents one consistent application-only executive summary", () => 
   assert.deepEqual(report.kpis.map((item) => item.value), [
     "28", "3,500", "2", "900 ms",
   ]);
+  assert.equal(report.kpis[1].label, "Tokens processed");
   assert.equal(report.kpis[3].note,
     "p95 1,800 ms · newest 26 of 26 known latencies");
   assert.equal(report.timeline.scope, "2 active UTC dates");
@@ -107,6 +114,8 @@ test("report presents one consistent application-only executive summary", () => 
   ]);
   assert.equal(report.summary.success, "96.4% · 27 of 28 calls");
   assert.equal(report.summary.cost, "$0.0280 · partial (27 of 28 calls priced)");
+  assert.equal(report.summary.inputBreakdown,
+    "560 uncached input · 2,240 cached input · 28 calls with breakdown");
   assert.equal(report.quality.evaluationCoverage, "20 of 28 application calls judged");
   assert.equal(report.range, "Aug 13, 2026 – Sep 11, 2026 · UTC");
   for (const timestamp of [report.generatedAt, report.summary.firstCapture, report.summary.latestCapture]) {
@@ -132,6 +141,8 @@ test("chart and exports retain dates while excluding sensitive trace fields", ()
   assert.match(exportedHtml, />24</);
   assert.match(exportedHtml, /Application LLM utilization by environment/);
   assert.match(exportedHtml, /Model performance and throughput/);
+  assert.match(exportedHtml, /Tokens processed/);
+  assert.match(exportedHtml, /560 uncached input · 2,240 cached input/);
   assert.doesNotMatch(exportedHtml, /simulator|type="range"/i);
   assert.match(exportedHtml,
     /<section><h2>LLM request volume[\s\S]*<\/section><section><h2>Report scope/);
@@ -142,10 +153,41 @@ test("chart and exports retain dates while excluding sensitive trace fields", ()
   assert.match(csv, /"'=HYPERLINK/);
   assert.match(csv, /billing-worker/);
   assert.match(csv, /"environment","attributed"/);
+  assert.match(csv, /"uncached_input_tokens","cached_input_tokens","input_breakdown_known_calls"/);
   assert.match(csv, /"period_start","period_end"/);
   assert.match(csv, /"2026-08-13","2026-09-11"/);
   assert.doesNotMatch(csv, /prompt|response|trace_id|session_id|user_id/i);
   assert.doesNotMatch(exportedHtml, /prompt_redacted|response_redacted|trace_id|session_id/);
+});
+
+test("exports keep unavailable token evidence distinct from observed zero", () => {
+  const input = bundle();
+  Object.assign(input.managementReport.applications.rows[1], {
+    inputTokens: 0, outputTokens: 0, totalTokens: 0, tokenKnownCalls: 0,
+    cachedInputTokens: 0, uncachedInputTokens: 0, inputBreakdownKnownCalls: 0,
+  });
+  Object.assign(input.managementReport.models.rows[1], {
+    inputTokens: 0, outputTokens: 0, totalTokens: 0, tokenKnownCalls: 0,
+    cachedInputTokens: 0, uncachedInputTokens: 0, inputBreakdownKnownCalls: 0,
+  });
+  const report = buildManagementReport(input);
+  const csv = managementReportCsv(report);
+  const exportedHtml = managementReportHtml(report);
+
+  assert.match(csv, /"billing-worker"[^\r\n]*,"","","","0",/);
+  assert.match(exportedHtml, /<b>custom-model-v1<\/b><small>custom-provider<\/small><\/td><td>4<\/td><td>75%<\/td><td>Unavailable<\/td>/);
+});
+
+test("missing or malformed input breakdown remains unavailable", () => {
+  const input = bundle();
+  Object.assign(input.managementReport.scope, {
+    cachedInputTokens: 3000,
+    uncachedInputTokens: -1,
+    inputBreakdownKnownCalls: 28,
+  });
+  const report = buildManagementReport(input);
+
+  assert.equal(report.summary.inputBreakdown, "Unavailable");
 });
 
 test("latency coverage stays distinct from the bounded percentile sample", () => {
@@ -175,6 +217,7 @@ test("empty and malformed report evidence remains unavailable instead of zero", 
     scope: {
       calls: 0, successfulCalls: 0, failedCalls: 0, successRatePct: null,
       inputTokens: 0, outputTokens: 0, totalTokens: 0, tokenKnownCalls: 0,
+      cachedInputTokens: 0, uncachedInputTokens: 0, inputBreakdownKnownCalls: 0,
       costUsd: null, costKnownCalls: 0, averageLatencyMs: null,
       latencyKnownCalls: 0, latencySampledCalls: 0, p50LatencyMs: null,
       p95LatencyMs: null, identifiedApplications: 0, unattributedCalls: 0,
