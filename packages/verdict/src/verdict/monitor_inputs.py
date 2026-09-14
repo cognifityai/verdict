@@ -17,6 +17,7 @@ from verdict.monitoring import (
     monitor_requires_rebootstrap,
     plan_prospective_manifest,
     trace_monitor_units,
+    validate_monitor_analysis_unit,
 )
 
 LOCAL_TENANT = "__verdict_local__"
@@ -81,6 +82,7 @@ def _evaluator_judgments(
 
 def load_monitor_units(storage, policy: MonitorPolicy, *, tenant_id: str):
     """Load one bounded, evaluator- and grouping-aware monitor input set."""
+    validate_monitor_analysis_unit(policy)
     traces = storage.list_traces(
         tenant_id=tenant_id, limit=MAX_MONITOR_INPUTS + 1,
     )

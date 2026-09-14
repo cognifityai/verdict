@@ -85,7 +85,7 @@ display them. Cluster and
 monitor activation are explicit transitions; a stored historical candidate is
 shown separately from the active prospective monitor and survives page reload.
 Report presents application-only request, tokens processed, latency, cost,
-service, and model summaries; Verdict judge calls are excluded. When a source
+service, and model summaries; Verdict judge and paired-replay calls are excluded. When a source
 supplies exact cache evidence, the report also separates cached from uncached
 input tokens and states how many calls have that breakdown. It defaults to the
 last 30 UTC calendar days, with 7-day, 90-day, and all-time choices. The chart shows up
@@ -205,7 +205,8 @@ Restart an older producer with the upgraded SDK before enabling shipping;
 shipping itself does not run analysis, judges, clustering, or monitors. See
 [`examples/agent_sdk.py`](examples/agent_sdk.py) for a runnable local example.
 
-An initial monitor proposal uses exact event-time membership. The count-mode
+An initial monitor proposal uses one genuine model-call Trace per analysis unit
+and exact event-time membership. Trace is the only currently supported unit. The count-mode
 default is an older 80% reference and newer 20% current cohort; explicit date
 ranges are also supported. Membership and the normalized metric counts used by
 the comparison are frozen together. In-flight traces are excluded. An ongoing
@@ -245,7 +246,8 @@ service all construct monitor inputs from the same frozen evaluator and grouping
 identity. They use stored judgments only and never invoke a judge implicitly.
 Stored monitors that predate frozen cohort facts remain readable but must be
 re-created from a reviewed preview before they can run again. The same applies
-to older evaluator-backed monitors that cannot represent pending finalization.
+to older evaluator-backed monitors that cannot represent pending finalization
+and to stored policies naming a non-Trace analysis unit.
 
 ## Runs key-free; add a key for the judge (BYOK)
 
@@ -515,8 +517,12 @@ values under supported credential fields such as `password`, `api_key`,
 `client_secret`, including explicit plural containers such as `passwords` and
 `api_keys`, are removed using the field name. Typed Agent instruction,
 context, and outcome events treat paired content as sensitive when their
-semantic `name` is a supported credential field. Quoted, unquoted, and
-embedded serialized assignments consume the complete sensitive value, and
+semantic `name` is a supported credential field. `=` assignments, quoted
+values, single-token `:` assignments, and embedded serialized forms consume
+the complete sensitive value. Quote a multiword value after `:`; an unquoted
+multiword colon clause is not removed wholesale based only on its label, while
+independently recognized secrets are still redacted. Valid padding on Basic and
+Bearer authorization values is removed with the credential, and
 existing Verdict redaction/hash placeholders remain unchanged when storage
 reapplies the boundary. Agent Run names and descriptive service, version, and
 environment fields cross the same boundary; routing IDs remain unchanged. The detector is

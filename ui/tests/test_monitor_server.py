@@ -1,11 +1,25 @@
 import asyncio
 import sqlite3
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from hashlib import sha256
 
 import httpx
+import pytest
 from fastapi import FastAPI, Request
 from verdict.dashboard.app import create_app
-from verdict.monitoring import CohortManifest, MonitorComparison, MonitorPolicy, MonitorStatus
+from verdict.monitoring import (
+    AnalysisUnitRecord,
+    CohortManifest,
+    MonitorComparison,
+    MonitorPolicy,
+    MonitorStatus,
+    compare_manifest,
+    monitor_policy_to_json,
+    monitor_snapshot_to_json,
+    plan_historical_manifest,
+    plan_prospective_manifest,
+)
 from verdict.schema import (
     ClusterIdentity,
     ClusterRegistryCluster,
@@ -75,6 +89,7 @@ def test_monitor_preview_includes_default_tenantless_sdk_traces(tmp_path):
                 "/api/monitor/preview",
                 headers={"X-Verdict-Setup": token},
                 json={
+                    "analysisUnit": "trace",
                     "windowMode": "count",
                     "referenceRatio": 0.5,
                     "minimumReference": 5,
@@ -88,6 +103,85 @@ def test_monitor_preview_includes_default_tenantless_sdk_traces(tmp_path):
     manifest = response.json()["snapshot"]["manifest"]
     assert len(manifest["reference_unit_ids"]) == 10
     assert len(manifest["current_unit_ids"]) == 10
+
+
+@pytest.mark.parametrize("analysis_unit", ["turn", "run", "session"])
+def test_monitor_preview_rejects_unsupported_analysis_units(
+    tmp_path,
+    analysis_unit: str,
+):
+    database = tmp_path / f"unsupported-{analysis_unit}.db"
+    _insert_traces(database, 20)
+
+    async def preview():
+        app = create_app(storage=f"sqlite:///{database}")
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            return await client.post(
+                "/api/monitor/preview",
+                headers={"X-Verdict-Setup": token},
+                json={
+                    "analysisUnit": analysis_unit,
+                    "windowMode": "count",
+                    "referenceRatio": 0.5,
+                    "minimumReference": 5,
+                    "minimumCurrent": 5,
+                },
+            )
+
+    response = asyncio.run(preview())
+
+    assert response.status_code == 400
+    assert response.json() == {
+        "error": "Monitor currently supports only the trace analysis unit."
+    }
+    connection = sqlite3.connect(database)
+    try:
+        assert connection.execute("SELECT COUNT(*) FROM monitor_policies").fetchone()[0] == 0
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize("analysis_unit", ["Trace", "span", None, 42, ["trace"]])
+def test_monitor_preview_rejects_invalid_analysis_units_without_persistence(
+    tmp_path,
+    analysis_unit,
+):
+    database = tmp_path / "invalid-analysis-unit.db"
+    _insert_traces(database, 20)
+
+    async def preview():
+        app = create_app(storage=f"sqlite:///{database}")
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            return await client.post(
+                "/api/monitor/preview",
+                headers={"X-Verdict-Setup": token},
+                json={
+                    "analysisUnit": analysis_unit,
+                    "windowMode": "count",
+                    "referenceRatio": 0.5,
+                    "minimumReference": 5,
+                    "minimumCurrent": 5,
+                },
+            )
+
+    response = asyncio.run(preview())
+
+    assert response.status_code == 400
+    connection = sqlite3.connect(database)
+    try:
+        assert connection.execute("SELECT COUNT(*) FROM monitor_policies").fetchone()[0] == 0
+    finally:
+        connection.close()
 
 
 def test_monitor_uses_the_configured_dashboard_tenant_and_scope(tmp_path):
@@ -1235,3 +1329,104 @@ def test_legacy_monitor_requires_guided_rebootstrap(tmp_path):
     assert state.json()["active"]["rebootstrapRequired"] is True
     assert run.status_code == 409
     assert run.json() == {"error": "monitor requires re-bootstrap"}
+
+
+def test_published_non_trace_monitor_is_readable_but_cannot_run(tmp_path):
+    database = tmp_path / "published-session.db"
+    SQLiteStorage(str(database)).close()
+    policy = MonitorPolicy(
+        "published-session",
+        "__verdict_local__:application:trace",
+        analysis_unit="session",
+        reference_ratio=0.5,
+        minimum_reference=2,
+        minimum_current=2,
+    )
+    units = tuple(
+        AnalysisUnitRecord(
+            f"unit-{index}",
+            NOW + timedelta(minutes=index),
+            {"failed": index >= 4},
+        )
+        for index in range(8)
+    )
+    trace_policy = replace(policy, analysis_unit="trace")
+    historical = plan_historical_manifest(
+        units,
+        trace_policy,
+        cutoff=NOW + timedelta(hours=1),
+    )
+    manifest = plan_prospective_manifest(
+        historical,
+        (),
+        trace_policy,
+        prospective_start_at=NOW + timedelta(hours=2),
+    )
+    comparison = compare_manifest((), manifest, trace_policy)
+    manifest = replace(manifest, policy_fingerprint=policy.fingerprint)
+    policy_payload = monitor_policy_to_json(policy)
+    snapshot_payload = monitor_snapshot_to_json(manifest, comparison)
+    connection = sqlite3.connect(database)
+    try:
+        now = NOW.isoformat()
+        connection.execute(
+            "INSERT INTO monitor_policies "
+            "(policy_id,scope_key,state,content_hash,payload_json,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (
+                policy.policy_id,
+                policy.scope_key,
+                "active",
+                sha256(policy_payload.encode()).hexdigest(),
+                policy_payload,
+                now,
+                now,
+            ),
+        )
+        connection.execute(
+            "INSERT INTO monitor_snapshots "
+            "(snapshot_id,policy_id,cutoff,content_hash,payload_json,created_at) "
+            "VALUES (?,?,?,?,?,?)",
+            (
+                manifest.snapshot_id,
+                policy.policy_id,
+                manifest.cutoff.isoformat(),
+                sha256(snapshot_payload.encode()).hexdigest(),
+                snapshot_payload,
+                now,
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    async def inspect_and_run():
+        app = create_app(storage=f"sqlite:///{database}")
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            state = await client.get("/api/monitor")
+            data = await client.get("/api/data")
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            run = await client.post(
+                "/api/monitor/run",
+                headers={"X-Verdict-Setup": token},
+            )
+            return state, data, run
+
+    state, data, run = asyncio.run(inspect_and_run())
+
+    assert state.status_code == data.status_code == 200
+    assert state.json()["state"] == "requires_rebootstrap"
+    assert state.json()["active"]["rebootstrapRequired"] is True
+    assert "unsupported analysis unit" in state.json()["active"]["rebootstrapReason"]
+    assert data.json()["monitor"]["state"] == "requires_rebootstrap"
+    assert run.status_code == 409
+    assert run.json() == {"error": "monitor requires re-bootstrap"}
+    connection = sqlite3.connect(database)
+    try:
+        assert connection.execute("SELECT COUNT(*) FROM monitor_snapshots").fetchone()[0] == 1
+    finally:
+        connection.close()

@@ -2130,7 +2130,7 @@ def _build(
         group = workload if workload in {"agent", "judge"} else "unclassified"
         if workload != "judge":
             explorer_trace_ids.append(r["trace_id"])
-        if workload != "judge" and (
+        if workload not in {"judge", "paired_replay"} and (
             report_start is None or report_start <= _dt(r["started_at"]) < report_end
         ):
             management_trace_ids.append(r["trace_id"])

@@ -29,6 +29,9 @@ for ingesting or inspecting evidence.
    suspends the affected claim instead of silently rebasing it.
 10. Candidate activation and rollback select immutable versions; historical
     results do not change meaning.
+11. Monitor policies currently use one genuine model-call Trace as the only
+    supported analysis unit. A stored policy naming another unit remains
+    readable but cannot execute and requires a trace-based replacement.
 
 ## Components
 

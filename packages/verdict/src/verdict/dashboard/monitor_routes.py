@@ -31,12 +31,16 @@ from verdict.monitoring import (
     monitor_snapshot_to_json,
     plan_historical_manifest,
     plan_prospective_manifest,
+    validate_monitor_analysis_unit,
 )
 
 TENANT = LOCAL_TENANT
 SCOPE = LOCAL_TRACE_SCOPE
 
 _BOUNDED_MONITOR_ERRORS = {
+    "Monitor currently supports only the trace analysis unit.": (
+        "Monitor currently supports only the trace analysis unit."
+    ),
     "monitor grouping exceeds 250 groups": (
         "Monitor supports at most 250 groups. Choose no grouping or reduce the "
         "number of provider/model or cluster groups."
@@ -128,7 +132,9 @@ class MonitorRoutes:
                     if parsed.tzinfo is None
                     else parsed.astimezone(timezone.utc)
                 )
-        return MonitorPolicy(**values)
+        policy = MonitorPolicy(**values)
+        validate_monitor_analysis_unit(policy)
+        return policy
 
     def cluster_registry_selection(self, writable, payload: dict[str, Any]):
         if payload.get("groupingMode", "none") != "cluster":
@@ -158,7 +164,10 @@ class MonitorRoutes:
         if state == "requires_rebootstrap":
             result["rebootstrapRequired"] = True
             result["rebootstrapReason"] = (
-                "This monitor predates immutable cohort evidence. Preview and "
+                "This monitor uses an unsupported analysis unit. Preview and "
+                "activate a trace-based replacement before running it again."
+                if policy.analysis_unit != "trace"
+                else "This monitor predates immutable cohort evidence. Preview and "
                 "activate a replacement before running it again."
             )
         return result

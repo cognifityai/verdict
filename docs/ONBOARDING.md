@@ -442,8 +442,12 @@ Supported credential field names such as `password`, `api_key`, `token`,
 the complete opaque value to be removed, including explicit plural containers
 such as `passwords` and `api_keys`. Typed Agent instruction, context, and
 outcome events remove paired content when their semantic `name` is one of these
-credential fields. This includes quoted, unquoted, and
-embedded assignments in serialized text. Existing Verdict redaction and hash
+credential fields. This includes embedded assignments in serialized text.
+Complete `=` values, quoted values, and single-token `:` values are removed.
+Quote a multiword value after `:`;
+unquoted multiword colon clauses are not removed wholesale based only on their
+label, while independently recognized secrets are still redacted. Basic and
+Bearer padding is removed with the credential. Existing Verdict redaction and hash
 placeholders remain terminal when capture and storage apply the boundary more
 than once. Agent Run names and descriptive service, version, and environment
 fields use the same boundary while routing IDs remain unchanged; flat GitHub,
@@ -626,7 +630,7 @@ persists the health record, exits 2, and does not write production judgments.
 The dashboard shows per-provider traffic, optional intent clusters, and pass
 rates by rubric dimension. **Report** shows application-only request, tokens
 processed, latency, cost, service, and model summaries; evaluator calls are
-excluded. Where exact cache evidence exists, Report separates cached and
+excluded, as are Verdict-owned paired-replay calls. Where exact cache evidence exists, Report separates cached and
 uncached input and states the covered call count. The default period is the
 last 30 UTC calendar days; 7-day, 90-day, and all-time
 choices are available. The timeline contains up to 31 active dates in the
@@ -771,7 +775,8 @@ the other captured workloads.
   inject the authorized registry tenant rather than trusting a browser query
   parameter; that same value projects active assignments and stable labels
   throughout the tenant-scoped views.
-- **Cohorts use event time.** Monitor uses the trace's captured event time, not
+- **Cohorts use event time.** Monitor currently supports one genuine model-call
+  Trace per analysis unit. Monitor uses the trace's captured event time, not
   the time a judgment or import was written. A historical preview freezes its
   selected membership and normalized facts. Activation records an event-time
   boundary and opens an empty prospective bucket, so older imported events do
@@ -784,6 +789,8 @@ the other captured workloads.
   Fixed-window rows created by older releases remain read-only legacy records.
   They have no tenant owner and are therefore suppressed by the tenant-scoped
   dashboard; use the current Monitor workflow instead.
+  Stored policies naming a non-Trace analysis unit also remain readable but
+  require a new trace-based preview before execution.
 - **Legacy mode is single-tenant per store.** Registry `active` mode requires
   `--tenant-id` and fetches only that authorized trace scope, so an
   unrelated tenant in shared PostgreSQL does not block the run. `off` retains

@@ -162,7 +162,11 @@ target deployment before relying on them.
   addition to PII patterns. Supported credential field names are normalized
   across case, separators, and camel case; password, API-key, token,
   secret-key, cookie, passcode, authorization, and credential variants remove
-  their complete quoted, unquoted, or embedded serialized values. Explicit
+  their complete `=` values, quoted values, single-token `:` values, or
+  embedded serialized forms. Multiword `:` values require quotes; unquoted
+  multiword colon clauses are not removed wholesale based only on the label,
+  while independently recognized secrets remain redacted. Basic and Bearer
+  token padding is included in the removed credential. Explicit
   plural credential containers such as `passwords` and `api_keys` follow the
   same rule. Typed Agent instruction, context, and outcome events remove paired
   content when their semantic `name` is a supported credential field. Existing

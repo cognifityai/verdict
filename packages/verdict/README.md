@@ -129,7 +129,8 @@ write failures increment the process-local `capture.dropped_records` metric and
 produce a bounded warning.
 
 The Monitor UI previews an immutable count-based (older 80% / newer 20% by
-default) or explicit-date policy before activation. Each metric has its own
+default) or explicit-date policy before activation. One genuine model-call
+Trace is the only currently supported analysis unit. Each metric has its own
 eligible denominator, Fisher's exact p-value, Benjamini-Hochberg adjustment,
 and effect-size gate. With provider/model or reviewed-cluster grouping, Verdict
 computes separate group-by-metric comparisons and adjusts across the complete
@@ -158,8 +159,9 @@ evaluator, dimensions, grouping version, and trace selection as the dashboard.
 `verdict-service` executes the dashboard's saved schedule once or continuously.
 The approved baseline membership and normalized metric counts are immutable.
 Grouped monitors are limited to 250 distinct groups. Older stored monitors
-without frozen cohort facts, or without evaluator-finalization state when an
-evaluator is selected, require a new reviewed preview before execution.
+without frozen cohort facts, without evaluator-finalization state when an
+evaluator is selected, or naming a non-Trace analysis unit remain readable but
+require a new reviewed preview before execution.
 
 The dashboard reads key-free findings from immutable analysis snapshots rather
 than recomputing them on every page load. It reports provider outcome,
@@ -168,8 +170,9 @@ evaluation status, finding severity, and drift comparison independently.
 monitor distinguishes traffic collection from a full cohort awaiting selected
 evaluator results.
 The dashboard has six top-level workspaces: Overview, Explore, Evaluate,
-Monitor, Report, and Settings. Report summarizes non-judge application calls
-over the last 30 UTC calendar days by default, with 7-day, 90-day, and all-time
+Monitor, Report, and Settings. Report summarizes application calls excluding
+Verdict-owned judge and paired-replay work over the last 30 UTC calendar days
+by default, with 7-day, 90-day, and all-time
 choices. Its chart shows up to 31 active dates in the selected period, plus the
 top 20 service/environment rows and top 20 models. Latency coverage uses every
 known value in the period; p50/p95 use the newest 10,000 known latencies.
@@ -198,8 +201,12 @@ such as `password`, `api_key`, `token`, `secret_key`, `cookie`, and `passcode`,
 including explicit plural containers such as `passwords` and `api_keys`, are
 removed without relying on their text shape. Typed Agent instruction, context,
 and outcome events also remove paired content when their semantic `name` is a
-supported credential field. Complete quoted, unquoted, and
-embedded serialized assignment values are removed; existing Verdict
+supported credential field. Complete `=` assignment values, quoted values,
+single-token `:` assignment values, and embedded serialized forms are removed.
+Multiword values after `:` must be quoted because unquoted multiword colon
+clauses are not removed wholesale based only on their label; independently
+recognized secrets are still redacted. Basic and Bearer credential padding is
+included in the removed value. Existing Verdict
 redaction/hash placeholders remain terminal across repeated storage passes.
 Agent Run names and descriptive service, version, and environment fields cross
 the same boundary while routing IDs remain unchanged.

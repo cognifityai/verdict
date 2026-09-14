@@ -1,5 +1,6 @@
 import json
 import random
+import re
 import string
 from copy import deepcopy
 
@@ -756,7 +757,7 @@ def test_common_provider_keys_and_secret_assignments_are_redacted() -> None:
             r'"{\"api\u005cu005fkey\":\"opaquecredential123\"}"',
             r'"{\"api\u005cu005fkey\":\"<SECRET>\"}"',
         ),
-        ("password: correct horse battery staple", "password: <SECRET>"),
+        ('password: "correct horse battery staple"', 'password: "<SECRET>"'),
         (
             "password=hunter2!Xq#9$z status=ok",
             "password=<SECRET> status=ok",
@@ -772,6 +773,119 @@ def test_sensitive_assignments_remove_the_complete_value(
     expected: str,
 ) -> None:
     assert redact(text) == expected
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "To reset your password: open Settings and choose Security.",
+        "Session token: expires after 30 minutes of inactivity.",
+        "We use one cookie: it remembers your language preference.",
+        "Password: must contain at least 12 characters.",
+        "API key: use the Credentials page to create one.",
+        "Access token: expires automatically after one hour.",
+        "Client secret: rotate it from the administrator console.",
+        "Passphrase: should be memorable but difficult to guess.",
+        "Authorization: use OAuth for production integrations.",
+        "Authorization: Basic authentication remains supported here.",
+        "Authorization: Basic authentication",
+        "Credentials: contact your administrator for access.",
+    ],
+)
+def test_sensitive_words_in_natural_language_are_not_assignments(text: str) -> None:
+    assert redact(text) == text
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("password: hunter2", "password: <SECRET>"),
+        ("api_key: opaquecredential123", "api_key: <SECRET>"),
+        ('passphrase: "correct horse battery staple"', 'passphrase: "<SECRET>"'),
+        ("password: hunter2 status=ok", "password: <SECRET> status=ok"),
+    ],
+)
+def test_unambiguous_colon_assignments_still_redact(
+    text: str,
+    expected: str,
+) -> None:
+    assert redact(text) == expected
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (
+            "Authorization: Bearer abcdefghijklmnopqrstuvwxyz012345=",
+            "Authorization: <SECRET>",
+        ),
+        (
+            "Authorization:\tBearer\tabcdefghijklmnopqrstuvwxyz012345==",
+            "Authorization:\t<SECRET>",
+        ),
+        (
+            "Proxy-Authorization: Basic dXNlcjpwYXNzd29yZA==",
+            "Proxy-Authorization: <SECRET>",
+        ),
+        (
+            "authorization=Bearer abcdefghijklmnopqrstuvwxyz012345== status=ok",
+            "authorization=<SECRET> status=ok",
+        ),
+    ],
+)
+def test_padded_authorization_values_are_fully_redacted(
+    text: str,
+    expected: str,
+) -> None:
+    assert redact(text) == expected
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "authorization: basic dXNlcjpwYXNzd29yZA==",
+        "AUTHORIZATION = Bearer abcdefghijklmnopqrstuvwxyz012345=",
+        "Proxy_Authorization:\tBasic\tdXNlcjpwYXNzd29yZA==",
+        "level=debug Authorization: Bearer abcdefghijklmnopqrstuvwxyz012345==",
+        "-H 'Authorization: Bearer abcdefghijklmnopqrstuvwxyz012345=='",
+        r'{"message":"Authorization: Bearer abcdefghijklmnopqrstuvwxyz012345=="}',
+        "Authorization: Bearer 012345678901234567890123456789==",
+        "Authorization: Bearer +/abcdefghijklmnopqrstuvwxyz==",
+        "Authorization: Bearer abcdefghijklmnopqrstuvwxyz%3D%3D",
+    ],
+)
+def test_authorization_padding_variants_do_not_retain_credentials(text: str) -> None:
+    output = redact(text)
+
+    assert "dXNlcjpwYXNzd29yZA" not in output
+    assert "abcdefghijklmnopqrstuvwxyz" not in output
+    assert "012345678901234567890123456789" not in output
+
+
+def test_padded_authorization_hash_is_complete_and_idempotent() -> None:
+    text = "Authorization: Bearer abcdefghijklmnopqrstuvwxyz012345=="
+
+    output = redact(text, mode="hash", secret="test-secret")
+
+    assert output is not None
+    assert "abcdefghijklmnopqrstuvwxyz012345" not in output
+    assert re.fullmatch(r"Authorization: <SECRET:[0-9a-f]{12}>", output)
+    assert redact(output, mode="hash", secret="test-secret") == output
+
+
+def test_padded_authorization_stops_at_following_assignment_and_line() -> None:
+    credential = "abcdefghijklmnopqrstuvwxyz012345=="
+    text = (
+        f"Authorization: Bearer {credential}, status=ok\n"
+        "message=available"
+    )
+
+    output = redact(text)
+
+    assert output == (
+        "Authorization: <SECRET>, status=ok\n"
+        "message=available"
+    )
 
 
 @pytest.mark.parametrize("punctuation", string.punctuation)
