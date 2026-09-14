@@ -1731,6 +1731,9 @@ def _empty_management_metric() -> dict[str, Any]:
         "inputTokens": 0,
         "outputTokens": 0,
         "tokenKnownCalls": 0,
+        "cachedInputTokens": 0,
+        "uncachedInputTokens": 0,
+        "inputBreakdownKnownCalls": 0,
         "costUsd": 0.0,
         "costKnownCalls": 0,
         "latencyTotalMs": 0.0,
@@ -1745,7 +1748,19 @@ def _nonnegative_number(value: object) -> float | None:
     return number if math.isfinite(number) and number >= 0 else None
 
 
-def _record_management_metric(metric: dict[str, Any], row: Mapping[str, Any]) -> None:
+def _cached_input_tokens(tags: object, input_tokens: float | None) -> int | None:
+    if input_tokens is None or not isinstance(tags, dict):
+        return None
+    value = tags.get("verdict.cached_input_tokens")
+    if not isinstance(value, str) or re.fullmatch(r"(?:0|[1-9][0-9]{0,18})", value) is None:
+        return None
+    cached = int(value)
+    return cached if cached <= input_tokens else None
+
+
+def _record_management_metric(
+    metric: dict[str, Any], row: Mapping[str, Any], tags: object
+) -> None:
     metric["calls"] += 1
     if row["error"]:
         metric["failedCalls"] += 1
@@ -1759,6 +1774,11 @@ def _record_management_metric(metric: dict[str, Any], row: Mapping[str, Any]) ->
         metric["outputTokens"] += int(output_tokens)
     if input_tokens is not None and output_tokens is not None:
         metric["tokenKnownCalls"] += 1
+    cached_input_tokens = _cached_input_tokens(tags, input_tokens)
+    if cached_input_tokens is not None and input_tokens is not None:
+        metric["cachedInputTokens"] += cached_input_tokens
+        metric["uncachedInputTokens"] += int(input_tokens) - cached_input_tokens
+        metric["inputBreakdownKnownCalls"] += 1
     cost = _nonnegative_number(row["cost_usd"])
     if cost is not None:
         metric["costUsd"] += cost
@@ -1782,6 +1802,9 @@ def _finish_management_metric(metric: Mapping[str, Any]) -> dict[str, Any]:
         "outputTokens": int(metric["outputTokens"]),
         "totalTokens": int(metric["inputTokens"] + metric["outputTokens"]),
         "tokenKnownCalls": int(metric["tokenKnownCalls"]),
+        "cachedInputTokens": int(metric["cachedInputTokens"]),
+        "uncachedInputTokens": int(metric["uncachedInputTokens"]),
+        "inputBreakdownKnownCalls": int(metric["inputBreakdownKnownCalls"]),
         "costUsd": round(metric["costUsd"], 9) if metric["costKnownCalls"] else None,
         "costKnownCalls": int(metric["costKnownCalls"]),
         "averageLatencyMs": round(metric["latencyTotalMs"] / known_latency, 1)
@@ -2111,7 +2134,7 @@ def _build(
             report_start is None or report_start <= _dt(r["started_at"]) < report_end
         ):
             management_trace_ids.append(r["trace_id"])
-            _record_management_metric(management_scope, r)
+            _record_management_metric(management_scope, r, tags)
             started_at = _dt(r["started_at"])
             management_first = min(management_first, started_at) if management_first else started_at
             management_latest = max(management_latest, started_at) if management_latest else started_at
@@ -2134,11 +2157,11 @@ def _build(
             application = management_applications.setdefault(
                 (service or None, environment), _empty_management_metric()
             )
-            _record_management_metric(application, r)
+            _record_management_metric(application, r, tags)
             model_metric = management_models.setdefault(
                 (provider, model), _empty_management_metric()
             )
-            _record_management_metric(model_metric, r)
+            _record_management_metric(model_metric, r, tags)
             date = started_at.date().isoformat()
             day = management_days.setdefault(
                 date, {"date": date, "calls": 0, "totalTokens": 0,

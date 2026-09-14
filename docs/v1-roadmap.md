@@ -11,8 +11,10 @@ agents. It can capture supported provider calls or import existing telemetry,
 store traces, evaluate responses with a rubric, cluster similar prompts, and
 inspect quality or cost changes over time. The local Claude Code/Codex adapter
 and framework-neutral application SDK also store typed, bounded source
-sessions, runs, turns, and observable events without relabeling them as
-provider calls.
+sessions, runs, turns, and observable events without relabeling those records
+as provider calls. When the separate standard Codex diagnostic database is
+available, its completed sampling markers add metadata-only OpenAI traces
+without inventing links back to Agent Runs.
 
 Today, Verdict can capture or import and evaluate calls such as:
 

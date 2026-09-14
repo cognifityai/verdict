@@ -84,9 +84,11 @@ fixed-window rows have no tenant owner, so the tenant-scoped dashboard does not
 display them. Cluster and
 monitor activation are explicit transitions; a stored historical candidate is
 shown separately from the active prospective monitor and survives page reload.
-Report presents application-only request, token, latency, cost, service, and
-model summaries; Verdict judge calls are excluded. It defaults to the last 30
-UTC calendar days, with 7-day, 90-day, and all-time choices. The chart shows up
+Report presents application-only request, tokens processed, latency, cost,
+service, and model summaries; Verdict judge calls are excluded. When a source
+supplies exact cache evidence, the report also separates cached from uncached
+input tokens and states how many calls have that breakdown. It defaults to the
+last 30 UTC calendar days, with 7-day, 90-day, and all-time choices. The chart shows up
 to 31 active dates in that period; tables contain at most 20 service/environment
 rows and 20 model rows. Latency coverage uses every known value in the period;
 p50/p95 use the newest 10,000
@@ -630,11 +632,11 @@ source. See [`ADR-013`](docs/adrs/013-stable-dependent-package-read-port.md).
   redaction uses a linear email scanner plus regex candidates, Luhn card checks,
   and standard-library IP validation. Presidio is not used.
 - **Agent-run evidence is source-bounded.** Local Claude Code/Codex capture and
-  explicit application SDK contexts persist source/run/turn/event rows
-  atomically and separately from genuine
-  provider `Trace` rows. Model-call events link to the Trace that owns LLM
-  request/response content; Verdict does not duplicate that content in the
-  event. Run detail reads page the normalized event timeline instead of loading
+  explicit application SDK contexts persist source/run/turn/event bundles
+  atomically. Those rows remain separate from provider `Trace` rows. When a
+  source supplies exact correlation, model-call events link to the Trace that
+  owns LLM request/response content; Verdict does not duplicate that content in
+  the event. Run detail reads page the normalized event timeline instead of loading
   one growing serialized run. The SDK can record typed tool/result, command,
   test, artifact, retry, handoff, feedback, and outcome events supplied by the
   application. Local-history adapters remain limited to evidence present in
@@ -654,9 +656,21 @@ source. See [`ADR-013`](docs/adrs/013-stable-dependent-package-read-port.md).
   Malformed or unavailable counters remain unavailable rather than becoming
   zero. These local-history token counts remain observable, but
   Verdict does not convert them into API-list-price spend because desktop or
-  subscription billing is not established by those files. Codex runs remain
-  outside LLM Trace comparisons when the source does not expose genuine model
-  request/response boundaries.
+  subscription billing is not established by those files. For the standard
+  `~/.codex/sessions` source, local capture also reads completed-call metadata
+  directly from the sibling `~/.codex/logs_2.sqlite`; no export is required.
+  Supported completion markers become metadata-only OpenAI traces containing
+  model and observed response time. When one valid usage event from the same
+  session matches the completion timestamp, the trace also includes its input
+  and output token counts. A valid cached-input count is retained in trace
+  metadata so reporting can show cached and uncached input without changing the
+  trace schema. Prompt, response, latency, cost, diagnostic body,
+  and raw source identifiers are never copied from diagnostics. These traces
+  are not evaluator inputs and are not speculatively linked to Agent Runs.
+  Codex diagnostic and session retention can differ, so their counts and token
+  coverage can differ. An absent,
+  malformed, symlinked, or changed diagnostic source fails closed without
+  blocking the existing history import.
 - A supported instrumented provider call made inside a manual span now stores
   that span's ID in `Trace.parent_span_id`. This is the sole automatic link
   direction: one manual span can contain many distinct provider calls, so no
