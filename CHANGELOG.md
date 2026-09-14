@@ -6,6 +6,8 @@ the product is refined.
 
 ## [Unreleased]
 
+## [0.1.0a18] - 2026-09-13
+
 ### Fixed
 
 - Structured Agent, tool, provider, span, and telemetry evidence now removes
@@ -156,6 +158,18 @@ the product is refined.
   local-agent evidence without treating all Agent Runs as local history.
 - Collector routes support the AnyIO 3 and early AnyIO 4 versions permitted by
   Verdict's existing dependency range.
+
+### Known limitations
+
+- Best-effort redaction does not yet interpret Agent semantic name/value pairs
+  or plural credential containers as one sensitive field; see issues
+  [#79](https://github.com/cognifityai/verdict/issues/79) and
+  [#80](https://github.com/cognifityai/verdict/issues/80). Sanitize those values
+  before capture.
+- Evaluator-health rows are not tenant-owned yet. A shared store can display a
+  different tenant's health aggregates when evaluator fingerprints match; see
+  [#78](https://github.com/cognifityai/verdict/issues/78). Keep each POC store
+  and standalone dashboard single-tenant.
 
 ## [0.1.0a17] - 2026-09-07
 

@@ -1,4 +1,4 @@
-# Run a customer POC with Verdict 0.1.0a17
+# Run a customer POC with Verdict 0.1.0a18
 
 Use this profile to demonstrate Verdict on verified provider calls without
 presenting the public alpha as production-ready. The historical `0.1.0a4`
@@ -11,17 +11,21 @@ provider, dashboard, semantic, and storage extras the POC needs:
 
 ```bash
 python -m pip install \
-  "cognifity-verdict[anthropic,openai,google,dashboard]==0.1.0a17" \
-  "cognifity-verdict-eval[semantic]==0.1.0a17" \
-  "cognifity-verdict-inspect==0.1.0a17"
+  "cognifity-verdict[anthropic,openai,google,dashboard]==0.1.0a18" \
+  "cognifity-verdict-eval[semantic]==0.1.0a18" \
+  "cognifity-verdict-inspect==0.1.0a18"
 python -m pip check
 python -c "import verdict, verdict_eval, verdict_inspect; print(verdict.__version__, verdict_eval.__version__, verdict_inspect.__version__)"
 ```
 
-The final command must print `0.1.0a17 0.1.0a17 0.1.0a17`. Add the `postgres`
+The final command must print `0.1.0a18 0.1.0a18 0.1.0a18`. Add the `postgres`
 extra only when the existing deployment uses PostgreSQL. Back up an existing
-store and dependency lockfile before upgrading; the additive registry migration
-preserves existing trace and evaluation tables.
+store and dependency lockfile before upgrading. On first open, `0.1.0a18`
+transactionally migrates `0.1.0a17` Agent Run bundles into normalized source,
+run, turn, and event tables. Existing trace and evaluation tables remain
+readable, but an older Agent writer is rejected after that migration; restore
+the pre-upgrade backup rather than running `0.1.0a17` against the upgraded
+store.
 
 ## 2. Use a released provider entry point
 
@@ -59,6 +63,14 @@ Content capture uses best-effort pattern redaction, not a compliance boundary.
 Use only specifically approved data, or set `capture_content=False`. For
 content-dependent evaluation, approved non-sensitive fixtures in an isolated
 store remain the safest POC path.
+
+This release does not yet treat Agent semantic name/value pairs or plural
+credential containers as one sensitive field; see
+[#79](https://github.com/cognifityai/verdict/issues/79) and
+[#80](https://github.com/cognifityai/verdict/issues/80). Sanitize those values
+before capture. Evaluator-health rows are also not tenant-owned; until
+[#78](https://github.com/cognifityai/verdict/issues/78) is fixed, use one tenant
+per POC store and standalone dashboard.
 
 Provider credentials remain in the customer's environment. Never put API keys
 in the skill file, repository, SQLite database, screenshots, or support bundle.
@@ -111,7 +123,7 @@ semantic quality.
 
 The POC is ready to show only when all of these are true:
 
-1. All three installed packages report `0.1.0a17` and `python -m pip check` passes.
+1. All three installed packages report `0.1.0a18` and `python -m pip check` passes.
 2. The application uses only a provider entry point in the supported column.
 3. `buffered_writes` is `False`; content capture is approved for the named POC
    data or explicitly disabled before collection.
@@ -122,6 +134,7 @@ The POC is ready to show only when all of these are true:
    active tenant pointer; experimental strategies retain their disclosure.
 7. No credential or customer content appears in the skill, logs, screenshots,
    release material, or repository.
+8. The POC store and standalone dashboard are dedicated to one tenant.
 
 The standalone dashboard binds to loopback by default. Non-loopback binding is
 refused unless `VERDICT_USER`, `VERDICT_PASS`, and an explicit
