@@ -30,7 +30,7 @@ from verdict.evidence import (
     SourceSession,
     stable_evidence_id,
 )
-from verdict.redaction import redact, redact_structure
+from verdict.redaction import redact, redact_structure, sanitize_agent_event_attributes
 from verdict.schema import Trace
 
 log = logging.getLogger("verdict.agent")
@@ -239,10 +239,31 @@ class _TurnState:
     ) -> AgentEvent:
         has_content = bool(EVENT_CONTENT_FIELDS & attributes.keys())
         safe_attributes = {
-            key: _bounded_value(self.owner.client, value)
+            key: value
             for key, value in attributes.items()
             if self.owner.client.capture_content or key not in EVENT_CONTENT_FIELDS
         }
+        # Hash semantic credentials before bounding; the second pass below
+        # closes the same rule after malformed children become omission markers.
+        try:
+            attributes_for_bounding = sanitize_agent_event_attributes(
+                event_type,
+                safe_attributes,
+                mode=self.owner.client.redaction_mode,
+                secret=self.owner.client.redaction_secret,
+            )
+        except Exception:
+            attributes_for_bounding = safe_attributes
+        safe_attributes = {
+            key: _bounded_value(self.owner.client, value)
+            for key, value in attributes_for_bounding.items()
+        }
+        safe_attributes = sanitize_agent_event_attributes(
+            event_type,
+            safe_attributes,
+            mode=self.owner.client.redaction_mode,
+            secret=self.owner.client.redaction_secret,
+        )
         privacy = (
             PrivacyClassification.REDACTED
             if has_content and self.owner.client.capture_content

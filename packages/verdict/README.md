@@ -194,8 +194,11 @@ pattern and field-aware redaction, including common provider/API credentials,
 GitHub tokens, and authorization headers, recursively across supported
 JSON-compatible message and tool structures before content limits, `Trace`
 assignment, and storage. Opaque values under supported credential field names
-such as `password`, `api_key`, `token`, `secret_key`, `cookie`, and `passcode`
-are removed without relying on their text shape. Complete quoted, unquoted, and
+such as `password`, `api_key`, `token`, `secret_key`, `cookie`, and `passcode`,
+including explicit plural containers such as `passwords` and `api_keys`, are
+removed without relying on their text shape. Typed Agent instruction, context,
+and outcome events also remove paired content when their semantic `name` is a
+supported credential field. Complete quoted, unquoted, and
 embedded serialized assignment values are removed; existing Verdict
 redaction/hash placeholders remain terminal across repeated storage passes.
 Agent Run names and descriptive service, version, and environment fields cross

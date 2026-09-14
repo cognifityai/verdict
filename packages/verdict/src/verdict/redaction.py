@@ -20,7 +20,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
-    from verdict.evidence import AgentCaptureBatch, AgentRunBundle
+    from verdict.evidence import AgentCaptureBatch, AgentEventType, AgentRunBundle
     from verdict.schema import Judgment, SpanRecord, Trace
 
 RedactionMode = Literal["redact", "hash", "encrypt"]
@@ -107,6 +107,38 @@ _SENSITIVE_KEY_SUFFIXES = (
     "cookie",
     "passcode",
 )
+_SENSITIVE_KEY_PLURAL_WORD_SUFFIXES = (
+    ("passwords",),
+    ("passwds",),
+    ("pwds",),
+    ("passphrases",),
+    ("authorizations",),
+    ("api", "keys"),
+    ("api", "tokens"),
+    ("access", "tokens"),
+    ("auth", "tokens"),
+    ("bearer", "tokens"),
+    ("refresh", "tokens"),
+    ("session", "tokens"),
+    ("identity", "tokens"),
+    ("id", "tokens"),
+    ("github", "tokens"),
+    ("client", "secrets"),
+    ("private", "keys"),
+    ("secret", "access", "keys"),
+    ("secret", "keys"),
+    ("secrets",),
+    ("cookies",),
+    ("passcodes",),
+)
+_SENSITIVE_KEY_PLURAL_EXACT_NAMES = frozenset(
+    "".join(words) for words in _SENSITIVE_KEY_PLURAL_WORD_SUFFIXES
+)
+_AGENT_SEMANTIC_CONTENT_FIELDS = {
+    "instruction": frozenset({"text"}),
+    "context": frozenset({"text", "value"}),
+    "outcome": frozenset({"value"}),
+}
 _NON_SENSITIVE_TOKEN_FIELDS = frozenset(
     {
         "cachecreationinputtoken",
@@ -200,7 +232,15 @@ def _is_sensitive_key(key: str) -> bool:
     normalized = "".join(re.findall(r"[A-Za-z0-9]+", key)).lower()
     if normalized in _NON_SENSITIVE_TOKEN_FIELDS:
         return False
-    return any(normalized.endswith(suffix) for suffix in _SENSITIVE_KEY_SUFFIXES)
+    if any(normalized.endswith(suffix) for suffix in _SENSITIVE_KEY_SUFFIXES):
+        return True
+    separated = re.sub(r"(?<=[A-Z])(?=[A-Z][a-z])", " ", key)
+    separated = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", separated)
+    words = tuple(part.lower() for part in re.findall(r"[A-Za-z0-9]+", separated))
+    return normalized in _SENSITIVE_KEY_PLURAL_EXACT_NAMES or any(
+        words[-len(suffix) :] == suffix
+        for suffix in _SENSITIVE_KEY_PLURAL_WORD_SUFFIXES
+    )
 
 
 def _secret_value(
@@ -873,6 +913,26 @@ def redact_structure(
     return _REDACTED
 
 
+def sanitize_agent_event_attributes(
+    event_type: AgentEventType | str,
+    attributes: dict[str, Any],
+    mode: RedactionMode = "redact",
+    secret: str | None = None,
+) -> dict[str, Any]:
+    """Sanitize one typed Agent event attribute mapping."""
+    sanitized = redact_structure(attributes, mode=mode, secret=secret)
+    if not isinstance(sanitized, dict):
+        return {}
+    event_kind = event_type if isinstance(event_type, str) else event_type.value
+    paired_fields = _AGENT_SEMANTIC_CONTENT_FIELDS.get(event_kind, ())
+    semantic_name = attributes.get("name")
+    if isinstance(semantic_name, str) and _is_sensitive_key(semantic_name):
+        for field in paired_fields:
+            if field in sanitized:
+                sanitized[field] = _secret_value(sanitized[field], mode, secret)
+    return sanitized
+
+
 def _analyze_structure(
     value: Any,
     *,
@@ -1034,10 +1094,12 @@ def _sanitize_agent_capture(
     )
     events = []
     for event in capture.events:
-        attributes = {
-            key: redact_structure(value, mode=mode, secret=secret)
-            for key, value in event.attributes.items()
-        }
+        attributes = sanitize_agent_event_attributes(
+            event.event_type,
+            event.attributes,
+            mode=mode,
+            secret=secret,
+        )
         events.append(replace(event, attributes=attributes))
     return type(capture)(
         session=capture.session,

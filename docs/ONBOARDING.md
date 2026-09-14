@@ -424,7 +424,10 @@ are recursively sanitized before content limits, `Trace` assignment, and storage
 includes nested OpenAI tool arguments and Anthropic-style tool inputs/results.
 Supported credential field names such as `password`, `api_key`, `token`,
 `secret_key`, `cookie`, `passcode`, `authorization`, and `client_secret` cause
-the complete opaque value to be removed. This includes quoted, unquoted, and
+the complete opaque value to be removed, including explicit plural containers
+such as `passwords` and `api_keys`. Typed Agent instruction, context, and
+outcome events remove paired content when their semantic `name` is one of these
+credential fields. This includes quoted, unquoted, and
 embedded assignments in serialized text. Existing Verdict redaction and hash
 placeholders remain terminal when capture and storage apply the boundary more
 than once. Agent Run names and descriptive service, version, and environment

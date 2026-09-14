@@ -400,9 +400,24 @@ def test_live_postgres_agent_run_bundle_is_atomic_redacted_and_tenant_scoped():
         ),
         events=(
             verdict.AgentEvent(
-                event_id=f"event-{suffix}",
+                event_id=f"event-context-{suffix}",
                 turn_id=f"turn-{suffix}",
                 sequence=0,
+                occurred_at=now,
+                event_type=verdict.AgentEventType.CONTEXT,
+                status=verdict.ExecutionStatus.COMPLETED,
+                provenance="test:context",
+                attributes={
+                    "name": "api_key",
+                    "value": "opaque-postgres-canary",
+                    "source": "application",
+                },
+                privacy_classification=verdict.PrivacyClassification.REDACTED,
+            ),
+            verdict.AgentEvent(
+                event_id=f"event-{suffix}",
+                turn_id=f"turn-{suffix}",
+                sequence=1,
                 occurred_at=now,
                 event_type=verdict.AgentEventType.TOOL_RESULT,
                 status=verdict.ExecutionStatus.COMPLETED,
@@ -410,7 +425,12 @@ def test_live_postgres_agent_run_bundle_is_atomic_redacted_and_tenant_scoped():
                 attributes={
                     "tool_name": "lookup",
                     "call_id": "call-1",
-                    "result": {"password": "opaque-postgres-canary"},
+                    "result": {
+                        "password": "opaque-postgres-canary",
+                        "api_keys": ["opaque-postgres-canary"],
+                        "passwords": {"primary": "opaque-postgres-canary"},
+                        "input_tokens": 12345678,
+                    },
                     "is_error": False,
                 },
                 privacy_classification=verdict.PrivacyClassification.REDACTED,
@@ -428,7 +448,11 @@ def test_live_postgres_agent_run_bundle_is_atomic_redacted_and_tenant_scoped():
         assert loaded.turns[0].total_tokens == 12
         assert loaded.turns[0].cached_input_tokens == 4
         assert loaded.turns[0].response_truncated is True
-        assert loaded.events[0].attributes["result"]["password"] == "<SECRET>"
+        assert loaded.events[0].attributes["value"] == "<SECRET>"
+        assert loaded.events[1].attributes["result"]["password"] == "<SECRET>"
+        assert loaded.events[1].attributes["result"]["api_keys"] == "<SECRET>"
+        assert loaded.events[1].attributes["result"]["passwords"] == "<SECRET>"
+        assert loaded.events[1].attributes["result"]["input_tokens"] == 12345678
         assert loaded.run.agent_name == "api_key=<SECRET>"
         assert loaded.run.agent_version == "token=<SECRET>"
         assert loaded.run.service_name == "password=<SECRET>"
@@ -438,6 +462,30 @@ def test_live_postgres_agent_run_bundle_is_atomic_redacted_and_tenant_scoped():
         assert storage.list_agent_run_bundles(tenant, limit=10) == [loaded]
         assert storage.has_agent_run_source_kind(tenant, "unknown-agent") is True
         assert storage.has_agent_run_source_kind(tenant, "codex") is False
+        storage._exec(
+            "UPDATE agent_events SET attributes_json=%s::jsonb "
+            "WHERE tenant_id=%s AND event_id=%s",
+            (
+                json.dumps(
+                    {
+                        "name": "password",
+                        "value": "opaque-historical-postgres-canary",
+                    }
+                ),
+                tenant,
+                f"event-context-{suffix}",
+            ),
+        )
+        historical = storage.get_agent_run_bundle(tenant, bundle.run.run_id)
+        assert historical is not None
+        assert historical.events[0].attributes["value"] == "<SECRET>"
+        assert "opaque-historical-postgres-canary" not in verdict.agent_run_bundle_to_json(
+            historical
+        )
+        assert storage.list_agent_run_bundles(tenant, limit=10) == [historical]
+        detail = build_agent_run_detail(DSN, tenant=tenant, run_id=bundle.run.run_id)
+        assert "opaque-historical-postgres-canary" not in json.dumps(detail)
+        assert "opaque-postgres-canary" not in json.dumps(detail)
         assert storage._fetchone(
             "SELECT 1 FROM agent_run_bundles WHERE tenant_id=%s", (tenant,)
         ) is None
