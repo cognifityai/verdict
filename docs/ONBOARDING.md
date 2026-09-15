@@ -24,9 +24,9 @@ uv venv --python 3.12 && source .venv/bin/activate     # or your own 3.10+ venv
 
 # Include the provider extras you want to test live. Google capture needs `google`.
 python -m pip install \
-  "cognifity-verdict[anthropic,openai,google,dashboard]==0.1.0a18" \
-  "cognifity-verdict-eval[semantic]==0.1.0a18" \
-  "cognifity-verdict-inspect==0.1.0a18"
+  "cognifity-verdict[anthropic,openai,google,dashboard]==0.1.0a19" \
+  "cognifity-verdict-eval[semantic]==0.1.0a19" \
+  "cognifity-verdict-inspect==0.1.0a19"
 ```
 
 For a customer POC on the public alpha, use the pinned commands and provider
@@ -38,7 +38,7 @@ lists them as hard dependencies, so the line above brings them in.
 Minimal alternative without the local semantic model:
 
 ```bash
-python -m pip install "cognifity-verdict-eval==0.1.0a18"  # lexical hash fallback
+python -m pip install "cognifity-verdict-eval==0.1.0a19"  # lexical hash fallback
 ```
 
 Already on an earlier synchronized alpha? Use the upgrade command in the repository
@@ -202,7 +202,7 @@ process-local `capture.dropped_records` runtime metric for records rejected by a
 full or failed spool; equivalent failures produce one bounded warning per
 failure class.
 
-For a central PostgreSQL deployment, install `0.1.0a18` with its `postgres`
+For a central PostgreSQL deployment, install `0.1.0a19` with its `postgres`
 extra and start the authenticated collector:
 
 ```bash
@@ -284,7 +284,7 @@ source uses OTLP protobuf. JSON files and hosted API readers do not require that
 extra:
 
 ```bash
-python -m pip install "cognifity-verdict[telemetry]==0.1.0a18"
+python -m pip install "cognifity-verdict[telemetry]==0.1.0a19"
 
 verdict-import file ./traces.ndjson --format auto \
   --storage sqlite:///./verdict.db --tenant-id my-team
@@ -465,12 +465,12 @@ a linear `@`-anchored scanner to keep malformed and long inputs bounded. It
 remains best effort, not a compliance control, and opaque metadata such as
 tenant/session/cluster IDs must be non-sensitive. Set `capture_content=False`
 when the approved customer boundary is metadata-only; error categories remain
-available, but provider and manual-span exception messages are omitted. The `0.1.0a18` POC profile also keeps
+available, but provider and manual-span exception messages are omitted. The `0.1.0a19` POC profile also keeps
 `buffered_writes=False`; buffered mode requires an explicit `shutdown()`
 imported from `verdict.client` before process exit.
 
 Use only the provider methods listed in the
-[`POC release profile`](POC_RELEASE_PROFILE.md). Release `0.1.0a18` includes the
+[`POC release profile`](POC_RELEASE_PROFILE.md). Release `0.1.0a19` includes the
 Anthropic `messages.stream(...)` helper plus OpenAI `responses.create(...)`,
 `responses.parse(...)`, and `responses.stream(...)` for new or existing
 responses, in addition to the earlier Chat/Google paths. OpenAI's
@@ -590,7 +590,7 @@ cost/latency traces written to the same store. Those traces are tagged as the
 `judge` workload and excluded from future drift inputs so the evaluator does not
 become part of the workload it evaluates. The flag is off by default.
 
-For PostgreSQL, install `cognifity-verdict[dashboard,postgres]==0.1.0a18` and pass
+For PostgreSQL, install `cognifity-verdict[dashboard,postgres]==0.1.0a19` and pass
 the same protected storage URL used by the SDK. Evidence tables use Verdict's
 normal additive schema initialization. The dashboard control plane lazily
 creates its append-only configuration table on first use.
