@@ -186,3 +186,18 @@ test("legacy candidate requiring re-bootstrap is not mistaken for active", async
   assert.equal(state.active, null);
   assert.equal(state.candidate.rebootstrapReason, "Preview again");
 });
+
+test("snapshotless active monitor shows only the re-bootstrap guidance", async () => {
+  const html = await render(`React.createElement(Monitor, {
+    configUrl: "/api/config", view: "status",
+    initialState: { active: {
+      state: "requires_rebootstrap",
+      rebootstrapReason: "This monitor uses an unsupported analysis unit.",
+      policy: { policy_id: "legacy-session-policy" },
+    } },
+  })`);
+
+  assert.match(html, /This monitor uses an unsupported analysis unit/);
+  assert.match(html, /Configure the replacement/);
+  assert.doesNotMatch(html, /No comparison configured/);
+});

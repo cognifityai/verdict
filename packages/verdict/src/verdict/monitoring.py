@@ -969,14 +969,17 @@ def plan_historical_manifest(units, policy: MonitorPolicy, *, cutoff: datetime) 
 
 def monitor_requires_rebootstrap(
     policy: MonitorPolicy,
-    manifest: CohortManifest,
+    manifest: CohortManifest | None,
     *,
     active: bool = False,
 ) -> bool:
     """Return whether a legacy policy lacks immutable execution evidence."""
+    if policy.analysis_unit != "trace":
+        return True
+    if manifest is None:
+        return active
     return (
-        policy.analysis_unit != "trace"
-        or manifest.reference_summary is None
+        manifest.reference_summary is None
         or manifest.current_summary is None
         or (policy.grouping_mode == "cluster" and policy.cluster_registry_version_id is None)
         or (

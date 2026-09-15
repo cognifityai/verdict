@@ -126,6 +126,7 @@ def test_monitor_preview_rejects_unsupported_analysis_units(
                 headers={"X-Verdict-Setup": token},
                 json={
                     "analysisUnit": analysis_unit,
+                    "evaluatorFingerprint": "f" * 64,
                     "windowMode": "count",
                     "referenceRatio": 0.5,
                     "minimumReference": 5,
@@ -1430,3 +1431,87 @@ def test_published_non_trace_monitor_is_readable_but_cannot_run(tmp_path):
         assert connection.execute("SELECT COUNT(*) FROM monitor_snapshots").fetchone()[0] == 1
     finally:
         connection.close()
+
+
+def test_published_non_trace_monitor_without_snapshot_requires_rebootstrap(tmp_path):
+    database = tmp_path / "published-session-without-snapshot.db"
+    SQLiteStorage(str(database)).close()
+    policy = MonitorPolicy(
+        "published-session-without-snapshot",
+        "__verdict_local__:application:trace",
+        analysis_unit="session",
+    )
+    candidate = replace(policy, policy_id="published-candidate-without-snapshot")
+    policy_payload = monitor_policy_to_json(policy)
+    candidate_payload = monitor_policy_to_json(candidate)
+    connection = sqlite3.connect(database)
+    try:
+        now = NOW.isoformat()
+        connection.executemany(
+            "INSERT INTO monitor_policies "
+            "(policy_id,scope_key,state,content_hash,payload_json,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (
+                (
+                    policy.policy_id,
+                    policy.scope_key,
+                    "active",
+                    sha256(policy_payload.encode()).hexdigest(),
+                    policy_payload,
+                    now,
+                    now,
+                ),
+                (
+                    candidate.policy_id,
+                    candidate.scope_key,
+                    "candidate",
+                    sha256(candidate_payload.encode()).hexdigest(),
+                    candidate_payload,
+                    now,
+                    now,
+                ),
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    async def inspect_and_run():
+        app = create_app(storage=f"sqlite:///{database}")
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            state = await client.get("/api/monitor")
+            data = await client.get("/api/data")
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            run = await client.post(
+                "/api/monitor/run",
+                headers={"X-Verdict-Setup": token},
+            )
+            activate = await client.post(
+                "/api/monitor/activate",
+                headers={"X-Verdict-Setup": token},
+                json={
+                    "policyId": candidate.policy_id,
+                    "expectedActivePolicyId": policy.policy_id,
+                },
+            )
+            return state, data, run, activate
+
+    state, data, run, activate = asyncio.run(inspect_and_run())
+
+    assert state.status_code == data.status_code == 200
+    assert state.json()["state"] == "requires_rebootstrap"
+    assert state.json()["active"]["state"] == "requires_rebootstrap"
+    assert state.json()["active"]["policyState"] == "active"
+    assert state.json()["active"]["rebootstrapRequired"] is True
+    assert "unsupported analysis unit" in state.json()["active"]["rebootstrapReason"]
+    assert "snapshot" not in state.json()["active"]
+    assert state.json()["candidate"] is None
+    assert data.json()["monitor"]["state"] == "requires_rebootstrap"
+    assert run.status_code == 409
+    assert run.json() == {"error": "monitor requires re-bootstrap"}
+    assert activate.status_code == 409
+    assert activate.json() == {"error": "monitor requires re-bootstrap"}

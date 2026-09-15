@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import secrets
+from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any
 
@@ -146,7 +147,7 @@ class MonitorRoutes:
 
     @staticmethod
     def response(
-        policy, state, manifest, comparison, *, approved_historical=None,
+        policy, state, manifest=None, comparison=None, *, approved_historical=None,
         policy_state=None,
     ) -> dict[str, object]:
         result = {
@@ -155,8 +156,11 @@ class MonitorRoutes:
             "policyState": policy_state or (
                 "candidate" if state == "candidate" else "active"
             ),
-            "snapshot": json.loads(monitor_snapshot_to_json(manifest, comparison)),
         }
+        if manifest is not None and comparison is not None:
+            result["snapshot"] = json.loads(
+                monitor_snapshot_to_json(manifest, comparison)
+            )
         if approved_historical is not None:
             result["approvedHistoricalSnapshot"] = json.loads(
                 monitor_snapshot_to_json(*approved_historical)
@@ -185,11 +189,15 @@ class MonitorRoutes:
 
     def _stored_response(self, writable, policy, state):
         snapshot = writable.get_latest_monitor_snapshot(policy.policy_id)
-        if snapshot is None:
-            return {"policy": json.loads(monitor_policy_to_json(policy)), "state": state}
         policy_state = state
-        if monitor_requires_rebootstrap(policy, snapshot[0], active=state == "active"):
+        if monitor_requires_rebootstrap(
+            policy,
+            snapshot[0] if snapshot is not None else None,
+            active=state == "active",
+        ):
             state = "requires_rebootstrap"
+        if snapshot is None:
+            return self.response(policy, state, policy_state=policy_state)
         return self.response(
             policy,
             state,
@@ -232,6 +240,10 @@ class MonitorRoutes:
                 )
             writable = None
             try:
+                policy = self.policy(
+                    payload,
+                    f"policy-{secrets.token_hex(12)}",
+                )
                 writable = self.setup.writable_storage()
                 fingerprint, dimensions = select_monitor_evaluator(
                     writable,
@@ -239,9 +251,8 @@ class MonitorRoutes:
                     evaluator_fingerprint=payload.get("evaluatorFingerprint"),
                 )
                 cluster_version = self.cluster_registry_selection(writable, payload)
-                policy = self.policy(
-                    payload,
-                    f"policy-{secrets.token_hex(12)}",
+                policy = replace(
+                    policy,
                     evaluator_fingerprint=fingerprint,
                     evaluator_dimensions=dimensions,
                     cluster_registry_version_id=cluster_version,
@@ -292,13 +303,15 @@ class MonitorRoutes:
                 if stored is None or stored[1] != "candidate":
                     raise ValueError("unknown policy")
                 historical = writable.get_initial_monitor_snapshot(policy_id)
-                if historical is None:
-                    raise ValueError("candidate has no snapshot")
-                if monitor_requires_rebootstrap(stored[0], historical[0]):
+                if monitor_requires_rebootstrap(
+                    stored[0], historical[0] if historical is not None else None,
+                ):
                     return JSONResponse(
                         {"error": "monitor requires re-bootstrap"},
                         status_code=409,
                     )
+                if historical is None:
+                    raise ValueError("candidate has no snapshot")
                 latest = writable.get_latest_monitor_snapshot(policy_id)
                 if latest is None:
                     raise ValueError("candidate has no snapshot")
@@ -368,13 +381,15 @@ class MonitorRoutes:
                 if policy is None:
                     return JSONResponse({"error": "no active monitor"}, status_code=409)
                 previous = writable.get_latest_monitor_snapshot(policy.policy_id)
-                if previous is None:
-                    raise ValueError("active monitor has no snapshot")
-                if monitor_requires_rebootstrap(policy, previous[0], active=True):
+                if monitor_requires_rebootstrap(
+                    policy, previous[0] if previous is not None else None, active=True,
+                ):
                     return JSONResponse(
                         {"error": "monitor requires re-bootstrap"},
                         status_code=409,
                     )
+                if previous is None:
+                    raise ValueError("active monitor has no snapshot")
                 manifest, comparison = self.prospective(writable, policy)
                 return self.response(
                     policy, "active", manifest, comparison,
