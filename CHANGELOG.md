@@ -20,6 +20,15 @@ the product is refined.
   instruction, context, and outcome events also treat paired `text` or `value`
   content as sensitive when their semantic `name` is a supported credential
   field.
+- Padded Basic and Bearer authorization credentials are now removed completely.
+  Unquoted multiword colon clauses are no longer removed wholesale based only
+  on their label; quote multiword credential values after `:` or use `=`
+  assignment syntax.
+- Management-report utilization now excludes Verdict-owned paired-replay calls
+  along with judge calls.
+- Monitor now accepts Trace as its only executable analysis unit across the API,
+  projection, and storage boundaries. Existing non-Trace policies remain
+  readable but require replacement before another run.
 
 ## [0.1.0a18] - 2026-09-13
 

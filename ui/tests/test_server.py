@@ -167,6 +167,29 @@ def test_dashboard_api_preserves_captured_empty_content(tmp_path):
     assert api_sample["response_redacted"] == ""
 
 
+def test_dashboard_storage_removes_padded_authorization_without_truncating_prose(
+    tmp_path,
+):
+    path = tmp_path / "redaction-boundary.db"
+    credential = "abcdefghijklmnopqrstuvwxyz012345=="
+    prose = "To reset your password: open Settings and choose Security."
+    storage = SQLiteStorage(str(path))
+    storage.insert_trace(
+        Trace(
+            trace_id="redaction-boundary",
+            prompt_redacted=f"Authorization: Bearer {credential}",
+            response_redacted=prose,
+        )
+    )
+    storage.close()
+
+    [sample] = build_bundle(path)["samples"]
+
+    assert credential not in sample["prompt_redacted"]
+    assert sample["prompt_redacted"] == "Authorization: <SECRET>"
+    assert sample["response_redacted"] == prose
+
+
 def test_dashboard_api_paginates_application_traces_with_deterministic_ties(tmp_path):
     import httpx
 

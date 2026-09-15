@@ -39,6 +39,7 @@ from verdict.monitoring import (
     monitor_policy_to_json,
     monitor_snapshot_from_json,
     monitor_snapshot_to_json,
+    validate_monitor_analysis_unit,
 )
 from verdict.normalized_evidence import (
     LEGACY_AGENT_WRITER_ERROR,
@@ -1543,6 +1544,7 @@ class SQLiteStorage:
         return [notification_attempt_from_json(row["payload_json"]) for row in rows]
 
     def save_monitor_policy(self, policy: MonitorPolicy) -> None:
+        validate_monitor_analysis_unit(policy)
         payload = monitor_policy_to_json(policy)
         digest = hashlib.sha256(payload.encode()).hexdigest()
         now = _iso(datetime.now(timezone.utc))
@@ -1624,6 +1626,8 @@ class SQLiteStorage:
                 ).fetchone()
                 if target is None:
                     raise ValueError("unknown monitor policy")
+                target_policy = monitor_policy_from_json(target["payload_json"])
+                validate_monitor_analysis_unit(target_policy)
                 self._conn.execute(
                     "UPDATE monitor_policies SET state='retired',updated_at=? "
                     "WHERE scope_key=? AND state IN ('active','candidate') "
@@ -1638,7 +1642,7 @@ class SQLiteStorage:
             except BaseException:
                 self._conn.execute("ROLLBACK")
                 raise
-        return monitor_policy_from_json(target["payload_json"])
+        return target_policy
 
     def save_monitor_snapshot(
         self, policy_id: str, manifest: CohortManifest, comparison: MonitorComparison
@@ -1654,10 +1658,9 @@ class SQLiteStorage:
             ).fetchone()
             if policy is None:
                 raise ValueError("unknown policy")
-            if (
-                monitor_policy_from_json(policy["payload_json"]).fingerprint
-                != manifest.policy_fingerprint
-            ):
+            stored_policy = monitor_policy_from_json(policy["payload_json"])
+            validate_monitor_analysis_unit(stored_policy)
+            if stored_policy.fingerprint != manifest.policy_fingerprint:
                 raise ValueError("monitor snapshot does not match policy")
             existing = self._conn.execute(
                 "SELECT content_hash FROM monitor_snapshots WHERE snapshot_id=?",

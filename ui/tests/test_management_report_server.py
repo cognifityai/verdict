@@ -117,6 +117,41 @@ def test_management_report_aggregates_daily_application_evidence(tmp_path):
     assert report["models"]["rows"][1]["model"] == "custom-model-v1"
 
 
+def test_management_report_excludes_paired_replay_workload(tmp_path):
+    path = tmp_path / "paired-replay.db"
+    storage = SQLiteStorage(str(path))
+    started_at = datetime(2026, 9, 8, tzinfo=timezone.utc)
+    storage.insert_trace(_trace("application", started_at))
+    storage.insert_trace(
+        _trace(
+            "paired-replay",
+            started_at + timedelta(days=1),
+            service_name="verdict-paired-replay",
+            environment="internal",
+            provider="replay-provider",
+            model="replay-model",
+            workload="paired_replay",
+        )
+    )
+    storage.close()
+
+    bundle = build_bundle(path)
+    report = bundle["managementReport"]
+
+    assert report["scope"]["calls"] == 1
+    assert report["scope"]["inputTokens"] == 100
+    assert report["scope"]["outputTokens"] == 25
+    assert report["scope"]["costUsd"] == 0.001
+    assert report["scope"]["latencyKnownCalls"] == 1
+    assert [row["date"] for row in report["timeline"]["rows"]] == ["2026-09-08"]
+    assert [row["name"] for row in report["applications"]["rows"]] == ["orders-api"]
+    assert [row["provider"] for row in report["models"]["rows"]] == ["openai"]
+    assert {sample["trace_id"] for sample in bundle["samples"]} == {
+        "application",
+        "paired-replay",
+    }
+
+
 def test_management_report_keeps_unknown_and_partial_evidence_explicit(tmp_path):
     path = tmp_path / "partial.db"
     storage = SQLiteStorage(str(path))

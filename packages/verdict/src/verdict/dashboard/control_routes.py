@@ -11,6 +11,7 @@ from verdict.dashboard.analysis_service import run_analysis
 from verdict.dashboard.control_plane import ControlStore
 from verdict.dashboard.monitor_routes import MonitorRoutes
 from verdict.dashboard.setup_routes import SetupRoutes
+from verdict.monitoring import MonitorRebootstrapRequired, monitor_requires_rebootstrap
 from verdict.telemetry.local_agents import capture_local_agents
 
 
@@ -147,6 +148,21 @@ class ControlRoutes:
                     raise ValueError("schedule source approval required")
                 writable = self.setup.writable_storage()
                 try:
+                    monitor_policy = None
+                    if payload.get("runMonitor") is True:
+                        monitor_policy = writable.get_active_monitor_policy(self.scope)
+                        if monitor_policy is not None:
+                            previous = writable.get_latest_monitor_snapshot(
+                                monitor_policy.policy_id
+                            )
+                            if monitor_requires_rebootstrap(
+                                monitor_policy,
+                                previous[0] if previous is not None else None,
+                                active=True,
+                            ):
+                                raise MonitorRebootstrapRequired(
+                                    "monitor requires re-bootstrap"
+                                )
                     summary = capture_local_agents(
                         writable,
                         tenant_id=self.tenant_id,
@@ -154,9 +170,7 @@ class ControlRoutes:
                         codex_root=codex_root,
                         capture_content=True,
                     )
-                    monitor_result = self._run_monitor(
-                        writable, payload.get("runMonitor") is True
-                    )
+                    monitor_result = self._run_monitor(writable, monitor_policy)
                 finally:
                     writable.close()
                 from verdict.dashboard.app import build_agent_insights_bundle
@@ -175,6 +189,11 @@ class ControlRoutes:
                     "analysis": analysis["analysisState"],
                     "monitor": monitor_result,
                 }
+            except MonitorRebootstrapRequired:
+                return JSONResponse(
+                    {"error": "monitor requires re-bootstrap"},
+                    status_code=409,
+                )
             except (OSError, TypeError, UnicodeError, ValueError):
                 return JSONResponse({"error": "scheduled cycle failed"}, status_code=400)
 
@@ -238,10 +257,7 @@ class ControlRoutes:
                 )
         return notifications
 
-    def _run_monitor(self, writable, enabled: bool):
-        if not enabled:
-            return None
-        policy = writable.get_active_monitor_policy(self.scope)
+    def _run_monitor(self, writable, policy):
         if policy is None:
             return None
         manifest, comparison = self.monitor.prospective(writable, policy)

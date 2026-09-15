@@ -895,6 +895,16 @@ def test_legacy_evaluator_snapshot_requires_rebootstrap() -> None:
     assert monitor_requires_rebootstrap(policy, loaded) is True
 
 
+def test_missing_snapshot_rebootstrap_depends_on_policy_state_and_analysis_unit() -> None:
+    trace_policy = MonitorPolicy("trace", "scope")
+    session_policy = MonitorPolicy("session", "scope", analysis_unit="session")
+
+    assert monitor_requires_rebootstrap(trace_policy, None) is False
+    assert monitor_requires_rebootstrap(trace_policy, None, active=True) is True
+    assert monitor_requires_rebootstrap(session_policy, None) is True
+    assert monitor_requires_rebootstrap(session_policy, None, active=True) is True
+
+
 def test_legacy_prospective_snapshot_without_activation_boundary_requires_rebootstrap() -> None:
     policy = MonitorPolicy(
         "p", "scope", reference_ratio=0.5,

@@ -83,7 +83,8 @@ does not duplicate it.
    Evaluator Lab runs display activity and elapsed time while completed results
    are stored.
 5. **Monitor**: preview count-based or explicit event-time reference/current
-   cohorts, then optionally activate the reviewed policy. Activation opens an
+   cohorts of genuine model-call Traces, then optionally activate the reviewed
+   policy. Trace is the only currently supported analysis unit. Activation opens an
    empty prospective bucket at a stored event-time boundary, so older imported
    history cannot become new traffic. Fisher's exact test, practical-effect
    thresholds, and multiple-testing correction are applied to eligible binary
@@ -94,6 +95,7 @@ does not duplicate it.
    a selectable 7-day, 30-day, 90-day, or all-time period alongside current
    monitor/change status, then export aggregate-only HTML, CSV, or browser
    Print/Save PDF output. Verdict evaluator calls stay outside utilization.
+   Verdict-owned paired-replay calls stay outside utilization as well.
 
 For a visual overview, see `docs/architecture-current.svg`.
 

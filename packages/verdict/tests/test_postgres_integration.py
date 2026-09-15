@@ -1118,6 +1118,15 @@ def test_live_postgres_monitor_policy_activation_and_snapshot():
         )
         storage.save_monitor_policy(incomplete)
         assert storage.get_latest_monitor_candidate(incomplete.scope_key) is None
+        unsupported = replace(
+            second,
+            policy_id=f"unsupported-{suffix}",
+            scope_key=f"{scope}:unsupported",
+            analysis_unit="session",
+        )
+        with pytest.raises(ValueError, match="only the trace analysis unit"):
+            storage.save_monitor_policy(unsupported)
+        assert storage.get_monitor_policy(unsupported.policy_id) is None
         storage.save_monitor_policy(second)
         assert storage.activate_monitor_policy(
             scope, first.policy_id, expected_active_policy_id=None,

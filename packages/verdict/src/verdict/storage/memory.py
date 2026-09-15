@@ -41,6 +41,7 @@ from verdict.monitoring import (
     monitor_policy_to_json,
     monitor_snapshot_from_json,
     monitor_snapshot_to_json,
+    validate_monitor_analysis_unit,
 )
 from verdict.normalized_evidence import (
     _LegacyLocalTextUpgrade,
@@ -502,6 +503,7 @@ class InMemoryStorage:
         return attempts[:limit]
 
     def save_monitor_policy(self, policy: MonitorPolicy) -> None:
+        validate_monitor_analysis_unit(policy)
         payload = monitor_policy_to_json(policy)
         with self._monitor_lock:
             existing = self._monitor_policies.get(policy.policy_id)
@@ -515,6 +517,7 @@ class InMemoryStorage:
         manifest: CohortManifest,
         comparison: MonitorComparison,
     ) -> None:
+        validate_monitor_analysis_unit(policy)
         policy_payload = monitor_policy_to_json(policy)
         snapshot_payload = monitor_snapshot_to_json(manifest, comparison)
         snapshot_key = (policy.policy_id, manifest.snapshot_id)
@@ -564,8 +567,12 @@ class InMemoryStorage:
             if current != expected_active_policy_id:
                 raise ValueError("active policy changed")
             stored = self._monitor_policies.get(policy_id)
-            if stored is None or monitor_policy_from_json(stored[0]).scope_key != scope_key:
+            if stored is None:
                 raise ValueError("unknown monitor policy")
+            target = monitor_policy_from_json(stored[0])
+            if target.scope_key != scope_key:
+                raise ValueError("unknown monitor policy")
+            validate_monitor_analysis_unit(target)
             for other_id, (payload, state) in list(self._monitor_policies.items()):
                 policy = monitor_policy_from_json(payload)
                 if (
@@ -576,7 +583,7 @@ class InMemoryStorage:
                     self._monitor_policies[other_id] = (payload, "retired")
             self._monitor_policies[policy_id] = (stored[0], "active")
             self._active_monitor_policies[scope_key] = policy_id
-            return monitor_policy_from_json(stored[0])
+            return target
 
     def save_monitor_snapshot(
         self, policy_id: str, manifest: CohortManifest, comparison: MonitorComparison
@@ -586,10 +593,9 @@ class InMemoryStorage:
             stored_policy = self._monitor_policies.get(policy_id)
             if stored_policy is None:
                 raise ValueError("unknown policy")
-            if (
-                monitor_policy_from_json(stored_policy[0]).fingerprint
-                != manifest.policy_fingerprint
-            ):
+            policy = monitor_policy_from_json(stored_policy[0])
+            validate_monitor_analysis_unit(policy)
+            if policy.fingerprint != manifest.policy_fingerprint:
                 raise ValueError("monitor snapshot does not match policy")
             key = (policy_id, manifest.snapshot_id)
             existing = self._monitor_snapshots.get(key)
