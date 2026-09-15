@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-__version__ = "0.1.0a18"
+__version__ = "0.1.0a19"
 
 if TYPE_CHECKING:
     from verdict_eval.judge import DEFAULT_RUBRIC, Judge, Rubric

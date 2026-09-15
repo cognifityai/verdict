@@ -6,6 +6,8 @@ the product is refined.
 
 ## [Unreleased]
 
+## [0.1.0a19] - 2026-09-15
+
 ### Fixed
 
 - Local capture now includes completed Codex model calls in LLM reports by
@@ -568,7 +570,9 @@ the product is refined.
   retain content must explicitly select metadata-only capture. Redaction remains
   best-effort rather than a compliance control.
 
-[Unreleased]: https://github.com/cognifityai/verdict/compare/v0.1.0a17...HEAD
+[Unreleased]: https://github.com/cognifityai/verdict/compare/v0.1.0a19...HEAD
+[0.1.0a19]: https://github.com/cognifityai/verdict/compare/v0.1.0a18...v0.1.0a19
+[0.1.0a18]: https://github.com/cognifityai/verdict/compare/v0.1.0a17...v0.1.0a18
 [0.1.0a17]: https://github.com/cognifityai/verdict/compare/v0.1.0a16...v0.1.0a17
 [0.1.0a16]: https://github.com/cognifityai/verdict/compare/v0.1.0a15...v0.1.0a16
 [0.1.0a15]: https://github.com/cognifityai/verdict/compare/v0.1.0a14...v0.1.0a15

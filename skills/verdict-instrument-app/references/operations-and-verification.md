@@ -7,7 +7,7 @@ test is insufficient evidence of trace collection or a rendered regression.
 
 Record the interpreter and installed distributions. Confirm the imported `verdict`
 module belongs to `cognifity-verdict`, not the unrelated package named `verdict`.
-Pin the synchronized `0.1.0a18` distributions and verify the installed pipeline
+Pin the synchronized `0.1.0a19` distributions and verify the installed pipeline
 and dashboard commands.
 
 ## Trace capture gate
@@ -164,7 +164,7 @@ user turns, tool-only calls, multimodal blocks, or another provider's message sc
 
 Use `--storage` or `VERDICT_STORAGE` with `verdict-pipeline` and
 `verdict-dashboard`. Reject generated schedules that mix these contracts.
-Release `0.1.0a18` still constructs the selected embedder when
+Release `0.1.0a19` still constructs the selected embedder when
 `--trust-existing-clusters` is used. For that external-taxonomy path, deliberately
 select an installed local embedder such as `--embedder hashing` to avoid an
 unnecessary MiniLM download, then run the exact command manually. This is an
