@@ -144,6 +144,8 @@ def test_fleet_operator_cli_requires_owner_url_and_emits_only_stable_failure(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    import verdict._fleet_postgres as fleet_postgres
+
     monkeypatch.delenv("VERDICT_DATABASE_URL", raising=False)
     assert main(["prepare", "--reader-role", "reader-a", "--tenant-id", "tenant-a"]) == 2
     missing = capsys.readouterr()
@@ -154,6 +156,11 @@ def test_fleet_operator_cli_requires_owner_url_and_emits_only_stable_failure(
         "VERDICT_DATABASE_URL",
         "postgresql://private-password-canary@127.0.0.1:1/private-database-canary",
     )
+
+    def missing_postgres_extra(*_args: object, **_kwargs: object) -> None:
+        raise ImportError("postgres extra missing")
+
+    monkeypatch.setattr(fleet_postgres, "configure_fleet", missing_postgres_extra)
     assert main(["prepare", "--reader-role", "reader-a", "--tenant-id", "tenant-a"]) == 1
     failed = capsys.readouterr()
     assert failed.out == ""

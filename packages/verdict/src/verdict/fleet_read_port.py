@@ -375,7 +375,7 @@ def main(argv: list[str] | None = None) -> int:
             reader_role=args.reader_role,
             tenant_id=args.tenant_id,
         )
-    except (FleetPostgresConfigurationError, VerdictFleetReadError, ValueError):
+    except (FleetPostgresConfigurationError, VerdictFleetReadError, ImportError, ValueError):
         print(f"fleet {args.action} failed", file=sys.stderr)
         return 1
     return 0
