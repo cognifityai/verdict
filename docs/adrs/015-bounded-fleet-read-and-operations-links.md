@@ -261,8 +261,10 @@ close, and a post-close call fails with `read_unavailable`.
 `create_app` adds the keyword-only `operations_page_url`, whose only accepted
 non-null value is the exact relative path `/operations`. When configured,
 `/api/config` adds `operationsPageUrl:"/operations"` and the core browser renders
-one top-level `Operations` link to it. When null, the config key is omitted, no
-link appears, and no new path comparison occurs. Verdict's existing
+one top-level `Operations` navigation control that explicitly assigns the
+current browser location to that path; it never requests a new browsing
+context. When null, the config key is omitted, no control appears, and no new
+path comparison occurs. Verdict's existing
 `operations_url` argument, `operationsUrl` config field, and Settings JSON
 adapter remain byte-for-byte unchanged.
 
@@ -375,7 +377,8 @@ public attack surface without a current requirement.
 - Auth/navigation tests cover `operations_page_url=None`, the exact configured
   path, descendants, trailing/path-prefix lookalikes, assets, unauthorized
   requests, one real mounted ASGI route, conditional `operationsPageUrl` config
-  and top-level link, and unchanged legacy `operations_url` Settings behavior.
+  and same-tab top-level navigation, and unchanged legacy `operations_url`
+  Settings behavior.
 - Browser tests cover exact trace/run/event selection, duplicate/oversized/
   malformed values, not-found, stale/reordered fetches, desktop/mobile, and
   existing no-query navigation.

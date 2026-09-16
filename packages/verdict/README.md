@@ -437,10 +437,10 @@ request is present.
 A private package that owns a full-page Operations application can instead
 mount its authenticated routes and assets at `/operations` in the same FastAPI
 composition root and pass `operations_page_url="/operations"` to
-`create_app()`. Verdict then adds one top-level **Operations** link and the same
-path to `/api/config`; it does not discover, import, or start the private
-package. Omitting the argument leaves the route, link, and config field absent.
-The older `operations_url` Settings adapter above is unchanged.
+`create_app()`. Verdict then adds one same-tab top-level **Operations** control
+and the same path to `/api/config`; it does not discover, import, or start the
+private package. Omitting the argument leaves the route, control, and config
+field absent. The older `operations_url` Settings adapter above is unchanged.
 
 The dashboard's **Monitor → Segments** workspace is a bounded view of the Task 5
 tenant/version registry. It shows active and preview versions, stable display

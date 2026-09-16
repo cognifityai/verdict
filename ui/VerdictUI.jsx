@@ -908,12 +908,12 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
               );
             })}
             {operationsPageUrl === "/operations" && (
-              <a href={operationsPageUrl}
+              <button type="button" onClick={() => window.location.assign(operationsPageUrl)}
                 className="h-11 sm:h-16 shrink-0 flex items-center gap-2 px-3 text-xs sm:text-sm border-b-2"
                 style={{ color: C.sub, borderColor: "transparent", fontWeight: 450 }}>
                 <Activity size={15} style={{ color: C.faint }} />
                 Operations
-              </a>
+              </button>
             )}
           </nav>
           <div className="ml-auto flex items-center gap-2 text-xs">

@@ -388,10 +388,14 @@ test("operations appears inside Settings only when the host configures an adapte
   } finally { delete globalThis.window; }
 });
 
-test("the full-page Operations link appears only at the exact configured path", async () => {
+test("the full-page Operations control navigates the current tab only at the exact path", async () => {
   const ui = await loadUiModule();
+  const assigned = [];
   globalThis.window = {
-    location: { hash: "#tab=overview&section=summary", pathname: "/dashboard" },
+    location: {
+      hash: "#tab=overview&section=summary", pathname: "/dashboard",
+      assign(destination) { assigned.push(destination); },
+    },
     history: { pushState() {}, replaceState() {} },
     addEventListener() {}, removeEventListener() {},
   };
@@ -403,10 +407,16 @@ test("the full-page Operations link appears only at the exact configured path", 
       data: bundle("judge-a"), operationsPageUrl: "/operations",
     });
 
-    assert.equal(findAll(withoutPage, (node) => node.type === "a" && node.props?.href === "/operations").length, 0);
-    const links = findAll(withPage, (node) => node.type === "a" && node.props?.href === "/operations");
-    assert.equal(links.length, 1);
-    assert.match(textOf(links[0]), /Operations/);
+    assert.equal(findAll(withoutPage,
+      (node) => node.type === "button" && textOf(node).trim() === "Operations").length, 0);
+    const controls = findAll(withPage,
+      (node) => node.type === "button" && textOf(node).trim() === "Operations");
+    assert.equal(controls.length, 1);
+    assert.equal(findAll(withPage,
+      (node) => node.type === "a" && node.props?.href === "/operations").length, 0);
+
+    controls[0].props.onClick();
+    assert.deepEqual(assigned, ["/operations"]);
   } finally { delete globalThis.window; }
 });
 
