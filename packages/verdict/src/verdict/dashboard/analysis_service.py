@@ -93,25 +93,26 @@ def run_analysis(
 ) -> dict[str, Any]:
     """Compute once, then publish one immutable terminal snapshot atomically."""
     cutoff = datetime.now(timezone.utc)
+    try:
+        result = build()
+        fingerprint = result.pop("_analysisInputFingerprint", None)
+        if not isinstance(fingerprint, str) or len(fingerprint) != 64:
+            raise ValueError("analysis builder did not provide an input fingerprint")
+        status = AnalysisRunStatus.COMPLETED
+    except Exception as exc:
+        result = {
+            "schema": "agent-insights-v2",
+            "error": {
+                "code": "analysis_failed",
+                "causeType": type(exc).__name__,
+                "attemptedAt": cutoff.isoformat(),
+            },
+        }
+        fingerprint = hashlib.sha256(_canonical(result)).hexdigest()
+        status = AnalysisRunStatus.ERROR
+
     storage = _storage(storage_url)
     try:
-        try:
-            result = build()
-            fingerprint = result.pop("_analysisInputFingerprint", None)
-            if not isinstance(fingerprint, str) or len(fingerprint) != 64:
-                raise ValueError("analysis builder did not provide an input fingerprint")
-            status = AnalysisRunStatus.COMPLETED
-        except Exception as exc:
-            result = {
-                "schema": "agent-insights-v2",
-                "error": {
-                    "code": "analysis_failed",
-                    "causeType": type(exc).__name__,
-                    "attemptedAt": cutoff.isoformat(),
-                },
-            }
-            fingerprint = hashlib.sha256(_canonical(result)).hexdigest()
-            status = AnalysisRunStatus.ERROR
         latest = storage.get_latest_deterministic_analysis_run(
             tenant,
             SCOPE_KEY,

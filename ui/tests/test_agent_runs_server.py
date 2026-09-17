@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 import httpx
 import verdict
+import verdict.dashboard.analysis_service as analysis_service
 from fastapi import FastAPI, Request
 from verdict.analysis_records import AnalysisRunStatus, DeterministicAnalysisRun
 from verdict.capture import AgentCaptureService
@@ -693,6 +694,40 @@ def test_analysis_failure_is_persisted_and_returned_as_an_explicit_state(tmp_pat
     assert result["error"]["code"] == "analysis_failed"
     assert result["error"]["causeType"] == "ValueError"
     assert "secret source detail" not in json.dumps(result)
+
+
+def test_analysis_build_finishes_before_persistent_storage_is_opened(monkeypatch):
+    events = []
+
+    class RecordingStorage:
+        def get_latest_deterministic_analysis_run(self, *args, **kwargs):
+            events.append("read")
+            return None
+
+        def save_deterministic_analysis_run(self, run):
+            events.append("save")
+
+        def close(self):
+            events.append("close")
+
+    def open_storage(_storage_url):
+        events.append("storage_open")
+        return RecordingStorage()
+
+    def build():
+        events.append("build")
+        assert "storage_open" not in events
+        return {
+            "schema": "agent-insights-v2",
+            "_analysisInputFingerprint": "a" * 64,
+        }
+
+    monkeypatch.setattr(analysis_service, "_storage", open_storage)
+
+    result = run_analysis("unused", tenant="local", build=build)
+
+    assert result["analysisState"]["status"] == "completed"
+    assert events == ["build", "storage_open", "read", "save", "close"]
 
 
 def test_incompatible_persisted_insights_are_not_served_as_current(tmp_path):
