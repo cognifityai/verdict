@@ -849,7 +849,10 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
       traceFilterCallback.current(route.traceJudgeStatus, route.traceId);
     }
   }, [route.section, route.tab, route.traceId, route.traceJudgeStatus, source]);
-  const initialRouteResolved = useRef(source !== "loading" || initialRoute.current.explicit);
+  const initialRouteResolved = useRef(
+    source !== "loading" || initialRoute.current.explicit
+      || initialSelection.current.state === "valid",
+  );
   useEffect(() => {
     if (source === "live" && !initialRouteResolved.current) {
       initialRouteResolved.current = true;

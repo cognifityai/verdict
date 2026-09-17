@@ -529,6 +529,45 @@ test("public query links select exact traces, runs, and events at the browser si
   } finally { delete globalThis.window; }
 });
 
+test("public query selections survive the loading to live transition", async () => {
+  const ui = await loadUiModule();
+  const cases = [
+    {
+      search: "?view=traces&trace_id=trace-1",
+      component: "Traces",
+      selected: ["selectedTraceId", "trace-1"],
+    },
+    {
+      search: "?view=agent-runs&run_id=run-1&event_id=event-1",
+      component: "Runs",
+      selected: ["selectedRunId", "run-1"],
+    },
+  ];
+
+  try {
+    for (const item of cases) {
+      const hooks = createEffectHooks();
+      globalThis.window = {
+        location: { hash: "", pathname: "/dashboard", search: item.search },
+        history: { pushState() {}, replaceState() {} },
+        addEventListener() {}, removeEventListener() {},
+      };
+
+      render(ui.Dashboard, hooks, { data: bundle("judge-a"), source: "loading" });
+      hooks.flushEffects();
+      render(ui.Dashboard, hooks, { data: bundle("judge-a"), source: "live" });
+      hooks.flushEffects();
+      const tree = render(ui.Dashboard, hooks, { data: bundle("judge-a"), source: "live" });
+      const selected = findAll(
+        tree,
+        (node) => node.type?.name === item.component,
+      )[0];
+      assert.equal(selected.props[item.selected[0]], item.selected[1]);
+      if (item.component === "Runs") assert.equal(selected.props.routedEventId, "event-1");
+    }
+  } finally { delete globalThis.window; }
+});
+
 test("monitoring lifecycle is one top-level workspace", async () => {
   const ui = await loadUiModule();
   const tree = render(ui.Dashboard, createHooks(), { data: bundle("judge-a") });
