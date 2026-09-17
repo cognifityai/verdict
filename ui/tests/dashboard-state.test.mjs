@@ -28,7 +28,7 @@ function componentStub(names) {
 }
 
 async function loadUiModule() {
-  const source = `${await readFile(UI_SOURCE, "utf8")}\nexport { Dashboard, Overview, DriftSignals, Traces, TraceDetail, TabHelp, Judge, Compare, ManagementReport, mountedApiUrl };\nexport { useOperations } from "./Operations.jsx";\nexport { RegistryView } from "./Registry.jsx";\nexport { EvaluatorLab } from "./EvaluatorLab.jsx";\nexport { Runs } from "./Runs.jsx";`;
+  const source = `${await readFile(UI_SOURCE, "utf8")}\nexport { Dashboard, Overview, DriftSignals, Traces, TraceDetail, TabHelp, Judge, Compare, ManagementReport, mountedApiUrl };\nexport { useOperations } from "./Operations.jsx";\nexport { RegistryView } from "./Registry.jsx";\nexport { EvaluatorLab } from "./EvaluatorLab.jsx";\nexport { Runs } from "./Runs.jsx";\nexport { Insights } from "./Insights.jsx";`;
   const result = await build({
     stdin: {
       contents: source,
@@ -357,6 +357,48 @@ function bundle(evaluator, samples = [], driftSignals = [], reportDays = 30) {
   };
 }
 
+function insightsSnapshot(status = "error") {
+  return {
+    schema: "agent-insights-v2",
+    scope: {
+      availableRuns: 0, analyzedRuns: 0, complete: true,
+      traces: { available: 0, analyzed: 0, complete: true },
+    },
+    findings: [],
+    dataHealth: {
+      counts: { runs: 0, turns: 0, events: 0 },
+      eventTypes: {}, eventStatuses: {}, promptStates: {}, responseStates: {},
+      traceLinks: { modelCalls: 0, linked: 0, unlinked: 0 },
+      traceEvidence: {
+        promptPresent: 0, responsePresent: 0, judgeEligible: 0,
+        notEvaluable: 0, notEvaluableReasons: {},
+      },
+      traceOperations: {}, traceFinishReasons: {},
+    },
+    reliability: {
+      runOutcomes: {}, turnOutcomes: {}, traceOutcomes: {},
+      toolErrors: 0, commandFailures: 0, testFailures: 0, retries: 0,
+    },
+    performance: {
+      modelCalls: 0, toolCalls: 0, inputTokens: null, outputTokens: null,
+      averageModelLatencyMs: null, latencyKnownCalls: 0,
+      costUsd: null, costState: "not_captured",
+    },
+    behavior: {
+      findingRuns: 0, findingTypes: 0, capturedResponses: 0,
+      averageResponseCharacters: null, refusals: 0,
+      apologyStarts: 0, hedges: 0, validJsonResponses: 0,
+    },
+    sourceActivity: [], modelComparisons: [],
+    error: status === "error" ? { code: "analysis_failed" } : undefined,
+    analysisState: {
+      status, analysisId: "analysis-1", analyzerVersion: "agent-insights-v2",
+      cutoff: "2026-09-17T00:00:00Z", completedAt: "2026-09-17T00:00:01Z",
+      inputFingerprint: "a".repeat(64),
+    },
+  };
+}
+
 function deferredFetches() {
   const requests = [];
   globalThis.fetch = (url, options = {}) => new Promise((resolve, reject) => {
@@ -364,6 +406,46 @@ function deferredFetches() {
   });
   return requests;
 }
+
+test("Insights reloads the normalized snapshot after an error retry", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const props = { url: "/api/insights?tenant=local" };
+
+  render(ui.Insights, hooks, props);
+  hooks.flushEffects();
+  await resolveJson(requests[0], insightsSnapshot("error"));
+
+  let tree = render(ui.Insights, hooks, props);
+  hooks.flushEffects();
+  const retry = findAll(
+    tree,
+    (node) => node.type === "button" && textOf(node).trim() === "Retry",
+  )[0];
+  const pending = retry.props.onClick();
+  await resolveJson(requests[1], { setupToken: "setup-token" });
+  assert.equal(requests[2].options.method, "POST");
+  await resolveJson(requests[2], {
+    schema: "agent-insights-v2",
+    error: { code: "analysis_failed", causeType: "OperationalError" },
+    analysisState: { status: "error" },
+  });
+
+  assert.equal(requests.length, 4);
+  assert.match(requests[3].url, /\/api\/insights\?tenant=local$/);
+  assert.equal(requests[3].options.method, undefined);
+  await resolveJson(requests[3], insightsSnapshot("error"));
+  await pending;
+
+  tree = render(ui.Insights, hooks, props);
+  assert.match(textOf(tree), /The latest analysis failed/);
+  const agentRuns = findAll(
+    tree,
+    (node) => node.type?.name === "Metric" && node.props?.label === "Agent runs",
+  )[0];
+  assert.equal(agentRuns.props.value, 0);
+});
 
 test("a mounted dashboard derives its API path from the host prefix", async () => {
   globalThis.window = { location: { pathname: "/admin/verdict/dashboard" } };
