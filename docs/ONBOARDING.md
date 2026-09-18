@@ -24,9 +24,9 @@ uv venv --python 3.12 && source .venv/bin/activate     # or your own 3.10+ venv
 
 # Include the provider extras you want to test live. Google capture needs `google`.
 python -m pip install \
-  "cognifity-verdict[anthropic,openai,google,dashboard]==0.1.0a18" \
-  "cognifity-verdict-eval[semantic]==0.1.0a18" \
-  "cognifity-verdict-inspect==0.1.0a18"
+  "cognifity-verdict[anthropic,openai,google,dashboard]==0.1.0a19" \
+  "cognifity-verdict-eval[semantic]==0.1.0a19" \
+  "cognifity-verdict-inspect==0.1.0a19"
 ```
 
 For a customer POC on the public alpha, use the pinned commands and provider
@@ -38,7 +38,7 @@ lists them as hard dependencies, so the line above brings them in.
 Minimal alternative without the local semantic model:
 
 ```bash
-python -m pip install "cognifity-verdict-eval==0.1.0a18"  # lexical hash fallback
+python -m pip install "cognifity-verdict-eval==0.1.0a19"  # lexical hash fallback
 ```
 
 Already on an earlier synchronized alpha? Use the upgrade command in the repository
@@ -74,6 +74,12 @@ Claude Code may record one provider response across multiple history rows.
 Verdict coalesces those rows into one model-call Trace and fills later response
 text without changing its evidence identity; a genuine tool-only call remains
 visible as textless rather than being presented as a missing capture.
+For the standard `~/.codex/sessions` directory, the preview also shows the
+sibling `~/.codex/logs_2.sqlite` source when it exists. Approval reads that
+database directly; no Codex export is required. Each supported completed-call
+marker becomes a metadata-only OpenAI Trace with its model and observed
+response time. Verdict never stores the diagnostic body or raw Codex source
+identifiers.
 
 Successful capture opens **Overview**. Local execution evidence is under
 **Explore → Agent Runs & Tools** and genuine model calls are under
@@ -108,6 +114,15 @@ response has complete input/output usage. Missing or malformed counters display
 as unavailable, not zero.
 Verdict therefore leaves cost unavailable for Claude Code and Codex history
 instead of applying API list prices to desktop or subscription activity.
+Codex diagnostic traces include input/output tokens only when one valid usage
+event from the same session matches the completion timestamp. Prompt,
+response, latency, and cost remain unavailable, and the traces are not
+evaluator inputs. Codex controls diagnostic and session retention
+independently, so Agent Run, model-call, and token-covered totals can differ;
+an unknown diagnostic schema is skipped and reported as unavailable.
+When that matched event also contains a valid cached-input count, Report shows
+cached and uncached input separately and reports the number of calls covered by
+the breakdown. Missing or impossible cache counts remain unavailable.
 
 Opted-in content remains bounded and recursively redacted. Each turn and event
 is bounded independently. Turn request and final-response text is redacted
@@ -187,7 +202,7 @@ process-local `capture.dropped_records` runtime metric for records rejected by a
 full or failed spool; equivalent failures produce one bounded warning per
 failure class.
 
-For a central PostgreSQL deployment, install `0.1.0a18` with its `postgres`
+For a central PostgreSQL deployment, install `0.1.0a19` with its `postgres`
 extra and start the authenticated collector:
 
 ```bash
@@ -269,7 +284,7 @@ source uses OTLP protobuf. JSON files and hosted API readers do not require that
 extra:
 
 ```bash
-python -m pip install "cognifity-verdict[telemetry]==0.1.0a18"
+python -m pip install "cognifity-verdict[telemetry]==0.1.0a19"
 
 verdict-import file ./traces.ndjson --format auto \
   --storage sqlite:///./verdict.db --tenant-id my-team
@@ -424,8 +439,15 @@ are recursively sanitized before content limits, `Trace` assignment, and storage
 includes nested OpenAI tool arguments and Anthropic-style tool inputs/results.
 Supported credential field names such as `password`, `api_key`, `token`,
 `secret_key`, `cookie`, `passcode`, `authorization`, and `client_secret` cause
-the complete opaque value to be removed. This includes quoted, unquoted, and
-embedded assignments in serialized text. Existing Verdict redaction and hash
+the complete opaque value to be removed, including explicit plural containers
+such as `passwords` and `api_keys`. Typed Agent instruction, context, and
+outcome events remove paired content when their semantic `name` is one of these
+credential fields. This includes embedded assignments in serialized text.
+Complete `=` values, quoted values, and single-token `:` values are removed.
+Quote a multiword value after `:`;
+unquoted multiword colon clauses are not removed wholesale based only on their
+label, while independently recognized secrets are still redacted. Basic and
+Bearer padding is removed with the credential. Existing Verdict redaction and hash
 placeholders remain terminal when capture and storage apply the boundary more
 than once. Agent Run names and descriptive service, version, and environment
 fields use the same boundary while routing IDs remain unchanged; flat GitHub,
@@ -443,12 +465,12 @@ a linear `@`-anchored scanner to keep malformed and long inputs bounded. It
 remains best effort, not a compliance control, and opaque metadata such as
 tenant/session/cluster IDs must be non-sensitive. Set `capture_content=False`
 when the approved customer boundary is metadata-only; error categories remain
-available, but provider and manual-span exception messages are omitted. The `0.1.0a18` POC profile also keeps
+available, but provider and manual-span exception messages are omitted. The `0.1.0a19` POC profile also keeps
 `buffered_writes=False`; buffered mode requires an explicit `shutdown()`
 imported from `verdict.client` before process exit.
 
 Use only the provider methods listed in the
-[`POC release profile`](POC_RELEASE_PROFILE.md). Release `0.1.0a18` includes the
+[`POC release profile`](POC_RELEASE_PROFILE.md). Release `0.1.0a19` includes the
 Anthropic `messages.stream(...)` helper plus OpenAI `responses.create(...)`,
 `responses.parse(...)`, and `responses.stream(...)` for new or existing
 responses, in addition to the earlier Chat/Google paths. OpenAI's
@@ -568,7 +590,7 @@ cost/latency traces written to the same store. Those traces are tagged as the
 `judge` workload and excluded from future drift inputs so the evaluator does not
 become part of the workload it evaluates. The flag is off by default.
 
-For PostgreSQL, install `cognifity-verdict[dashboard,postgres]==0.1.0a18` and pass
+For PostgreSQL, install `cognifity-verdict[dashboard,postgres]==0.1.0a19` and pass
 the same protected storage URL used by the SDK. Evidence tables use Verdict's
 normal additive schema initialization. The dashboard control plane lazily
 creates its append-only configuration table on first use.
@@ -613,9 +635,11 @@ present, `degraded` or `insufficient_data` status is a hard gate: the command
 persists the health record, exits 2, and does not write production judgments.
 
 The dashboard shows per-provider traffic, optional intent clusters, and pass
-rates by rubric dimension. **Report** shows application-only request, token,
-latency, cost, service, and model summaries; evaluator calls are excluded. The
-default period is the last 30 UTC calendar days; 7-day, 90-day, and all-time
+rates by rubric dimension. **Report** shows application-only request, tokens
+processed, latency, cost, service, and model summaries; evaluator calls are
+excluded, as are Verdict-owned paired-replay calls. Where exact cache evidence exists, Report separates cached and
+uncached input and states the covered call count. The default period is the
+last 30 UTC calendar days; 7-day, 90-day, and all-time
 choices are available. The timeline contains up to 31 active dates in the
 selected period; tables contain at most 20 service/environment rows and 20 model
 rows. Latency coverage uses every known value in the period, while p50/p95 use
@@ -758,7 +782,8 @@ the other captured workloads.
   inject the authorized registry tenant rather than trusting a browser query
   parameter; that same value projects active assignments and stable labels
   throughout the tenant-scoped views.
-- **Cohorts use event time.** Monitor uses the trace's captured event time, not
+- **Cohorts use event time.** Monitor currently supports one genuine model-call
+  Trace per analysis unit. Monitor uses the trace's captured event time, not
   the time a judgment or import was written. A historical preview freezes its
   selected membership and normalized facts. Activation records an event-time
   boundary and opens an empty prospective bucket, so older imported events do
@@ -771,6 +796,8 @@ the other captured workloads.
   Fixed-window rows created by older releases remain read-only legacy records.
   They have no tenant owner and are therefore suppressed by the tenant-scoped
   dashboard; use the current Monitor workflow instead.
+  Stored policies naming a non-Trace analysis unit also remain readable but
+  require a new trace-based preview before execution.
 - **Legacy mode is single-tenant per store.** Registry `active` mode requires
   `--tenant-id` and fetches only that authorized trace scope, so an
   unrelated tenant in shared PostgreSQL does not block the run. `off` retains

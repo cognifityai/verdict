@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import sqlite3
 from dataclasses import replace
 from datetime import datetime, timezone
 
@@ -17,7 +19,7 @@ from verdict import (
     Trace,
 )
 from verdict.capture import AgentCaptureService
-from verdict.evidence import AgentCaptureBatch
+from verdict.evidence import AgentCaptureBatch, agent_run_bundle_to_json
 from verdict.storage import BufferedStorage, InMemoryStorage, SQLiteStorage
 
 NOW = datetime(2026, 8, 31, tzinfo=timezone.utc)
@@ -442,6 +444,82 @@ def test_storage_redacts_nested_agent_evidence_before_persistence(evidence_stora
     assert loaded.events[0].attributes["result"]["password"] == "<SECRET>"
     assert "customer@example.com" not in repr(loaded)
     assert "opaque-storage-canary" not in repr(loaded)
+
+
+def test_storage_redacts_semantic_pairs_and_plural_credentials(evidence_storage) -> None:
+    canary = "opaque-storage-boundary-canary"
+    original = _bundle()
+    semantic_event = replace(
+        original.events[0],
+        event_type=AgentEventType.CONTEXT,
+        attributes={"name": "OIDCIDTokens", "value": canary, "source": "custom"},
+    )
+    plural_event = replace(
+        original.events[0],
+        event_id="event_2",
+        sequence=1,
+        attributes={
+            "tool_name": "lookup",
+            "call_id": "call-2",
+            "result": {
+                "api_keys": [canary],
+                "passwords": {"primary": canary},
+                "AWSSECRETACCESSKEYS": [canary],
+                "XAPIKeys": [canary],
+                "input_tokens": 12345678,
+            },
+            "is_error": False,
+        },
+    )
+
+    evidence_storage.replace_agent_run_bundle(
+        replace(original, events=(semantic_event, plural_event))
+    )
+    loaded = evidence_storage.get_agent_run_bundle("tenant-a", "run_1")
+
+    assert loaded is not None
+    assert canary not in repr(loaded)
+    assert loaded.events[0].attributes["value"] == "<SECRET>"
+    result = loaded.events[1].attributes["result"]
+    assert result["api_keys"] == "<SECRET>"
+    assert result["passwords"] == "<SECRET>"
+    assert result["AWSSECRETACCESSKEYS"] == "<SECRET>"
+    assert result["XAPIKeys"] == "<SECRET>"
+    assert result["input_tokens"] == 12345678
+
+
+def test_sqlite_reads_redact_historical_semantic_credentials(tmp_path) -> None:
+    path = tmp_path / "historical-redaction.db"
+    storage = SQLiteStorage(str(path))
+    storage.replace_agent_run_bundle(_bundle())
+    storage.close()
+    canary = "opaque-historical-storage-canary"
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "UPDATE agent_events SET event_type=?,attributes_json=? "
+            "WHERE tenant_id=? AND run_id=? AND event_id=?",
+            (
+                "context",
+                json.dumps({"name": "USERIDTOKENS", "value": canary}),
+                "tenant-a",
+                "run_1",
+                "event_1",
+            ),
+        )
+
+    storage = SQLiteStorage(str(path))
+    try:
+        loaded = storage.get_agent_run_bundle("tenant-a", "run_1")
+
+        assert loaded is not None
+        assert loaded.events[0].attributes == {
+            "name": "USERIDTOKENS",
+            "value": "<SECRET>",
+        }
+        assert canary not in agent_run_bundle_to_json(loaded)
+        assert storage.list_agent_run_bundles("tenant-a") == [loaded]
+    finally:
+        storage.close()
 
 
 def test_read_bundle_is_detached_from_stored_state(evidence_storage) -> None:

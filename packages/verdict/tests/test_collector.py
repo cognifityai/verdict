@@ -230,8 +230,30 @@ def test_collector_reapplies_field_redaction_to_untrusted_agent_records(tmp_path
             "attributes": {
                 "tool_name": "lookup",
                 "call_id": "call-1",
-                "result": {"password": canary},
+                "result": {
+                    "password": canary,
+                    "api_keys": [canary],
+                    "passwords": {"primary": canary},
+                    "AWSSECRETACCESSKEYS": [canary],
+                    "XAPIKeys": [canary],
+                    "input_tokens": 12345678,
+                },
                 "is_error": False,
+            },
+            "privacy_classification": "redacted",
+            "trace_id": None,
+        }
+    )
+    payload["record"]["batch"]["events"].append(
+        {
+            **model_event,
+            "event_id": "event-context",
+            "sequence": 2,
+            "event_type": "context",
+            "attributes": {
+                "name": "OIDCIDTokens",
+                "value": canary,
+                "source": "remote",
             },
             "privacy_classification": "redacted",
             "trace_id": None,
@@ -245,6 +267,12 @@ def test_collector_reapplies_field_redaction_to_untrusted_agent_records(tmp_path
     [bundle] = storage.list_agent_run_bundles(TENANT)
     assert canary not in repr(bundle)
     assert bundle.events[1].attributes["result"]["password"] == "<SECRET>"
+    assert bundle.events[1].attributes["result"]["api_keys"] == "<SECRET>"
+    assert bundle.events[1].attributes["result"]["passwords"] == "<SECRET>"
+    assert bundle.events[1].attributes["result"]["AWSSECRETACCESSKEYS"] == "<SECRET>"
+    assert bundle.events[1].attributes["result"]["XAPIKeys"] == "<SECRET>"
+    assert bundle.events[1].attributes["result"]["input_tokens"] == 12345678
+    assert bundle.events[2].attributes["value"] == "<SECRET>"
 
 
 def test_batch_identity_binds_body_and_producer(tmp_path: Path) -> None:

@@ -17,6 +17,32 @@ the product is refined.
   bounded same-origin selection links. The existing Settings-level
   `operations_url` adapter remains unchanged.
 
+## [0.1.0a19] - 2026-09-15
+
+### Fixed
+
+- Local capture now includes completed Codex model calls in LLM reports by
+  matching the standard sibling `logs_2.sqlite` completion markers with
+  same-session usage events. These traces contain model, observed response
+  time, input/output tokens, and valid cached-input metadata when the match is
+  unambiguous. Management reporting labels the total as tokens processed and
+  separates cached from uncached input where that evidence exists; diagnostic
+  bodies and raw source identifiers are not stored.
+- Field-aware redaction now removes complete values from explicit plural
+  credential containers such as `api_keys` and `passwords`. Typed Agent
+  instruction, context, and outcome events also treat paired `text` or `value`
+  content as sensitive when their semantic `name` is a supported credential
+  field.
+- Padded Basic and Bearer authorization credentials are now removed completely.
+  Unquoted multiword colon clauses are no longer removed wholesale based only
+  on their label; quote multiword credential values after `:` or use `=`
+  assignment syntax.
+- Management-report utilization now excludes Verdict-owned paired-replay calls
+  along with judge calls.
+- Monitor now accepts Trace as its only executable analysis unit across the API,
+  projection, and storage boundaries. Existing non-Trace policies remain
+  readable but require replacement before another run.
+
 ## [0.1.0a18] - 2026-09-13
 
 ### Fixed
@@ -555,7 +581,9 @@ the product is refined.
   retain content must explicitly select metadata-only capture. Redaction remains
   best-effort rather than a compliance control.
 
-[Unreleased]: https://github.com/cognifityai/verdict/compare/v0.1.0a17...HEAD
+[Unreleased]: https://github.com/cognifityai/verdict/compare/v0.1.0a19...HEAD
+[0.1.0a19]: https://github.com/cognifityai/verdict/compare/v0.1.0a18...v0.1.0a19
+[0.1.0a18]: https://github.com/cognifityai/verdict/compare/v0.1.0a17...v0.1.0a18
 [0.1.0a17]: https://github.com/cognifityai/verdict/compare/v0.1.0a16...v0.1.0a17
 [0.1.0a16]: https://github.com/cognifityai/verdict/compare/v0.1.0a15...v0.1.0a16
 [0.1.0a15]: https://github.com/cognifityai/verdict/compare/v0.1.0a14...v0.1.0a15

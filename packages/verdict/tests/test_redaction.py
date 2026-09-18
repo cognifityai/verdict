@@ -1,5 +1,6 @@
 import json
 import random
+import re
 import string
 from copy import deepcopy
 
@@ -9,6 +10,7 @@ from verdict.redaction import (
     redact,
     redact_messages,
     redact_structure,
+    sanitize_agent_event_attributes,
     sanitize_error_text,
     sanitize_trace,
 )
@@ -755,7 +757,7 @@ def test_common_provider_keys_and_secret_assignments_are_redacted() -> None:
             r'"{\"api\u005cu005fkey\":\"opaquecredential123\"}"',
             r'"{\"api\u005cu005fkey\":\"<SECRET>\"}"',
         ),
-        ("password: correct horse battery staple", "password: <SECRET>"),
+        ('password: "correct horse battery staple"', 'password: "<SECRET>"'),
         (
             "password=hunter2!Xq#9$z status=ok",
             "password=<SECRET> status=ok",
@@ -771,6 +773,119 @@ def test_sensitive_assignments_remove_the_complete_value(
     expected: str,
 ) -> None:
     assert redact(text) == expected
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "To reset your password: open Settings and choose Security.",
+        "Session token: expires after 30 minutes of inactivity.",
+        "We use one cookie: it remembers your language preference.",
+        "Password: must contain at least 12 characters.",
+        "API key: use the Credentials page to create one.",
+        "Access token: expires automatically after one hour.",
+        "Client secret: rotate it from the administrator console.",
+        "Passphrase: should be memorable but difficult to guess.",
+        "Authorization: use OAuth for production integrations.",
+        "Authorization: Basic authentication remains supported here.",
+        "Authorization: Basic authentication",
+        "Credentials: contact your administrator for access.",
+    ],
+)
+def test_sensitive_words_in_natural_language_are_not_assignments(text: str) -> None:
+    assert redact(text) == text
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("password: hunter2", "password: <SECRET>"),
+        ("api_key: opaquecredential123", "api_key: <SECRET>"),
+        ('passphrase: "correct horse battery staple"', 'passphrase: "<SECRET>"'),
+        ("password: hunter2 status=ok", "password: <SECRET> status=ok"),
+    ],
+)
+def test_unambiguous_colon_assignments_still_redact(
+    text: str,
+    expected: str,
+) -> None:
+    assert redact(text) == expected
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (
+            "Authorization: Bearer abcdefghijklmnopqrstuvwxyz012345=",
+            "Authorization: <SECRET>",
+        ),
+        (
+            "Authorization:\tBearer\tabcdefghijklmnopqrstuvwxyz012345==",
+            "Authorization:\t<SECRET>",
+        ),
+        (
+            "Proxy-Authorization: Basic dXNlcjpwYXNzd29yZA==",
+            "Proxy-Authorization: <SECRET>",
+        ),
+        (
+            "authorization=Bearer abcdefghijklmnopqrstuvwxyz012345== status=ok",
+            "authorization=<SECRET> status=ok",
+        ),
+    ],
+)
+def test_padded_authorization_values_are_fully_redacted(
+    text: str,
+    expected: str,
+) -> None:
+    assert redact(text) == expected
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "authorization: basic dXNlcjpwYXNzd29yZA==",
+        "AUTHORIZATION = Bearer abcdefghijklmnopqrstuvwxyz012345=",
+        "Proxy_Authorization:\tBasic\tdXNlcjpwYXNzd29yZA==",
+        "level=debug Authorization: Bearer abcdefghijklmnopqrstuvwxyz012345==",
+        "-H 'Authorization: Bearer abcdefghijklmnopqrstuvwxyz012345=='",
+        r'{"message":"Authorization: Bearer abcdefghijklmnopqrstuvwxyz012345=="}',
+        "Authorization: Bearer 012345678901234567890123456789==",
+        "Authorization: Bearer +/abcdefghijklmnopqrstuvwxyz==",
+        "Authorization: Bearer abcdefghijklmnopqrstuvwxyz%3D%3D",
+    ],
+)
+def test_authorization_padding_variants_do_not_retain_credentials(text: str) -> None:
+    output = redact(text)
+
+    assert "dXNlcjpwYXNzd29yZA" not in output
+    assert "abcdefghijklmnopqrstuvwxyz" not in output
+    assert "012345678901234567890123456789" not in output
+
+
+def test_padded_authorization_hash_is_complete_and_idempotent() -> None:
+    text = "Authorization: Bearer abcdefghijklmnopqrstuvwxyz012345=="
+
+    output = redact(text, mode="hash", secret="test-secret")
+
+    assert output is not None
+    assert "abcdefghijklmnopqrstuvwxyz012345" not in output
+    assert re.fullmatch(r"Authorization: <SECRET:[0-9a-f]{12}>", output)
+    assert redact(output, mode="hash", secret="test-secret") == output
+
+
+def test_padded_authorization_stops_at_following_assignment_and_line() -> None:
+    credential = "abcdefghijklmnopqrstuvwxyz012345=="
+    text = (
+        f"Authorization: Bearer {credential}, status=ok\n"
+        "message=available"
+    )
+
+    output = redact(text)
+
+    assert output == (
+        "Authorization: <SECRET>, status=ok\n"
+        "message=available"
+    )
 
 
 @pytest.mark.parametrize("punctuation", string.punctuation)
@@ -863,6 +978,38 @@ def test_arbitrary_placeholder_shaped_credential_is_not_trusted(value: str) -> N
     "field",
     [
         "password",
+        "passwords",
+        "passphrases",
+        "api_keys",
+        r"api\u005fkeys",
+        "x-api-keys",
+        "XAPIKeys",
+        "XAPIKEYS",
+        "api_tokens",
+        "access_tokens",
+        "auth_tokens",
+        "bearer_tokens",
+        "refresh_tokens",
+        "session_tokens",
+        "id_tokens",
+        "x-id-tokens",
+        "XIDTokens",
+        "XIDTOKENS",
+        "oidc_id_tokens",
+        "OIDCIDTokens",
+        "OIDCIDTOKENS",
+        r"OIDC\u0049DTokens",
+        "user_id_tokens",
+        "USERIDTokens",
+        "USERIDTOKENS",
+        "githubTokens",
+        "client_secrets",
+        "private_keys",
+        "AWS_SECRET_ACCESS_KEYS",
+        "AWSSECRETACCESSKEYS",
+        "secret_keys",
+        "cookies",
+        "passcodes",
         "clientSecret",
         "x-api-key",
         "AWS_SECRET_ACCESS_KEY",
@@ -906,6 +1053,24 @@ def test_sensitive_mapping_fields_redact_the_entire_opaque_value(field: str) -> 
         "completion_token",
         "input_tokens",
         "max_tokens",
+        "token_counts",
+        "tokens",
+        "valid_tokens",
+        "invalid_tokens",
+        "paid_tokens",
+        "void_tokens",
+        "VALIDTOKENS",
+        "INVALIDTOKENS",
+        "PAIDTOKENS",
+        "VOIDTOKENS",
+        "bypass_words",
+        "compass_phrases",
+        "compass_codes",
+        "public_keys",
+        "BYPASSWORDS",
+        "COMPASSPHRASES",
+        "COMPASSCODES",
+        "PUBLICKEYS",
         "public_key",
         "key",
         "fingerprint",
@@ -930,6 +1095,96 @@ def test_field_aware_hash_mode_is_deterministic_without_cleartext() -> None:
     assignment = redact('password="opaque-field-canary-value"', mode="hash", secret="first-secret")
     assert redact(assignment) == assignment
     assert redact(assignment, mode="hash", secret="first-secret") == assignment
+
+
+@pytest.mark.parametrize(
+    ("event_type", "value"),
+    [
+        ("instruction", {"name": "password", "text": "opaque-semantic-canary"}),
+        ("context", {"name": "api_key", "value": "opaque-semantic-canary"}),
+        (
+            "context",
+            {
+                "name": "PASSWORD",
+                "text": "opaque-semantic-canary",
+                "value": "opaque-semantic-canary",
+            },
+        ),
+        ("outcome", {"name": "accessToken", "value": ["opaque-semantic-canary"]}),
+        ("context", {"name": "user_id_tokens", "value": "opaque-semantic-canary"}),
+        ("context", {"name": "OIDCIDTokens", "value": "opaque-semantic-canary"}),
+        ("context", {"name": "USERIDTOKENS", "value": "opaque-semantic-canary"}),
+    ],
+)
+def test_sensitive_agent_semantic_name_redacts_its_paired_content(
+    event_type: str, value: dict[str, object]
+) -> None:
+    output = sanitize_agent_event_attributes(event_type, value)
+
+    assert "opaque-semantic-canary" not in json.dumps(output)
+    assert output["name"] == value["name"]
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "input_tokens",
+        "valid_tokens",
+        "invalid_tokens",
+        "paid_tokens",
+        "void_tokens",
+        "bypass_words",
+        "compass_phrases",
+        "compass_codes",
+    ],
+)
+def test_ordinary_semantic_name_preserves_its_paired_value(name: str) -> None:
+    value = {"name": name, "value": 12345678}
+
+    assert sanitize_agent_event_attributes("context", value) == value
+
+
+def test_arbitrary_name_value_mapping_is_not_reinterpreted_as_agent_evidence() -> None:
+    value = {"name": "password", "value": "ordinary-provider-schema-value"}
+
+    assert redact_structure(value) == value
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "passwords",
+        "api_keys",
+        "access_tokens",
+        "client_secrets",
+        "secret_keys",
+        "x-id-tokens",
+        "XAPIKeys",
+        "XIDTokens",
+        "OIDCIDTokens",
+        r"OIDC\u0049DTokens",
+        "USERIDTokens",
+        "AWSSECRETACCESSKEYS",
+    ],
+)
+def test_plural_sensitive_assignments_remove_the_complete_value(field: str) -> None:
+    canary = "opaque-plural-assignment-canary"
+
+    output = redact(f"{field}={canary} status=ok")
+
+    assert output == f"{field}=<SECRET> status=ok"
+    assert canary not in output
+
+
+def test_sensitive_agent_semantic_hash_is_terminal_across_storage_passes() -> None:
+    value = {"name": "OIDCIDTokens", "value": "opaque-semantic-hash-canary"}
+
+    first = sanitize_agent_event_attributes("context", value, mode="hash", secret="key")
+    repeated = sanitize_agent_event_attributes("context", first, mode="hash", secret="key")
+
+    assert first == repeated
+    assert first["value"].startswith("<SECRET:")
+    assert "opaque-semantic-hash-canary" not in json.dumps(first)
 
 
 @pytest.mark.parametrize(
@@ -1023,6 +1278,9 @@ def test_flat_github_and_basic_authorization_credentials_are_redacted() -> None:
 def test_flat_credential_near_misses_are_not_redacted() -> None:
     text = (
         "input_tokens=12345678 max_tokens=87654321 "
+        "VALIDTOKENS=12345678 BYPASSWORDS=ordinary-value "
+        "COMPASSPHRASES=ordinary-value COMPASSCODES=ordinary-value "
+        "PUBLICKEYS=ordinary-value "
         "public_key=ordinary-public-key Basic programming "
         "ghp_short github_pat_short"
     )

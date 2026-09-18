@@ -84,9 +84,11 @@ fixed-window rows have no tenant owner, so the tenant-scoped dashboard does not
 display them. Cluster and
 monitor activation are explicit transitions; a stored historical candidate is
 shown separately from the active prospective monitor and survives page reload.
-Report presents application-only request, token, latency, cost, service, and
-model summaries; Verdict judge calls are excluded. It defaults to the last 30
-UTC calendar days, with 7-day, 90-day, and all-time choices. The chart shows up
+Report presents application-only request, tokens processed, latency, cost,
+service, and model summaries; Verdict judge and paired-replay calls are excluded. When a source
+supplies exact cache evidence, the report also separates cached from uncached
+input tokens and states how many calls have that breakdown. It defaults to the
+last 30 UTC calendar days, with 7-day, 90-day, and all-time choices. The chart shows up
 to 31 active dates in that period; tables contain at most 20 service/environment
 rows and 20 model rows. Latency coverage uses every known value in the period;
 p50/p95 use the newest 10,000
@@ -203,7 +205,8 @@ Restart an older producer with the upgraded SDK before enabling shipping;
 shipping itself does not run analysis, judges, clustering, or monitors. See
 [`examples/agent_sdk.py`](examples/agent_sdk.py) for a runnable local example.
 
-An initial monitor proposal uses exact event-time membership. The count-mode
+An initial monitor proposal uses one genuine model-call Trace per analysis unit
+and exact event-time membership. Trace is the only currently supported unit. The count-mode
 default is an older 80% reference and newer 20% current cohort; explicit date
 ranges are also supported. Membership and the normalized metric counts used by
 the comparison are frozen together. In-flight traces are excluded. An ongoing
@@ -243,7 +246,8 @@ service all construct monitor inputs from the same frozen evaluator and grouping
 identity. They use stored judgments only and never invoke a judge implicitly.
 Stored monitors that predate frozen cohort facts remain readable but must be
 re-created from a reviewed preview before they can run again. The same applies
-to older evaluator-backed monitors that cannot represent pending finalization.
+to older evaluator-backed monitors that cannot represent pending finalization
+and to stored policies naming a non-Trace analysis unit.
 
 ## Runs key-free; add a key for the judge (BYOK)
 
@@ -278,12 +282,12 @@ you use:
 
 ```bash
 python -m pip install \
-  "cognifity-verdict[anthropic,openai,google,dashboard]==0.1.0a18" \
-  "cognifity-verdict-eval[semantic]==0.1.0a18" \
-  "cognifity-verdict-inspect==0.1.0a18"
+  "cognifity-verdict[anthropic,openai,google,dashboard]==0.1.0a19" \
+  "cognifity-verdict-eval[semantic]==0.1.0a19" \
+  "cognifity-verdict-inspect==0.1.0a19"
 ```
 
-For a customer proof of concept on `0.1.0a18`, follow the bounded
+For a customer proof of concept on `0.1.0a19`, follow the bounded
 [`POC release profile`](docs/POC_RELEASE_PROFILE.md). It names the provider
 entry points exercised for this release, keeps persistence synchronous, and
 separates a workflow demonstration from a production-readiness claim.
@@ -302,9 +306,9 @@ PostgreSQL store:
 
 ```bash
 python -m pip install \
-  "cognifity-verdict[dashboard,postgres]==0.1.0a18" \
-  "cognifity-verdict-eval==0.1.0a18" \
-  "cognifity-verdict-inspect==0.1.0a18"
+  "cognifity-verdict[dashboard,postgres]==0.1.0a19" \
+  "cognifity-verdict-eval==0.1.0a19" \
+  "cognifity-verdict-inspect==0.1.0a19"
 ```
 
 The dashboard server is part of the core distribution because the core
@@ -320,9 +324,9 @@ do not delete or reclone it:
 
 ```bash
 python -m pip install --upgrade \
-  "cognifity-verdict[anthropic,openai,google,dashboard]==0.1.0a18" \
-  "cognifity-verdict-eval[semantic]==0.1.0a18" \
-  "cognifity-verdict-inspect==0.1.0a18"
+  "cognifity-verdict[anthropic,openai,google,dashboard]==0.1.0a19" \
+  "cognifity-verdict-eval[semantic]==0.1.0a19" \
+  "cognifity-verdict-inspect==0.1.0a19"
 
 python -m pip check
 python -c "import verdict, verdict_eval, verdict_inspect; print(verdict.__version__, verdict_eval.__version__, verdict_inspect.__version__)"
@@ -353,7 +357,7 @@ API remains `import verdict`.
 Minimal install without the local semantic model:
 
 ```bash
-python -m pip install "cognifity-verdict-eval==0.1.0a18"  # lexical hash fallback
+python -m pip install "cognifity-verdict-eval==0.1.0a19"  # lexical hash fallback
 ```
 
 The full test suite also needs pytest and the dashboard's HTTP test dependency:
@@ -380,7 +384,7 @@ Install the `telemetry` extra when accepting OTLP protobuf; it is optional for
 JSON files and API readers:
 
 ```bash
-python -m pip install "cognifity-verdict[telemetry,postgres]==0.1.0a18"
+python -m pip install "cognifity-verdict[telemetry,postgres]==0.1.0a19"
 
 # JSON, JSONL, or NDJSON; use --format auto or name the source explicitly.
 verdict-import file ./langsmith-runs.jsonl --format langsmith \
@@ -510,8 +514,15 @@ JSON-compatible message fields, including nested tool inputs/results and OpenAI
 tool arguments, before content limits, `Trace` assignment, and storage. Opaque
 values under supported credential fields such as `password`, `api_key`,
 `token`, `secret_key`, `cookie`, `passcode`, `authorization`, and
-`client_secret` are removed using the field name. Quoted, unquoted, and
-embedded serialized assignments consume the complete sensitive value, and
+`client_secret`, including explicit plural containers such as `passwords` and
+`api_keys`, are removed using the field name. Typed Agent instruction,
+context, and outcome events treat paired content as sensitive when their
+semantic `name` is a supported credential field. `=` assignments, quoted
+values, single-token `:` assignments, and embedded serialized forms consume
+the complete sensitive value. Quote a multiword value after `:`; an unquoted
+multiword colon clause is not removed wholesale based only on its label, while
+independently recognized secrets are still redacted. Valid padding on Basic and
+Bearer authorization values is removed with the credential, and
 existing Verdict redaction/hash placeholders remain unchanged when storage
 reapplies the boundary. Agent Run names and descriptive service, version, and
 environment fields cross the same boundary; routing IDs remain unchanged. The detector is
@@ -525,7 +536,7 @@ unacceptable; provider and manual-span failures then retain an error category
 without exception message content. IPv6 validation preserves trailing text that is not part of the
 validated address; clock values such as `12:34:56` are not treated as IPv6. Use
 non-sensitive tenant/session/cluster IDs. `sample_rate`
-controls what fraction of supported calls is retained. The `0.1.0a18` POC
+controls what fraction of supported calls is retained. The `0.1.0a19` POC
 profile keeps `buffered_writes=False`, so a normal process exit cannot strand
 queued telemetry. `buffered_writes=True` moves writes to a background batched
 writer but requires an explicit `shutdown()` imported from `verdict.client`
@@ -603,7 +614,7 @@ source. See [`ADR-013`](docs/adrs/013-stable-dependent-package-read-port.md).
 - Agent Run exploration pages through every stored run in 30-row pages while
   retaining bounded event and turn detail. Finding links continue to show the
   exact affected-run set rather than applying list offsets to it.
-- **Published capture coverage in `0.1.0a18`:** the bounded POC profile names
+- **Published capture coverage in `0.1.0a19`:** the bounded POC profile names
   Anthropic
   `messages.create(...)` (including `stream=True`), OpenAI
   `chat.completions.create(...)` and its stream helper, and Google
@@ -627,11 +638,11 @@ source. See [`ADR-013`](docs/adrs/013-stable-dependent-package-read-port.md).
   redaction uses a linear email scanner plus regex candidates, Luhn card checks,
   and standard-library IP validation. Presidio is not used.
 - **Agent-run evidence is source-bounded.** Local Claude Code/Codex capture and
-  explicit application SDK contexts persist source/run/turn/event rows
-  atomically and separately from genuine
-  provider `Trace` rows. Model-call events link to the Trace that owns LLM
-  request/response content; Verdict does not duplicate that content in the
-  event. Run detail reads page the normalized event timeline instead of loading
+  explicit application SDK contexts persist source/run/turn/event bundles
+  atomically. Those rows remain separate from provider `Trace` rows. When a
+  source supplies exact correlation, model-call events link to the Trace that
+  owns LLM request/response content; Verdict does not duplicate that content in
+  the event. Run detail reads page the normalized event timeline instead of loading
   one growing serialized run. The SDK can record typed tool/result, command,
   test, artifact, retry, handoff, feedback, and outcome events supplied by the
   application. Local-history adapters remain limited to evidence present in
@@ -651,9 +662,21 @@ source. See [`ADR-013`](docs/adrs/013-stable-dependent-package-read-port.md).
   Malformed or unavailable counters remain unavailable rather than becoming
   zero. These local-history token counts remain observable, but
   Verdict does not convert them into API-list-price spend because desktop or
-  subscription billing is not established by those files. Codex runs remain
-  outside LLM Trace comparisons when the source does not expose genuine model
-  request/response boundaries.
+  subscription billing is not established by those files. For the standard
+  `~/.codex/sessions` source, local capture also reads completed-call metadata
+  directly from the sibling `~/.codex/logs_2.sqlite`; no export is required.
+  Supported completion markers become metadata-only OpenAI traces containing
+  model and observed response time. When one valid usage event from the same
+  session matches the completion timestamp, the trace also includes its input
+  and output token counts. A valid cached-input count is retained in trace
+  metadata so reporting can show cached and uncached input without changing the
+  trace schema. Prompt, response, latency, cost, diagnostic body,
+  and raw source identifiers are never copied from diagnostics. These traces
+  are not evaluator inputs and are not speculatively linked to Agent Runs.
+  Codex diagnostic and session retention can differ, so their counts and token
+  coverage can differ. An absent,
+  malformed, symlinked, or changed diagnostic source fails closed without
+  blocking the existing history import.
 - A supported instrumented provider call made inside a manual span now stores
   that span's ID in `Trace.parent_span_id`. This is the sole automatic link
   direction: one manual span can contain many distinct provider calls, so no
@@ -752,7 +775,7 @@ source. See [`ADR-013`](docs/adrs/013-stable-dependent-package-read-port.md).
   agreement remains a separate diagnostic. Any sentinel execution error
   prevents a `healthy` status: too few usable examples remain
   `insufficient_data`; otherwise the result is `degraded`.
-- The `0.1.0a18` POC drift demonstration assumes independently sampled calls.
+- The `0.1.0a19` POC drift demonstration assumes independently sampled calls.
   Do not treat repeated turns from the same conversation as independent
   evidence or use that profile for a production decision.
 - The current local Monitor scope is tenant-bound and rejects mixed-tenant

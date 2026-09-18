@@ -164,7 +164,7 @@ export function Monitor({ configUrl, evaluation = {}, initialState = null, view 
         }} className="border px-4 py-2 text-sm">Run next cohort now</button>}
       </div>
     </section>}
-    {view === "status" && !active?.snapshot && !candidate?.snapshot && <section className="border p-5" style={box}><div className="text-xs font-mono" style={{ color: "#f2b84b" }}>MONITORING</div><h2 className="text-lg font-semibold mt-1">No comparison configured</h2><p className="text-sm mt-2" style={{ color: "#94a39d" }}>Open Compare History to create a historical comparison. Activate it only if new traffic will continue arriving.</p></section>}
+    {view === "status" && !active && !candidate && <section className="border p-5" style={box}><div className="text-xs font-mono" style={{ color: "#f2b84b" }}>MONITORING</div><h2 className="text-lg font-semibold mt-1">No comparison configured</h2><p className="text-sm mt-2" style={{ color: "#94a39d" }}>Open Compare History to create a historical comparison. Activate it only if new traffic will continue arriving.</p></section>}
     {error && <div role="alert" className="border p-4" style={{ ...box, color: "#ff6b6b" }}>{error}</div>}
     {candidate && active && <div role="status" className="border p-4 text-sm" style={{ ...box, color: "#f2b84b" }}>A newer historical candidate is shown below. The existing prospective monitor remains active until you explicitly activate the candidate.</div>}
     {requiresRebootstrap && <div role="alert" className="border p-4" style={{ ...box, color: "#f2b84b" }}>{active.rebootstrapReason} Configure the replacement above and select Preview comparison.</div>}

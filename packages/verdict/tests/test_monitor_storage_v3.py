@@ -3,11 +3,13 @@ from datetime import datetime, timedelta, timezone
 from threading import Barrier, Thread
 
 import pytest
+from verdict.monitor_inputs import load_monitor_units
 from verdict.monitoring import (
     AnalysisUnitRecord,
     MonitorPolicy,
     MonitorStatus,
     compare_manifest,
+    monitor_requires_rebootstrap,
     plan_historical_manifest,
     plan_prospective_manifest,
 )
@@ -86,6 +88,94 @@ def test_policy_without_initial_snapshot_is_not_a_visible_candidate(storage) -> 
 
     assert storage.get_monitor_policy(policy.policy_id) == (policy, "candidate")
     assert storage.get_latest_monitor_candidate(policy.scope_key) is None
+
+
+@pytest.mark.parametrize("analysis_unit", ["turn", "run", "session"])
+def test_storage_rejects_new_non_trace_monitor_policies(
+    storage,
+    analysis_unit: str,
+) -> None:
+    policy = replace(_policy(), analysis_unit=analysis_unit)
+
+    with pytest.raises(ValueError, match="only the trace analysis unit"):
+        storage.save_monitor_policy(policy)
+
+    assert storage.get_monitor_policy(policy.policy_id) is None
+
+    manifest, comparison = _snapshot(_policy())
+    with pytest.raises(ValueError, match="only the trace analysis unit"):
+        storage.save_monitor_candidate(policy, manifest, comparison)
+
+    assert storage.get_monitor_policy(policy.policy_id) is None
+
+
+@pytest.mark.parametrize("analysis_unit", ["turn", "run", "session"])
+def test_published_non_trace_monitor_policies_require_rebootstrap(
+    analysis_unit: str,
+) -> None:
+    trace_policy = _policy()
+    manifest, _comparison = _snapshot(trace_policy)
+    policy = replace(trace_policy, analysis_unit=analysis_unit)
+    claimed_manifest = replace(
+        manifest,
+        policy_fingerprint=policy.fingerprint,
+    )
+
+    assert monitor_requires_rebootstrap(policy, claimed_manifest) is True
+
+
+@pytest.mark.parametrize("analysis_unit", ["turn", "run", "session"])
+def test_non_trace_monitor_projection_fails_before_storage_read(
+    analysis_unit: str,
+) -> None:
+    class StorageReadMustNotRun:
+        def list_traces(self, **_kwargs):
+            raise AssertionError("storage read must not run")
+
+    policy = replace(_policy(), analysis_unit=analysis_unit)
+
+    with pytest.raises(ValueError, match="only the trace analysis unit"):
+        load_monitor_units(
+            StorageReadMustNotRun(),
+            policy,
+            tenant_id="tenant",
+        )
+
+
+@pytest.mark.parametrize("analysis_unit", ["turn", "run", "session"])
+def test_non_trace_monitor_direct_calculations_are_rejected(
+    analysis_unit: str,
+) -> None:
+    trace_policy = _policy()
+    units = tuple(
+        AnalysisUnitRecord(
+            f"unit-{index}",
+            NOW + timedelta(minutes=index),
+            {"failed": index >= 3},
+        )
+        for index in range(6)
+    )
+    trace_manifest = plan_historical_manifest(
+        units,
+        trace_policy,
+        cutoff=NOW + timedelta(hours=1),
+    )
+    policy = replace(trace_policy, analysis_unit=analysis_unit)
+    claimed_manifest = replace(
+        trace_manifest,
+        policy_fingerprint=policy.fingerprint,
+    )
+
+    with pytest.raises(ValueError, match="only the trace analysis unit"):
+        plan_historical_manifest(
+            units,
+            policy,
+            cutoff=NOW + timedelta(hours=1),
+        )
+    with pytest.raises(ValueError, match="only the trace analysis unit"):
+        plan_prospective_manifest(claimed_manifest, (), policy)
+    with pytest.raises(ValueError, match="only the trace analysis unit"):
+        compare_manifest(units, claimed_manifest, policy)
 
 
 def test_candidate_policy_and_initial_snapshot_are_saved_together(storage) -> None:

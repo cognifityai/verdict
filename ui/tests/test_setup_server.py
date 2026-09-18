@@ -1,5 +1,6 @@
 import asyncio
 import json
+import sqlite3
 
 import httpx
 from verdict.dashboard.app import create_app
@@ -21,11 +22,32 @@ def _write_codex(path):
     path.write_text("".join(json.dumps(row) + "\n" for row in records))
 
 
+def _write_codex_diagnostic(path):
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            """CREATE TABLE logs (
+                   id INTEGER PRIMARY KEY, ts INTEGER, ts_nanos INTEGER,
+                   target TEXT, feedback_log_body TEXT, process_uuid TEXT
+               )"""
+        )
+        connection.execute(
+            """INSERT INTO logs VALUES (
+                   1, 1788000000, 0, 'codex_core::session::turn', ?, 'process-a'
+               )""",
+            (
+                "run{thread.id=thread-a turn.id=turn-a model=gpt-5.6-sol}: "
+                "post sampling token usage turn_id=turn-a "
+                "secret=DIAGNOSTIC_BODY_CANARY",
+            ),
+        )
+
+
 def test_setup_preview_then_approved_local_capture(tmp_path):
-    codex = tmp_path / "codex"
+    codex = tmp_path / "codex" / "sessions"
     claude = tmp_path / "claude"
     claude.mkdir()
     _write_codex(codex / "session.jsonl")
+    _write_codex_diagnostic(codex.parent / "logs_2.sqlite")
     database = tmp_path / "verdict.db"
 
     async def setup():
@@ -52,11 +74,17 @@ def test_setup_preview_then_approved_local_capture(tmp_path):
     preview, capture, rejected, dashboard, runs = asyncio.run(setup())
     assert preview.status_code == 200
     assert preview.json()["codex"]["files"] == 1
+    assert preview.json()["codex"]["modelCallDiagnostics"] == {
+        "path": str(codex.parent / "logs_2.sqlite"),
+        "exists": True,
+    }
     assert capture.status_code == 200
     assert capture.json()["summary"]["stored"] == 1
+    assert capture.json()["summary"]["codex_model_calls"]["stored"] == 1
     assert "SECRET_CANARY" not in capture.text
+    assert "DIAGNOSTIC_BODY_CANARY" not in capture.text
     assert rejected.status_code == 403
-    assert dashboard.json()["meta"]["totalTraces"] == 0
+    assert dashboard.json()["meta"]["totalTraces"] == 1
     assert dashboard.json()["meta"]["totalAgentRuns"] == 1
     assert dashboard.json()["meta"]["agentRunSources"] == [
         {"sourceKind": "codex", "runs": 1}

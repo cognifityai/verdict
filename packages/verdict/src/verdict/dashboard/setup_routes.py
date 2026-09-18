@@ -21,6 +21,7 @@ from verdict.telemetry.files import SUPPORTED_FORMATS, iter_telemetry_file
 from verdict.telemetry.local_agents import capture_local_agents
 from verdict.telemetry.model import ImportContext
 from verdict.telemetry.runner import ImportRunError, import_into_storage
+from verdict.telemetry.sources.codex import codex_diagnostic_path
 
 _MAX_FILES_PREVIEW = 10_000
 LOCAL_SCOPE = "__verdict_local__"
@@ -168,6 +169,15 @@ class SetupRoutes:
             result = {
                 "claude": preview(claude_root),
                 "codex": preview(codex_root),
+            }
+            diagnostic = codex_diagnostic_path(codex_root) if codex_root else None
+            result["codex"]["modelCallDiagnostics"] = {
+                "path": str(diagnostic) if diagnostic else None,
+                "exists": bool(
+                    diagnostic
+                    and diagnostic.is_file()
+                    and not diagnostic.is_symlink()
+                ),
             }
             self._previewed_local_roots.clear()
             self._previewed_local_roots.add(

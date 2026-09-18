@@ -253,6 +253,12 @@ class MonitorPolicy:
         ).hexdigest()
 
 
+def validate_monitor_analysis_unit(policy: MonitorPolicy) -> None:
+    """Reject new execution or persistence for unsupported monitor units."""
+    if policy.analysis_unit != "trace":
+        raise ValueError("Monitor currently supports only the trace analysis unit.")
+
+
 @dataclass(frozen=True, slots=True)
 class FrozenGroupCount:
     group_id: str
@@ -918,6 +924,7 @@ def _manifest(
 
 def plan_historical_manifest(units, policy: MonitorPolicy, *, cutoff: datetime) -> CohortManifest:
     """Choose historical membership first, then freeze its normalized facts."""
+    validate_monitor_analysis_unit(policy)
     _aware(cutoff, "cutoff")
     rows = [unit for unit in _ordered(units) if unit.event_time <= cutoff]
     if policy.window_mode is WindowMode.COUNT:
@@ -962,11 +969,15 @@ def plan_historical_manifest(units, policy: MonitorPolicy, *, cutoff: datetime) 
 
 def monitor_requires_rebootstrap(
     policy: MonitorPolicy,
-    manifest: CohortManifest,
+    manifest: CohortManifest | None,
     *,
     active: bool = False,
 ) -> bool:
     """Return whether a legacy policy lacks immutable execution evidence."""
+    if policy.analysis_unit != "trace":
+        return True
+    if manifest is None:
+        return active
     return (
         manifest.reference_summary is None
         or manifest.current_summary is None
@@ -990,6 +1001,7 @@ def plan_prospective_manifest(
     prospective_start_at: datetime | None = None,
 ) -> CohortManifest:
     """Freeze the next non-overlapping current bucket against one reference."""
+    validate_monitor_analysis_unit(policy)
     if previous.policy_fingerprint != policy.fingerprint:
         raise ValueError("policy fingerprint changed; create a candidate policy")
     if previous.reference_summary is None or previous.current_summary is None:
@@ -1078,6 +1090,7 @@ def plan_prospective_manifest(
 
 def compare_manifest(units, manifest: CohortManifest, policy: MonitorPolicy) -> MonitorComparison:
     """Compare immutable cohort summaries; never reload approved outcomes."""
+    validate_monitor_analysis_unit(policy)
     if manifest.policy_fingerprint != policy.fingerprint:
         raise ValueError("manifest and policy do not match")
     if manifest.reference_summary is None or manifest.current_summary is None:

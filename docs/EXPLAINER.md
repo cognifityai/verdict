@@ -27,15 +27,17 @@ does not duplicate it.
   Observability, Phoenix, Opik, MLflow, and bounded voice transcript records
   without storing a second raw vendor envelope.
 - Supports non-streaming and streaming responses for the supported SDK paths.
-  The versioned [`0.1.0a18 POC release profile`](POC_RELEASE_PROFILE.md) names
+  The versioned [`0.1.0a19 POC release profile`](POC_RELEASE_PROFILE.md) names
   the released entry points explicitly, including Anthropic
   `messages.stream(...)` and OpenAI Responses create, parse, and helper paths.
 - Stores traces in SQLite by default, with Postgres support for deployments that
   need a server database.
 - Recursively redacts common sensitive patterns and complete opaque values
   under supported credential field names in JSON-compatible message and tool
-  data, including embedded assignments in serialized text. Repeated storage
-  sanitation preserves existing Verdict redaction and hash placeholders.
+  data, including explicit plural credential containers and embedded
+  assignments in serialized text. Typed Agent instruction, context, and
+  outcome events use their semantic names to protect paired content. Repeated
+  storage sanitation preserves existing Verdict redaction and hash placeholders.
   Agent Run names and descriptive service, version, and environment fields are
   also sanitized without rewriting routing IDs.
   Redaction runs before content limits; metadata-only capture retains error
@@ -67,7 +69,7 @@ does not duplicate it.
 2. **Store**: traces are written through a storage interface. SQLite is the
    default local store; Postgres is available for shared environments. Optional
    buffered writes move persistence to a background batched writer and require
-   explicit client shutdown. The `0.1.0a18` POC profile uses synchronous writes.
+   explicit client shutdown. The `0.1.0a19` POC profile uses synchronous writes.
 3. **Group when useful**: reviewed provider/model or cluster facets can isolate
    a workload, but the default Monitor comparison covers all eligible traffic.
    Exact-key `explicit` clustering is supported; automatic MiniLM `semantic`
@@ -81,7 +83,8 @@ does not duplicate it.
    Evaluator Lab runs display activity and elapsed time while completed results
    are stored.
 5. **Monitor**: preview count-based or explicit event-time reference/current
-   cohorts, then optionally activate the reviewed policy. Activation opens an
+   cohorts of genuine model-call Traces, then optionally activate the reviewed
+   policy. Trace is the only currently supported analysis unit. Activation opens an
    empty prospective bucket at a stored event-time boundary, so older imported
    history cannot become new traffic. Fisher's exact test, practical-effect
    thresholds, and multiple-testing correction are applied to eligible binary
@@ -92,6 +95,7 @@ does not duplicate it.
    a selectable 7-day, 30-day, 90-day, or all-time period alongside current
    monitor/change status, then export aggregate-only HTML, CSV, or browser
    Print/Save PDF output. Verdict evaluator calls stay outside utilization.
+   Verdict-owned paired-replay calls stay outside utilization as well.
 
 For a visual overview, see `docs/architecture-current.svg`.
 

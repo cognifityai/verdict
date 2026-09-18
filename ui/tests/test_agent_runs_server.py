@@ -298,6 +298,59 @@ def test_agent_run_detail_exposes_ordered_bounded_events_and_trace_links(tmp_pat
     assert "payload_json" not in response.text
 
 
+def test_agent_run_detail_redacts_historical_semantic_and_plural_credentials(tmp_path):
+    path = tmp_path / "historical-redaction.db"
+    storage = SQLiteStorage(str(path))
+    now = datetime(2026, 8, 31, tzinfo=timezone.utc)
+    storage.replace_agent_run_bundle(_bundle("local", now, with_turn=True))
+    storage.close()
+    canary = "opaque-historical-agent-canary"
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "UPDATE agent_events SET event_type=?,attributes_json=? "
+            "WHERE tenant_id=? AND run_id=? AND event_id=?",
+            (
+                "context",
+                json.dumps(
+                    {
+                        "name": "OIDCIDTokens",
+                        "value": canary,
+                        "api_keys": [canary],
+                        "AWSSECRETACCESSKEYS": [canary],
+                        "XAPIKeys": [canary],
+                        "source": "historical",
+                    }
+                ),
+                "local",
+                "r-local",
+                "event-2",
+            ),
+        )
+
+    async def request_detail():
+        transport = httpx.ASGITransport(
+            app=create_app(storage=f"sqlite:///{path}", tenant_id="local")
+        )
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
+            return await client.get("/api/runs/r-local")
+
+    response = asyncio.run(request_detail())
+
+    assert response.status_code == 200
+    assert canary not in response.text
+    event = next(item for item in response.json()["events"] if item["eventId"] == "event-2")
+    assert event["attributes"] == {
+        "AWSSECRETACCESSKEYS": "<SECRET>",
+        "XAPIKeys": "<SECRET>",
+        "api_keys": "<SECRET>",
+        "name": "OIDCIDTokens",
+        "source": "historical",
+        "value": "<SECRET>",
+    }
+
+
 def test_agent_run_detail_serves_multiple_maximum_size_turn_previews(tmp_path):
     path = tmp_path / "large-turns.db"
     storage = SQLiteStorage(str(path))

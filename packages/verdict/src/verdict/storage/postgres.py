@@ -46,6 +46,7 @@ from verdict.monitoring import (
     monitor_policy_to_json,
     monitor_snapshot_from_json,
     monitor_snapshot_to_json,
+    validate_monitor_analysis_unit,
 )
 from verdict.normalized_evidence import (
     LEGACY_AGENT_WRITER_ERROR,
@@ -1506,6 +1507,7 @@ class PostgresStorage:
         return [notification_attempt_from_json(row[0]) for row in rows]
 
     def _save_monitor_policy(self, cur, policy: MonitorPolicy) -> None:
+        validate_monitor_analysis_unit(policy)
         payload = monitor_policy_to_json(policy)
         digest = hashlib.sha256(payload.encode()).hexdigest()
         cur.execute(
@@ -1593,6 +1595,10 @@ class PostgresStorage:
             target = cur.fetchone()
             if target is None:
                 raise ValueError("unknown monitor policy")
+            target_policy = monitor_policy_from_json(
+                self._monitor_policy_payload(target[0])
+            )
+            validate_monitor_analysis_unit(target_policy)
             cur.execute(
                 "UPDATE monitor_policies SET state='retired',updated_at=now() "
                 "WHERE scope_key=%s AND state IN ('active','candidate') "
@@ -1603,7 +1609,7 @@ class PostgresStorage:
                 "UPDATE monitor_policies SET state='active',updated_at=now() WHERE policy_id=%s",
                 (policy_id,),
             )
-        return monitor_policy_from_json(self._monitor_policy_payload(target[0]))
+        return target_policy
 
     def _save_monitor_snapshot(
         self,
@@ -1624,6 +1630,7 @@ class PostgresStorage:
         if policy_row is None:
             raise ValueError("unknown policy")
         stored_policy = monitor_policy_from_json(self._monitor_policy_payload(policy_row[0]))
+        validate_monitor_analysis_unit(stored_policy)
         if stored_policy.fingerprint != manifest.policy_fingerprint:
             raise ValueError("monitor snapshot does not match policy")
         cur.execute(

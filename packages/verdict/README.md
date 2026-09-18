@@ -171,7 +171,8 @@ write failures increment the process-local `capture.dropped_records` metric and
 produce a bounded warning.
 
 The Monitor UI previews an immutable count-based (older 80% / newer 20% by
-default) or explicit-date policy before activation. Each metric has its own
+default) or explicit-date policy before activation. One genuine model-call
+Trace is the only currently supported analysis unit. Each metric has its own
 eligible denominator, Fisher's exact p-value, Benjamini-Hochberg adjustment,
 and effect-size gate. With provider/model or reviewed-cluster grouping, Verdict
 computes separate group-by-metric comparisons and adjusts across the complete
@@ -200,8 +201,9 @@ evaluator, dimensions, grouping version, and trace selection as the dashboard.
 `verdict-service` executes the dashboard's saved schedule once or continuously.
 The approved baseline membership and normalized metric counts are immutable.
 Grouped monitors are limited to 250 distinct groups. Older stored monitors
-without frozen cohort facts, or without evaluator-finalization state when an
-evaluator is selected, require a new reviewed preview before execution.
+without frozen cohort facts, without evaluator-finalization state when an
+evaluator is selected, or naming a non-Trace analysis unit remain readable but
+require a new reviewed preview before execution.
 
 The dashboard reads key-free findings from immutable analysis snapshots rather
 than recomputing them on every page load. It reports provider outcome,
@@ -210,8 +212,9 @@ evaluation status, finding severity, and drift comparison independently.
 monitor distinguishes traffic collection from a full cohort awaiting selected
 evaluator results.
 The dashboard has six top-level workspaces: Overview, Explore, Evaluate,
-Monitor, Report, and Settings. Report summarizes non-judge application calls
-over the last 30 UTC calendar days by default, with 7-day, 90-day, and all-time
+Monitor, Report, and Settings. Report summarizes application calls excluding
+Verdict-owned judge and paired-replay work over the last 30 UTC calendar days
+by default, with 7-day, 90-day, and all-time
 choices. Its chart shows up to 31 active dates in the selected period, plus the
 top 20 service/environment rows and top 20 models. Latency coverage uses every
 known value in the period; p50/p95 use the newest 10,000 known latencies.
@@ -236,9 +239,16 @@ pattern and field-aware redaction, including common provider/API credentials,
 GitHub tokens, and authorization headers, recursively across supported
 JSON-compatible message and tool structures before content limits, `Trace`
 assignment, and storage. Opaque values under supported credential field names
-such as `password`, `api_key`, `token`, `secret_key`, `cookie`, and `passcode`
-are removed without relying on their text shape. Complete quoted, unquoted, and
-embedded serialized assignment values are removed; existing Verdict
+such as `password`, `api_key`, `token`, `secret_key`, `cookie`, and `passcode`,
+including explicit plural containers such as `passwords` and `api_keys`, are
+removed without relying on their text shape. Typed Agent instruction, context,
+and outcome events also remove paired content when their semantic `name` is a
+supported credential field. Complete `=` assignment values, quoted values,
+single-token `:` assignment values, and embedded serialized forms are removed.
+Multiword values after `:` must be quoted because unquoted multiword colon
+clauses are not removed wholesale based only on their label; independently
+recognized secrets are still redacted. Basic and Bearer credential padding is
+included in the removed value. Existing Verdict
 redaction/hash placeholders remain terminal across repeated storage passes.
 Agent Run names and descriptive service, version, and environment fields cross
 the same boundary while routing IDs remain unchanged.
@@ -260,7 +270,7 @@ content capture when its documented coverage is insufficient.
 Import existing telemetry without instrumenting the application:
 
 ```bash
-pip install "cognifity-verdict[telemetry]==0.1.0a18"  # extra is for OTLP protobuf
+pip install "cognifity-verdict[telemetry]==0.1.0a19"  # extra is for OTLP protobuf
 verdict-import file traces.jsonl --format auto --storage sqlite:///./verdict.db
 verdict-import receive-otlp --storage sqlite:///./verdict.db
 ```
@@ -282,7 +292,7 @@ deprecated trace-list endpoint, so Verdict receives one record per actual
 generation or embedding rather than a trace aggregate.
 
 For a customer proof of concept, follow the versioned
-[`0.1.0a18 POC release profile`](https://github.com/cognifityai/verdict/blob/v0.1.0a18/docs/POC_RELEASE_PROFILE.md).
+[`0.1.0a19 POC release profile`](https://github.com/cognifityai/verdict/blob/v0.1.0a19/docs/POC_RELEASE_PROFILE.md).
 It pins the package set, provider entry points, persistence mode, and privacy
 boundary used for release verification.
 
@@ -332,7 +342,7 @@ each ended span is persisted once independently of provider success. `flush()` i
 a FIFO point-in-time barrier and accepts an optional timeout. `close()` rejects
 new reads/writes, drains every accepted FIFO write, stops and joins the worker,
 then closes the inner adapter; post-close `flush()` is an idempotent no-op.
-The `0.1.0a18` POC profile uses `buffered_writes=False`. Buffered mode requires
+The `0.1.0a19` POC profile uses `buffered_writes=False`. Buffered mode requires
 an explicit `shutdown()` imported from `verdict.client` before process exit.
 Fixed-window `DriftRun` snapshots created by older releases remain readable for
 compatibility; the current pipeline does not create or replace them.
@@ -372,7 +382,7 @@ client = Anthropic()
 Install and run the version-matched dashboard without a source checkout:
 
 ```bash
-python -m pip install "cognifity-verdict[dashboard]==0.1.0a18"
+python -m pip install "cognifity-verdict[dashboard]==0.1.0a19"
 verdict-dashboard --storage sqlite:///./verdict.db
 ```
 
@@ -408,7 +418,7 @@ report. Analysis runs on the Verdict dashboard host; semantic analysis and the
 external judge are separate opt-ins. The judge also requires an explicit
 confirmation before any content is sent to its provider.
 
-Upgrade an existing synchronized `0.1.0a5` through `0.1.0a17` environment with
+Upgrade an existing synchronized `0.1.0a5` through `0.1.0a18` environment with
 `python -m pip install --upgrade`
 and the same provider, dashboard, semantic, and storage extras already in use.
 The published wheels replace editable installs without a new clone and reuse the
@@ -465,7 +475,7 @@ and stable labels from the same active registry. Standalone and legacy stores
 without an active registry for the selected tenant continue to use
 `Trace.cluster_id`.
 
-For published release `0.1.0a18`, the bounded POC entry points include Anthropic
+For published release `0.1.0a19`, the bounded POC entry points include Anthropic
 `messages.create(...)` (including `stream=True`), OpenAI
 `chat.completions.create(...)` and its stream helper, and Google
 `models.generate_content(...)` / `generate_content_stream(...)`, plus the

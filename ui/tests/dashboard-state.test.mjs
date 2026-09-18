@@ -319,7 +319,8 @@ function bundle(evaluator, samples = [], driftSignals = [], reportDays = 30) {
         latestCapturedAt: "2026-09-10T00:03:00+00:00",
         calls: 28, successfulCalls: 27, failedCalls: 1, successRatePct: 96.4,
         inputTokens: 2800, outputTokens: 700, totalTokens: 3500,
-        tokenKnownCalls: 28, costUsd: 0.028, costKnownCalls: 27,
+        tokenKnownCalls: 28, cachedInputTokens: 2240, uncachedInputTokens: 560,
+        inputBreakdownKnownCalls: 28, costUsd: 0.028, costKnownCalls: 27,
         averageLatencyMs: 1000, latencyKnownCalls: 26,
         latencySampledCalls: 26, p50LatencyMs: 900, p95LatencyMs: 1800,
         identifiedApplications: 2, unattributedCalls: 0,
@@ -330,12 +331,12 @@ function bundle(evaluator, samples = [], driftSignals = [], reportDays = 30) {
         { date: "2026-09-10", calls: 4, totalTokens: 500, tokenKnownCalls: 4 },
       ] },
       applications: { availableRows: 2, shownRows: 2, rows: [
-        { name: "orders-api", environment: "production", attributed: true, calls: 24, successfulCalls: 24, failedCalls: 0, successRatePct: 100, inputTokens: 2400, outputTokens: 600, totalTokens: 3000, tokenKnownCalls: 24, costUsd: 0.024, costKnownCalls: 24, averageLatencyMs: 900, latencyKnownCalls: 24 },
-        { name: "billing-worker", environment: "staging", attributed: true, calls: 4, successfulCalls: 3, failedCalls: 1, successRatePct: 75, inputTokens: 400, outputTokens: 100, totalTokens: 500, tokenKnownCalls: 4, costUsd: 0.004, costKnownCalls: 3, averageLatencyMs: 1600, latencyKnownCalls: 2 },
+        { name: "orders-api", environment: "production", attributed: true, calls: 24, successfulCalls: 24, failedCalls: 0, successRatePct: 100, inputTokens: 2400, outputTokens: 600, totalTokens: 3000, tokenKnownCalls: 24, cachedInputTokens: 1920, uncachedInputTokens: 480, inputBreakdownKnownCalls: 24, costUsd: 0.024, costKnownCalls: 24, averageLatencyMs: 900, latencyKnownCalls: 24 },
+        { name: "billing-worker", environment: "staging", attributed: true, calls: 4, successfulCalls: 3, failedCalls: 1, successRatePct: 75, inputTokens: 400, outputTokens: 100, totalTokens: 500, tokenKnownCalls: 4, cachedInputTokens: 320, uncachedInputTokens: 80, inputBreakdownKnownCalls: 4, costUsd: 0.004, costKnownCalls: 3, averageLatencyMs: 1600, latencyKnownCalls: 2 },
       ] },
       models: { availableRows: 2, shownRows: 2, rows: [
-        { provider: "openai", model: "gpt-5-mini", calls: 24, successfulCalls: 24, failedCalls: 0, successRatePct: 100, inputTokens: 2400, outputTokens: 600, totalTokens: 3000, tokenKnownCalls: 24, costUsd: 0.024, costKnownCalls: 24, averageLatencyMs: 900, latencyKnownCalls: 24 },
-        { provider: "custom-provider", model: "custom-model-v1", calls: 4, successfulCalls: 3, failedCalls: 1, successRatePct: 75, inputTokens: 400, outputTokens: 100, totalTokens: 500, tokenKnownCalls: 4, costUsd: 0.004, costKnownCalls: 3, averageLatencyMs: 1600, latencyKnownCalls: 2 },
+        { provider: "openai", model: "gpt-5-mini", calls: 24, successfulCalls: 24, failedCalls: 0, successRatePct: 100, inputTokens: 2400, outputTokens: 600, totalTokens: 3000, tokenKnownCalls: 24, cachedInputTokens: 1920, uncachedInputTokens: 480, inputBreakdownKnownCalls: 24, costUsd: 0.024, costKnownCalls: 24, averageLatencyMs: 900, latencyKnownCalls: 24 },
+        { provider: "custom-provider", model: "custom-model-v1", calls: 4, successfulCalls: 3, failedCalls: 1, successRatePct: 75, inputTokens: 400, outputTokens: 100, totalTokens: 500, tokenKnownCalls: 4, cachedInputTokens: 320, uncachedInputTokens: 80, inputBreakdownKnownCalls: 4, costUsd: 0.004, costKnownCalls: 3, averageLatencyMs: 1600, latencyKnownCalls: 2 },
       ] },
     },
     evaluation: { selectedId: evaluator, availableIdentities: [] },
@@ -541,9 +542,29 @@ test("management report exposes labeled daily volume and application-level table
   assert.match(text, /orders-api/);
   assert.match(text, /Model performance and throughput/);
   assert.match(text, /gpt-5-mini/);
+  assert.match(text, /480\s+uncached in ·\s+1,920\s+cached in/);
   assert.match(text, /Report scope/);
   assert.doesNotMatch(text, /Capacity & Cost Simulator/);
   assert.doesNotMatch(text, /Recent LLM activity/);
+});
+
+test("management report does not render unavailable model tokens as zero", async () => {
+  const ui = await loadUiModule();
+  const data = bundle("judge-a");
+  Object.assign(data.managementReport.models.rows[0], {
+    inputTokens: 0, outputTokens: 0, totalTokens: 0, tokenKnownCalls: 0,
+  });
+  const tree = render(ui.ManagementReport, createHooks(), { data, source: "live" });
+  const modelTable = findAll(
+    tree,
+    (node) => typeof node.type === "function"
+      && node.type.name === "UtilizationTable"
+      && node.props.kind === "model",
+  )[0];
+  const rendered = render(modelTable.type, createHooks(), modelTable.props);
+  const tokenCells = findAll(rendered, (node) => node.props?.["data-report-token"]);
+
+  assert.equal(textOf(tokenCells[0]).trim(), "—");
 });
 
 test("Monitor keeps fixed-window signals as clearly labeled legacy history", async () => {
@@ -828,7 +849,7 @@ test("Trace Explorer renders execution and evaluation as separate states", async
   assert.match(text, /not evaluated/i);
 });
 
-test("Compare explains why captured Codex runs may not be LLM traces", async () => {
+test("Compare explains Codex diagnostic model-call coverage", async () => {
   const ui = await loadUiModule();
   const data = bundle(null);
   data.meta.agentRunSources = [{ sourceKind: "codex", runs: 9 }];
@@ -841,7 +862,9 @@ test("Compare explains why captured Codex runs may not be LLM traces", async () 
   const tree = render(ui.Compare, createHooks(), { data, source: "live" });
 
   assert.match(textOf(tree), /9\s+Codex agent runs were captured/i);
-  assert.match(textOf(tree), /not included in LLM trace comparisons/i);
+  assert.match(textOf(tree), /metadata-only model calls/i);
+  assert.match(textOf(tree), /token usage where a matching session event exists/i);
+  assert.match(textOf(tree), /Agent-run and model-call counts can differ/i);
 });
 
 test("Reliability heading exposes a visible, accessible evidence explanation", async () => {

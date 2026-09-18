@@ -17,6 +17,7 @@ from verdict.monitoring import (
     monitor_requires_rebootstrap,
     plan_prospective_manifest,
     trace_monitor_units,
+    validate_monitor_analysis_unit,
 )
 
 LOCAL_TENANT = "__verdict_local__"
@@ -81,6 +82,7 @@ def _evaluator_judgments(
 
 def load_monitor_units(storage, policy: MonitorPolicy, *, tenant_id: str):
     """Load one bounded, evaluator- and grouping-aware monitor input set."""
+    validate_monitor_analysis_unit(policy)
     traces = storage.list_traces(
         tenant_id=tenant_id, limit=MAX_MONITOR_INPUTS + 1,
     )
@@ -182,12 +184,14 @@ def advance_monitor(
     if expected_state not in {"active", "candidate"}:
         raise ValueError("monitor expected state is invalid")
     previous = storage.get_latest_monitor_snapshot(policy.policy_id)
-    if previous is None:
-        raise ValueError("monitor policy has no snapshot")
     if monitor_requires_rebootstrap(
-        policy, previous[0], active=expected_state == "active",
+        policy,
+        previous[0] if previous is not None else None,
+        active=expected_state == "active",
     ):
         raise MonitorRebootstrapRequired("monitor requires re-bootstrap")
+    if previous is None:
+        raise ValueError("monitor policy has no snapshot")
     units = load_monitor_units(storage, policy, tenant_id=tenant_id)
     manifest = plan_prospective_manifest(previous[0], units, policy)
     comparison = compare_manifest(units, manifest, policy)

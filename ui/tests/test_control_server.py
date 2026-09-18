@@ -1,11 +1,14 @@
 import asyncio
+import sqlite3
 from datetime import datetime, timedelta, timezone
+from hashlib import sha256
 
 import httpx
 import pytest
 from verdict.dashboard.app import create_app
 from verdict.dashboard.control_plane import ControlStore
 from verdict.evidence import AgentRun, AgentRunBundle, ExecutionStatus, SourceSession
+from verdict.monitoring import MonitorPolicy, monitor_policy_to_json
 from verdict.schema import DriftSignal, Trace
 from verdict.storage import SQLiteStorage
 
@@ -260,3 +263,67 @@ def test_run_schedule_action_advances_active_monitor_once(tmp_path):
     finally:
         storage.close()
     assert snapshot_count == 3
+
+
+def test_run_schedule_preflights_monitor_rebootstrap_before_capture(
+    tmp_path,
+    monkeypatch,
+):
+    database = tmp_path / "published-session-without-snapshot.db"
+    source = tmp_path / "claude"
+    source.mkdir()
+    SQLiteStorage(str(database)).close()
+    policy = MonitorPolicy(
+        "published-session-without-snapshot",
+        "__verdict_local__:application:trace",
+        analysis_unit="session",
+    )
+    payload = monitor_policy_to_json(policy)
+    connection = sqlite3.connect(database)
+    try:
+        now = datetime(2026, 1, 1, tzinfo=timezone.utc).isoformat()
+        connection.execute(
+            "INSERT INTO monitor_policies "
+            "(policy_id,scope_key,state,content_hash,payload_json,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (
+                policy.policy_id,
+                policy.scope_key,
+                "active",
+                sha256(payload.encode()).hexdigest(),
+                payload,
+                now,
+                now,
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    def unexpected_capture(*args, **kwargs):
+        raise AssertionError("capture must not run before monitor preflight")
+
+    monkeypatch.setattr(
+        "verdict.dashboard.control_routes.capture_local_agents",
+        unexpected_capture,
+    )
+
+    async def scenario():
+        transport = httpx.ASGITransport(
+            app=create_app(storage=f"sqlite:///{database}")
+        )
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            return await client.post(
+                "/api/control/actions/run-schedule",
+                headers={"X-Verdict-Setup": token},
+                json={"claudeRoot": str(source), "runMonitor": True},
+            )
+
+    response = asyncio.run(scenario())
+
+    assert response.status_code == 409
+    assert response.json() == {"error": "monitor requires re-bootstrap"}

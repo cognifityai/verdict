@@ -9,6 +9,8 @@ Presidio-based pass is a possible future addition but is NOT currently wired in.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import hmac
 import ipaddress
@@ -20,7 +22,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
-    from verdict.evidence import AgentCaptureBatch, AgentRunBundle
+    from verdict.evidence import AgentCaptureBatch, AgentEventType, AgentRunBundle
     from verdict.schema import Judgment, SpanRecord, Trace
 
 RedactionMode = Literal["redact", "hash", "encrypt"]
@@ -107,6 +109,48 @@ _SENSITIVE_KEY_SUFFIXES = (
     "cookie",
     "passcode",
 )
+_SENSITIVE_KEY_PLURAL_WORD_SUFFIXES = (
+    ("passwords",),
+    ("passwds",),
+    ("pwds",),
+    ("passphrases",),
+    ("authorizations",),
+    ("api", "keys"),
+    ("api", "tokens"),
+    ("access", "tokens"),
+    ("auth", "tokens"),
+    ("bearer", "tokens"),
+    ("refresh", "tokens"),
+    ("session", "tokens"),
+    ("identity", "tokens"),
+    ("id", "tokens"),
+    ("github", "tokens"),
+    ("client", "secrets"),
+    ("private", "keys"),
+    ("secret", "access", "keys"),
+    ("secret", "keys"),
+    ("secrets",),
+    ("cookies",),
+    ("passcodes",),
+)
+_SENSITIVE_KEY_PLURAL_EXACT_NAMES = frozenset(
+    {"".join(words) for words in _SENSITIVE_KEY_PLURAL_WORD_SUFFIXES}
+    | {
+        # Unseparated scoped plural names have no recoverable word boundary.
+        # Keep supported aliases exact instead of restoring collision-prone
+        # plural suffix matching (for example, ``valid_tokens`` vs ``id_tokens``).
+        "awssecretaccesskeys",
+        "oidcidtokens",
+        "useridtokens",
+        "xapikeys",
+        "xidtokens",
+    }
+)
+_AGENT_SEMANTIC_CONTENT_FIELDS = {
+    "instruction": frozenset({"text"}),
+    "context": frozenset({"text", "value"}),
+    "outcome": frozenset({"value"}),
+}
 _NON_SENSITIVE_TOKEN_FIELDS = frozenset(
     {
         "cachecreationinputtoken",
@@ -151,7 +195,8 @@ _PATTERNS = {
     ),
     "BEARER_TOKEN": re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{16,}"),
     "BASIC_AUTH": re.compile(
-        r"(?i)\b(?:proxy[-_ ]+)?authorization\s*:\s*Basic\s+[A-Za-z0-9+/=]{8,}"
+        r"(?i)\b(?:proxy[-_ ]+)?authorization\s*:\s*Basic\s+"
+        r"(?P<basic_credential>[A-Za-z0-9+/=]{8,})(?![A-Za-z0-9+/=])"
     ),
     # Email candidates are handled by the linear at-sign scanner below before
     # this mapping, so an email embedded in a URL is still classified as EMAIL.
@@ -200,7 +245,15 @@ def _is_sensitive_key(key: str) -> bool:
     normalized = "".join(re.findall(r"[A-Za-z0-9]+", key)).lower()
     if normalized in _NON_SENSITIVE_TOKEN_FIELDS:
         return False
-    return any(normalized.endswith(suffix) for suffix in _SENSITIVE_KEY_SUFFIXES)
+    if any(normalized.endswith(suffix) for suffix in _SENSITIVE_KEY_SUFFIXES):
+        return True
+    separated = re.sub(r"(?<=[A-Z])(?=[A-Z][a-z])", " ", key)
+    separated = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", separated)
+    words = tuple(part.lower() for part in re.findall(r"[A-Za-z0-9]+", separated))
+    return normalized in _SENSITIVE_KEY_PLURAL_EXACT_NAMES or any(
+        words[-len(suffix) :] == suffix
+        for suffix in _SENSITIVE_KEY_PLURAL_WORD_SUFFIXES
+    )
 
 
 def _secret_value(
@@ -219,6 +272,17 @@ def _secret_value(
     return "<SECRET>"
 
 
+def _is_basic_auth_credential(value: str) -> bool:
+    try:
+        decoded = base64.b64decode(
+            value + "=" * (-len(value) % 4),
+            validate=True,
+        )
+    except (binascii.Error, ValueError):
+        return False
+    return b":" in decoded
+
+
 def _preceding_backslashes(text: str, index: int) -> int:
     count = 0
     index -= 1
@@ -228,7 +292,7 @@ def _preceding_backslashes(text: str, index: int) -> int:
     return count
 
 
-def _assignment_prefix(text: str, start: int) -> tuple[str | None, int]:
+def _assignment_prefix(text: str, start: int) -> tuple[str | None, int, str | None]:
     cursor = start
     while cursor < len(text) and (
         text[cursor].isascii()
@@ -241,11 +305,12 @@ def _assignment_prefix(text: str, start: int) -> tuple[str | None, int]:
     while cursor < len(text) and text[cursor].isspace():
         cursor += 1
     if cursor >= len(text) or text[cursor] not in ":=":
-        return None, cursor
+        return None, cursor, None
+    separator = text[cursor]
     cursor += 1
     while cursor < len(text) and text[cursor].isspace():
         cursor += 1
-    return key, cursor
+    return key, cursor, separator
 
 
 def _quoted_assignment_value(
@@ -299,8 +364,12 @@ def _assignment_follows(text: str, start: int) -> bool:
     match = _REDACTION_TOKEN.match(text, cursor)
     if match is None or match.group("assignment") is None:
         return False
-    key, _ = _assignment_prefix(text, match.start())
-    return key is not None
+    key, value_start, _ = _assignment_prefix(text, match.start())
+    return (
+        key is not None
+        and value_start < len(text)
+        and text[value_start] not in "=\r\n"
+    )
 
 
 def _unquoted_assignment_value_end(text: str, start: int) -> int:
@@ -395,7 +464,7 @@ def _redact_secret_assignments(
         if match.group("placeholder") is not None:
             search_cursor = match.end()
             continue
-        key, value_start = _assignment_prefix(text, match.start())
+        key, value_start, separator = _assignment_prefix(text, match.start())
         if key is None:
             search_cursor = max(match.end(), value_start)
             continue
@@ -410,6 +479,30 @@ def _redact_secret_assignments(
             continue
         content_start, content_end, value_end, opening, closing = value_span
         value = text[content_start:content_end]
+        value_words = value.strip().split()
+        authorization_scheme = value_words[0].lower() if len(value_words) == 2 else None
+        is_authorization_scheme = (
+            key.lower().replace("_", "").replace("-", "").endswith("authorization")
+            and (
+                authorization_scheme == "bearer"
+                or (
+                    authorization_scheme == "basic"
+                    and _is_basic_auth_credential(value_words[1])
+                )
+            )
+        )
+        if (
+            separator == ":"
+            and not opening
+            and any(character.isspace() for character in value.strip())
+            and not is_authorization_scheme
+        ):
+            # An unquoted multiword colon clause is indistinguishable from
+            # ordinary prose (for example, ``password: open Settings``).
+            # Require either ``=`` or quotes for multiword assignment values.
+            # Keep searching inside the clause for later unambiguous fields.
+            search_cursor = value_start
+            continue
         if _PLACEHOLDER.fullmatch(value) is not None:
             search_cursor = value_end
             continue
@@ -437,6 +530,18 @@ def _sub_outside_placeholders(text: str, pattern: re.Pattern[str], replacement) 
         cursor = placeholder.end()
     output.append(pattern.sub(replacement, text[cursor:]))
     return "".join(output)
+
+
+def _basic_auth_repl(
+    match: re.Match[str],
+    mode: RedactionMode,
+    secret: str | None,
+) -> str:
+    if not _is_basic_auth_credential(match.group("basic_credential")):
+        return match.group(0)
+    if mode == "hash":
+        return _hash_match(match.group(0), "BASIC_AUTH", secret)
+    return "<BASIC_AUTH>"
 
 
 def _is_word_character(character: str) -> bool:
@@ -568,6 +673,12 @@ def redact(
                     secret,
                     following=m.string[m.end() : m.end() + 1],
                 ),
+            )
+        elif label == "BASIC_AUTH":
+            out = _sub_outside_placeholders(
+                out,
+                pat,
+                lambda match: _basic_auth_repl(match, mode, secret),
             )
         elif mode == "hash":
             out = _sub_outside_placeholders(
@@ -873,6 +984,26 @@ def redact_structure(
     return _REDACTED
 
 
+def sanitize_agent_event_attributes(
+    event_type: AgentEventType | str,
+    attributes: dict[str, Any],
+    mode: RedactionMode = "redact",
+    secret: str | None = None,
+) -> dict[str, Any]:
+    """Sanitize one typed Agent event attribute mapping."""
+    sanitized = redact_structure(attributes, mode=mode, secret=secret)
+    if not isinstance(sanitized, dict):
+        return {}
+    event_kind = event_type if isinstance(event_type, str) else event_type.value
+    paired_fields = _AGENT_SEMANTIC_CONTENT_FIELDS.get(event_kind, ())
+    semantic_name = attributes.get("name")
+    if isinstance(semantic_name, str) and _is_sensitive_key(semantic_name):
+        for field in paired_fields:
+            if field in sanitized:
+                sanitized[field] = _secret_value(sanitized[field], mode, secret)
+    return sanitized
+
+
 def _analyze_structure(
     value: Any,
     *,
@@ -1034,10 +1165,12 @@ def _sanitize_agent_capture(
     )
     events = []
     for event in capture.events:
-        attributes = {
-            key: redact_structure(value, mode=mode, secret=secret)
-            for key, value in event.attributes.items()
-        }
+        attributes = sanitize_agent_event_attributes(
+            event.event_type,
+            event.attributes,
+            mode=mode,
+            secret=secret,
+        )
         events.append(replace(event, attributes=attributes))
     return type(capture)(
         session=capture.session,
