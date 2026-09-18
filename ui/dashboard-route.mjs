@@ -33,6 +33,61 @@ function bounded(value, maximum) {
     && new TextEncoder().encode(value).length <= maximum ? value : null;
 }
 
+function selectionId(value) {
+  return typeof value === "string" && !value.includes("\0")
+    ? bounded(value, 256) : null;
+}
+
+function exactSelectionParams(params, allowed) {
+  const keys = [...params.keys()];
+  return keys.every((key) => allowed.has(key))
+    && [...allowed].every((key) => key === "event_id" || params.getAll(key).length === 1)
+    && keys.every((key) => params.getAll(key).length === 1);
+}
+
+export function parseDashboardSelection(search) {
+  if (typeof search !== "string" || search === "" || search === "?") {
+    return { state: "none", route: null };
+  }
+  const source = search.replace(/^\?/, "");
+  try {
+    decodeURIComponent(source.replaceAll("+", "%20"));
+  } catch {
+    return { state: "invalid", route: null };
+  }
+  const params = new URLSearchParams(source);
+  const view = params.get("view");
+  if (view === "traces"
+      && exactSelectionParams(params, new Set(["view", "trace_id"]))) {
+    const traceId = selectionId(params.get("trace_id"));
+    if (traceId) return {
+      state: "valid",
+      route: {
+        tab: "explore", section: "calls", explicit: true,
+        findingCode: null, runIds: [], selectedRunId: null,
+        runIdsTruncated: false, traceJudgeStatus: "all",
+        traceId, evaluatorId: null,
+      },
+    };
+  }
+  if (view === "agent-runs"
+      && exactSelectionParams(params, new Set(["view", "run_id", "event_id"]))) {
+    const runId = selectionId(params.get("run_id"));
+    const eventValue = params.get("event_id");
+    const eventId = eventValue === null ? null : selectionId(eventValue);
+    if (runId && (eventValue === null || eventId)) return {
+      state: "valid",
+      route: {
+        tab: "explore", section: "runs", explicit: true,
+        findingCode: null, runIds: [runId], selectedRunId: runId,
+        runIdsTruncated: false, traceJudgeStatus: "all",
+        traceId: null, evaluatorId: null, eventId,
+      },
+    };
+  }
+  return { state: "invalid", route: null };
+}
+
 function normalizedDestination(params, fallbackTab) {
   const requested = params.get("tab");
   if (SECTIONS[requested]) {
@@ -59,6 +114,7 @@ export function parseDashboardRoute(hash, fallbackTab = "overview") {
   const runIds = [...new Set(params.getAll("run")
     .map((value) => bounded(value, 256)).filter(Boolean))].slice(0, 50);
   const selected = bounded(params.get("selected"), 256);
+  const selectedRunId = selected && runIds.includes(selected) ? selected : runIds[0] || null;
   const requestedJudgeStatus = params.get("judge");
   const traceJudgeStatus = ["all", "judged", "not_judged", "judge_error", "pass", "fail", "unclear"]
     .includes(requestedJudgeStatus) ? requestedJudgeStatus : "all";
@@ -68,11 +124,13 @@ export function parseDashboardRoute(hash, fallbackTab = "overview") {
     explicit: Boolean(SECTIONS[requestedTab] || LEGACY_ROUTES[requestedTab] || requestedTab === "drift"),
     findingCode: bounded(params.get("finding"), 128),
     runIds,
-    selectedRunId: selected && runIds.includes(selected) ? selected : runIds[0] || null,
+    selectedRunId,
     runIdsTruncated: params.get("truncated") === "1",
     traceJudgeStatus,
     traceId: bounded(params.get("trace"), 256),
     evaluatorId: bounded(params.get("evaluator"), 64),
+    eventId: tab === "explore" && section === "runs" && selectedRunId
+      ? selectionId(params.get("event_id")) : null,
   };
 }
 
@@ -98,6 +156,10 @@ export function serializeDashboardRoute(route) {
   for (const runId of runIds) params.append("run", runId);
   if (runIds.includes(route?.selectedRunId)) params.set("selected", route.selectedRunId);
   if (route?.runIdsTruncated === true) params.set("truncated", "1");
+  if (tab === "explore" && section === "runs" && runIds.includes(route?.selectedRunId)) {
+    const eventId = selectionId(route?.eventId);
+    if (eventId) params.set("event_id", eventId);
+  }
   if (tab === "explore" && section === "calls") {
     if (["judged", "not_judged", "judge_error", "pass", "fail", "unclear"].includes(route?.traceJudgeStatus)) {
       params.set("judge", route.traceJudgeStatus);

@@ -101,6 +101,48 @@ package needs a separate propagated identity source and must otherwise report
 the correlation as unmapped. See
 [`ADR-013`](../../docs/adrs/013-stable-dependent-package-read-port.md).
 
+### Bounded fleet metadata for trusted integrations
+
+PostgreSQL deployments can explicitly enable a separate metadata-only fleet
+reader for a trusted same-process package. It reads at most 2,000 traces from
+one authorized tenant and one half-open window of at most 15 minutes. The DTO
+contains timing, status, model/routing names, token/latency/cost scalars, and an
+exact Agent Run link when one exists. Prompt, response, raw message, error,
+session, user, tags, and arbitrary agent attributes never cross this boundary.
+
+The database owner must opt in. Precreate a dedicated LOGIN reader with no role
+memberships or direct Verdict-relation privileges, grant it `USAGE` but not
+`CREATE` on the configured Verdict schema, set it read-only, and then run:
+
+```bash
+VERDICT_DATABASE_URL="$VERDICT_OWNER_DATABASE_URL" \
+  python -m verdict.fleet_read_port prepare \
+  --reader-role verdict_operations_reader --tenant-id customer-a
+```
+
+The private integration uses its dedicated reader URL:
+
+```python
+from verdict.fleet_read_port import PostgresVerdictFleetReadPortV1
+
+fleet = PostgresVerdictFleetReadPortV1(
+    verdict_reader_url,
+    tenant_id=authorized_tenant_id,
+)
+window = fleet.read_trace_window(
+    tenant_id=authorized_tenant_id,
+    window_start=window_start,
+    window_end=window_end,
+)
+fleet.close()
+```
+
+Disable only that role/tenant mapping with the same command using `disable` in
+place of `prepare`. The shared views and index remain inert for another mapped
+reader or a later re-enable. SQLite and ordinary Verdict startup do not install
+or scan this fleet boundary. See
+[`ADR-015`](../../docs/adrs/015-bounded-fleet-read-and-operations-links.md).
+
 To keep application processes off the database, select the bounded local file
 transport and later import its process-owned JSONL segments through canonical
 storage:
@@ -401,6 +443,14 @@ Verdict renders the normalized metrics/jobs response, while the host remains
 responsible for cloud credentials, authorization, CSRF protection, collection,
 and job execution. Without `operations_url`, no operations panel or extra
 request is present.
+
+A private package that owns a full-page Operations application can instead
+mount its authenticated routes and assets at `/operations` in the same FastAPI
+composition root and pass `operations_page_url="/operations"` to
+`create_app()`. Verdict then adds one same-tab top-level **Operations** control
+and the same path to `/api/config`; it does not discover, import, or start the
+private package. Omitting the argument leaves the route, control, and config
+field absent. The older `operations_url` Settings adapter above is unchanged.
 
 The dashboard's **Monitor → Segments** workspace is a bounded view of the Task 5
 tenant/version registry. It shows active and preview versions, stable display

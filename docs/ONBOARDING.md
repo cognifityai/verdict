@@ -602,6 +602,13 @@ normalized infrastructure/application metrics and authorized job controls;
 Verdict does not acquire cloud credentials or execute host jobs. Existing
 standalone and mounted dashboards are unchanged when the option is omitted.
 
+For a private full-page Operations application, the host composition root
+mounts that package's authenticated routes and assets at `/operations`, then
+passes `operations_page_url="/operations"` to `create_app()`. This adds only the
+top-level link and `/api/config` field; Verdict does not load or discover the
+private package. The legacy `operations_url` Settings integration remains a
+separate, unchanged option.
+
 For independent judge-health trending, add a fixed human-labeled JSONL anchor
 set. Its first optional row is `{"set_name":"support-v1"}`; each remaining row
 contains `sentinel_id`, `query`, `response`, optional `context`, and a `labels`

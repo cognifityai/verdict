@@ -23,7 +23,8 @@ import { SetupWizard } from "./SetupWizard.jsx";
 import { initialDashboardTab } from "./source-state.mjs";
 import { Monitor, MonitorComparisonMetrics } from "./Monitor.jsx";
 import {
-  canonicalDashboardHash, parseDashboardRoute, serializeDashboardRoute,
+  canonicalDashboardHash, parseDashboardRoute, parseDashboardSelection,
+  serializeDashboardRoute,
 } from "./dashboard-route.mjs";
 import { formatCaptureRange, formatLatency, timelineTick } from "./presentation-format.mjs";
 
@@ -259,19 +260,26 @@ function mountedInsightsUrl() {
 }
 
 function useOperationsConfig() {
-  const [operationsUrl, setOperationsUrl] = useState(null);
+  const [operations, setOperations] = useState({
+    operationsUrl: null,
+    operationsPageUrl: null,
+  });
   useEffect(() => {
     let active = true;
     fetch(mountedConfigUrl(), { credentials: "same-origin", headers: { Accept: "application/json" } })
       .then((response) => response.ok ? response.json() : null)
       .then((config) => {
-        const value = config?.operationsUrl;
-        if (active && typeof value === "string" && value.startsWith("/") && !value.startsWith("//")) setOperationsUrl(value);
+        const adapter = config?.operationsUrl;
+        const page = config?.operationsPageUrl;
+        if (active) setOperations({
+          operationsUrl: typeof adapter === "string" && adapter.startsWith("/") && !adapter.startsWith("//") ? adapter : null,
+          operationsPageUrl: page === "/operations" ? page : null,
+        });
       })
       .catch(() => {});
     return () => { active = false; };
   }, []);
-  return operationsUrl;
+  return operations;
 }
 
 const API_URL = mountedApiUrl();
@@ -764,20 +772,33 @@ function navigateSetup(commitRoute, route, destination) {
   commitRoute({ ...route, tab: target[0], section: target[1] });
 }
 
-function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluatorChange, onTracePageChange, onTraceFilterChange, traceOffset = 0, reloading, loadError, operationsUrl = null }) {
+function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluatorChange, onTracePageChange, onTraceFilterChange, traceOffset = 0, reloading, loadError, operationsUrl = null, operationsPageUrl = null }) {
   const DATA = data;
+  const initialSelection = useRef(parseDashboardSelection(
+    typeof window === "undefined" ? "" : window.location.search,
+  ));
   const initialRoute = useRef(parseDashboardRoute(
     typeof window === "undefined" ? "" : window.location.hash,
     initialDashboardTab(data.meta),
   ));
-  const [route, setRoute] = useState(initialRoute.current);
+  const [route, setRoute] = useState(
+    initialSelection.current.state === "valid"
+      ? initialSelection.current.route : initialRoute.current,
+  );
+  const [selectionError, setSelectionError] = useState(
+    initialSelection.current.state === "invalid",
+  );
   const tab = route.tab;
   const commitRoute = React.useCallback((next, replace = false) => {
     const normalized = parseDashboardRoute(serializeDashboardRoute(next), "overview");
     setRoute(normalized);
+    setSelectionError(false);
     if (typeof window !== "undefined") {
+      const destination = window.location.search
+        ? `${window.location.pathname}${serializeDashboardRoute(normalized)}`
+        : serializeDashboardRoute(normalized);
       window.history[replace ? "replaceState" : "pushState"](
-        {}, "", serializeDashboardRoute(normalized),
+        {}, "", destination,
       );
     }
   }, []);
@@ -798,6 +819,20 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
   useEffect(() => {
     const restore = () => {
       const fallback = initialDashboardTab(DATA.meta);
+      const selection = parseDashboardSelection(window.location.search);
+      if (selection.state === "valid") {
+        setRoute(selection.route);
+        setSelectionError(false);
+        window.history.replaceState(
+          {}, "", `${window.location.pathname}${serializeDashboardRoute(selection.route)}`,
+        );
+        return;
+      }
+      if (selection.state === "invalid") {
+        setRoute(parseDashboardRoute("", fallback));
+        setSelectionError(true);
+        return;
+      }
       const canonical = canonicalDashboardHash(window.location.hash, fallback);
       setRoute(parseDashboardRoute(canonical || window.location.hash, fallback));
       if (canonical) window.history.replaceState({}, "", canonical);
@@ -814,7 +849,10 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
       traceFilterCallback.current(route.traceJudgeStatus, route.traceId);
     }
   }, [route.section, route.tab, route.traceId, route.traceJudgeStatus, source]);
-  const initialRouteResolved = useRef(source !== "loading" || initialRoute.current.explicit);
+  const initialRouteResolved = useRef(
+    source !== "loading" || initialRoute.current.explicit
+      || initialSelection.current.state === "valid",
+  );
   useEffect(() => {
     if (source === "live" && !initialRouteResolved.current) {
       initialRouteResolved.current = true;
@@ -872,6 +910,14 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
                 </button>
               );
             })}
+            {operationsPageUrl === "/operations" && (
+              <button type="button" onClick={() => window.location.assign(operationsPageUrl)}
+                className="h-11 sm:h-16 shrink-0 flex items-center gap-2 px-3 text-xs sm:text-sm border-b-2"
+                style={{ color: C.sub, borderColor: "transparent", fontWeight: 450 }}>
+                <Activity size={15} style={{ color: C.faint }} />
+                Operations
+              </button>
+            )}
           </nav>
           <div className="ml-auto flex items-center gap-2 text-xs">
             <span className="flex items-center gap-1.5 px-1 sm:px-2 py-1" title={sourceLabel} style={{ color: sourceColor }}>
@@ -931,6 +977,13 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
             <span>{loadError}</span>
           </div>
         )}
+        {selectionError && (
+          <div role="alert" className="mb-5 px-3 py-3 border flex items-start gap-2 text-sm"
+            style={{ borderColor: "#6b5529", background: C.amberBg, color: C.text, borderRadius: 3 }}>
+            <AlertTriangle size={16} style={{ color: C.amber, marginTop: 1, flexShrink: 0 }} />
+            <span>The requested Verdict link is invalid. No trace or agent activity was selected.</span>
+          </div>
+        )}
         {DATA.truncation?.applied && boundedResources.length > 0 && (
           <div role="status" className="mb-5 px-3 py-3 border flex items-start gap-2 text-sm"
             style={{ borderColor: "#6b5529", background: C.amberBg, color: C.text, borderRadius: 3 }}>
@@ -972,6 +1025,7 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
           findingCode={route.findingCode}
           runIdsTruncated={route.runIdsTruncated}
           evaluatorFingerprint={evaluation.selectedIdentity?.fingerprint || null}
+          routedEventId={route.eventId || null}
           onSelectRun={(runId) => commitRoute({ ...route, selectedRunId: runId })}
           onShowAll={() => commitRoute({ ...route, tab: "explore", section: "runs", findingCode: null, runIds: [], selectedRunId: null })}
           onOpenTrace={(traceId) => commitRoute({ ...route, tab: "explore", section: "calls", traceJudgeStatus: "all", traceId })}
@@ -1498,7 +1552,9 @@ function Traces({ data = SEED, source = "sample", traceOffset = 0, reloading = f
         }} /> : (
           <Panel className="p-8 text-center">
             <Eye size={22} style={{ color: C.faint, margin: "0 auto" }} />
-            <div className="text-sm mt-2" style={{ color: C.sub }}>Select a trace to inspect its metadata and any captured content or judge verdicts.</div>
+            <div className="text-sm mt-2" style={{ color: C.sub }}>{routedTraceId && source === "live"
+              ? "The requested trace is unavailable in this tenant."
+              : "Select a trace to inspect its metadata and any captured content or judge verdicts."}</div>
           </Panel>
         )}
       </div>
@@ -1886,7 +1942,7 @@ function MiniBar({ title, data, fmt }) {
 }
 
 /* ------------------------------------------------------------------- APP */
-function App({ data = SEED, source = "sample", onReload, onEvaluatorChange, onTracePageChange, onTraceFilterChange, traceOffset = 0, reloading, loadError, operationsUrl = null }) {
+function App({ data = SEED, source = "sample", onReload, onEvaluatorChange, onTracePageChange, onTraceFilterChange, traceOffset = 0, reloading, loadError, operationsUrl = null, operationsPageUrl = null }) {
   const [mode, setMode] = useState("landing");
   return (
     <div style={{ fontFamily: "ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif", height: "100%", background: C.bg }}>
@@ -1895,7 +1951,7 @@ function App({ data = SEED, source = "sample", onReload, onEvaluatorChange, onTr
         : <Dashboard data={data} onExit={() => setMode("landing")} source={source} onReload={onReload}
           onEvaluatorChange={onEvaluatorChange} onTracePageChange={onTracePageChange} onTraceFilterChange={onTraceFilterChange} traceOffset={traceOffset}
           reloading={reloading} loadError={loadError}
-          operationsUrl={operationsUrl} />}
+          operationsUrl={operationsUrl} operationsPageUrl={operationsPageUrl} />}
     </div>
   );
 }
@@ -1910,22 +1966,22 @@ export function LandingRoot() {
 
 export function DashboardRoot() {
   const data = useDashboardData();
-  const operationsUrl = useOperationsConfig();
+  const { operationsUrl, operationsPageUrl } = useOperationsConfig();
   return (
     <div style={{ fontFamily: "ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif", minHeight: "100%", background: C.bg }}>
       <Dashboard data={data.snapshot} onExit={() => { window.location.href = "/"; }} source={data.source}
         onReload={data.reload} onEvaluatorChange={data.load} onTracePageChange={data.loadTracePage}
         onTraceFilterChange={data.loadTraceFilter}
         traceOffset={data.traceOffset} reloading={data.loading}
-        loadError={data.error} operationsUrl={operationsUrl} />
+        loadError={data.error} operationsUrl={operationsUrl} operationsPageUrl={operationsPageUrl} />
     </div>
   );
 }
 
 export default function Root() {
   const data = useDashboardData();
-  const operationsUrl = useOperationsConfig();
+  const { operationsUrl, operationsPageUrl } = useOperationsConfig();
   return <App data={data.snapshot} source={data.source} onReload={data.reload}
     onEvaluatorChange={data.load} onTracePageChange={data.loadTracePage} onTraceFilterChange={data.loadTraceFilter} traceOffset={data.traceOffset}
-    reloading={data.loading} loadError={data.error} operationsUrl={operationsUrl} />;
+    reloading={data.loading} loadError={data.error} operationsUrl={operationsUrl} operationsPageUrl={operationsPageUrl} />;
 }

@@ -228,6 +228,12 @@ the same packaged UI adds an Operations view for normalized host telemetry and
 job controls. Collection, authorization, CSRF, and execution stay in the host;
 Verdict remains cloud-neutral. Omitting the option preserves the original
 cloud-neutral dashboard behavior.
+An authenticated host may also mount a private, full-page application at the
+fixed `/operations` path and pass `operations_page_url="/operations"`. Verdict
+then advertises and links to that same-origin page without importing private
+code or starting a collector. When omitted, the page route, navigation entry,
+and config field do not exist. This is independent of the legacy
+`operations_url` Settings adapter.
 When `VERDICT_USER` and `VERDICT_PASS` are both set, HTTP Basic authentication
 gates the dashboard shells at `/` and `/dashboard` plus `/api/data`, while
 `/api/health` remains public. Chart series contain observed bins only. The response keeps full-store

@@ -652,6 +652,113 @@ def test_mounted_dashboard_exposes_only_a_same_origin_operations_path(tmp_path):
     }
 
 
+def test_dashboard_exposes_the_fixed_operations_page_only_when_configured(tmp_path):
+    import httpx
+
+    path = tmp_path / "operations-page.db"
+    SQLiteStorage(str(path)).close()
+
+    async def request_configs():
+        absent_transport = httpx.ASGITransport(
+            app=create_app(storage=f"sqlite:///{path}"),
+        )
+        configured_transport = httpx.ASGITransport(
+            app=create_app(
+                storage=f"sqlite:///{path}",
+                operations_page_url="/operations",
+            ),
+        )
+        async with (
+            httpx.AsyncClient(
+                transport=absent_transport,
+                base_url="http://testserver",
+            ) as absent,
+            httpx.AsyncClient(
+                transport=configured_transport,
+                base_url="http://testserver",
+            ) as configured,
+        ):
+            return await absent.get("/api/config"), await configured.get("/api/config")
+
+    absent, configured = asyncio.run(request_configs())
+
+    assert absent.json() == {
+        "operationsUrl": None,
+        "tenantId": "__verdict_local__",
+    }
+    assert configured.json() == {
+        "operationsUrl": None,
+        "operationsPageUrl": "/operations",
+        "tenantId": "__verdict_local__",
+    }
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "operations",
+        "/operations/",
+        "/operations?view=live",
+        "//attacker.example/operations",
+        "https://attacker.example/operations",
+        False,
+    ],
+)
+def test_dashboard_rejects_every_nonexact_operations_page_path(tmp_path, value):
+    path = tmp_path / "invalid-operations-page.db"
+    SQLiteStorage(str(path)).close()
+
+    with pytest.raises(ValueError, match="operations_page_url must be /operations"):
+        create_app(
+            storage=f"sqlite:///{path}",
+            operations_page_url=value,
+        )
+
+
+def test_basic_auth_gates_a_late_mounted_operations_page_and_descendants(
+    monkeypatch,
+):
+    import base64
+
+    import httpx
+    from fastapi import FastAPI
+
+    monkeypatch.setenv("VERDICT_USER", "reviewer")
+    monkeypatch.setenv("VERDICT_PASS", "secret")
+    app = create_app(operations_page_url="/operations")
+    operations = FastAPI()
+
+    @operations.get("/")
+    @operations.get("/live")
+    def operations_page():
+        return {"page": "operations"}
+
+    app.mount("/operations", operations)
+
+    async def requests():
+        transport = httpx.ASGITransport(app=app)
+        token = base64.b64encode(b"reviewer:secret").decode()
+        headers = {"Authorization": f"Basic {token}"}
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            return (
+                await client.get("/operations/"),
+                await client.get("/operations/live"),
+                await client.get("/operations-prefix"),
+                await client.get("/operations/live", headers=headers),
+            )
+
+    root, descendant, lookalike, authenticated = asyncio.run(requests())
+
+    assert root.status_code == 401
+    assert descendant.status_code == 401
+    assert lookalike.status_code == 404
+    assert authenticated.status_code == 200
+    assert authenticated.json() == {"page": "operations"}
+
+
 def test_dashboard_rejects_cross_origin_operations_urls(tmp_path):
     path = tmp_path / "unsafe-operations.db"
     SQLiteStorage(str(path)).close()

@@ -2942,6 +2942,7 @@ def create_app(
     *,
     storage: str | os.PathLike[str] | None = None,
     operations_url: str | None = None,
+    operations_page_url: str | None = None,
     allowed_hosts: list[str] | None = None,
     tenant_id: str = LOCAL_TENANT,
 ):
@@ -2972,6 +2973,8 @@ def create_app(
             or parsed_operations.fragment
         ):
             raise ValueError("operations_url must be a same-origin absolute path")
+    if operations_page_url is not None and operations_page_url != "/operations":
+        raise ValueError("operations_page_url must be /operations")
     backend = "postgresql" if _is_postgres(configured_storage) else "sqlite"
     setup_token = secrets.token_urlsafe(32)
     app = FastAPI(title="Verdict Dashboard", version="0.1.0")
@@ -3002,13 +3005,23 @@ def create_app(
     # The dashboard shell and live data require the password. Health and static
     # assets contain no stored telemetry and remain public.
     def _is_gated(path: str) -> bool:
-        return path in {"/", "/dashboard", "/api/config"} or path.startswith(
+        core_path = path in {"/", "/dashboard", "/api/config"} or path.startswith(
             (
-                "/api/data", "/api/registry", "/api/runs", "/api/insights",
-                "/api/evaluators", "/api/setup", "/api/monitor", "/api/clusters",
+                "/api/data",
+                "/api/registry",
+                "/api/runs",
+                "/api/insights",
+                "/api/evaluators",
+                "/api/setup",
+                "/api/monitor",
+                "/api/clusters",
                 "/api/control",
             )
         )
+        operations_path = operations_page_url is not None and (
+            path == operations_page_url or path.startswith(operations_page_url + "/")
+        )
+        return core_path or operations_path
 
     @app.middleware("http")
     async def basic_auth(request, call_next):
@@ -3066,7 +3079,10 @@ def create_app(
 
     @app.get("/api/config")
     def config():
-        return {"operationsUrl": operations_url, "tenantId": configured_tenant}
+        result = {"operationsUrl": operations_url, "tenantId": configured_tenant}
+        if operations_page_url is not None:
+            result["operationsPageUrl"] = operations_page_url
+        return result
 
     from verdict.dashboard.setup_routes import SetupRoutes
 

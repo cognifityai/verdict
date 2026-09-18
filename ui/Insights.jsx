@@ -7,14 +7,17 @@ const C = { panel: "#111715", border: "#26332e", sub: "#94a39d", faint: "#68766f
 export function Insights({ url, onOpenRuns, mode = "findings" }) {
   const [state, setState] = useState({ loading: true, error: null, data: null });
   const [running, setRunning] = useState(false);
-  const load = React.useCallback(() => {
+  const load = React.useCallback(async () => {
     setState((current) => ({ ...current, loading: true, error: null }));
-    fetch(url, { credentials: "same-origin", headers: { Accept: "application/json" } })
-      .then((response) => response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`)))
-      .then((data) => setState({ loading: false, error: null, data }))
-      .catch((error) => setState({ loading: false, error: String(error), data: null }));
+    try {
+      const response = await fetch(url, { credentials: "same-origin", headers: { Accept: "application/json" } });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      setState({ loading: false, error: null, data: await response.json() });
+    } catch (error) {
+      setState({ loading: false, error: String(error), data: null });
+    }
   }, [url]);
-  useEffect(load, [load]);
+  useEffect(() => { void load(); }, [load]);
   const runAnalysis = React.useCallback(async () => {
     setRunning(true);
     setState((current) => ({ ...current, error: null }));
@@ -28,11 +31,12 @@ export function Insights({ url, onOpenRuns, mode = "findings" }) {
         headers: { Accept: "application/json", "X-Verdict-Setup": setupToken },
       });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      setState({ loading: false, error: null, data: await response.json() });
+      await response.json();
+      await load();
     } catch (error) {
       setState((current) => ({ ...current, error: String(error) }));
     } finally { setRunning(false); }
-  }, [url]);
+  }, [load, url]);
   if (state.error) return <Notice icon={AlertTriangle}>Insights unavailable: {state.error}</Notice>;
   if (!state.data) return <Notice icon={RefreshCw}>Analyzing captured evidence…</Notice>;
   const data = state.data;

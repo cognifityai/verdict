@@ -28,7 +28,7 @@ function componentStub(names) {
 }
 
 async function loadUiModule() {
-  const source = `${await readFile(UI_SOURCE, "utf8")}\nexport { Dashboard, Overview, DriftSignals, Traces, TraceDetail, TabHelp, Judge, Compare, ManagementReport, mountedApiUrl };\nexport { useOperations } from "./Operations.jsx";\nexport { RegistryView } from "./Registry.jsx";\nexport { EvaluatorLab } from "./EvaluatorLab.jsx";\nexport { Runs } from "./Runs.jsx";`;
+  const source = `${await readFile(UI_SOURCE, "utf8")}\nexport { Dashboard, Overview, DriftSignals, Traces, TraceDetail, TabHelp, Judge, Compare, ManagementReport, mountedApiUrl };\nexport { useOperations } from "./Operations.jsx";\nexport { RegistryView } from "./Registry.jsx";\nexport { EvaluatorLab } from "./EvaluatorLab.jsx";\nexport { Runs } from "./Runs.jsx";\nexport { Insights } from "./Insights.jsx";`;
   const result = await build({
     stdin: {
       contents: source,
@@ -357,6 +357,48 @@ function bundle(evaluator, samples = [], driftSignals = [], reportDays = 30) {
   };
 }
 
+function insightsSnapshot(status = "error") {
+  return {
+    schema: "agent-insights-v2",
+    scope: {
+      availableRuns: 0, analyzedRuns: 0, complete: true,
+      traces: { available: 0, analyzed: 0, complete: true },
+    },
+    findings: [],
+    dataHealth: {
+      counts: { runs: 0, turns: 0, events: 0 },
+      eventTypes: {}, eventStatuses: {}, promptStates: {}, responseStates: {},
+      traceLinks: { modelCalls: 0, linked: 0, unlinked: 0 },
+      traceEvidence: {
+        promptPresent: 0, responsePresent: 0, judgeEligible: 0,
+        notEvaluable: 0, notEvaluableReasons: {},
+      },
+      traceOperations: {}, traceFinishReasons: {},
+    },
+    reliability: {
+      runOutcomes: {}, turnOutcomes: {}, traceOutcomes: {},
+      toolErrors: 0, commandFailures: 0, testFailures: 0, retries: 0,
+    },
+    performance: {
+      modelCalls: 0, toolCalls: 0, inputTokens: null, outputTokens: null,
+      averageModelLatencyMs: null, latencyKnownCalls: 0,
+      costUsd: null, costState: "not_captured",
+    },
+    behavior: {
+      findingRuns: 0, findingTypes: 0, capturedResponses: 0,
+      averageResponseCharacters: null, refusals: 0,
+      apologyStarts: 0, hedges: 0, validJsonResponses: 0,
+    },
+    sourceActivity: [], modelComparisons: [],
+    error: status === "error" ? { code: "analysis_failed" } : undefined,
+    analysisState: {
+      status, analysisId: "analysis-1", analyzerVersion: "agent-insights-v2",
+      cutoff: "2026-09-17T00:00:00Z", completedAt: "2026-09-17T00:00:01Z",
+      inputFingerprint: "a".repeat(64),
+    },
+  };
+}
+
 function deferredFetches() {
   const requests = [];
   globalThis.fetch = (url, options = {}) => new Promise((resolve, reject) => {
@@ -364,6 +406,46 @@ function deferredFetches() {
   });
   return requests;
 }
+
+test("Insights reloads the normalized snapshot after an error retry", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const props = { url: "/api/insights?tenant=local" };
+
+  render(ui.Insights, hooks, props);
+  hooks.flushEffects();
+  await resolveJson(requests[0], insightsSnapshot("error"));
+
+  let tree = render(ui.Insights, hooks, props);
+  hooks.flushEffects();
+  const retry = findAll(
+    tree,
+    (node) => node.type === "button" && textOf(node).trim() === "Retry",
+  )[0];
+  const pending = retry.props.onClick();
+  await resolveJson(requests[1], { setupToken: "setup-token" });
+  assert.equal(requests[2].options.method, "POST");
+  await resolveJson(requests[2], {
+    schema: "agent-insights-v2",
+    error: { code: "analysis_failed", causeType: "OperationalError" },
+    analysisState: { status: "error" },
+  });
+
+  assert.equal(requests.length, 4);
+  assert.match(requests[3].url, /\/api\/insights\?tenant=local$/);
+  assert.equal(requests[3].options.method, undefined);
+  await resolveJson(requests[3], insightsSnapshot("error"));
+  await pending;
+
+  tree = render(ui.Insights, hooks, props);
+  assert.match(textOf(tree), /The latest analysis failed/);
+  const agentRuns = findAll(
+    tree,
+    (node) => node.type?.name === "Metric" && node.props?.label === "Agent runs",
+  )[0];
+  assert.equal(agentRuns.props.value, 0);
+});
 
 test("a mounted dashboard derives its API path from the host prefix", async () => {
   globalThis.window = { location: { pathname: "/admin/verdict/dashboard" } };
@@ -386,6 +468,110 @@ test("operations appears inside Settings only when the host configures an adapte
     assert.match(textOf(withoutAdapter), /No operations adapter configured/);
     const withAdapter = render(ui.Dashboard, createHooks(), { data: bundle("judge-a"), operationsUrl: "/api/admin/operations" });
     assert.equal(findAll(withAdapter, (node) => typeof node.type === "function" && node.type.name === "Operations").length, 1);
+  } finally { delete globalThis.window; }
+});
+
+test("the full-page Operations control navigates the current tab only at the exact path", async () => {
+  const ui = await loadUiModule();
+  const assigned = [];
+  globalThis.window = {
+    location: {
+      hash: "#tab=overview&section=summary", pathname: "/dashboard",
+      assign(destination) { assigned.push(destination); },
+    },
+    history: { pushState() {}, replaceState() {} },
+    addEventListener() {}, removeEventListener() {},
+  };
+  try {
+    const withoutPage = render(ui.Dashboard, createHooks(), {
+      data: bundle("judge-a"), operationsPageUrl: null,
+    });
+    const withPage = render(ui.Dashboard, createHooks(), {
+      data: bundle("judge-a"), operationsPageUrl: "/operations",
+    });
+
+    assert.equal(findAll(withoutPage,
+      (node) => node.type === "button" && textOf(node).trim() === "Operations").length, 0);
+    const controls = findAll(withPage,
+      (node) => node.type === "button" && textOf(node).trim() === "Operations");
+    assert.equal(controls.length, 1);
+    assert.equal(findAll(withPage,
+      (node) => node.type === "a" && node.props?.href === "/operations").length, 0);
+
+    controls[0].props.onClick();
+    assert.deepEqual(assigned, ["/operations"]);
+  } finally { delete globalThis.window; }
+});
+
+test("public query links select exact traces, runs, and events at the browser sink", async () => {
+  const ui = await loadUiModule();
+  const renderSelection = (search) => {
+    globalThis.window = {
+      location: { hash: "", pathname: "/dashboard", search },
+      history: { pushState() {}, replaceState() {} },
+      addEventListener() {}, removeEventListener() {},
+    };
+    return render(ui.Dashboard, createHooks(), { data: bundle("judge-a"), source: "live" });
+  };
+  try {
+    const traceTree = renderSelection("?view=traces&trace_id=trace-1");
+    const traceView = findAll(traceTree, (node) => node.type?.name === "Traces")[0];
+    assert.equal(traceView.props.selectedTraceId, "trace-1");
+
+    const runTree = renderSelection("?view=agent-runs&run_id=run-1&event_id=event-1");
+    const runView = findAll(runTree, (node) => node.type?.name === "Runs")[0];
+    assert.equal(runView.props.selectedRunId, "run-1");
+    assert.equal(runView.props.routedEventId, "event-1");
+
+    const invalidTree = renderSelection("?view=traces&trace_id=one&trace_id=two");
+    assert.match(textOf(invalidTree), /requested Verdict link is invalid/);
+    assert.doesNotMatch(textOf(invalidTree), /trace one|trace two/);
+  } finally { delete globalThis.window; }
+});
+
+test("public query selections survive the loading to live transition", async () => {
+  const ui = await loadUiModule();
+  const cases = [
+    {
+      search: "?view=traces&trace_id=trace-1",
+      component: "Traces",
+      selected: ["selectedTraceId", "trace-1"],
+      canonical: "/dashboard#tab=explore&section=calls&trace=trace-1",
+    },
+    {
+      search: "?view=agent-runs&run_id=run-1&event_id=event-1",
+      component: "Runs",
+      selected: ["selectedRunId", "run-1"],
+      canonical: "/dashboard#tab=explore&section=runs&run=run-1&selected=run-1&event_id=event-1",
+    },
+  ];
+
+  try {
+    for (const item of cases) {
+      const hooks = createEffectHooks();
+      const replacements = [];
+      globalThis.window = {
+        location: { hash: "", pathname: "/dashboard", search: item.search },
+        history: {
+          pushState() {},
+          replaceState(_state, _unused, destination) { replacements.push(destination); },
+        },
+        addEventListener() {}, removeEventListener() {},
+      };
+
+      render(ui.Dashboard, hooks, { data: bundle("judge-a"), source: "loading" });
+      hooks.flushEffects();
+      render(ui.Dashboard, hooks, { data: bundle("judge-a"), source: "live" });
+      hooks.flushEffects();
+      const tree = render(ui.Dashboard, hooks, { data: bundle("judge-a"), source: "live" });
+      const selected = findAll(
+        tree,
+        (node) => node.type?.name === item.component,
+      )[0];
+      assert.equal(selected.props[item.selected[0]], item.selected[1]);
+      if (item.component === "Runs") assert.equal(selected.props.routedEventId, "event-1");
+      assert.equal(replacements.at(-1), item.canonical);
+    }
   } finally { delete globalThis.window; }
 });
 

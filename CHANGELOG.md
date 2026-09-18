@@ -6,6 +6,23 @@ the product is refined.
 
 ## [Unreleased]
 
+### Fixed
+
+- Exact Agent-event dashboard links now retain their bounded `event_id` while
+  the dashboard canonicalizes the initial query into its refreshable hash, so
+  loading-to-live transitions continue to focus the requested event.
+
+### Added
+
+- PostgreSQL deployments can explicitly prepare a bounded, tenant-scoped Fleet
+  ReadPort V1 for trusted same-process integrations. Its immutable DTOs expose
+  only allowlisted trace metrics and exact Agent Run links; ordinary Verdict
+  startup, SQLite, and metadata/content capture remain unchanged.
+- Authenticated hosts can advertise a private full-page `/operations` mount
+  through `operations_page_url`, and Verdict trace/Agent Run pages accept
+  bounded same-origin selection links. The existing Settings-level
+  `operations_url` adapter remains unchanged.
+
 ## [0.1.0a19] - 2026-09-15
 
 ### Fixed

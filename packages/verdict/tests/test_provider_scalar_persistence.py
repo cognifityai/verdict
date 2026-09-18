@@ -1931,7 +1931,10 @@ def test_real_openai_responses_request_hook_error_emits_no_provider_trace(tmp_pa
         responder=responder,
         request_hooks=(fail_before_transport,),
     ) as (openai, provider, storage):
-        with pytest.raises(openai.APIConnectionError):
+        # OpenAI SDK releases may either preserve a user request-hook error or
+        # wrap it as APIConnectionError. Verdict owns neither choice; its
+        # contract here is that pre-transport failure emits no provider trace.
+        with pytest.raises((openai.APIConnectionError, RuntimeError)):
             provider.responses.create(model="gpt-4o-mini", input="hi")
 
         assert attempts == 0
