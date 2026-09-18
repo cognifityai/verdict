@@ -99,7 +99,7 @@ class ScannerTests(unittest.TestCase):
             "conflict",
         )
         self.assertIn(
-            "outside the a9 surface",
+            "outside the target release surface",
             by_rule_and_path[("openai-responses-raw-manager", "app.py")]["finding"],
         )
         self.assertEqual(
@@ -117,8 +117,8 @@ class ScannerTests(unittest.TestCase):
         self.assertIn(("content-capture-enabled", "app.py"), by_rule_and_path)
         self.assertIn(("buffered-writes-enabled", "app.py"), by_rule_and_path)
         self.assertEqual(
-            by_rule_and_path[("verdict-shutdown-not-exported", "app.py")]["support"],
-            "conflict",
+            by_rule_and_path[("verdict-shutdown-call", "app.py")]["support"],
+            "review",
         )
         self.assertIn(("verdict-client-shutdown-import", "app.py"), by_rule_and_path)
 

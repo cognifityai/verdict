@@ -66,7 +66,7 @@ Agents with a native skill installer may install the
 tagged `skills/verdict-instrument-app` directory using that host's documented
 mechanism. A skill install does not install Python dependencies. The skill first
 inspects the customer application's interpreter, then proposes a fresh install,
-`0.1.0a5` through `0.1.0a18` upgrade, synchronized repair, or no package change.
+`0.1.0a5` through `0.1.0a19` upgrade, synchronized repair, or no package change.
 It must obtain approval before running that command. The registry, pipeline, Inspect, and
 dashboard commands come from the installed packages and do not need a Verdict source
 checkout. The direct-file prompt above remains the cross-host fallback.
@@ -74,7 +74,7 @@ checkout. The direct-file prompt above remains the cross-host fallback.
 ## What happens when the skill runs again
 
 The read-only environment inspector distinguishes an absent install,
-synchronized `0.1.0a5`–`0.1.0a18` upgrade, current `0.1.0a20`, mixed-package
+synchronized `0.1.0a5`–`0.1.0a19` upgrade, current `0.1.0a20`, mixed-package
 repair, and collision with the unrelated `verdict` distribution. It reports whether the
 active `VERDICT_STORAGE` backend is SQLite or PostgreSQL without printing the
 URL.

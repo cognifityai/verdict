@@ -14,7 +14,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 TARGET_VERSION = "0.1.0a20"
-UPGRADE_VERSIONS = {f"0.1.0a{release}" for release in range(5, 19)}
+UPGRADE_VERSIONS = {f"0.1.0a{release}" for release in range(5, 20)}
 REQUIRED_DISTRIBUTIONS = (
     "cognifity-verdict",
     "cognifity-verdict-eval",

@@ -13,6 +13,9 @@ the product is refined.
 - Exact Agent-event dashboard links now retain their bounded `event_id` while
   the dashboard canonicalizes the initial query into its refreshable hash, so
   loading-to-live transitions continue to focus the requested event.
+- The installation skill now recognizes synchronized `0.1.0a19` environments
+  as supported upgrade sources and treats the public `verdict.shutdown()` API
+  as a reviewable lifecycle call instead of a package conflict.
 
 ### Added
 

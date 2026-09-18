@@ -418,7 +418,7 @@ report. Analysis runs on the Verdict dashboard host; semantic analysis and the
 external judge are separate opt-ins. The judge also requires an explicit
 confirmation before any content is sent to its provider.
 
-Upgrade an existing synchronized `0.1.0a5` through `0.1.0a18` environment with
+Upgrade an existing synchronized `0.1.0a5` through `0.1.0a19` environment with
 `python -m pip install --upgrade`
 and the same provider, dashboard, semantic, and storage extras already in use.
 The published wheels replace editable installs without a new clone and reuse the

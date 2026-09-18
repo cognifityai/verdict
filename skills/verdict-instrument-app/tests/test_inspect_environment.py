@@ -93,7 +93,7 @@ def test_a7_environment_requires_synchronized_upgrade(
 
 @pytest.mark.parametrize(
     "version",
-    [f"0.1.0a{release}" for release in range(8, 19)],
+    [f"0.1.0a{release}" for release in range(8, 20)],
 )
 def test_recent_alpha_environment_requires_synchronized_upgrade(
     monkeypatch: pytest.MonkeyPatch,
@@ -105,7 +105,7 @@ def test_recent_alpha_environment_requires_synchronized_upgrade(
     assert report["action"] == "upgrade"
 
 
-def test_a19_environment_is_current(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a20_environment_is_current(monkeypatch: pytest.MonkeyPatch) -> None:
     report = inspect(monkeypatch, synchronized("0.1.0a20"))
 
     assert report["state"] == "current"

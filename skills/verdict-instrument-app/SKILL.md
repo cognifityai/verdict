@@ -30,7 +30,7 @@ Handle its state explicitly:
 | State | Required response |
 | --- | --- |
 | `absent` | Propose one pinned `0.1.0a20` install with only the approved provider, dashboard, semantic, and storage extras. |
-| `upgrade` | A synchronized `0.1.0a5` through `0.1.0a18` set exists. Preserve the backend and required extras, back up the store and lockfile, and propose an in-place `0.1.0a20` wheel upgrade. |
+| `upgrade` | A synchronized `0.1.0a5` through `0.1.0a19` set exists. Preserve the backend and required extras, back up the store and lockfile, and propose an in-place `0.1.0a20` wheel upgrade. |
 | `current` | Continue discovery without reinstalling. Treat missing optional commands as a scope decision, not a version failure. |
 | `repair` | Missing or mixed Cognifity distributions exist. Show the mismatch and propose one synchronized `0.1.0a20` repair. |
 | `conflict` | The unrelated PyPI distribution named `verdict` is installed. Stop and propose a clean environment or its explicitly approved removal. |
@@ -180,9 +180,9 @@ and add only the approved extras. An upgrade from an editable checkout to the
 published wheels does not require deleting or recloning that checkout.
 
 Preserve request/response semantics and existing exception handling. Do not add
-per-request initialization. If buffered writes are later approved, import
-`shutdown` from `verdict.client` and exercise `shutdown()` on every normal and
-cancellation path. It is not exported as `verdict.shutdown` in `0.1.0a20`.
+per-request initialization. If buffered writes are later approved, use the
+public `verdict.shutdown()` export and exercise it on every normal and
+cancellation path.
 
 ### 7. Verify the last affected sink
 
