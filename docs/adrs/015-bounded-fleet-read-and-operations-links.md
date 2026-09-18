@@ -297,8 +297,8 @@ tenant plus its dedicated reader credential, and never exposes the port to a
 browser. The adapter rejects call/result tenant mismatch. The core dashboard
 remains the authentication owner for mounted same-origin routes.
 
-The first release containing this contract is planned as
-`cognifity-verdict==0.1.0a19`, supports Python 3.10+, and preserves the current
+The first release containing this contract is targeted as
+`cognifity-verdict==0.1.0a20`, supports Python 3.10+, and preserves the current
 default SQLite install. Importing the DTO/protocol adds no PostgreSQL import;
 constructing the adapter without the PostgreSQL extra fails with one stable
 installation instruction. Existing positional DTOs, public functions, capture
