@@ -6,6 +6,8 @@ the product is refined.
 
 ## [Unreleased]
 
+## [0.1.0a20] - 2026-09-18
+
 ### Fixed
 
 - Exact Agent-event dashboard links now retain their bounded `event_id` while
@@ -587,7 +589,8 @@ the product is refined.
   retain content must explicitly select metadata-only capture. Redaction remains
   best-effort rather than a compliance control.
 
-[Unreleased]: https://github.com/cognifityai/verdict/compare/v0.1.0a19...HEAD
+[Unreleased]: https://github.com/cognifityai/verdict/compare/v0.1.0a20...HEAD
+[0.1.0a20]: https://github.com/cognifityai/verdict/compare/v0.1.0a19...v0.1.0a20
 [0.1.0a19]: https://github.com/cognifityai/verdict/compare/v0.1.0a18...v0.1.0a19
 [0.1.0a18]: https://github.com/cognifityai/verdict/compare/v0.1.0a17...v0.1.0a18
 [0.1.0a17]: https://github.com/cognifityai/verdict/compare/v0.1.0a16...v0.1.0a17
