@@ -6,6 +6,12 @@ the product is refined.
 
 ## [Unreleased]
 
+### Fixed
+
+- Exact Agent-event dashboard links now retain their bounded `event_id` while
+  the dashboard canonicalizes the initial query into its refreshable hash, so
+  loading-to-live transitions continue to focus the requested event.
+
 ### Added
 
 - PostgreSQL deployments can explicitly prepare a bounded, tenant-scoped Fleet

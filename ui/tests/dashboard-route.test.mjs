@@ -14,7 +14,7 @@ test("finding routes preserve every bounded affected run and the selected run", 
   assert.deepEqual(parseDashboardRoute(hash), {
     tab: "explore", section: "runs", explicit: true, findingCode: "tool_error",
     runIds: ["run-40", "run-2"], selectedRunId: "run-2", runIdsTruncated: true,
-    traceJudgeStatus: "all", traceId: null, evaluatorId: null,
+    traceJudgeStatus: "all", traceId: null, evaluatorId: null, eventId: null,
   });
 });
 
@@ -22,7 +22,7 @@ test("invalid direct-link state fails closed without preserving unrelated runs",
   assert.deepEqual(parseDashboardRoute("#tab=nope&run=&selected=secret", "insights"), {
     tab: "overview", section: "summary", explicit: false, findingCode: null, runIds: [],
     selectedRunId: null, runIdsTruncated: false,
-    traceJudgeStatus: "all", traceId: null, evaluatorId: null,
+    traceJudgeStatus: "all", traceId: null, evaluatorId: null, eventId: null,
   });
 });
 
@@ -123,6 +123,37 @@ test("public trace and agent links select only their exact bounded destination",
       },
     },
   );
+});
+
+test("public Agent-event selection survives canonical hash serialization", () => {
+  const selection = parseDashboardSelection(
+    "?view=agent-runs&run_id=run-one&event_id=event-one",
+  );
+  assert.equal(selection.state, "valid");
+  const hash = serializeDashboardRoute(selection.route);
+  assert.equal(
+    hash,
+    "#tab=explore&section=runs&run=run-one&selected=run-one&event_id=event-one",
+  );
+  const restored = parseDashboardRoute(hash);
+  assert.equal(restored.selectedRunId, "run-one");
+  assert.equal(restored.eventId, "event-one");
+});
+
+test("event focus is dropped outside one selected Agent Run", () => {
+  for (const route of [
+    { tab: "explore", section: "runs", eventId: "event-one" },
+    {
+      tab: "explore", section: "runs", runIds: ["run-one"],
+      selectedRunId: "run-one", eventId: "bad\0event",
+    },
+    {
+      tab: "explore", section: "calls", runIds: ["run-one"],
+      selectedRunId: "run-one", eventId: "event-one",
+    },
+  ]) {
+    assert.equal(serializeDashboardRoute(route).includes("event_id="), false);
+  }
 });
 
 test("unknown duplicate malformed and oversized public selections fail closed", () => {

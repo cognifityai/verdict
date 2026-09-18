@@ -536,20 +536,26 @@ test("public query selections survive the loading to live transition", async () 
       search: "?view=traces&trace_id=trace-1",
       component: "Traces",
       selected: ["selectedTraceId", "trace-1"],
+      canonical: "/dashboard#tab=explore&section=calls&trace=trace-1",
     },
     {
       search: "?view=agent-runs&run_id=run-1&event_id=event-1",
       component: "Runs",
       selected: ["selectedRunId", "run-1"],
+      canonical: "/dashboard#tab=explore&section=runs&run=run-1&selected=run-1&event_id=event-1",
     },
   ];
 
   try {
     for (const item of cases) {
       const hooks = createEffectHooks();
+      const replacements = [];
       globalThis.window = {
         location: { hash: "", pathname: "/dashboard", search: item.search },
-        history: { pushState() {}, replaceState() {} },
+        history: {
+          pushState() {},
+          replaceState(_state, _unused, destination) { replacements.push(destination); },
+        },
         addEventListener() {}, removeEventListener() {},
       };
 
@@ -564,6 +570,7 @@ test("public query selections survive the loading to live transition", async () 
       )[0];
       assert.equal(selected.props[item.selected[0]], item.selected[1]);
       if (item.component === "Runs") assert.equal(selected.props.routedEventId, "event-1");
+      assert.equal(replacements.at(-1), item.canonical);
     }
   } finally { delete globalThis.window; }
 });

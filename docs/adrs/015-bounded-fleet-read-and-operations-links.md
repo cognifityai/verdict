@@ -341,6 +341,23 @@ public attack surface without a current requirement.
   Operations adapters remain unchanged.
 - Exact request-to-gateway/deployment/GPU meaning remains outside Verdict.
 
+### Defect-class closure: event selection survives URL canonicalization
+
+The exact Agent-event query route was accepted and rendered during the initial
+dashboard load, but the loading-to-live canonicalization path serialized only
+the selected run. That second state transition removed `event_id`, so the last
+browser/API sink could silently broaden the selection from one event to its
+whole run.
+
+The route contract therefore carries a bounded `event_id` only when the active
+destination is `explore/runs` and the referenced run is the selected run. Query
+selection, hash serialization, hash parsing, history replacement, React props,
+and the final run-detail request must preserve that exact pair. Empty,
+oversized, NUL-containing, duplicate, wrong-section, or run-less event values
+remain absent or fail closed; trace and ordinary dashboard routes remain
+unchanged. This is a browser-state compatibility fix only and changes no public
+Python signature, storage row, authentication boundary, or content policy.
+
 ## Verification contract
 
 - Public signature/field-order/version fixtures; exact constructors, subclass
@@ -379,9 +396,10 @@ public attack surface without a current requirement.
   requests, one real mounted ASGI route, conditional `operationsPageUrl` config
   and same-tab top-level navigation, and unchanged legacy `operations_url`
   Settings behavior.
-- Browser tests cover exact trace/run/event selection, duplicate/oversized/
-  malformed values, not-found, stale/reordered fetches, desktop/mobile, and
-  existing no-query navigation.
+- Browser tests cover exact trace/run/event selection across the
+  loading-to-live canonicalization transition, duplicate/oversized/malformed
+  values, wrong-section and run-less event state, not-found, stale/reordered
+  fetches, desktop/mobile, and existing no-query navigation.
 - A clean Python 3.10 wheel installs/imports without PostgreSQL/private-package
   dependencies; a clean PostgreSQL-extra wheel exercises the real adapter.
 - Critical privacy, tenant, density, auth-prefix, deadline/close, and deep-link

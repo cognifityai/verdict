@@ -114,6 +114,7 @@ export function parseDashboardRoute(hash, fallbackTab = "overview") {
   const runIds = [...new Set(params.getAll("run")
     .map((value) => bounded(value, 256)).filter(Boolean))].slice(0, 50);
   const selected = bounded(params.get("selected"), 256);
+  const selectedRunId = selected && runIds.includes(selected) ? selected : runIds[0] || null;
   const requestedJudgeStatus = params.get("judge");
   const traceJudgeStatus = ["all", "judged", "not_judged", "judge_error", "pass", "fail", "unclear"]
     .includes(requestedJudgeStatus) ? requestedJudgeStatus : "all";
@@ -123,11 +124,13 @@ export function parseDashboardRoute(hash, fallbackTab = "overview") {
     explicit: Boolean(SECTIONS[requestedTab] || LEGACY_ROUTES[requestedTab] || requestedTab === "drift"),
     findingCode: bounded(params.get("finding"), 128),
     runIds,
-    selectedRunId: selected && runIds.includes(selected) ? selected : runIds[0] || null,
+    selectedRunId,
     runIdsTruncated: params.get("truncated") === "1",
     traceJudgeStatus,
     traceId: bounded(params.get("trace"), 256),
     evaluatorId: bounded(params.get("evaluator"), 64),
+    eventId: tab === "explore" && section === "runs" && selectedRunId
+      ? selectionId(params.get("event_id")) : null,
   };
 }
 
@@ -153,6 +156,10 @@ export function serializeDashboardRoute(route) {
   for (const runId of runIds) params.append("run", runId);
   if (runIds.includes(route?.selectedRunId)) params.set("selected", route.selectedRunId);
   if (route?.runIdsTruncated === true) params.set("truncated", "1");
+  if (tab === "explore" && section === "runs" && runIds.includes(route?.selectedRunId)) {
+    const eventId = selectionId(route?.eventId);
+    if (eventId) params.set("event_id", eventId);
+  }
   if (tab === "explore" && section === "calls") {
     if (["judged", "not_judged", "judge_error", "pass", "fail", "unclear"].includes(route?.traceJudgeStatus)) {
       params.set("judge", route.traceJudgeStatus);
