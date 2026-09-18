@@ -17,7 +17,8 @@ and expose quality, cost, and drift across your own traffic.
 For agents, Verdict captures supported provider calls and can also retain the
 application-declared run, turn, tool, command, test, retry, feedback, and outcome
 structure around them. The provider `Trace` owns LLM content; the linked event
-does not duplicate it.
+does not duplicate it. When the application explicitly records a boolean-false
+business outcome, Agent Insights surfaces that failure without a judge call.
 
 ## What Verdict Does
 

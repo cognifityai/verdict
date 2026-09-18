@@ -734,6 +734,38 @@ def test_insights_marks_missing_responses_not_evaluable(tmp_path):
     assert evidence["notEvaluableReasons"] == {"response_not_captured": 1}
 
 
+def test_insights_surface_explicit_failed_business_outcomes(tmp_path):
+    path = tmp_path / "failed-business-outcome.db"
+    storage = SQLiteStorage(str(path))
+    now = datetime(2026, 8, 31, tzinfo=timezone.utc)
+    bundle = _bundle("local", now, with_turn=True)
+    outcome = AgentEvent(
+        "business-outcome",
+        "turn",
+        2,
+        now,
+        AgentEventType.OUTCOME,
+        ExecutionStatus.FAILED,
+        "verdict:sdk",
+        {"name": "workflow_success", "value": False, "source": "application"},
+        PrivacyClassification.REDACTED,
+    )
+    storage.replace_agent_run_bundle(replace(bundle, events=(*bundle.events, outcome)))
+    storage.close()
+
+    report = build_agent_insights_bundle(path, tenant="local")
+
+    finding = next(item for item in report["findings"] if item["code"] == "business_outcome_failed")
+    assert finding == {
+        "code": "business_outcome_failed",
+        "severity": "error",
+        "message": "One or more explicit business outcomes reported failure.",
+        "runs": 1,
+        "runIds": ["r-local"],
+        "runIdsTruncated": False,
+    }
+
+
 def test_analysis_failure_is_persisted_and_returned_as_an_explicit_state(tmp_path):
     storage_url = f"sqlite:///{tmp_path / 'analysis-error.db'}"
 

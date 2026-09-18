@@ -119,6 +119,50 @@ def test_missing_evidence_is_not_misclassified_as_failure() -> None:
     assert not any(finding.code == "response_failed" for finding in report.findings)
 
 
+def test_explicit_failed_business_outcome_is_reported() -> None:
+    bundle = _bundle()
+    failed_outcome = AgentEvent(
+        "business-outcome",
+        "turn",
+        4,
+        NOW,
+        AgentEventType.OUTCOME,
+        ExecutionStatus.FAILED,
+        "verdict:sdk",
+        {"name": "workflow_success", "value": False, "source": "application"},
+        PrivacyClassification.REDACTED,
+    )
+
+    report = analyze_agent_run(replace(bundle, events=(*bundle.events, failed_outcome)))
+
+    finding = next(
+        finding for finding in report.findings if finding.code == "business_outcome_failed"
+    )
+    assert finding.severity == "error"
+    assert finding.evidence_event_ids == ("business-outcome",)
+
+
+def test_completed_outcomes_do_not_imply_business_failure() -> None:
+    bundle = _bundle()
+    descriptive_outcome = AgentEvent(
+        "descriptive-outcome",
+        "turn",
+        4,
+        NOW,
+        AgentEventType.OUTCOME,
+        ExecutionStatus.COMPLETED,
+        "verdict:sdk",
+        {"name": "step_accepted", "value": False, "source": "application"},
+        PrivacyClassification.REDACTED,
+    )
+
+    report = analyze_agent_run(replace(bundle, events=(*bundle.events, descriptive_outcome)))
+
+    assert not any(
+        finding.code == "business_outcome_failed" for finding in report.findings
+    )
+
+
 def test_policy_checks_required_steps_prohibited_tools_and_json() -> None:
     report = analyze_agent_run(
         _bundle(response="not json"),

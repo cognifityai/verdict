@@ -132,6 +132,7 @@ _FINDING_SUMMARIES = {
     "event_capture_partial": "The source exceeded the bounded event limit; event analysis is partial.",
     "tool_error": "One or more captured tool results reported failure.",
     "command_failed": "One or more captured commands returned a non-zero status.",
+    "business_outcome_failed": "One or more explicit business outcomes reported failure.",
     "possible_tool_loop": (
         "Identical tool calls with identical arguments repeated within a turn past the configured threshold."
     ),

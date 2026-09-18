@@ -6,7 +6,13 @@ import json
 from dataclasses import dataclass, field
 from typing import Literal
 
-from verdict.evidence import AgentEvent, AgentEventType, AgentRunBundle, EvidenceState
+from verdict.evidence import (
+    AgentEvent,
+    AgentEventType,
+    AgentRunBundle,
+    EvidenceState,
+    ExecutionStatus,
+)
 
 Severity = Literal["info", "warning", "error"]
 
@@ -85,6 +91,11 @@ def analyze_agent_run(
         )
     ]
     retries = events_by_type[AgentEventType.RETRY]
+    failed_business_outcomes = [
+        event
+        for event in events_by_type[AgentEventType.OUTCOME]
+        if event.status is ExecutionStatus.FAILED
+    ]
     model_calls = events_by_type[AgentEventType.MODEL_CALL]
     input_tokens = sum(
         value
@@ -174,6 +185,15 @@ def analyze_agent_run(
                 "error",
                 f"{len(test_failures)} test execution(s) reported failure.",
                 test_failures,
+            )
+        )
+    if failed_business_outcomes:
+        findings.append(
+            _finding(
+                "business_outcome_failed",
+                "error",
+                f"{len(failed_business_outcomes)} explicit business outcome(s) reported failure.",
+                failed_business_outcomes,
             )
         )
 
