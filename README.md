@@ -144,6 +144,12 @@ with verdict.agent_run(name="support-agent", session_id=session_id) as run:
     run.record_business_outcome("resolved", True)
 ```
 
+An explicit boolean `False` business outcome is retained as a failed outcome
+event and appears as a deterministic `business_outcome_failed` Agent Insight.
+This status remains available when content capture is disabled. Other outcome
+values remain descriptive; Verdict does not infer application-specific success
+semantics from names, scores, or model responses.
+
 The run is sampled as one unit. A supported provider call inside the active
 turn creates one genuine `Trace` for its prompt/response and one model-call
 event containing only operational scalars and the Trace link; LLM content is
@@ -647,7 +653,9 @@ source. See [`ADR-013`](docs/adrs/013-stable-dependent-package-read-port.md).
   test, artifact, retry, handoff, feedback, and outcome events supplied by the
   application. Local-history adapters remain limited to evidence present in
   their source formats. Verdict does not independently prove artifact state,
-  deployment success, task outcomes, or subagent correctness. Source-identified
+  deployment success, task outcomes that the application did not explicitly
+  report, or subagent correctness. An explicit boolean-false business outcome
+  is surfaced as a deterministic failure finding. Source-identified
   child histories remain distinct runs; a parent reference can remain unresolved
   when the source's parent history is no longer present. Each turn and event is
   bounded independently. Turn request/response text is redacted before its

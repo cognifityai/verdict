@@ -125,6 +125,34 @@ def test_full_agent_context_persists_typed_timeline_and_one_trace_owner() -> Non
     assert read.model_calls[0].trace_id == correlation_id
 
 
+def test_business_outcome_status_preserves_failure_without_content_capture() -> None:
+    storage = InMemoryStorage()
+    verdict.init(
+        storage=storage,
+        tenant_id="tenant-a",
+        capture_content=False,
+        instrumentors=[],
+    )
+
+    with verdict.agent_run(name="workflow") as run:
+        with run.turn(user_input="private request") as turn:
+            turn.record_outcome("step_accepted", False)
+            turn.set_output("private response")
+        run.record_business_outcome("workflow_success", False)
+        run.record_business_outcome("quality_score", 0)
+
+    [bundle] = storage.list_agent_run_bundles("tenant-a")
+    outcomes = {
+        event.attributes["name"]: event
+        for event in bundle.events
+        if event.event_type is AgentEventType.OUTCOME
+    }
+    assert outcomes["step_accepted"].status is ExecutionStatus.COMPLETED
+    assert outcomes["workflow_success"].status is ExecutionStatus.FAILED
+    assert outcomes["quality_score"].status is ExecutionStatus.COMPLETED
+    assert all("value" not in event.attributes for event in outcomes.values())
+
+
 def test_agent_redacted_event_contains_no_credential_canary_after_storage() -> None:
     storage = InMemoryStorage()
     canary = "opaque-agent-credential"

@@ -179,5 +179,7 @@ and an approved design before implementation.
 
 Verdict currently ships LLM-call capture, local storage, rubric evaluation,
 clustering, drift inspection, dashboard tooling, and source-bounded local
-agent-run/tool-sequence evidence. Cross-source execution graphs, authoritative
-task-success tracking, and outcome-backed run metrics are planned work.
+agent-run/tool-sequence evidence. Explicit boolean-false application outcomes
+surface deterministic failure findings. Cross-source execution graphs,
+automatic task-success inference, calibrated outcome comparisons, and
+outcome-backed run metrics are planned work.

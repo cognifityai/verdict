@@ -765,6 +765,7 @@ class AgentRunContext:
         event = self._latest_turn._event(
             AgentEventType.OUTCOME,
             {"name": name, "value": value, "source": source},
+            status=(ExecutionStatus.FAILED if value is False else ExecutionStatus.COMPLETED),
         )
         self._latest_turn.emit(event)
 

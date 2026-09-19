@@ -163,6 +163,11 @@ with verdict.agent_run(name="support-agent", session_id=session_id) as run:
     run.record_business_outcome("resolved", True)
 ```
 
+Use a boolean `False` only when the application can authoritatively establish
+that the business outcome failed. Verdict retains that fact in the event status
+and surfaces a deterministic `business_outcome_failed` finding, even in
+metadata-only capture. Non-boolean outcome values remain descriptive.
+
 The same contexts work with `async with`. Tool exceptions and run/turn timeout,
 cancellation, failure, or completion are recorded without replacing the
 application exception. Supported provider calls that begin inside a turn link

@@ -64,6 +64,11 @@ with verdict.agent_run(name="support-agent", session_id=session_id) as run:
     run.record_business_outcome("resolved", True)
 ```
 
+An explicit boolean `False` business outcome is retained as a failed outcome
+event and surfaced as a deterministic Agent Insight, including when content
+capture is disabled. Other values remain descriptive; Verdict does not infer
+application-specific success semantics.
+
 Supported provider calls inside the turn automatically create linked genuine
 `Trace` records. The SDK also exposes typed helpers for instructions, context,
 commands, tests, artifacts, retries, handoffs, feedback, and outcomes. Sync and

@@ -16,6 +16,10 @@ Runs, turns, and tools. Typed helpers record instruction availability, context,
 commands, tests, artifacts, retries, handoffs, user feedback, and business
 outcomes. Callers supply only facts their application observes; Verdict does
 not infer missing execution success or semantic correctness.
+An explicit boolean-false business outcome is encoded using the existing failed
+event status and becomes a deterministic Agent Insight. That status remains
+observable when the outcome value itself is omitted by metadata-only capture;
+other values retain completed descriptive-event status.
 
 One deterministic decision samples the whole run. Child runs inherit the
 parent decision. Context is task-local and is restored after nested or failed
