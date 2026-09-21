@@ -51,6 +51,45 @@ POSTGRES_SKIP_REASON = "no explicitly disposable live PostgreSQL database"
 pytestmark = pytest.mark.skipif(DSN is None, reason=POSTGRES_SKIP_REASON)
 
 
+def test_live_postgres_empty_store_reports_only_the_connected_backend() -> None:
+    import asyncio
+
+    import psycopg
+    from psycopg import sql
+    from psycopg.conninfo import make_conninfo
+
+    schema = f"verdict_empty_dashboard_{uuid4().hex}"
+    with psycopg.connect(DSN, autocommit=True) as admin:
+        admin.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+    try:
+        scoped_dsn = make_conninfo(DSN, options=f"-csearch_path={schema}")
+        PostgresStorage(scoped_dsn, min_pool=1, max_pool=1).close()
+
+        async def request_data():
+            transport = httpx.ASGITransport(app=create_app(storage=scoped_dsn))
+            async with httpx.AsyncClient(
+                transport=transport,
+                base_url="http://testserver",
+            ) as client:
+                return await client.get("/api/data")
+
+        response = asyncio.run(request_data())
+
+        assert response.status_code == 200, response.text
+        assert response.json()["meta"]["storageBackend"] == "postgresql"
+        assert response.json()["meta"]["totalAgentRuns"] == 0
+        assert response.json()["meta"]["totalTraces"] == 0
+        assert "storageConfigured" not in response.json()["meta"]
+        assert scoped_dsn not in response.text
+    finally:
+        with psycopg.connect(DSN, autocommit=True) as admin:
+            admin.execute(
+                sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(
+                    sql.Identifier(schema)
+                )
+            )
+
+
 def test_live_postgres_control_center_and_analysis_use_conninfo() -> None:
     import asyncio
 

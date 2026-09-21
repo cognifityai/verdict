@@ -96,6 +96,46 @@ def test_content_security_policy_allows_only_local_scripts():
     assert "unpkg.com" not in _CSP
 
 
+def test_dashboard_marks_reachable_empty_store_without_leaking_location(
+    tmp_path,
+    monkeypatch,
+):
+    import httpx
+
+    path = tmp_path / "private-customer-host-secret.db"
+    SQLiteStorage(str(path)).close()
+
+    async def request_data():
+        explicit_transport = httpx.ASGITransport(
+            app=create_app(storage=f"sqlite:///{path}"),
+        )
+        monkeypatch.setenv("VERDICT_DB", str(path))
+        environment_transport = httpx.ASGITransport(app=create_app())
+        async with (
+            httpx.AsyncClient(
+                transport=explicit_transport,
+                base_url="http://testserver",
+            ) as explicit,
+            httpx.AsyncClient(
+                transport=environment_transport,
+                base_url="http://testserver",
+            ) as environment,
+        ):
+            return await explicit.get("/api/data"), await environment.get("/api/data")
+
+    explicit, environment = asyncio.run(request_data())
+
+    assert explicit.status_code == environment.status_code == 200
+    assert explicit.json()["meta"]["storageBackend"] == "sqlite"
+    assert explicit.json()["meta"]["totalAgentRuns"] == 0
+    assert explicit.json()["meta"]["totalTraces"] == 0
+    assert environment.json()["meta"]["storageBackend"] == "sqlite"
+    assert "storageConfigured" not in explicit.json()["meta"]
+    assert str(path) not in explicit.text
+    assert path.name not in explicit.text
+    assert str(path) not in environment.text
+
+
 def test_bundle_marks_unknown_cost_and_exposes_signal_examples(tmp_path):
     path = tmp_path / "verdict.db"
     storage = SQLiteStorage(str(path))

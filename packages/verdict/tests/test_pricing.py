@@ -60,6 +60,36 @@ def test_longest_substring_match_wins():
     assert not math.isclose(cost, gpt4o_in + gpt4o_out, rel_tol=1e-9)
 
 
+def test_gpt_41_family_and_dated_aliases_use_current_base_text_rates():
+    expected = {
+        "gpt-4.1": (0.002, 0.008),
+        "gpt-4.1-mini": (0.0004, 0.0016),
+        "gpt-4.1-nano": (0.0001, 0.0004),
+    }
+
+    for model, rates in expected.items():
+        assert PRICE_PER_1K[model] == rates
+        assert math.isclose(
+            compute_cost_usd(model, 1000, 1000) or 0.0,
+            sum(rates),
+            rel_tol=1e-9,
+        )
+        assert math.isclose(
+            compute_cost_usd(f"openai/{model}-2025-04-14", 1000, 1000) or 0.0,
+            sum(rates),
+            rel_tol=1e-9,
+        )
+
+
+def test_gpt_41_specific_variant_wins_and_unknown_neighbor_stays_unpriced():
+    assert math.isclose(
+        compute_cost_usd("gpt-4.1-mini-2025-04-14", 1000, 1000) or 0.0,
+        0.002,
+        rel_tol=1e-9,
+    )
+    assert compute_cost_usd("gpt-4.2-mini-2025-04-14", 1000, 1000) is None
+
+
 def test_unknown_model_returns_none():
     assert compute_cost_usd("some-random-model", 100, 100) is None
 

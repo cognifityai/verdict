@@ -6,6 +6,16 @@ the product is refined.
 
 ## [Unreleased]
 
+### Fixed
+
+- Reachable empty SQLite and PostgreSQL stores now appear as
+  connected and waiting for traffic instead of being mistaken for an
+  unavailable dashboard. The API exposes only the backend class and never a
+  filesystem path or credential-bearing DSN.
+- The dated static pricing table now covers GPT-4.1, GPT-4.1 mini, and GPT-4.1
+  nano, including provider-prefixed and dated model identifiers. Existing
+  unknown-model behavior and historical stored rows are unchanged.
+
 ## [0.1.0a20] - 2026-09-18
 
 ### Fixed
