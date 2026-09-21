@@ -1305,7 +1305,7 @@ test("Agent Runs can fetch one exact Turn evaluator without reusing Trace covera
   tree = render(ui.Runs, hooks, props);
   let detail = findAll(tree, (node) => typeof node.type === "function" && node.type.name === "RunDetail")[0];
   assert.ok(detail);
-  assert.match(textOf(render(detail.type, createHooks(), detail.props)), /latest current Turn result across evaluators/);
+  assert.match(textOf(render(detail.type, createHooks(), detail.props)), /latest valid current Turn result among the 8 newest evaluator slots/);
   const digest = "a".repeat(64);
   let rendered = render(detail.type, createHooks(), detail.props);
   findAll(rendered, (node) => node.type === "input" && node.props["aria-label"] === "Exact Turn evaluator fingerprint")[0]

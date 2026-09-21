@@ -437,8 +437,10 @@ Preview examines at most 100 tenant-visible candidate Turns (including
 ineligible ones) per keyset page and requires explicit approval of the planned
 calls and external egress. SQLite/Postgres keep one bounded result slot per
 Turn and evaluator; a changed Turn makes the old score stale until reevaluated.
-Agent Runs detail shows only current Turn results. Trace coverage, pipelines,
-and Monitor remain Trace-based; Turn judging does not provide tool/citation
+Agent Runs detail shows the latest valid current Turn result among the eight
+newest evaluator slots per Turn, or one exact evaluator fingerprint when
+selected. Older results are not implied absent by this bounded view. Trace
+coverage, pipelines, and Monitor remain Trace-based; Turn judging does not provide tool/citation
 provenance, claim verification, or independent-session statistics. A completed
 Turn result contains one score per evaluable rubric dimension; malformed or
 partial stored results are not counted as judged and require a new approved run.

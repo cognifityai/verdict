@@ -105,6 +105,7 @@ MAX_SERIES_POINTS = 100
 MAX_DASHBOARD_PROVIDERS = 8
 MAX_DASHBOARD_CLUSTERS = 20
 MAX_DASHBOARD_DIMENSIONS = 12
+MAX_TURN_DETAIL_EVALUATORS = 8
 MAX_DASHBOARD_EVALUATORS = 20
 MAX_DASHBOARD_DRIFT_SIGNALS = 40
 MAX_DRIFT_SIGNAL_LAYERS = 12
@@ -862,13 +863,14 @@ def build_agent_run_detail(
                 params.append(turn_evaluator_fingerprint)
             for turn in eligible_turns:
                 params.extend((turn.turn_id, turn_evidence_fingerprint(turn)))
+            params.extend((MAX_TURN_DETAIL_EVALUATORS, len(eligible_turns) * MAX_TURN_DETAIL_EVALUATORS))
             for row in session.execute(
                 "SELECT turn_id,evaluator_fingerprint,evidence_fingerprint,status,result_json FROM ("
                 "SELECT turn_id,evaluator_fingerprint,evidence_fingerprint,status,result_json,"
                 "ROW_NUMBER() OVER (PARTITION BY turn_id ORDER BY evaluated_at DESC,"
                 "evaluator_fingerprint DESC) AS rn FROM agent_turn_judgments "
                 "WHERE tenant_id=? AND run_id=? " + evaluator_clause + "AND (" + conditions + ")"
-                ") ranked WHERE rn=1 LIMIT 50", tuple(params),
+                ") ranked WHERE rn<=? ORDER BY turn_id,rn LIMIT ?", tuple(params),
             ):
                 if row["turn_id"] in turn_judgments:
                     continue
@@ -932,8 +934,9 @@ def build_agent_run_detail(
         return {
             "runId": run["run_id"],
             "turnEvaluationScope": {
-                "mode": "exact_evaluator" if turn_evaluator_fingerprint else "latest_current_any_evaluator",
+                "mode": "exact_evaluator" if turn_evaluator_fingerprint else "latest_valid_bounded",
                 "evaluatorFingerprint": turn_evaluator_fingerprint,
+                "maxEvaluatorsPerTurn": 1 if turn_evaluator_fingerprint else MAX_TURN_DETAIL_EVALUATORS,
             },
             "focusEventId": event_id,
             "sourceKind": run["source_kind"],

@@ -242,7 +242,7 @@ function RunDetail({ run, detail, onEventPage, onTurnPage, onFocusEvent, focusEv
         )) : <div className="text-sm" style={{ color: color.sub }}>No deterministic findings.</div>}
       </div>
       <h2 className="font-semibold mt-6">Turns</h2>
-      <div className="text-xs mt-1" style={{ color: color.sub }}>{turnEvaluatorFilter ? "Showing only this exact Turn evaluator." : "Showing the latest current Turn result across evaluators, if any. Trace evaluator coverage above is separate."}</div>
+      <div className="text-xs mt-1" style={{ color: color.sub }}>{turnEvaluatorFilter ? "Showing only this exact Turn evaluator." : `Showing the latest valid current Turn result among the ${detail.data?.turnEvaluationScope?.maxEvaluatorsPerTurn || 8} newest evaluator slots per Turn, if any. Older results require an exact evaluator fingerprint. Trace evaluator coverage above is separate.`}</div>
       <div className="flex flex-wrap gap-2 mt-2 items-center text-xs"><input aria-label="Exact Turn evaluator fingerprint" placeholder="Exact 64-character evaluator fingerprint" value={turnEvaluatorInput} onChange={(event) => onTurnEvaluatorInput(event.target.value)} className="border p-2 bg-transparent min-w-[200px] flex-1 font-mono" /><button className="border px-3 py-2" disabled={!/^[0-9a-f]{64}$/.test(turnEvaluatorInput)} onClick={() => onTurnEvaluatorFilter(turnEvaluatorInput)}>Show exact evaluator</button><button className="border px-3 py-2" disabled={!turnEvaluatorFilter} onClick={() => { onTurnEvaluatorInput(""); onTurnEvaluatorFilter(null); }}>Show latest</button></div>
       <div className="mt-2 space-y-2">
         {(detail.data?.turns || []).map((turn) => (
@@ -252,7 +252,7 @@ function RunDetail({ run, detail, onEventPage, onTurnPage, onFocusEvent, focusEv
               <div>Request ({turn.requestState}{turn.requestTruncated ? ", bounded preview" : ""}): {turn.request ?? "not available"}</div>
               <div className="mt-2">Response ({turn.responseState}{turn.responseTruncated ? ", bounded preview" : ""}): {turn.response ?? "not available"}</div>
               <div className="mt-2">Source-reported token usage: {turnTokenSummary(turn.tokenUsage)}</div>
-              <div className="mt-2">{turnEvaluatorFilter ? "Exact Turn evaluation" : "Latest current Turn evaluation"}: {turn.evaluation ? `${turn.evaluation.status} · ${turn.evaluation.rubricName}/${turn.evaluation.rubricVersion} · ${turn.evaluation.judgeModels?.join(", ")} · evaluator ${turn.evaluation.evaluatorFingerprint} · ${turn.evaluation.dimensions.map((d) => `${d.name}: ${d.verdict}`).join(" · ") || "no scores"}` : "No current native Turn result for this scope"}</div>
+              <div className="mt-2">{turnEvaluatorFilter ? "Exact Turn evaluation" : "Latest valid current Turn evaluation (bounded)"}: {turn.evaluation ? `${turn.evaluation.status} · ${turn.evaluation.rubricName}/${turn.evaluation.rubricVersion} · ${turn.evaluation.judgeModels?.join(", ")} · evaluator ${turn.evaluation.evaluatorFingerprint} · ${turn.evaluation.dimensions.map((d) => `${d.name}: ${d.verdict}`).join(" · ") || "no scores"}` : "No current native Turn result for this scope"}</div>
             </div>
           </details>
         ))}

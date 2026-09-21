@@ -3,13 +3,14 @@
 import os
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from threading import Event
 from uuid import uuid4
 
 import pytest
 import verdict.storage.postgres as postgres_module
 from verdict.agent_judgment import AgentTurnJudgment, turn_evidence_fingerprint
+from verdict.dashboard.app import build_agent_run_detail
 from verdict.evidence import (
     AgentRun,
     AgentRunBundle,
@@ -168,5 +169,14 @@ def test_postgres_malformed_current_slot_is_not_judged_and_can_be_replaced():
         assert storage.save_agent_turn_judgment_if_current(result) == "saved"
         rows, _ = storage.list_agent_turn_evaluation_candidates(tenant, "a" * 64)
         assert rows[0][1] is JudgmentStatus.COMPLETED
+        newer = replace(result, evaluator_fingerprint="b" * 64,
+                        evaluated_at=result.evaluated_at + timedelta(seconds=1))
+        assert storage.save_agent_turn_judgment_if_current(newer) == "saved"
+        with storage._pool.connection() as conn:
+            conn.execute("UPDATE agent_turn_judgments SET result_json='[]' "
+                         "WHERE tenant_id=%s AND evaluator_fingerprint=%s", (tenant, "b" * 64))
+        detail = build_agent_run_detail(os.environ["VERDICT_TEST_POSTGRES_DSN"],
+                                        tenant=tenant, run_id="run")
+        assert detail["turns"][0]["evaluation"]["evaluatorFingerprint"] == "a" * 64
     finally:
         storage.close()

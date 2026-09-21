@@ -562,7 +562,9 @@ inherit provider Trace scores. Each preview scans at most 100 candidate
 Turns, counts ineligible Turns in that window, and offers a cursor for older
 Turns. Approve that exact page before external judge calls. A Turn/evaluator
 has one bounded SQLite/Postgres score slot; a later evidence extension makes
-its score stale. Current results appear in Agent Runs detail, separately from
+its score stale. Agent Runs detail displays the latest valid current result
+among the eight newest evaluator slots per Turn, or one exact evaluator when
+selected; older results are not implied absent. This remains separate from
 Trace coverage. No tool provenance or citation verification is supplied to
 the Turn judge yet; Monitor remains Trace-only.
 When `OPENAI_BASE_URL` is set, the OpenAI provider uses that compatible endpoint;
