@@ -357,7 +357,9 @@ referenced by a retained Trace. SQLite and PostgreSQL execute multi-table trace
 deletion and pruning atomically and serialize concurrent trace writers while
 they decide which shared parent spans must survive.
 Stored costs are best-effort estimates from Verdict's dated static base-price table;
-unknown models remain unpriced, and the values are not billing truth.
+the table includes GPT-4.1 base text models and their published dated snapshots.
+Unverified fine-tuned/custom derivatives remain unpriced; the values are not
+billing truth.
 
 Hosts that need agent-versus-evaluator cost provenance can bind a bounded,
 task-local workload label:
@@ -390,6 +392,11 @@ Install and run the version-matched dashboard without a source checkout:
 python -m pip install "cognifity-verdict[dashboard]==0.1.0a20"
 verdict-dashboard --storage sqlite:///./verdict.db
 ```
+
+Any reachable store with no Agent Runs or LLM Traces visible for the selected
+tenant is shown as connected and waiting for SDK traffic or an approved import.
+The dashboard reports only whether the configured backend is SQLite or
+PostgreSQL; it does not return a database path or DSN to the browser.
 
 If capture/import used an explicit tenant, pass the same `--tenant-id` to the
 dashboard or set `VERDICT_TENANT_ID`. The default remains

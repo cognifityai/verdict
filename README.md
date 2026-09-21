@@ -789,8 +789,10 @@ source. See [`ADR-013`](docs/adrs/013-stable-dependent-package-read-port.md).
 - The current local Monitor scope is tenant-bound and rejects mixed-tenant
   analysis.
 - `cost_usd` is a best-effort estimate from a dated static base-price table, not
-  a billing source of truth. Unknown models remain unpriced; caching, special
-  tiers, tools, residency, and negotiated discounts are not modeled.
+  a billing source of truth. The table includes GPT-4.1 base text models and
+  their published dated snapshots; unknown and unverified fine-tuned/custom
+  models remain unpriced. Caching, special tiers, tools, residency, and
+  negotiated discounts are not modeled.
 - Judge execution is sequential. Judge token/cost usage, evaluation-budget
   enforcement, cache-aware provider-Trace pricing, human-readable cluster naming, and
   automatic fragmented-cluster fusion are not implemented. Their scoped

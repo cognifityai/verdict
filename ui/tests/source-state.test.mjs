@@ -2,10 +2,47 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  configuredStorePresentation,
   observedSourcePresentation,
   initialDashboardTab,
   setupFailureMessage,
 } from "../source-state.mjs";
+
+test("configured empty stores are distinct without trusting arbitrary metadata", () => {
+  assert.deepEqual(
+    configuredStorePresentation({
+      storageBackend: "sqlite",
+      totalAgentRuns: 0,
+      totalTraces: 0,
+    }),
+    { connectedEmpty: true, backendLabel: "SQLite" },
+  );
+  assert.deepEqual(
+    configuredStorePresentation({
+      storageBackend: "postgresql",
+      totalAgentRuns: 0,
+      totalTraces: 0,
+    }),
+    { connectedEmpty: true, backendLabel: "PostgreSQL" },
+  );
+  for (const meta of [
+    {},
+    { storageBackend: "mysql", totalAgentRuns: 0, totalTraces: 0 },
+    { storageBackend: "toString", totalAgentRuns: 0, totalTraces: 0 },
+    { storageBackend: "constructor", totalAgentRuns: 0, totalTraces: 0 },
+    { storageBackend: "__proto__", totalAgentRuns: 0, totalTraces: 0 },
+    { storageBackend: "sqlite", totalAgentRuns: null, totalTraces: 0 },
+    { storageBackend: "sqlite", totalAgentRuns: "", totalTraces: 0 },
+    { storageBackend: "sqlite", totalAgentRuns: 0, totalTraces: null },
+    { storageBackend: "sqlite", totalAgentRuns: 0, totalTraces: "" },
+    { storageBackend: "sqlite", totalAgentRuns: 0, totalTraces: 1 },
+  ]) {
+    assert.deepEqual(
+      configuredStorePresentation(meta),
+      { connectedEmpty: false, backendLabel: null },
+    );
+  }
+});
 
 test("agent runs open the findings-first overview", () => {
   const meta = { totalTraces: 0, totalAgentRuns: 55 };

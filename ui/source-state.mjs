@@ -4,6 +4,25 @@ export function initialDashboardTab(meta = {}) {
   return "settings";
 }
 
+export function configuredStorePresentation(meta = {}) {
+  let backendLabel = null;
+  if (meta.storageBackend === "sqlite") backendLabel = "SQLite";
+  if (meta.storageBackend === "postgresql") backendLabel = "PostgreSQL";
+  const totalAgentRuns = meta.totalAgentRuns;
+  const totalTraces = meta.totalTraces;
+  const connectedEmpty = backendLabel !== null
+    && typeof totalAgentRuns === "number"
+    && Number.isInteger(totalAgentRuns)
+    && totalAgentRuns === 0
+    && typeof totalTraces === "number"
+    && Number.isInteger(totalTraces)
+    && totalTraces === 0;
+  return {
+    connectedEmpty,
+    backendLabel: connectedEmpty ? backendLabel : null,
+  };
+}
+
 export function observedSourcePresentation(meta = {}) {
   const rows = (Array.isArray(meta.agentRunSources) ? meta.agentRunSources : [])
     .filter((item) => typeof item?.sourceKind === "string"

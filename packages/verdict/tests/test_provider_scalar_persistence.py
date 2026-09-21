@@ -736,6 +736,60 @@ async def test_real_async_openai_chat_stream_with_sdk_omit_values_persists_one_r
         storage.close()
 
 
+@pytest.mark.parametrize(
+    ("model", "expected_cost"),
+    [
+        ("gpt-4.1-mini-2025-04-14", 0.0000024),
+        ("ft:gpt-4.1-mini-2025-04-14:org:custom:abc123", None),
+        ("custom/gpt-4.1-mini-replica", None),
+        ("custom/gpt-4.1-mini", None),
+        ("my-fine-tune/gpt-4.1-mini-2025-04-14", None),
+    ],
+)
+def test_real_openai_gpt_41_response_persists_only_known_cost(
+    tmp_path, model, expected_cost,
+):
+    openai = pytest.importorskip("openai")
+    from verdict.instrumentors.openai import OpenAIInstrumentor
+
+    def dated_response(request: httpx.Request) -> httpx.Response:
+        response = _provider_response(request)
+        payload = response.json()
+        payload["model"] = model
+        return httpx.Response(200, json=payload)
+
+    verdict_client, storage = _sqlite_client(tmp_path, "openai-gpt-41-mini")
+    instrumentor = OpenAIInstrumentor(verdict_client)
+    http_client = httpx.Client(transport=httpx.MockTransport(dated_response))
+    instrumentor.install()
+    try:
+        provider = openai.OpenAI(
+            api_key="test",
+            base_url="http://provider.test/v1",
+            max_retries=0,
+            http_client=http_client,
+        )
+        response = provider.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": "hi"}],
+        )
+
+        assert response.model == model
+        [trace] = storage.list_traces()
+        assert trace.request_model == model
+        assert trace.response_model == model
+        assert trace.input_tokens == 2
+        assert trace.output_tokens == 1
+        if expected_cost is None:
+            assert trace.cost_usd is None
+        else:
+            assert math.isclose(trace.cost_usd or 0.0, expected_cost, rel_tol=1e-9)
+    finally:
+        instrumentor.uninstall()
+        http_client.close()
+        storage.close()
+
+
 def test_real_openai_chat_create_stream_declared_minimum_surface_persists_one_row(
     tmp_path,
 ):

@@ -3143,6 +3143,7 @@ def create_app(
                 trace_id=trace_id,
                 report_days=report_days,
             )
+            bundle["meta"]["storageBackend"] = backend
             bundle["monitor"] = monitor_routes.read_state(tenant_id=authorized_tenant)
             return bundle
         except DashboardBundleLimitError:

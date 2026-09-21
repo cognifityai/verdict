@@ -1,5 +1,9 @@
 import React, { useEffect, useState } from "react";
-import { observedSourcePresentation, setupFailureMessage } from "./source-state.mjs";
+import {
+  configuredStorePresentation,
+  observedSourcePresentation,
+  setupFailureMessage,
+} from "./source-state.mjs";
 
 const panel = "border p-5";
 const style = { borderColor: "#26332e", background: "#111715" };
@@ -19,8 +23,10 @@ export function SetupWizard({ configUrl, onComplete, onNavigate, onRefresh, agen
   const hasAgentRuns = Number(agentSummary.totalAgentRuns) > 0;
   const hasTraces = Number(agentSummary.totalTraces) > 0;
   const hasData = hasAgentRuns || hasTraces;
+  const storePresentation = configuredStorePresentation(agentSummary);
+  const hasObservedStore = hasData || storePresentation.connectedEmpty;
   const sourcePresentation = observedSourcePresentation(agentSummary);
-  const [editing, setEditing] = useState(!hasData);
+  const [editing, setEditing] = useState(!hasObservedStore);
   const root = configUrl.replace(/\/api\/config$/, "");
   const serverOrigin = root || (typeof window === "undefined" ? "this Verdict server" : window.location.origin);
   useEffect(() => {
@@ -30,8 +36,8 @@ export function SetupWizard({ configUrl, onComplete, onNavigate, onRefresh, agen
       .catch((failure) => setError(setupFailureMessage(failure, serverOrigin)));
   }, [configUrl, serverOrigin]);
   useEffect(() => {
-    if (hasData) setEditing(false);
-  }, [hasData]);
+    if (hasObservedStore) setEditing(false);
+  }, [hasObservedStore]);
 
   async function post(path, payload) {
     setBusy(true); setError(null);
@@ -55,7 +61,7 @@ export function SetupWizard({ configUrl, onComplete, onNavigate, onRefresh, agen
   ];
   const localKey = JSON.stringify([claudeRoot, codexRoot]);
   const importKey = JSON.stringify([filePath, fileFormat]);
-  if (hasData && !editing) {
+  if (hasObservedStore && !editing) {
     const sourceText = (Array.isArray(agentSummary.agentRunSources) ? agentSummary.agentRunSources : [])
       .filter((item) => typeof item?.sourceKind === "string" && item.sourceKind && Number.isInteger(Number(item.runs)) && Number(item.runs) > 0)
       .map((item) => `${item.sourceKind}: ${item.runs}`)
@@ -63,13 +69,14 @@ export function SetupWizard({ configUrl, onComplete, onNavigate, onRefresh, agen
     return (
       <div className="max-w-4xl space-y-4">
         <section className={panel} style={style}>
-          <div className="text-xs font-mono" style={{ color: "#4ee1aa" }}>OBSERVED DATA SOURCES</div>
-          <h2 className="text-lg font-semibold mt-1">{sourcePresentation.heading}</h2>
+          <div className="text-xs font-mono" style={{ color: "#4ee1aa" }}>{storePresentation.connectedEmpty ? "CONNECTED VERDICT STORE" : "OBSERVED DATA SOURCES"}</div>
+          <h2 className="text-lg font-semibold mt-1">{storePresentation.connectedEmpty ? `Connected ${storePresentation.backendLabel} store` : sourcePresentation.heading}</h2>
           <div className="grid sm:grid-cols-3 gap-2 mt-4">
             <div className="border p-3" style={{ borderColor: "#26332e" }}><div className="text-xs" style={{ color: "#94a39d" }}>Agent Runs</div><div className="text-xl mt-1">{agentSummary.totalAgentRuns || 0}</div></div>
             <div className="border p-3" style={{ borderColor: "#26332e" }}><div className="text-xs" style={{ color: "#94a39d" }}>LLM Traces</div><div className="text-xl mt-1">{agentSummary.totalTraces || 0}</div></div>
-            <div className="border p-3" style={{ borderColor: "#26332e" }}><div className="text-xs" style={{ color: "#94a39d" }}>{sourcePresentation.sourceLabel}</div><div className="text-sm mt-1">{sourceText || (hasAgentRuns ? "source details unavailable" : "trace records")}{agentSummary.agentRunSourcesTruncated ? " · additional sources omitted" : ""}</div></div>
+            <div className="border p-3" style={{ borderColor: "#26332e" }}><div className="text-xs" style={{ color: "#94a39d" }}>{storePresentation.connectedEmpty ? "Storage backend" : sourcePresentation.sourceLabel}</div><div className="text-sm mt-1">{storePresentation.connectedEmpty ? storePresentation.backendLabel : (sourceText || (hasAgentRuns ? "source details unavailable" : "trace records"))}{agentSummary.agentRunSourcesTruncated ? " · additional sources omitted" : ""}</div></div>
           </div>
+          {storePresentation.connectedEmpty && <p className="text-sm mt-4" style={{ color: "#94a39d" }}>Verdict is connected and waiting for live SDK traffic or an approved import. No Agent Runs or LLM Traces are visible for this tenant yet.</p>}
           {hasAgentRuns && <p className="text-sm mt-4" style={{ color: "#94a39d" }}>
             Newest observed run started: <span className="font-mono">{agentSummary.lastAgentCaptureAt || "unavailable"}</span>.
             {sourcePresentation.hasLocalAgents && <> Claude Code and Codex history can be manually rescanned or collected by a saved <code>verdict-service</code> schedule.</>}
@@ -84,9 +91,9 @@ export function SetupWizard({ configUrl, onComplete, onNavigate, onRefresh, agen
   return (
     <div className="max-w-4xl space-y-4">
       <section className={panel} style={style}>
-        <div className="text-xs font-mono" style={{ color: "#4ee1aa" }}>{hasData ? "ADD OR RESCAN DATA" : "1 · SOURCE"}</div>
-        <h2 className="text-lg font-semibold mt-1">{hasData ? "Add, import, or rescan a source" : "What do you want to analyze?"}</h2>
-        {hasData && <button onClick={() => setEditing(false)} className="mt-3 text-sm underline">Back to observed sources</button>}
+        <div className="text-xs font-mono" style={{ color: "#4ee1aa" }}>{hasObservedStore ? "ADD OR RESCAN DATA" : "1 · SOURCE"}</div>
+        <h2 className="text-lg font-semibold mt-1">{hasObservedStore ? "Add, import, or rescan a source" : "What do you want to analyze?"}</h2>
+        {hasObservedStore && <button onClick={() => setEditing(false)} className="mt-3 text-sm underline">Back to connected store</button>}
         <div className="grid sm:grid-cols-2 gap-2 mt-4">
           {sources.map(([id, label]) => <button key={id} onClick={() => { setSource(id); setResult(null); }}
             className="border p-3 text-left text-sm" style={{ borderColor: source === id ? "#4ee1aa" : "#26332e", background: source === id ? "#18221e" : "transparent" }}>{label}</button>)}

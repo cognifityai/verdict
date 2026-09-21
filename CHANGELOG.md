@@ -6,6 +6,18 @@ the product is refined.
 
 ## [Unreleased]
 
+### Fixed
+
+- Reachable SQLite and PostgreSQL stores with no Agent Runs or Traces visible
+  for the selected tenant now appear as connected and waiting for traffic
+  instead of an unavailable dashboard. The API exposes only the backend class,
+  never a filesystem path or credential-bearing DSN.
+- The dated static pricing table now covers GPT-4.1, GPT-4.1 mini, and GPT-4.1
+  nano, including bare and explicit OpenAI-prefixed base IDs and their published
+  dated snapshots.
+  Unverified fine-tuned/custom derivatives remain unpriced; historical stored
+  rows are unchanged.
+
 ## [0.1.0a20] - 2026-09-18
 
 ### Fixed
