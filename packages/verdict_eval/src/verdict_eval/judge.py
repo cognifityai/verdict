@@ -241,11 +241,12 @@ class Judge:
         trace_id: str = "",
     ) -> Judgment:
         """Run the judge on a single (query, response, optional context) tuple."""
+        identity = self.evaluator_identity(context)
         dimensions = self.score(query=query, response=response, context=context)
         return Judgment(
             trace_id=trace_id,
             dimensions=dimensions,
-            **self.evaluator_identity(context),
+            **identity,
         )
 
     def score(

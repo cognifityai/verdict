@@ -24,8 +24,8 @@ from datetime import datetime
 
 from verdict.agent_judgment import (
     AgentTurnJudgment,
-    parse_stored_turn_judgment,
     sanitized_turn_judgment,
+    trusted_turn_judgment,
     turn_evidence_fingerprint,
     turn_evidence_reason,
     turn_judgment_write_decision,
@@ -1356,7 +1356,7 @@ class PostgresStorage:
         with self._pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
             cur.execute(
                 "SELECT t.*, j.evidence_fingerprint AS judgment_evidence,"
-                "j.status AS judgment_status FROM agent_turns t "
+                "j.status AS judgment_status,j.result_json AS judgment_json FROM agent_turns t "
                 "LEFT JOIN agent_turn_judgments j ON j.tenant_id=t.tenant_id "
                 "AND j.run_id=t.run_id AND j.turn_id=t.turn_id "
                 "AND j.evaluator_fingerprint=%s WHERE t.tenant_id=%s "
@@ -1370,8 +1370,13 @@ class PostgresStorage:
                 turn = agent_turn_from_row(row)
                 current = (row["judgment_evidence"] == turn_evidence_fingerprint(turn)
                            and turn_evidence_reason(turn) is None)
-                items.append((turn, JudgmentStatus(row["judgment_status"])
-                              if current and row["judgment_status"] else None))
+                trusted = trusted_turn_judgment(
+                    row["judgment_json"] if current else None,
+                    tenant_id=tenant_id, run_id=turn.run_id, turn_id=turn.turn_id,
+                    evaluator_fingerprint=evaluator_fingerprint,
+                    evidence_fingerprint=row["judgment_evidence"], status=row["judgment_status"],
+                )
+                items.append((turn, trusted.status if trusted else None))
         return items, len(rows) > limit
 
     def save_agent_turn_judgment_if_current(self, judgment: AgentTurnJudgment) -> str:
@@ -1384,14 +1389,21 @@ class PostgresStorage:
             row = cur.fetchone()
             turn = dict(zip([column.name for column in cur.description], row, strict=True)) if row else None
             cur.execute(
-                "SELECT result_json FROM agent_turn_judgments WHERE tenant_id=%s "
+                "SELECT result_json,evidence_fingerprint,status FROM agent_turn_judgments WHERE tenant_id=%s "
                 "AND run_id=%s AND turn_id=%s AND evaluator_fingerprint=%s",
                 (judgment.tenant_id, judgment.run_id, judgment.turn_id, judgment.evaluator_fingerprint),
             )
             previous = cur.fetchone()
             decision = turn_judgment_write_decision(
                 agent_turn_from_row(turn) if turn else None, judgment,
-                parse_stored_turn_judgment(previous[0]) if previous else None,
+                trusted_turn_judgment(
+                    previous[0] if previous else None,
+                    tenant_id=judgment.tenant_id, run_id=judgment.run_id,
+                    turn_id=judgment.turn_id,
+                    evaluator_fingerprint=judgment.evaluator_fingerprint,
+                    evidence_fingerprint=previous[1] if previous else None,
+                    status=previous[2] if previous else None,
+                ),
             )
             if decision == "saved":
                 cur.execute(

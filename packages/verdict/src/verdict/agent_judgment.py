@@ -151,6 +151,28 @@ def parse_stored_turn_judgment(raw: str) -> AgentTurnJudgment:
         raise AgentTurnJudgmentStoreError("invalid persisted Turn result") from exc
 
 
+def trusted_turn_judgment(
+    raw: str | None, *, tenant_id: str, run_id: str, turn_id: str,
+    evaluator_fingerprint: str, evidence_fingerprint: str | None = None,
+    status: str | None = None,
+) -> AgentTurnJudgment | None:
+    """Ignore a malformed or mismatched stored slot; it is not a completed score."""
+    if raw is None:
+        return None
+    try:
+        result = parse_stored_turn_judgment(raw)
+    except AgentTurnJudgmentStoreError:
+        return None
+    if (
+        (result.tenant_id, result.run_id, result.turn_id, result.evaluator_fingerprint)
+        != (tenant_id, run_id, turn_id, evaluator_fingerprint)
+        or (evidence_fingerprint is not None and result.evidence_fingerprint != evidence_fingerprint)
+        or (status is not None and result.status.value != status)
+    ):
+        return None
+    return result
+
+
 def validate_turn_scan(
     tenant_id: str, evaluator_fingerprint: str, limit: int,
     before: tuple[datetime, str, str] | None,

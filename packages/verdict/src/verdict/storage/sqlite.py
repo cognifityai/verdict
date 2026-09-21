@@ -17,8 +17,8 @@ from pathlib import Path
 
 from verdict.agent_judgment import (
     AgentTurnJudgment,
-    parse_stored_turn_judgment,
     sanitized_turn_judgment,
+    trusted_turn_judgment,
     turn_evidence_fingerprint,
     turn_evidence_reason,
     turn_judgment_write_decision,
@@ -1392,7 +1392,7 @@ class SQLiteStorage:
         with self._lock:
             rows = self._conn.execute(
                 "SELECT t.*, j.evidence_fingerprint AS judgment_evidence,"
-                "j.status AS judgment_status FROM agent_turns t "
+                "j.status AS judgment_status,j.result_json AS judgment_json FROM agent_turns t "
                 "LEFT JOIN agent_turn_judgments j ON j.tenant_id=t.tenant_id "
                 "AND j.run_id=t.run_id AND j.turn_id=t.turn_id "
                 "AND j.evaluator_fingerprint=? WHERE t.tenant_id=? "
@@ -1404,8 +1404,13 @@ class SQLiteStorage:
                 turn = agent_turn_from_row(dict(row))
                 current = (row["judgment_evidence"] == turn_evidence_fingerprint(turn)
                            and turn_evidence_reason(turn) is None)
-                items.append((turn, JudgmentStatus(row["judgment_status"])
-                              if current and row["judgment_status"] else None))
+                trusted = trusted_turn_judgment(
+                    row["judgment_json"] if current else None,
+                    tenant_id=tenant_id, run_id=turn.run_id, turn_id=turn.turn_id,
+                    evaluator_fingerprint=evaluator_fingerprint,
+                    evidence_fingerprint=row["judgment_evidence"], status=row["judgment_status"],
+                )
+                items.append((turn, trusted.status if trusted else None))
         return items, len(rows) > limit
 
     def save_agent_turn_judgment_if_current(self, judgment: AgentTurnJudgment) -> str:
@@ -1418,14 +1423,21 @@ class SQLiteStorage:
                     (judgment.tenant_id, judgment.run_id, judgment.turn_id),
                 ).fetchone()
                 previous = self._conn.execute(
-                    "SELECT result_json FROM agent_turn_judgments WHERE tenant_id=? "
+                    "SELECT result_json,evidence_fingerprint,status FROM agent_turn_judgments WHERE tenant_id=? "
                     "AND run_id=? AND turn_id=? AND evaluator_fingerprint=?",
                     (judgment.tenant_id, judgment.run_id, judgment.turn_id, judgment.evaluator_fingerprint),
                 ).fetchone()
                 decision = turn_judgment_write_decision(
                     agent_turn_from_row(dict(row)) if row else None,
                     judgment,
-                    parse_stored_turn_judgment(previous["result_json"]) if previous else None,
+                    trusted_turn_judgment(
+                        previous["result_json"] if previous else None,
+                        tenant_id=judgment.tenant_id, run_id=judgment.run_id,
+                        turn_id=judgment.turn_id,
+                        evaluator_fingerprint=judgment.evaluator_fingerprint,
+                        evidence_fingerprint=previous["evidence_fingerprint"] if previous else None,
+                        status=previous["status"] if previous else None,
+                    ),
                 )
                 if decision == "saved":
                     self._conn.execute(

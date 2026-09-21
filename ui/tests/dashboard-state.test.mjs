@@ -128,6 +128,9 @@ test("Evaluator Lab previews a native Turn page and sends its approved identitie
   await preview;
   tree = render(ui.EvaluatorLab, hooks, props);
   assert.match(textOf(tree), /1\s+tenant-visible candidates/);
+  assert.match(textOf(tree), /provider billing can exceed it/);
+  assert.match(textOf(tree), /cost is an estimate, not a billing cap/);
+  assert.doesNotMatch(textOf(tree), /maximum estimated cost/i);
   const consent = findAll(tree, (node) => node.type === "input" && node.props.type === "checkbox")[0];
   consent.props.onChange({ target: { checked: true } });
   tree = render(ui.EvaluatorLab, hooks, props);
@@ -1314,7 +1317,31 @@ test("Agent Runs can fetch one exact Turn evaluator without reusing Trace covera
     .props.onClick();
   render(ui.Runs, hooks, props);
   hooks.flushEffects();
-  assert.ok(requests.some((request) => request.url.includes(`turn_evaluator_fingerprint=${digest}`)));
+  const exactA = requests.find((request) => request.url.includes(`turn_evaluator_fingerprint=${digest}`));
+  assert.ok(exactA);
+  const digestB = "b".repeat(64);
+  tree = render(ui.Runs, hooks, props);
+  detail = findAll(tree, (node) => typeof node.type === "function" && node.type.name === "RunDetail")[0];
+  rendered = render(detail.type, createHooks(), detail.props);
+  findAll(rendered, (node) => node.type === "input" && node.props["aria-label"] === "Exact Turn evaluator fingerprint")[0]
+    .props.onChange({ target: { value: digestB } });
+  tree = render(ui.Runs, hooks, props);
+  detail = findAll(tree, (node) => typeof node.type === "function" && node.type.name === "RunDetail")[0];
+  rendered = render(detail.type, createHooks(), detail.props);
+  findAll(rendered, (node) => node.type === "button" && textOf(node) === "Show exact evaluator")[0]
+    .props.onClick();
+  render(ui.Runs, hooks, props);
+  hooks.flushEffects();
+  const exactB = requests.find((request) => request.url.includes(`turn_evaluator_fingerprint=${digestB}`));
+  assert.ok(exactB);
+  const detailPage = (fingerprint) => ({ turns: [{ turnId: "turn-a", evaluation: { evaluatorFingerprint: fingerprint } }],
+    turnPage: { available: 1, shown: 1, offset: 0, limit: 20, truncated: false },
+    events: [], page: { available: 0, shown: 0, offset: 0, limit: 100, truncated: false } });
+  await resolveJson(exactB, detailPage(digestB));
+  await resolveJson(exactA, detailPage(digest));
+  tree = render(ui.Runs, hooks, props);
+  detail = findAll(tree, (node) => typeof node.type === "function" && node.type.name === "RunDetail")[0];
+  assert.equal(detail.props.detail.data.turns[0].evaluation.evaluatorFingerprint, digestB);
 });
 
 test("Agent Runs presents component-only token evidence as partial", async () => {

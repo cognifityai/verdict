@@ -23,6 +23,7 @@ export function Runs({
   const [focusEventId, setFocusEventId] = useState(null);
   const [runOffset, setRunOffset] = useState(0);
   const listRequest = React.useRef(0);
+  const detailRequest = React.useRef(0);
   const load = React.useCallback(() => {
     const requestId = ++listRequest.current;
     setState((current) => ({ ...current, loading: true, error: null }));
@@ -80,6 +81,7 @@ export function Runs({
   useEffect(() => {
     if (!selectedRunId) return;
     const controller = new AbortController();
+    const requestId = ++detailRequest.current;
     setDetail({ loading: true, error: null, data: null });
     const eventFocus = focusEventId ? `&event_id=${encodeURIComponent(focusEventId)}` : "";
     const turnEvaluator = turnEvaluatorFilter ? `&turn_evaluator_fingerprint=${turnEvaluatorFilter}` : "";
@@ -87,9 +89,16 @@ export function Runs({
       credentials: "same-origin", headers: { Accept: "application/json" }, signal: controller.signal,
     })
       .then((response) => response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`)))
-      .then((data) => setDetail({ loading: false, error: null, data }))
+      .then((data) => {
+        if (requestId === detailRequest.current && !controller.signal.aborted) {
+          setDetail({ loading: false, error: null, data });
+        }
+      })
       .catch((error) => {
-        if (error?.name !== "AbortError") setDetail({ loading: false, error: String(error), data: null });
+        if (requestId === detailRequest.current && !controller.signal.aborted
+            && error?.name !== "AbortError") {
+          setDetail({ loading: false, error: String(error), data: null });
+        }
       });
     return () => controller.abort();
   }, [eventOffset, focusEventId, selectedRunId, turnOffset, turnEvaluatorFilter, url]);

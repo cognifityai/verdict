@@ -570,7 +570,9 @@ the UI reports only that a custom endpoint is configured and never returns the
 URL. Unknown local model names remain unpriced.
 The default selection is every evidence-complete, not-yet-evaluated trace in the bounded
 10,000-trace scan; an optional numeric cap remains available. Preview shows the
-exact planned calls and maximum static-price estimate before approval. Coverage
+exact planned calls and a rough static-price cost estimate before approval; it
+is not a billing cap because actual tokenization and provider charges can
+exceed it. Coverage
 is specific to the exact evaluator configuration; other evaluator results are
 kept separate. The approval screen names the exact dimensions that will be sent
 to the judge and lists context-required dimensions that cannot run because a

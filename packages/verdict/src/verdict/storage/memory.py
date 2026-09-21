@@ -16,8 +16,8 @@ from datetime import datetime
 
 from verdict.agent_judgment import (
     AgentTurnJudgment,
-    parse_stored_turn_judgment,
     sanitized_turn_judgment,
+    trusted_turn_judgment,
     turn_evidence_fingerprint,
     turn_evidence_reason,
     turn_judgment_write_decision,
@@ -377,7 +377,10 @@ class InMemoryStorage:
             items = []
             for turn in turns[:limit]:
                 raw = self._agent_turn_judgments.get((tenant_id, turn.run_id, turn.turn_id, evaluator_fingerprint))
-                judgment = parse_stored_turn_judgment(raw) if raw else None
+                judgment = trusted_turn_judgment(
+                    raw, tenant_id=tenant_id, run_id=turn.run_id, turn_id=turn.turn_id,
+                    evaluator_fingerprint=evaluator_fingerprint,
+                )
                 current = (judgment is not None and turn_evidence_reason(turn) is None
                            and judgment.evidence_fingerprint == turn_evidence_fingerprint(turn))
                 items.append((copy.deepcopy(turn), judgment.status if current else None))
@@ -390,7 +393,11 @@ class InMemoryStorage:
             prior = self._agent_turn_judgments.get(key)
             decision = turn_judgment_write_decision(
                 self._agent_turns.get(key[:3]), judgment,
-                parse_stored_turn_judgment(prior) if prior else None,
+                trusted_turn_judgment(
+                    prior, tenant_id=judgment.tenant_id, run_id=judgment.run_id,
+                    turn_id=judgment.turn_id,
+                    evaluator_fingerprint=judgment.evaluator_fingerprint,
+                ),
             )
             if decision == "saved":
                 self._agent_turn_judgments[key] = payload

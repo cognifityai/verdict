@@ -837,7 +837,11 @@ def build_agent_run_detail(
     configured = str(storage)
 
     def builder(session: _QuerySession) -> dict:
-        from verdict.agent_judgment import turn_evidence_fingerprint, turn_evidence_reason
+        from verdict.agent_judgment import (
+            trusted_turn_judgment,
+            turn_evidence_fingerprint,
+            turn_evidence_reason,
+        )
         page = agent_evidence_queries.load_run_page(
             session, tenant, run_id,
             event_limit=event_limit, event_offset=event_offset,
@@ -859,8 +863,8 @@ def build_agent_run_detail(
             for turn in eligible_turns:
                 params.extend((turn.turn_id, turn_evidence_fingerprint(turn)))
             for row in session.execute(
-                "SELECT turn_id,evaluator_fingerprint,status,result_json FROM ("
-                "SELECT turn_id,evaluator_fingerprint,status,result_json,"
+                "SELECT turn_id,evaluator_fingerprint,evidence_fingerprint,status,result_json FROM ("
+                "SELECT turn_id,evaluator_fingerprint,evidence_fingerprint,status,result_json,"
                 "ROW_NUMBER() OVER (PARTITION BY turn_id ORDER BY evaluated_at DESC,"
                 "evaluator_fingerprint DESC) AS rn FROM agent_turn_judgments "
                 "WHERE tenant_id=? AND run_id=? " + evaluator_clause + "AND (" + conditions + ")"
@@ -868,34 +872,24 @@ def build_agent_run_detail(
             ):
                 if row["turn_id"] in turn_judgments:
                     continue
-                try:
-                    payload = json.loads(row["result_json"])
-                    if not isinstance(payload, dict) or (
-                        payload.get("tenant_id") != tenant
-                        or payload.get("run_id") != run_id
-                        or payload.get("turn_id") != row["turn_id"]
-                        or payload.get("evaluator_fingerprint") != row["evaluator_fingerprint"]
-                        or payload.get("status") != row["status"]
-                    ):
-                        continue
-                    dimensions = payload.get("dimensions", [])
-                    if not isinstance(dimensions, list):
-                        dimensions = []
-                    turn_judgments[row["turn_id"]] = {
-                        "evaluatorFingerprint": row["evaluator_fingerprint"],
-                        "rubricName": payload.get("rubric_name"),
-                        "rubricVersion": payload.get("rubric_version"),
-                        "judgeModels": payload.get("judge_models"),
-                        "status": row["status"],
-                        "dimensions": [
-                            {"name": item["name"][:80], "verdict": item["verdict"]}
-                            for item in dimensions[:MAX_DASHBOARD_DIMENSIONS]
-                            if isinstance(item, dict) and isinstance(item.get("name"), str)
-                            and item.get("verdict") in {"pass", "fail", "unclear"}
-                        ],
-                    }
-                except (ValueError, TypeError, KeyError):
+                result = trusted_turn_judgment(
+                    row["result_json"], tenant_id=tenant, run_id=run_id,
+                    turn_id=row["turn_id"], evaluator_fingerprint=row["evaluator_fingerprint"],
+                    evidence_fingerprint=row["evidence_fingerprint"], status=row["status"],
+                )
+                if result is None:
                     continue
+                turn_judgments[row["turn_id"]] = {
+                    "evaluatorFingerprint": row["evaluator_fingerprint"],
+                    "rubricName": result.rubric_name,
+                    "rubricVersion": result.rubric_version,
+                    "judgeModels": result.judge_models,
+                    "status": result.status.value,
+                    "dimensions": [
+                        {"name": item.name, "verdict": item.verdict.value}
+                        for item in result.dimensions[:MAX_DASHBOARD_DIMENSIONS]
+                    ],
+                }
         available = page["eventCount"]
         available_turns = page["turnCount"]
         resolved_event_offset = page["eventOffset"]

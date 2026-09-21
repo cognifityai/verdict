@@ -8,7 +8,11 @@ import httpx
 import verdict
 import verdict.dashboard.analysis_service as analysis_service
 from fastapi import FastAPI, Request
-from verdict.agent_judgment import AgentTurnJudgment, turn_evidence_fingerprint
+from verdict.agent_judgment import (
+    AgentTurnJudgment,
+    agent_turn_judgment_to_json,
+    turn_evidence_fingerprint,
+)
 from verdict.analysis_records import AnalysisRunStatus, DeterministicAnalysisRun
 from verdict.capture import AgentCaptureService
 from verdict.dashboard import agent_evidence_queries
@@ -158,6 +162,11 @@ def test_malformed_stored_turn_result_does_not_break_run_detail(tmp_path):
     )
     storage.save_agent_turn_judgment_if_current(result)
     storage._conn.execute("UPDATE agent_turn_judgments SET result_json='[]'")
+    detail = build_agent_run_detail(path, tenant="local", run_id="r-local")
+    assert detail["turns"][0]["evaluation"] is None
+    payload = json.loads(agent_turn_judgment_to_json(result))
+    payload["judge_models"] = "not a list"
+    storage._conn.execute("UPDATE agent_turn_judgments SET result_json=?", (json.dumps(payload),))
     storage.close()
     detail = build_agent_run_detail(path, tenant="local", run_id="r-local")
     assert detail["turns"][0]["evaluation"] is None

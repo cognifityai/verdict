@@ -1,3 +1,4 @@
+import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
@@ -9,6 +10,7 @@ import verdict
 from verdict.agent_judgment import (
     AgentTurnJudgment,
     agent_turn_judgment_from_json,
+    agent_turn_judgment_to_json,
     turn_evidence_fingerprint,
 )
 from verdict.dashboard.evaluator_lab import (
@@ -501,6 +503,45 @@ def test_low_level_turn_result_rejects_sensitive_dimension_names_and_redacts_ide
         raw = storage._conn.execute("SELECT result_json FROM agent_turn_judgments").fetchone()[0]
         assert "alice@example.com" not in raw
         assert "<EMAIL>" in raw
+    finally:
+        storage.close()
+
+
+@pytest.mark.parametrize("backend", ["memory", "sqlite"])
+@pytest.mark.parametrize("corruption", ["not_object", "invalid_model_list"])
+def test_corrupt_current_slot_is_retryable_and_repaired_after_explicit_approval(
+    tmp_path, backend, corruption,
+):
+    storage = InMemoryStorage() if backend == "memory" else SQLiteStorage(str(tmp_path / "repair.db"))
+    try:
+        storage.replace_agent_run_bundle(_agent_turn_bundle())
+        config = {**_config(), "unit": "agent_turn"}
+        provider = CountingProvider()
+        preview = preview_evaluation(storage, tenant_id="local", config=config)
+        first = execute_evaluation(storage, tenant_id="local", provider=provider,
+                                   config={**config, "planFingerprint": preview["planFingerprint"],
+                                           "plannedTurns": preview["plannedTurns"]},
+                                   confirm_external_egress=True)
+        fingerprint = first["evaluatorFingerprint"]
+        raw = _stored_turn_result(storage, fingerprint)
+        corrupt = "[]" if corruption == "not_object" else json.dumps({
+            **json.loads(agent_turn_judgment_to_json(raw)),
+            "judge_models": "not a list",
+        })
+        if isinstance(storage, SQLiteStorage):
+            storage._conn.execute("UPDATE agent_turn_judgments SET result_json=?", (corrupt,))
+        else:
+            storage._agent_turn_judgments[("local", "run-1", "turn-1", fingerprint)] = corrupt
+        retry = preview_evaluation(storage, tenant_id="local", config=config)
+        assert retry["alreadyJudged"] == 0
+        assert retry["plannedCalls"] == 1
+        repaired = execute_evaluation(storage, tenant_id="local", provider=provider,
+                                      config={**config, "planFingerprint": retry["planFingerprint"],
+                                              "plannedTurns": retry["plannedTurns"]},
+                                      confirm_external_egress=True)
+        assert provider.calls == 2
+        assert repaired["completed"] == 1
+        assert preview_evaluation(storage, tenant_id="local", config=config)["alreadyJudged"] == 1
     finally:
         storage.close()
 
