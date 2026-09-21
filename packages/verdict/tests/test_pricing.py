@@ -71,21 +71,14 @@ def test_gpt_41_family_and_dated_aliases_use_current_base_text_rates():
 
     for model, rates in expected.items():
         assert PRICE_PER_1K[model] == rates
-        assert math.isclose(
-            compute_cost_usd(model, 1000, 1000) or 0.0,
-            sum(rates),
-            rel_tol=1e-9,
-        )
-        assert math.isclose(
-            compute_cost_usd(f"openai/{model}-2025-04-14", 1000, 1000) or 0.0,
-            sum(rates),
-            rel_tol=1e-9,
-        )
-        assert math.isclose(
-            compute_cost_usd(f"openai:{model}", 1000, 1000) or 0.0,
-            sum(rates),
-            rel_tol=1e-9,
-        )
+        for prefix in ("", "openai/", "openai:"):
+            for suffix in ("", "-2025-04-14"):
+                alias = f"{prefix}{model}{suffix}"
+                assert math.isclose(
+                    compute_cost_usd(alias, 1000, 1000) or 0.0,
+                    sum(rates),
+                    rel_tol=1e-9,
+                ), alias
 
 
 def test_gpt_41_specific_variant_wins_and_unknown_neighbor_stays_unpriced():
@@ -101,6 +94,11 @@ def test_gpt_41_unverified_derivatives_and_unknown_snapshots_stay_unpriced():
     for model in (
         "ft:gpt-4.1-mini-2025-04-14:org:custom:abc123",
         "custom/gpt-4.1-mini-replica",
+        "custom/gpt-4.1-mini",
+        "my-fine-tune/gpt-4.1-mini-2025-04-14",
+        "azure/gpt-4.1-mini",
+        "not-openai/gpt-4.1-mini",
+        "custom/openai:gpt-4.1-mini",
         "gpt-4.1-mini-2026-01-01",
         "not-gpt-4.1",
     ):
@@ -113,6 +111,14 @@ def test_gpt_41_random_derivative_suffixes_do_not_inherit_base_prices():
         for _ in range(10):
             suffix = "".join(rng.choices(string.ascii_lowercase + string.digits, k=12))
             assert compute_cost_usd(f"openai/{model}-{suffix}", 1000, 1000) is None
+
+
+def test_gpt_41_random_custom_namespaces_do_not_inherit_base_prices():
+    rng = random.Random(42)
+    for model in ("gpt-4.1", "gpt-4.1-mini", "gpt-4.1-nano"):
+        for _ in range(10):
+            namespace = "".join(rng.choices(string.ascii_lowercase, k=12))
+            assert compute_cost_usd(f"{namespace}/{model}", 1000, 1000) is None
 
 
 def test_unknown_model_returns_none():

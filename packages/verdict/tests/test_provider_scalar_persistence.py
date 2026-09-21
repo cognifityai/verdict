@@ -742,6 +742,8 @@ async def test_real_async_openai_chat_stream_with_sdk_omit_values_persists_one_r
         ("gpt-4.1-mini-2025-04-14", 0.0000024),
         ("ft:gpt-4.1-mini-2025-04-14:org:custom:abc123", None),
         ("custom/gpt-4.1-mini-replica", None),
+        ("custom/gpt-4.1-mini", None),
+        ("my-fine-tune/gpt-4.1-mini-2025-04-14", None),
     ],
 )
 def test_real_openai_gpt_41_response_persists_only_known_cost(

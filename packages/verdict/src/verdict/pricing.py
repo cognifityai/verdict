@@ -89,6 +89,12 @@ PRICE_PER_1K: dict[str, tuple[float, float]] = {
 
 _GPT41_BASE_MODELS = frozenset({"gpt-4.1", "gpt-4.1-mini", "gpt-4.1-nano"})
 _GPT41_SNAPSHOT_DATE = "2025-04-14"
+_GPT41_ALIASES = {
+    f"{prefix}{model}{suffix}": model
+    for model in _GPT41_BASE_MODELS
+    for prefix in ("", "openai/", "openai:")
+    for suffix in ("", f"-{_GPT41_SNAPSHOT_DATE}")
+}
 
 # These retired/deprecated Claude API aliases previously resolved to the dated
 # releases above. Keep alias recognition exact so a future "claude-opus-4-x"
@@ -106,10 +112,11 @@ def compute_cost_usd(
 ) -> float | None:
     """Estimate the USD cost of a call from its model name and token counts.
 
-    Matches ``model`` against PRICE_PER_1K by substring; the longest matching
-    key wins (so "gpt-4o-mini" beats "gpt-4o"). Returns None if the model is
-    unknown or if *both* token counts are missing. A missing input/output count
-    is treated as zero so a partially-known call still yields an estimate.
+    Exact aliases resolve first. Other models use the longest matching
+    PRICE_PER_1K substring (so "gpt-4o-mini" beats "gpt-4o"); GPT-4.1 prices
+    require an exact approved alias. Returns None if the model is unknown or
+    if *both* token counts are missing. A missing input/output count is treated
+    as zero so a partially-known call still yields an estimate.
 
     Never raises — returns None on any unexpected input.
     """
@@ -134,14 +141,13 @@ def compute_cost_usd(
         # a hyphen. Normalize only that separator, then match immutable releases.
         lookup_model = normalized_model.replace("@", "-")
         model_leaf = normalized_model.rsplit("/", 1)[-1]
-        gpt41_leaf = model_leaf.removeprefix("openai:")
         best_key = EXACT_MODEL_ALIASES.get(model_leaf)
+        if best_key is None:
+            best_key = _GPT41_ALIASES.get(normalized_model)
         if best_key is None:
             # Longest substring match wins for dated/versioned entries.
             for key in PRICE_PER_1K:
-                if key in _GPT41_BASE_MODELS and gpt41_leaf not in {
-                    key, f"{key}-{_GPT41_SNAPSHOT_DATE}"
-                }:
+                if key in _GPT41_BASE_MODELS:
                     continue
                 if key in lookup_model and (
                     best_key is None or len(key) > len(best_key)
