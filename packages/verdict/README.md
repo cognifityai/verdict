@@ -295,7 +295,7 @@ tool-only parts rather than presenting them as an assistant response.
 Evaluator Lab can separately judge native completed Agent Turns whose redacted
 request and final output are present and untruncated. This does not relabel a
 provider tool-call Trace as an answer or change Trace judgment coverage.
-Turn previews are tenant-scoped 1,000-candidate keyset pages with explicit
+Turn previews are tenant-scoped 100-candidate keyset pages with explicit
 egress approval. A bounded Turn/evaluator result slot is current only for the
 exact redacted evidence fingerprint; later Turn extensions require reevaluation.
 Agent Runs detail displays current scores. Tool/citation context and Monitor

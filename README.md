@@ -433,7 +433,7 @@ Verdict database as sensitive.
 Evaluator Lab also has a separate opt-in Agent Turn unit for completed,
 untruncated Turns with a present redacted request and final response. It judges
 the Turn's final output without making a provider Trace or a Trace Judgment.
-Preview examines at most 1,000 tenant-visible candidate Turns (including
+Preview examines at most 100 tenant-visible candidate Turns (including
 ineligible ones) per keyset page and requires explicit approval of the planned
 calls and external egress. SQLite/Postgres keep one bounded result slot per
 Turn and evaluator; a changed Turn makes the old score stale until reevaluated.

@@ -4,15 +4,24 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
 from verdict.evidence import AgentTurn, EvidenceState, ExecutionStatus
-from verdict.redaction import redact
+from verdict.redaction import redact, redact_structure
 from verdict.schema import DimensionScore, JudgmentStatus, Verdict
 
 _MAX_RESULT_BYTES = 65_536
+MAX_TURN_SCAN = 100
+
+
+class AgentTurnJudgmentStoreError(RuntimeError):
+    """A persisted Turn result cannot be safely interpreted."""
+
+
+_DIMENSION_NAME = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 
 
 def turn_evidence_fingerprint(turn: AgentTurn) -> str:
@@ -76,9 +85,39 @@ class AgentTurnJudgment:
             raise ValueError("evaluation time must have a timezone")
         if self.status is JudgmentStatus.ERROR and self.dimensions:
             raise ValueError("error judgment cannot contain scores")
+        if (
+            not isinstance(self.expected_dimensions, list)
+            or len(self.expected_dimensions) > 12
+            or any(not isinstance(name, str) or not _DIMENSION_NAME.fullmatch(name)
+                   for name in self.expected_dimensions)
+            or len(set(self.expected_dimensions)) != len(self.expected_dimensions)
+        ):
+            raise ValueError("invalid expected dimensions")
+        if not isinstance(self.dimensions, list) or len(self.dimensions) > 12 or any(
+            not isinstance(dimension, DimensionScore)
+            or dimension.name not in self.expected_dimensions
+            for dimension in self.dimensions
+        ):
+            raise ValueError("invalid scored dimensions")
+        if not isinstance(self.rubric_name, str) or not _DIMENSION_NAME.fullmatch(self.rubric_name):
+            raise ValueError("invalid rubric name")
+        if not isinstance(self.rubric_version, str) or len(self.rubric_version.encode("utf-8")) > 64:
+            raise ValueError("invalid rubric version")
+        if not isinstance(self.judge_models, list) or len(self.judge_models) > 8 or any(
+            not isinstance(model, str) or not model or len(model.encode("utf-8")) > 256
+            for model in self.judge_models
+        ):
+            raise ValueError("invalid judge models")
+        self.evaluator_config = redact_structure(self.evaluator_config)
+        if not isinstance(self.evaluator_config, dict):
+            raise ValueError("invalid evaluator config")
+        self.evaluator_provider = redact(self.evaluator_provider) or ""
+        self.rubric_version = redact(self.rubric_version) or ""
+        self.judge_models = [redact(model) or "" for model in self.judge_models]
         self.error = redact(self.error)
         for dimension in self.dimensions:
             dimension.reasoning = redact(dimension.reasoning) or ""
+            dimension.judge_model = redact(dimension.judge_model) or ""
         if len(agent_turn_judgment_to_json(self).encode("utf-8")) > _MAX_RESULT_BYTES:
             raise ValueError("Agent Turn judgment exceeds size limit")
 
@@ -99,6 +138,19 @@ def agent_turn_judgment_from_json(raw: str | dict[str, Any]) -> AgentTurnJudgmen
     return AgentTurnJudgment(**payload)
 
 
+def sanitized_turn_judgment(result: AgentTurnJudgment) -> tuple[AgentTurnJudgment, str]:
+    """Revalidate mutable score fields at the final persistence boundary."""
+    clean = agent_turn_judgment_from_json(agent_turn_judgment_to_json(result))
+    return clean, agent_turn_judgment_to_json(clean)
+
+
+def parse_stored_turn_judgment(raw: str) -> AgentTurnJudgment:
+    try:
+        return agent_turn_judgment_from_json(raw)
+    except (ValueError, TypeError, KeyError, AttributeError) as exc:
+        raise AgentTurnJudgmentStoreError("invalid persisted Turn result") from exc
+
+
 def validate_turn_scan(
     tenant_id: str, evaluator_fingerprint: str, limit: int,
     before: tuple[datetime, str, str] | None,
@@ -109,23 +161,14 @@ def validate_turn_scan(
         char not in "0123456789abcdef" for char in evaluator_fingerprint
     ):
         raise ValueError("invalid evaluator fingerprint")
-    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
-        raise ValueError("turn scan limit must be 1-1000")
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= MAX_TURN_SCAN:
+        raise ValueError("turn scan limit must be 1-100")
     if before is not None and (
         not isinstance(before, tuple) or len(before) != 3
         or not isinstance(before[0], datetime) or before[0].tzinfo is None
         or any(not isinstance(v, str) or not v or len(v.encode("utf-8")) > 256 for v in before[1:])
     ):
         raise ValueError("invalid turn scan cursor")
-
-
-def current_turn_judgment(
-    turn: AgentTurn, judgment: AgentTurnJudgment | None,
-) -> AgentTurnJudgment | None:
-    return judgment if (
-        judgment is not None and turn_evidence_reason(turn) is None
-        and judgment.evidence_fingerprint == turn_evidence_fingerprint(turn)
-    ) else None
 
 
 def turn_judgment_write_decision(

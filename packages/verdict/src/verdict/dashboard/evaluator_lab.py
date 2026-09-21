@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from verdict.agent_judgment import (
+    MAX_TURN_SCAN,
     AgentTurnJudgment,
     turn_evidence_fingerprint,
     turn_evidence_reason,
@@ -225,9 +226,9 @@ def _plan_fingerprint(evaluator_fingerprint, max_calls, planned_traces):
 
 
 def _turn_scan_options(config):
-    limit = config.get("scanLimit", 1000)
-    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
-        raise ValueError("turn scan limit must be 1-1000")
+    limit = config.get("scanLimit", MAX_TURN_SCAN)
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= MAX_TURN_SCAN:
+        raise ValueError("turn scan limit must be 1-100")
     raw = config.get("before")
     if raw is None:
         return limit, None
@@ -266,7 +267,7 @@ def _turn_candidates(storage, tenant_id, identity, config, max_calls):
             reasons[reason] += 1
             continue
         eligible += 1
-        if judgment and judgment.status is JudgmentStatus.COMPLETED:
+        if judgment is JudgmentStatus.COMPLETED:
             already += 1
             continue
         if max_calls is None or len(selected) < max_calls:
@@ -546,6 +547,12 @@ def _execute_turn_evaluation(storage, tenant_id, config, provider_name, model,
                 errors += 1
         elif outcome == "stale":
             stale += 1
+        elif outcome == "already_error":
+            # The retry still consumed a call and failed, even though the old
+            # error slot is retained instead of rewritten.
+            errors += 1
+        elif outcome == "already_completed":
+            already += 1
     return {
         "unit": "agent_turn", "availableTurns": len(rows), "eligible": eligible,
         "plannedCalls": len(selected), "alreadyJudged": already,

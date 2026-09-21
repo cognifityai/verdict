@@ -16,9 +16,10 @@ from datetime import datetime
 
 from verdict.agent_judgment import (
     AgentTurnJudgment,
-    agent_turn_judgment_from_json,
-    agent_turn_judgment_to_json,
-    current_turn_judgment,
+    parse_stored_turn_judgment,
+    sanitized_turn_judgment,
+    turn_evidence_fingerprint,
+    turn_evidence_reason,
     turn_judgment_write_decision,
     validate_turn_scan,
 )
@@ -364,9 +365,9 @@ class InMemoryStorage:
         self.replace_agent_capture(bundle)
 
     def list_agent_turn_evaluation_candidates(
-        self, tenant_id: str, evaluator_fingerprint: str, *, limit: int = 1000,
+        self, tenant_id: str, evaluator_fingerprint: str, *, limit: int = 100,
         before: tuple[datetime, str, str] | None = None,
-    ) -> tuple[list[tuple[AgentTurn, AgentTurnJudgment | None]], bool]:
+    ) -> tuple[list[tuple[AgentTurn, JudgmentStatus | None]], bool]:
         validate_turn_scan(tenant_id, evaluator_fingerprint, limit, before)
         with self._agent_evidence_lock:
             turns = [turn for (scope, _, _), turn in self._agent_turns.items()
@@ -376,18 +377,20 @@ class InMemoryStorage:
             items = []
             for turn in turns[:limit]:
                 raw = self._agent_turn_judgments.get((tenant_id, turn.run_id, turn.turn_id, evaluator_fingerprint))
-                judgment = agent_turn_judgment_from_json(raw) if raw else None
-                items.append((copy.deepcopy(turn), current_turn_judgment(turn, judgment)))
+                judgment = parse_stored_turn_judgment(raw) if raw else None
+                current = (judgment is not None and turn_evidence_reason(turn) is None
+                           and judgment.evidence_fingerprint == turn_evidence_fingerprint(turn))
+                items.append((copy.deepcopy(turn), judgment.status if current else None))
         return items, len(turns) > limit
 
     def save_agent_turn_judgment_if_current(self, judgment: AgentTurnJudgment) -> str:
-        payload = agent_turn_judgment_to_json(judgment)
+        judgment, payload = sanitized_turn_judgment(judgment)
         key = (judgment.tenant_id, judgment.run_id, judgment.turn_id, judgment.evaluator_fingerprint)
         with self._agent_evidence_lock:
             prior = self._agent_turn_judgments.get(key)
             decision = turn_judgment_write_decision(
                 self._agent_turns.get(key[:3]), judgment,
-                agent_turn_judgment_from_json(prior) if prior else None,
+                parse_stored_turn_judgment(prior) if prior else None,
             )
             if decision == "saved":
                 self._agent_turn_judgments[key] = payload

@@ -16,6 +16,7 @@ from verdict.evidence import (
     ExecutionStatus,
     SourceSession,
 )
+from verdict.schema import JudgmentStatus
 from verdict.storage.postgres import PostgresStorage
 
 
@@ -61,7 +62,12 @@ def test_postgres_turn_judgment_cas_with_two_connections_and_extension():
             assert old_result.result() == "stale"
             assert new_result.result() == "saved"
         rows, more = writer.list_agent_turn_evaluation_candidates(tenant, "a" * 64)
-        assert not more and rows[0][1].evidence_fingerprint == new.evidence_fingerprint
+        assert not more and rows[0][1] is JudgmentStatus.COMPLETED
+        assert writer._fetchone(
+            "SELECT evidence_fingerprint FROM agent_turn_judgments "
+            "WHERE tenant_id=%s AND run_id=%s AND turn_id=%s AND evaluator_fingerprint=%s",
+            (tenant, "run", "turn", "a" * 64),
+        )[0] == new.evidence_fingerprint
         assert writer.list_agent_turn_evaluation_candidates("other", "a" * 64)[0] == []
     finally:
         writer.close()

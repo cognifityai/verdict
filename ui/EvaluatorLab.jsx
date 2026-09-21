@@ -50,7 +50,7 @@ export function EvaluatorLab({ configUrl, onOpenEvaluated }) {
   }, [busyAction, evaluationStartedAt]);
   const payload = (cursor = turnCursor) => ({
     provider, model, maxCalls: judgeAll ? "all" : maxCalls, maxOutputTokens: 512,
-    unit, ...(unit === "agent_turn" ? { scanLimit: 1000, ...(cursor ? { before: cursor } : {}) } : {}),
+    unit, ...(unit === "agent_turn" ? { scanLimit: 100, ...(cursor ? { before: cursor } : {}) } : {}),
     rubric: { name: rubricName, version: rubricVersion, dimensions: dimensions.map(([name, description]) => ({ name, description })) },
   });
   const previewCurrent = previewConfigKey === JSON.stringify(payload());
@@ -88,7 +88,7 @@ export function EvaluatorLab({ configUrl, onOpenEvaluated }) {
         <label className="text-sm">Model<input value={model} onChange={(event) => setModel(event.target.value)} className="block w-full border p-2 mt-1 bg-transparent" /></label>
         <label className="text-sm">Rubric name<input value={rubricName} onChange={(event) => setRubricName(event.target.value)} className="block w-full border p-2 mt-1 bg-transparent" /></label>
         <label className="text-sm">Rubric version<input value={rubricVersion} onChange={(event) => setRubricVersion(event.target.value)} className="block w-full border p-2 mt-1 bg-transparent" /></label>
-        <label className="text-sm">Evaluation scope<select value={judgeAll ? "all" : "limit"} onChange={(event) => setJudgeAll(event.target.value === "all")} className="block w-full border p-2 mt-1 bg-transparent"><option value="all">All eligible in this bounded scan</option><option value="limit">Limit judge calls</option></select>{!judgeAll && <input aria-label="Maximum judge calls" type="number" min="1" max="10000" value={maxCalls} onChange={(event) => setMaxCalls(Number(event.target.value))} className="block w-full border p-2 mt-2 bg-transparent" />}<span className="block text-xs mt-1" style={{ color: C.faint }}>{unit === "agent_turn" ? "Scans at most 1,000 candidate Turns per page, including ineligible Turns. Continue to older Turns explicitly." : "Scans at most 10,000 Traces."}</span></label>
+        <label className="text-sm">Evaluation scope<select value={judgeAll ? "all" : "limit"} onChange={(event) => setJudgeAll(event.target.value === "all")} className="block w-full border p-2 mt-1 bg-transparent"><option value="all">All eligible in this bounded scan</option><option value="limit">Limit judge calls</option></select>{!judgeAll && <input aria-label="Maximum judge calls" type="number" min="1" max="10000" value={maxCalls} onChange={(event) => setMaxCalls(Number(event.target.value))} className="block w-full border p-2 mt-2 bg-transparent" />}<span className="block text-xs mt-1" style={{ color: C.faint }}>{unit === "agent_turn" ? "Scans at most 100 candidate Turns per page, including ineligible Turns. Continue to older Turns explicitly." : "Scans at most 10,000 Traces."}</span></label>
         <div className="text-sm"><div>Secret reference</div><div className="border p-2 mt-1 font-mono" style={{ color: providerState?.configured ? C.green : C.amber }}>{providerState?.secretReference || "loading"} · {providerState?.configured ? "configured" : "not configured"}{providerState?.customEndpointConfigured ? " · custom endpoint configured by OPENAI_BASE_URL" : ""}</div></div>
       </div>
       <h3 className="font-semibold mt-5">Rubric dimensions</h3>

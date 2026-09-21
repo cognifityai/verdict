@@ -22,6 +22,7 @@ from verdict.schema import (
     DriftSignal,
     EvaluatorHealthRecord,
     Judgment,
+    JudgmentStatus,
     SpanRecord,
     Trace,
 )
@@ -115,9 +116,9 @@ class Storage(Protocol):
     def replace_agent_run_bundle(self, bundle: AgentRunBundle) -> None: ...
 
     def list_agent_turn_evaluation_candidates(
-        self, tenant_id: str, evaluator_fingerprint: str, *, limit: int = 1000,
+        self, tenant_id: str, evaluator_fingerprint: str, *, limit: int = 100,
         before: tuple[datetime, str, str] | None = None,
-    ) -> tuple[list[tuple[AgentTurn, AgentTurnJudgment | None]], bool]: ...
+    ) -> tuple[list[tuple[AgentTurn, JudgmentStatus | None]], bool]: ...
 
     def save_agent_turn_judgment_if_current(self, judgment: AgentTurnJudgment) -> str: ...
 

@@ -6,7 +6,11 @@ from datetime import datetime, timezone
 import httpx
 import pytest
 import verdict
-from verdict.agent_judgment import AgentTurnJudgment, turn_evidence_fingerprint
+from verdict.agent_judgment import (
+    AgentTurnJudgment,
+    agent_turn_judgment_from_json,
+    turn_evidence_fingerprint,
+)
 from verdict.dashboard.evaluator_lab import (
     evaluator_environment,
     execute_calibration,
@@ -22,7 +26,7 @@ from verdict.evidence import (
     ExecutionStatus,
     SourceSession,
 )
-from verdict.schema import DimensionScore, Judgment, Trace, Verdict
+from verdict.schema import DimensionScore, Judgment, JudgmentStatus, Trace, Verdict
 from verdict.storage import InMemoryStorage
 from verdict.storage.sqlite import SQLiteStorage
 from verdict_eval.providers import CompletionResponse
@@ -104,6 +108,18 @@ def _agent_turn_bundle(*, tenant="local"):
     )
 
 
+def _stored_turn_result(storage, fingerprint):
+    if isinstance(storage, SQLiteStorage):
+        raw = storage._conn.execute(
+            "SELECT result_json FROM agent_turn_judgments WHERE tenant_id=? AND run_id=? "
+            "AND turn_id=? AND evaluator_fingerprint=?",
+            ("local", "run-1", "turn-1", fingerprint),
+        ).fetchone()[0]
+    else:
+        raw = storage._agent_turn_judgments[("local", "run-1", "turn-1", fingerprint)]
+    return agent_turn_judgment_from_json(raw)
+
+
 def test_agent_turn_preview_uses_final_output_without_relabeling_provider_trace():
     storage = InMemoryStorage()
     storage.replace_agent_run_bundle(_agent_turn_bundle())
@@ -143,8 +159,9 @@ def test_native_turn_judgment_persists_only_current_tenant_evidence(tmp_path, ba
         assert storage.list_judgments_for_trace("provider-tool-call") == []
         assert "The answer is 42." in str(provider.requests[0].messages)
         assert storage.list_agent_turn_evaluation_candidates("other", result["evaluatorFingerprint"])[0][0][1] is None
-        [(_turn, judgment)] = storage.list_agent_turn_evaluation_candidates("local", result["evaluatorFingerprint"])[0]
-        assert judgment.status.value == "completed"
+        [(_turn, status)] = storage.list_agent_turn_evaluation_candidates("local", result["evaluatorFingerprint"])[0]
+        assert status is JudgmentStatus.COMPLETED
+        judgment = _stored_turn_result(storage, result["evaluatorFingerprint"])
         assert [dim.name for dim in judgment.dimensions] == ["relevance", "completeness"]
         assert "The answer is 42." not in str(judgment)
         assert preview_evaluation(storage, tenant_id="local", config=config)["alreadyJudged"] == 1
@@ -214,7 +231,8 @@ def test_turn_save_cas_late_error_and_concurrent_evidence_change(tmp_path, backe
         assert storage.save_agent_turn_judgment_if_current(updated) == "saved"
         assert storage.save_agent_turn_judgment_if_current(success) == "stale"
         rows, more = storage.list_agent_turn_evaluation_candidates("local", "a" * 64)
-        assert more is False and rows[0][1].evidence_fingerprint == updated.evidence_fingerprint
+        assert more is False and rows[0][1] is JudgmentStatus.COMPLETED
+        assert _stored_turn_result(storage, "a" * 64).evidence_fingerprint == updated.evidence_fingerprint
     finally:
         storage.close()
 
@@ -322,7 +340,7 @@ def test_oversize_judge_reasoning_becomes_bounded_error_not_partial_result():
                                 confirm_external_egress=True)
     assert result["errors"] == 1 and result["completed"] == 0
     rows, _ = storage.list_agent_turn_evaluation_candidates("local", result["evaluatorFingerprint"])
-    assert rows[0][1].status.value == "error"
+    assert rows[0][1] is JudgmentStatus.ERROR
 
 
 def test_turn_deleted_while_judge_runs_does_not_leave_orphan_score(tmp_path):
@@ -410,6 +428,81 @@ def test_turn_judge_reasoning_redacted_before_disk_and_dashboard(tmp_path):
     visible = build_agent_run_detail(path, tenant="local", run_id="run-1")
     assert "alice@example.com" not in str(visible["turns"][0]["evaluation"])
     assert "Evidence from" not in str(visible["turns"][0]["evaluation"])
+
+
+@pytest.mark.parametrize("backend", ["memory", "sqlite"])
+def test_mutated_judge_result_is_resanitized_at_storage_boundary(tmp_path, backend):
+    storage = InMemoryStorage() if backend == "memory" else SQLiteStorage(str(tmp_path / "mutated.db"))
+    try:
+        bundle = _agent_turn_bundle()
+        storage.replace_agent_run_bundle(bundle)
+        result = AgentTurnJudgment(
+            tenant_id="local", run_id="run-1", turn_id="turn-1",
+            evaluator_fingerprint="a" * 64,
+            evidence_fingerprint=turn_evidence_fingerprint(bundle.turns[0]),
+            evaluator_provider="anthropic", evaluator_config={}, judge_models=["test"],
+            expected_dimensions=["relevance"], rubric_name="test", rubric_version="1",
+            dimensions=[DimensionScore("relevance", Verdict.PASS, "safe", "test")],
+        )
+        result.dimensions[0].reasoning = "alice@example.com"
+        assert storage.save_agent_turn_judgment_if_current(result) == "saved"
+        rows, _ = storage.list_agent_turn_evaluation_candidates("local", "a" * 64)
+        assert rows[0][1] is JudgmentStatus.COMPLETED
+        assert _stored_turn_result(storage, "a" * 64).dimensions[0].reasoning == "<EMAIL>"
+        assert result.dimensions[0].reasoning == "alice@example.com"
+    finally:
+        storage.close()
+
+
+def test_repeated_failed_turn_judge_calls_are_reported_as_errors():
+    storage = InMemoryStorage()
+    storage.replace_agent_run_bundle(_agent_turn_bundle())
+    config = {**_config(), "unit": "agent_turn"}
+
+    class FailingProvider(CountingProvider):
+        def complete(self, request):
+            self.calls += 1
+            raise RuntimeError("provider failed")
+
+    provider = FailingProvider()
+    for expected_calls in (1, 2):
+        preview = preview_evaluation(storage, tenant_id="local", config=config)
+        result = execute_evaluation(storage, tenant_id="local", provider=provider,
+                                    config={**config, "planFingerprint": preview["planFingerprint"],
+                                            "plannedTurns": preview["plannedTurns"]},
+                                    confirm_external_egress=True)
+        assert provider.calls == expected_calls
+        assert result["plannedCalls"] == 1
+        assert result["errors"] == 1
+        assert result["completed"] == 0
+        assert result["stale"] == 0
+
+
+def test_low_level_turn_result_rejects_sensitive_dimension_names_and_redacts_identity(tmp_path):
+    storage = SQLiteStorage(str(tmp_path / "identity-privacy.db"))
+    try:
+        bundle = _agent_turn_bundle()
+        storage.replace_agent_run_bundle(bundle)
+        values = dict(
+            tenant_id="local", run_id="run-1", turn_id="turn-1",
+            evaluator_fingerprint="a" * 64,
+            evidence_fingerprint=turn_evidence_fingerprint(bundle.turns[0]),
+            evaluator_provider="anthropic", evaluator_config={"memo": "alice@example.com"},
+            judge_models=["judge-alice@example.com"], expected_dimensions=["quality"],
+            rubric_name="test", rubric_version="1",
+        )
+        with pytest.raises(ValueError, match="expected dimensions"):
+            AgentTurnJudgment(**{**values, "expected_dimensions": ["alice@example.com"]})
+        with pytest.raises(ValueError, match="scored dimensions"):
+            AgentTurnJudgment(**values, dimensions=[
+                DimensionScore("alice@example.com", Verdict.PASS, "ok", "test"),
+            ])
+        assert storage.save_agent_turn_judgment_if_current(AgentTurnJudgment(**values)) == "saved"
+        raw = storage._conn.execute("SELECT result_json FROM agent_turn_judgments").fetchone()[0]
+        assert "alice@example.com" not in raw
+        assert "<EMAIL>" in raw
+    finally:
+        storage.close()
 
 
 def _config():

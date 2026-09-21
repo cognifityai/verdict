@@ -803,6 +803,7 @@ def build_agent_run_detail(
     turn_limit: int = 20,
     turn_offset: int = 0,
     event_id: str | None = None,
+    turn_evaluator_fingerprint: str | None = None,
 ) -> dict:
     """Read one tenant-scoped run with its canonical ordered evidence timeline."""
     for name, value in (("tenant", tenant), ("run_id", run_id)):
@@ -827,6 +828,12 @@ def build_agent_run_detail(
         not isinstance(event_id, str) or not event_id or len(event_id.encode("utf-8")) > 256
     ):
         raise ValueError("invalid event_id")
+    if turn_evaluator_fingerprint is not None and (
+        not isinstance(turn_evaluator_fingerprint, str)
+        or len(turn_evaluator_fingerprint) != 64
+        or any(char not in "0123456789abcdef" for char in turn_evaluator_fingerprint)
+    ):
+        raise ValueError("invalid Turn evaluator fingerprint")
     configured = str(storage)
 
     def builder(session: _QuerySession) -> dict:
@@ -846,6 +853,9 @@ def build_agent_run_detail(
         if eligible_turns and session.table_exists("agent_turn_judgments"):
             conditions = " OR ".join("(turn_id=? AND evidence_fingerprint=?)" for _ in eligible_turns)
             params = [tenant, run_id]
+            evaluator_clause = "AND evaluator_fingerprint=? " if turn_evaluator_fingerprint else ""
+            if turn_evaluator_fingerprint:
+                params.append(turn_evaluator_fingerprint)
             for turn in eligible_turns:
                 params.extend((turn.turn_id, turn_evidence_fingerprint(turn)))
             for row in session.execute(
@@ -853,18 +863,29 @@ def build_agent_run_detail(
                 "SELECT turn_id,evaluator_fingerprint,status,result_json,"
                 "ROW_NUMBER() OVER (PARTITION BY turn_id ORDER BY evaluated_at DESC,"
                 "evaluator_fingerprint DESC) AS rn FROM agent_turn_judgments "
-                "WHERE tenant_id=? AND run_id=? AND (" + conditions + ")"
+                "WHERE tenant_id=? AND run_id=? " + evaluator_clause + "AND (" + conditions + ")"
                 ") ranked WHERE rn=1 LIMIT 50", tuple(params),
             ):
                 if row["turn_id"] in turn_judgments:
                     continue
                 try:
                     payload = json.loads(row["result_json"])
+                    if not isinstance(payload, dict) or (
+                        payload.get("tenant_id") != tenant
+                        or payload.get("run_id") != run_id
+                        or payload.get("turn_id") != row["turn_id"]
+                        or payload.get("evaluator_fingerprint") != row["evaluator_fingerprint"]
+                        or payload.get("status") != row["status"]
+                    ):
+                        continue
                     dimensions = payload.get("dimensions", [])
                     if not isinstance(dimensions, list):
                         dimensions = []
                     turn_judgments[row["turn_id"]] = {
                         "evaluatorFingerprint": row["evaluator_fingerprint"],
+                        "rubricName": payload.get("rubric_name"),
+                        "rubricVersion": payload.get("rubric_version"),
+                        "judgeModels": payload.get("judge_models"),
                         "status": row["status"],
                         "dimensions": [
                             {"name": item["name"][:80], "verdict": item["verdict"]}
@@ -916,6 +937,10 @@ def build_agent_run_detail(
                 }
         return {
             "runId": run["run_id"],
+            "turnEvaluationScope": {
+                "mode": "exact_evaluator" if turn_evaluator_fingerprint else "latest_current_any_evaluator",
+                "evaluatorFingerprint": turn_evaluator_fingerprint,
+            },
             "focusEventId": event_id,
             "sourceKind": run["source_kind"],
             "startedAt": _dashboard_time(run["started_at"]),
@@ -3261,6 +3286,7 @@ def create_app(
         turn_limit: int = Query(default=20, ge=1, le=50),
         turn_offset: int = Query(default=0, ge=0),
         event_id: str | None = None,
+        turn_evaluator_fingerprint: str | None = None,
     ):
         try:
             authorized_tenant = _authorized_tenant(request)
@@ -3273,6 +3299,7 @@ def create_app(
                 turn_limit=turn_limit,
                 turn_offset=turn_offset,
                 event_id=event_id,
+                turn_evaluator_fingerprint=turn_evaluator_fingerprint,
             )
         except KeyError:
             return JSONResponse({"error": "agent run not found"}, status_code=404)

@@ -116,7 +116,7 @@ test("Evaluator Lab previews a native Turn page and sends its approved identitie
     textOf(node).includes("Preview eligibility"))[0].props.onClick();
   const sent = JSON.parse(requests[2].options.body);
   assert.equal(sent.unit, "agent_turn");
-  assert.equal(sent.scanLimit, 1000);
+  assert.equal(sent.scanLimit, 100);
   await resolveJson(requests[2], {
     unit: "agent_turn", availableTurns: 1, eligible: 1, alreadyJudged: 0,
     notEvaluable: 0, plannedCalls: 1, estimatedMaximumCostUsd: 0.01,
@@ -1283,6 +1283,38 @@ test("Agent Runs pages the full list and keeps an empty last page recoverable", 
     tree, (node) => node.type === "button" && textOf(node) === "Previous",
   )[0];
   assert.equal(previous.props.disabled, false);
+});
+
+test("Agent Runs can fetch one exact Turn evaluator without reusing Trace coverage", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const props = { url: "/api/runs", evaluatorFingerprint: "trace-only" };
+  render(ui.Runs, hooks, props);
+  hooks.flushEffects();
+  await resolveJson(requests[0], runListPage(0, ["run-a"]));
+  let tree = render(ui.Runs, hooks, props);
+  hooks.flushEffects();
+  const initial = requests.find((request) => request.url.includes("/run-a?"));
+  assert.ok(initial);
+  assert.doesNotMatch(initial.url, /turn_evaluator_fingerprint/);
+  await resolveJson(initial, { turns: [], turnPage: { available: 0, shown: 0, offset: 0, limit: 20, truncated: false }, events: [], page: { available: 0, shown: 0, offset: 0, limit: 100, truncated: false } });
+  tree = render(ui.Runs, hooks, props);
+  let detail = findAll(tree, (node) => typeof node.type === "function" && node.type.name === "RunDetail")[0];
+  assert.ok(detail);
+  assert.match(textOf(render(detail.type, createHooks(), detail.props)), /latest current Turn result across evaluators/);
+  const digest = "a".repeat(64);
+  let rendered = render(detail.type, createHooks(), detail.props);
+  findAll(rendered, (node) => node.type === "input" && node.props["aria-label"] === "Exact Turn evaluator fingerprint")[0]
+    .props.onChange({ target: { value: digest } });
+  tree = render(ui.Runs, hooks, props);
+  detail = findAll(tree, (node) => typeof node.type === "function" && node.type.name === "RunDetail")[0];
+  rendered = render(detail.type, createHooks(), detail.props);
+  findAll(rendered, (node) => node.type === "button" && textOf(node) === "Show exact evaluator")[0]
+    .props.onClick();
+  render(ui.Runs, hooks, props);
+  hooks.flushEffects();
+  assert.ok(requests.some((request) => request.url.includes(`turn_evaluator_fingerprint=${digest}`)));
 });
 
 test("Agent Runs presents component-only token evidence as partial", async () => {
