@@ -830,6 +830,7 @@ def build_agent_run_detail(
     configured = str(storage)
 
     def builder(session: _QuerySession) -> dict:
+        from verdict.agent_judgment import turn_evidence_fingerprint, turn_evidence_reason
         page = agent_evidence_queries.load_run_page(
             session, tenant, run_id,
             event_limit=event_limit, event_offset=event_offset,
@@ -840,6 +841,40 @@ def build_agent_run_detail(
         run = page["run"]
         shown = page["events"]
         shown_turns = [agent_turn_from_row(turn) for turn in page["turns"]]
+        turn_judgments = {}
+        eligible_turns = [turn for turn in shown_turns if turn_evidence_reason(turn) is None]
+        if eligible_turns and session.table_exists("agent_turn_judgments"):
+            conditions = " OR ".join("(turn_id=? AND evidence_fingerprint=?)" for _ in eligible_turns)
+            params = [tenant, run_id]
+            for turn in eligible_turns:
+                params.extend((turn.turn_id, turn_evidence_fingerprint(turn)))
+            for row in session.execute(
+                "SELECT turn_id,evaluator_fingerprint,status,result_json FROM ("
+                "SELECT turn_id,evaluator_fingerprint,status,result_json,"
+                "ROW_NUMBER() OVER (PARTITION BY turn_id ORDER BY evaluated_at DESC,"
+                "evaluator_fingerprint DESC) AS rn FROM agent_turn_judgments "
+                "WHERE tenant_id=? AND run_id=? AND (" + conditions + ")"
+                ") ranked WHERE rn=1 LIMIT 50", tuple(params),
+            ):
+                if row["turn_id"] in turn_judgments:
+                    continue
+                try:
+                    payload = json.loads(row["result_json"])
+                    dimensions = payload.get("dimensions", [])
+                    if not isinstance(dimensions, list):
+                        dimensions = []
+                    turn_judgments[row["turn_id"]] = {
+                        "evaluatorFingerprint": row["evaluator_fingerprint"],
+                        "status": row["status"],
+                        "dimensions": [
+                            {"name": item["name"][:80], "verdict": item["verdict"]}
+                            for item in dimensions[:MAX_DASHBOARD_DIMENSIONS]
+                            if isinstance(item, dict) and isinstance(item.get("name"), str)
+                            and item.get("verdict") in {"pass", "fail", "unclear"}
+                        ],
+                    }
+                except (ValueError, TypeError, KeyError):
+                    continue
         available = page["eventCount"]
         available_turns = page["turnCount"]
         resolved_event_offset = page["eventOffset"]
@@ -904,6 +939,7 @@ def build_agent_run_detail(
                 "response": turn.final_response_redacted,
                 "requestTruncated": turn.request_truncated,
                 "responseTruncated": turn.response_truncated,
+                "evaluation": turn_judgments.get(turn.turn_id),
                 "tokenUsage": {
                     "inputTokens": turn.input_tokens,
                     "cachedInputTokens": turn.cached_input_tokens,

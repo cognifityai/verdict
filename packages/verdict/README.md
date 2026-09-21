@@ -292,6 +292,15 @@ OTLP message objects may provide text in `content`, `text`, or typed text
 `parts`. Verdict joins genuine text parts in order and ignores unsupported
 tool-only parts rather than presenting them as an assistant response.
 
+Evaluator Lab can separately judge native completed Agent Turns whose redacted
+request and final output are present and untruncated. This does not relabel a
+provider tool-call Trace as an answer or change Trace judgment coverage.
+Turn previews are tenant-scoped 1,000-candidate keyset pages with explicit
+egress approval. A bounded Turn/evaluator result slot is current only for the
+exact redacted evidence fingerprint; later Turn extensions require reevaluation.
+Agent Runs detail displays current scores. Tool/citation context and Monitor
+analysis units remain separate future work.
+
 The Langfuse reader targets the supported v4 Observations API v2, not the
 deprecated trace-list endpoint, so Verdict receives one record per actual
 generation or embedding rather than a trace aggregate.

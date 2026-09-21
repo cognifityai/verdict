@@ -602,6 +602,7 @@ def test_live_postgres_dashboard_reads_existing_turn_schema_without_migration():
         "response": None,
         "requestTruncated": False,
         "responseTruncated": False,
+        "evaluation": None,
         "tokenUsage": {
             "inputTokens": None,
             "cachedInputTokens": None,

@@ -14,6 +14,14 @@ from contextlib import contextmanager
 from dataclasses import replace
 from datetime import datetime
 
+from verdict.agent_judgment import (
+    AgentTurnJudgment,
+    agent_turn_judgment_from_json,
+    agent_turn_judgment_to_json,
+    current_turn_judgment,
+    turn_judgment_write_decision,
+    validate_turn_scan,
+)
 from verdict.analysis_records import (
     DeliveryOutcome,
     DeterministicAnalysisRun,
@@ -99,6 +107,7 @@ class InMemoryStorage:
         self._import_sources: dict[tuple[str, str], SourceSession] = {}
         self._agent_runs: dict[tuple[str, str], AgentRun] = {}
         self._agent_turns: dict[tuple[str, str, str], AgentTurn] = {}
+        self._agent_turn_judgments: dict[tuple[str, str, str, str], str] = {}
         self._agent_events: dict[tuple[str, str, str], AgentEvent] = {}
         self._agent_evidence_lock = threading.RLock()
         self._analysis_runs: dict[str, str] = {}
@@ -353,6 +362,36 @@ class InMemoryStorage:
 
     def replace_agent_run_bundle(self, bundle: AgentRunBundle) -> None:
         self.replace_agent_capture(bundle)
+
+    def list_agent_turn_evaluation_candidates(
+        self, tenant_id: str, evaluator_fingerprint: str, *, limit: int = 1000,
+        before: tuple[datetime, str, str] | None = None,
+    ) -> tuple[list[tuple[AgentTurn, AgentTurnJudgment | None]], bool]:
+        validate_turn_scan(tenant_id, evaluator_fingerprint, limit, before)
+        with self._agent_evidence_lock:
+            turns = [turn for (scope, _, _), turn in self._agent_turns.items()
+                     if scope == tenant_id and (before is None or
+                     (turn.started_at, turn.run_id, turn.turn_id) < before)]
+            turns.sort(key=lambda turn: (turn.started_at, turn.run_id, turn.turn_id), reverse=True)
+            items = []
+            for turn in turns[:limit]:
+                raw = self._agent_turn_judgments.get((tenant_id, turn.run_id, turn.turn_id, evaluator_fingerprint))
+                judgment = agent_turn_judgment_from_json(raw) if raw else None
+                items.append((copy.deepcopy(turn), current_turn_judgment(turn, judgment)))
+        return items, len(turns) > limit
+
+    def save_agent_turn_judgment_if_current(self, judgment: AgentTurnJudgment) -> str:
+        payload = agent_turn_judgment_to_json(judgment)
+        key = (judgment.tenant_id, judgment.run_id, judgment.turn_id, judgment.evaluator_fingerprint)
+        with self._agent_evidence_lock:
+            prior = self._agent_turn_judgments.get(key)
+            decision = turn_judgment_write_decision(
+                self._agent_turns.get(key[:3]), judgment,
+                agent_turn_judgment_from_json(prior) if prior else None,
+            )
+            if decision == "saved":
+                self._agent_turn_judgments[key] = payload
+            return decision
 
     def get_agent_run_bundle(
         self,
@@ -1519,6 +1558,11 @@ class InMemoryStorage:
 
     def close(self) -> None:
         self._traces.clear()
+        self._import_sources.clear()
+        self._agent_runs.clear()
+        self._agent_turns.clear()
+        self._agent_events.clear()
+        self._agent_turn_judgments.clear()
         self._judgments.clear()
         self._evaluator_health.clear()
         self._signals.clear()

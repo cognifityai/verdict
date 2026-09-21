@@ -10,11 +10,12 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Protocol, runtime_checkable
 
+from verdict.agent_judgment import AgentTurnJudgment
 from verdict.analysis_records import (
     DeterministicAnalysisRun,
     NotificationDeliveryAttempt,
 )
-from verdict.evidence import AgentCaptureBatch, AgentRunBundle
+from verdict.evidence import AgentCaptureBatch, AgentRunBundle, AgentTurn
 from verdict.monitoring import CohortManifest, MonitorComparison, MonitorPolicy
 from verdict.schema import (
     DriftRun,
@@ -112,6 +113,13 @@ class Storage(Protocol):
     ) -> None: ...
 
     def replace_agent_run_bundle(self, bundle: AgentRunBundle) -> None: ...
+
+    def list_agent_turn_evaluation_candidates(
+        self, tenant_id: str, evaluator_fingerprint: str, *, limit: int = 1000,
+        before: tuple[datetime, str, str] | None = None,
+    ) -> tuple[list[tuple[AgentTurn, AgentTurnJudgment | None]], bool]: ...
+
+    def save_agent_turn_judgment_if_current(self, judgment: AgentTurnJudgment) -> str: ...
 
     def get_agent_run_bundle(
         self,

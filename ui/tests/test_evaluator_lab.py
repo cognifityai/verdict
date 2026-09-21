@@ -1,8 +1,12 @@
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import datetime, timezone
 
+import httpx
 import pytest
+import verdict
+from verdict.agent_judgment import AgentTurnJudgment, turn_evidence_fingerprint
 from verdict.dashboard.evaluator_lab import (
     evaluator_environment,
     execute_calibration,
@@ -10,8 +14,17 @@ from verdict.dashboard.evaluator_lab import (
     preview_calibration,
     preview_evaluation,
 )
-from verdict.schema import Judgment, Trace
+from verdict.evidence import (
+    AgentRun,
+    AgentRunBundle,
+    AgentTurn,
+    EvidenceState,
+    ExecutionStatus,
+    SourceSession,
+)
+from verdict.schema import DimensionScore, Judgment, Trace, Verdict
 from verdict.storage import InMemoryStorage
+from verdict.storage.sqlite import SQLiteStorage
 from verdict_eval.providers import CompletionResponse
 
 
@@ -66,6 +79,337 @@ def _trace(trace_id, *, prompt="question", response="answer"):
         tenant_id="local",
         cluster_id="all",
     )
+
+
+def _agent_turn_bundle(*, tenant="local"):
+    now = datetime(2026, 8, 31, tzinfo=timezone.utc)
+    return AgentRunBundle(
+        session=SourceSession(
+            source_session_id="session-1", tenant_id=tenant,
+            source_kind="pydantic-ai", source_locator_hash="a" * 64,
+            started_at=now, observed_at=now,
+        ),
+        run=AgentRun(
+            run_id="run-1", source_session_id="session-1", tenant_id=tenant,
+            started_at=now, ended_at=now, status=ExecutionStatus.COMPLETED,
+        ),
+        turns=(AgentTurn(
+            turn_id="turn-1", run_id="run-1", sequence=0, started_at=now,
+            ended_at=now, status=ExecutionStatus.COMPLETED,
+            user_request_redacted="What is the answer?",
+            final_response_redacted="The answer is 42.",
+            request_state=EvidenceState.PRESENT,
+            response_state=EvidenceState.PRESENT,
+        ),),
+    )
+
+
+def test_agent_turn_preview_uses_final_output_without_relabeling_provider_trace():
+    storage = InMemoryStorage()
+    storage.replace_agent_run_bundle(_agent_turn_bundle())
+    storage.insert_trace(_trace("provider-tool-call", response=""))
+
+    preview = preview_evaluation(
+        storage, tenant_id="local", config={**_config(), "unit": "agent_turn"},
+    )
+
+    assert preview["unit"] == "agent_turn"
+    assert preview["availableTurns"] == 1
+    assert preview["eligible"] == 1
+    assert preview["plannedCalls"] == 1
+    assert preview["plannedTurns"][0]["runId"] == "run-1"
+    assert preview["plannedTurns"][0]["turnId"] == "turn-1"
+    assert storage.list_judgments_for_trace("provider-tool-call") == []
+
+
+@pytest.mark.parametrize("backend", ["memory", "sqlite"])
+def test_native_turn_judgment_persists_only_current_tenant_evidence(tmp_path, backend):
+    storage = InMemoryStorage() if backend == "memory" else SQLiteStorage(str(tmp_path / "turns.db"))
+    try:
+        storage.replace_agent_run_bundle(_agent_turn_bundle())
+        storage.replace_agent_run_bundle(_agent_turn_bundle(tenant="other"))
+        storage.insert_trace(_trace("provider-tool-call", response=""))
+        config = {**_config(), "unit": "agent_turn"}
+        preview = preview_evaluation(storage, tenant_id="local", config=config)
+        provider = CountingProvider()
+        result = execute_evaluation(
+            storage, tenant_id="local",
+            config={**config, "planFingerprint": preview["planFingerprint"],
+                    "plannedTurns": preview["plannedTurns"]},
+            provider=provider, confirm_external_egress=True,
+        )
+        assert result["completed"] == 1
+        assert provider.calls == 1
+        assert storage.list_judgments_for_trace("provider-tool-call") == []
+        assert "The answer is 42." in str(provider.requests[0].messages)
+        assert storage.list_agent_turn_evaluation_candidates("other", result["evaluatorFingerprint"])[0][0][1] is None
+        [(_turn, judgment)] = storage.list_agent_turn_evaluation_candidates("local", result["evaluatorFingerprint"])[0]
+        assert judgment.status.value == "completed"
+        assert [dim.name for dim in judgment.dimensions] == ["relevance", "completeness"]
+        assert "The answer is 42." not in str(judgment)
+        assert preview_evaluation(storage, tenant_id="local", config=config)["alreadyJudged"] == 1
+
+        old = judgment
+        bundle = _agent_turn_bundle()
+        changed = replace(bundle, turns=(replace(
+            bundle.turns[0], final_response_redacted="The answer is 42. Additional context.",
+        ),))
+        storage.replace_agent_run_bundle(changed)
+        [(_turn, judgment)] = storage.list_agent_turn_evaluation_candidates("local", result["evaluatorFingerprint"])[0]
+        assert judgment is None
+        assert storage.save_agent_turn_judgment_if_current(old) == "stale"
+        assert preview_evaluation(storage, tenant_id="local", config=config)["plannedCalls"] == 1
+    finally:
+        storage.close()
+
+
+def test_turn_plan_rejects_tenant_replay_and_changed_evidence_without_provider_call():
+    storage = InMemoryStorage()
+    storage.replace_agent_run_bundle(_agent_turn_bundle())
+    storage.replace_agent_run_bundle(_agent_turn_bundle(tenant="other"))
+    config = {**_config(), "unit": "agent_turn"}
+    preview = preview_evaluation(storage, tenant_id="local", config=config)
+    approved = {**config, "planFingerprint": preview["planFingerprint"], "plannedTurns": preview["plannedTurns"]}
+    provider = CountingProvider()
+    with pytest.raises(ValueError, match="plan"):
+        execute_evaluation(storage, tenant_id="other", config=approved,
+                           provider=provider, confirm_external_egress=True)
+    assert provider.calls == 0
+    bundle = _agent_turn_bundle()
+    storage.replace_agent_run_bundle(replace(bundle, turns=(replace(
+        bundle.turns[0], final_response_redacted="The answer is 42. Revised.",
+    ),)))
+    with pytest.raises(ValueError, match="plan"):
+        execute_evaluation(storage, tenant_id="local", config=approved,
+                           provider=provider, confirm_external_egress=True)
+    assert provider.calls == 0
+
+
+@pytest.mark.parametrize("backend", ["memory", "sqlite"])
+def test_turn_save_cas_late_error_and_concurrent_evidence_change(tmp_path, backend):
+    storage = InMemoryStorage() if backend == "memory" else SQLiteStorage(str(tmp_path / "cas.db"))
+    try:
+        bundle = _agent_turn_bundle()
+        storage.replace_agent_run_bundle(bundle)
+        turn = bundle.turns[0]
+        identity = {
+            "tenant_id": "local", "run_id": "run-1", "turn_id": "turn-1",
+            "evaluator_fingerprint": "a" * 64, "evidence_fingerprint": turn_evidence_fingerprint(turn),
+            "evaluator_provider": "anthropic", "evaluator_config": {},
+            "judge_models": ["test"], "expected_dimensions": ["relevance"],
+            "rubric_name": "test", "rubric_version": "1",
+        }
+        error = AgentTurnJudgment(**identity, status="error", error="temporary")
+        success = AgentTurnJudgment(**identity)
+        assert storage.save_agent_turn_judgment_if_current(error) == "saved"
+        assert storage.save_agent_turn_judgment_if_current(success) == "saved"
+        assert storage.save_agent_turn_judgment_if_current(error) == "already_completed"
+        assert storage.save_agent_turn_judgment_if_current(success) == "already_completed"
+        changed = replace(bundle, turns=(replace(
+            turn, final_response_redacted="The answer is 42. Revised.",
+        ),))
+        storage.replace_agent_run_bundle(changed)
+        assert storage.save_agent_turn_judgment_if_current(success) == "stale"
+        updated = replace(success, evidence_fingerprint=turn_evidence_fingerprint(changed.turns[0]))
+        assert storage.save_agent_turn_judgment_if_current(updated) == "saved"
+        assert storage.save_agent_turn_judgment_if_current(success) == "stale"
+        rows, more = storage.list_agent_turn_evaluation_candidates("local", "a" * 64)
+        assert more is False and rows[0][1].evidence_fingerprint == updated.evidence_fingerprint
+    finally:
+        storage.close()
+
+
+def test_turn_scan_counts_ineligible_candidates_and_keyset_pages():
+    storage = InMemoryStorage()
+    bundle = _agent_turn_bundle()
+    first = replace(bundle.turns[0], turn_id="turn-0", sequence=0,
+                    final_response_redacted=None, response_state=EvidenceState.MISSING)
+    second = replace(bundle.turns[0], turn_id="turn-1", sequence=1)
+    storage.replace_agent_run_bundle(replace(bundle, turns=(first, second)))
+    config = {**_config(), "unit": "agent_turn", "scanLimit": 1}
+    page = preview_evaluation(storage, tenant_id="local", config=config)
+    assert page["availableTurns"] == 1 and page["hasMore"]
+    assert page["plannedCalls"] == 1
+    older = preview_evaluation(storage, tenant_id="local", config={**config, "before": page["nextCursor"]})
+    assert older["plannedCalls"] == 0
+    assert older["notEvaluableReasons"] == {"response_unavailable": 1}
+    assert not older["hasMore"]
+
+
+def test_turn_config_rejects_malformed_cursor_and_needs_egress_confirmation():
+    storage = InMemoryStorage()
+    storage.replace_agent_run_bundle(_agent_turn_bundle())
+    config = {**_config(), "unit": "agent_turn"}
+    with pytest.raises(ValueError, match="cursor"):
+        preview_evaluation(storage, tenant_id="local", config={**config, "before": {"startedAt": "bad"}})
+    with pytest.raises(ValueError, match="egress"):
+        execute_evaluation(storage, tenant_id="local", config=config, confirm_external_egress=False)
+
+
+def test_real_openai_sdk_tool_response_and_agent_sdk_final_turn_are_distinct():
+    openai = pytest.importorskip("openai")
+    storage = InMemoryStorage()
+    verdict.shutdown()
+    verdict.init(storage=storage, tenant_id="local", instrumentors=["openai"])
+    try:
+        def respond(_request):
+            return httpx.Response(200, json={
+                "id": "chatcmpl-local", "object": "chat.completion", "created": 1,
+                "model": "gpt-4o-mini", "choices": [{"index": 0, "message": {
+                    "role": "assistant", "content": None, "tool_calls": [{
+                        "id": "call-1", "type": "function", "function": {
+                            "name": "final_result", "arguments": '{"answer":"42"}',
+                        },
+                    }],
+                }, "finish_reason": "tool_calls"}],
+                "usage": {"prompt_tokens": 5, "completion_tokens": 4, "total_tokens": 9},
+            })
+        with httpx.Client(transport=httpx.MockTransport(respond)) as http_client:
+            provider = openai.OpenAI(api_key="local-test-only", base_url="http://provider.test/v1",
+                                    http_client=http_client)
+            with verdict.agent_run(name="structured-agent") as run:
+                with run.turn(user_input="What is the answer?") as turn:
+                    provider.chat.completions.create(
+                        model="gpt-4o-mini", messages=[{"role": "user", "content": "What is the answer?"}],
+                    )
+                    turn.set_output("The answer is 42.")
+        [trace] = storage.list_traces(tenant_id="local")
+        assert not (trace.response_redacted or "").strip()
+        assert preview_evaluation(storage, tenant_id="local", config=_config())["eligible"] == 0
+        preview = preview_evaluation(storage, tenant_id="local", config={**_config(), "unit": "agent_turn"})
+        assert preview["eligible"] == 1 and preview["plannedCalls"] == 1
+    finally:
+        verdict.shutdown()
+
+
+def test_turn_changes_during_judge_call_result_is_not_published():
+    storage = InMemoryStorage()
+    original = _agent_turn_bundle()
+    storage.replace_agent_run_bundle(original)
+    config = {**_config(), "unit": "agent_turn"}
+    preview = preview_evaluation(storage, tenant_id="local", config=config)
+
+    class ExtendingProvider(CountingProvider):
+        def complete(self, request):
+            storage.replace_agent_run_bundle(replace(original, turns=(replace(
+                original.turns[0], final_response_redacted="The answer is 42. Later extension.",
+            ),)))
+            return super().complete(request)
+
+    result = execute_evaluation(storage, tenant_id="local", provider=ExtendingProvider(),
+                                config={**config, "planFingerprint": preview["planFingerprint"],
+                                        "plannedTurns": preview["plannedTurns"]},
+                                confirm_external_egress=True)
+    assert result["completed"] == 0 and result["stale"] == 1
+    assert preview_evaluation(storage, tenant_id="local", config=config)["plannedCalls"] == 1
+
+
+def test_oversize_judge_reasoning_becomes_bounded_error_not_partial_result():
+    storage = InMemoryStorage()
+    storage.replace_agent_run_bundle(_agent_turn_bundle())
+    config = {**_config(), "unit": "agent_turn"}
+    preview = preview_evaluation(storage, tenant_id="local", config=config)
+
+    class OversizeProvider(CountingProvider):
+        def complete(self, request):
+            result = super().complete(request)
+            return replace(result, text='{"relevance":{"reasoning":"' + "x" * 70000 +
+                           '","verdict":"PASS"},"completeness":{"reasoning":"ok","verdict":"PASS"}}')
+
+    result = execute_evaluation(storage, tenant_id="local", provider=OversizeProvider(),
+                                config={**config, "planFingerprint": preview["planFingerprint"],
+                                        "plannedTurns": preview["plannedTurns"]},
+                                confirm_external_egress=True)
+    assert result["errors"] == 1 and result["completed"] == 0
+    rows, _ = storage.list_agent_turn_evaluation_candidates("local", result["evaluatorFingerprint"])
+    assert rows[0][1].status.value == "error"
+
+
+def test_turn_deleted_while_judge_runs_does_not_leave_orphan_score(tmp_path):
+    storage = SQLiteStorage(str(tmp_path / "deleted.db"))
+    try:
+        storage.replace_agent_run_bundle(_agent_turn_bundle())
+        config = {**_config(), "unit": "agent_turn"}
+        preview = preview_evaluation(storage, tenant_id="local", config=config)
+
+        class DeletingProvider(CountingProvider):
+            def complete(self, request):
+                storage._conn.execute("DELETE FROM agent_runs WHERE tenant_id=? AND run_id=?",
+                                      ("local", "run-1"))
+                return super().complete(request)
+
+        result = execute_evaluation(storage, tenant_id="local", provider=DeletingProvider(),
+                                    config={**config, "planFingerprint": preview["planFingerprint"],
+                                            "plannedTurns": preview["plannedTurns"]},
+                                    confirm_external_egress=True)
+        assert result["stale"] == 1 and result["completed"] == 0
+        assert storage._conn.execute("SELECT count(*) FROM agent_turn_judgments").fetchone()[0] == 0
+    finally:
+        storage.close()
+
+
+@pytest.mark.parametrize("failure", ["storage", "cancel"])
+def test_provider_success_then_storage_failure_or_cancellation_cannot_claim_completion(failure):
+    class FailingStorage(InMemoryStorage):
+        def save_agent_turn_judgment_if_current(self, judgment):
+            raise OSError("durable storage unavailable")
+
+    storage = FailingStorage() if failure == "storage" else InMemoryStorage()
+    storage.replace_agent_run_bundle(_agent_turn_bundle())
+    config = {**_config(), "unit": "agent_turn"}
+    preview = preview_evaluation(storage, tenant_id="local", config=config)
+    provider = CountingProvider()
+    if failure == "cancel":
+        def cancel(_request):
+            raise KeyboardInterrupt()
+        provider.complete = cancel
+    with pytest.raises(OSError if failure == "storage" else KeyboardInterrupt):
+        execute_evaluation(storage, tenant_id="local", provider=provider,
+                           config={**config, "planFingerprint": preview["planFingerprint"],
+                                   "plannedTurns": preview["plannedTurns"]},
+                           confirm_external_egress=True)
+    assert preview_evaluation(storage, tenant_id="local", config=config)["plannedCalls"] == 1
+
+
+def test_memory_close_clears_agent_evidence_and_native_results():
+    storage = InMemoryStorage()
+    bundle = _agent_turn_bundle()
+    storage.replace_agent_run_bundle(bundle)
+    storage.save_agent_turn_judgment_if_current(AgentTurnJudgment(
+        tenant_id="local", run_id="run-1", turn_id="turn-1",
+        evaluator_fingerprint="a" * 64,
+        evidence_fingerprint=turn_evidence_fingerprint(bundle.turns[0]),
+        evaluator_provider="anthropic", evaluator_config={}, judge_models=["test"],
+        expected_dimensions=[], rubric_name="test", rubric_version="1",
+    ))
+    storage.close()
+    assert storage.list_agent_turn_evaluation_candidates("local", "a" * 64)[0] == []
+    assert storage.get_agent_run_bundle("local", "run-1") is None
+
+
+def test_turn_judge_reasoning_redacted_before_disk_and_dashboard(tmp_path):
+    from verdict.dashboard.app import build_agent_run_detail
+
+    path = tmp_path / "privacy.db"
+    storage = SQLiteStorage(str(path))
+    bundle = _agent_turn_bundle()
+    storage.replace_agent_run_bundle(bundle)
+    result = AgentTurnJudgment(
+        tenant_id="local", run_id="run-1", turn_id="turn-1",
+        evaluator_fingerprint="a" * 64,
+        evidence_fingerprint=turn_evidence_fingerprint(bundle.turns[0]),
+        evaluator_provider="anthropic", evaluator_config={}, judge_models=["test"],
+        expected_dimensions=["relevance"], rubric_name="test", rubric_version="1",
+        dimensions=[DimensionScore("relevance", Verdict.PASS,
+                                   "Evidence from alice@example.com", "test")],
+    )
+    assert storage.save_agent_turn_judgment_if_current(result) == "saved"
+    raw = storage._conn.execute("SELECT result_json FROM agent_turn_judgments").fetchone()[0]
+    assert "alice@example.com" not in raw and "<EMAIL>" in raw
+    storage.close()
+    visible = build_agent_run_detail(path, tenant="local", run_id="run-1")
+    assert "alice@example.com" not in str(visible["turns"][0]["evaluation"])
+    assert "Evidence from" not in str(visible["turns"][0]["evaluation"])
 
 
 def _config():

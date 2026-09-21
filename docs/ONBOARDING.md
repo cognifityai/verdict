@@ -555,6 +555,16 @@ bucket against the frozen reference.
 
 Evaluator Lab shows NOT_EVALUABLE reasons before any model call, reads provider
 keys only from environment variables, and requires an explicit egress approval.
+Select provider Trace (the backward-compatible default) for an individual
+model exchange, or Agent Turn for a completed final output. The Turn path
+requires present, untruncated redacted request/response text and does not
+inherit provider Trace scores. Each preview scans at most 1,000 candidate
+Turns, counts ineligible Turns in that window, and offers a cursor for older
+Turns. Approve that exact page before external judge calls. A Turn/evaluator
+has one bounded SQLite/Postgres score slot; a later evidence extension makes
+its score stale. Current results appear in Agent Runs detail, separately from
+Trace coverage. No tool provenance or citation verification is supplied to
+the Turn judge yet; Monitor remains Trace-only.
 When `OPENAI_BASE_URL` is set, the OpenAI provider uses that compatible endpoint;
 the UI reports only that a custom endpoint is configured and never returns the
 URL. Unknown local model names remain unpriced.

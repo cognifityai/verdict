@@ -217,7 +217,7 @@ function RunDetail({ run, detail, onEventPage, onTurnPage, onFocusEvent, focusEv
         <StatusFact label="Source outcome" value={run.sourceOutcome || run.status} />
         <StatusFact label="Turn outcomes" value={displayCounts(run.turnOutcomes)} />
         <StatusFact label="Finding severity" value={displayCounts(run.findingSeverity)} />
-        <StatusFact label="Selected evaluator" value={run.evaluationCoverage?.state === "selected" ? `${run.evaluationCoverage.judged} judged · ${run.evaluationCoverage.notJudged} not judged · ${run.evaluationCoverage.judgeErrors} errors` : "Not selected"} />
+        <StatusFact label="Selected Trace evaluator" value={run.evaluationCoverage?.state === "selected" ? `${run.evaluationCoverage.judged} judged · ${run.evaluationCoverage.notJudged} not judged · ${run.evaluationCoverage.judgeErrors} errors` : "Not selected"} />
       </div>
       <h2 className="font-semibold mt-6">Deterministic findings</h2>
       <div className="mt-2 space-y-2">
@@ -238,6 +238,7 @@ function RunDetail({ run, detail, onEventPage, onTurnPage, onFocusEvent, focusEv
               <div>Request ({turn.requestState}{turn.requestTruncated ? ", bounded preview" : ""}): {turn.request ?? "not available"}</div>
               <div className="mt-2">Response ({turn.responseState}{turn.responseTruncated ? ", bounded preview" : ""}): {turn.response ?? "not available"}</div>
               <div className="mt-2">Source-reported token usage: {turnTokenSummary(turn.tokenUsage)}</div>
+              <div className="mt-2">Turn evaluation: {turn.evaluation ? `${turn.evaluation.status} · ${turn.evaluation.dimensions.map((d) => `${d.name}: ${d.verdict}`).join(" · ") || "no scores"}` : "No current native Turn result"}</div>
             </div>
           </details>
         ))}

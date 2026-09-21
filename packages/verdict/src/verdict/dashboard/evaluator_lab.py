@@ -10,9 +10,15 @@ import os
 import re
 import threading
 from collections import Counter
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from verdict.agent_judgment import (
+    AgentTurnJudgment,
+    turn_evidence_fingerprint,
+    turn_evidence_reason,
+)
 from verdict.pricing import PRICING_LAST_VERIFIED, compute_cost_usd
 from verdict.redaction import redact
 from verdict.schema import Judgment, JudgmentStatus, Trace
@@ -58,6 +64,8 @@ def evaluator_environment() -> dict[str, Any]:
 def _validated_config(config: dict[str, Any]):
     if not isinstance(config, dict):
         raise ValueError("evaluator config must be an object")
+    if config.get("unit", "trace") not in ("trace", "agent_turn"):
+        raise ValueError("unsupported evaluation unit")
     provider = config.get("provider")
     model = config.get("model")
     if provider not in _PROVIDER_KEYS:
@@ -216,6 +224,87 @@ def _plan_fingerprint(evaluator_fingerprint, max_calls, planned_traces):
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
+def _turn_scan_options(config):
+    limit = config.get("scanLimit", 1000)
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
+        raise ValueError("turn scan limit must be 1-1000")
+    raw = config.get("before")
+    if raw is None:
+        return limit, None
+    if not isinstance(raw, dict) or set(raw) != {"startedAt", "runId", "turnId"}:
+        raise ValueError("invalid turn cursor")
+    try:
+        started = datetime.fromisoformat(raw["startedAt"])
+        before = (started, raw["runId"], raw["turnId"])
+        if started.tzinfo is None or any(not isinstance(v, str) or not v or len(v.encode("utf-8")) > 256 for v in before[1:]):
+            raise ValueError("invalid turn cursor")
+    except (TypeError, ValueError, KeyError) as exc:
+        raise ValueError("invalid turn cursor") from exc
+    return limit, before
+
+
+def _turn_plan_fingerprint(tenant_id, evaluator_fingerprint, max_calls, limit, before, planned):
+    return hashlib.sha256(json.dumps(
+        ["agent_turn", tenant_id, evaluator_fingerprint, max_calls, limit,
+         [before[0].isoformat(), *before[1:]] if before else None, planned],
+        sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")).hexdigest()
+
+
+def _turn_candidates(storage, tenant_id, identity, config, max_calls):
+    limit, before = _turn_scan_options(config)
+    rows, has_more = storage.list_agent_turn_evaluation_candidates(
+        tenant_id, identity["evaluator_fingerprint"], limit=limit, before=before,
+    )
+    reasons: Counter[str] = Counter()
+    selected = []
+    eligible = 0
+    already = 0
+    for turn, judgment in rows:
+        reason = turn_evidence_reason(turn)
+        if reason:
+            reasons[reason] += 1
+            continue
+        eligible += 1
+        if judgment and judgment.status is JudgmentStatus.COMPLETED:
+            already += 1
+            continue
+        if max_calls is None or len(selected) < max_calls:
+            selected.append(turn)
+    planned = [{"runId": turn.run_id, "turnId": turn.turn_id,
+                "evidenceFingerprint": turn_evidence_fingerprint(turn)} for turn in selected]
+    last = rows[-1][0] if rows else None
+    next_cursor = ({"startedAt": last.started_at.isoformat(), "runId": last.run_id,
+                    "turnId": last.turn_id} if has_more and last else None)
+    return rows, selected, reasons, eligible, already, planned, next_cursor, limit, before
+
+
+def _turn_preview(storage, tenant_id, config, provider, model, max_calls, max_output, rubric):
+    identity = _judge(_IdentityOnlyProvider(provider), model, rubric, max_output).evaluator_identity(context=None)
+    rows, selected, reasons, eligible, already, planned, next_cursor, limit, before = (
+        _turn_candidates(storage, tenant_id, identity, config, max_calls)
+    )
+    effective = set(identity["expected_dimensions"])
+    rubric_chars = sum(len(d.name) + len(d.description) for d in rubric.dimensions if d.name in effective)
+    input_estimate = sum(math.ceil((len(turn.user_request_redacted or "") +
+                    len(turn.final_response_redacted or "") + rubric_chars) / 4) + 400
+                    for turn in selected)
+    return {
+        "unit": "agent_turn", "provider": provider, "model": model,
+        "rubric": _rubric_summary(rubric, identity),
+        "availableTurns": len(rows), "eligible": eligible,
+        "notEvaluable": sum(reasons.values()), "notEvaluableReasons": dict(sorted(reasons.items())),
+        "plannedCalls": len(selected), "plannedTurns": planned,
+        "planFingerprint": _turn_plan_fingerprint(tenant_id, identity["evaluator_fingerprint"],
+                                                    max_calls, limit, before, planned),
+        "alreadyJudged": already, "maximumCalls": "all" if max_calls is None else max_calls,
+        "scanLimit": limit, "hasMore": next_cursor is not None, "nextCursor": next_cursor,
+        "estimatedInputTokens": input_estimate, "maximumOutputTokens": max_output * len(selected),
+        "estimatedMaximumCostUsd": compute_cost_usd(model, input_estimate, max_output * len(selected)),
+        "costIsStaticEstimate": True, "externalEgressRequired": True,
+    }
+
+
 def _approved_trace_ids(config, evaluator_fingerprint, max_calls, eligible):
     fingerprint = config.get("planFingerprint")
     planned_traces = config.get("plannedTraces")
@@ -260,6 +349,8 @@ def preview_evaluation(
     storage: Storage, *, tenant_id: str, config: dict[str, Any]
 ) -> dict[str, Any]:
     provider, model, max_calls, max_output, rubric = _validated_config(config)
+    if config.get("unit") == "agent_turn":
+        return _turn_preview(storage, tenant_id, config, provider, model, max_calls, max_output, rubric)
     traces, eligible, reasons = _selected(storage, tenant_id)
     identity = _judge(
         _IdentityOnlyProvider(provider), model, rubric, max_output
@@ -347,6 +438,9 @@ def _execute_evaluation(
     if confirm_external_egress is not True:
         raise ValueError("external judge egress was not confirmed")
     provider_name, model, max_calls, _max_output, rubric = _validated_config(config)
+    if config.get("unit") == "agent_turn":
+        return _execute_turn_evaluation(storage, tenant_id, config, provider_name,
+                                        model, max_calls, _max_output, rubric, provider)
     traces, eligible, reasons = _selected(storage, tenant_id)
     preview_identity = _judge(
         _IdentityOnlyProvider(provider_name), model, rubric, _max_output
@@ -406,6 +500,60 @@ def _execute_evaluation(
         "evaluatorFingerprint": identity["evaluator_fingerprint"],
         "evaluatorId": dashboard_identity["id"],
         "rubric": _rubric_summary(rubric, identity),
+    }
+
+
+def _execute_turn_evaluation(storage, tenant_id, config, provider_name, model,
+                             max_calls, max_output, rubric, provider):
+    preview_identity = _judge(_IdentityOnlyProvider(provider_name), model, rubric,
+                              max_output).evaluator_identity(context=None)
+    rows, selected, reasons, eligible, already, planned, next_cursor, limit, before = (
+        _turn_candidates(storage, tenant_id, preview_identity, config, max_calls)
+    )
+    fingerprint = _turn_plan_fingerprint(tenant_id, preview_identity["evaluator_fingerprint"],
+                                         max_calls, limit, before, planned)
+    if (config.get("planFingerprint") != fingerprint or
+        config.get("plannedTurns") != planned):
+        raise ValueError("evaluator preview plan is no longer current")
+    judge = _judge(provider or _provider(provider_name), model, rubric, max_output)
+    identity = judge.evaluator_identity(context=None)
+    if identity["evaluator_fingerprint"] != preview_identity["evaluator_fingerprint"]:
+        raise ValueError("judge provider behavior changed after preview")
+    from verdict.dashboard.app import evaluator_identity
+    dashboard_identity = evaluator_identity(identity)
+    completed = errors = stale = 0
+    for turn in selected:
+        try:
+            dimensions = judge.score(query=turn.user_request_redacted or "",
+                                     response=turn.final_response_redacted or "")
+            record = AgentTurnJudgment(
+                tenant_id=tenant_id, run_id=turn.run_id, turn_id=turn.turn_id,
+                evidence_fingerprint=turn_evidence_fingerprint(turn), dimensions=dimensions,
+                **identity,
+            )
+        except Exception as exc:
+            record = AgentTurnJudgment(
+                tenant_id=tenant_id, run_id=turn.run_id, turn_id=turn.turn_id,
+                evidence_fingerprint=turn_evidence_fingerprint(turn),
+                status=JudgmentStatus.ERROR,
+                error=(redact(str(exc)) or "judge error")[:2000], **identity,
+            )
+        outcome = storage.save_agent_turn_judgment_if_current(record)
+        if outcome == "saved":
+            if record.status is JudgmentStatus.COMPLETED:
+                completed += 1
+            else:
+                errors += 1
+        elif outcome == "stale":
+            stale += 1
+    return {
+        "unit": "agent_turn", "availableTurns": len(rows), "eligible": eligible,
+        "plannedCalls": len(selected), "alreadyJudged": already,
+        "completed": completed, "errors": errors, "stale": stale,
+        "hasMore": next_cursor is not None, "nextCursor": next_cursor,
+        "notEvaluable": sum(reasons.values()), "notEvaluableReasons": dict(sorted(reasons.items())),
+        "evaluatorFingerprint": identity["evaluator_fingerprint"],
+        "evaluatorId": dashboard_identity["id"], "rubric": _rubric_summary(rubric, identity),
     }
 
 

@@ -8,6 +8,7 @@ import httpx
 import verdict
 import verdict.dashboard.analysis_service as analysis_service
 from fastapi import FastAPI, Request
+from verdict.agent_judgment import AgentTurnJudgment, turn_evidence_fingerprint
 from verdict.analysis_records import AnalysisRunStatus, DeterministicAnalysisRun
 from verdict.capture import AgentCaptureService
 from verdict.dashboard import agent_evidence_queries
@@ -63,6 +64,37 @@ def _bundle(
         turns,
         events,
     )
+
+
+def test_run_detail_shows_current_native_turn_scores_without_cross_tenant_leak(tmp_path):
+    path = tmp_path / "turn-scores.db"
+    storage = SQLiteStorage(str(path))
+    now = datetime(2026, 8, 31, tzinfo=timezone.utc)
+    local = _bundle("local", now, with_turn=True)
+    other = _bundle("other", now, with_turn=True)
+    storage.replace_agent_run_bundle(local)
+    storage.replace_agent_run_bundle(other)
+    result = AgentTurnJudgment(
+        tenant_id="local", run_id="r-local", turn_id="turn",
+        evaluator_fingerprint="a" * 64,
+        evidence_fingerprint=turn_evidence_fingerprint(local.turns[0]),
+        evaluator_provider="anthropic", evaluator_config={}, judge_models=["test"],
+        expected_dimensions=["relevance"], rubric_name="test", rubric_version="1",
+    )
+    assert storage.save_agent_turn_judgment_if_current(result) == "saved"
+    storage.close()
+    visible = build_agent_run_detail(path, tenant="local", run_id="r-local")
+    hidden = build_agent_run_detail(path, tenant="other", run_id="r-other")
+    assert visible["turns"][0]["evaluation"]["status"] == "completed"
+    assert hidden["turns"][0]["evaluation"] is None
+    assert "request" not in json.dumps(visible["turns"][0]["evaluation"])
+    storage = SQLiteStorage(str(path))
+    storage.replace_agent_run_bundle(replace(local, turns=(replace(
+        local.turns[0], final_response_redacted="response extended",
+    ),)))
+    storage.close()
+    stale = build_agent_run_detail(path, tenant="local", run_id="r-local")
+    assert stale["turns"][0]["evaluation"] is None
 
 
 def test_agent_runs_api_exposes_typed_analysis_without_raw_envelopes(tmp_path):

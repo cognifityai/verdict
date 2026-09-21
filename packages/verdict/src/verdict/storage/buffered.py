@@ -363,6 +363,15 @@ class BufferedStorage:
     def replace_agent_run_bundle(self, bundle: AgentRunBundle) -> None:
         self.replace_agent_capture(bundle)
 
+    def save_agent_turn_judgment_if_current(self, judgment):
+        return self._maintenance(self._inner.save_agent_turn_judgment_if_current, judgment)
+
+    def list_agent_turn_evaluation_candidates(
+        self, tenant_id, evaluator_fingerprint, *, limit=1000, before=None,
+    ):
+        return self._read(self._inner.list_agent_turn_evaluation_candidates,
+                          tenant_id, evaluator_fingerprint, limit=limit, before=before)
+
     def replace_agent_capture(
         self,
         bundle: AgentRunBundle,

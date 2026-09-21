@@ -6,6 +6,15 @@ the product is refined.
 
 ## [Unreleased]
 
+### Added
+
+- Evaluator Lab can judge a completed Agent Turn's present, untruncated
+  redacted request and final output as a native unit. Preview is a bounded
+  tenant-scoped keyset page with explicit egress approval. SQLite and Postgres
+  store a bounded, evidence-fingerprinted result per Turn/evaluator; stale
+  results are excluded from Agent Runs detail and do not become Trace judgments.
+  Trace evaluation and Monitor remain unchanged.
+
 ### Fixed
 
 - Reachable SQLite and PostgreSQL stores with no Agent Runs or Traces visible

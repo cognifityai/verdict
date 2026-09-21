@@ -95,6 +95,56 @@ test("Evaluator Lab starts with a neutral response-quality rubric name", async (
   assert.equal(openAIOption.props.value, "openai");
 });
 
+test("Evaluator Lab previews a native Turn page and sends its approved identities", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const props = { configUrl: "/api/config" };
+  render(ui.EvaluatorLab, hooks, props);
+  hooks.flushEffects();
+  await resolveJson(requests[0], { setupToken: "setup-token" });
+  await resolveJson(requests[1], {
+    evalPackageAvailable: true,
+    providers: [{ provider: "anthropic", configured: true }],
+  });
+  let tree = render(ui.EvaluatorLab, hooks, props);
+  const unit = findAll(tree, (node) => node.type === "select" &&
+    findAll(node, (child) => child.type === "option" && child.props.value === "agent_turn").length)[0];
+  unit.props.onChange({ target: { value: "agent_turn" } });
+  tree = render(ui.EvaluatorLab, hooks, props);
+  const preview = findAll(tree, (node) => node.type === "button" &&
+    textOf(node).includes("Preview eligibility"))[0].props.onClick();
+  const sent = JSON.parse(requests[2].options.body);
+  assert.equal(sent.unit, "agent_turn");
+  assert.equal(sent.scanLimit, 1000);
+  await resolveJson(requests[2], {
+    unit: "agent_turn", availableTurns: 1, eligible: 1, alreadyJudged: 0,
+    notEvaluable: 0, plannedCalls: 1, estimatedMaximumCostUsd: 0.01,
+    maximumOutputTokens: 512, notEvaluableReasons: {},
+    rubric: { dimensions: ["relevance"], skippedDimensions: [] },
+    planFingerprint: "turn-plan", plannedTurns: [{ runId: "run", turnId: "turn", evidenceFingerprint: "a".repeat(64) }],
+    hasMore: false,
+  });
+  await preview;
+  tree = render(ui.EvaluatorLab, hooks, props);
+  assert.match(textOf(tree), /1\s+tenant-visible candidates/);
+  const consent = findAll(tree, (node) => node.type === "input" && node.props.type === "checkbox")[0];
+  consent.props.onChange({ target: { checked: true } });
+  tree = render(ui.EvaluatorLab, hooks, props);
+  const run = findAll(tree, (node) => node.type === "button" &&
+    textOf(node).includes("Run 1 judge calls"))[0].props.onClick();
+  const approved = JSON.parse(requests[3].options.body);
+  assert.deepEqual(approved.plannedTurns, [{ runId: "run", turnId: "turn", evidenceFingerprint: "a".repeat(64) }]);
+  assert.equal(approved.plannedTraces, undefined);
+  await resolveJson(requests[3], { unit: "agent_turn", availableTurns: 1,
+    eligible: 1, completed: 1, alreadyJudged: 0, errors: 0, stale: 0,
+    notEvaluable: 0, notEvaluableReasons: {}, evaluatorFingerprint: "a".repeat(64) });
+  await run;
+  tree = render(ui.EvaluatorLab, hooks, props);
+  assert.match(textOf(tree), /Current Turn scores appear on the Agent Runs detail page/);
+  assert.doesNotMatch(textOf(tree), /View evaluated traces/);
+});
+
 test("Evaluator Lab makes a long judge run visible and prevents duplicate submission", async () => {
   const ui = await loadUiModule();
   const hooks = createEffectHooks();
@@ -1731,7 +1781,7 @@ test("judge scores directs an empty store to Evaluator Lab without legacy window
 
   const rendered = textOf(render(ui.Judge, createHooks(), { data })).replace(/\s+/g, " ");
 
-  assert.match(rendered, /No evaluator results have been stored yet/);
+  assert.match(rendered, /No Trace evaluator results have been stored yet/);
   assert.match(rendered, /Evaluator Lab stores results for an eligible trace set/);
   assert.doesNotMatch(rendered, /global content-bearing traces/);
 });
@@ -1751,6 +1801,6 @@ test("unresolved legacy evaluator selection is confined to legacy history", asyn
 
   assert.equal(signalMetric, undefined);
   assert.doesNotMatch(overview, /Evaluation drift signals/);
-  assert.match(judge, /Select an evaluator to view judge results/);
-  assert.doesNotMatch(judge, /No evaluator results have been stored yet/);
+  assert.match(judge, /Select a Trace evaluator to view judge results/);
+  assert.doesNotMatch(judge, /No Trace evaluator results have been stored yet/);
 });

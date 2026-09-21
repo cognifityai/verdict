@@ -430,6 +430,17 @@ content transfer: only allowlisted fields are copied and the storage boundary
 applies Verdict's best-effort redaction, but operators must still treat the
 Verdict database as sensitive.
 
+Evaluator Lab also has a separate opt-in Agent Turn unit for completed,
+untruncated Turns with a present redacted request and final response. It judges
+the Turn's final output without making a provider Trace or a Trace Judgment.
+Preview examines at most 1,000 tenant-visible candidate Turns (including
+ineligible ones) per keyset page and requires explicit approval of the planned
+calls and external egress. SQLite/Postgres keep one bounded result slot per
+Turn and evaluator; a changed Turn makes the old score stale until reevaluated.
+Agent Runs detail shows only current Turn results. Trace coverage, pipelines,
+and Monitor remain Trace-based; Turn judging does not provide tool/citation
+provenance, claim verification, or independent-session statistics.
+
 Files are bounded to 64 MiB for JSON and 16 MiB per NDJSON row; hosted API
 responses are bounded to 64 MiB; the OTLP listener defaults to a 16 MiB request
 cap. Content is bounded to 1,000 messages and 100,000 UTF-8 characters per
