@@ -157,6 +157,7 @@ def test_postgres_malformed_current_slot_is_not_judged_and_can_be_replaced():
             evaluator_provider="anthropic", evaluator_config={}, judge_models=["test"],
             expected_dimensions=["quality"], rubric_name="test", rubric_version="1",
             dimensions=[DimensionScore("quality", Verdict.PASS, "ok", "test")],
+            evaluated_at=datetime(2026, 8, 31, 10, tzinfo=timezone(timedelta(hours=2))),
         )
         assert storage.save_agent_turn_judgment_if_current(result) == "saved"
         with storage._pool.connection() as conn:
@@ -170,8 +171,11 @@ def test_postgres_malformed_current_slot_is_not_judged_and_can_be_replaced():
         rows, _ = storage.list_agent_turn_evaluation_candidates(tenant, "a" * 64)
         assert rows[0][1] is JudgmentStatus.COMPLETED
         newer = replace(result, evaluator_fingerprint="b" * 64,
-                        evaluated_at=result.evaluated_at + timedelta(seconds=1))
+                        evaluated_at=datetime(2026, 8, 31, 9, tzinfo=timezone.utc))
         assert storage.save_agent_turn_judgment_if_current(newer) == "saved"
+        latest = build_agent_run_detail(os.environ["VERDICT_TEST_POSTGRES_DSN"],
+                                        tenant=tenant, run_id="run")
+        assert latest["turns"][0]["evaluation"]["evaluatorFingerprint"] == "b" * 64
         with storage._pool.connection() as conn:
             conn.execute("UPDATE agent_turn_judgments SET result_json='[]' "
                          "WHERE tenant_id=%s AND evaluator_fingerprint=%s", (tenant, "b" * 64))

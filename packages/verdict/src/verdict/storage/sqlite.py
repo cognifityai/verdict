@@ -1448,7 +1448,7 @@ class SQLiteStorage:
                         "evaluated_at=excluded.evaluated_at,result_json=excluded.result_json",
                         (judgment.tenant_id, judgment.run_id, judgment.turn_id,
                          judgment.evaluator_fingerprint, judgment.evidence_fingerprint,
-                         judgment.status.value, judgment.evaluated_at.isoformat(), payload),
+                         judgment.status.value, _iso(judgment.evaluated_at), payload),
                     )
                 self._conn.commit()
                 return decision

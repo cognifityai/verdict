@@ -298,7 +298,7 @@ provider tool-call Trace as an answer or change Trace judgment coverage.
 Turn previews are tenant-scoped 100-candidate keyset pages with explicit
 egress approval. A bounded Turn/evaluator result slot is current only for the
 exact redacted evidence fingerprint; later Turn extensions require reevaluation.
-Agent Runs detail displays the latest valid current score among eight newest
+Agent Runs detail displays the latest valid current result among eight newest
 evaluator slots per Turn, or one selected exact evaluator. Older results may
 exist outside this bounded view. Tool/citation context and Monitor
 analysis units remain separate future work.

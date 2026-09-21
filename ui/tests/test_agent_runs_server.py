@@ -233,6 +233,43 @@ def test_latest_turn_result_checks_only_bounded_newest_evaluator_slots(tmp_path)
     assert exact["turns"][0]["evaluation"]["evaluatorFingerprint"] == f"{1:064x}"
 
 
+def test_turn_result_latest_order_normalizes_timezone_offsets_in_sqlite(tmp_path):
+    path = tmp_path / "offset-order.db"
+    storage = SQLiteStorage(str(path))
+    now = datetime(2026, 8, 31, tzinfo=timezone.utc)
+    bundle = _bundle("local", now, with_turn=True)
+    storage.replace_agent_run_bundle(bundle)
+    for fingerprint, when in (
+        ("a" * 64, datetime(2026, 8, 31, 10, tzinfo=timezone(timedelta(hours=2)))),
+        ("b" * 64, datetime(2026, 8, 31, 9, tzinfo=timezone.utc)),
+    ):
+        assert storage.save_agent_turn_judgment_if_current(AgentTurnJudgment(
+            tenant_id="local", run_id="r-local", turn_id="turn",
+            evaluator_fingerprint=fingerprint,
+            evidence_fingerprint=turn_evidence_fingerprint(bundle.turns[0]),
+            evaluator_provider="anthropic", evaluator_config={}, judge_models=["test"],
+            expected_dimensions=["relevance"], rubric_name="test", rubric_version="1",
+            dimensions=[DimensionScore("relevance", Verdict.PASS, "ok", "test")],
+            evaluated_at=when,
+        )) == "saved"
+    stored = storage._conn.execute(
+        "SELECT evaluated_at FROM agent_turn_judgments ORDER BY evaluated_at DESC"
+    ).fetchall()
+    assert stored[0][0] == "2026-08-31T09:00:00+00:00"
+    storage.close()
+    detail = build_agent_run_detail(path, tenant="local", run_id="r-local")
+    assert detail["turns"][0]["evaluation"]["evaluatorFingerprint"] == "b" * 64
+
+    async def read_api():
+        transport = httpx.ASGITransport(app=create_app(storage=f"sqlite:///{path}", tenant_id="local"))
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            return await client.get("/api/runs/r-local")
+
+    response = asyncio.run(read_api())
+    assert response.status_code == 200
+    assert response.json()["turns"][0]["evaluation"]["evaluatorFingerprint"] == "b" * 64
+
+
 def test_agent_runs_api_exposes_typed_analysis_without_raw_envelopes(tmp_path):
     path = tmp_path / "runs.db"
     storage = SQLiteStorage(str(path))
