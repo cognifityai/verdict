@@ -99,6 +99,12 @@ class AgentTurnJudgment:
             for dimension in self.dimensions
         ):
             raise ValueError("invalid scored dimensions")
+        if self.status is JudgmentStatus.COMPLETED and (
+            not self.expected_dimensions
+            or len(self.dimensions) != len(self.expected_dimensions)
+            or {dimension.name for dimension in self.dimensions} != set(self.expected_dimensions)
+        ):
+            raise ValueError("completed Turn judgment needs one score per expected dimension")
         if not isinstance(self.rubric_name, str) or not _DIMENSION_NAME.fullmatch(self.rubric_name):
             raise ValueError("invalid rubric name")
         if not isinstance(self.rubric_version, str) or len(self.rubric_version.encode("utf-8")) > 64:

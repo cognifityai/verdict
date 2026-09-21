@@ -219,7 +219,9 @@ def test_turn_save_cas_late_error_and_concurrent_evidence_change(tmp_path, backe
             "rubric_name": "test", "rubric_version": "1",
         }
         error = AgentTurnJudgment(**identity, status="error", error="temporary")
-        success = AgentTurnJudgment(**identity)
+        success = AgentTurnJudgment(**identity, dimensions=[
+            DimensionScore("relevance", Verdict.PASS, "ok", "test"),
+        ])
         assert storage.save_agent_turn_judgment_if_current(error) == "saved"
         assert storage.save_agent_turn_judgment_if_current(success) == "saved"
         assert storage.save_agent_turn_judgment_if_current(error) == "already_completed"
@@ -401,6 +403,7 @@ def test_memory_close_clears_agent_evidence_and_native_results():
         evidence_fingerprint=turn_evidence_fingerprint(bundle.turns[0]),
         evaluator_provider="anthropic", evaluator_config={}, judge_models=["test"],
         expected_dimensions=[], rubric_name="test", rubric_version="1",
+        status=JudgmentStatus.ERROR, error="test failure",
     ))
     storage.close()
     assert storage.list_agent_turn_evaluation_candidates("local", "a" * 64)[0] == []
@@ -499,7 +502,9 @@ def test_low_level_turn_result_rejects_sensitive_dimension_names_and_redacts_ide
             AgentTurnJudgment(**values, dimensions=[
                 DimensionScore("alice@example.com", Verdict.PASS, "ok", "test"),
             ])
-        assert storage.save_agent_turn_judgment_if_current(AgentTurnJudgment(**values)) == "saved"
+        assert storage.save_agent_turn_judgment_if_current(AgentTurnJudgment(
+            **values, dimensions=[DimensionScore("quality", Verdict.PASS, "ok", "test")],
+        )) == "saved"
         raw = storage._conn.execute("SELECT result_json FROM agent_turn_judgments").fetchone()[0]
         assert "alice@example.com" not in raw
         assert "<EMAIL>" in raw
@@ -508,7 +513,9 @@ def test_low_level_turn_result_rejects_sensitive_dimension_names_and_redacts_ide
 
 
 @pytest.mark.parametrize("backend", ["memory", "sqlite"])
-@pytest.mark.parametrize("corruption", ["not_object", "invalid_model_list"])
+@pytest.mark.parametrize("corruption", [
+    "not_object", "invalid_model_list", "missing_score", "duplicate_score",
+])
 def test_corrupt_current_slot_is_retryable_and_repaired_after_explicit_approval(
     tmp_path, backend, corruption,
 ):
@@ -524,10 +531,17 @@ def test_corrupt_current_slot_is_retryable_and_repaired_after_explicit_approval(
                                    confirm_external_egress=True)
         fingerprint = first["evaluatorFingerprint"]
         raw = _stored_turn_result(storage, fingerprint)
-        corrupt = "[]" if corruption == "not_object" else json.dumps({
-            **json.loads(agent_turn_judgment_to_json(raw)),
-            "judge_models": "not a list",
-        })
+        payload = json.loads(agent_turn_judgment_to_json(raw))
+        if corruption == "not_object":
+            corrupt = "[]"
+        else:
+            if corruption == "invalid_model_list":
+                payload["judge_models"] = "not a list"
+            elif corruption == "missing_score":
+                payload["dimensions"] = payload["dimensions"][:1]
+            else:
+                payload["dimensions"].append(payload["dimensions"][0])
+            corrupt = json.dumps(payload)
         if isinstance(storage, SQLiteStorage):
             storage._conn.execute("UPDATE agent_turn_judgments SET result_json=?", (corrupt,))
         else:
@@ -544,6 +558,22 @@ def test_corrupt_current_slot_is_retryable_and_repaired_after_explicit_approval(
         assert preview_evaluation(storage, tenant_id="local", config=config)["alreadyJudged"] == 1
     finally:
         storage.close()
+
+
+def test_completed_turn_result_requires_one_score_per_expected_dimension():
+    values = dict(
+        tenant_id="local", run_id="run-1", turn_id="turn-1",
+        evaluator_fingerprint="a" * 64, evidence_fingerprint="b" * 64,
+        evaluator_provider="anthropic", evaluator_config={}, judge_models=["test"],
+        expected_dimensions=["quality"], rubric_name="test", rubric_version="1",
+    )
+    for dimensions in ([], [
+        DimensionScore("quality", Verdict.PASS),
+        DimensionScore("quality", Verdict.PASS),
+    ]):
+        with pytest.raises(ValueError, match="one score per expected dimension"):
+            AgentTurnJudgment(**values, dimensions=dimensions)
+    assert AgentTurnJudgment(**values, status=JudgmentStatus.ERROR).dimensions == []
 
 
 def _config():

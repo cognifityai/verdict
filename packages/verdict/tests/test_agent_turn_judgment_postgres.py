@@ -18,7 +18,7 @@ from verdict.evidence import (
     ExecutionStatus,
     SourceSession,
 )
-from verdict.schema import JudgmentStatus
+from verdict.schema import DimensionScore, JudgmentStatus, Verdict
 from verdict.storage.postgres import PostgresStorage
 
 
@@ -49,7 +49,9 @@ def test_postgres_turn_judgment_cas_with_two_connections_and_extension():
             judge_models=["test"], expected_dimensions=["quality"],
             rubric_name="test", rubric_version="1",
         )
-        old = AgentTurnJudgment(**identity)
+        old = AgentTurnJudgment(**identity, dimensions=[
+            DimensionScore("quality", Verdict.PASS, "ok", "test"),
+        ])
         with ThreadPoolExecutor(max_workers=2) as pool:
             results = list(pool.map(lambda store: store.save_agent_turn_judgment_if_current(old),
                                     (writer, second)))
@@ -95,6 +97,7 @@ def test_postgres_turn_save_and_capture_interleave_under_row_lock(monkeypatch, f
             evidence_fingerprint=turn_evidence_fingerprint(bundle.turns[0]),
             evaluator_provider="anthropic", evaluator_config={}, judge_models=["test"],
             expected_dimensions=["quality"], rubric_name="test", rubric_version="1",
+            dimensions=[DimensionScore("quality", Verdict.PASS, "ok", "test")],
         )
         if first == "capture":
             original_write = second._write_normalized_bundle_cursor
@@ -152,6 +155,7 @@ def test_postgres_malformed_current_slot_is_not_judged_and_can_be_replaced():
             evidence_fingerprint=turn_evidence_fingerprint(bundle.turns[0]),
             evaluator_provider="anthropic", evaluator_config={}, judge_models=["test"],
             expected_dimensions=["quality"], rubric_name="test", rubric_version="1",
+            dimensions=[DimensionScore("quality", Verdict.PASS, "ok", "test")],
         )
         assert storage.save_agent_turn_judgment_if_current(result) == "saved"
         with storage._pool.connection() as conn:

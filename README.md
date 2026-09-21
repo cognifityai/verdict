@@ -439,7 +439,9 @@ calls and external egress. SQLite/Postgres keep one bounded result slot per
 Turn and evaluator; a changed Turn makes the old score stale until reevaluated.
 Agent Runs detail shows only current Turn results. Trace coverage, pipelines,
 and Monitor remain Trace-based; Turn judging does not provide tool/citation
-provenance, claim verification, or independent-session statistics.
+provenance, claim verification, or independent-session statistics. A completed
+Turn result contains one score per evaluable rubric dimension; malformed or
+partial stored results are not counted as judged and require a new approved run.
 
 Files are bounded to 64 MiB for JSON and 16 MiB per NDJSON row; hosted API
 responses are bounded to 64 MiB; the OTLP listener defaults to a 16 MiB request

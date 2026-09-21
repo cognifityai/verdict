@@ -34,7 +34,7 @@ from verdict.evidence import (
     PrivacyClassification,
     SourceSession,
 )
-from verdict.schema import Operation, Trace
+from verdict.schema import DimensionScore, Operation, Trace, Verdict
 from verdict.storage import SQLiteStorage
 
 
@@ -84,6 +84,7 @@ def test_run_detail_shows_current_native_turn_scores_without_cross_tenant_leak(t
         evidence_fingerprint=turn_evidence_fingerprint(local.turns[0]),
         evaluator_provider="anthropic", evaluator_config={}, judge_models=["test"],
         expected_dimensions=["relevance"], rubric_name="test", rubric_version="1",
+        dimensions=[DimensionScore("relevance", Verdict.PASS, "ok", "test")],
     )
     assert storage.save_agent_turn_judgment_if_current(result) == "saved"
     storage.close()
@@ -116,6 +117,7 @@ def test_run_detail_labels_latest_turn_evaluator_and_filters_exact_identity(tmp_
             evaluator_provider="anthropic", evaluator_config={}, judge_models=["test"],
             expected_dimensions=["relevance"], rubric_name="quality",
             rubric_version=version, evaluated_at=when,
+            dimensions=[DimensionScore("relevance", Verdict.PASS, "ok", "test")],
         )) == "saved"
     storage.close()
     latest = build_agent_run_detail(path, tenant="local", run_id="r-local")
@@ -158,18 +160,26 @@ def test_malformed_stored_turn_result_does_not_break_run_detail(tmp_path):
         evaluator_fingerprint="a" * 64,
         evidence_fingerprint=turn_evidence_fingerprint(bundle.turns[0]),
         evaluator_provider="anthropic", evaluator_config={}, judge_models=["test"],
-        expected_dimensions=[], rubric_name="test", rubric_version="1",
+        expected_dimensions=["relevance"], rubric_name="test", rubric_version="1",
+        dimensions=[DimensionScore("relevance", Verdict.PASS, "ok", "test")],
     )
     storage.save_agent_turn_judgment_if_current(result)
     storage._conn.execute("UPDATE agent_turn_judgments SET result_json='[]'")
     detail = build_agent_run_detail(path, tenant="local", run_id="r-local")
     assert detail["turns"][0]["evaluation"] is None
-    payload = json.loads(agent_turn_judgment_to_json(result))
-    payload["judge_models"] = "not a list"
-    storage._conn.execute("UPDATE agent_turn_judgments SET result_json=?", (json.dumps(payload),))
+    original = json.loads(agent_turn_judgment_to_json(result))
+    for change in ("invalid_model_list", "missing_score", "duplicate_score"):
+        payload = json.loads(json.dumps(original))
+        if change == "invalid_model_list":
+            payload["judge_models"] = "not a list"
+        elif change == "missing_score":
+            payload["dimensions"] = []
+        else:
+            payload["dimensions"].append(payload["dimensions"][0])
+        storage._conn.execute("UPDATE agent_turn_judgments SET result_json=?", (json.dumps(payload),))
+        detail = build_agent_run_detail(path, tenant="local", run_id="r-local")
+        assert detail["turns"][0]["evaluation"] is None
     storage.close()
-    detail = build_agent_run_detail(path, tenant="local", run_id="r-local")
-    assert detail["turns"][0]["evaluation"] is None
 
 
 def test_agent_runs_api_exposes_typed_analysis_without_raw_envelopes(tmp_path):
