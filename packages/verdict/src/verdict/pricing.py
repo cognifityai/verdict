@@ -9,6 +9,8 @@ effort estimate, not a billing source of truth.
 Known exact aliases resolve to an immutable release entry first. Other matching
 is by substring of the model name (longest matching key wins), so a provider-
 prefixed/suffixed model ID still resolves to its dated or versioned entry.
+GPT-4.1 base prices are limited to the published base IDs and snapshots;
+fine-tuned and custom derivatives do not inherit them.
 """
 
 from __future__ import annotations
@@ -85,6 +87,9 @@ PRICE_PER_1K: dict[str, tuple[float, float]] = {
     "gemini-1.5-pro": (0.00125, 0.005),
 }
 
+_GPT41_BASE_MODELS = frozenset({"gpt-4.1", "gpt-4.1-mini", "gpt-4.1-nano"})
+_GPT41_SNAPSHOT_DATE = "2025-04-14"
+
 # These retired/deprecated Claude API aliases previously resolved to the dated
 # releases above. Keep alias recognition exact so a future "claude-opus-4-x"
 # identifier cannot inherit a stale rate.
@@ -129,10 +134,15 @@ def compute_cost_usd(
         # a hyphen. Normalize only that separator, then match immutable releases.
         lookup_model = normalized_model.replace("@", "-")
         model_leaf = normalized_model.rsplit("/", 1)[-1]
+        gpt41_leaf = model_leaf.removeprefix("openai:")
         best_key = EXACT_MODEL_ALIASES.get(model_leaf)
         if best_key is None:
             # Longest substring match wins for dated/versioned entries.
             for key in PRICE_PER_1K:
+                if key in _GPT41_BASE_MODELS and gpt41_leaf not in {
+                    key, f"{key}-{_GPT41_SNAPSHOT_DATE}"
+                }:
+                    continue
                 if key in lookup_model and (
                     best_key is None or len(key) > len(best_key)
                 ):

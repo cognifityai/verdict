@@ -736,11 +736,19 @@ async def test_real_async_openai_chat_stream_with_sdk_omit_values_persists_one_r
         storage.close()
 
 
-def test_real_openai_dated_gpt_41_mini_response_persists_known_cost(tmp_path):
+@pytest.mark.parametrize(
+    ("model", "expected_cost"),
+    [
+        ("gpt-4.1-mini-2025-04-14", 0.0000024),
+        ("ft:gpt-4.1-mini-2025-04-14:org:custom:abc123", None),
+        ("custom/gpt-4.1-mini-replica", None),
+    ],
+)
+def test_real_openai_gpt_41_response_persists_only_known_cost(
+    tmp_path, model, expected_cost,
+):
     openai = pytest.importorskip("openai")
     from verdict.instrumentors.openai import OpenAIInstrumentor
-
-    model = "gpt-4.1-mini-2025-04-14"
 
     def dated_response(request: httpx.Request) -> httpx.Response:
         response = _provider_response(request)
@@ -770,7 +778,10 @@ def test_real_openai_dated_gpt_41_mini_response_persists_known_cost(tmp_path):
         assert trace.response_model == model
         assert trace.input_tokens == 2
         assert trace.output_tokens == 1
-        assert math.isclose(trace.cost_usd or 0.0, 0.0000024, rel_tol=1e-9)
+        if expected_cost is None:
+            assert trace.cost_usd is None
+        else:
+            assert math.isclose(trace.cost_usd or 0.0, expected_cost, rel_tol=1e-9)
     finally:
         instrumentor.uninstall()
         http_client.close()

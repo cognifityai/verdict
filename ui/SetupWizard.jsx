@@ -70,13 +70,13 @@ export function SetupWizard({ configUrl, onComplete, onNavigate, onRefresh, agen
       <div className="max-w-4xl space-y-4">
         <section className={panel} style={style}>
           <div className="text-xs font-mono" style={{ color: "#4ee1aa" }}>{storePresentation.connectedEmpty ? "CONNECTED VERDICT STORE" : "OBSERVED DATA SOURCES"}</div>
-          <h2 className="text-lg font-semibold mt-1">{storePresentation.connectedEmpty ? `Empty ${storePresentation.backendLabel} store` : sourcePresentation.heading}</h2>
+          <h2 className="text-lg font-semibold mt-1">{storePresentation.connectedEmpty ? `Connected ${storePresentation.backendLabel} store` : sourcePresentation.heading}</h2>
           <div className="grid sm:grid-cols-3 gap-2 mt-4">
             <div className="border p-3" style={{ borderColor: "#26332e" }}><div className="text-xs" style={{ color: "#94a39d" }}>Agent Runs</div><div className="text-xl mt-1">{agentSummary.totalAgentRuns || 0}</div></div>
             <div className="border p-3" style={{ borderColor: "#26332e" }}><div className="text-xs" style={{ color: "#94a39d" }}>LLM Traces</div><div className="text-xl mt-1">{agentSummary.totalTraces || 0}</div></div>
             <div className="border p-3" style={{ borderColor: "#26332e" }}><div className="text-xs" style={{ color: "#94a39d" }}>{storePresentation.connectedEmpty ? "Storage backend" : sourcePresentation.sourceLabel}</div><div className="text-sm mt-1">{storePresentation.connectedEmpty ? storePresentation.backendLabel : (sourceText || (hasAgentRuns ? "source details unavailable" : "trace records"))}{agentSummary.agentRunSourcesTruncated ? " · additional sources omitted" : ""}</div></div>
           </div>
-          {storePresentation.connectedEmpty && <p className="text-sm mt-4" style={{ color: "#94a39d" }}>Verdict is connected and waiting for live SDK traffic or an approved import. No Agent Runs or LLM Traces are stored yet.</p>}
+          {storePresentation.connectedEmpty && <p className="text-sm mt-4" style={{ color: "#94a39d" }}>Verdict is connected and waiting for live SDK traffic or an approved import. No Agent Runs or LLM Traces are visible for this tenant yet.</p>}
           {hasAgentRuns && <p className="text-sm mt-4" style={{ color: "#94a39d" }}>
             Newest observed run started: <span className="font-mono">{agentSummary.lastAgentCaptureAt || "unavailable"}</span>.
             {sourcePresentation.hasLocalAgents && <> Claude Code and Codex history can be manually rescanned or collected by a saved <code>verdict-service</code> schedule.</>}

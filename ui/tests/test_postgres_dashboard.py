@@ -51,7 +51,10 @@ POSTGRES_SKIP_REASON = "no explicitly disposable live PostgreSQL database"
 pytestmark = pytest.mark.skipif(DSN is None, reason=POSTGRES_SKIP_REASON)
 
 
-def test_live_postgres_empty_store_reports_only_the_connected_backend() -> None:
+@pytest.mark.parametrize("foreign_trace", [False, True])
+def test_live_postgres_empty_tenant_view_reports_only_backend(
+    foreign_trace: bool,
+) -> None:
     import asyncio
 
     import psycopg
@@ -63,10 +66,20 @@ def test_live_postgres_empty_store_reports_only_the_connected_backend() -> None:
         admin.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
     try:
         scoped_dsn = make_conninfo(DSN, options=f"-csearch_path={schema}")
-        PostgresStorage(scoped_dsn, min_pool=1, max_pool=1).close()
+        storage = PostgresStorage(scoped_dsn, min_pool=1, max_pool=1)
+        if foreign_trace:
+            storage.insert_trace(Trace(
+                trace_id="foreign-tenant-canary",
+                tenant_id="tenant-b",
+                provider="openai",
+                request_model="gpt-4.1-mini",
+            ))
+        storage.close()
 
         async def request_data():
-            transport = httpx.ASGITransport(app=create_app(storage=scoped_dsn))
+            transport = httpx.ASGITransport(
+                app=create_app(storage=scoped_dsn, tenant_id="tenant-a"),
+            )
             async with httpx.AsyncClient(
                 transport=transport,
                 base_url="http://testserver",
@@ -80,6 +93,7 @@ def test_live_postgres_empty_store_reports_only_the_connected_backend() -> None:
         assert response.json()["meta"]["totalAgentRuns"] == 0
         assert response.json()["meta"]["totalTraces"] == 0
         assert "storageConfigured" not in response.json()["meta"]
+        assert "foreign-tenant-canary" not in response.text
         assert scoped_dsn not in response.text
     finally:
         with psycopg.connect(DSN, autocommit=True) as admin:

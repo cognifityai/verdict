@@ -136,6 +136,37 @@ def test_dashboard_marks_reachable_empty_store_without_leaking_location(
     assert str(path) not in environment.text
 
 
+def test_dashboard_zero_counts_are_scoped_to_selected_tenant(tmp_path):
+    import httpx
+
+    path = tmp_path / "shared-tenant.db"
+    storage = SQLiteStorage(str(path))
+    storage.insert_trace(Trace(
+        trace_id="foreign-trace-canary",
+        tenant_id="tenant-b",
+        provider="openai",
+        request_model="gpt-4.1-mini",
+    ))
+    storage.close()
+
+    async def request_data():
+        transport = httpx.ASGITransport(
+            app=create_app(storage=f"sqlite:///{path}", tenant_id="tenant-a"),
+        )
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            return await client.get("/api/data")
+
+    response = asyncio.run(request_data())
+    assert response.status_code == 200
+    assert response.json()["meta"]["storageBackend"] == "sqlite"
+    assert response.json()["meta"]["totalAgentRuns"] == 0
+    assert response.json()["meta"]["totalTraces"] == 0
+    assert "foreign-trace-canary" not in response.text
+
+
 def test_bundle_marks_unknown_cost_and_exposes_signal_examples(tmp_path):
     path = tmp_path / "verdict.db"
     storage = SQLiteStorage(str(path))

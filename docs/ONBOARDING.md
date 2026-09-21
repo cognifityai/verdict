@@ -538,10 +538,10 @@ Start the findings-first dashboard against the same store:
 verdict --storage sqlite:///./verdict.db
 ```
 
-If the selected SQLite or PostgreSQL store is reachable but still empty, the
-dashboard identifies it as connected and waiting for live SDK traffic or an
-approved import. Browser responses include only the backend class, never the
-configured path or DSN.
+If the selected SQLite or PostgreSQL store is reachable but has no Agent Runs or
+LLM Traces visible for the selected tenant, the dashboard identifies it as
+connected and waiting for live SDK traffic or an approved import. Browser
+responses include only the backend class, never the configured path or DSN.
 
 Reliability, Performance, Behavior, persisted evidence coverage, Agent Runs,
 and the ordered event explorer are key-free. The first deterministic analysis
