@@ -8,6 +8,10 @@ the product is refined.
 
 ### Fixed
 
+- Codex local-history capture now reads text blocks from completed `UserMessage`
+  items as Agent Turn requests, alongside the earlier `user_message` records.
+  A rescan can fill requests previously marked missing; non-text-only requests
+  remain missing rather than being invented.
 - Reachable SQLite and PostgreSQL stores with no Agent Runs or Traces visible
   for the selected tenant now appear as connected and waiting for traffic
   instead of an unavailable dashboard. The API exposes only the backend class,

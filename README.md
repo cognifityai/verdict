@@ -75,6 +75,9 @@ retains those source paths in the local control store so `verdict-service` can
 rescan them; that durable schedule is configuration, not captured evidence.
 When the source records child execution identity, local capture retains it as a
 separate child run instead of folding its turns into the parent.
+For Codex histories, text in completed `UserMessage` items is captured as the
+Turn request alongside the older `user_message` format. A rescan can fill
+previously missing text; non-text-only requests remain unavailable.
 
 The findings-first dashboard has six top-level workspaces: **Overview**,
 **Explore**, **Evaluate**, **Monitor**, **Report**, and **Settings**. Overview

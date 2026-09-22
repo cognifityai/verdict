@@ -70,6 +70,12 @@ the capture. Bounded redacted content retention is on by default; clear it only
 for an intentional metadata-only run. The server rejects capture when those
 exact paths were not previewed in the current process. Source files are
 read-only and repeated rescans are idempotent.
+Codex Turn requests are taken from text in either legacy `user_message`
+records or completed `UserMessage` items. Non-text-only messages remain
+missing evidence; Verdict does not turn image or attachment metadata into
+request text. Rescanning with content capture enabled can fill a request that
+an earlier import marked missing.
+
 Claude Code may record one provider response across multiple history rows.
 Verdict coalesces those rows into one model-call Trace and fills later response
 text without changing its evidence identity; a genuine tool-only call remains

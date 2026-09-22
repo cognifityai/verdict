@@ -9,6 +9,7 @@ import pytest
 import verdict.evidence as evidence_contract
 from verdict import AgentEventType, EvidenceState, ExecutionStatus, PrivacyClassification
 from verdict.capture import AgentCaptureService
+from verdict.dashboard.app import build_agent_run_detail
 from verdict.storage import BufferedStorage, InMemoryStorage, SQLiteStorage
 from verdict.telemetry.cli import main
 from verdict.telemetry.local_agents import capture_local_agents
@@ -110,6 +111,19 @@ def _codex_records(secret: str = "private payload") -> list[dict[str, object]]:
             },
         },
     ]
+
+
+def _codex_item_message_records(content: object) -> list[dict[str, object]]:
+    records = _codex_records()
+    records[3] = {
+        "timestamp": "2026-08-30T10:01:02Z",
+        "type": "event_msg",
+        "payload": {
+            "type": "item_completed",
+            "item": {"id": "user-1", "type": "UserMessage", "content": content},
+        },
+    }
+    return records
 
 
 def _claude_records() -> list[dict[str, object]]:
@@ -297,6 +311,138 @@ def test_codex_capture_is_idempotent_and_content_on_by_default(tmp_path: Path) -
     assert all(event.trace_id is None for event in bundle.events)
     assert "<environment_context>" not in repr(bundle)
     assert any(event.privacy_classification is PrivacyClassification.REDACTED for event in bundle.events)
+
+
+def test_current_codex_user_message_reaches_redacted_turn_and_detail(tmp_path: Path) -> None:
+    root = tmp_path / "codex"
+    content = [
+        {"type": "text", "text": (
+            "<environment_context>ignore me</environment_context>\n"
+            "## My request:\nreview alice@example.com"
+        ), "text_elements": []},
+        {"type": "local_image", "path": "/tmp/synthetic-image.png"},
+        {"type": "text", "text": "then summarize", "text_elements": [
+            {"text": "NESTED_CANARY_NOT_CONTENT"}
+        ]},
+    ]
+    records = _codex_item_message_records(content)
+    records.insert(1, {
+        "timestamp": "2026-08-30T10:00:01Z", "type": "event_msg",
+        "payload": {"type": "item_completed", "item": {
+            "type": "UserMessage", "content": [{"type": "text", "text": "outside turn"}]
+        }},
+    })
+    records.insert(5, {
+        "timestamp": "2026-08-30T10:01:02Z", "type": "event_msg",
+        "payload": {"type": "item_completed", "item": {
+            "type": "UserMessage", "content": [{"type": "text", "text": "second request"}]
+        }},
+    })
+    _write_jsonl(root / "session.jsonl", records)
+    path = tmp_path / "verdict.db"
+    storage = SQLiteStorage(str(path))
+
+    summary = capture_local_agents(storage, tenant_id="local", codex_root=root)
+
+    assert summary.stored == 1
+    [bundle] = storage.list_agent_run_bundles("local")
+    [turn] = bundle.turns
+    assert turn.request_state is EvidenceState.PRESENT
+    assert turn.user_request_redacted == "review <EMAIL>\nthen summarize\n\nsecond request"
+    assert turn.final_response_redacted == "fixed"
+    detail = build_agent_run_detail(path, tenant="local", run_id=bundle.run.run_id)
+    assert detail["turns"][0]["requestState"] == "present"
+    assert detail["turns"][0]["request"] == turn.user_request_redacted
+    assert "alice@example.com" not in repr(bundle) + repr(detail)
+    assert "/tmp/synthetic-image.png" not in repr(bundle) + repr(detail)
+    assert "NESTED_CANARY_NOT_CONTENT" not in repr(bundle) + repr(detail)
+    assert storage.list_agent_run_bundles("other") == []
+    storage.close()
+
+
+def test_codex_user_message_rescan_completes_missing_request(tmp_path: Path) -> None:
+    root = tmp_path / "codex"
+    records = _codex_item_message_records([{"type": "text", "text": "current request"}])
+    _write_jsonl(root / "session.jsonl", [row for row in records
+                                        if row.get("payload", {}).get("type") != "item_completed"])
+    storage = SQLiteStorage(str(tmp_path / "verdict.db"))
+    assert capture_local_agents(storage, tenant_id="local", codex_root=root).stored == 1
+    [before] = storage.list_agent_run_bundles("local")[0].turns
+    assert before.request_state is EvidenceState.MISSING
+
+    _write_jsonl(root / "session.jsonl", records)
+    assert capture_local_agents(storage, tenant_id="local", codex_root=root).stored == 1
+    assert capture_local_agents(storage, tenant_id="local", codex_root=root).stored == 1
+    [after] = storage.list_agent_run_bundles("local")[0].turns
+    assert after.turn_id == before.turn_id
+    assert after.request_state is EvidenceState.PRESENT
+    assert after.user_request_redacted == "current request"
+    storage.close()
+
+
+@pytest.mark.parametrize("content", [None, [], {"type": "text", "text": "ignored"},
+                                     [{"type": "local_image", "path": "/tmp/synthetic-image.png"}],
+                                     [{"type": "text", "text": 42}]])
+def test_codex_user_message_without_text_stays_missing(tmp_path: Path, content: object) -> None:
+    root = tmp_path / "codex"
+    _write_jsonl(root / "session.jsonl", _codex_item_message_records(content))
+    storage = SQLiteStorage(str(tmp_path / "verdict.db"))
+    assert capture_local_agents(storage, tenant_id="local", codex_root=root).stored == 1
+    [turn] = storage.list_agent_run_bundles("local")[0].turns
+    assert turn.request_state is EvidenceState.MISSING
+    assert turn.user_request_redacted is None
+    storage.close()
+
+
+@pytest.mark.parametrize("item", [None, "malformed", [],
+                                  {"type": "Other", "content": [{"type": "text", "text": "no"}]}])
+def test_codex_unknown_completed_items_do_not_become_requests(
+    tmp_path: Path, item: object,
+) -> None:
+    root = tmp_path / "codex"
+    records = _codex_item_message_records([{"type": "text", "text": "current request"}])
+    records[3]["payload"]["item"] = item
+    _write_jsonl(root / "session.jsonl", records)
+    storage = SQLiteStorage(str(tmp_path / "verdict.db"))
+    assert capture_local_agents(storage, tenant_id="local", codex_root=root).stored == 1
+    [turn] = storage.list_agent_run_bundles("local")[0].turns
+    assert turn.request_state is EvidenceState.MISSING
+    storage.close()
+
+
+def test_codex_current_message_honors_content_off_and_truncation(tmp_path: Path) -> None:
+    root = tmp_path / "codex"
+    records = _codex_item_message_records([{"type": "text", "text": "é" * 33_000}])
+    _write_jsonl(root / "session.jsonl", records)
+    storage = SQLiteStorage(str(tmp_path / "verdict.db"))
+    assert capture_local_agents(storage, tenant_id="local", codex_root=root,
+                                capture_content=False).stored == 1
+    [off] = storage.list_agent_run_bundles("local")[0].turns
+    assert off.request_state is EvidenceState.NOT_CAPTURED
+    assert off.user_request_redacted is None
+    assert capture_local_agents(storage, tenant_id="local", codex_root=root).stored == 1
+    [on] = storage.list_agent_run_bundles("local")[0].turns
+    assert on.request_state is EvidenceState.PRESENT
+    assert on.request_truncated is True
+    assert len(on.user_request_redacted.encode("utf-8")) <= 65_536
+    storage.close()
+
+
+def test_codex_legacy_and_current_request_records_both_remain_observable(tmp_path: Path) -> None:
+    root = tmp_path / "codex"
+    records = _codex_records(secret="legacy request")
+    records.insert(4, {
+        "timestamp": "2026-08-30T10:01:02Z", "type": "event_msg",
+        "payload": {"type": "item_completed", "item": {
+            "type": "UserMessage", "content": [{"type": "text", "text": "follow-up"}]
+        }},
+    })
+    _write_jsonl(root / "session.jsonl", records)
+    storage = SQLiteStorage(str(tmp_path / "verdict.db"))
+    assert capture_local_agents(storage, tenant_id="local", codex_root=root).stored == 1
+    [turn] = storage.list_agent_run_bundles("local")[0].turns
+    assert turn.user_request_redacted == "fix the test legacy request\n\nfollow-up"
+    storage.close()
 
 
 def test_codex_stale_first_snapshot_is_not_attributed_to_the_next_turn(

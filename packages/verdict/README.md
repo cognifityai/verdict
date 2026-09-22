@@ -38,6 +38,10 @@ Claude totals appear only after terminal, complete response usage. Those source
 activity totals are not a quality ranking: latency, price, judging, and model
 comparisons still use genuine `Trace` records only.
 
+Codex Turn requests include text from completed `UserMessage` items and the
+older `user_message` format. Rescanning can fill previously missing request
+text; non-text-only messages remain missing evidence.
+
 For automation, the equivalent commands are:
 
 ```bash

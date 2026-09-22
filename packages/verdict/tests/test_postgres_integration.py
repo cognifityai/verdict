@@ -614,6 +614,43 @@ def test_live_postgres_dashboard_reads_existing_turn_schema_without_migration():
     }]
 
 
+def test_live_postgres_codex_item_message_rescan_fills_turn_request(tmp_path):
+    root = tmp_path / "codex"
+    root.mkdir()
+    records = [
+        {"timestamp": "2026-08-30T10:00:00Z", "type": "session_meta",
+         "payload": {"id": "session-1", "session_id": "session-1"}},
+        {"timestamp": "2026-08-30T10:01:00Z", "type": "event_msg",
+         "payload": {"type": "task_started", "turn_id": "turn-1"}},
+        {"timestamp": "2026-08-30T10:01:01Z", "type": "event_msg",
+         "payload": {"type": "item_completed", "item": {"type": "UserMessage",
+                     "content": [{"type": "text", "text": "inspect build"}]}}},
+        {"timestamp": "2026-08-30T10:01:02Z", "type": "event_msg",
+         "payload": {"type": "task_complete", "turn_id": "turn-1",
+                     "last_agent_message": "done"}},
+    ]
+    path = root / "session.jsonl"
+    path.write_text("".join(json.dumps(row) + "\n" for row in records[:2] + records[3:]))
+    with isolated_test_dsn(DSN) as scoped_dsn:
+        storage = PostgresStorage(scoped_dsn, min_pool=1, max_pool=1)
+        try:
+            assert capture_local_agents(storage, tenant_id="tenant-a", codex_root=root).stored == 1
+            [before] = storage.list_agent_run_bundles("tenant-a")[0].turns
+            assert before.request_state is verdict.EvidenceState.MISSING
+            path.write_text("".join(json.dumps(row) + "\n" for row in records))
+            assert capture_local_agents(storage, tenant_id="tenant-a", codex_root=root).stored == 1
+            [bundle] = storage.list_agent_run_bundles("tenant-a")
+            [after] = bundle.turns
+            assert after.turn_id == before.turn_id
+            assert after.user_request_redacted == "inspect build"
+            assert after.request_state is verdict.EvidenceState.PRESENT
+            assert storage.list_agent_run_bundles("tenant-b") == []
+            detail = build_agent_run_detail(scoped_dsn, tenant="tenant-a", run_id=bundle.run.run_id)
+            assert detail["turns"][0]["request"] == "inspect build"
+        finally:
+            storage.close()
+
+
 def test_live_postgres_reconciles_legacy_local_agent_text(tmp_path):
     with isolated_test_dsn(DSN) as scoped_dsn:
         tenant = f"local-preview-upgrade-{uuid4().hex}"
