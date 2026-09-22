@@ -85,7 +85,12 @@ def turn_evidence_fingerprint(turn: AgentTurn, tool_counts: TurnToolCounts | Non
         turn.request_truncated, turn.response_truncated,
     ]
     if tool_counts is not None:
-        payload.extend([TOOL_EVIDENCE_MODE, asdict(tool_counts)])
+        # The total event count bounds eligibility; only these four counts
+        # are visible to the judge and therefore bind score currentness.
+        payload.extend([TOOL_EVIDENCE_MODE, [
+            tool_counts.calls, tool_counts.results,
+            tool_counts.error_results, tool_counts.unknown_results,
+        ]])
     return hashlib.sha256(json.dumps(
         payload, ensure_ascii=False, separators=(",", ":"),
     ).encode("utf-8")).hexdigest()

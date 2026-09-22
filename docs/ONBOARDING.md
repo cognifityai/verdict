@@ -582,6 +582,11 @@ database without blocking evidence capture. The directory must be trusted
 and writable. Postgres guards each Turn/evaluator separately. A crash,
 connection loss, or provider-side retry can still result in an extra charge;
 this is not an exactly-once billing guarantee.
+The four judge-visible counts, not the total event count, bind score
+currentness. An unrelated non-tool event below the 64-event eligibility cap
+does not schedule a new judge call. At more than 64 total events the Turn is
+not eligible for counts-only judging. Preview and Agent Run detail batch the
+bounded event-metadata reads for each Turn page.
 When `OPENAI_BASE_URL` is set, the OpenAI provider uses that compatible endpoint;
 the UI reports only that a custom endpoint is configured and never returns the
 URL. Unknown local model names remain unpriced.
