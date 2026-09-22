@@ -620,6 +620,7 @@ class PostgresStorage:
             raise ImportError(
                 'PostgresStorage requires `pip install "psycopg[binary,pool]"`'
             ) from e
+        self._dsn = dsn
         self._pool = ConnectionPool(
             conninfo=dsn,
             min_size=min_pool,
@@ -1417,6 +1418,52 @@ class PostgresStorage:
                      judgment.status.value, judgment.evaluated_at, payload),
                 )
             return decision
+
+    def get_agent_turn_evaluation_candidate(
+        self, tenant_id: str, run_id: str, turn_id: str, evaluator_fingerprint: str,
+    ) -> tuple[AgentTurn, JudgmentStatus | None] | None:
+        validate_turn_scan(tenant_id, evaluator_fingerprint, 1, None)
+        with self._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT t.*,j.evidence_fingerprint AS judgment_evidence,"
+                "j.status AS judgment_status,j.result_json AS judgment_json FROM agent_turns t "
+                "LEFT JOIN agent_turn_judgments j ON j.tenant_id=t.tenant_id "
+                "AND j.run_id=t.run_id AND j.turn_id=t.turn_id "
+                "AND j.evaluator_fingerprint=%s WHERE t.tenant_id=%s AND t.run_id=%s AND t.turn_id=%s",
+                (evaluator_fingerprint, tenant_id, run_id, turn_id),
+            )
+            raw = cur.fetchone()
+            if raw is None:
+                return None
+            row = dict(zip([column.name for column in cur.description], raw, strict=True))
+            turn = agent_turn_from_row(row)
+            current = (row["judgment_evidence"] == turn_evidence_fingerprint(turn)
+                       and turn_evidence_reason(turn) is None)
+            trusted = trusted_turn_judgment(
+                row["judgment_json"] if current else None,
+                tenant_id=tenant_id, run_id=run_id, turn_id=turn_id,
+                evaluator_fingerprint=evaluator_fingerprint,
+                evidence_fingerprint=row["judgment_evidence"], status=row["judgment_status"],
+            )
+            return turn, trusted.status if trusted else None
+
+    @contextmanager
+    def agent_turn_judge_guard(self, tenant_id, run_id, turn_id, evaluator_fingerprint):
+        import psycopg
+
+        key = int.from_bytes(hashlib.sha256(json.dumps(
+            ["verdict-turn-judge", tenant_id, run_id, turn_id, evaluator_fingerprint],
+            separators=(",", ":"), ensure_ascii=False,
+        ).encode("utf-8")).digest()[:8], "big", signed=True)
+        # A dedicated session keeps a max_pool=1 storage usable while the
+        # provider call runs. Closing it always releases the advisory lock.
+        with psycopg.connect(self._dsn, autocommit=True) as conn:
+            acquired = bool(conn.execute("SELECT pg_try_advisory_lock(%s)", (key,)).fetchone()[0])
+            try:
+                yield acquired
+            finally:
+                if acquired:
+                    conn.execute("SELECT pg_advisory_unlock(%s)", (key,))
 
     def get_agent_run_bundle(
         self,

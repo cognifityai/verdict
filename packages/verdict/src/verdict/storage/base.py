@@ -7,6 +7,7 @@ import cycles.
 
 from __future__ import annotations
 
+from contextlib import AbstractContextManager
 from datetime import datetime
 from typing import Protocol, runtime_checkable
 
@@ -121,6 +122,14 @@ class Storage(Protocol):
     ) -> tuple[list[tuple[AgentTurn, JudgmentStatus | None]], bool]: ...
 
     def save_agent_turn_judgment_if_current(self, judgment: AgentTurnJudgment) -> str: ...
+
+    def get_agent_turn_evaluation_candidate(
+        self, tenant_id: str, run_id: str, turn_id: str, evaluator_fingerprint: str,
+    ) -> tuple[AgentTurn, JudgmentStatus | None] | None: ...
+
+    def agent_turn_judge_guard(
+        self, tenant_id: str, run_id: str, turn_id: str, evaluator_fingerprint: str,
+    ) -> AbstractContextManager[bool]: ...
 
     def get_agent_run_bundle(
         self,

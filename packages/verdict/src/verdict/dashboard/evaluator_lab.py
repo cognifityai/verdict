@@ -522,24 +522,40 @@ def _execute_turn_evaluation(storage, tenant_id, config, provider_name, model,
         raise ValueError("judge provider behavior changed after preview")
     from verdict.dashboard.app import evaluator_identity
     dashboard_identity = evaluator_identity(identity)
-    completed = errors = stale = 0
+    completed = errors = stale = in_progress = 0
     for turn in selected:
-        try:
-            dimensions = judge.score(query=turn.user_request_redacted or "",
-                                     response=turn.final_response_redacted or "")
-            record = AgentTurnJudgment(
-                tenant_id=tenant_id, run_id=turn.run_id, turn_id=turn.turn_id,
-                evidence_fingerprint=turn_evidence_fingerprint(turn), dimensions=dimensions,
-                **identity,
+        with storage.agent_turn_judge_guard(
+            tenant_id, turn.run_id, turn.turn_id, identity["evaluator_fingerprint"],
+        ) as acquired:
+            if not acquired:
+                in_progress += 1
+                continue
+            candidate = storage.get_agent_turn_evaluation_candidate(
+                tenant_id, turn.run_id, turn.turn_id, identity["evaluator_fingerprint"],
             )
-        except Exception as exc:
-            record = AgentTurnJudgment(
-                tenant_id=tenant_id, run_id=turn.run_id, turn_id=turn.turn_id,
-                evidence_fingerprint=turn_evidence_fingerprint(turn),
-                status=JudgmentStatus.ERROR,
-                error=(redact(str(exc)) or "judge error")[:2000], **identity,
-            )
-        outcome = storage.save_agent_turn_judgment_if_current(record)
+            if (candidate is None or turn_evidence_reason(candidate[0]) is not None or
+                turn_evidence_fingerprint(candidate[0]) != turn_evidence_fingerprint(turn)):
+                stale += 1
+                continue
+            if candidate[1] is JudgmentStatus.COMPLETED:
+                already += 1
+                continue
+            try:
+                dimensions = judge.score(query=turn.user_request_redacted or "",
+                                         response=turn.final_response_redacted or "")
+                record = AgentTurnJudgment(
+                    tenant_id=tenant_id, run_id=turn.run_id, turn_id=turn.turn_id,
+                    evidence_fingerprint=turn_evidence_fingerprint(turn), dimensions=dimensions,
+                    **identity,
+                )
+            except Exception as exc:
+                record = AgentTurnJudgment(
+                    tenant_id=tenant_id, run_id=turn.run_id, turn_id=turn.turn_id,
+                    evidence_fingerprint=turn_evidence_fingerprint(turn),
+                    status=JudgmentStatus.ERROR,
+                    error=(redact(str(exc)) or "judge error")[:2000], **identity,
+                )
+            outcome = storage.save_agent_turn_judgment_if_current(record)
         if outcome == "saved":
             if record.status is JudgmentStatus.COMPLETED:
                 completed += 1
@@ -557,6 +573,7 @@ def _execute_turn_evaluation(storage, tenant_id, config, provider_name, model,
         "unit": "agent_turn", "availableTurns": len(rows), "eligible": eligible,
         "plannedCalls": len(selected), "alreadyJudged": already,
         "completed": completed, "errors": errors, "stale": stale,
+        "inProgress": in_progress,
         "hasMore": next_cursor is not None, "nextCursor": next_cursor,
         "notEvaluable": sum(reasons.values()), "notEvaluableReasons": dict(sorted(reasons.items())),
         "evaluatorFingerprint": identity["evaluator_fingerprint"],

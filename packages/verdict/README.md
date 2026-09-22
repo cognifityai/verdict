@@ -298,6 +298,15 @@ provider tool-call Trace as an answer or change Trace judgment coverage.
 Turn previews are tenant-scoped 100-candidate keyset pages with explicit
 egress approval. A bounded Turn/evaluator result slot is current only for the
 exact redacted evidence fingerprint; later Turn extensions require reevaluation.
+Before each provider call, execution rechecks that Turn under a cross-process
+judge guard. A concurrent request skips a busy Turn and reports `inProgress`;
+it does not treat the Turn as completed. SQLite uses a separate lock file next
+to the database (the database directory must be trusted and writable), so
+capture can continue during judging; SQLite Turn judges serialize per database.
+Postgres guards individual Turn/evaluator pairs. A judge failure remains
+retryable. This prevents simultaneous local judge egress while the guard is
+held, but cannot guarantee a single provider charge after process failure,
+connection loss, or a provider-side retry.
 Agent Runs detail displays the latest valid current result among eight newest
 evaluator slots per Turn, or one selected exact evaluator. Older results may
 exist outside this bounded view. Tool/citation context and Monitor

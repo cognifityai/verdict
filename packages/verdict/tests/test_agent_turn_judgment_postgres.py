@@ -34,6 +34,30 @@ def _bundle(tenant):
 
 
 @pytest.mark.skipif(not os.environ.get("VERDICT_TEST_POSTGRES_DSN"), reason="disposable Postgres required")
+def test_postgres_turn_judge_guard_scopes_identity_and_leaves_pool_available():
+    dsn = os.environ["VERDICT_TEST_POSTGRES_DSN"]
+    storage = PostgresStorage(dsn, max_pool=1)
+    other = PostgresStorage(dsn, max_pool=1)
+    tenant = f"turn-guard-{uuid4().hex}"
+    try:
+        storage.replace_agent_run_bundle(_bundle(tenant))
+        with storage.agent_turn_judge_guard(tenant, "run", "turn", "a" * 64) as acquired:
+            assert acquired
+            assert storage.get_agent_run_bundle(tenant, "run") is not None
+            with other.agent_turn_judge_guard(tenant, "run", "turn", "a" * 64) as busy:
+                assert not busy
+            with other.agent_turn_judge_guard(tenant, "run", "turn", "b" * 64) as distinct:
+                assert distinct
+            with other.agent_turn_judge_guard("other", "run", "turn", "a" * 64) as isolated:
+                assert isolated
+        with other.agent_turn_judge_guard(tenant, "run", "turn", "a" * 64) as released:
+            assert released
+    finally:
+        storage.close()
+        other.close()
+
+
+@pytest.mark.skipif(not os.environ.get("VERDICT_TEST_POSTGRES_DSN"), reason="disposable Postgres required")
 def test_postgres_turn_judgment_cas_with_two_connections_and_extension():
     dsn = os.environ["VERDICT_TEST_POSTGRES_DSN"]
     writer = PostgresStorage(dsn)

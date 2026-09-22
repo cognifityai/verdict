@@ -1,8 +1,11 @@
 import json
+import multiprocessing
+import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import datetime, timezone
+from uuid import uuid4
 
 import httpx
 import pytest
@@ -30,6 +33,7 @@ from verdict.evidence import (
 )
 from verdict.schema import DimensionScore, Judgment, JudgmentStatus, Trace, Verdict
 from verdict.storage import InMemoryStorage
+from verdict.storage.postgres import PostgresStorage
 from verdict.storage.sqlite import SQLiteStorage
 from verdict_eval.providers import CompletionResponse
 
@@ -120,6 +124,149 @@ def _stored_turn_result(storage, fingerprint):
     else:
         raw = storage._agent_turn_judgments[("local", "run-1", "turn-1", fingerprint)]
     return agent_turn_judgment_from_json(raw)
+
+
+def _turn_judge_process(path, tenant, approved, observations, release):
+    class WaitingProvider(CountingProvider):
+        def complete(self, request):
+            observations.put("provider_called")
+            if not release.wait(10):
+                raise TimeoutError("test provider wait expired")
+            return super().complete(request)
+
+    storage = (PostgresStorage(path, max_pool=1) if path.startswith("postgres")
+               else SQLiteStorage(path))
+    try:
+        result = execute_evaluation(
+            storage, tenant_id=tenant, config=approved,
+            confirm_external_egress=True, provider=WaitingProvider(),
+        )
+        observations.put(("result", result["completed"], result["alreadyJudged"],
+                          result["inProgress"]))
+    finally:
+        storage.close()
+
+
+def _exit_while_holding_turn_guard(path, entered):
+    storage = SQLiteStorage(path)
+    with storage.agent_turn_judge_guard("local", "run-1", "turn-1", "a" * 64) as acquired:
+        if acquired:
+            entered.set()
+            os._exit(0)
+    os._exit(1)
+
+
+def test_turn_judge_does_not_egress_twice_across_sqlite_processes(tmp_path):
+    path = str(tmp_path / "cross-process.db")
+    storage = SQLiteStorage(path)
+    try:
+        storage.replace_agent_run_bundle(_agent_turn_bundle())
+        config = {**_config(), "unit": "agent_turn"}
+        preview = preview_evaluation(storage, tenant_id="local", config=config)
+        approved = {**config, "planFingerprint": preview["planFingerprint"],
+                    "plannedTurns": preview["plannedTurns"]}
+    finally:
+        storage.close()
+
+    ctx = multiprocessing.get_context("spawn")
+    observations = ctx.Queue()
+    release = ctx.Event()
+    first = ctx.Process(target=_turn_judge_process, args=(path, "local", approved, observations, release))
+    second = ctx.Process(target=_turn_judge_process, args=(path, "local", approved, observations, release))
+    try:
+        first.start()
+        assert observations.get(timeout=10) == "provider_called"
+        # The judge lock must not hold a transaction on the evidence DB.
+        writer = SQLiteStorage(path)
+        try:
+            writer.replace_agent_run_bundle(_agent_turn_bundle(tenant="other"))
+        finally:
+            writer.close()
+        second.start()
+        # A second provider entry while the first is in flight is the defect.
+        assert observations.get(timeout=10) == ("result", 0, 0, 1)
+    finally:
+        release.set()
+        for process in (first, second):
+            if process.pid:
+                process.join(timeout=10)
+                if process.is_alive():
+                    process.terminate()
+                    process.join(timeout=10)
+    assert first.exitcode == second.exitcode == 0
+    assert observations.get(timeout=10) == ("result", 1, 0, 0)
+
+
+def test_sqlite_turn_guard_resolves_aliases_and_releases_on_process_exit(tmp_path):
+    path = tmp_path / "guard.db"
+    alias = tmp_path / "alias.db"
+    storage = SQLiteStorage(str(path))
+    alias.symlink_to(path)
+    aliased = SQLiteStorage(str(alias))
+    try:
+        with storage.agent_turn_judge_guard("local", "run-1", "turn-1", "a" * 64) as acquired:
+            assert acquired
+            with aliased.agent_turn_judge_guard("local", "run-1", "turn-1", "a" * 64) as busy:
+                assert not busy
+    finally:
+        aliased.close()
+        storage.close()
+
+    ctx = multiprocessing.get_context("spawn")
+    entered = ctx.Event()
+    process = ctx.Process(target=_exit_while_holding_turn_guard, args=(str(path), entered))
+    process.start()
+    try:
+        assert entered.wait(10)
+        process.join(timeout=10)
+        assert process.exitcode == 0
+        recovered = SQLiteStorage(str(path))
+        try:
+            with recovered.agent_turn_judge_guard("local", "run-1", "turn-1", "a" * 64) as acquired:
+                assert acquired
+        finally:
+            recovered.close()
+    finally:
+        if process.is_alive():
+            process.terminate()
+            process.join(timeout=10)
+
+
+@pytest.mark.skipif(not os.environ.get("VERDICT_TEST_POSTGRES_DSN"),
+                    reason="disposable Postgres required")
+def test_turn_judge_does_not_egress_twice_across_postgres_processes():
+    dsn = os.environ["VERDICT_TEST_POSTGRES_DSN"]
+    tenant = f"turn-guard-{uuid4().hex}"
+    storage = PostgresStorage(dsn, max_pool=1)
+    try:
+        storage.replace_agent_run_bundle(_agent_turn_bundle(tenant=tenant))
+        config = {**_config(), "unit": "agent_turn"}
+        preview = preview_evaluation(storage, tenant_id=tenant, config=config)
+        approved = {**config, "planFingerprint": preview["planFingerprint"],
+                    "plannedTurns": preview["plannedTurns"]}
+    finally:
+        storage.close()
+
+    ctx = multiprocessing.get_context("spawn")
+    observations = ctx.Queue()
+    release = ctx.Event()
+    first = ctx.Process(target=_turn_judge_process, args=(dsn, tenant, approved, observations, release))
+    second = ctx.Process(target=_turn_judge_process, args=(dsn, tenant, approved, observations, release))
+    try:
+        first.start()
+        assert observations.get(timeout=15) == "provider_called"
+        second.start()
+        assert observations.get(timeout=15) == ("result", 0, 0, 1)
+    finally:
+        release.set()
+        for process in (first, second):
+            if process.pid:
+                process.join(timeout=15)
+                if process.is_alive():
+                    process.terminate()
+                    process.join(timeout=10)
+    assert first.exitcode == second.exitcode == 0
+    assert observations.get(timeout=10) == ("result", 1, 0, 0)
 
 
 def test_agent_turn_preview_uses_final_output_without_relabeling_provider_trace():

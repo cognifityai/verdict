@@ -567,6 +567,14 @@ among the eight newest evaluator slots per Turn, or one exact evaluator when
 selected; older results are not implied absent. This remains separate from
 Trace coverage. No tool provenance or citation verification is supplied to
 the Turn judge yet; Monitor remains Trace-only.
+Concurrent Turn judge requests recheck currentness under a cross-process guard
+before egress. A busy Turn is skipped and reported as `inProgress` ("Judge busy;
+retry" in the dashboard), not counted as evaluated. SQLite uses a separate
+lock file beside the evidence database and serializes Turn judging per
+database without blocking evidence capture. The directory must be trusted
+and writable. Postgres guards each Turn/evaluator separately. A crash,
+connection loss, or provider-side retry can still result in an extra charge;
+this is not an exactly-once billing guarantee.
 When `OPENAI_BASE_URL` is set, the OpenAI provider uses that compatible endpoint;
 the UI reports only that a custom endpoint is configured and never returns the
 URL. Unknown local model names remain unpriced.

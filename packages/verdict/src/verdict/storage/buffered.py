@@ -60,6 +60,7 @@ from __future__ import annotations
 import queue
 import threading
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -371,6 +372,19 @@ class BufferedStorage:
     ):
         return self._read(self._inner.list_agent_turn_evaluation_candidates,
                           tenant_id, evaluator_fingerprint, limit=limit, before=before)
+
+    def get_agent_turn_evaluation_candidate(
+        self, tenant_id, run_id, turn_id, evaluator_fingerprint,
+    ):
+        return self._read(self._inner.get_agent_turn_evaluation_candidate,
+                          tenant_id, run_id, turn_id, evaluator_fingerprint)
+
+    @contextmanager
+    def agent_turn_judge_guard(self, tenant_id, run_id, turn_id, evaluator_fingerprint):
+        with self._inner.agent_turn_judge_guard(
+            tenant_id, run_id, turn_id, evaluator_fingerprint,
+        ) as acquired:
+            yield acquired
 
     def replace_agent_capture(
         self,

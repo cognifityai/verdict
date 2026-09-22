@@ -403,6 +403,29 @@ class InMemoryStorage:
                 self._agent_turn_judgments[key] = payload
             return decision
 
+    def get_agent_turn_evaluation_candidate(
+        self, tenant_id: str, run_id: str, turn_id: str, evaluator_fingerprint: str,
+    ) -> tuple[AgentTurn, JudgmentStatus | None] | None:
+        validate_turn_scan(tenant_id, evaluator_fingerprint, 1, None)
+        with self._agent_evidence_lock:
+            turn = self._agent_turns.get((tenant_id, run_id, turn_id))
+            if turn is None:
+                return None
+            raw = self._agent_turn_judgments.get((tenant_id, run_id, turn_id, evaluator_fingerprint))
+            judgment = trusted_turn_judgment(
+                raw, tenant_id=tenant_id, run_id=run_id, turn_id=turn_id,
+                evaluator_fingerprint=evaluator_fingerprint,
+            )
+            current = (judgment is not None and turn_evidence_reason(turn) is None
+                       and judgment.evidence_fingerprint == turn_evidence_fingerprint(turn))
+            return copy.deepcopy(turn), judgment.status if current else None
+
+    @contextmanager
+    def agent_turn_judge_guard(self, tenant_id, run_id, turn_id, evaluator_fingerprint):
+        # In-memory evidence is process-local. The evaluator's process lock
+        # serializes local calls; no durable cross-process lock is meaningful.
+        yield True
+
     def get_agent_run_bundle(
         self,
         tenant_id: str,

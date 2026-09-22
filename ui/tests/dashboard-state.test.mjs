@@ -140,11 +140,13 @@ test("Evaluator Lab previews a native Turn page and sends its approved identitie
   assert.deepEqual(approved.plannedTurns, [{ runId: "run", turnId: "turn", evidenceFingerprint: "a".repeat(64) }]);
   assert.equal(approved.plannedTraces, undefined);
   await resolveJson(requests[3], { unit: "agent_turn", availableTurns: 1,
-    eligible: 1, completed: 1, alreadyJudged: 0, errors: 0, stale: 0,
+    eligible: 1, completed: 0, alreadyJudged: 0, errors: 0, stale: 0, inProgress: 1,
     notEvaluable: 0, notEvaluableReasons: {}, evaluatorFingerprint: "a".repeat(64) });
   await run;
   tree = render(ui.EvaluatorLab, hooks, props);
   assert.match(textOf(tree), /Current Turn scores appear on the Agent Runs detail page/);
+  assert.equal(findAll(tree, (node) => node.props?.label === "Judge busy; retry" &&
+    node.props.value === 1).length, 1);
   assert.doesNotMatch(textOf(tree), /View evaluated traces/);
 });
 
