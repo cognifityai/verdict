@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from verdict.agent_judgment import (
+    TOOL_EVIDENCE_MODE,
     AgentTurnJudgment,
     sanitized_turn_judgment,
     trusted_turn_judgment,
@@ -106,6 +107,7 @@ from verdict.storage.base import (
     _validate_drift_run_snapshot,
     _validate_evaluator_judgment_query,
 )
+from verdict.storage.turn_tool_evidence import read_turn_tool_counts
 
 
 def _trace_tenant_clause(requested: str, column: str = "tenant_id") -> str:
@@ -1385,6 +1387,7 @@ class SQLiteStorage:
     def list_agent_turn_evaluation_candidates(
         self, tenant_id: str, evaluator_fingerprint: str, *, limit: int = 100,
         before: tuple[datetime, str, str] | None = None,
+        tool_evidence: bool = False,
     ) -> tuple[list[tuple[AgentTurn, JudgmentStatus | None]], bool]:
         validate_turn_scan(tenant_id, evaluator_fingerprint, limit, before)
         cursor_clause = "AND (t.started_at,t.run_id,t.turn_id) < (?,?,?)" if before else ""
@@ -1393,7 +1396,10 @@ class SQLiteStorage:
             params.extend([before[0].isoformat(), before[1], before[2]])
         params.append(limit + 1)
         with self._lock:
-            rows = self._conn.execute(
+            if tool_evidence:
+                self._conn.execute("BEGIN")
+            try:
+                rows = self._conn.execute(
                 "SELECT t.*, j.evidence_fingerprint AS judgment_evidence,"
                 "j.status AS judgment_status,j.result_json AS judgment_json FROM agent_turns t "
                 "LEFT JOIN agent_turn_judgments j ON j.tenant_id=t.tenant_id "
@@ -1401,19 +1407,34 @@ class SQLiteStorage:
                 "AND j.evaluator_fingerprint=? WHERE t.tenant_id=? "
                 + cursor_clause + " ORDER BY t.started_at DESC,t.run_id DESC,t.turn_id DESC LIMIT ?",
                 params,
-            ).fetchall()
-            items = []
-            for row in rows[:limit]:
-                turn = agent_turn_from_row(dict(row))
-                current = (row["judgment_evidence"] == turn_evidence_fingerprint(turn)
-                           and turn_evidence_reason(turn) is None)
-                trusted = trusted_turn_judgment(
-                    row["judgment_json"] if current else None,
-                    tenant_id=tenant_id, run_id=turn.run_id, turn_id=turn.turn_id,
-                    evaluator_fingerprint=evaluator_fingerprint,
-                    evidence_fingerprint=row["judgment_evidence"], status=row["judgment_status"],
-                )
-                items.append((turn, trusted.status if trusted else None))
+                ).fetchall()
+                items = []
+                for row in rows[:limit]:
+                    turn = agent_turn_from_row(dict(row))
+                    counts = (
+                        read_turn_tool_counts(
+                            self._conn.cursor(), postgres=False, tenant_id=tenant_id,
+                            run_id=turn.run_id, turn_id=turn.turn_id,
+                        ) if tool_evidence else None
+                    )
+                    current = (row["judgment_evidence"] == turn_evidence_fingerprint(turn, counts)
+                               and turn_evidence_reason(turn) is None
+                               and (counts is None or counts.unavailable_reason is None))
+                    trusted = trusted_turn_judgment(
+                        row["judgment_json"] if current else None,
+                        tenant_id=tenant_id, run_id=turn.run_id, turn_id=turn.turn_id,
+                        evaluator_fingerprint=evaluator_fingerprint,
+                        evidence_fingerprint=row["judgment_evidence"], status=row["judgment_status"],
+                    )
+                    if trusted is not None and (
+                        trusted.evaluator_config.get("tool_evidence_mode") == TOOL_EVIDENCE_MODE
+                    ) != tool_evidence:
+                        trusted = None
+                    item = (turn, trusted.status if trusted else None)
+                    items.append((*item, counts) if tool_evidence else item)
+            finally:
+                if tool_evidence:
+                    self._conn.rollback()
         return items, len(rows) > limit
 
     def save_agent_turn_judgment_if_current(self, judgment: AgentTurnJudgment) -> str:
@@ -1430,6 +1451,13 @@ class SQLiteStorage:
                     "AND run_id=? AND turn_id=? AND evaluator_fingerprint=?",
                     (judgment.tenant_id, judgment.run_id, judgment.turn_id, judgment.evaluator_fingerprint),
                 ).fetchone()
+                tool_counts = (
+                    read_turn_tool_counts(
+                        self._conn.cursor(), postgres=False, tenant_id=judgment.tenant_id,
+                        run_id=judgment.run_id, turn_id=judgment.turn_id,
+                    ) if judgment.evaluator_config.get("tool_evidence_mode") == TOOL_EVIDENCE_MODE
+                    else None
+                )
                 decision = turn_judgment_write_decision(
                     agent_turn_from_row(dict(row)) if row else None,
                     judgment,
@@ -1441,6 +1469,7 @@ class SQLiteStorage:
                         evidence_fingerprint=previous["evidence_fingerprint"] if previous else None,
                         status=previous["status"] if previous else None,
                     ),
+                    tool_counts,
                 )
                 if decision == "saved":
                     self._conn.execute(
@@ -1461,29 +1490,46 @@ class SQLiteStorage:
 
     def get_agent_turn_evaluation_candidate(
         self, tenant_id: str, run_id: str, turn_id: str, evaluator_fingerprint: str,
-    ) -> tuple[AgentTurn, JudgmentStatus | None] | None:
+        *, tool_evidence: bool = False,
+    ) -> tuple | None:
         validate_turn_scan(tenant_id, evaluator_fingerprint, 1, None)
         with self._lock:
-            row = self._conn.execute(
-                "SELECT t.*,j.evidence_fingerprint AS judgment_evidence,"
-                "j.status AS judgment_status,j.result_json AS judgment_json FROM agent_turns t "
-                "LEFT JOIN agent_turn_judgments j ON j.tenant_id=t.tenant_id "
-                "AND j.run_id=t.run_id AND j.turn_id=t.turn_id "
-                "AND j.evaluator_fingerprint=? WHERE t.tenant_id=? AND t.run_id=? AND t.turn_id=?",
-                (evaluator_fingerprint, tenant_id, run_id, turn_id),
-            ).fetchone()
-            if row is None:
-                return None
-            turn = agent_turn_from_row(dict(row))
-            current = (row["judgment_evidence"] == turn_evidence_fingerprint(turn)
-                       and turn_evidence_reason(turn) is None)
-            trusted = trusted_turn_judgment(
-                row["judgment_json"] if current else None,
-                tenant_id=tenant_id, run_id=run_id, turn_id=turn_id,
-                evaluator_fingerprint=evaluator_fingerprint,
-                evidence_fingerprint=row["judgment_evidence"], status=row["judgment_status"],
-            )
-            return turn, trusted.status if trusted else None
+            if tool_evidence:
+                self._conn.execute("BEGIN")
+            try:
+                row = self._conn.execute(
+                    "SELECT t.*,j.evidence_fingerprint AS judgment_evidence,"
+                    "j.status AS judgment_status,j.result_json AS judgment_json FROM agent_turns t "
+                    "LEFT JOIN agent_turn_judgments j ON j.tenant_id=t.tenant_id "
+                    "AND j.run_id=t.run_id AND j.turn_id=t.turn_id "
+                    "AND j.evaluator_fingerprint=? WHERE t.tenant_id=? AND t.run_id=? AND t.turn_id=?",
+                    (evaluator_fingerprint, tenant_id, run_id, turn_id),
+                ).fetchone()
+                if row is None:
+                    return None
+                turn = agent_turn_from_row(dict(row))
+                counts = (read_turn_tool_counts(
+                    self._conn.cursor(), postgres=False, tenant_id=tenant_id,
+                    run_id=run_id, turn_id=turn_id,
+                ) if tool_evidence else None)
+                current = (row["judgment_evidence"] == turn_evidence_fingerprint(turn, counts)
+                           and turn_evidence_reason(turn) is None
+                           and (counts is None or counts.unavailable_reason is None))
+                trusted = trusted_turn_judgment(
+                    row["judgment_json"] if current else None,
+                    tenant_id=tenant_id, run_id=run_id, turn_id=turn_id,
+                    evaluator_fingerprint=evaluator_fingerprint,
+                    evidence_fingerprint=row["judgment_evidence"], status=row["judgment_status"],
+                )
+                if trusted is not None and (
+                    trusted.evaluator_config.get("tool_evidence_mode") == TOOL_EVIDENCE_MODE
+                ) != tool_evidence:
+                    trusted = None
+                item = (turn, trusted.status if trusted else None)
+                return (*item, counts) if tool_evidence else item
+            finally:
+                if tool_evidence:
+                    self._conn.rollback()
 
     @contextmanager
     def agent_turn_judge_guard(self, tenant_id, run_id, turn_id, evaluator_fingerprint):

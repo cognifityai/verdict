@@ -7,7 +7,7 @@ import json
 import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, ClassVar
 
 from verdict.evidence import AgentTurn, EvidenceState, ExecutionStatus
 from verdict.redaction import redact, redact_structure
@@ -15,6 +15,8 @@ from verdict.schema import DimensionScore, JudgmentStatus, Verdict
 
 _MAX_RESULT_BYTES = 65_536
 MAX_TURN_SCAN = 100
+MAX_TOOL_EVIDENCE_EVENTS = 64
+TOOL_EVIDENCE_MODE = "counts_v1"
 
 
 class AgentTurnJudgmentStoreError(RuntimeError):
@@ -24,13 +26,66 @@ class AgentTurnJudgmentStoreError(RuntimeError):
 _DIMENSION_NAME = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 
 
-def turn_evidence_fingerprint(turn: AgentTurn) -> str:
+@dataclass(frozen=True)
+class TurnToolCounts:
+    """Metadata-only projection; no event content or identifiers can escape."""
+
+    PROMPT_TEMPLATE: ClassVar[str] = (
+        "Recorded tool calls: {calls}\n"
+        "Recorded tool results: {results}\n"
+        "Recorded error results: {error_results}\n"
+        "Results with unknown error status: {unknown_results}"
+    )
+
+    event_count: int = 0
+    calls: int = 0
+    results: int = 0
+    error_results: int = 0
+    unknown_results: int = 0
+
+    @property
+    def unavailable_reason(self) -> str | None:
+        if self.event_count > MAX_TOOL_EVIDENCE_EVENTS:
+            return "tool_evidence_limit"
+        if self.calls + self.results == 0:
+            return "tool_evidence_unavailable"
+        return None
+
+    def prompt_block(self) -> str:
+        if self.unavailable_reason is not None:
+            raise ValueError("tool evidence is not evaluable")
+        return self.PROMPT_TEMPLATE.format(
+            calls=self.calls, results=self.results,
+            error_results=self.error_results, unknown_results=self.unknown_results,
+        )
+
+
+def tool_counts_from_rows(rows: list[tuple[str, str, object]]) -> TurnToolCounts:
+    """Reduce no more than N+1 ordered event metadata rows to bounded counts."""
+    if len(rows) > MAX_TOOL_EVIDENCE_EVENTS:
+        return TurnToolCounts(event_count=len(rows))
+    calls = results = errors = unknown = 0
+    for event_type, status, is_error in rows:
+        if event_type == "tool_call":
+            calls += 1
+        elif event_type == "tool_result":
+            results += 1
+            if is_error is True or status in ("failed", "timed_out", "cancelled"):
+                errors += 1
+            elif is_error is not False or status != "completed":
+                unknown += 1
+    return TurnToolCounts(len(rows), calls, results, errors, unknown)
+
+
+def turn_evidence_fingerprint(turn: AgentTurn, tool_counts: TurnToolCounts | None = None) -> str:
     """Bind a result to the exact redacted evidence and eligibility state."""
     payload = [
         turn.status.value, turn.request_state.value, turn.response_state.value,
         turn.user_request_redacted, turn.final_response_redacted,
         turn.request_truncated, turn.response_truncated,
     ]
+    if tool_counts is not None:
+        payload.extend([TOOL_EVIDENCE_MODE, asdict(tool_counts)])
     return hashlib.sha256(json.dumps(
         payload, ensure_ascii=False, separators=(",", ":"),
     ).encode("utf-8")).hexdigest()
@@ -117,6 +172,13 @@ class AgentTurnJudgment:
         self.evaluator_config = redact_structure(self.evaluator_config)
         if not isinstance(self.evaluator_config, dict):
             raise ValueError("invalid evaluator config")
+        mode = self.evaluator_config.get("tool_evidence_mode")
+        template = self.evaluator_config.get("tool_evidence_template")
+        if mode is None:
+            if "tool_evidence_mode" in self.evaluator_config or template is not None:
+                raise ValueError("invalid tool evidence configuration")
+        elif mode != TOOL_EVIDENCE_MODE or not isinstance(template, str) or not template:
+            raise ValueError("invalid tool evidence configuration")
         self.evaluator_provider = redact(self.evaluator_provider) or ""
         self.rubric_version = redact(self.rubric_version) or ""
         self.judge_models = [redact(model) or "" for model in self.judge_models]
@@ -202,11 +264,22 @@ def validate_turn_scan(
 def turn_judgment_write_decision(
     turn: AgentTurn | None, incoming: AgentTurnJudgment,
     previous: AgentTurnJudgment | None,
+    tool_counts: TurnToolCounts | None = None,
 ) -> str:
-    if turn is None or turn_evidence_reason(turn) is not None or (
-        turn_evidence_fingerprint(turn) != incoming.evidence_fingerprint
+    mode = incoming.evaluator_config.get("tool_evidence_mode")
+    if mode not in (None, TOOL_EVIDENCE_MODE):
+        return "stale"
+    if mode == TOOL_EVIDENCE_MODE and (
+        tool_counts is None or tool_counts.unavailable_reason is not None
     ):
         return "stale"
+    if turn is None or turn_evidence_reason(turn) is not None or (
+        turn_evidence_fingerprint(turn, tool_counts if mode else None)
+        != incoming.evidence_fingerprint
+    ):
+        return "stale"
+    if previous is not None and previous.evaluator_config != incoming.evaluator_config:
+        previous = None
     if previous is not None and previous.evidence_fingerprint == incoming.evidence_fingerprint:
         if previous.status is JudgmentStatus.COMPLETED:
             return "already_completed"
