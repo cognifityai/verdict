@@ -317,6 +317,10 @@ are ineligible in this mode. Counts do not establish MCP origin, complete
 tool coverage, citation support, or factual accuracy, and do not enable
 rubric dimensions requiring retrieved context. Citation verification and
 Monitor analysis units remain separate future work.
+Only the four judge-visible counts bind score currentness: adding an unrelated
+model event below the 64-event limit does not invalidate a score. Total event
+count remains a separate eligibility bound. Preview and Agent Run detail read
+bounded event metadata for their Turn page in one batched query.
 
 The Langfuse reader targets the supported v4 Observations API v2, not the
 deprecated trace-list endpoint, so Verdict receives one record per actual

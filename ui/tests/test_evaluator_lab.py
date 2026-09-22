@@ -160,12 +160,27 @@ def _exit_while_holding_turn_guard(path, entered):
     os._exit(1)
 
 
-def test_turn_judge_does_not_egress_twice_across_sqlite_processes(tmp_path):
+def _guard_bundle(tenant, tool_mode):
+    bundle = _agent_turn_bundle(tenant=tenant)
+    if not tool_mode:
+        return bundle
+    return replace(bundle, events=(AgentEvent(
+        event_id="tool-call", turn_id="turn-1", sequence=0,
+        occurred_at=bundle.turns[0].started_at,
+        event_type=AgentEventType.TOOL_CALL, status=ExecutionStatus.COMPLETED,
+        provenance="sdk", attributes={"tool_name": "tool", "call_id": "id"},
+    ),))
+
+
+@pytest.mark.parametrize("tool_mode", [False, True])
+def test_turn_judge_does_not_egress_twice_across_sqlite_processes(tmp_path, tool_mode):
     path = str(tmp_path / "cross-process.db")
     storage = SQLiteStorage(path)
     try:
-        storage.replace_agent_run_bundle(_agent_turn_bundle())
+        storage.replace_agent_run_bundle(_guard_bundle("local", tool_mode))
         config = {**_config(), "unit": "agent_turn"}
+        if tool_mode:
+            config["toolEvidence"] = "counts_v1"
         preview = preview_evaluation(storage, tenant_id="local", config=config)
         approved = {**config, "planFingerprint": preview["planFingerprint"],
                     "plannedTurns": preview["plannedTurns"]}
@@ -238,13 +253,16 @@ def test_sqlite_turn_guard_resolves_aliases_and_releases_on_process_exit(tmp_pat
 
 @pytest.mark.skipif(not os.environ.get("VERDICT_TEST_POSTGRES_DSN"),
                     reason="disposable Postgres required")
-def test_turn_judge_does_not_egress_twice_across_postgres_processes():
+@pytest.mark.parametrize("tool_mode", [False, True])
+def test_turn_judge_does_not_egress_twice_across_postgres_processes(tool_mode):
     dsn = os.environ["VERDICT_TEST_POSTGRES_DSN"]
     tenant = f"turn-guard-{uuid4().hex}"
     storage = PostgresStorage(dsn, max_pool=1)
     try:
-        storage.replace_agent_run_bundle(_agent_turn_bundle(tenant=tenant))
+        storage.replace_agent_run_bundle(_guard_bundle(tenant, tool_mode))
         config = {**_config(), "unit": "agent_turn"}
+        if tool_mode:
+            config["toolEvidence"] = "counts_v1"
         preview = preview_evaluation(storage, tenant_id=tenant, config=config)
         approved = {**config, "planFingerprint": preview["planFingerprint"],
                     "plannedTurns": preview["plannedTurns"]}
@@ -385,6 +403,71 @@ def test_tool_result_body_enrichment_preserves_counts_only_score(tmp_path, backe
         storage.replace_agent_run_bundle(replace(bundle, events=(call, enriched)))
         assert preview_evaluation(storage, tenant_id="local", config=config)["alreadyJudged"] == 1
     finally:
+        storage.close()
+
+
+@pytest.mark.parametrize("backend", ["memory", "sqlite"])
+def test_unrelated_model_event_preserves_counts_only_score(tmp_path, backend):
+    storage = InMemoryStorage() if backend == "memory" else SQLiteStorage(str(tmp_path / "model.db"))
+    try:
+        bundle = _agent_turn_bundle()
+        now = bundle.turns[0].started_at
+        call = AgentEvent(
+            event_id="call-1", turn_id="turn-1", sequence=0, occurred_at=now,
+            event_type=AgentEventType.TOOL_CALL, status=ExecutionStatus.COMPLETED,
+            provenance="sdk", attributes={"tool_name": "tool", "call_id": "id"},
+        )
+        storage.replace_agent_run_bundle(replace(bundle, events=(call,)))
+        config = {**_config(), "unit": "agent_turn", "toolEvidence": "counts_v1"}
+        preview = preview_evaluation(storage, tenant_id="local", config=config)
+        assert execute_evaluation(
+            storage, tenant_id="local",
+            config={**config, "planFingerprint": preview["planFingerprint"],
+                    "plannedTurns": preview["plannedTurns"]},
+            provider=CountingProvider(), confirm_external_egress=True,
+        )["completed"] == 1
+        model_event = AgentEvent(
+            event_id="model-1", turn_id="turn-1", sequence=1, occurred_at=now,
+            event_type=AgentEventType.MODEL_CALL, status=ExecutionStatus.COMPLETED,
+            provenance="sdk", attributes={"provider": "unknown"},
+        )
+        storage.replace_agent_run_bundle(replace(bundle, events=(call, model_event)))
+        after = preview_evaluation(storage, tenant_id="local", config=config)
+        assert after["alreadyJudged"] == 1
+        assert after["plannedCalls"] == 0
+        if backend == "sqlite":
+            from verdict.dashboard.app import build_agent_run_detail
+
+            detail = build_agent_run_detail(tmp_path / "model.db", tenant="local", run_id="run-1")
+            assert detail["turns"][0]["evaluation"]["toolEvidence"] == "counts_v1"
+    finally:
+        storage.close()
+
+
+def test_tool_preview_batches_bounded_sqlite_event_reads(tmp_path):
+    storage = SQLiteStorage(str(tmp_path / "batch.db"))
+    try:
+        bundle = _agent_turn_bundle()
+        now = bundle.turns[0].started_at
+        turns = tuple(replace(bundle.turns[0], turn_id=f"turn-{index}", sequence=index)
+                      for index in range(100))
+        events = tuple(AgentEvent(
+            event_id=f"call-{index}", turn_id=turn.turn_id, sequence=0,
+            occurred_at=now, event_type=AgentEventType.TOOL_CALL,
+            status=ExecutionStatus.COMPLETED, provenance="sdk",
+            attributes={"tool_name": "tool", "call_id": f"id-{index}"},
+        ) for index, turn in enumerate(turns))
+        storage.replace_agent_run_bundle(replace(bundle, turns=turns, events=events))
+        queries = []
+        storage._conn.set_trace_callback(lambda statement: queries.append(statement)
+                                         if "FROM agent_events" in statement else None)
+        preview = preview_evaluation(storage, tenant_id="local",
+                                     config={**_config(), "maxCalls": 100, "unit": "agent_turn",
+                                             "toolEvidence": "counts_v1"})
+        assert preview["plannedCalls"] == 100
+        assert len(queries) <= 1
+    finally:
+        storage._conn.set_trace_callback(None)
         storage.close()
 
 

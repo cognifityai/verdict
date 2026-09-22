@@ -54,6 +54,35 @@ def _tool_events():
 
 
 @pytest.mark.skipif(not os.environ.get("VERDICT_TEST_POSTGRES_DSN"), reason="disposable Postgres required")
+def test_postgres_bounded_tool_projection_reads_full_turn_page():
+    storage = PostgresStorage(os.environ["VERDICT_TEST_POSTGRES_DSN"])
+    tenant = f"turn-batch-{uuid4().hex}"
+    try:
+        bundle = _bundle(tenant)
+        turns = tuple(replace(bundle.turns[0], turn_id=f"turn-{index}", sequence=index)
+                      for index in range(100))
+        now = bundle.turns[0].started_at
+        events = tuple(AgentEvent(
+            event_id=f"call-{index}", turn_id=turn.turn_id, sequence=0,
+            occurred_at=now, event_type=AgentEventType.TOOL_CALL,
+            status=ExecutionStatus.COMPLETED, provenance="sdk",
+            attributes={"tool_name": "tool", "call_id": f"id-{index}"},
+        ) for index, turn in enumerate(turns))
+        storage.replace_agent_run_bundle(replace(bundle, turns=turns, events=events))
+        rows, has_more = storage.list_agent_turn_evaluation_candidates(
+            tenant, "c" * 64, limit=100, tool_evidence=True,
+        )
+        assert not has_more
+        assert len(rows) == 100
+        assert all(counts.calls == 1 and counts.results == 0 for _, _, counts in rows)
+        assert storage.list_agent_turn_evaluation_candidates(
+            "other", "c" * 64, limit=100, tool_evidence=True,
+        )[0] == []
+    finally:
+        storage.close()
+
+
+@pytest.mark.skipif(not os.environ.get("VERDICT_TEST_POSTGRES_DSN"), reason="disposable Postgres required")
 def test_postgres_tool_counts_bind_preview_storage_and_dashboard():
     storage = PostgresStorage(os.environ["VERDICT_TEST_POSTGRES_DSN"])
     tenant = f"turn-tools-{uuid4().hex}"

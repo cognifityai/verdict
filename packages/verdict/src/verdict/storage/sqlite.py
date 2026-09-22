@@ -107,7 +107,10 @@ from verdict.storage.base import (
     _validate_drift_run_snapshot,
     _validate_evaluator_judgment_query,
 )
-from verdict.storage.turn_tool_evidence import read_turn_tool_counts
+from verdict.storage.turn_tool_evidence import (
+    read_turn_tool_counts,
+    read_turn_tool_counts_batch,
+)
 
 
 def _trace_tenant_clause(requested: str, column: str = "tenant_id") -> str:
@@ -1408,14 +1411,17 @@ class SQLiteStorage:
                 + cursor_clause + " ORDER BY t.started_at DESC,t.run_id DESC,t.turn_id DESC LIMIT ?",
                 params,
                 ).fetchall()
+                counts_by_turn = (
+                    read_turn_tool_counts_batch(
+                        self._conn.cursor(), postgres=False, tenant_id=tenant_id,
+                        turn_keys=[(row["run_id"], row["turn_id"]) for row in rows[:limit]],
+                    ) if tool_evidence else {}
+                )
                 items = []
                 for row in rows[:limit]:
                     turn = agent_turn_from_row(dict(row))
                     counts = (
-                        read_turn_tool_counts(
-                            self._conn.cursor(), postgres=False, tenant_id=tenant_id,
-                            run_id=turn.run_id, turn_id=turn.turn_id,
-                        ) if tool_evidence else None
+                        counts_by_turn[(turn.run_id, turn.turn_id)] if tool_evidence else None
                     )
                     current = (row["judgment_evidence"] == turn_evidence_fingerprint(turn, counts)
                                and turn_evidence_reason(turn) is None

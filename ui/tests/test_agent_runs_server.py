@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 import httpx
 import verdict
 import verdict.dashboard.analysis_service as analysis_service
+import verdict.dashboard.query as dashboard_query
 from fastapi import FastAPI, Request
 from verdict.agent_judgment import (
     AgentTurnJudgment,
@@ -101,6 +102,30 @@ def test_run_detail_shows_current_native_turn_scores_without_cross_tenant_leak(t
     storage.close()
     stale = build_agent_run_detail(path, tenant="local", run_id="r-local")
     assert stale["turns"][0]["evaluation"] is None
+
+
+def test_run_detail_batches_tool_metadata_for_turn_page(tmp_path, monkeypatch):
+    path = tmp_path / "detail-batch.db"
+    storage = SQLiteStorage(str(path))
+    now = datetime(2026, 8, 31, tzinfo=timezone.utc)
+    bundle = _bundle("local", now, with_turn=True)
+    turns = tuple(replace(bundle.turns[0], turn_id=f"turn-{index}", sequence=index)
+                  for index in range(50))
+    storage.replace_agent_run_bundle(replace(bundle, turns=turns, events=()))
+    storage.close()
+
+    event_queries = []
+    original = dashboard_query.SQLiteSession.execute
+
+    def counted(self, query, params=()):
+        if "AS is_error" in query and "FROM agent_events" in query:
+            event_queries.append(query)
+        return original(self, query, params)
+
+    monkeypatch.setattr(dashboard_query.SQLiteSession, "execute", counted)
+    detail = build_agent_run_detail(path, tenant="local", run_id="r-local", turn_limit=50)
+    assert len(detail["turns"]) == 50
+    assert len(event_queries) == 1
 
 
 def test_run_detail_shows_only_current_tool_count_judgment(tmp_path):

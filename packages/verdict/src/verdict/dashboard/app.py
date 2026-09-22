@@ -839,14 +839,12 @@ def build_agent_run_detail(
 
     def builder(session: _QuerySession) -> dict:
         from verdict.agent_judgment import (
-            MAX_TOOL_EVIDENCE_EVENTS,
             TOOL_EVIDENCE_MODE,
-            tool_counts_from_rows,
             trusted_turn_judgment,
             turn_evidence_fingerprint,
             turn_evidence_reason,
         )
-        from verdict.storage.turn_tool_evidence import tool_metadata_sql
+        from verdict.storage.turn_tool_evidence import read_turn_tool_counts_batch
         page = agent_evidence_queries.load_run_page(
             session, tenant, run_id,
             event_limit=event_limit, event_offset=event_offset,
@@ -867,17 +865,14 @@ def build_agent_run_detail(
             evaluator_clause = "AND evaluator_fingerprint=? " if turn_evaluator_fingerprint else ""
             if turn_evaluator_fingerprint:
                 params.append(turn_evaluator_fingerprint)
+            all_counts = read_turn_tool_counts_batch(
+                session, postgres=_is_postgres(configured), tenant_id=tenant,
+                turn_keys=[(turn.run_id, turn.turn_id) for turn in eligible_turns],
+                session=True,
+            )
             for turn in eligible_turns:
                 fingerprints = {None: turn_evidence_fingerprint(turn)}
-                event_rows = session.execute(
-                    tool_metadata_sql(postgres=_is_postgres(configured)),
-                    (tenant, run_id, turn.turn_id, MAX_TOOL_EVIDENCE_EVENTS + 1),
-                )
-                counts = tool_counts_from_rows([
-                    (row["event_type"], row["status"],
-                     None if row["is_error"] is None else bool(row["is_error"]))
-                    for row in event_rows
-                ])
+                counts = all_counts[(turn.run_id, turn.turn_id)]
                 if counts.unavailable_reason is None:
                     fingerprints[TOOL_EVIDENCE_MODE] = turn_evidence_fingerprint(turn, counts)
                     counts_by_turn[turn.turn_id] = counts
