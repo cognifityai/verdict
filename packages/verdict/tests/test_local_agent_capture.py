@@ -321,6 +321,7 @@ def test_current_codex_user_message_reaches_redacted_turn_and_detail(tmp_path: P
             "## My request:\nreview alice@example.com"
         ), "text_elements": []},
         {"type": "local_image", "path": "/tmp/synthetic-image.png"},
+        {"type": "text", "text": {"unexpected": "NESTED_INVALID_TEXT"}},
         {"type": "text", "text": "then summarize", "text_elements": [
             {"text": "NESTED_CANARY_NOT_CONTENT"}
         ]},
@@ -356,6 +357,7 @@ def test_current_codex_user_message_reaches_redacted_turn_and_detail(tmp_path: P
     assert "alice@example.com" not in repr(bundle) + repr(detail)
     assert "/tmp/synthetic-image.png" not in repr(bundle) + repr(detail)
     assert "NESTED_CANARY_NOT_CONTENT" not in repr(bundle) + repr(detail)
+    assert "NESTED_INVALID_TEXT" not in repr(bundle) + repr(detail)
     assert storage.list_agent_run_bundles("other") == []
     storage.close()
 
@@ -380,17 +382,23 @@ def test_codex_user_message_rescan_completes_missing_request(tmp_path: Path) -> 
     storage.close()
 
 
-@pytest.mark.parametrize("content", [None, [], {"type": "text", "text": "ignored"},
+@pytest.mark.parametrize("content", [None, [], "untyped synthetic request",
+                                     {"type": "text", "text": "ignored"},
                                      [{"type": "local_image", "path": "/tmp/synthetic-image.png"}],
                                      [{"type": "text", "text": 42}]])
 def test_codex_user_message_without_text_stays_missing(tmp_path: Path, content: object) -> None:
     root = tmp_path / "codex"
     _write_jsonl(root / "session.jsonl", _codex_item_message_records(content))
-    storage = SQLiteStorage(str(tmp_path / "verdict.db"))
+    path = tmp_path / "verdict.db"
+    storage = SQLiteStorage(str(path))
     assert capture_local_agents(storage, tenant_id="local", codex_root=root).stored == 1
-    [turn] = storage.list_agent_run_bundles("local")[0].turns
+    [bundle] = storage.list_agent_run_bundles("local")
+    [turn] = bundle.turns
     assert turn.request_state is EvidenceState.MISSING
     assert turn.user_request_redacted is None
+    detail = build_agent_run_detail(path, tenant="local", run_id=bundle.run.run_id)
+    assert detail["turns"][0]["requestState"] == "missing"
+    assert detail["turns"][0]["request"] is None
     storage.close()
 
 

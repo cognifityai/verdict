@@ -800,7 +800,8 @@ def _parse_codex(path: Path, *, home: Path | None) -> _ParsedHistory:
                 text = _safe_text(payload.get("message"), home=home)
             else:
                 item = _mapping(payload.get("item"))
-                if item is None or item.get("type") != "UserMessage":
+                if (item is None or item.get("type") != "UserMessage"
+                        or not isinstance(item.get("content"), list)):
                     continue
                 text = _message_text(item, home=home)
             if text.value:
