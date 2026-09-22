@@ -65,6 +65,26 @@ def test_trace_judgment_identity_is_captured_before_provider_mutates() -> None:
     assert judge.evaluator_identity()["evaluator_fingerprint"] != result.evaluator_fingerprint
 
 
+@pytest.mark.parametrize(
+    ("mode", "template"),
+    [("unsupported", "calls: {calls}"), ("counts_v1", None)],
+)
+def test_direct_score_rejects_invalid_tool_mode_before_egress(mode, template):
+    class CountingProvider(FakeProvider):
+        calls = 0
+
+        def complete(self, request):
+            self.calls += 1
+            return super().complete(request)
+
+    provider = CountingProvider("{}")
+    judge = Judge(provider=provider, model="judge-a",
+                  tool_evidence_mode=mode, tool_evidence_template=template)
+    with pytest.raises(ValueError):
+        judge.score(query="question", response="answer", tool_evidence="counts")
+    assert provider.calls == 0
+
+
 def _fake_json_for(verdicts: dict[str, str]) -> str:
     return json.dumps({k: {"reasoning": "r", "verdict": v} for k, v in verdicts.items()})
 

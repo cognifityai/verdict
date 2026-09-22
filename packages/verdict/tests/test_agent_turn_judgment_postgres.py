@@ -9,9 +9,16 @@ from uuid import uuid4
 
 import pytest
 import verdict.storage.postgres as postgres_module
-from verdict.agent_judgment import AgentTurnJudgment, turn_evidence_fingerprint
+from verdict.agent_judgment import (
+    AgentTurnJudgment,
+    TurnToolCounts,
+    agent_turn_judgment_to_json,
+    turn_evidence_fingerprint,
+)
 from verdict.dashboard.app import build_agent_run_detail
 from verdict.evidence import (
+    AgentEvent,
+    AgentEventType,
     AgentRun,
     AgentRunBundle,
     AgentTurn,
@@ -31,6 +38,162 @@ def _bundle(tenant):
         (AgentTurn("turn", "run", 0, now, ExecutionStatus.COMPLETED, now,
                    "question", "answer", EvidenceState.PRESENT, EvidenceState.PRESENT),),
     )
+
+
+def _tool_events():
+    now = datetime(2026, 8, 31, tzinfo=timezone.utc)
+    return (
+        AgentEvent("call", "turn", 0, now, AgentEventType.TOOL_CALL,
+                   ExecutionStatus.COMPLETED, "sdk",
+                   {"tool_name": "private_tool", "call_id": "private_id"}),
+        AgentEvent("result", "turn", 1, now, AgentEventType.TOOL_RESULT,
+                   ExecutionStatus.FAILED, "sdk",
+                   {"tool_name": "private_tool", "call_id": "private_id",
+                    "is_error": True}),
+    )
+
+
+@pytest.mark.skipif(not os.environ.get("VERDICT_TEST_POSTGRES_DSN"), reason="disposable Postgres required")
+def test_postgres_tool_counts_bind_preview_storage_and_dashboard():
+    storage = PostgresStorage(os.environ["VERDICT_TEST_POSTGRES_DSN"])
+    tenant = f"turn-tools-{uuid4().hex}"
+    try:
+        bundle = _bundle(tenant)
+        other_tenant = f"turn-tools-other-{uuid4().hex}"
+        call, result = _tool_events()
+        with_call = replace(bundle, events=(call,))
+        storage.replace_agent_run_bundle(with_call)
+        storage.replace_agent_run_bundle(replace(_bundle(other_tenant), events=(call,)))
+        [(turn, status, counts)], more = storage.list_agent_turn_evaluation_candidates(
+            tenant, "c" * 64, tool_evidence=True,
+        )
+        assert not more and status is None
+        assert (counts.calls, counts.results, counts.error_results) == (1, 0, 0)
+        judgment = AgentTurnJudgment(
+            tenant_id=tenant, run_id="run", turn_id="turn", evaluator_fingerprint="c" * 64,
+            evidence_fingerprint=turn_evidence_fingerprint(turn, counts),
+            evaluator_provider="anthropic", evaluator_config={
+                "tool_evidence_mode": "counts_v1",
+                "tool_evidence_template": TurnToolCounts.PROMPT_TEMPLATE,
+            },
+            judge_models=["test"], expected_dimensions=["quality"],
+            rubric_name="test", rubric_version="1",
+            dimensions=[DimensionScore("quality", Verdict.PASS, "ok", "test")],
+        )
+        assert storage.save_agent_turn_judgment_if_current(judgment) == "saved"
+        visible = build_agent_run_detail(os.environ["VERDICT_TEST_POSTGRES_DSN"],
+                                         tenant=tenant, run_id="run")
+        assert visible["turns"][0]["evaluation"]["toolEvidence"] == "counts_v1"
+        assert visible["turns"][0]["evaluation"]["toolCounts"]["calls"] == 1
+        other = build_agent_run_detail(os.environ["VERDICT_TEST_POSTGRES_DSN"],
+                                       tenant=other_tenant, run_id="run")
+        assert other["turns"][0]["evaluation"] is None
+
+        with storage._pool.connection() as conn:
+            conn.execute(
+                "UPDATE agent_turn_judgments SET result_json=jsonb_set("
+                "result_json::jsonb,'{evaluator_config,tool_evidence_mode}',"
+                "'[]'::jsonb)::text WHERE tenant_id=%s AND run_id='run' AND turn_id='turn'",
+                (tenant,),
+            )
+        rows, _ = storage.list_agent_turn_evaluation_candidates(
+            tenant, "c" * 64, tool_evidence=True,
+        )
+        assert rows[0][1] is None
+        assert build_agent_run_detail(os.environ["VERDICT_TEST_POSTGRES_DSN"],
+                                      tenant=tenant, run_id="run")["turns"][0]["evaluation"] is None
+        with storage._pool.connection() as conn:
+            conn.execute(
+                "UPDATE agent_turn_judgments SET result_json=%s "
+                "WHERE tenant_id=%s AND run_id='run' AND turn_id='turn'",
+                (agent_turn_judgment_to_json(judgment), tenant),
+            )
+
+        storage.replace_agent_run_bundle(replace(bundle, events=(call, result)))
+        assert storage.save_agent_turn_judgment_if_current(judgment) == "stale"
+        rows, _ = storage.list_agent_turn_evaluation_candidates(
+            tenant, "c" * 64, tool_evidence=True,
+        )
+        assert rows[0][1] is None
+        assert build_agent_run_detail(os.environ["VERDICT_TEST_POSTGRES_DSN"],
+                                      tenant=tenant, run_id="run")["turns"][0]["evaluation"] is None
+    finally:
+        storage.close()
+
+
+@pytest.mark.skipif(not os.environ.get("VERDICT_TEST_POSTGRES_DSN"), reason="disposable Postgres required")
+@pytest.mark.parametrize("first", ["capture", "save"])
+def test_postgres_tool_count_cas_serializes_with_event_append(monkeypatch, first):
+    dsn = os.environ["VERDICT_TEST_POSTGRES_DSN"]
+    writer = PostgresStorage(dsn)
+    second = PostgresStorage(dsn)
+    tenant = f"turn-tool-race-{uuid4().hex}"
+    entered = Event()
+    follower_started = Event()
+    release = Event()
+    try:
+        bundle = _bundle(tenant)
+        call, result = _tool_events()
+        writer.replace_agent_run_bundle(replace(bundle, events=(call,)))
+        [(turn, _, counts)], _ = writer.list_agent_turn_evaluation_candidates(
+            tenant, "d" * 64, tool_evidence=True,
+        )
+        old = AgentTurnJudgment(
+            tenant_id=tenant, run_id="run", turn_id="turn", evaluator_fingerprint="d" * 64,
+            evidence_fingerprint=turn_evidence_fingerprint(turn, counts),
+            evaluator_provider="anthropic", evaluator_config={
+                "tool_evidence_mode": "counts_v1",
+                "tool_evidence_template": TurnToolCounts.PROMPT_TEMPLATE,
+            },
+            judge_models=["test"], expected_dimensions=["quality"],
+            rubric_name="test", rubric_version="1",
+            dimensions=[DimensionScore("quality", Verdict.PASS, "ok", "test")],
+        )
+        changed = replace(bundle, events=(call, result))
+        if first == "capture":
+            original_write = second._write_normalized_bundle_cursor
+
+            def paused_write(*args, **kwargs):
+                original_write(*args, **kwargs)
+                entered.set()
+                assert release.wait(10)
+
+            monkeypatch.setattr(second, "_write_normalized_bundle_cursor", paused_write)
+        else:
+            original_decision = postgres_module.turn_judgment_write_decision
+
+            def paused_decision(*args, **kwargs):
+                entered.set()
+                assert release.wait(10)
+                return original_decision(*args, **kwargs)
+
+            monkeypatch.setattr(postgres_module, "turn_judgment_write_decision", paused_decision)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            def follow(action, argument):
+                follower_started.set()
+                return action(argument)
+
+            if first == "capture":
+                leading = pool.submit(second.replace_agent_run_bundle, changed)
+                assert entered.wait(10)
+                trailing = pool.submit(follow, writer.save_agent_turn_judgment_if_current, old)
+            else:
+                leading = pool.submit(writer.save_agent_turn_judgment_if_current, old)
+                assert entered.wait(10)
+                trailing = pool.submit(follow, second.replace_agent_run_bundle, changed)
+            assert follower_started.wait(10)
+            assert not trailing.done()
+            release.set()
+            assert leading.result(timeout=10) == ("saved" if first == "save" else None)
+            assert trailing.result(timeout=10) == ("stale" if first == "capture" else None)
+        rows, _ = writer.list_agent_turn_evaluation_candidates(
+            tenant, "d" * 64, tool_evidence=True,
+        )
+        assert rows[0][1] is None
+    finally:
+        release.set()
+        writer.close()
+        second.close()
 
 
 @pytest.mark.skipif(not os.environ.get("VERDICT_TEST_POSTGRES_DSN"), reason="disposable Postgres required")

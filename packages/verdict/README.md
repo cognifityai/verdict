@@ -309,8 +309,14 @@ held, but cannot guarantee a single provider charge after process failure,
 connection loss, or a provider-side retry.
 Agent Runs detail displays the latest valid current result among eight newest
 evaluator slots per Turn, or one selected exact evaluator. Older results may
-exist outside this bounded view. Tool/citation context and Monitor
-analysis units remain separate future work.
+exist outside this bounded view. An optional `toolEvidence: "counts_v1"`
+mode adds only bounded recorded tool call/result/error counts to the judge
+prompt; the event projection never includes tool names, arguments, result
+bodies, or URLs. Turns with no recorded tool events or more than 64 events
+are ineligible in this mode. Counts do not establish MCP origin, complete
+tool coverage, citation support, or factual accuracy, and do not enable
+rubric dimensions requiring retrieved context. Citation verification and
+Monitor analysis units remain separate future work.
 
 The Langfuse reader targets the supported v4 Observations API v2, not the
 deprecated trace-list endpoint, so Verdict receives one record per actual
