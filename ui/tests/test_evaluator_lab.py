@@ -1,9 +1,14 @@
+import builtins
+import importlib.util
+import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
+import httpx
 import pytest
 from verdict.dashboard.evaluator_lab import (
+    _IdentityOnlyProvider,
     evaluator_environment,
     execute_calibration,
     execute_evaluation,
@@ -12,7 +17,7 @@ from verdict.dashboard.evaluator_lab import (
 )
 from verdict.schema import Judgment, Trace
 from verdict.storage import InMemoryStorage
-from verdict_eval.providers import CompletionResponse
+from verdict_eval.providers import AnthropicAdapter, CompletionResponse
 
 
 def test_evaluator_environment_reports_openai_compatible_endpoint_without_value(
@@ -34,9 +39,9 @@ def test_evaluator_environment_reports_openai_compatible_endpoint_without_value(
 
 class CountingProvider:
     name = "anthropic"
-    supports_temperature = False
 
     def __init__(self):
+        self.supports_temperature = _IdentityOnlyProvider("anthropic").supports_temperature
         self.calls = 0
         self.requests = []
 
@@ -125,6 +130,115 @@ def test_preview_separates_evidence_eligibility_before_any_judge_call():
     assert preview["notEvaluableReasons"] == {"response_not_captured": 1}
     assert preview["estimatedMaximumCostUsd"] is not None
     assert preview["externalEgressRequired"] is True
+
+
+def test_anthropic_preview_runs_with_the_installed_sdk_without_network_egress(monkeypatch):
+    anthropic = pytest.importorskip("anthropic")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    requests = []
+
+    def respond(request):
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json={
+            "id": "msg_local_test",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-haiku-4-5",
+            "content": [{"type": "text", "text": (
+                '{"relevance":{"reasoning":"direct","verdict":"PASS"},'
+                '"completeness":{"reasoning":"complete","verdict":"PASS"}}'
+            )}],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 10, "output_tokens": 8},
+        })
+
+    storage = InMemoryStorage()
+    storage.insert_trace(_trace("eligible"))
+    config = _config()
+    with monkeypatch.context() as no_egress:
+        def reject_provider_call(self, request):
+            raise AssertionError("preflight attempted a provider call")
+
+        no_egress.setattr(AnthropicAdapter, "complete", reject_provider_call)
+        preview = preview_evaluation(storage, tenant_id="local", config=config)
+    assert requests == []
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        provider = AnthropicAdapter(api_key="local-test", max_retries=1)
+        provider._client.close()
+        provider._client = anthropic.Anthropic(api_key="local-test", http_client=client)
+        result = execute_evaluation(
+            storage,
+            tenant_id="local",
+            config={
+                **config,
+                "planFingerprint": preview["planFingerprint"],
+                "plannedTraces": preview["plannedTraces"],
+            },
+            provider=provider,
+            confirm_external_egress=True,
+        )
+
+    assert result["completed"] == 1, storage.list_judgments_for_cluster("all", limit=10)
+    assert result["errors"] == 0
+    assert len(requests) == 1
+    assert ("temperature" in requests[0]) is provider.supports_temperature
+    assert requests[0].get("temperature") in (None, 0.0)
+    [judgment] = storage.list_judgments_for_cluster("all", limit=10)
+    assert judgment.evaluator_fingerprint == result["evaluatorFingerprint"]
+
+
+def test_anthropic_preview_matches_an_adapter_without_temperature(monkeypatch):
+    class OlderAdapter:
+        supports_temperature = False
+
+        def __init__(self, api_key):
+            self._client = self
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("verdict_eval.providers.AnthropicAdapter", OlderAdapter)
+    storage = InMemoryStorage()
+    storage.insert_trace(_trace("eligible"))
+    config = _approved_config(storage, _config())
+    provider = CountingProvider()
+    provider.supports_temperature = False
+
+    result = execute_evaluation(
+        storage,
+        tenant_id="local",
+        config=config,
+        provider=provider,
+        confirm_external_egress=True,
+    )
+
+    assert result["completed"] == 1
+    assert result["errors"] == 0
+
+
+def test_anthropic_preview_remains_available_without_optional_sdk(monkeypatch):
+    original_find_spec = importlib.util.find_spec
+    original_import = builtins.__import__
+
+    def import_without_anthropic(name, *args, **kwargs):
+        if name == "anthropic" or name.startswith("anthropic."):
+            raise ImportError("anthropic SDK unavailable")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(
+        importlib.util,
+        "find_spec",
+        lambda name: None if name == "anthropic" else original_find_spec(name),
+    )
+    monkeypatch.setattr(builtins, "__import__", import_without_anthropic)
+    storage = InMemoryStorage()
+    storage.insert_trace(_trace("eligible"))
+
+    preview = preview_evaluation(storage, tenant_id="local", config=_config())
+
+    assert preview["plannedCalls"] == 1
+    assert preview["eligible"] == 1
 
 
 def test_execute_judges_only_eligible_traces_and_persists_identity():

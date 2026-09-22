@@ -143,7 +143,22 @@ def _selected(storage: Storage, tenant_id: str):
 class _IdentityOnlyProvider:
     def __init__(self, name: str) -> None:
         self.name = name
-        self.supports_temperature = name != "anthropic"
+        if name == "anthropic":
+            if importlib.util.find_spec("anthropic") is None:
+                # Preserve offline preflight when the optional SDK is absent.
+                self.supports_temperature = False
+                return
+            from verdict_eval.providers import AnthropicAdapter
+
+            # The installed SDK determines whether the live adapter sends temperature.
+            # Constructing the adapter does not make a provider request.
+            adapter = AnthropicAdapter(api_key="unused-preview-key")
+            try:
+                self.supports_temperature = adapter.supports_temperature
+            finally:
+                adapter._client.close()
+        else:
+            self.supports_temperature = True
 
 
 def _judge(provider, model, rubric, max_output):
