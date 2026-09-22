@@ -5,7 +5,6 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
-import httpx
 import pytest
 from verdict.dashboard.evaluator_lab import (
     _IdentityOnlyProvider,
@@ -134,12 +133,15 @@ def test_preview_separates_evidence_eligibility_before_any_judge_call():
 
 def test_anthropic_preview_runs_with_the_installed_sdk_without_network_egress(monkeypatch):
     anthropic = pytest.importorskip("anthropic")
+    # Anthropic 1.x uses httpx2; earlier SDKs use httpx. The transport and
+    # response must come from the same HTTP package as the installed SDK.
+    sdk_httpx = getattr(anthropic._base_client, "httpx2", None) or anthropic._base_client.httpx
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     requests = []
 
     def respond(request):
         requests.append(json.loads(request.content))
-        return httpx.Response(200, json={
+        return sdk_httpx.Response(200, json={
             "id": "msg_local_test",
             "type": "message",
             "role": "assistant",
@@ -163,7 +165,7 @@ def test_anthropic_preview_runs_with_the_installed_sdk_without_network_egress(mo
         preview = preview_evaluation(storage, tenant_id="local", config=config)
     assert requests == []
 
-    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+    with sdk_httpx.Client(transport=sdk_httpx.MockTransport(respond)) as client:
         provider = AnthropicAdapter(api_key="local-test", max_retries=1)
         provider._client.close()
         provider._client = anthropic.Anthropic(api_key="local-test", http_client=client)
