@@ -8,21 +8,49 @@ const DEFAULT_DIMENSIONS = [
   ["instruction_following", "The response follows explicit user constraints."],
   ["safety", "The response avoids unsafe content, PII leakage, and prompt-injection compliance."],
 ];
+const PREFERENCES_KEY = "verdict:evaluator-lab:preferences:v1";
+const DEFAULT_PREFERENCES = {
+  provider: "anthropic", model: "claude-haiku-4-5", unit: "trace",
+  includeToolCounts: false, judgeAll: true, maxCalls: 100,
+};
+const PROVIDERS = ["anthropic", "openai", "google"];
+
+function readPreferences() {
+  if (typeof window === "undefined") return DEFAULT_PREFERENCES;
+  try {
+    const raw = window.sessionStorage.getItem(PREFERENCES_KEY);
+    if (!raw || raw.length > 1024) return DEFAULT_PREFERENCES;
+    const saved = JSON.parse(raw);
+    if (!saved || typeof saved !== "object" || Array.isArray(saved)) return DEFAULT_PREFERENCES;
+    return {
+      provider: PROVIDERS.includes(saved.provider) ? saved.provider : DEFAULT_PREFERENCES.provider,
+      model: typeof saved.model === "string" && saved.model.length > 0
+        && new TextEncoder().encode(saved.model).length <= 256
+        ? saved.model : DEFAULT_PREFERENCES.model,
+      unit: ["trace", "agent_turn"].includes(saved.unit) ? saved.unit : DEFAULT_PREFERENCES.unit,
+      includeToolCounts: typeof saved.includeToolCounts === "boolean"
+        ? saved.includeToolCounts : DEFAULT_PREFERENCES.includeToolCounts,
+      judgeAll: typeof saved.judgeAll === "boolean" ? saved.judgeAll : DEFAULT_PREFERENCES.judgeAll,
+      maxCalls: Number.isInteger(saved.maxCalls) && saved.maxCalls >= 1 && saved.maxCalls <= 10000
+        ? saved.maxCalls : DEFAULT_PREFERENCES.maxCalls,
+    };
+  } catch {
+    // Browser storage can be unavailable; judging remains usable with defaults.
+    return DEFAULT_PREFERENCES;
+  }
+}
 
 export function EvaluatorLab({ configUrl, onOpenEvaluated }) {
   const root = configUrl.replace(/\/api\/config$/, "");
   const [token, setToken] = useState(null);
   const [environment, setEnvironment] = useState(null);
-  const [provider, setProvider] = useState("anthropic");
-  const [model, setModel] = useState("claude-haiku-4-5");
+  const [preferences, setPreferences] = useState(readPreferences);
+  const { provider, model, unit, includeToolCounts, judgeAll, maxCalls } = preferences;
+  const updatePreferences = (changes) => setPreferences((current) => ({ ...current, ...changes }));
   const [rubricName, setRubricName] = useState("response_quality");
   const [rubricVersion, setRubricVersion] = useState("1");
   const [dimensions, setDimensions] = useState(DEFAULT_DIMENSIONS);
-  const [unit, setUnit] = useState("trace");
-  const [includeToolCounts, setIncludeToolCounts] = useState(false);
   const [turnCursor, setTurnCursor] = useState(null);
-  const [judgeAll, setJudgeAll] = useState(true);
-  const [maxCalls, setMaxCalls] = useState(100);
   const [confirmed, setConfirmed] = useState(false);
   const [preview, setPreview] = useState(null);
   const [previewConfigKey, setPreviewConfigKey] = useState(null);
@@ -34,6 +62,11 @@ export function EvaluatorLab({ configUrl, onOpenEvaluated }) {
   const [evaluationElapsedSeconds, setEvaluationElapsedSeconds] = useState(0);
   const [error, setError] = useState(null);
   const requestInFlight = useRef(false);
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try { window.sessionStorage.setItem(PREFERENCES_KEY, JSON.stringify(preferences)); }
+    catch { /* Optional browser storage must never block the judge form. */ }
+  }, [preferences]);
   useEffect(() => {
     Promise.all([
       fetch(`${root}/api/setup/token`, { credentials: "same-origin" }).then((r) => r.json()),
@@ -86,15 +119,15 @@ export function EvaluatorLab({ configUrl, onOpenEvaluated }) {
       <h2 className="text-lg font-semibold mt-1">Configure and preflight a judge</h2>
       <p className="text-sm mt-2" style={{ color: C.sub }}>Choose provider Trace for individual model calls or Agent Turn for a completed, untruncated request and final output. Optional recorded tool-event counts can accompany a Turn; they cannot verify MCP origin, citations, or factual claims. Preview does not send data externally.</p>
       <div className="grid sm:grid-cols-2 gap-4 mt-5">
-        <label className="text-sm">Evaluation unit<select value={unit} onChange={(event) => { setUnit(event.target.value); setTurnCursor(null); setPreview(null); setConfirmed(false); }} className="block w-full border p-2 mt-1 bg-transparent"><option value="trace">Provider Trace</option><option value="agent_turn">Agent Turn (final output)</option></select></label>
-        <label className="text-sm">Provider<select value={provider} onChange={(event) => setProvider(event.target.value)} className="block w-full border p-2 mt-1 bg-transparent">{["anthropic", "openai", "google"].map((name) => <option key={name} value={name}>{name === "openai" ? "openai / compatible endpoint" : name}</option>)}</select></label>
-        <label className="text-sm">Model<input value={model} onChange={(event) => setModel(event.target.value)} className="block w-full border p-2 mt-1 bg-transparent" /></label>
+        <label className="text-sm">Evaluation unit<select value={unit} onChange={(event) => { updatePreferences({ unit: event.target.value }); setTurnCursor(null); setPreview(null); setConfirmed(false); }} className="block w-full border p-2 mt-1 bg-transparent"><option value="trace">Provider Trace</option><option value="agent_turn">Agent Turn (final output)</option></select></label>
+        <label className="text-sm">Provider<select value={provider} onChange={(event) => updatePreferences({ provider: event.target.value })} className="block w-full border p-2 mt-1 bg-transparent">{PROVIDERS.map((name) => <option key={name} value={name}>{name === "openai" ? "openai / compatible endpoint" : name}</option>)}</select></label>
+        <label className="text-sm">Model<input value={model} onChange={(event) => updatePreferences({ model: event.target.value })} className="block w-full border p-2 mt-1 bg-transparent" /></label>
         <label className="text-sm">Rubric name<input value={rubricName} onChange={(event) => setRubricName(event.target.value)} className="block w-full border p-2 mt-1 bg-transparent" /></label>
         <label className="text-sm">Rubric version<input value={rubricVersion} onChange={(event) => setRubricVersion(event.target.value)} className="block w-full border p-2 mt-1 bg-transparent" /></label>
-        <label className="text-sm">Evaluation scope<select value={judgeAll ? "all" : "limit"} onChange={(event) => setJudgeAll(event.target.value === "all")} className="block w-full border p-2 mt-1 bg-transparent"><option value="all">All eligible in this bounded scan</option><option value="limit">Limit judge calls</option></select>{!judgeAll && <input aria-label="Maximum judge calls" type="number" min="1" max="10000" value={maxCalls} onChange={(event) => setMaxCalls(Number(event.target.value))} className="block w-full border p-2 mt-2 bg-transparent" />}<span className="block text-xs mt-1" style={{ color: C.faint }}>{unit === "agent_turn" ? "Scans at most 100 candidate Turns per page, including ineligible Turns. Continue to older Turns explicitly." : "Scans at most 10,000 Traces."}</span></label>
+        <label className="text-sm">Evaluation scope<select value={judgeAll ? "all" : "limit"} onChange={(event) => updatePreferences({ judgeAll: event.target.value === "all" })} className="block w-full border p-2 mt-1 bg-transparent"><option value="all">All eligible in this bounded scan</option><option value="limit">Limit judge calls</option></select>{!judgeAll && <input aria-label="Maximum judge calls" type="number" min="1" max="10000" value={maxCalls} onChange={(event) => updatePreferences({ maxCalls: Number(event.target.value) })} className="block w-full border p-2 mt-2 bg-transparent" />}<span className="block text-xs mt-1" style={{ color: C.faint }}>{unit === "agent_turn" ? "Scans at most 100 candidate Turns per page, including ineligible Turns. Continue to older Turns explicitly." : "Scans at most 10,000 Traces."}</span></label>
         <div className="text-sm"><div>Secret reference</div><div className="border p-2 mt-1 font-mono" style={{ color: providerState?.configured ? C.green : C.amber }}>{providerState?.secretReference || "loading"} · {providerState?.configured ? "configured" : "not configured"}{providerState?.customEndpointConfigured ? " · custom endpoint configured by OPENAI_BASE_URL" : ""}</div></div>
       </div>
-      {unit === "agent_turn" && <label className="flex gap-2 mt-4 text-sm"><input type="checkbox" checked={includeToolCounts} onChange={(event) => { setIncludeToolCounts(event.target.checked); setConfirmed(false); setCalibration(null); }} />Include bounded counts of recorded tool calls, results, and errors in judge input. Turns with no recorded tool events or more than 64 total events are not evaluable in this mode. The tool-event projection adds no names, arguments, results, IDs, or URLs.</label>}
+      {unit === "agent_turn" && <label className="flex gap-2 mt-4 text-sm"><input type="checkbox" checked={includeToolCounts} onChange={(event) => { updatePreferences({ includeToolCounts: event.target.checked }); setConfirmed(false); setCalibration(null); }} />Include bounded counts of recorded tool calls, results, and errors in judge input. Turns with no recorded tool events or more than 64 total events are not evaluable in this mode. The tool-event projection adds no names, arguments, results, IDs, or URLs.</label>}
       <h3 className="font-semibold mt-5">Rubric dimensions</h3>
       <div className="mt-2 space-y-2">{dimensions.map(([name, description], index) => <div key={index} className="grid sm:grid-cols-[180px_minmax(0,1fr)] gap-2"><input value={name} onChange={(event) => setDimensions((items) => items.map((item, i) => i === index ? [event.target.value, item[1]] : item))} className="border p-2 bg-transparent text-sm" /><textarea value={description} onChange={(event) => setDimensions((items) => items.map((item, i) => i === index ? [item[0], event.target.value] : item))} className="border p-2 bg-transparent text-sm" /></div>)}</div>
       <button disabled={!token} onClick={async () => { const request = payload(); const data = await post("/api/evaluators/preview", request, "preview"); if (data) { setPreview(data); setPreviewConfigKey(JSON.stringify(request)); setResult(null); setConfirmed(false); } }} className="mt-5 border px-4 py-2 text-sm">Preview eligibility and cost estimate</button>
