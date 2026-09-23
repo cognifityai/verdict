@@ -444,7 +444,18 @@ Agent Runs detail shows the latest valid current Turn result among the eight
 newest evaluator slots per Turn, or one exact evaluator fingerprint when
 selected. Older results are not implied absent by this bounded view. Trace
 coverage, pipelines, and Monitor remain Trace-based; Turn judging does not provide tool/citation
-provenance, claim verification, or independent-session statistics. A completed
+provenance by default. An explicit `toolEvidence: "counts_v1"` Turn option
+sends only bounded counts of recorded tool calls, results, reported errors,
+and unknown outcomes with the redacted Turn text. The tool-event projection
+does not add names, IDs, arguments, result bodies, or URLs to judge input.
+Turns with no recorded tool events or more than 64 total events are ineligible
+in this mode. Tool counts are not
+retrieved source context and cannot establish MCP origin, citation support,
+claim accuracy, or complete tool coverage; context-required rubric dimensions
+remain skipped. Preview, approval, durable result, and Turn detail bind the
+same counts snapshot, while default Turn and provider Trace results retain
+their existing identities. Turn judging does not provide citation provenance,
+claim verification, or independent-session statistics. A completed
 Turn result contains one score per evaluable rubric dimension; malformed or
 partial stored results are not counted as judged and require a new approved run.
 

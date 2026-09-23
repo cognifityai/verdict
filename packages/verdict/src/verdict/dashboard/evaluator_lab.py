@@ -16,7 +16,9 @@ from typing import Any
 
 from verdict.agent_judgment import (
     MAX_TURN_SCAN,
+    TOOL_EVIDENCE_MODE,
     AgentTurnJudgment,
+    TurnToolCounts,
     turn_evidence_fingerprint,
     turn_evidence_reason,
 )
@@ -67,6 +69,10 @@ def _validated_config(config: dict[str, Any]):
         raise ValueError("evaluator config must be an object")
     if config.get("unit", "trace") not in ("trace", "agent_turn"):
         raise ValueError("unsupported evaluation unit")
+    if config.get("toolEvidence") not in (None, TOOL_EVIDENCE_MODE):
+        raise ValueError("unsupported tool evidence mode")
+    if config.get("toolEvidence") is not None and config.get("unit") != "agent_turn":
+        raise ValueError("tool evidence requires Agent Turn evaluation")
     provider = config.get("provider")
     model = config.get("model")
     if provider not in _PROVIDER_KEYS:
@@ -170,7 +176,7 @@ class _IdentityOnlyProvider:
             self.supports_temperature = True
 
 
-def _judge(provider, model, rubric, max_output):
+def _judge(provider, model, rubric, max_output, *, tool_evidence=False):
     from verdict_eval.judge import Judge
 
     return Judge(
@@ -179,6 +185,8 @@ def _judge(provider, model, rubric, max_output):
         rubric=rubric,
         skip_context_dependent_when_missing=True,
         max_tokens=max_output,
+        tool_evidence_mode=TOOL_EVIDENCE_MODE if tool_evidence else None,
+        tool_evidence_template=TurnToolCounts.PROMPT_TEMPLATE if tool_evidence else None,
     )
 
 
@@ -269,15 +277,19 @@ def _turn_plan_fingerprint(tenant_id, evaluator_fingerprint, max_calls, limit, b
 
 def _turn_candidates(storage, tenant_id, identity, config, max_calls):
     limit, before = _turn_scan_options(config)
+    tool_mode = config.get("toolEvidence") == TOOL_EVIDENCE_MODE
     rows, has_more = storage.list_agent_turn_evaluation_candidates(
         tenant_id, identity["evaluator_fingerprint"], limit=limit, before=before,
+        tool_evidence=tool_mode,
     )
     reasons: Counter[str] = Counter()
     selected = []
     eligible = 0
     already = 0
-    for turn, judgment in rows:
-        reason = turn_evidence_reason(turn)
+    for item in rows:
+        turn, judgment = item[:2]
+        counts = item[2] if tool_mode else None
+        reason = turn_evidence_reason(turn) or (counts.unavailable_reason if counts else None)
         if reason:
             reasons[reason] += 1
             continue
@@ -286,9 +298,10 @@ def _turn_candidates(storage, tenant_id, identity, config, max_calls):
             already += 1
             continue
         if max_calls is None or len(selected) < max_calls:
-            selected.append(turn)
+            selected.append((turn, counts))
     planned = [{"runId": turn.run_id, "turnId": turn.turn_id,
-                "evidenceFingerprint": turn_evidence_fingerprint(turn)} for turn in selected]
+                "evidenceFingerprint": turn_evidence_fingerprint(turn, counts)}
+               for turn, counts in selected]
     last = rows[-1][0] if rows else None
     next_cursor = ({"startedAt": last.started_at.isoformat(), "runId": last.run_id,
                     "turnId": last.turn_id} if has_more and last else None)
@@ -296,17 +309,21 @@ def _turn_candidates(storage, tenant_id, identity, config, max_calls):
 
 
 def _turn_preview(storage, tenant_id, config, provider, model, max_calls, max_output, rubric):
-    identity = _judge(_IdentityOnlyProvider(provider), model, rubric, max_output).evaluator_identity(context=None)
+    tool_mode = config.get("toolEvidence") == TOOL_EVIDENCE_MODE
+    identity = _judge(_IdentityOnlyProvider(provider), model, rubric, max_output,
+                      tool_evidence=tool_mode).evaluator_identity(context=None)
     rows, selected, reasons, eligible, already, planned, next_cursor, limit, before = (
         _turn_candidates(storage, tenant_id, identity, config, max_calls)
     )
     effective = set(identity["expected_dimensions"])
     rubric_chars = sum(len(d.name) + len(d.description) for d in rubric.dimensions if d.name in effective)
     input_estimate = sum(math.ceil((len(turn.user_request_redacted or "") +
-                    len(turn.final_response_redacted or "") + rubric_chars) / 4) + 400
-                    for turn in selected)
+                    len(turn.final_response_redacted or "") + rubric_chars +
+                    (len(counts.prompt_block()) if counts else 0)) / 4) + 400
+                    for turn, counts in selected)
     return {
         "unit": "agent_turn", "provider": provider, "model": model,
+        "toolEvidence": TOOL_EVIDENCE_MODE if tool_mode else "none",
         "rubric": _rubric_summary(rubric, identity),
         "availableTurns": len(rows), "eligible": eligible,
         "notEvaluable": sum(reasons.values()), "notEvaluableReasons": dict(sorted(reasons.items())),
@@ -521,8 +538,9 @@ def _execute_evaluation(
 
 def _execute_turn_evaluation(storage, tenant_id, config, provider_name, model,
                              max_calls, max_output, rubric, provider):
+    tool_mode = config.get("toolEvidence") == TOOL_EVIDENCE_MODE
     preview_identity = _judge(_IdentityOnlyProvider(provider_name), model, rubric,
-                              max_output).evaluator_identity(context=None)
+                              max_output, tool_evidence=tool_mode).evaluator_identity(context=None)
     rows, selected, reasons, eligible, already, planned, next_cursor, limit, before = (
         _turn_candidates(storage, tenant_id, preview_identity, config, max_calls)
     )
@@ -531,14 +549,15 @@ def _execute_turn_evaluation(storage, tenant_id, config, provider_name, model,
     if (config.get("planFingerprint") != fingerprint or
         config.get("plannedTurns") != planned):
         raise ValueError("evaluator preview plan is no longer current")
-    judge = _judge(provider or _provider(provider_name), model, rubric, max_output)
+    judge = _judge(provider or _provider(provider_name), model, rubric, max_output,
+                   tool_evidence=tool_mode)
     identity = judge.evaluator_identity(context=None)
     if identity["evaluator_fingerprint"] != preview_identity["evaluator_fingerprint"]:
         raise ValueError("judge provider behavior changed after preview")
     from verdict.dashboard.app import evaluator_identity
     dashboard_identity = evaluator_identity(identity)
     completed = errors = stale = in_progress = 0
-    for turn in selected:
+    for turn, counts in selected:
         with storage.agent_turn_judge_guard(
             tenant_id, turn.run_id, turn.turn_id, identity["evaluator_fingerprint"],
         ) as acquired:
@@ -547,9 +566,13 @@ def _execute_turn_evaluation(storage, tenant_id, config, provider_name, model,
                 continue
             candidate = storage.get_agent_turn_evaluation_candidate(
                 tenant_id, turn.run_id, turn.turn_id, identity["evaluator_fingerprint"],
+                tool_evidence=tool_mode,
             )
+            current_counts = candidate[2] if candidate is not None and tool_mode else None
             if (candidate is None or turn_evidence_reason(candidate[0]) is not None or
-                turn_evidence_fingerprint(candidate[0]) != turn_evidence_fingerprint(turn)):
+                (current_counts is not None and current_counts.unavailable_reason is not None) or
+                turn_evidence_fingerprint(candidate[0], current_counts) !=
+                turn_evidence_fingerprint(turn, counts)):
                 stale += 1
                 continue
             if candidate[1] is JudgmentStatus.COMPLETED:
@@ -557,16 +580,18 @@ def _execute_turn_evaluation(storage, tenant_id, config, provider_name, model,
                 continue
             try:
                 dimensions = judge.score(query=turn.user_request_redacted or "",
-                                         response=turn.final_response_redacted or "")
+                                         response=turn.final_response_redacted or "",
+                                         tool_evidence=current_counts.prompt_block() if current_counts else None)
                 record = AgentTurnJudgment(
                     tenant_id=tenant_id, run_id=turn.run_id, turn_id=turn.turn_id,
-                    evidence_fingerprint=turn_evidence_fingerprint(turn), dimensions=dimensions,
+                    evidence_fingerprint=turn_evidence_fingerprint(turn, current_counts),
+                    dimensions=dimensions,
                     **identity,
                 )
             except Exception as exc:
                 record = AgentTurnJudgment(
                     tenant_id=tenant_id, run_id=turn.run_id, turn_id=turn.turn_id,
-                    evidence_fingerprint=turn_evidence_fingerprint(turn),
+                    evidence_fingerprint=turn_evidence_fingerprint(turn, current_counts),
                     status=JudgmentStatus.ERROR,
                     error=(redact(str(exc)) or "judge error")[:2000], **identity,
                 )
@@ -585,7 +610,8 @@ def _execute_turn_evaluation(storage, tenant_id, config, provider_name, model,
         elif outcome == "already_completed":
             already += 1
     return {
-        "unit": "agent_turn", "availableTurns": len(rows), "eligible": eligible,
+        "unit": "agent_turn", "toolEvidence": TOOL_EVIDENCE_MODE if tool_mode else "none",
+        "availableTurns": len(rows), "eligible": eligible,
         "plannedCalls": len(selected), "alreadyJudged": already,
         "completed": completed, "errors": errors, "stale": stale,
         "inProgress": in_progress,
@@ -617,6 +643,8 @@ def _label_set(path: str | Path, rubric):
 
 def preview_calibration(*, path: str | Path, config: dict[str, Any]) -> dict[str, Any]:
     _provider_name, model, _max_calls, max_output, rubric = _validated_config(config)
+    if config.get("toolEvidence") is not None:
+        raise ValueError("calibration examples do not contain Agent Turn tool evidence")
     set_name, examples = _label_set(path, rubric)
     label_counts: Counter[str] = Counter()
     estimated_input = 0
@@ -650,6 +678,8 @@ def execute_calibration(
     if confirm_external_egress is not True:
         raise ValueError("external judge egress was not confirmed")
     provider_name, model, _max_calls, max_output, rubric = _validated_config(config)
+    if config.get("toolEvidence") is not None:
+        raise ValueError("calibration examples do not contain Agent Turn tool evidence")
     set_name, examples = _label_set(path, rubric)
     from verdict_eval.judge import Judge
     from verdict_eval.judge_health import evaluate_judge_health

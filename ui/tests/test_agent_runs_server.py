@@ -7,9 +7,11 @@ from datetime import datetime, timedelta, timezone
 import httpx
 import verdict
 import verdict.dashboard.analysis_service as analysis_service
+import verdict.dashboard.query as dashboard_query
 from fastapi import FastAPI, Request
 from verdict.agent_judgment import (
     AgentTurnJudgment,
+    TurnToolCounts,
     agent_turn_judgment_to_json,
     turn_evidence_fingerprint,
 )
@@ -97,6 +99,97 @@ def test_run_detail_shows_current_native_turn_scores_without_cross_tenant_leak(t
     storage.replace_agent_run_bundle(replace(local, turns=(replace(
         local.turns[0], final_response_redacted="response extended",
     ),)))
+    storage.close()
+    stale = build_agent_run_detail(path, tenant="local", run_id="r-local")
+    assert stale["turns"][0]["evaluation"] is None
+
+
+def test_run_detail_batches_tool_metadata_for_turn_page(tmp_path, monkeypatch):
+    path = tmp_path / "detail-batch.db"
+    storage = SQLiteStorage(str(path))
+    now = datetime(2026, 8, 31, tzinfo=timezone.utc)
+    bundle = _bundle("local", now, with_turn=True)
+    turns = tuple(replace(bundle.turns[0], turn_id=f"turn-{index}", sequence=index)
+                  for index in range(50))
+    storage.replace_agent_run_bundle(replace(bundle, turns=turns, events=()))
+    storage.close()
+
+    event_queries = []
+    original = dashboard_query.SQLiteSession.execute
+
+    def counted(self, query, params=()):
+        if "AS is_error" in query and "FROM agent_events" in query:
+            event_queries.append(query)
+        return original(self, query, params)
+
+    monkeypatch.setattr(dashboard_query.SQLiteSession, "execute", counted)
+    detail = build_agent_run_detail(path, tenant="local", run_id="r-local", turn_limit=50)
+    assert len(detail["turns"]) == 50
+    assert len(event_queries) == 1
+
+
+def test_run_detail_shows_only_current_tool_count_judgment(tmp_path):
+    path = tmp_path / "turn-tool-scores.db"
+    storage = SQLiteStorage(str(path))
+    now = datetime(2026, 8, 31, tzinfo=timezone.utc)
+    bundle = _bundle("local", now, with_turn=True)
+    call = AgentEvent(
+        "call", "turn", 2, now, AgentEventType.TOOL_CALL,
+        ExecutionStatus.COMPLETED, "sdk",
+        {"tool_name": "secret_tool", "call_id": "secret_id", "arguments": "private"},
+        PrivacyClassification.REDACTED,
+    )
+    with_call = replace(bundle, events=(*bundle.events, call))
+    storage.replace_agent_run_bundle(with_call)
+    [(turn, _status, counts)], _ = storage.list_agent_turn_evaluation_candidates(
+        "local", "c" * 64, tool_evidence=True,
+    )
+    judgment = AgentTurnJudgment(
+        tenant_id="local", run_id="r-local", turn_id="turn",
+        evaluator_fingerprint="c" * 64,
+        evidence_fingerprint=turn_evidence_fingerprint(turn, counts),
+        evaluator_provider="anthropic", evaluator_config={
+            "tool_evidence_mode": "counts_v1",
+            "tool_evidence_template": TurnToolCounts.PROMPT_TEMPLATE,
+        },
+        judge_models=["test"], expected_dimensions=["relevance"],
+        rubric_name="quality", rubric_version="1",
+        dimensions=[DimensionScore("relevance", Verdict.PASS, "ok", "test")],
+    )
+    assert storage.save_agent_turn_judgment_if_current(judgment) == "saved"
+    storage.close()
+    visible = build_agent_run_detail(path, tenant="local", run_id="r-local")
+    assert visible["turns"][0]["evaluation"]["toolEvidence"] == "counts_v1"
+    assert visible["turns"][0]["evaluation"]["toolCounts"] == {
+        "calls": 1, "results": 0, "errorResults": 0, "unknownResults": 0,
+    }
+    assert "secret_tool" not in json.dumps(visible["turns"][0]["evaluation"])
+    corrupt = json.loads(agent_turn_judgment_to_json(judgment))
+    corrupt["evaluator_config"]["tool_evidence_mode"] = []
+    with sqlite3.connect(path) as connection:
+        connection.execute("UPDATE agent_turn_judgments SET result_json=?",
+                           (json.dumps(corrupt),))
+    assert build_agent_run_detail(path, tenant="local", run_id="r-local")["turns"][0]["evaluation"] is None
+
+    async def detail_after_corruption():
+        transport = httpx.ASGITransport(app=create_app(storage=f"sqlite:///{path}", tenant_id="local"))
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            return await client.get("/api/runs/r-local")
+
+    response = asyncio.run(detail_after_corruption())
+    assert response.status_code == 200
+    assert response.json()["turns"][0]["evaluation"] is None
+    with sqlite3.connect(path) as connection:
+        connection.execute("UPDATE agent_turn_judgments SET result_json=?",
+                           (agent_turn_judgment_to_json(judgment),))
+    storage = SQLiteStorage(str(path))
+    result = AgentEvent(
+        "result", "turn", 3, now, AgentEventType.TOOL_RESULT,
+        ExecutionStatus.FAILED, "sdk",
+        {"tool_name": "secret_tool", "call_id": "secret_id", "is_error": True,
+         "result": "private"}, PrivacyClassification.REDACTED,
+    )
+    storage.replace_agent_run_bundle(replace(bundle, events=(*bundle.events, call, result)))
     storage.close()
     stale = build_agent_run_detail(path, tenant="local", run_id="r-local")
     assert stale["turns"][0]["evaluation"] is None

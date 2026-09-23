@@ -11,7 +11,7 @@ from contextlib import AbstractContextManager
 from datetime import datetime
 from typing import Protocol, runtime_checkable
 
-from verdict.agent_judgment import AgentTurnJudgment
+from verdict.agent_judgment import AgentTurnJudgment, TurnToolCounts
 from verdict.analysis_records import (
     DeterministicAnalysisRun,
     NotificationDeliveryAttempt,
@@ -119,13 +119,19 @@ class Storage(Protocol):
     def list_agent_turn_evaluation_candidates(
         self, tenant_id: str, evaluator_fingerprint: str, *, limit: int = 100,
         before: tuple[datetime, str, str] | None = None,
-    ) -> tuple[list[tuple[AgentTurn, JudgmentStatus | None]], bool]: ...
+        tool_evidence: bool = False,
+    ) -> tuple[
+        list[tuple[AgentTurn, JudgmentStatus | None] |
+             tuple[AgentTurn, JudgmentStatus | None, TurnToolCounts]], bool,
+    ]: ...
 
     def save_agent_turn_judgment_if_current(self, judgment: AgentTurnJudgment) -> str: ...
 
     def get_agent_turn_evaluation_candidate(
         self, tenant_id: str, run_id: str, turn_id: str, evaluator_fingerprint: str,
-    ) -> tuple[AgentTurn, JudgmentStatus | None] | None: ...
+        *, tool_evidence: bool = False,
+    ) -> (tuple[AgentTurn, JudgmentStatus | None] |
+          tuple[AgentTurn, JudgmentStatus | None, TurnToolCounts] | None): ...
 
     def agent_turn_judge_guard(
         self, tenant_id: str, run_id: str, turn_id: str, evaluator_fingerprint: str,

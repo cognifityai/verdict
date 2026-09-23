@@ -23,6 +23,7 @@ from dataclasses import asdict
 from datetime import datetime
 
 from verdict.agent_judgment import (
+    TOOL_EVIDENCE_MODE,
     AgentTurnJudgment,
     sanitized_turn_judgment,
     trusted_turn_judgment,
@@ -112,6 +113,10 @@ from verdict.storage.base import (
     _validate_agent_bundle_run_id,
     _validate_drift_run_snapshot,
     _validate_evaluator_judgment_query,
+)
+from verdict.storage.turn_tool_evidence import (
+    read_turn_tool_counts,
+    read_turn_tool_counts_batch,
 )
 
 
@@ -1347,6 +1352,7 @@ class PostgresStorage:
     def list_agent_turn_evaluation_candidates(
         self, tenant_id: str, evaluator_fingerprint: str, *, limit: int = 100,
         before: tuple[datetime, str, str] | None = None,
+        tool_evidence: bool = False,
     ) -> tuple[list[tuple[AgentTurn, JudgmentStatus | None]], bool]:
         validate_turn_scan(tenant_id, evaluator_fingerprint, limit, before)
         cursor_clause = "AND (t.started_at,t.run_id,t.turn_id) < (%s,%s,%s)" if before else ""
@@ -1355,6 +1361,8 @@ class PostgresStorage:
             params.extend(before)
         params.append(limit + 1)
         with self._pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
+            if tool_evidence:
+                cur.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
             cur.execute(
                 "SELECT t.*, j.evidence_fingerprint AS judgment_evidence,"
                 "j.status AS judgment_status,j.result_json AS judgment_json FROM agent_turns t "
@@ -1366,18 +1374,33 @@ class PostgresStorage:
             )
             columns = [column.name for column in cur.description]
             rows = [dict(zip(columns, row, strict=True)) for row in cur.fetchall()]
+            counts_by_turn = (
+                read_turn_tool_counts_batch(
+                    cur, postgres=True, tenant_id=tenant_id,
+                    turn_keys=[(row["run_id"], row["turn_id"]) for row in rows[:limit]],
+                ) if tool_evidence else {}
+            )
             items = []
             for row in rows[:limit]:
                 turn = agent_turn_from_row(row)
-                current = (row["judgment_evidence"] == turn_evidence_fingerprint(turn)
-                           and turn_evidence_reason(turn) is None)
+                counts = (
+                    counts_by_turn[(turn.run_id, turn.turn_id)] if tool_evidence else None
+                )
+                current = (row["judgment_evidence"] == turn_evidence_fingerprint(turn, counts)
+                           and turn_evidence_reason(turn) is None
+                           and (counts is None or counts.unavailable_reason is None))
                 trusted = trusted_turn_judgment(
                     row["judgment_json"] if current else None,
                     tenant_id=tenant_id, run_id=turn.run_id, turn_id=turn.turn_id,
                     evaluator_fingerprint=evaluator_fingerprint,
                     evidence_fingerprint=row["judgment_evidence"], status=row["judgment_status"],
                 )
-                items.append((turn, trusted.status if trusted else None))
+                if trusted is not None and (
+                    trusted.evaluator_config.get("tool_evidence_mode") == TOOL_EVIDENCE_MODE
+                ) != tool_evidence:
+                    trusted = None
+                item = (turn, trusted.status if trusted else None)
+                items.append((*item, counts) if tool_evidence else item)
         return items, len(rows) > limit
 
     def save_agent_turn_judgment_if_current(self, judgment: AgentTurnJudgment) -> str:
@@ -1395,6 +1418,13 @@ class PostgresStorage:
                 (judgment.tenant_id, judgment.run_id, judgment.turn_id, judgment.evaluator_fingerprint),
             )
             previous = cur.fetchone()
+            tool_counts = (
+                read_turn_tool_counts(
+                    cur, postgres=True, tenant_id=judgment.tenant_id,
+                    run_id=judgment.run_id, turn_id=judgment.turn_id,
+                ) if judgment.evaluator_config.get("tool_evidence_mode") == TOOL_EVIDENCE_MODE
+                else None
+            )
             decision = turn_judgment_write_decision(
                 agent_turn_from_row(turn) if turn else None, judgment,
                 trusted_turn_judgment(
@@ -1405,6 +1435,7 @@ class PostgresStorage:
                     evidence_fingerprint=previous[1] if previous else None,
                     status=previous[2] if previous else None,
                 ),
+                tool_counts,
             )
             if decision == "saved":
                 cur.execute(
@@ -1421,9 +1452,12 @@ class PostgresStorage:
 
     def get_agent_turn_evaluation_candidate(
         self, tenant_id: str, run_id: str, turn_id: str, evaluator_fingerprint: str,
-    ) -> tuple[AgentTurn, JudgmentStatus | None] | None:
+        *, tool_evidence: bool = False,
+    ) -> tuple | None:
         validate_turn_scan(tenant_id, evaluator_fingerprint, 1, None)
-        with self._pool.connection() as conn, conn.cursor() as cur:
+        with self._pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
+            if tool_evidence:
+                cur.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
             cur.execute(
                 "SELECT t.*,j.evidence_fingerprint AS judgment_evidence,"
                 "j.status AS judgment_status,j.result_json AS judgment_json FROM agent_turns t "
@@ -1437,15 +1471,24 @@ class PostgresStorage:
                 return None
             row = dict(zip([column.name for column in cur.description], raw, strict=True))
             turn = agent_turn_from_row(row)
-            current = (row["judgment_evidence"] == turn_evidence_fingerprint(turn)
-                       and turn_evidence_reason(turn) is None)
+            counts = (read_turn_tool_counts(
+                cur, postgres=True, tenant_id=tenant_id, run_id=run_id, turn_id=turn_id,
+            ) if tool_evidence else None)
+            current = (row["judgment_evidence"] == turn_evidence_fingerprint(turn, counts)
+                       and turn_evidence_reason(turn) is None
+                       and (counts is None or counts.unavailable_reason is None))
             trusted = trusted_turn_judgment(
                 row["judgment_json"] if current else None,
                 tenant_id=tenant_id, run_id=run_id, turn_id=turn_id,
                 evaluator_fingerprint=evaluator_fingerprint,
                 evidence_fingerprint=row["judgment_evidence"], status=row["judgment_status"],
             )
-            return turn, trusted.status if trusted else None
+            if trusted is not None and (
+                trusted.evaluator_config.get("tool_evidence_mode") == TOOL_EVIDENCE_MODE
+            ) != tool_evidence:
+                trusted = None
+            item = (turn, trusted.status if trusted else None)
+            return (*item, counts) if tool_evidence else item
 
     @contextmanager
     def agent_turn_judge_guard(self, tenant_id, run_id, turn_id, evaluator_fingerprint):

@@ -839,10 +839,12 @@ def build_agent_run_detail(
 
     def builder(session: _QuerySession) -> dict:
         from verdict.agent_judgment import (
+            TOOL_EVIDENCE_MODE,
             trusted_turn_judgment,
             turn_evidence_fingerprint,
             turn_evidence_reason,
         )
+        from verdict.storage.turn_tool_evidence import read_turn_tool_counts_batch
         page = agent_evidence_queries.load_run_page(
             session, tenant, run_id,
             event_limit=event_limit, event_offset=event_offset,
@@ -856,20 +858,36 @@ def build_agent_run_detail(
         turn_judgments = {}
         eligible_turns = [turn for turn in shown_turns if turn_evidence_reason(turn) is None]
         if eligible_turns and session.table_exists("agent_turn_judgments"):
-            conditions = " OR ".join("(turn_id=? AND evidence_fingerprint=?)" for _ in eligible_turns)
+            evidence_by_turn = {}
+            counts_by_turn = {}
+            conditions = []
             params = [tenant, run_id]
             evaluator_clause = "AND evaluator_fingerprint=? " if turn_evaluator_fingerprint else ""
             if turn_evaluator_fingerprint:
                 params.append(turn_evaluator_fingerprint)
+            all_counts = read_turn_tool_counts_batch(
+                session, postgres=_is_postgres(configured), tenant_id=tenant,
+                turn_keys=[(turn.run_id, turn.turn_id) for turn in eligible_turns],
+                session=True,
+            )
             for turn in eligible_turns:
-                params.extend((turn.turn_id, turn_evidence_fingerprint(turn)))
+                fingerprints = {None: turn_evidence_fingerprint(turn)}
+                counts = all_counts[(turn.run_id, turn.turn_id)]
+                if counts.unavailable_reason is None:
+                    fingerprints[TOOL_EVIDENCE_MODE] = turn_evidence_fingerprint(turn, counts)
+                    counts_by_turn[turn.turn_id] = counts
+                evidence_by_turn[turn.turn_id] = fingerprints
+                choices = list(fingerprints.values())
+                conditions.append("(turn_id=? AND evidence_fingerprint IN (" +
+                                  ",".join("?" for _ in choices) + "))")
+                params.extend((turn.turn_id, *choices))
             params.extend((MAX_TURN_DETAIL_EVALUATORS, len(eligible_turns) * MAX_TURN_DETAIL_EVALUATORS))
             for row in session.execute(
                 "SELECT turn_id,evaluator_fingerprint,evidence_fingerprint,status,result_json FROM ("
                 "SELECT turn_id,evaluator_fingerprint,evidence_fingerprint,status,result_json,"
                 "ROW_NUMBER() OVER (PARTITION BY turn_id ORDER BY evaluated_at DESC,"
                 "evaluator_fingerprint DESC) AS rn FROM agent_turn_judgments "
-                "WHERE tenant_id=? AND run_id=? " + evaluator_clause + "AND (" + conditions + ")"
+                "WHERE tenant_id=? AND run_id=? " + evaluator_clause + "AND (" + " OR ".join(conditions) + ")"
                 ") ranked WHERE rn<=? ORDER BY turn_id,rn LIMIT ?", tuple(params),
             ):
                 if row["turn_id"] in turn_judgments:
@@ -881,8 +899,21 @@ def build_agent_run_detail(
                 )
                 if result is None:
                     continue
+                mode = result.evaluator_config.get("tool_evidence_mode")
+                if mode is not None and mode != TOOL_EVIDENCE_MODE:
+                    continue
+                if evidence_by_turn[row["turn_id"]].get(mode) != result.evidence_fingerprint:
+                    continue
                 turn_judgments[row["turn_id"]] = {
                     "evaluatorFingerprint": row["evaluator_fingerprint"],
+                    "toolEvidence": TOOL_EVIDENCE_MODE if mode == TOOL_EVIDENCE_MODE else "none",
+                    "toolCounts": (
+                        {"calls": counts_by_turn[row["turn_id"]].calls,
+                         "results": counts_by_turn[row["turn_id"]].results,
+                         "errorResults": counts_by_turn[row["turn_id"]].error_results,
+                         "unknownResults": counts_by_turn[row["turn_id"]].unknown_results}
+                        if mode == TOOL_EVIDENCE_MODE else None
+                    ),
                     "rubricName": result.rubric_name,
                     "rubricVersion": result.rubric_version,
                     "judgeModels": result.judge_models,
@@ -1014,6 +1045,7 @@ def build_agent_run_detail(
             raise ImportError("PostgreSQL dashboard support requires the postgres extra") from exc
         with psycopg.connect(configured, autocommit=False, row_factory=dict_row) as connection:
             with connection.transaction():
+                connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
                 connection.execute("SET TRANSACTION READ ONLY")
                 result = builder(_PostgresSession(connection))
     else:

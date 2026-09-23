@@ -83,7 +83,13 @@ business outcome, Agent Insights surfaces that failure without a judge call.
    bounded tenant-scoped storage and become stale when the Turn text extends.
    A preview scans at most 100 candidate Turns per keyset page, with an
    explicit cursor for older work; it does not claim an all-history denominator.
-   Turn judging does not yet include tool/citation evidence or claim support.
+   Turn judging can optionally include bounded counts of recorded tool calls,
+   results, and errors. Tool-event names, IDs, arguments, result bodies, and URLs
+   are not added to judge input. No tool events or more than 64 total events
+   makes this option ineligible. Counts do not prove MCP origin, complete
+   tool use, citation support, or factual grounding, so context-required
+   dimensions remain skipped. Citation evidence and claim support are not
+   supplied.
    Capture itself does not make judge calls. Every stored judgment identifies
    the evaluator provider, model list, rubric name/version, behavior-relevant
    configuration, expected dimensions, and prompt/rubric fingerprint. Results

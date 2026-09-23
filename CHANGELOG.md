@@ -8,6 +8,11 @@ the product is refined.
 
 ### Added
 
+- Agent Turn judging has an opt-in, counts-only tool-evidence mode. It supplies
+  bounded recorded call/result/error counts in a separate judge prompt block,
+  without tool content or source context. Preview, result currentness, and
+  Agent Runs detail use the same evidence projection; Turns with no recorded
+  tool events or more than 64 events are ineligible in this mode.
 - Evaluator Lab can judge a completed Agent Turn's present, untruncated
   redacted request and final output as a native unit. Preview is a bounded
   tenant-scoped, at-most-100-candidate keyset page with explicit egress approval. SQLite and Postgres
