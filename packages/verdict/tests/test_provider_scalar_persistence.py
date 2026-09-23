@@ -2838,7 +2838,8 @@ def test_real_anthropic_messages_stream_helper_preserves_raising_iterable_bounda
             assert messages.iterations == 0
             assert storage.list_traces() == []
             with pytest.raises(RuntimeError, match=r"failure@example\.com"):
-                provider.messages.stream(**request)
+                with provider.messages.stream(**request):
+                    pass
         else:
             with pytest.raises(RuntimeError, match=r"failure@example\.com"):
                 provider.messages.create(
@@ -2875,7 +2876,8 @@ async def test_real_async_anthropic_messages_stream_helper_preserves_raising_ite
             assert messages.iterations == 0
             assert storage.list_traces() == []
             with pytest.raises(RuntimeError, match=r"failure@example\.com"):
-                provider.messages.stream(**request)
+                async with provider.messages.stream(**request):
+                    pass
         else:
             with pytest.raises(RuntimeError, match=r"failure@example\.com"):
                 await provider.messages.create(
@@ -3029,7 +3031,7 @@ async def test_real_anthropic_messages_stream_helper_does_not_buffer_disabled_co
     tmp_path,
     is_async,
 ):
-    messages = _SinglePassMessages("hi")
+    messages = _SinglePassList("hi")
     if is_async:
         async with _real_async_anthropic_client(
             tmp_path,

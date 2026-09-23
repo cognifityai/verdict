@@ -17,6 +17,10 @@ the product is refined.
 
 ### Fixed
 
+- Anthropic SDK 1.8 message serialization now recognizes Verdict's lazy capture
+  wrapper without consuming one-shot message iterables before the provider
+  request. Stream-helper input failures remain captured whether the SDK raises
+  while creating or entering its lazy manager.
 - Reachable SQLite and PostgreSQL stores with no Agent Runs or Traces visible
   for the selected tenant now appear as connected and waiting for traffic
   instead of an unavailable dashboard. The API exposes only the backend class,
