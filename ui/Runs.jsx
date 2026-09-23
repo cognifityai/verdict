@@ -18,9 +18,12 @@ export function Runs({
   const [detail, setDetail] = useState({ loading: false, error: null, data: null });
   const [eventOffset, setEventOffset] = useState(0);
   const [turnOffset, setTurnOffset] = useState(0);
+  const [turnEvaluatorInput, setTurnEvaluatorInput] = useState("");
+  const [turnEvaluatorFilter, setTurnEvaluatorFilter] = useState(null);
   const [focusEventId, setFocusEventId] = useState(null);
   const [runOffset, setRunOffset] = useState(0);
   const listRequest = React.useRef(0);
+  const detailRequest = React.useRef(0);
   const load = React.useCallback(() => {
     const requestId = ++listRequest.current;
     setState((current) => ({ ...current, loading: true, error: null }));
@@ -78,18 +81,27 @@ export function Runs({
   useEffect(() => {
     if (!selectedRunId) return;
     const controller = new AbortController();
+    const requestId = ++detailRequest.current;
     setDetail({ loading: true, error: null, data: null });
     const eventFocus = focusEventId ? `&event_id=${encodeURIComponent(focusEventId)}` : "";
-    fetch(`${url}/${encodeURIComponent(selectedRunId)}?event_limit=100&event_offset=${eventOffset}&turn_limit=20&turn_offset=${turnOffset}${eventFocus}`, {
+    const turnEvaluator = turnEvaluatorFilter ? `&turn_evaluator_fingerprint=${turnEvaluatorFilter}` : "";
+    fetch(`${url}/${encodeURIComponent(selectedRunId)}?event_limit=100&event_offset=${eventOffset}&turn_limit=20&turn_offset=${turnOffset}${eventFocus}${turnEvaluator}`, {
       credentials: "same-origin", headers: { Accept: "application/json" }, signal: controller.signal,
     })
       .then((response) => response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`)))
-      .then((data) => setDetail({ loading: false, error: null, data }))
+      .then((data) => {
+        if (requestId === detailRequest.current && !controller.signal.aborted) {
+          setDetail({ loading: false, error: null, data });
+        }
+      })
       .catch((error) => {
-        if (error?.name !== "AbortError") setDetail({ loading: false, error: String(error), data: null });
+        if (requestId === detailRequest.current && !controller.signal.aborted
+            && error?.name !== "AbortError") {
+          setDetail({ loading: false, error: String(error), data: null });
+        }
       });
     return () => controller.abort();
-  }, [eventOffset, focusEventId, selectedRunId, turnOffset, url]);
+  }, [eventOffset, focusEventId, selectedRunId, turnOffset, turnEvaluatorFilter, url]);
 
   if (state.error) return <Notice icon={AlertTriangle} text={`Runs unavailable: ${state.error}`} />;
   if (!state.data) return <Notice icon={RefreshCw} text="Loading agent runs…" />;
@@ -141,7 +153,7 @@ export function Runs({
           <button disabled={state.loading || !page.truncated} onClick={() => changeRunPage(page.offset + page.limit)} className="border px-3 py-1">Next</button>
         </div>}
       </section>
-      <RunDetail run={runs.find((run) => run.runId === selectedRunId)} detail={detail} onEventPage={(offset) => { setFocusEventId(null); setEventOffset(offset); }} onTurnPage={setTurnOffset} onFocusEvent={(eventId) => { setFocusEventId(eventId); setEventOffset(0); }} focusEventId={focusEventId} onOpenTrace={onOpenTrace} />
+      <RunDetail run={runs.find((run) => run.runId === selectedRunId)} detail={detail} onEventPage={(offset) => { setFocusEventId(null); setEventOffset(offset); }} onTurnPage={setTurnOffset} onFocusEvent={(eventId) => { setFocusEventId(eventId); setEventOffset(0); }} focusEventId={focusEventId} onOpenTrace={onOpenTrace} turnEvaluatorInput={turnEvaluatorInput} onTurnEvaluatorInput={setTurnEvaluatorInput} turnEvaluatorFilter={turnEvaluatorFilter} onTurnEvaluatorFilter={setTurnEvaluatorFilter} />
     </div>
   );
 }
@@ -186,7 +198,7 @@ function turnTokenSummary(usage) {
   return "not captured";
 }
 
-function RunDetail({ run, detail, onEventPage, onTurnPage, onFocusEvent, focusEventId, onOpenTrace }) {
+function RunDetail({ run, detail, onEventPage, onTurnPage, onFocusEvent, focusEventId, onOpenTrace, turnEvaluatorInput, onTurnEvaluatorInput, turnEvaluatorFilter, onTurnEvaluatorFilter }) {
   if (!run) return null;
   const metrics = run.metrics || {};
   const sourceUsage = run.sourceTokenUsage || { totalTokens: null, state: "not_captured" };
@@ -217,7 +229,7 @@ function RunDetail({ run, detail, onEventPage, onTurnPage, onFocusEvent, focusEv
         <StatusFact label="Source outcome" value={run.sourceOutcome || run.status} />
         <StatusFact label="Turn outcomes" value={displayCounts(run.turnOutcomes)} />
         <StatusFact label="Finding severity" value={displayCounts(run.findingSeverity)} />
-        <StatusFact label="Selected evaluator" value={run.evaluationCoverage?.state === "selected" ? `${run.evaluationCoverage.judged} judged · ${run.evaluationCoverage.notJudged} not judged · ${run.evaluationCoverage.judgeErrors} errors` : "Not selected"} />
+        <StatusFact label="Selected Trace evaluator" value={run.evaluationCoverage?.state === "selected" ? `${run.evaluationCoverage.judged} judged · ${run.evaluationCoverage.notJudged} not judged · ${run.evaluationCoverage.judgeErrors} errors` : "Not selected"} />
       </div>
       <h2 className="font-semibold mt-6">Deterministic findings</h2>
       <div className="mt-2 space-y-2">
@@ -230,6 +242,8 @@ function RunDetail({ run, detail, onEventPage, onTurnPage, onFocusEvent, focusEv
         )) : <div className="text-sm" style={{ color: color.sub }}>No deterministic findings.</div>}
       </div>
       <h2 className="font-semibold mt-6">Turns</h2>
+      <div className="text-xs mt-1" style={{ color: color.sub }}>{turnEvaluatorFilter ? "Showing only this exact Turn evaluator." : `Showing the latest valid current Turn result among the ${detail.data?.turnEvaluationScope?.maxEvaluatorsPerTurn || 8} newest evaluator slots per Turn, if any. Older results require an exact evaluator fingerprint. Trace evaluator coverage above is separate.`}</div>
+      <div className="flex flex-wrap gap-2 mt-2 items-center text-xs"><input aria-label="Exact Turn evaluator fingerprint" placeholder="Exact 64-character evaluator fingerprint" value={turnEvaluatorInput} onChange={(event) => onTurnEvaluatorInput(event.target.value)} className="border p-2 bg-transparent min-w-[200px] flex-1 font-mono" /><button className="border px-3 py-2" disabled={!/^[0-9a-f]{64}$/.test(turnEvaluatorInput)} onClick={() => onTurnEvaluatorFilter(turnEvaluatorInput)}>Show exact evaluator</button><button className="border px-3 py-2" disabled={!turnEvaluatorFilter} onClick={() => { onTurnEvaluatorInput(""); onTurnEvaluatorFilter(null); }}>Show latest</button></div>
       <div className="mt-2 space-y-2">
         {(detail.data?.turns || []).map((turn) => (
           <details key={turn.turnId} className="border p-3" style={{ borderColor: color.border }}>
@@ -238,6 +252,7 @@ function RunDetail({ run, detail, onEventPage, onTurnPage, onFocusEvent, focusEv
               <div>Request ({turn.requestState}{turn.requestTruncated ? ", bounded preview" : ""}): {turn.request ?? "not available"}</div>
               <div className="mt-2">Response ({turn.responseState}{turn.responseTruncated ? ", bounded preview" : ""}): {turn.response ?? "not available"}</div>
               <div className="mt-2">Source-reported token usage: {turnTokenSummary(turn.tokenUsage)}</div>
+              <div className="mt-2">{turnEvaluatorFilter ? "Exact Turn evaluation" : "Latest valid current Turn evaluation (bounded)"}: {turn.evaluation ? `${turn.evaluation.status} · ${turn.evaluation.rubricName}/${turn.evaluation.rubricVersion} · ${turn.evaluation.judgeModels?.join(", ")} · evaluator ${turn.evaluation.evaluatorFingerprint} · ${turn.evaluation.dimensions.map((d) => `${d.name}: ${d.verdict}`).join(" · ") || "no scores"}` : "No current native Turn result for this scope"}</div>
             </div>
           </details>
         ))}

@@ -8,6 +8,11 @@ import httpx
 import verdict
 import verdict.dashboard.analysis_service as analysis_service
 from fastapi import FastAPI, Request
+from verdict.agent_judgment import (
+    AgentTurnJudgment,
+    agent_turn_judgment_to_json,
+    turn_evidence_fingerprint,
+)
 from verdict.analysis_records import AnalysisRunStatus, DeterministicAnalysisRun
 from verdict.capture import AgentCaptureService
 from verdict.dashboard import agent_evidence_queries
@@ -29,7 +34,7 @@ from verdict.evidence import (
     PrivacyClassification,
     SourceSession,
 )
-from verdict.schema import Operation, Trace
+from verdict.schema import DimensionScore, Operation, Trace, Verdict
 from verdict.storage import SQLiteStorage
 
 
@@ -63,6 +68,206 @@ def _bundle(
         turns,
         events,
     )
+
+
+def test_run_detail_shows_current_native_turn_scores_without_cross_tenant_leak(tmp_path):
+    path = tmp_path / "turn-scores.db"
+    storage = SQLiteStorage(str(path))
+    now = datetime(2026, 8, 31, tzinfo=timezone.utc)
+    local = _bundle("local", now, with_turn=True)
+    other = _bundle("other", now, with_turn=True)
+    storage.replace_agent_run_bundle(local)
+    storage.replace_agent_run_bundle(other)
+    result = AgentTurnJudgment(
+        tenant_id="local", run_id="r-local", turn_id="turn",
+        evaluator_fingerprint="a" * 64,
+        evidence_fingerprint=turn_evidence_fingerprint(local.turns[0]),
+        evaluator_provider="anthropic", evaluator_config={}, judge_models=["test"],
+        expected_dimensions=["relevance"], rubric_name="test", rubric_version="1",
+        dimensions=[DimensionScore("relevance", Verdict.PASS, "ok", "test")],
+    )
+    assert storage.save_agent_turn_judgment_if_current(result) == "saved"
+    storage.close()
+    visible = build_agent_run_detail(path, tenant="local", run_id="r-local")
+    hidden = build_agent_run_detail(path, tenant="other", run_id="r-other")
+    assert visible["turns"][0]["evaluation"]["status"] == "completed"
+    assert hidden["turns"][0]["evaluation"] is None
+    assert "request" not in json.dumps(visible["turns"][0]["evaluation"])
+    storage = SQLiteStorage(str(path))
+    storage.replace_agent_run_bundle(replace(local, turns=(replace(
+        local.turns[0], final_response_redacted="response extended",
+    ),)))
+    storage.close()
+    stale = build_agent_run_detail(path, tenant="local", run_id="r-local")
+    assert stale["turns"][0]["evaluation"] is None
+
+
+def test_run_detail_labels_latest_turn_evaluator_and_filters_exact_identity(tmp_path):
+    path = tmp_path / "multi-evaluator.db"
+    storage = SQLiteStorage(str(path))
+    now = datetime(2026, 8, 31, tzinfo=timezone.utc)
+    bundle = _bundle("local", now, with_turn=True)
+    storage.replace_agent_run_bundle(bundle)
+    for fingerprint, version, when in (("a" * 64, "one", now),
+                                       ("b" * 64, "two", now + timedelta(seconds=1))):
+        assert storage.save_agent_turn_judgment_if_current(AgentTurnJudgment(
+            tenant_id="local", run_id="r-local", turn_id="turn",
+            evaluator_fingerprint=fingerprint,
+            evidence_fingerprint=turn_evidence_fingerprint(bundle.turns[0]),
+            evaluator_provider="anthropic", evaluator_config={}, judge_models=["test"],
+            expected_dimensions=["relevance"], rubric_name="quality",
+            rubric_version=version, evaluated_at=when,
+            dimensions=[DimensionScore("relevance", Verdict.PASS, "ok", "test")],
+        )) == "saved"
+    storage.close()
+    latest = build_agent_run_detail(path, tenant="local", run_id="r-local")
+    exact = build_agent_run_detail(path, tenant="local", run_id="r-local",
+                                   turn_evaluator_fingerprint="a" * 64)
+    assert latest["turnEvaluationScope"]["mode"] == "latest_valid_bounded"
+    assert latest["turnEvaluationScope"]["maxEvaluatorsPerTurn"] == 8
+    assert latest["turns"][0]["evaluation"]["evaluatorFingerprint"] == "b" * 64
+    assert latest["turns"][0]["evaluation"]["rubricVersion"] == "two"
+    assert exact["turnEvaluationScope"]["mode"] == "exact_evaluator"
+    assert exact["turnEvaluationScope"]["maxEvaluatorsPerTurn"] == 1
+    assert exact["turns"][0]["evaluation"]["evaluatorFingerprint"] == "a" * 64
+    assert exact["turns"][0]["evaluation"]["rubricVersion"] == "one"
+    assert build_agent_run_detail(path, tenant="local", run_id="r-local",
+                                  turn_evaluator_fingerprint="c" * 64)["turns"][0]["evaluation"] is None
+
+    async def request_exact():
+        transport = httpx.ASGITransport(app=create_app(storage=f"sqlite:///{path}", tenant_id="local"))
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            exact_response = await client.get("/api/runs/r-local", params={
+                "turn_evaluator_fingerprint": "a" * 64,
+            })
+            bad_response = await client.get("/api/runs/r-local", params={
+                "turn_evaluator_fingerprint": "not-a-digest",
+            })
+            return exact_response, bad_response
+
+    response, bad = asyncio.run(request_exact())
+    assert response.status_code == 200
+    assert response.json()["turns"][0]["evaluation"]["evaluatorFingerprint"] == "a" * 64
+    assert bad.status_code == 400
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "UPDATE agent_turn_judgments SET result_json='[]' WHERE evaluator_fingerprint=?",
+            ("b" * 64,),
+        )
+    fallback = build_agent_run_detail(path, tenant="local", run_id="r-local")
+    assert fallback["turns"][0]["evaluation"]["evaluatorFingerprint"] == "a" * 64
+    assert build_agent_run_detail(path, tenant="local", run_id="r-local",
+                                  turn_evaluator_fingerprint="b" * 64)["turns"][0]["evaluation"] is None
+
+    async def default_after_corruption():
+        transport = httpx.ASGITransport(app=create_app(storage=f"sqlite:///{path}", tenant_id="local"))
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            return await client.get("/api/runs/r-local")
+
+    api_fallback = asyncio.run(default_after_corruption())
+    assert api_fallback.status_code == 200
+    assert api_fallback.json()["turns"][0]["evaluation"]["evaluatorFingerprint"] == "a" * 64
+
+
+def test_malformed_stored_turn_result_does_not_break_run_detail(tmp_path):
+    path = tmp_path / "malformed-evaluator.db"
+    storage = SQLiteStorage(str(path))
+    now = datetime(2026, 8, 31, tzinfo=timezone.utc)
+    bundle = _bundle("local", now, with_turn=True)
+    storage.replace_agent_run_bundle(bundle)
+    result = AgentTurnJudgment(
+        tenant_id="local", run_id="r-local", turn_id="turn",
+        evaluator_fingerprint="a" * 64,
+        evidence_fingerprint=turn_evidence_fingerprint(bundle.turns[0]),
+        evaluator_provider="anthropic", evaluator_config={}, judge_models=["test"],
+        expected_dimensions=["relevance"], rubric_name="test", rubric_version="1",
+        dimensions=[DimensionScore("relevance", Verdict.PASS, "ok", "test")],
+    )
+    storage.save_agent_turn_judgment_if_current(result)
+    storage._conn.execute("UPDATE agent_turn_judgments SET result_json='[]'")
+    detail = build_agent_run_detail(path, tenant="local", run_id="r-local")
+    assert detail["turns"][0]["evaluation"] is None
+    original = json.loads(agent_turn_judgment_to_json(result))
+    for change in ("invalid_model_list", "missing_score", "duplicate_score"):
+        payload = json.loads(json.dumps(original))
+        if change == "invalid_model_list":
+            payload["judge_models"] = "not a list"
+        elif change == "missing_score":
+            payload["dimensions"] = []
+        else:
+            payload["dimensions"].append(payload["dimensions"][0])
+        storage._conn.execute("UPDATE agent_turn_judgments SET result_json=?", (json.dumps(payload),))
+        detail = build_agent_run_detail(path, tenant="local", run_id="r-local")
+        assert detail["turns"][0]["evaluation"] is None
+    storage.close()
+
+
+def test_latest_turn_result_checks_only_bounded_newest_evaluator_slots(tmp_path):
+    path = tmp_path / "bounded-evaluators.db"
+    storage = SQLiteStorage(str(path))
+    now = datetime(2026, 8, 31, tzinfo=timezone.utc)
+    bundle = _bundle("local", now, with_turn=True)
+    storage.replace_agent_run_bundle(bundle)
+    for index in range(1, 10):
+        fingerprint = f"{index:064x}"
+        storage.save_agent_turn_judgment_if_current(AgentTurnJudgment(
+            tenant_id="local", run_id="r-local", turn_id="turn",
+            evaluator_fingerprint=fingerprint,
+            evidence_fingerprint=turn_evidence_fingerprint(bundle.turns[0]),
+            evaluator_provider="anthropic", evaluator_config={}, judge_models=["test"],
+            expected_dimensions=["relevance"], rubric_name="test", rubric_version="1",
+            dimensions=[DimensionScore("relevance", Verdict.PASS, "ok", "test")],
+            evaluated_at=now + timedelta(seconds=index),
+        ))
+        if index > 1:
+            storage._conn.execute(
+                "UPDATE agent_turn_judgments SET result_json='[]' WHERE evaluator_fingerprint=?",
+                (fingerprint,),
+            )
+    storage.close()
+    bounded = build_agent_run_detail(path, tenant="local", run_id="r-local")
+    assert bounded["turnEvaluationScope"]["maxEvaluatorsPerTurn"] == 8
+    assert bounded["turns"][0]["evaluation"] is None
+    exact = build_agent_run_detail(path, tenant="local", run_id="r-local",
+                                   turn_evaluator_fingerprint=f"{1:064x}")
+    assert exact["turns"][0]["evaluation"]["evaluatorFingerprint"] == f"{1:064x}"
+
+
+def test_turn_result_latest_order_normalizes_timezone_offsets_in_sqlite(tmp_path):
+    path = tmp_path / "offset-order.db"
+    storage = SQLiteStorage(str(path))
+    now = datetime(2026, 8, 31, tzinfo=timezone.utc)
+    bundle = _bundle("local", now, with_turn=True)
+    storage.replace_agent_run_bundle(bundle)
+    for fingerprint, when in (
+        ("a" * 64, datetime(2026, 8, 31, 10, tzinfo=timezone(timedelta(hours=2)))),
+        ("b" * 64, datetime(2026, 8, 31, 9, tzinfo=timezone.utc)),
+    ):
+        assert storage.save_agent_turn_judgment_if_current(AgentTurnJudgment(
+            tenant_id="local", run_id="r-local", turn_id="turn",
+            evaluator_fingerprint=fingerprint,
+            evidence_fingerprint=turn_evidence_fingerprint(bundle.turns[0]),
+            evaluator_provider="anthropic", evaluator_config={}, judge_models=["test"],
+            expected_dimensions=["relevance"], rubric_name="test", rubric_version="1",
+            dimensions=[DimensionScore("relevance", Verdict.PASS, "ok", "test")],
+            evaluated_at=when,
+        )) == "saved"
+    stored = storage._conn.execute(
+        "SELECT evaluated_at FROM agent_turn_judgments ORDER BY evaluated_at DESC"
+    ).fetchall()
+    assert stored[0][0] == "2026-08-31T09:00:00+00:00"
+    storage.close()
+    detail = build_agent_run_detail(path, tenant="local", run_id="r-local")
+    assert detail["turns"][0]["evaluation"]["evaluatorFingerprint"] == "b" * 64
+
+    async def read_api():
+        transport = httpx.ASGITransport(app=create_app(storage=f"sqlite:///{path}", tenant_id="local"))
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            return await client.get("/api/runs/r-local")
+
+    response = asyncio.run(read_api())
+    assert response.status_code == 200
+    assert response.json()["turns"][0]["evaluation"]["evaluatorFingerprint"] == "b" * 64
 
 
 def test_agent_runs_api_exposes_typed_analysis_without_raw_envelopes(tmp_path):

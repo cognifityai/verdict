@@ -77,6 +77,13 @@ business outcome, Agent Insights surfaces that failure without a judge call.
    and `hybrid` fallback remain experimental opt-in alpha features.
 4. **Evaluate**: the separately invoked batch pipeline or Evaluator Lab selects
    traces and scores them with a configured judge and rubric.
+   Evaluator Lab additionally offers a distinct Agent Turn unit: a completed,
+   untruncated redacted request and final output are scored without fabricating
+   a provider Trace or changing the Trace-based pipeline. Turn results have
+   bounded tenant-scoped storage and become stale when the Turn text extends.
+   A preview scans at most 100 candidate Turns per keyset page, with an
+   explicit cursor for older work; it does not claim an all-history denominator.
+   Turn judging does not yet include tool/citation evidence or claim support.
    Capture itself does not make judge calls. Every stored judgment identifies
    the evaluator provider, model list, rubric name/version, behavior-relevant
    configuration, expected dimensions, and prompt/rubric fingerprint. Results

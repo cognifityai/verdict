@@ -6,12 +6,25 @@ the product is refined.
 
 ## [Unreleased]
 
+### Added
+
+- Evaluator Lab can judge a completed Agent Turn's present, untruncated
+  redacted request and final output as a native unit. Preview is a bounded
+  tenant-scoped, at-most-100-candidate keyset page with explicit egress approval. SQLite and Postgres
+  store a bounded, evidence-fingerprinted result per Turn/evaluator; stale
+  results are excluded from Agent Runs detail and do not become Trace judgments.
+  Trace evaluation and Monitor remain unchanged.
+
 ### Fixed
 
 - Codex local-history capture now reads text blocks from completed `UserMessage`
   items as Agent Turn requests, alongside the earlier `user_message` records.
   A rescan can fill requests previously marked missing; non-text-only requests
   remain missing rather than being invented.
+- Anthropic SDK 1.8 message serialization now recognizes Verdict's lazy capture
+  wrapper without consuming one-shot message iterables before the provider
+  request. Stream-helper input failures remain captured whether the SDK raises
+  while creating or entering its lazy manager.
 - Reachable SQLite and PostgreSQL stores with no Agent Runs or Traces visible
   for the selected tenant now appear as connected and waiting for traffic
   instead of an unavailable dashboard. The API exposes only the backend class,

@@ -9,6 +9,7 @@ from fastapi import Request
 from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
 
+from verdict.agent_judgment import AgentTurnJudgmentStoreError
 from verdict.dashboard.setup_routes import SetupRoutes
 
 _log = logging.getLogger("verdict.dashboard")
@@ -36,16 +37,23 @@ def register_lab_routes(app, setup: SetupRoutes) -> None:
             )
         except ValueError as exc:
             if str(exc) == "no rubric dimensions are evaluable without context":
+                explanation = (
+                    "Verdict does not have retrieved context for this evaluation unit."
+                    if payload.get("unit") == "agent_turn" else
+                    "Verdict traces do not include retrieved context."
+                )
                 return JSONResponse(
                     {
                         "error": (
-                            "No rubric dimensions can be evaluated because Verdict "
-                            "traces do not include retrieved context."
+                            "No rubric dimensions can be evaluated because " + explanation
                         )
                     },
                     status_code=400,
                 )
             return JSONResponse({"error": "invalid evaluator preview"}, status_code=400)
+        except AgentTurnJudgmentStoreError:
+            _log.exception("invalid persisted Turn result")
+            return JSONResponse({"error": "stored Turn evaluation unavailable"}, status_code=503)
         except (ImportError, OSError, TypeError, UnicodeError):
             return JSONResponse({"error": "invalid evaluator preview"}, status_code=400)
         finally:
@@ -71,6 +79,9 @@ def register_lab_routes(app, setup: SetupRoutes) -> None:
                 config=payload,
                 confirm_external_egress=payload.get("confirmExternalEgress") is True,
             )
+        except AgentTurnJudgmentStoreError:
+            _log.exception("invalid persisted Turn result")
+            return JSONResponse({"error": "stored Turn evaluation unavailable"}, status_code=503)
         except (ImportError, OSError, TypeError, UnicodeError, ValueError):
             return JSONResponse({"error": "invalid evaluator run"}, status_code=400)
         finally:

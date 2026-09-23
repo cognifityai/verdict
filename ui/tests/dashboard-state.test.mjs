@@ -95,6 +95,61 @@ test("Evaluator Lab starts with a neutral response-quality rubric name", async (
   assert.equal(openAIOption.props.value, "openai");
 });
 
+test("Evaluator Lab previews a native Turn page and sends its approved identities", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const props = { configUrl: "/api/config" };
+  render(ui.EvaluatorLab, hooks, props);
+  hooks.flushEffects();
+  await resolveJson(requests[0], { setupToken: "setup-token" });
+  await resolveJson(requests[1], {
+    evalPackageAvailable: true,
+    providers: [{ provider: "anthropic", configured: true }],
+  });
+  let tree = render(ui.EvaluatorLab, hooks, props);
+  const unit = findAll(tree, (node) => node.type === "select" &&
+    findAll(node, (child) => child.type === "option" && child.props.value === "agent_turn").length)[0];
+  unit.props.onChange({ target: { value: "agent_turn" } });
+  tree = render(ui.EvaluatorLab, hooks, props);
+  const preview = findAll(tree, (node) => node.type === "button" &&
+    textOf(node).includes("Preview eligibility"))[0].props.onClick();
+  const sent = JSON.parse(requests[2].options.body);
+  assert.equal(sent.unit, "agent_turn");
+  assert.equal(sent.scanLimit, 100);
+  await resolveJson(requests[2], {
+    unit: "agent_turn", availableTurns: 1, eligible: 1, alreadyJudged: 0,
+    notEvaluable: 0, plannedCalls: 1, estimatedMaximumCostUsd: 0.01,
+    maximumOutputTokens: 512, notEvaluableReasons: {},
+    rubric: { dimensions: ["relevance"], skippedDimensions: [] },
+    planFingerprint: "turn-plan", plannedTurns: [{ runId: "run", turnId: "turn", evidenceFingerprint: "a".repeat(64) }],
+    hasMore: false,
+  });
+  await preview;
+  tree = render(ui.EvaluatorLab, hooks, props);
+  assert.match(textOf(tree), /1\s+tenant-visible candidates/);
+  assert.match(textOf(tree), /provider billing can exceed it/);
+  assert.match(textOf(tree), /cost is an estimate, not a billing cap/);
+  assert.doesNotMatch(textOf(tree), /maximum estimated cost/i);
+  const consent = findAll(tree, (node) => node.type === "input" && node.props.type === "checkbox")[0];
+  consent.props.onChange({ target: { checked: true } });
+  tree = render(ui.EvaluatorLab, hooks, props);
+  const run = findAll(tree, (node) => node.type === "button" &&
+    textOf(node).includes("Run 1 judge calls"))[0].props.onClick();
+  const approved = JSON.parse(requests[3].options.body);
+  assert.deepEqual(approved.plannedTurns, [{ runId: "run", turnId: "turn", evidenceFingerprint: "a".repeat(64) }]);
+  assert.equal(approved.plannedTraces, undefined);
+  await resolveJson(requests[3], { unit: "agent_turn", availableTurns: 1,
+    eligible: 1, completed: 0, alreadyJudged: 0, errors: 0, stale: 0, inProgress: 1,
+    notEvaluable: 0, notEvaluableReasons: {}, evaluatorFingerprint: "a".repeat(64) });
+  await run;
+  tree = render(ui.EvaluatorLab, hooks, props);
+  assert.match(textOf(tree), /Current Turn scores appear on the Agent Runs detail page/);
+  assert.equal(findAll(tree, (node) => node.props?.label === "Judge busy; retry" &&
+    node.props.value === 1).length, 1);
+  assert.doesNotMatch(textOf(tree), /View evaluated traces/);
+});
+
 test("Evaluator Lab makes a long judge run visible and prevents duplicate submission", async () => {
   const ui = await loadUiModule();
   const hooks = createEffectHooks();
@@ -1235,6 +1290,62 @@ test("Agent Runs pages the full list and keeps an empty last page recoverable", 
   assert.equal(previous.props.disabled, false);
 });
 
+test("Agent Runs can fetch one exact Turn evaluator without reusing Trace coverage", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const props = { url: "/api/runs", evaluatorFingerprint: "trace-only" };
+  render(ui.Runs, hooks, props);
+  hooks.flushEffects();
+  await resolveJson(requests[0], runListPage(0, ["run-a"]));
+  let tree = render(ui.Runs, hooks, props);
+  hooks.flushEffects();
+  const initial = requests.find((request) => request.url.includes("/run-a?"));
+  assert.ok(initial);
+  assert.doesNotMatch(initial.url, /turn_evaluator_fingerprint/);
+  await resolveJson(initial, { turns: [], turnPage: { available: 0, shown: 0, offset: 0, limit: 20, truncated: false }, events: [], page: { available: 0, shown: 0, offset: 0, limit: 100, truncated: false } });
+  tree = render(ui.Runs, hooks, props);
+  let detail = findAll(tree, (node) => typeof node.type === "function" && node.type.name === "RunDetail")[0];
+  assert.ok(detail);
+  assert.match(textOf(render(detail.type, createHooks(), detail.props)), /latest valid current Turn result among the 8 newest evaluator slots/);
+  const digest = "a".repeat(64);
+  let rendered = render(detail.type, createHooks(), detail.props);
+  findAll(rendered, (node) => node.type === "input" && node.props["aria-label"] === "Exact Turn evaluator fingerprint")[0]
+    .props.onChange({ target: { value: digest } });
+  tree = render(ui.Runs, hooks, props);
+  detail = findAll(tree, (node) => typeof node.type === "function" && node.type.name === "RunDetail")[0];
+  rendered = render(detail.type, createHooks(), detail.props);
+  findAll(rendered, (node) => node.type === "button" && textOf(node) === "Show exact evaluator")[0]
+    .props.onClick();
+  render(ui.Runs, hooks, props);
+  hooks.flushEffects();
+  const exactA = requests.find((request) => request.url.includes(`turn_evaluator_fingerprint=${digest}`));
+  assert.ok(exactA);
+  const digestB = "b".repeat(64);
+  tree = render(ui.Runs, hooks, props);
+  detail = findAll(tree, (node) => typeof node.type === "function" && node.type.name === "RunDetail")[0];
+  rendered = render(detail.type, createHooks(), detail.props);
+  findAll(rendered, (node) => node.type === "input" && node.props["aria-label"] === "Exact Turn evaluator fingerprint")[0]
+    .props.onChange({ target: { value: digestB } });
+  tree = render(ui.Runs, hooks, props);
+  detail = findAll(tree, (node) => typeof node.type === "function" && node.type.name === "RunDetail")[0];
+  rendered = render(detail.type, createHooks(), detail.props);
+  findAll(rendered, (node) => node.type === "button" && textOf(node) === "Show exact evaluator")[0]
+    .props.onClick();
+  render(ui.Runs, hooks, props);
+  hooks.flushEffects();
+  const exactB = requests.find((request) => request.url.includes(`turn_evaluator_fingerprint=${digestB}`));
+  assert.ok(exactB);
+  const detailPage = (fingerprint) => ({ turns: [{ turnId: "turn-a", evaluation: { evaluatorFingerprint: fingerprint } }],
+    turnPage: { available: 1, shown: 1, offset: 0, limit: 20, truncated: false },
+    events: [], page: { available: 0, shown: 0, offset: 0, limit: 100, truncated: false } });
+  await resolveJson(exactB, detailPage(digestB));
+  await resolveJson(exactA, detailPage(digest));
+  tree = render(ui.Runs, hooks, props);
+  detail = findAll(tree, (node) => typeof node.type === "function" && node.type.name === "RunDetail")[0];
+  assert.equal(detail.props.detail.data.turns[0].evaluation.evaluatorFingerprint, digestB);
+});
+
 test("Agent Runs presents component-only token evidence as partial", async () => {
   const ui = await loadUiModule();
   const hooks = createEffectHooks();
@@ -1731,7 +1842,7 @@ test("judge scores directs an empty store to Evaluator Lab without legacy window
 
   const rendered = textOf(render(ui.Judge, createHooks(), { data })).replace(/\s+/g, " ");
 
-  assert.match(rendered, /No evaluator results have been stored yet/);
+  assert.match(rendered, /No Trace evaluator results have been stored yet/);
   assert.match(rendered, /Evaluator Lab stores results for an eligible trace set/);
   assert.doesNotMatch(rendered, /global content-bearing traces/);
 });
@@ -1751,6 +1862,6 @@ test("unresolved legacy evaluator selection is confined to legacy history", asyn
 
   assert.equal(signalMetric, undefined);
   assert.doesNotMatch(overview, /Evaluation drift signals/);
-  assert.match(judge, /Select an evaluator to view judge results/);
-  assert.doesNotMatch(judge, /No evaluator results have been stored yet/);
+  assert.match(judge, /Select a Trace evaluator to view judge results/);
+  assert.doesNotMatch(judge, /No Trace evaluator results have been stored yet/);
 });

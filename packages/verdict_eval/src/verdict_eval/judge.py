@@ -241,8 +241,19 @@ class Judge:
         trace_id: str = "",
     ) -> Judgment:
         """Run the judge on a single (query, response, optional context) tuple."""
-        rubric = self._effective_rubric(context)
         identity = self.evaluator_identity(context)
+        dimensions = self.score(query=query, response=response, context=context)
+        return Judgment(
+            trace_id=trace_id,
+            dimensions=dimensions,
+            **identity,
+        )
+
+    def score(
+        self, *, query: str, response: str, context: str | None = None,
+    ) -> list[DimensionScore]:
+        """Score evidence without assigning it to any particular analysis unit."""
+        rubric = self._effective_rubric(context)
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": _user_prompt(query, response, context, rubric)},
@@ -266,11 +277,7 @@ class Judge:
             )
             for d in rubric.dimensions
         ]
-        return Judgment(
-            trace_id=trace_id,
-            dimensions=dimensions,
-            **identity,
-        )
+        return dimensions
 
 
 class JudgeEnsemble:

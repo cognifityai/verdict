@@ -46,6 +46,25 @@ def test_judge_marks_provider_call_and_restores_existing_workload() -> None:
         clear_context()
 
 
+def test_trace_judgment_identity_is_captured_before_provider_mutates() -> None:
+    class MutatingProvider(FakeProvider):
+        name = "before-call"
+        supports_temperature = False
+
+        def complete(self, request):
+            self.name = "after-call"
+            self.supports_temperature = True
+            return super().complete(request)
+
+    provider = MutatingProvider("{}")
+    judge = Judge(provider=provider, model="judge-a")
+    expected = judge.evaluator_identity()
+    result = judge.judge(query="question", response="answer")
+    assert result.evaluator_provider == "before-call"
+    assert result.evaluator_fingerprint == expected["evaluator_fingerprint"]
+    assert judge.evaluator_identity()["evaluator_fingerprint"] != result.evaluator_fingerprint
+
+
 def _fake_json_for(verdicts: dict[str, str]) -> str:
     return json.dumps({k: {"reasoning": "r", "verdict": v} for k, v in verdicts.items()})
 

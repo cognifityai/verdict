@@ -15,6 +15,15 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 
+from verdict.agent_judgment import (
+    AgentTurnJudgment,
+    sanitized_turn_judgment,
+    trusted_turn_judgment,
+    turn_evidence_fingerprint,
+    turn_evidence_reason,
+    turn_judgment_write_decision,
+    validate_turn_scan,
+)
 from verdict.analysis_records import (
     DeliveryOutcome,
     DeterministicAnalysisRun,
@@ -28,6 +37,7 @@ from verdict.analysis_records import (
 from verdict.evidence import (
     AgentCaptureBatch,
     AgentRunBundle,
+    AgentTurn,
     agent_run_bundle_from_json,
 )
 from verdict.monitoring import (
@@ -255,6 +265,22 @@ CREATE TABLE IF NOT EXISTS agent_turns (
 );
 CREATE INDEX IF NOT EXISTS idx_agent_turns_run
     ON agent_turns(tenant_id, run_id, sequence, turn_id);
+CREATE INDEX IF NOT EXISTS idx_agent_turns_evaluation_scan
+    ON agent_turns(tenant_id, started_at DESC, run_id DESC, turn_id DESC);
+
+CREATE TABLE IF NOT EXISTS agent_turn_judgments (
+    tenant_id TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    turn_id TEXT NOT NULL,
+    evaluator_fingerprint TEXT NOT NULL CHECK(length(evaluator_fingerprint)=64),
+    evidence_fingerprint TEXT NOT NULL CHECK(length(evidence_fingerprint)=64),
+    status TEXT NOT NULL CHECK(status IN ('completed','error')),
+    evaluated_at TEXT NOT NULL,
+    result_json TEXT NOT NULL CHECK(length(CAST(result_json AS BLOB)) <= 65536),
+    PRIMARY KEY (tenant_id, run_id, turn_id, evaluator_fingerprint),
+    FOREIGN KEY (tenant_id, run_id, turn_id)
+        REFERENCES agent_turns(tenant_id, run_id, turn_id) ON DELETE CASCADE
+);
 
 CREATE TABLE IF NOT EXISTS agent_events (
     tenant_id TEXT NOT NULL,
@@ -652,6 +678,9 @@ class SQLiteStorage:
     def __init__(self, path: str) -> None:
         path = _normalize_sqlite_path(path)
         Path(path).parent.mkdir(parents=True, exist_ok=True)
+        self._judge_lock_path = (
+            None if path == ":memory:" else str(Path(path).resolve()) + ".judge-lock"
+        )
         self._conn = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
         # Set row_factory once on the shared connection rather than mutating it
         # per read call (shared-mutable-state smell). All reads expect sqlite3.Row.
@@ -1352,6 +1381,132 @@ class SQLiteStorage:
 
     def replace_agent_run_bundle(self, bundle: AgentRunBundle) -> None:
         self.replace_agent_capture(bundle)
+
+    def list_agent_turn_evaluation_candidates(
+        self, tenant_id: str, evaluator_fingerprint: str, *, limit: int = 100,
+        before: tuple[datetime, str, str] | None = None,
+    ) -> tuple[list[tuple[AgentTurn, JudgmentStatus | None]], bool]:
+        validate_turn_scan(tenant_id, evaluator_fingerprint, limit, before)
+        cursor_clause = "AND (t.started_at,t.run_id,t.turn_id) < (?,?,?)" if before else ""
+        params = [evaluator_fingerprint, tenant_id]
+        if before:
+            params.extend([before[0].isoformat(), before[1], before[2]])
+        params.append(limit + 1)
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT t.*, j.evidence_fingerprint AS judgment_evidence,"
+                "j.status AS judgment_status,j.result_json AS judgment_json FROM agent_turns t "
+                "LEFT JOIN agent_turn_judgments j ON j.tenant_id=t.tenant_id "
+                "AND j.run_id=t.run_id AND j.turn_id=t.turn_id "
+                "AND j.evaluator_fingerprint=? WHERE t.tenant_id=? "
+                + cursor_clause + " ORDER BY t.started_at DESC,t.run_id DESC,t.turn_id DESC LIMIT ?",
+                params,
+            ).fetchall()
+            items = []
+            for row in rows[:limit]:
+                turn = agent_turn_from_row(dict(row))
+                current = (row["judgment_evidence"] == turn_evidence_fingerprint(turn)
+                           and turn_evidence_reason(turn) is None)
+                trusted = trusted_turn_judgment(
+                    row["judgment_json"] if current else None,
+                    tenant_id=tenant_id, run_id=turn.run_id, turn_id=turn.turn_id,
+                    evaluator_fingerprint=evaluator_fingerprint,
+                    evidence_fingerprint=row["judgment_evidence"], status=row["judgment_status"],
+                )
+                items.append((turn, trusted.status if trusted else None))
+        return items, len(rows) > limit
+
+    def save_agent_turn_judgment_if_current(self, judgment: AgentTurnJudgment) -> str:
+        judgment, payload = sanitized_turn_judgment(judgment)
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                row = self._conn.execute(
+                    "SELECT * FROM agent_turns WHERE tenant_id=? AND run_id=? AND turn_id=?",
+                    (judgment.tenant_id, judgment.run_id, judgment.turn_id),
+                ).fetchone()
+                previous = self._conn.execute(
+                    "SELECT result_json,evidence_fingerprint,status FROM agent_turn_judgments WHERE tenant_id=? "
+                    "AND run_id=? AND turn_id=? AND evaluator_fingerprint=?",
+                    (judgment.tenant_id, judgment.run_id, judgment.turn_id, judgment.evaluator_fingerprint),
+                ).fetchone()
+                decision = turn_judgment_write_decision(
+                    agent_turn_from_row(dict(row)) if row else None,
+                    judgment,
+                    trusted_turn_judgment(
+                        previous["result_json"] if previous else None,
+                        tenant_id=judgment.tenant_id, run_id=judgment.run_id,
+                        turn_id=judgment.turn_id,
+                        evaluator_fingerprint=judgment.evaluator_fingerprint,
+                        evidence_fingerprint=previous["evidence_fingerprint"] if previous else None,
+                        status=previous["status"] if previous else None,
+                    ),
+                )
+                if decision == "saved":
+                    self._conn.execute(
+                        "INSERT INTO agent_turn_judgments (tenant_id,run_id,turn_id,evaluator_fingerprint,"
+                        "evidence_fingerprint,status,evaluated_at,result_json) VALUES (?,?,?,?,?,?,?,?) "
+                        "ON CONFLICT (tenant_id,run_id,turn_id,evaluator_fingerprint) DO UPDATE SET "
+                        "evidence_fingerprint=excluded.evidence_fingerprint,status=excluded.status,"
+                        "evaluated_at=excluded.evaluated_at,result_json=excluded.result_json",
+                        (judgment.tenant_id, judgment.run_id, judgment.turn_id,
+                         judgment.evaluator_fingerprint, judgment.evidence_fingerprint,
+                         judgment.status.value, _iso(judgment.evaluated_at), payload),
+                    )
+                self._conn.commit()
+                return decision
+            except BaseException:
+                self._conn.rollback()
+                raise
+
+    def get_agent_turn_evaluation_candidate(
+        self, tenant_id: str, run_id: str, turn_id: str, evaluator_fingerprint: str,
+    ) -> tuple[AgentTurn, JudgmentStatus | None] | None:
+        validate_turn_scan(tenant_id, evaluator_fingerprint, 1, None)
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT t.*,j.evidence_fingerprint AS judgment_evidence,"
+                "j.status AS judgment_status,j.result_json AS judgment_json FROM agent_turns t "
+                "LEFT JOIN agent_turn_judgments j ON j.tenant_id=t.tenant_id "
+                "AND j.run_id=t.run_id AND j.turn_id=t.turn_id "
+                "AND j.evaluator_fingerprint=? WHERE t.tenant_id=? AND t.run_id=? AND t.turn_id=?",
+                (evaluator_fingerprint, tenant_id, run_id, turn_id),
+            ).fetchone()
+            if row is None:
+                return None
+            turn = agent_turn_from_row(dict(row))
+            current = (row["judgment_evidence"] == turn_evidence_fingerprint(turn)
+                       and turn_evidence_reason(turn) is None)
+            trusted = trusted_turn_judgment(
+                row["judgment_json"] if current else None,
+                tenant_id=tenant_id, run_id=run_id, turn_id=turn_id,
+                evaluator_fingerprint=evaluator_fingerprint,
+                evidence_fingerprint=row["judgment_evidence"], status=row["judgment_status"],
+            )
+            return turn, trusted.status if trusted else None
+
+    @contextmanager
+    def agent_turn_judge_guard(self, tenant_id, run_id, turn_id, evaluator_fingerprint):
+        if self._judge_lock_path is None:
+            # A :memory: database cannot be shared with another process.
+            yield True
+            return
+        # Separate lock database: an in-flight remote call never holds a write
+        # transaction on the evidence database and cannot block capture there.
+        lock = sqlite3.connect(self._judge_lock_path, timeout=0, isolation_level=None)
+        acquired = False
+        try:
+            try:
+                lock.execute("BEGIN IMMEDIATE")
+                acquired = True
+            except sqlite3.OperationalError as exc:
+                if "locked" not in str(exc).lower():
+                    raise
+            yield acquired
+        finally:
+            if acquired:
+                lock.rollback()
+            lock.close()
 
     def get_agent_run_bundle(
         self,
