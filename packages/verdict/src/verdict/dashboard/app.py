@@ -105,6 +105,7 @@ MAX_SERIES_POINTS = 100
 MAX_DASHBOARD_PROVIDERS = 8
 MAX_DASHBOARD_CLUSTERS = 20
 MAX_DASHBOARD_DIMENSIONS = 12
+MAX_TURN_DETAIL_EVALUATORS = 8
 MAX_DASHBOARD_EVALUATORS = 20
 MAX_DASHBOARD_DRIFT_SIGNALS = 40
 MAX_DRIFT_SIGNAL_LAYERS = 12
@@ -803,6 +804,7 @@ def build_agent_run_detail(
     turn_limit: int = 20,
     turn_offset: int = 0,
     event_id: str | None = None,
+    turn_evaluator_fingerprint: str | None = None,
 ) -> dict:
     """Read one tenant-scoped run with its canonical ordered evidence timeline."""
     for name, value in (("tenant", tenant), ("run_id", run_id)):
@@ -827,9 +829,20 @@ def build_agent_run_detail(
         not isinstance(event_id, str) or not event_id or len(event_id.encode("utf-8")) > 256
     ):
         raise ValueError("invalid event_id")
+    if turn_evaluator_fingerprint is not None and (
+        not isinstance(turn_evaluator_fingerprint, str)
+        or len(turn_evaluator_fingerprint) != 64
+        or any(char not in "0123456789abcdef" for char in turn_evaluator_fingerprint)
+    ):
+        raise ValueError("invalid Turn evaluator fingerprint")
     configured = str(storage)
 
     def builder(session: _QuerySession) -> dict:
+        from verdict.agent_judgment import (
+            trusted_turn_judgment,
+            turn_evidence_fingerprint,
+            turn_evidence_reason,
+        )
         page = agent_evidence_queries.load_run_page(
             session, tenant, run_id,
             event_limit=event_limit, event_offset=event_offset,
@@ -840,6 +853,45 @@ def build_agent_run_detail(
         run = page["run"]
         shown = page["events"]
         shown_turns = [agent_turn_from_row(turn) for turn in page["turns"]]
+        turn_judgments = {}
+        eligible_turns = [turn for turn in shown_turns if turn_evidence_reason(turn) is None]
+        if eligible_turns and session.table_exists("agent_turn_judgments"):
+            conditions = " OR ".join("(turn_id=? AND evidence_fingerprint=?)" for _ in eligible_turns)
+            params = [tenant, run_id]
+            evaluator_clause = "AND evaluator_fingerprint=? " if turn_evaluator_fingerprint else ""
+            if turn_evaluator_fingerprint:
+                params.append(turn_evaluator_fingerprint)
+            for turn in eligible_turns:
+                params.extend((turn.turn_id, turn_evidence_fingerprint(turn)))
+            params.extend((MAX_TURN_DETAIL_EVALUATORS, len(eligible_turns) * MAX_TURN_DETAIL_EVALUATORS))
+            for row in session.execute(
+                "SELECT turn_id,evaluator_fingerprint,evidence_fingerprint,status,result_json FROM ("
+                "SELECT turn_id,evaluator_fingerprint,evidence_fingerprint,status,result_json,"
+                "ROW_NUMBER() OVER (PARTITION BY turn_id ORDER BY evaluated_at DESC,"
+                "evaluator_fingerprint DESC) AS rn FROM agent_turn_judgments "
+                "WHERE tenant_id=? AND run_id=? " + evaluator_clause + "AND (" + conditions + ")"
+                ") ranked WHERE rn<=? ORDER BY turn_id,rn LIMIT ?", tuple(params),
+            ):
+                if row["turn_id"] in turn_judgments:
+                    continue
+                result = trusted_turn_judgment(
+                    row["result_json"], tenant_id=tenant, run_id=run_id,
+                    turn_id=row["turn_id"], evaluator_fingerprint=row["evaluator_fingerprint"],
+                    evidence_fingerprint=row["evidence_fingerprint"], status=row["status"],
+                )
+                if result is None:
+                    continue
+                turn_judgments[row["turn_id"]] = {
+                    "evaluatorFingerprint": row["evaluator_fingerprint"],
+                    "rubricName": result.rubric_name,
+                    "rubricVersion": result.rubric_version,
+                    "judgeModels": result.judge_models,
+                    "status": result.status.value,
+                    "dimensions": [
+                        {"name": item.name, "verdict": item.verdict.value}
+                        for item in result.dimensions[:MAX_DASHBOARD_DIMENSIONS]
+                    ],
+                }
         available = page["eventCount"]
         available_turns = page["turnCount"]
         resolved_event_offset = page["eventOffset"]
@@ -881,6 +933,11 @@ def build_agent_run_detail(
                 }
         return {
             "runId": run["run_id"],
+            "turnEvaluationScope": {
+                "mode": "exact_evaluator" if turn_evaluator_fingerprint else "latest_valid_bounded",
+                "evaluatorFingerprint": turn_evaluator_fingerprint,
+                "maxEvaluatorsPerTurn": 1 if turn_evaluator_fingerprint else MAX_TURN_DETAIL_EVALUATORS,
+            },
             "focusEventId": event_id,
             "sourceKind": run["source_kind"],
             "startedAt": _dashboard_time(run["started_at"]),
@@ -904,6 +961,7 @@ def build_agent_run_detail(
                 "response": turn.final_response_redacted,
                 "requestTruncated": turn.request_truncated,
                 "responseTruncated": turn.response_truncated,
+                "evaluation": turn_judgments.get(turn.turn_id),
                 "tokenUsage": {
                     "inputTokens": turn.input_tokens,
                     "cachedInputTokens": turn.cached_input_tokens,
@@ -3225,6 +3283,7 @@ def create_app(
         turn_limit: int = Query(default=20, ge=1, le=50),
         turn_offset: int = Query(default=0, ge=0),
         event_id: str | None = None,
+        turn_evaluator_fingerprint: str | None = None,
     ):
         try:
             authorized_tenant = _authorized_tenant(request)
@@ -3237,6 +3296,7 @@ def create_app(
                 turn_limit=turn_limit,
                 turn_offset=turn_offset,
                 event_id=event_id,
+                turn_evaluator_fingerprint=turn_evaluator_fingerprint,
             )
         except KeyError:
             return JSONResponse({"error": "agent run not found"}, status_code=404)

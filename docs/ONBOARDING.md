@@ -555,12 +555,34 @@ bucket against the frozen reference.
 
 Evaluator Lab shows NOT_EVALUABLE reasons before any model call, reads provider
 keys only from environment variables, and requires an explicit egress approval.
+Select provider Trace (the backward-compatible default) for an individual
+model exchange, or Agent Turn for a completed final output. The Turn path
+requires present, untruncated redacted request/response text and does not
+inherit provider Trace scores. Each preview scans at most 100 candidate
+Turns, counts ineligible Turns in that window, and offers a cursor for older
+Turns. Approve that exact page before external judge calls. A Turn/evaluator
+has one bounded SQLite/Postgres score slot; a later evidence extension makes
+its score stale. Agent Runs detail displays the latest valid current result
+among the eight newest evaluator slots per Turn, or one exact evaluator when
+selected; older results are not implied absent. This remains separate from
+Trace coverage. No tool provenance or citation verification is supplied to
+the Turn judge yet; Monitor remains Trace-only.
+Concurrent Turn judge requests recheck currentness under a cross-process guard
+before egress. A busy Turn is skipped and reported as `inProgress` ("Judge busy;
+retry" in the dashboard), not counted as evaluated. SQLite uses a separate
+lock file beside the evidence database and serializes Turn judging per
+database without blocking evidence capture. The directory must be trusted
+and writable. Postgres guards each Turn/evaluator separately. A crash,
+connection loss, or provider-side retry can still result in an extra charge;
+this is not an exactly-once billing guarantee.
 When `OPENAI_BASE_URL` is set, the OpenAI provider uses that compatible endpoint;
 the UI reports only that a custom endpoint is configured and never returns the
 URL. Unknown local model names remain unpriced.
 The default selection is every evidence-complete, not-yet-evaluated trace in the bounded
 10,000-trace scan; an optional numeric cap remains available. Preview shows the
-exact planned calls and maximum static-price estimate before approval. Coverage
+exact planned calls and a rough static-price cost estimate before approval; it
+is not a billing cap because actual tokenization and provider charges can
+exceed it. Coverage
 is specific to the exact evaluator configuration; other evaluator results are
 kept separate. The approval screen names the exact dimensions that will be sent
 to the judge and lists context-required dimensions that cannot run because a

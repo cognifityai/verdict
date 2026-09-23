@@ -1178,7 +1178,7 @@ function Overview({ data = SEED, includeMonitor = true }) {
         <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3 mt-4">
           <MetricCell label="Agent runs analyzed" value={`${deterministic.analyzedRuns}/${deterministic.availableRuns}`} sub={deterministic.complete ? "complete persisted snapshot" : "partial or not run"} />
           <MetricCell label="Traces analyzed" value={`${deterministic.analyzedTraces}/${deterministic.availableTraces}`} sub="deterministic, judge-free analysis" />
-          <MetricCell label="Selected evaluator" value={`${evaluationCoverage.judged} judged`} sub={`${evaluationCoverage.notJudged} not judged · ${evaluationCoverage.judgeErrors} judge errors`} />
+          <MetricCell label="Selected Trace evaluator" value={`${evaluationCoverage.judged} judged`} sub={`${evaluationCoverage.notJudged} not judged · ${evaluationCoverage.judgeErrors} judge errors`} />
         </div>
       </Panel>
 
@@ -1724,7 +1724,7 @@ function Judge({ data = SEED, onOpenOperations = null }) {
           <div className="flex items-start gap-3">
             <Scale size={18} style={{ color: C.amber, marginTop: 1 }} />
             <div className="flex-1">
-              <div className="font-semibold">{evaluatorSelectionNeeded ? "Select an evaluator to view judge results" : "No evaluator results have been stored yet"}</div>
+              <div className="font-semibold">{evaluatorSelectionNeeded ? "Select a Trace evaluator to view judge results" : "No Trace evaluator results have been stored yet"}</div>
               <div className="text-sm mt-1" style={{ color: C.sub }}>
                 {evaluatorSelectionNeeded
                   ? "Choose an evaluator identity above to load its persisted judgments."

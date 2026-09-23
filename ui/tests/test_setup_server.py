@@ -295,7 +295,7 @@ def test_configured_tenant_owns_setup_import_evaluator_and_dashboard_reads(tmp_p
 
 
 def test_evaluator_preview_explains_when_every_dimension_requires_context(tmp_path):
-    async def preview():
+    async def preview(unit):
         app = create_app(storage=f"sqlite:///{tmp_path / 'verdict.db'}")
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(
@@ -306,6 +306,7 @@ def test_evaluator_preview_explains_when_every_dimension_requires_context(tmp_pa
                 "/api/evaluators/preview",
                 headers={"X-Verdict-Setup": token},
                 json={
+                    "unit": unit,
                     "provider": "anthropic",
                     "model": "claude-haiku-4-5",
                     "maxCalls": "all",
@@ -324,15 +325,15 @@ def test_evaluator_preview_explains_when_every_dimension_requires_context(tmp_pa
                 },
             )
 
-    response = asyncio.run(preview())
-
-    assert response.status_code == 400
-    assert response.json() == {
-        "error": (
-            "No rubric dimensions can be evaluated because Verdict traces do not "
-            "include retrieved context."
-        )
-    }
+    for unit, explanation in (
+        ("trace", "Verdict traces do not include retrieved context."),
+        ("agent_turn", "Verdict does not have retrieved context for this evaluation unit."),
+    ):
+        response = asyncio.run(preview(unit))
+        assert response.status_code == 400
+        assert response.json() == {
+            "error": "No rubric dimensions can be evaluated because " + explanation
+        }
 
 
 def test_setup_imports_a_bounded_historical_directory(tmp_path):
