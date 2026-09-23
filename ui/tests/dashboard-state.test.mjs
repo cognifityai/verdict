@@ -199,6 +199,128 @@ test("Turn tool-count consent binds the displayed preview and disables stale exe
     textOf(node).includes("Run 1 judge calls"))[0].props.disabled, true);
 });
 
+test("Evaluator Lab restores judge choices after reload without restoring approval", async () => {
+  const ui = await loadUiModule();
+  const previousWindow = globalThis.window;
+  const previousFetch = globalThis.fetch;
+  const saved = new Map();
+  const requests = [];
+  globalThis.window = { sessionStorage: {
+    getItem: (key) => saved.get(key) ?? null,
+    setItem: (key, value) => saved.set(key, value),
+  } };
+  globalThis.fetch = async (url, options = {}) => {
+    requests.push({ url, method: options.method || "GET" });
+    const data = url.endsWith("/api/setup/token") ? { setupToken: "token" }
+      : url.endsWith("/api/evaluators") ? { evalPackageAvailable: true,
+        providers: [{ provider: "google", configured: true, secretReference: "GOOGLE_API_KEY" }] }
+        : { unit: "agent_turn", toolEvidence: "counts_v1", availableTurns: 1,
+          eligible: 1, alreadyJudged: 0, notEvaluable: 0, plannedCalls: 1,
+          estimatedMaximumCostUsd: 0.001, maximumOutputTokens: 512,
+          notEvaluableReasons: {}, planFingerprint: "plan",
+          plannedTurns: [{ runId: "run", turnId: "turn", evidenceFingerprint: "a".repeat(64) }],
+          hasMore: false };
+    return { ok: true, json: async () => data };
+  };
+  const props = { configUrl: "/api/config" };
+  const field = (tree, labelText, type) => {
+    const label = findAll(tree, (node) => node.type === "label"
+      && node.props.children[0] === labelText)[0];
+    return findAll(label, (node) => node.type === type)[0];
+  };
+  try {
+    const first = createEffectHooks();
+    let tree = render(ui.EvaluatorLab, first, props);
+    first.flushEffects();
+    await new Promise(setImmediate);
+    tree = render(ui.EvaluatorLab, first, props);
+    field(tree, "Evaluation unit", "select").props.onChange({ target: { value: "agent_turn" } });
+    tree = render(ui.EvaluatorLab, first, props);
+    findAll(tree, (node) => node.type === "input" && node.props.type === "checkbox")[0]
+      .props.onChange({ target: { checked: true } });
+    field(tree, "Provider", "select").props.onChange({ target: { value: "google" } });
+    field(tree, "Model", "input").props.onChange({ target: { value: "gemini-2.5-flash-lite" } });
+    field(tree, "Evaluation scope", "select").props.onChange({ target: { value: "limit" } });
+    tree = render(ui.EvaluatorLab, first, props);
+    field(tree, "Evaluation scope", "input").props.onChange({ target: { value: "10" } });
+    tree = render(ui.EvaluatorLab, first, props);
+    first.flushEffects();
+    await findAll(tree, (node) => node.type === "button"
+      && textOf(node).includes("Preview eligibility"))[0].props.onClick();
+    tree = render(ui.EvaluatorLab, first, props);
+    findAll(tree, (node) => node.type === "input"
+      && node.props.type === "checkbox").at(-1).props.onChange({ target: { checked: true } });
+
+    const second = createEffectHooks();
+    tree = render(ui.EvaluatorLab, second, props);
+    second.flushEffects();
+    await new Promise(setImmediate);
+    tree = render(ui.EvaluatorLab, second, props);
+    assert.equal(field(tree, "Evaluation unit", "select").props.value, "agent_turn");
+    assert.equal(findAll(tree, (node) => node.type === "input"
+      && node.props.type === "checkbox")[0].props.checked, true);
+    assert.equal(field(tree, "Provider", "select").props.value, "google");
+    assert.equal(field(tree, "Model", "input").props.value, "gemini-2.5-flash-lite");
+    assert.equal(field(tree, "Evaluation scope", "select").props.value, "limit");
+    assert.equal(field(tree, "Evaluation scope", "input").props.value, 10);
+    assert.doesNotMatch(textOf(tree), /Planned calls|Run 1 judge calls/);
+    assert.deepEqual(requests.filter((request) => request.method === "POST")
+      .map((request) => request.url), ["/api/evaluators/preview"]);
+    const persisted = JSON.parse([...saved.values()][0]);
+    assert.deepEqual(Object.keys(persisted).sort(),
+      ["includeToolCounts", "judgeAll", "maxCalls", "model", "provider", "unit"]);
+  } finally {
+    if (previousWindow === undefined) delete globalThis.window;
+    else globalThis.window = previousWindow;
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test("Evaluator Lab bounds saved choices and tolerates unavailable browser storage", async () => {
+  const ui = await loadUiModule();
+  const previousWindow = globalThis.window;
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({ ok: true, json: async () => ({}) });
+  const props = { configUrl: "/api/config" };
+  try {
+    for (const [stored, provider, model, unit, toolCounts, scope, cap] of [
+      ["{invalid", "anthropic", "claude-haiku-4-5", "trace", false, "all", null],
+      [JSON.stringify({ provider: "unknown", model: "", unit: "unknown",
+        includeToolCounts: "true", judgeAll: "limit", maxCalls: 10001 }),
+        "anthropic", "claude-haiku-4-5", "trace", false, "all", null],
+      [JSON.stringify({ provider: "google", model: "😀".repeat(100), unit: "agent_turn",
+        includeToolCounts: true, judgeAll: false, maxCalls: 10 }),
+        "google", "claude-haiku-4-5", "agent_turn", true, "limit", 10],
+      [JSON.stringify({ provider: "openai", model: "local/cheap-model", judgeAll: false, maxCalls: -1 }),
+        "openai", "local/cheap-model", "trace", false, "limit", 100],
+      ["x".repeat(2000), "anthropic", "claude-haiku-4-5", "trace", false, "all", null],
+    ]) {
+      globalThis.window = { sessionStorage: { getItem: () => stored, setItem() {} } };
+      const tree = render(ui.EvaluatorLab, createHooks(), props);
+      const labels = findAll(tree, (node) => node.type === "label");
+      const control = (name, type) => findAll(labels.find((node) => node.props.children[0] === name),
+        (node) => node.type === type)[0];
+      assert.equal(control("Provider", "select").props.value, provider);
+      assert.equal(control("Model", "input").props.value, model);
+      assert.equal(control("Evaluation unit", "select").props.value, unit);
+      if (unit === "agent_turn") assert.equal(findAll(tree, (node) => node.type === "input"
+        && node.props.type === "checkbox")[0].props.checked, toolCounts);
+      assert.equal(control("Evaluation scope", "select").props.value, scope);
+      if (cap !== null) assert.equal(control("Evaluation scope", "input").props.value, cap);
+    }
+    globalThis.window = { get sessionStorage() { throw new Error("blocked"); } };
+    const hooks = createEffectHooks();
+    const tree = render(ui.EvaluatorLab, hooks, props);
+    assert.equal(findAll(tree, (node) => node.type === "select" && node.props.value === "anthropic").length, 1);
+    assert.doesNotThrow(() => hooks.flushEffects());
+    await new Promise(setImmediate);
+  } finally {
+    if (previousWindow === undefined) delete globalThis.window;
+    else globalThis.window = previousWindow;
+    globalThis.fetch = previousFetch;
+  }
+});
+
 test("Evaluator Lab makes a long judge run visible and prevents duplicate submission", async () => {
   const ui = await loadUiModule();
   const hooks = createEffectHooks();
