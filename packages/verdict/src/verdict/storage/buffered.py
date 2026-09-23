@@ -369,15 +369,18 @@ class BufferedStorage:
 
     def list_agent_turn_evaluation_candidates(
         self, tenant_id, evaluator_fingerprint, *, limit=100, before=None,
+        tool_evidence=False,
     ):
         return self._read(self._inner.list_agent_turn_evaluation_candidates,
-                          tenant_id, evaluator_fingerprint, limit=limit, before=before)
+                          tenant_id, evaluator_fingerprint, limit=limit, before=before,
+                          tool_evidence=tool_evidence)
 
     def get_agent_turn_evaluation_candidate(
-        self, tenant_id, run_id, turn_id, evaluator_fingerprint,
+        self, tenant_id, run_id, turn_id, evaluator_fingerprint, *, tool_evidence=False,
     ):
         return self._read(self._inner.get_agent_turn_evaluation_candidate,
-                          tenant_id, run_id, turn_id, evaluator_fingerprint)
+                          tenant_id, run_id, turn_id, evaluator_fingerprint,
+                          tool_evidence=tool_evidence)
 
     @contextmanager
     def agent_turn_judge_guard(self, tenant_id, run_id, turn_id, evaluator_fingerprint):

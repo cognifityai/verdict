@@ -131,7 +131,7 @@ test("Evaluator Lab previews a native Turn page and sends its approved identitie
   assert.match(textOf(tree), /provider billing can exceed it/);
   assert.match(textOf(tree), /cost is an estimate, not a billing cap/);
   assert.doesNotMatch(textOf(tree), /maximum estimated cost/i);
-  const consent = findAll(tree, (node) => node.type === "input" && node.props.type === "checkbox")[0];
+  const consent = findAll(tree, (node) => node.type === "input" && node.props.type === "checkbox").at(-1);
   consent.props.onChange({ target: { checked: true } });
   tree = render(ui.EvaluatorLab, hooks, props);
   const run = findAll(tree, (node) => node.type === "button" &&
@@ -148,6 +148,55 @@ test("Evaluator Lab previews a native Turn page and sends its approved identitie
   assert.equal(findAll(tree, (node) => node.props?.label === "Judge busy; retry" &&
     node.props.value === 1).length, 1);
   assert.doesNotMatch(textOf(tree), /View evaluated traces/);
+});
+
+test("Turn tool-count consent binds the displayed preview and disables stale execution", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const props = { configUrl: "/api/config" };
+  render(ui.EvaluatorLab, hooks, props);
+  hooks.flushEffects();
+  await resolveJson(requests[0], { setupToken: "setup-token" });
+  await resolveJson(requests[1], {
+    evalPackageAvailable: true,
+    providers: [{ provider: "anthropic", configured: true }],
+  });
+  let tree = render(ui.EvaluatorLab, hooks, props);
+  const unit = findAll(tree, (node) => node.type === "select" &&
+    findAll(node, (child) => child.type === "option" && child.props.value === "agent_turn").length)[0];
+  unit.props.onChange({ target: { value: "agent_turn" } });
+  tree = render(ui.EvaluatorLab, hooks, props);
+  const toolOption = findAll(tree, (node) => node.type === "input" && node.props.type === "checkbox")[0];
+  toolOption.props.onChange({ target: { checked: true } });
+  tree = render(ui.EvaluatorLab, hooks, props);
+  const preview = findAll(tree, (node) => node.type === "button" &&
+    textOf(node).includes("Preview eligibility"))[0].props.onClick();
+  assert.equal(JSON.parse(requests[2].options.body).toolEvidence, "counts_v1");
+  await resolveJson(requests[2], {
+    unit: "agent_turn", toolEvidence: "counts_v1", availableTurns: 1,
+    eligible: 1, alreadyJudged: 0, notEvaluable: 0, plannedCalls: 1,
+    estimatedMaximumCostUsd: 0.01, maximumOutputTokens: 512,
+    notEvaluableReasons: {}, rubric: { dimensions: ["relevance"], skippedDimensions: [] },
+    planFingerprint: "tool-plan", plannedTurns: [{ runId: "run", turnId: "turn",
+      evidenceFingerprint: "b".repeat(64) }], hasMore: false,
+  });
+  await preview;
+  tree = render(ui.EvaluatorLab, hooks, props);
+  assert.match(textOf(tree), /recorded tool-event counts/);
+  assert.match(textOf(tree), /no source verification/);
+  const consent = findAll(tree, (node) => node.type === "input" && node.props.type === "checkbox").at(-1);
+  consent.props.onChange({ target: { checked: true } });
+  tree = render(ui.EvaluatorLab, hooks, props);
+  const run = findAll(tree, (node) => node.type === "button" &&
+    textOf(node).includes("Run 1 judge calls"))[0];
+  assert.equal(run.props.disabled, false);
+  const countToggle = findAll(tree, (node) => node.type === "input" && node.props.type === "checkbox")[0];
+  countToggle.props.onChange({ target: { checked: false } });
+  tree = render(ui.EvaluatorLab, hooks, props);
+  assert.match(textOf(tree), /Configuration changed/);
+  assert.equal(findAll(tree, (node) => node.type === "button" &&
+    textOf(node).includes("Run 1 judge calls"))[0].props.disabled, true);
 });
 
 test("Evaluator Lab makes a long judge run visible and prevents duplicate submission", async () => {
@@ -1336,7 +1385,11 @@ test("Agent Runs can fetch one exact Turn evaluator without reusing Trace covera
   hooks.flushEffects();
   const exactB = requests.find((request) => request.url.includes(`turn_evaluator_fingerprint=${digestB}`));
   assert.ok(exactB);
-  const detailPage = (fingerprint) => ({ turns: [{ turnId: "turn-a", evaluation: { evaluatorFingerprint: fingerprint } }],
+  const detailPage = (fingerprint) => ({ turns: [{ turnId: "turn-a", sequence: 0,
+    status: "completed", evaluation: { evaluatorFingerprint: fingerprint,
+      status: "completed", rubricName: "quality", rubricVersion: "1", judgeModels: ["test"],
+      dimensions: [], toolEvidence: "counts_v1",
+      toolCounts: { calls: 4, results: 4, errorResults: 0, unknownResults: 0 } } }],
     turnPage: { available: 1, shown: 1, offset: 0, limit: 20, truncated: false },
     events: [], page: { available: 0, shown: 0, offset: 0, limit: 100, truncated: false } });
   await resolveJson(exactB, detailPage(digestB));
@@ -1344,6 +1397,14 @@ test("Agent Runs can fetch one exact Turn evaluator without reusing Trace covera
   tree = render(ui.Runs, hooks, props);
   detail = findAll(tree, (node) => typeof node.type === "function" && node.type.name === "RunDetail")[0];
   assert.equal(detail.props.detail.data.turns[0].evaluation.evaluatorFingerprint, digestB);
+  assert.match(textOf(render(detail.type, createHooks(), detail.props)), /Recorded tool events:\s+4\s+calls/);
+  const defaultDetail = detailPage(digestB);
+  defaultDetail.turns[0].evaluation.toolEvidence = "none";
+  const defaultText = textOf(render(detail.type, createHooks(), {
+    ...detail.props, detail: { ...detail.props.detail, data: defaultDetail },
+  }));
+  assert.match(defaultText, /tool counts not included in this judgment/);
+  assert.doesNotMatch(defaultText, /no tool evidence/);
 });
 
 test("Agent Runs presents component-only token evidence as partial", async () => {

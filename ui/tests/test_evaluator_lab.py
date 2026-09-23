@@ -14,6 +14,7 @@ import pytest
 import verdict
 from verdict.agent_judgment import (
     AgentTurnJudgment,
+    TurnToolCounts,
     agent_turn_judgment_from_json,
     agent_turn_judgment_to_json,
     turn_evidence_fingerprint,
@@ -27,11 +28,14 @@ from verdict.dashboard.evaluator_lab import (
     preview_evaluation,
 )
 from verdict.evidence import (
+    AgentEvent,
+    AgentEventType,
     AgentRun,
     AgentRunBundle,
     AgentTurn,
     EvidenceState,
     ExecutionStatus,
+    PrivacyClassification,
     SourceSession,
 )
 from verdict.schema import DimensionScore, Judgment, JudgmentStatus, Trace, Verdict
@@ -159,12 +163,27 @@ def _exit_while_holding_turn_guard(path, entered):
     os._exit(1)
 
 
-def test_turn_judge_does_not_egress_twice_across_sqlite_processes(tmp_path):
+def _guard_bundle(tenant, tool_mode):
+    bundle = _agent_turn_bundle(tenant=tenant)
+    if not tool_mode:
+        return bundle
+    return replace(bundle, events=(AgentEvent(
+        event_id="tool-call", turn_id="turn-1", sequence=0,
+        occurred_at=bundle.turns[0].started_at,
+        event_type=AgentEventType.TOOL_CALL, status=ExecutionStatus.COMPLETED,
+        provenance="sdk", attributes={"tool_name": "tool", "call_id": "id"},
+    ),))
+
+
+@pytest.mark.parametrize("tool_mode", [False, True])
+def test_turn_judge_does_not_egress_twice_across_sqlite_processes(tmp_path, tool_mode):
     path = str(tmp_path / "cross-process.db")
     storage = SQLiteStorage(path)
     try:
-        storage.replace_agent_run_bundle(_agent_turn_bundle())
+        storage.replace_agent_run_bundle(_guard_bundle("local", tool_mode))
         config = {**_config(), "unit": "agent_turn"}
+        if tool_mode:
+            config["toolEvidence"] = "counts_v1"
         preview = preview_evaluation(storage, tenant_id="local", config=config)
         approved = {**config, "planFingerprint": preview["planFingerprint"],
                     "plannedTurns": preview["plannedTurns"]}
@@ -237,13 +256,16 @@ def test_sqlite_turn_guard_resolves_aliases_and_releases_on_process_exit(tmp_pat
 
 @pytest.mark.skipif(not os.environ.get("VERDICT_TEST_POSTGRES_DSN"),
                     reason="disposable Postgres required")
-def test_turn_judge_does_not_egress_twice_across_postgres_processes():
+@pytest.mark.parametrize("tool_mode", [False, True])
+def test_turn_judge_does_not_egress_twice_across_postgres_processes(tool_mode):
     dsn = os.environ["VERDICT_TEST_POSTGRES_DSN"]
     tenant = f"turn-guard-{uuid4().hex}"
     storage = PostgresStorage(dsn, max_pool=1)
     try:
-        storage.replace_agent_run_bundle(_agent_turn_bundle(tenant=tenant))
+        storage.replace_agent_run_bundle(_guard_bundle(tenant, tool_mode))
         config = {**_config(), "unit": "agent_turn"}
+        if tool_mode:
+            config["toolEvidence"] = "counts_v1"
         preview = preview_evaluation(storage, tenant_id=tenant, config=config)
         approved = {**config, "planFingerprint": preview["planFingerprint"],
                     "plannedTurns": preview["plannedTurns"]}
@@ -288,6 +310,369 @@ def test_agent_turn_preview_uses_final_output_without_relabeling_provider_trace(
     assert preview["plannedTurns"][0]["runId"] == "run-1"
     assert preview["plannedTurns"][0]["turnId"] == "turn-1"
     assert storage.list_judgments_for_trace("provider-tool-call") == []
+
+
+@pytest.mark.parametrize("backend", ["memory", "sqlite"])
+def test_turn_tool_mode_sends_only_recorded_counts_to_judge(tmp_path, backend):
+    storage = InMemoryStorage() if backend == "memory" else SQLiteStorage(str(tmp_path / "tools.db"))
+    try:
+        bundle = _agent_turn_bundle()
+        now = bundle.turns[0].started_at
+        events = (
+            AgentEvent(
+                event_id="call-1", turn_id="turn-1", sequence=0, occurred_at=now,
+                event_type=AgentEventType.TOOL_CALL, status=ExecutionStatus.COMPLETED,
+                provenance="sdk", privacy_classification=PrivacyClassification.REDACTED,
+                attributes={"tool_name": "mcp_private_tool", "call_id": "secret-call-id",
+                            "arguments": {"url": "https://private.example/source"}},
+            ),
+            AgentEvent(
+                event_id="result-1", turn_id="turn-1", sequence=1, occurred_at=now,
+                event_type=AgentEventType.TOOL_RESULT, status=ExecutionStatus.COMPLETED,
+                provenance="sdk", privacy_classification=PrivacyClassification.REDACTED,
+                attributes={"tool_name": "mcp_private_tool", "call_id": "secret-call-id",
+                            "is_error": False, "result": "CANARY_TOOL_RESULT"},
+            ),
+        )
+        storage.replace_agent_run_bundle(replace(bundle, events=events))
+        storage.replace_agent_run_bundle(replace(_agent_turn_bundle(tenant="other"), events=events))
+        config = {**_config(), "unit": "agent_turn", "toolEvidence": "counts_v1"}
+        preview = preview_evaluation(storage, tenant_id="local", config=config)
+        assert preview["toolEvidence"] == "counts_v1"
+        assert preview["plannedCalls"] == 1
+        storage.replace_agent_run_bundle(replace(bundle, events=tuple(reversed(events))))
+        assert preview_evaluation(storage, tenant_id="local", config=config)[
+            "plannedTurns"] == preview["plannedTurns"]
+        context_rubric = {**config, "rubric": {**config["rubric"], "dimensions": [
+            *config["rubric"]["dimensions"],
+            {"name": "groundedness", "description": "Supported by cited sources.",
+             "requiresContext": True},
+        ]}}
+        context_preview = preview_evaluation(storage, tenant_id="local", config=context_rubric)
+        assert context_preview["rubric"]["skippedDimensions"] == ["groundedness"]
+        provider = CountingProvider()
+        result = execute_evaluation(
+            storage, tenant_id="local",
+            config={**config, "planFingerprint": preview["planFingerprint"],
+                    "plannedTurns": preview["plannedTurns"]},
+            provider=provider, confirm_external_egress=True,
+        )
+        assert result["completed"] == 1
+        other = preview_evaluation(storage, tenant_id="other", config=config)
+        assert other["plannedCalls"] == 1
+        assert other["alreadyJudged"] == 0
+        request = str(provider.requests[0].messages)
+        assert "Recorded tool calls: 1" in request
+        assert "Recorded tool results: 1" in request
+        for forbidden in ("mcp_private_tool", "secret-call-id", "private.example", "CANARY_TOOL_RESULT"):
+            assert forbidden not in request
+        default = preview_evaluation(
+            storage, tenant_id="local", config={**_config(), "unit": "agent_turn"},
+        )
+        assert default["plannedCalls"] == 1
+        assert default["planFingerprint"] != preview["planFingerprint"]
+    finally:
+        storage.close()
+
+
+@pytest.mark.parametrize("backend", ["memory", "sqlite"])
+def test_tool_result_body_enrichment_preserves_counts_only_score(tmp_path, backend):
+    storage = InMemoryStorage() if backend == "memory" else SQLiteStorage(str(tmp_path / "body.db"))
+    try:
+        bundle = _agent_turn_bundle()
+        now = bundle.turns[0].started_at
+        call = AgentEvent(
+            event_id="call-1", turn_id="turn-1", sequence=0, occurred_at=now,
+            event_type=AgentEventType.TOOL_CALL, status=ExecutionStatus.COMPLETED,
+            provenance="sdk", attributes={"tool_name": "tool", "call_id": "id"},
+        )
+        result = AgentEvent(
+            event_id="result-1", turn_id="turn-1", sequence=1, occurred_at=now,
+            event_type=AgentEventType.TOOL_RESULT, status=ExecutionStatus.COMPLETED,
+            provenance="sdk", privacy_classification=PrivacyClassification.REDACTED,
+            attributes={"tool_name": "tool", "call_id": "id",
+                        "is_error": False, "result": ""},
+        )
+        storage.replace_agent_run_bundle(replace(bundle, events=(call, result)))
+        config = {**_config(), "unit": "agent_turn", "toolEvidence": "counts_v1"}
+        preview = preview_evaluation(storage, tenant_id="local", config=config)
+        assert execute_evaluation(
+            storage, tenant_id="local",
+            config={**config, "planFingerprint": preview["planFingerprint"],
+                    "plannedTurns": preview["plannedTurns"]},
+            provider=CountingProvider(), confirm_external_egress=True,
+        )["completed"] == 1
+        enriched = replace(result, attributes={**result.attributes, "result": "LATER_BODY"})
+        storage.replace_agent_run_bundle(replace(bundle, events=(call, enriched)))
+        assert preview_evaluation(storage, tenant_id="local", config=config)["alreadyJudged"] == 1
+    finally:
+        storage.close()
+
+
+@pytest.mark.parametrize("backend", ["memory", "sqlite"])
+def test_unrelated_model_event_preserves_counts_only_score(tmp_path, backend):
+    storage = InMemoryStorage() if backend == "memory" else SQLiteStorage(str(tmp_path / "model.db"))
+    try:
+        bundle = _agent_turn_bundle()
+        now = bundle.turns[0].started_at
+        call = AgentEvent(
+            event_id="call-1", turn_id="turn-1", sequence=0, occurred_at=now,
+            event_type=AgentEventType.TOOL_CALL, status=ExecutionStatus.COMPLETED,
+            provenance="sdk", attributes={"tool_name": "tool", "call_id": "id"},
+        )
+        storage.replace_agent_run_bundle(replace(bundle, events=(call,)))
+        config = {**_config(), "unit": "agent_turn", "toolEvidence": "counts_v1"}
+        preview = preview_evaluation(storage, tenant_id="local", config=config)
+        assert execute_evaluation(
+            storage, tenant_id="local",
+            config={**config, "planFingerprint": preview["planFingerprint"],
+                    "plannedTurns": preview["plannedTurns"]},
+            provider=CountingProvider(), confirm_external_egress=True,
+        )["completed"] == 1
+        model_event = AgentEvent(
+            event_id="model-1", turn_id="turn-1", sequence=1, occurred_at=now,
+            event_type=AgentEventType.MODEL_CALL, status=ExecutionStatus.COMPLETED,
+            provenance="sdk", attributes={"provider": "unknown"},
+        )
+        storage.replace_agent_run_bundle(replace(bundle, events=(call, model_event)))
+        after = preview_evaluation(storage, tenant_id="local", config=config)
+        assert after["alreadyJudged"] == 1
+        assert after["plannedCalls"] == 0
+        if backend == "sqlite":
+            from verdict.dashboard.app import build_agent_run_detail
+
+            detail = build_agent_run_detail(tmp_path / "model.db", tenant="local", run_id="run-1")
+            assert detail["turns"][0]["evaluation"]["toolEvidence"] == "counts_v1"
+    finally:
+        storage.close()
+
+
+def test_tool_preview_batches_bounded_sqlite_event_reads(tmp_path):
+    storage = SQLiteStorage(str(tmp_path / "batch.db"))
+    try:
+        bundle = _agent_turn_bundle()
+        now = bundle.turns[0].started_at
+        turns = tuple(replace(bundle.turns[0], turn_id=f"turn-{index}", sequence=index)
+                      for index in range(100))
+        events = tuple(AgentEvent(
+            event_id=f"call-{index}", turn_id=turn.turn_id, sequence=0,
+            occurred_at=now, event_type=AgentEventType.TOOL_CALL,
+            status=ExecutionStatus.COMPLETED, provenance="sdk",
+            attributes={"tool_name": "tool", "call_id": f"id-{index}"},
+        ) for index, turn in enumerate(turns))
+        storage.replace_agent_run_bundle(replace(bundle, turns=turns, events=events))
+        queries = []
+        storage._conn.set_trace_callback(lambda statement: queries.append(statement)
+                                         if "FROM agent_events" in statement else None)
+        preview = preview_evaluation(storage, tenant_id="local",
+                                     config={**_config(), "maxCalls": 100, "unit": "agent_turn",
+                                             "toolEvidence": "counts_v1"})
+        assert preview["plannedCalls"] == 100
+        assert len(queries) <= 1
+    finally:
+        storage._conn.set_trace_callback(None)
+        storage.close()
+
+
+def test_tool_count_template_change_is_new_evaluator_identity(monkeypatch):
+    storage = InMemoryStorage()
+    bundle = _agent_turn_bundle()
+    now = bundle.turns[0].started_at
+    call = AgentEvent(
+        event_id="call-1", turn_id="turn-1", sequence=0, occurred_at=now,
+        event_type=AgentEventType.TOOL_CALL, status=ExecutionStatus.COMPLETED,
+        provenance="sdk", attributes={"tool_name": "tool", "call_id": "id"},
+    )
+    storage.replace_agent_run_bundle(replace(bundle, events=(call,)))
+    config = {**_config(), "unit": "agent_turn", "toolEvidence": "counts_v1"}
+    first = preview_evaluation(storage, tenant_id="local", config=config)
+    monkeypatch.setattr(TurnToolCounts, "PROMPT_TEMPLATE",
+                        TurnToolCounts.PROMPT_TEMPLATE.replace(
+                            "Recorded tool calls", "Observed tool calls"))
+    second = preview_evaluation(storage, tenant_id="local", config=config)
+    assert first["plannedCalls"] == second["plannedCalls"] == 1
+    assert first["planFingerprint"] != second["planFingerprint"]
+
+
+@pytest.mark.parametrize("backend", ["memory", "sqlite"])
+@pytest.mark.parametrize("corruption", ["missing_mode", "unhashable_mode", "missing_template"])
+def test_tool_mode_mismatched_stored_slot_is_retryable(tmp_path, backend, corruption):
+    storage = InMemoryStorage() if backend == "memory" else SQLiteStorage(str(tmp_path / "mode.db"))
+    try:
+        bundle = _agent_turn_bundle()
+        call = AgentEvent(
+            event_id="call-1", turn_id="turn-1", sequence=0,
+            occurred_at=bundle.turns[0].started_at,
+            event_type=AgentEventType.TOOL_CALL, status=ExecutionStatus.COMPLETED,
+            provenance="sdk", attributes={"tool_name": "tool", "call_id": "id"},
+        )
+        storage.replace_agent_run_bundle(replace(bundle, events=(call,)))
+        config = {**_config(), "unit": "agent_turn", "toolEvidence": "counts_v1"}
+        provider = CountingProvider()
+        preview = preview_evaluation(storage, tenant_id="local", config=config)
+        first = execute_evaluation(
+            storage, tenant_id="local", provider=provider,
+            config={**config, "planFingerprint": preview["planFingerprint"],
+                    "plannedTurns": preview["plannedTurns"]},
+            confirm_external_egress=True,
+        )
+        fingerprint = first["evaluatorFingerprint"]
+        payload = json.loads(agent_turn_judgment_to_json(_stored_turn_result(storage, fingerprint)))
+        if corruption == "missing_mode":
+            payload["evaluator_config"].pop("tool_evidence_mode")
+            payload["evaluator_config"].pop("tool_evidence_template")
+        elif corruption == "unhashable_mode":
+            payload["evaluator_config"]["tool_evidence_mode"] = []
+        else:
+            payload["evaluator_config"].pop("tool_evidence_template")
+        corrupt = json.dumps(payload)
+        if isinstance(storage, SQLiteStorage):
+            storage._conn.execute("UPDATE agent_turn_judgments SET result_json=?", (corrupt,))
+        else:
+            storage._agent_turn_judgments[("local", "run-1", "turn-1", fingerprint)] = corrupt
+        retry = preview_evaluation(storage, tenant_id="local", config=config)
+        assert retry["alreadyJudged"] == 0
+        assert retry["plannedCalls"] == 1
+        repaired = execute_evaluation(
+            storage, tenant_id="local", provider=provider,
+            config={**config, "planFingerprint": retry["planFingerprint"],
+                    "plannedTurns": retry["plannedTurns"]},
+            confirm_external_egress=True,
+        )
+        assert repaired["completed"] == 1
+        assert provider.calls == 2
+    finally:
+        storage.close()
+
+
+def test_turn_tool_mode_requires_recorded_evidence_and_rejects_oversize_turn():
+    storage = InMemoryStorage()
+    bundle = _agent_turn_bundle()
+    config = {**_config(), "unit": "agent_turn", "toolEvidence": "counts_v1"}
+    storage.replace_agent_run_bundle(bundle)
+    missing = preview_evaluation(storage, tenant_id="local", config=config)
+    assert missing["plannedCalls"] == 0
+    assert missing["notEvaluableReasons"] == {"tool_evidence_unavailable": 1}
+
+    now = bundle.turns[0].started_at
+    events = [AgentEvent(
+        event_id="tool-call", turn_id="turn-1", sequence=0, occurred_at=now,
+        event_type=AgentEventType.TOOL_CALL, status=ExecutionStatus.COMPLETED,
+        provenance="sdk", attributes={"tool_name": "tool", "call_id": "id"},
+    )]
+    events.extend(AgentEvent(
+        event_id=f"model-{index}", turn_id="turn-1", sequence=index + 1,
+        occurred_at=now, event_type=AgentEventType.MODEL_CALL,
+        status=ExecutionStatus.COMPLETED, provenance="sdk",
+        attributes={"provider": "unknown-provider"},
+    ) for index in range(63))
+    storage.replace_agent_run_bundle(replace(bundle, events=tuple(events)))
+    assert preview_evaluation(storage, tenant_id="local", config=config)["plannedCalls"] == 1
+    events.append(AgentEvent(
+        event_id="model-over-limit", turn_id="turn-1", sequence=64,
+        occurred_at=now, event_type=AgentEventType.MODEL_CALL,
+        status=ExecutionStatus.COMPLETED, provenance="sdk",
+        attributes={"provider": "unknown-provider"},
+    ))
+    storage.replace_agent_run_bundle(replace(bundle, events=tuple(events)))
+    over = preview_evaluation(storage, tenant_id="local", config=config)
+    assert over["plannedCalls"] == 0
+    assert over["notEvaluableReasons"] == {"tool_evidence_limit": 1}
+    assert preview_evaluation(storage, tenant_id="local", config={**_config(),
+                              "unit": "agent_turn"})["plannedCalls"] == 1
+
+
+@pytest.mark.parametrize("unit,mode", [
+    ("trace", "counts_v1"), ("agent_turn", True),
+    ("agent_turn", "unknown"),
+])
+def test_tool_evidence_mode_rejects_invalid_or_trace_configuration(unit, mode):
+    with pytest.raises(ValueError, match="tool evidence"):
+        preview_evaluation(InMemoryStorage(), tenant_id="local",
+                           config={**_config(), "unit": unit, "toolEvidence": mode})
+
+
+def test_tool_mode_treats_malformed_stored_error_flag_as_unknown(tmp_path):
+    storage = SQLiteStorage(str(tmp_path / "malformed-tool.db"))
+    try:
+        bundle = _agent_turn_bundle()
+        now = bundle.turns[0].started_at
+        result = AgentEvent(
+            event_id="result", turn_id="turn-1", sequence=0, occurred_at=now,
+            event_type=AgentEventType.TOOL_RESULT, status=ExecutionStatus.COMPLETED,
+            provenance="sdk", attributes={"tool_name": "tool", "call_id": "id",
+                                          "is_error": False},
+        )
+        storage.replace_agent_run_bundle(replace(bundle, events=(result,)))
+        storage._conn.execute(
+            "UPDATE agent_events SET attributes_json=? WHERE tenant_id=? AND run_id=? "
+            "AND event_id=?", ('{"is_error":"not-a-boolean"}', "local", "run-1", "result"),
+        )
+        config = {**_config(), "unit": "agent_turn", "toolEvidence": "counts_v1"}
+        preview = preview_evaluation(storage, tenant_id="local", config=config)
+        provider = CountingProvider()
+        execution = execute_evaluation(
+            storage, tenant_id="local", provider=provider, confirm_external_egress=True,
+            config={**config, "planFingerprint": preview["planFingerprint"],
+                    "plannedTurns": preview["plannedTurns"]},
+        )
+        assert execution["completed"] == 1
+        prompt = str(provider.requests[0].messages)
+        assert "Results with unknown error status: 1" in prompt
+        assert "not-a-boolean" not in prompt
+    finally:
+        storage.close()
+
+
+@pytest.mark.parametrize("backend", ["memory", "sqlite"])
+@pytest.mark.parametrize("when", ["before", "during"])
+def test_tool_counts_change_invalidates_preview_or_durable_result(tmp_path, backend, when):
+    storage = InMemoryStorage() if backend == "memory" else SQLiteStorage(str(tmp_path / "race.db"))
+    try:
+        bundle = _agent_turn_bundle()
+        now = bundle.turns[0].started_at
+        call = AgentEvent(
+            event_id="call", turn_id="turn-1", sequence=0, occurred_at=now,
+            event_type=AgentEventType.TOOL_CALL, status=ExecutionStatus.COMPLETED,
+            provenance="sdk", attributes={"tool_name": "tool", "call_id": "id"},
+        )
+        initial = replace(bundle, events=(call,))
+        storage.replace_agent_run_bundle(initial)
+        config = {**_config(), "unit": "agent_turn", "toolEvidence": "counts_v1"}
+        preview = preview_evaluation(storage, tenant_id="local", config=config)
+        result_event = AgentEvent(
+            event_id="result", turn_id="turn-1", sequence=1, occurred_at=now,
+            event_type=AgentEventType.TOOL_RESULT, status=ExecutionStatus.FAILED,
+            provenance="sdk", privacy_classification=PrivacyClassification.REDACTED,
+            attributes={"tool_name": "tool", "call_id": "id", "is_error": True,
+                        "result": "private"},
+        )
+        changed = replace(bundle, events=(call, result_event))
+
+        class ChangingProvider(CountingProvider):
+            def complete(self, request):
+                if when == "during":
+                    storage.replace_agent_run_bundle(changed)
+                return super().complete(request)
+
+        provider = ChangingProvider()
+        if when == "before":
+            storage.replace_agent_run_bundle(changed)
+        approved = {**config, "planFingerprint": preview["planFingerprint"],
+                    "plannedTurns": preview["plannedTurns"]}
+        if when == "before":
+            with pytest.raises(ValueError, match="no longer current"):
+                execute_evaluation(storage, tenant_id="local", config=approved,
+                                   provider=provider, confirm_external_egress=True)
+            assert provider.calls == 0
+        else:
+            outcome = execute_evaluation(storage, tenant_id="local", config=approved,
+                                         provider=provider, confirm_external_egress=True)
+            assert outcome["stale"] == 1
+            assert outcome["completed"] == 0
+            assert provider.calls == 1
+    finally:
+        storage.close()
 
 
 @pytest.mark.parametrize("backend", ["memory", "sqlite"])

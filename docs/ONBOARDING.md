@@ -566,7 +566,14 @@ its score stale. Agent Runs detail displays the latest valid current result
 among the eight newest evaluator slots per Turn, or one exact evaluator when
 selected; older results are not implied absent. This remains separate from
 Trace coverage. No tool provenance or citation verification is supplied to
-the Turn judge yet; Monitor remains Trace-only.
+the Turn judge by default. To include bounded tool-use metadata, select
+"Include bounded counts" before previewing Agent Turns. The preview and
+egress consent then cover only recorded call/result/error counts; the event
+projection adds no tool names, IDs, arguments, result text, or URLs. This mode
+excludes Turns with no recorded tool events or more than 64 total events.
+Counts do not prove MCP origin, source support, or factual correctness and do not enable rubric
+dimensions that require retrieved context. A changed count makes the prior
+Turn judgment stale. Monitor remains Trace-only.
 Concurrent Turn judge requests recheck currentness under a cross-process guard
 before egress. A busy Turn is skipped and reported as `inProgress` ("Judge busy;
 retry" in the dashboard), not counted as evaluated. SQLite uses a separate
@@ -575,6 +582,11 @@ database without blocking evidence capture. The directory must be trusted
 and writable. Postgres guards each Turn/evaluator separately. A crash,
 connection loss, or provider-side retry can still result in an extra charge;
 this is not an exactly-once billing guarantee.
+The four judge-visible counts, not the total event count, bind score
+currentness. An unrelated non-tool event below the 64-event eligibility cap
+does not schedule a new judge call. At more than 64 total events the Turn is
+not eligible for counts-only judging. Preview and Agent Run detail batch the
+bounded event-metadata reads for each Turn page.
 When `OPENAI_BASE_URL` is set, the OpenAI provider uses that compatible endpoint;
 the UI reports only that a custom endpoint is configured and never returns the
 URL. Unknown local model names remain unpriced.

@@ -122,10 +122,19 @@ def _user_prompt(
     response: str,
     context: str | None,
     rubric: Rubric,
+    tool_evidence: str | None = None,
 ) -> str:
     parts = [f"USER QUERY:\n{query.strip()}\n"]
     if _has_context(context):
         parts.append(f"RETRIEVED CONTEXT:\n{context.strip()}\n")
+    if tool_evidence is not None:
+        parts.append(
+            "RECORDED TOOL-EVENT COUNTS (not retrieved source context):\n"
+            f"{tool_evidence.strip()}\n"
+            "These are counts of captured events, not proof of complete tool use, "
+            "MCP origin, successful execution, source support, or factual accuracy. "
+            "Do not infer absence from a zero count.\n"
+        )
     parts.append(f"ASSISTANT RESPONSE:\n{response.strip()}\n")
     parts.append("RUBRIC DIMENSIONS:")
     for d in rubric.dimensions:
@@ -183,6 +192,14 @@ class Judge:
     # It remains False by default for backward compatibility; context-aware callers
     # opt in explicitly.
     skip_context_dependent_when_missing: bool = False
+    tool_evidence_mode: str | None = None
+    tool_evidence_template: str | None = None
+
+    def _validate_tool_evidence_configuration(self) -> None:
+        if self.tool_evidence_mode not in (None, "counts_v1"):
+            raise ValueError("unsupported tool evidence mode")
+        if (self.tool_evidence_mode is None) != (self.tool_evidence_template is None):
+            raise ValueError("tool evidence template does not match evaluator mode")
 
     def _effective_rubric(self, context: str | None) -> Rubric:
         """Drop context-dependent dimensions when there's no context and the
@@ -198,6 +215,7 @@ class Judge:
 
     def evaluator_identity(self, context: str | None = None) -> dict:
         """Return the complete behavior-relevant identity for one evaluation."""
+        self._validate_tool_evidence_configuration()
         rubric = self._effective_rubric(context)
         provider = str(getattr(self.provider, "name", type(self.provider).__name__))
         temperature_applied = getattr(self.provider, "supports_temperature", True)
@@ -210,6 +228,9 @@ class Judge:
                 self.skip_context_dependent_when_missing
             ),
         }
+        if self.tool_evidence_mode is not None:
+            config["tool_evidence_mode"] = self.tool_evidence_mode
+            config["tool_evidence_template"] = self.tool_evidence_template
         fingerprint_payload = {
             "provider": provider,
             "models": [self.model],
@@ -218,7 +239,8 @@ class Judge:
             "rubric": _rubric_payload(rubric),
             "system_prompt": SYSTEM_PROMPT,
             "user_prompt_template": _user_prompt(
-                "__QUERY__", "__RESPONSE__", "__CONTEXT__", rubric
+                "__QUERY__", "__RESPONSE__", "__CONTEXT__", rubric,
+                "__TOOL_EVIDENCE__" if self.tool_evidence_mode else None,
             ),
             "config": config,
         }
@@ -239,10 +261,14 @@ class Judge:
         response: str,
         context: str | None = None,
         trace_id: str = "",
+        tool_evidence: str | None = None,
     ) -> Judgment:
         """Run the judge on a single (query, response, optional context) tuple."""
         identity = self.evaluator_identity(context)
-        dimensions = self.score(query=query, response=response, context=context)
+        dimensions = self.score(
+            query=query, response=response, context=context,
+            tool_evidence=tool_evidence,
+        )
         return Judgment(
             trace_id=trace_id,
             dimensions=dimensions,
@@ -251,12 +277,17 @@ class Judge:
 
     def score(
         self, *, query: str, response: str, context: str | None = None,
+        tool_evidence: str | None = None,
     ) -> list[DimensionScore]:
         """Score evidence without assigning it to any particular analysis unit."""
+        self._validate_tool_evidence_configuration()
+        if (self.tool_evidence_mode is None) != (tool_evidence is None):
+            raise ValueError("tool evidence does not match evaluator mode")
         rubric = self._effective_rubric(context)
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": _user_prompt(query, response, context, rubric)},
+            {"role": "user", "content": _user_prompt(query, response, context, rubric,
+                                                      tool_evidence)},
         ]
         req = CompletionRequest(
             model=self.model,

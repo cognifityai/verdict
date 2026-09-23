@@ -15,8 +15,11 @@ from dataclasses import replace
 from datetime import datetime
 
 from verdict.agent_judgment import (
+    MAX_TOOL_EVIDENCE_EVENTS,
+    TOOL_EVIDENCE_MODE,
     AgentTurnJudgment,
     sanitized_turn_judgment,
+    tool_counts_from_rows,
     trusted_turn_judgment,
     turn_evidence_fingerprint,
     turn_evidence_reason,
@@ -364,9 +367,21 @@ class InMemoryStorage:
     def replace_agent_run_bundle(self, bundle: AgentRunBundle) -> None:
         self.replace_agent_capture(bundle)
 
+    def _turn_tool_counts(self, tenant_id: str, run_id: str, turn_id: str):
+        events = sorted(
+            (event for (scope, run, _), event in self._agent_events.items()
+             if (scope, run, event.turn_id) == (tenant_id, run_id, turn_id)),
+            key=lambda event: (event.sequence, event.event_id),
+        )[:MAX_TOOL_EVIDENCE_EVENTS + 1]
+        return tool_counts_from_rows([
+            (event.event_type.value, event.status.value, event.attributes.get("is_error"))
+            for event in events
+        ])
+
     def list_agent_turn_evaluation_candidates(
         self, tenant_id: str, evaluator_fingerprint: str, *, limit: int = 100,
         before: tuple[datetime, str, str] | None = None,
+        tool_evidence: bool = False,
     ) -> tuple[list[tuple[AgentTurn, JudgmentStatus | None]], bool]:
         validate_turn_scan(tenant_id, evaluator_fingerprint, limit, before)
         with self._agent_evidence_lock:
@@ -376,14 +391,21 @@ class InMemoryStorage:
             turns.sort(key=lambda turn: (turn.started_at, turn.run_id, turn.turn_id), reverse=True)
             items = []
             for turn in turns[:limit]:
+                counts = self._turn_tool_counts(tenant_id, turn.run_id, turn.turn_id) if tool_evidence else None
                 raw = self._agent_turn_judgments.get((tenant_id, turn.run_id, turn.turn_id, evaluator_fingerprint))
                 judgment = trusted_turn_judgment(
                     raw, tenant_id=tenant_id, run_id=turn.run_id, turn_id=turn.turn_id,
                     evaluator_fingerprint=evaluator_fingerprint,
                 )
+                if judgment is not None and (
+                    judgment.evaluator_config.get("tool_evidence_mode") == TOOL_EVIDENCE_MODE
+                ) != tool_evidence:
+                    judgment = None
                 current = (judgment is not None and turn_evidence_reason(turn) is None
-                           and judgment.evidence_fingerprint == turn_evidence_fingerprint(turn))
-                items.append((copy.deepcopy(turn), judgment.status if current else None))
+                           and (counts is None or counts.unavailable_reason is None)
+                           and judgment.evidence_fingerprint == turn_evidence_fingerprint(turn, counts))
+                item = (copy.deepcopy(turn), judgment.status if current else None)
+                items.append((*item, counts) if tool_evidence else item)
         return items, len(turns) > limit
 
     def save_agent_turn_judgment_if_current(self, judgment: AgentTurnJudgment) -> str:
@@ -391,6 +413,11 @@ class InMemoryStorage:
         key = (judgment.tenant_id, judgment.run_id, judgment.turn_id, judgment.evaluator_fingerprint)
         with self._agent_evidence_lock:
             prior = self._agent_turn_judgments.get(key)
+            tool_counts = (
+                self._turn_tool_counts(*key[:3])
+                if judgment.evaluator_config.get("tool_evidence_mode") == TOOL_EVIDENCE_MODE
+                else None
+            )
             decision = turn_judgment_write_decision(
                 self._agent_turns.get(key[:3]), judgment,
                 trusted_turn_judgment(
@@ -398,6 +425,7 @@ class InMemoryStorage:
                     turn_id=judgment.turn_id,
                     evaluator_fingerprint=judgment.evaluator_fingerprint,
                 ),
+                tool_counts,
             )
             if decision == "saved":
                 self._agent_turn_judgments[key] = payload
@@ -405,20 +433,28 @@ class InMemoryStorage:
 
     def get_agent_turn_evaluation_candidate(
         self, tenant_id: str, run_id: str, turn_id: str, evaluator_fingerprint: str,
-    ) -> tuple[AgentTurn, JudgmentStatus | None] | None:
+        *, tool_evidence: bool = False,
+    ) -> tuple | None:
         validate_turn_scan(tenant_id, evaluator_fingerprint, 1, None)
         with self._agent_evidence_lock:
             turn = self._agent_turns.get((tenant_id, run_id, turn_id))
             if turn is None:
                 return None
+            counts = self._turn_tool_counts(tenant_id, run_id, turn_id) if tool_evidence else None
             raw = self._agent_turn_judgments.get((tenant_id, run_id, turn_id, evaluator_fingerprint))
             judgment = trusted_turn_judgment(
                 raw, tenant_id=tenant_id, run_id=run_id, turn_id=turn_id,
                 evaluator_fingerprint=evaluator_fingerprint,
             )
+            if judgment is not None and (
+                judgment.evaluator_config.get("tool_evidence_mode") == TOOL_EVIDENCE_MODE
+            ) != tool_evidence:
+                judgment = None
             current = (judgment is not None and turn_evidence_reason(turn) is None
-                       and judgment.evidence_fingerprint == turn_evidence_fingerprint(turn))
-            return copy.deepcopy(turn), judgment.status if current else None
+                       and (counts is None or counts.unavailable_reason is None)
+                       and judgment.evidence_fingerprint == turn_evidence_fingerprint(turn, counts))
+            item = (copy.deepcopy(turn), judgment.status if current else None)
+            return (*item, counts) if tool_evidence else item
 
     @contextmanager
     def agent_turn_judge_guard(self, tenant_id, run_id, turn_id, evaluator_fingerprint):
