@@ -22,6 +22,10 @@ the product is refined.
 
 ### Fixed
 
+- Codex local-history capture now reads text blocks from completed `UserMessage`
+  items as Agent Turn requests, alongside the earlier `user_message` records.
+  A rescan can fill requests previously marked missing; non-text-only requests
+  remain missing rather than being invented.
 - Anthropic SDK 1.8 message serialization now recognizes Verdict's lazy capture
   wrapper without consuming one-shot message iterables before the provider
   request. Stream-helper input failures remain captured whether the SDK raises

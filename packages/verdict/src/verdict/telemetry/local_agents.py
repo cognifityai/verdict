@@ -795,8 +795,15 @@ def _parse_codex(path: Path, *, home: Path | None) -> _ParsedHistory:
                     status=status,
                     has_content=True,
                 )
-        elif outer == "event_msg" and inner == "user_message":
-            text = _safe_text(payload.get("message"), home=home)
+        elif outer == "event_msg" and inner in {"user_message", "item_completed"}:
+            if inner == "user_message":
+                text = _safe_text(payload.get("message"), home=home)
+            else:
+                item = _mapping(payload.get("item"))
+                if (item is None or item.get("type") != "UserMessage"
+                        or not isinstance(item.get("content"), list)):
+                    continue
+                text = _message_text(item, home=home)
             if text.value:
                 appended = _append_turn_text(
                     active.request, active.legacy_request, text
