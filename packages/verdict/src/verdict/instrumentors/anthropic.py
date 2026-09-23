@@ -16,6 +16,7 @@ import importlib
 import inspect
 import random
 import time
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
@@ -83,7 +84,7 @@ def _maybe_import_anthropic():
         return False
 
 
-class _CapturedMessages:
+class _CapturedMessages(Sequence[Any]):
     """Replay provider-consumed messages without driving the source early."""
 
     def __init__(self, source: Any) -> None:
@@ -95,6 +96,19 @@ class _CapturedMessages:
 
     def __iter__(self):
         return self._iterate()
+
+    def __len__(self) -> int:
+        for _ in self._iterate():
+            pass
+        return len(self._cache)
+
+    def __getitem__(self, index: int | slice) -> Any:
+        if isinstance(index, slice) or index < 0:
+            return list(self._iterate())[index]
+        for current, item in enumerate(self._iterate()):
+            if current == index:
+                return item
+        raise IndexError(index)
 
     def _iterate(self):
         index = 0
