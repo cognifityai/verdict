@@ -214,8 +214,9 @@ Restart an older producer with the upgraded SDK before enabling shipping;
 shipping itself does not run analysis, judges, clustering, or monitors. See
 [`examples/agent_sdk.py`](examples/agent_sdk.py) for a runnable local example.
 
-An initial monitor proposal uses one genuine model-call Trace per analysis unit
-and exact event-time membership. Trace is the only currently supported unit. The count-mode
+An activatable monitor proposal uses one genuine model-call Trace per analysis unit
+and exact event-time membership. Trace is the only unit supported by the
+persisted prospective alert lifecycle. The count-mode
 default is an older 80% reference and newer 20% current cohort; explicit date
 ranges are also supported. Membership and the normalized metric counts used by
 the comparison are frozen together. In-flight traces are excluded. An ongoing
@@ -257,6 +258,23 @@ Stored monitors that predate frozen cohort facts remain readable but must be
 re-created from a reviewed preview before they can run again. The same applies
 to older evaluator-backed monitors that cannot represent pending finalization
 and to stored policies naming a non-Trace analysis unit.
+
+Monitor also offers a separate **Logical session (descriptive)** preview for
+native Agent evidence. It groups runs only by an explicit `AgentRun.session_id`
+and compares currently terminal sessions using either an older/newer count
+split or explicit event-time windows. It reports deterministic
+completion/final-output rates, optional current Agent Turn judgment PASS rates,
+effect sizes, and missing/in-progress coverage. It does not infer that sessions
+are independent or finalized, so it emits no p-values or alert decision, saves
+no policy or snapshot, and cannot be activated. Missing session identities are
+never reconstructed from source-session, Trace, tag, or process metadata.
+The preview fails closed above 1,000 runs or 10,000 Turns. Selecting a Turn
+evaluator also caps redacted Turn text at 16 MiB and selected judgments at
+10,000 / 16 MiB; counts-only tool evidence additionally caps scanned events at
+100,000. The returned projection contains no Turn text or event bodies and
+never silently samples an incomplete session. The evaluator selector inspects
+the newest 1,000 stored Turn-result slots, shows at most 100 identities, and
+reports when older slots were not inspected.
 
 ## Runs key-free; add a key for the judge (BYOK)
 
@@ -443,8 +461,10 @@ Turn and evaluator; a changed Turn makes the old score stale until reevaluated.
 Agent Runs detail shows the latest valid current Turn result among the eight
 newest evaluator slots per Turn, or one exact evaluator fingerprint when
 selected. Older results are not implied absent by this bounded view. Trace
-coverage, pipelines, and Monitor remain Trace-based; Turn judging does not provide tool/citation
-provenance by default. An explicit `toolEvidence: "counts_v1"` Turn option
+coverage and pipelines remain Trace-based. The descriptive logical-session
+Monitor preview can aggregate current native Turn judgments, but Turn judging
+does not provide tool/citation provenance by default. An explicit
+`toolEvidence: "counts_v1"` Turn option
 sends only bounded counts of recorded tool calls, results, reported errors,
 and unknown outcomes with the redacted Turn text. The tool-event projection
 does not add names, IDs, arguments, result bodies, or URLs to judge input.
@@ -454,8 +474,9 @@ retrieved source context and cannot establish MCP origin, citation support,
 claim accuracy, or complete tool coverage; context-required rubric dimensions
 remain skipped. Preview, approval, durable result, and Turn detail bind the
 same counts snapshot, while default Turn and provider Trace results retain
-their existing identities. Turn judging does not provide citation provenance,
-claim verification, or independent-session statistics. A completed
+their existing identities. Turn judging does not provide citation provenance or
+claim verification, and the logical-session preview makes no
+independent-session statistical claim. A completed
 Turn result contains one score per evaluable rubric dimension; malformed or
 partial stored results are not counted as judged and require a new approved run.
 
@@ -814,7 +835,9 @@ source. See [`ADR-013`](docs/adrs/013-stable-dependent-package-read-port.md).
   `insufficient_data`; otherwise the result is `degraded`.
 - The `0.1.0a20` POC drift demonstration assumes independently sampled calls.
   Do not treat repeated turns from the same conversation as independent
-  evidence or use that profile for a production decision.
+  evidence or use that profile for a production decision. Use Monitor's
+  descriptive logical-session preview to inspect session-level rates and
+  coverage; it deliberately omits inferential significance and alert claims.
 - The current local Monitor scope is tenant-bound and rejects mixed-tenant
   analysis.
 - `cost_usd` is a best-effort estimate from a dated static base-price table, not

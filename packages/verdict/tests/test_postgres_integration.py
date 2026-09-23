@@ -21,6 +21,12 @@ import pytest
 import verdict
 import verdict.client as client_module
 from _postgres_test_safety import isolated_test_dsn, validate_test_dsn
+from verdict.agent_judgment import (
+    TOOL_EVIDENCE_MODE,
+    AgentTurnJudgment,
+    TurnToolCounts,
+    turn_evidence_fingerprint,
+)
 from verdict.analysis_records import (
     AnalysisRunStatus,
     DeliveryOutcome,
@@ -29,7 +35,17 @@ from verdict.analysis_records import (
 )
 from verdict.dashboard.analysis_service import read_latest_analysis, run_analysis
 from verdict.dashboard.app import build_agent_run_detail
-from verdict.evidence import AgentCaptureBatch
+from verdict.evidence import (
+    AgentCaptureBatch,
+    AgentEvent,
+    AgentEventType,
+    AgentRun,
+    AgentRunBundle,
+    AgentTurn,
+    EvidenceState,
+    ExecutionStatus,
+    SourceSession,
+)
 from verdict.instrumentors.base import apply_routing_context, persist_trace
 from verdict.monitor_inputs import load_monitor_units
 from verdict.monitoring import (
@@ -859,6 +875,232 @@ def test_live_postgres_agent_capture_rolls_back_trace_and_hierarchy(monkeypatch)
         storage._exec("DELETE FROM import_sources WHERE tenant_id=%s", (tenant,))
         storage._exec("DELETE FROM traces WHERE trace_id=%s", (trace.trace_id,))
         storage.close()
+
+
+def test_live_postgres_loads_tenant_scoped_logical_session_monitor_evidence(monkeypatch):
+    now = datetime(2026, 9, 23, tzinfo=timezone.utc)
+    tenant = f"session-monitor-{uuid4().hex}"
+    other_tenant = f"session-monitor-other-{uuid4().hex}"
+
+    def bundle(scope: str, suffix: str) -> AgentRunBundle:
+        source_id = f"source-{suffix}"
+        run_id = f"run-{suffix}"
+        return AgentRunBundle(
+            SourceSession(source_id, scope, "test", "a" * 64, now, now),
+            AgentRun(
+                run_id,
+                source_id,
+                scope,
+                now,
+                ExecutionStatus.COMPLETED,
+                now,
+                session_id=f"logical-{suffix}",
+            ),
+            (AgentTurn(
+                f"turn-{suffix}",
+                run_id,
+                0,
+                now,
+                ExecutionStatus.COMPLETED,
+                now,
+                "request",
+                "response",
+                EvidenceState.PRESENT,
+                EvidenceState.PRESENT,
+            ),),
+        )
+
+    with _isolated_postgres_storage() as storage:
+        wanted = bundle(tenant, "wanted")
+        storage.replace_agent_run_bundle(wanted)
+        storage.replace_agent_run_bundle(bundle(other_tenant, "other"))
+        turn = wanted.turns[0]
+        evaluator_fingerprint = "e" * 64
+        judgment = AgentTurnJudgment(
+            tenant_id=tenant,
+            run_id=turn.run_id,
+            turn_id=turn.turn_id,
+            evaluator_fingerprint=evaluator_fingerprint,
+            evidence_fingerprint=turn_evidence_fingerprint(turn),
+            evaluator_provider="test",
+            evaluator_config={},
+            judge_models=["judge"],
+            expected_dimensions=["quality"],
+            rubric_name="quality",
+            rubric_version="1",
+            dimensions=[DimensionScore("quality", Verdict.PASS, "bounded", "judge")],
+        )
+        assert storage.save_agent_turn_judgment_if_current(judgment) == "saved"
+
+        evidence = storage.load_logical_session_monitor_evidence(
+            tenant,
+            evaluator_fingerprint=evaluator_fingerprint,
+        )
+        identities = storage.list_agent_turn_evaluator_identities(tenant)
+
+        assert [item.run_id for item in evidence.runs] == ["run-wanted"]
+        assert [item.turn_id for item in evidence.judgments] == ["turn-wanted"]
+        assert [item.evaluator_fingerprint for item in identities.judgments] == [
+            evaluator_fingerprint
+        ]
+        assert storage.load_logical_session_monitor_evidence(other_tenant).runs[
+            0
+        ].run_id == "run-other"
+        assert "request" not in repr(evidence)
+        assert "response" not in repr(evidence)
+
+        repaired = bundle(tenant, "repaired")
+        repaired = replace(
+            repaired,
+            session=replace(repaired.session, source_locator_hash="1" * 64),
+        )
+        second = bundle(tenant, "second")
+        second = replace(
+            second,
+            session=replace(second.session, source_locator_hash="2" * 64),
+        )
+        storage.replace_agent_run_bundle(repaired)
+        storage.replace_agent_run_bundle(second)
+        repaired_turn = repaired.turns[0]
+        completed = replace(
+            judgment,
+            run_id=repaired_turn.run_id,
+            turn_id=repaired_turn.turn_id,
+            evaluator_fingerprint="1" * 64,
+            evidence_fingerprint=turn_evidence_fingerprint(repaired_turn),
+            evaluated_at=now + timedelta(days=3),
+        )
+        error = replace(
+            completed,
+            status=JudgmentStatus.ERROR,
+            dimensions=[],
+            error="provider failed",
+            evaluated_at=now,
+        )
+        second_turn = second.turns[0]
+        other = replace(
+            judgment,
+            run_id=second_turn.run_id,
+            turn_id=second_turn.turn_id,
+            evaluator_fingerprint="2" * 64,
+            evidence_fingerprint=turn_evidence_fingerprint(second_turn),
+            evaluated_at=now + timedelta(days=2),
+        )
+        assert storage.save_agent_turn_judgment_if_current(error) == "saved"
+        assert storage.save_agent_turn_judgment_if_current(other) == "saved"
+        assert storage.save_agent_turn_judgment_if_current(completed) == "saved"
+
+        import verdict.storage.postgres as storage_module
+
+        monkeypatch.setattr(storage_module, "MAX_AGENT_EVALUATOR_IDENTITY_CANDIDATES", 1)
+        newest = storage.list_agent_turn_evaluator_identities(tenant)
+        assert [item.evaluator_fingerprint for item in newest.judgments] == ["1" * 64]
+        assert newest.truncated is True
+        monkeypatch.setattr(storage_module, "MAX_AGENT_EVALUATOR_IDENTITY_CANDIDATES", 1_000)
+
+        tool_bundle = bundle(tenant, "tools")
+        tool_bundle = replace(
+            tool_bundle,
+            session=replace(tool_bundle.session, source_locator_hash="c" * 64),
+            events=(
+                AgentEvent(
+                    "call-tools", tool_bundle.turns[0].turn_id, 0, now,
+                    AgentEventType.TOOL_CALL, ExecutionStatus.COMPLETED, "test",
+                    {"tool_name": "private-tool", "call_id": "private-call"},
+                ),
+                AgentEvent(
+                    "result-tools", tool_bundle.turns[0].turn_id, 1, now,
+                    AgentEventType.TOOL_RESULT, ExecutionStatus.COMPLETED, "test",
+                    {"tool_name": "private-tool", "call_id": "private-call"},
+                ),
+            ),
+        )
+        storage.replace_agent_run_bundle(tool_bundle)
+        tool_turn = tool_bundle.turns[0]
+        tool_fingerprint = "d" * 64
+        counts = TurnToolCounts(
+            event_count=2,
+            calls=1,
+            results=1,
+            unknown_results=1,
+        )
+        tool_judgment = replace(
+            judgment,
+            run_id=tool_turn.run_id,
+            turn_id=tool_turn.turn_id,
+            evaluator_fingerprint=tool_fingerprint,
+            evidence_fingerprint=turn_evidence_fingerprint(tool_turn, counts),
+            evaluator_config={
+                "tool_evidence_mode": TOOL_EVIDENCE_MODE,
+                "tool_evidence_template": TurnToolCounts.PROMPT_TEMPLATE,
+            },
+        )
+        assert storage.save_agent_turn_judgment_if_current(tool_judgment) == "saved"
+        tool_evidence = storage.load_logical_session_monitor_evidence(
+            tenant,
+            evaluator_fingerprint=tool_fingerprint,
+            tool_evidence_mode=TOOL_EVIDENCE_MODE,
+        )
+        tool_run = next(item for item in tool_evidence.runs if item.run_id == "run-tools")
+        assert tool_run.turns[0].evidence_fingerprint == tool_judgment.evidence_fingerprint
+        assert "private-tool" not in repr(tool_evidence)
+        assert "private-call" not in repr(tool_evidence)
+
+        whitespace = bundle(tenant, "whitespace")
+        whitespace = replace(
+            whitespace,
+            session=replace(whitespace.session, source_locator_hash="f" * 64),
+            turns=(replace(
+                whitespace.turns[0],
+                final_response_redacted=" \t\n\v\f\r\u00a0\u2003\u3000",
+            ),),
+        )
+        storage.replace_agent_run_bundle(whitespace)
+        whitespace_evidence = storage.load_logical_session_monitor_evidence(tenant)
+        whitespace_run = next(
+            item for item in whitespace_evidence.runs if item.run_id == "run-whitespace"
+        )
+        assert whitespace_run.turns[0].final_output_present is False
+
+        corrupt = bundle(tenant, "corrupt")
+        corrupt = replace(
+            corrupt,
+            session=replace(corrupt.session, source_locator_hash="b" * 64),
+        )
+        storage.replace_agent_run_bundle(corrupt)
+        corrupt_turn = corrupt.turns[0]
+        with storage._pool.connection() as conn, conn.transaction():
+            conn.execute(
+                "INSERT INTO agent_turn_judgments ("
+                "tenant_id,run_id,turn_id,evaluator_fingerprint,evidence_fingerprint,"
+                "status,evaluated_at,result_json) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+                (
+                    tenant,
+                    corrupt_turn.run_id,
+                    corrupt_turn.turn_id,
+                    evaluator_fingerprint,
+                    "b" * 64,
+                    "completed",
+                    now + timedelta(days=1),
+                    "{malformed",
+                ),
+            )
+        identities = storage.list_agent_turn_evaluator_identities(tenant)
+        discovered = [item.evaluator_fingerprint for item in identities.judgments]
+        assert discovered.count(evaluator_fingerprint) == 1
+        assert tool_fingerprint in discovered
+        with storage._pool.connection() as conn:
+            assert conn.execute(
+                "SELECT 1 FROM pg_indexes WHERE schemaname=current_schema() "
+                "AND indexname='idx_agent_turn_judgments_tenant_evaluated'",
+            ).fetchone() == (1,)
+
+        monkeypatch.setattr(storage_module, "MAX_LOGICAL_SESSION_MONITOR_TURN_TEXT_BYTES", 8)
+        with pytest.raises(ValueError, match="bounded Turn text limit"):
+            storage.load_logical_session_monitor_evidence(
+                tenant,
+                evaluator_fingerprint=evaluator_fingerprint,
+            )
 
 
 def test_live_postgres_trace_retention_clears_agent_event_link():

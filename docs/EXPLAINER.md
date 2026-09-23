@@ -98,11 +98,13 @@ business outcome, Agent Insights surfaces that failure without a judge call.
    are stored.
 5. **Monitor**: preview count-based or explicit event-time reference/current
    cohorts of genuine model-call Traces, then optionally activate the reviewed
-   policy. Trace is the only currently supported analysis unit. Activation opens an
+   policy. Trace is the only unit supported by the prospective alert lifecycle. Activation opens an
    empty prospective bucket at a stored event-time boundary, so older imported
    history cannot become new traffic. Fisher's exact test, practical-effect
    thresholds, and multiple-testing correction are applied to eligible binary
-   metrics. Grouping is optional.
+   metrics. Grouping is optional. A separate descriptive view groups native
+   Agent runs by explicit logical session identity and reports rates, effects,
+   and coverage without p-values, alerts, persistence, or activation.
 6. **Inspect**: use the CLI, Python APIs, or dashboard to review traces, scores,
    clusters, and drift reports.
 7. **Report**: review application-only utilization and evaluation coverage over

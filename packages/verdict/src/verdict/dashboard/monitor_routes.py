@@ -34,6 +34,7 @@ from verdict.monitoring import (
     plan_prospective_manifest,
     validate_monitor_analysis_unit,
 )
+from verdict.session_monitoring import preview_logical_sessions
 
 TENANT = LOCAL_TENANT
 SCOPE = LOCAL_TRACE_SCOPE
@@ -49,6 +50,31 @@ _BOUNDED_MONITOR_ERRORS = {
     "monitor grouping produces too many metric cells": (
         "This monitor has too many group and metric combinations. Reduce its "
         "groups or evaluator dimensions."
+    ),
+    "logical-session comparison does not support grouping": (
+        "Logical-session comparison does not support grouping."
+    ),
+    "logical-session comparison is unavailable for this storage": (
+        "Logical-session comparison is unavailable for this storage backend."
+    ),
+    "selected Agent Turn evaluator is unavailable": (
+        "Selected Agent Turn evaluator is unavailable. Refresh Monitor and try again."
+    ),
+    "logical-session preview exceeds bounded run limit": (
+        "Logical-session preview supports at most 1,000 runs in one tenant snapshot."
+    ),
+    "logical-session preview exceeds bounded Turn limit": (
+        "Logical-session preview supports at most 10,000 Turns in one tenant snapshot."
+    ),
+    "logical-session preview exceeds bounded Turn text limit": (
+        "Logical-session evaluator preview supports at most 16 MiB of selected Turn text."
+    ),
+    "logical-session preview exceeds bounded event limit": (
+        "Logical-session preview supports at most 100,000 events in one tenant snapshot."
+    ),
+    "logical-session preview exceeds bounded judgment limit": (
+        "Logical-session preview supports at most 10,000 selected judgments and 16 MiB "
+        "of judgment data in one tenant snapshot."
     ),
 }
 
@@ -145,6 +171,89 @@ class MonitorRoutes:
             raise ValueError("cluster grouping requires an active registry")
         return active.version_id
 
+    def agent_evaluators(
+        self,
+        writable,
+        tenant_id: str | None = None,
+    ) -> tuple[list[dict[str, object]], bool]:
+        reader = getattr(writable, "list_agent_turn_evaluator_identities", None)
+        if not callable(reader):
+            return [], False
+        page = reader(
+            tenant_id or self.tenant_id,
+            limit=100,
+        )
+        rows = getattr(page, "judgments", page)
+        return [
+            {
+                "fingerprint": row.evaluator_fingerprint,
+                "label": (
+                    f"{'+'.join(row.judge_models)} · "
+                    f"{row.rubric_name} v{row.rubric_version} · "
+                    f"fp {row.evaluator_fingerprint[:8]}"
+                ),
+                "expectedDimensions": list(row.expected_dimensions),
+                "toolEvidence": (
+                    row.evaluator_config.get("tool_evidence_mode") or "none"
+                ),
+            }
+            for row in rows
+        ], bool(getattr(page, "truncated", False))
+
+    def logical_session_preview(
+        self,
+        writable,
+        payload: dict[str, Any],
+    ) -> dict[str, object]:
+        if payload.get("groupingMode", "none") != "none":
+            raise ValueError("logical-session comparison does not support grouping")
+        mode = WindowMode(payload.get("windowMode", "count"))
+        fingerprint = payload.get("evaluatorFingerprint") or None
+        evaluator_rows, _truncated = self.agent_evaluators(writable)
+        evaluators = {item["fingerprint"]: item for item in evaluator_rows}
+        if fingerprint is not None and fingerprint not in evaluators:
+            raise ValueError("selected Agent Turn evaluator is unavailable")
+        dimensions = (
+            tuple(evaluators[fingerprint]["expectedDimensions"])
+            if fingerprint is not None else ()
+        )
+        values: dict[str, object] = {
+            "tenant_id": self.tenant_id,
+            "reference_ratio": float(payload.get("referenceRatio", 0.8)),
+            "evaluator_fingerprint": fingerprint,
+            "evaluator_dimensions": dimensions,
+        }
+        if mode is WindowMode.EXPLICIT:
+            for source, target in (
+                ("referenceStart", "reference_start"),
+                ("referenceEnd", "reference_end"),
+                ("currentStart", "current_start"),
+                ("currentEnd", "current_end"),
+            ):
+                value = payload[source]
+                if not isinstance(value, str):
+                    raise ValueError("explicit window boundary must be text")
+                parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                values[target] = (
+                    parsed.replace(tzinfo=timezone.utc)
+                    if parsed.tzinfo is None
+                    else parsed.astimezone(timezone.utc)
+                )
+        reader = getattr(writable, "load_logical_session_monitor_evidence", None)
+        if not callable(reader):
+            raise ValueError("logical-session comparison is unavailable for this storage")
+        evidence = reader(
+            self.tenant_id,
+            evaluator_fingerprint=fingerprint,
+            tool_evidence_mode=(
+                evaluators[fingerprint]["toolEvidence"]
+                if fingerprint is not None
+                and evaluators[fingerprint]["toolEvidence"] != "none"
+                else None
+            ),
+        )
+        return preview_logical_sessions(evidence, **values).as_dict()
+
     @staticmethod
     def response(
         policy, state, manifest=None, comparison=None, *, approved_historical=None,
@@ -214,6 +323,10 @@ class MonitorRoutes:
         """Return the one durable read model used by every monitor surface."""
         writable = self.setup.writable_storage()
         try:
+            agent_evaluators, evaluator_discovery_truncated = self.agent_evaluators(
+                writable,
+                tenant_id or self.tenant_id,
+            )
             scope = f"{tenant_id or self.tenant_id}:application:trace"
             active_policy = writable.get_active_monitor_policy(scope)
             candidate_policy = writable.get_latest_monitor_candidate(scope)
@@ -227,8 +340,20 @@ class MonitorRoutes:
             )
             primary = active or candidate
             if primary is None:
-                return {"state": "not_configured", "active": None, "candidate": None}
-            return {"state": primary["state"], "active": active, "candidate": candidate}
+                return {
+                    "state": "not_configured",
+                    "active": None,
+                    "candidate": None,
+                    "agentEvaluators": agent_evaluators,
+                    "agentEvaluatorDiscoveryTruncated": evaluator_discovery_truncated,
+                }
+            return {
+                "state": primary["state"],
+                "active": active,
+                "candidate": candidate,
+                "agentEvaluators": agent_evaluators,
+                "agentEvaluatorDiscoveryTruncated": evaluator_discovery_truncated,
+            }
         finally:
             writable.close()
 
@@ -240,6 +365,9 @@ class MonitorRoutes:
                 )
             writable = None
             try:
+                if payload.get("analysisUnit", "trace") == "logical_session":
+                    writable = self.setup.writable_storage()
+                    return self.logical_session_preview(writable, payload)
                 policy = self.policy(
                     payload,
                     f"policy-{secrets.token_hex(12)}",

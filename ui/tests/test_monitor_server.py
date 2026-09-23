@@ -7,7 +7,23 @@ from hashlib import sha256
 import httpx
 import pytest
 from fastapi import FastAPI, Request
+from verdict.agent_judgment import (
+    TOOL_EVIDENCE_MODE,
+    AgentTurnJudgment,
+    TurnToolCounts,
+    turn_evidence_fingerprint,
+)
 from verdict.dashboard.app import create_app
+from verdict.evidence import (
+    AgentEvent,
+    AgentEventType,
+    AgentRun,
+    AgentRunBundle,
+    AgentTurn,
+    EvidenceState,
+    ExecutionStatus,
+    SourceSession,
+)
 from verdict.monitoring import (
     AnalysisUnitRecord,
     CohortManifest,
@@ -38,6 +54,73 @@ from verdict_eval.cluster_registry import ClusterRegistryService
 from verdict_eval.clustering_strategies import FitConfig
 
 NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+
+def _insert_logical_session_runs(path, sessions):
+    storage = SQLiteStorage(str(path))
+    try:
+        for index, logical_session in enumerate(sessions):
+            started = NOW + timedelta(minutes=index)
+            source_id = f"private-source-{index}"
+            run_id = f"private-run-{index}"
+            turn_id = f"private-turn-{index}"
+            storage.replace_agent_run_bundle(AgentRunBundle(
+                SourceSession(
+                    source_id,
+                    "__verdict_local__",
+                    "test",
+                    sha256(source_id.encode()).hexdigest(),
+                    started,
+                    started,
+                ),
+                AgentRun(
+                    run_id,
+                    source_id,
+                    "__verdict_local__",
+                    started,
+                    ExecutionStatus.COMPLETED,
+                    started + timedelta(seconds=1),
+                    session_id=logical_session,
+                ),
+                (AgentTurn(
+                    turn_id,
+                    run_id,
+                    0,
+                    started,
+                    ExecutionStatus.COMPLETED,
+                    started + timedelta(seconds=1),
+                    "request",
+                    "response",
+                    EvidenceState.PRESENT,
+                    EvidenceState.PRESENT,
+                ),),
+            ))
+    finally:
+        storage.close()
+
+
+def _insert_agent_turn_judgment(path, *, evaluator_fingerprint):
+    storage = SQLiteStorage(str(path))
+    try:
+        bundle = storage.get_agent_run_bundle("__verdict_local__", "private-run-0")
+        turn = bundle.turns[0]
+        judgment = AgentTurnJudgment(
+            tenant_id="__verdict_local__",
+            run_id=turn.run_id,
+            turn_id=turn.turn_id,
+            evaluator_fingerprint=evaluator_fingerprint,
+            evidence_fingerprint=turn_evidence_fingerprint(turn),
+            evaluator_provider="test",
+            evaluator_config={},
+            judge_models=["judge"],
+            expected_dimensions=["quality"],
+            rubric_name="quality",
+            rubric_version="1",
+            dimensions=[DimensionScore("quality", Verdict.PASS, "bounded", "judge")],
+        )
+        assert storage.save_agent_turn_judgment_if_current(judgment) == "saved"
+    finally:
+        storage.close()
 
 
 def _insert_traces(
@@ -103,6 +186,280 @@ def test_monitor_preview_includes_default_tenantless_sdk_traces(tmp_path):
     manifest = response.json()["snapshot"]["manifest"]
     assert len(manifest["reference_unit_ids"]) == 10
     assert len(manifest["current_unit_ids"]) == 10
+
+
+def test_logical_session_preview_is_descriptive_private_and_not_persisted(tmp_path):
+    database = tmp_path / "logical-sessions.db"
+    _insert_logical_session_runs(
+        database,
+        ("private-logical-a", "private-logical-a", "private-logical-b"),
+    )
+
+    async def preview():
+        app = create_app(storage=f"sqlite:///{database}")
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver",
+        ) as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            response = await client.post(
+                "/api/monitor/preview",
+                headers={"X-Verdict-Setup": token},
+                json={
+                    "analysisUnit": "logical_session",
+                    "windowMode": "count",
+                    "referenceRatio": 0.5,
+                    "groupingMode": "none",
+                },
+            )
+            return response, await client.get("/api/monitor")
+
+    response, state = asyncio.run(preview())
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["state"] == "descriptive"
+    assert body["observationalUnits"] == 2
+    assert body["inferential"] is False
+    assert body["activationAllowed"] is False
+    assert all(metric["pValue"] is None and metric["alert"] is None for metric in body["metrics"])
+    encoded = response.text
+    assert "private-logical" not in encoded
+    assert "private-run" not in encoded
+    assert "private-turn" not in encoded
+    assert state.json()["candidate"] is None
+    connection = sqlite3.connect(database)
+    try:
+        assert connection.execute("SELECT COUNT(*) FROM monitor_policies").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM monitor_snapshots").fetchone()[0] == 0
+    finally:
+        connection.close()
+
+
+def test_logical_session_preview_rejects_trace_grouping(tmp_path):
+    database = tmp_path / "logical-session-grouping.db"
+    _insert_logical_session_runs(database, ("session-a", "session-b"))
+
+    async def preview():
+        app = create_app(storage=f"sqlite:///{database}")
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver",
+        ) as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            return await client.post(
+                "/api/monitor/preview",
+                headers={"X-Verdict-Setup": token},
+                json={
+                    "analysisUnit": "logical_session",
+                    "windowMode": "count",
+                    "referenceRatio": 0.5,
+                    "groupingMode": "provider_model",
+                },
+            )
+
+    response = asyncio.run(preview())
+
+    assert response.status_code == 400
+    assert response.json() == {
+        "error": "Logical-session comparison does not support grouping."
+    }
+
+
+def test_logical_session_preview_rejects_stale_evaluator_and_malformed_window(tmp_path):
+    database = tmp_path / "logical-session-invalid.db"
+    _insert_logical_session_runs(database, ("session-a", "session-b"))
+
+    async def preview():
+        app = create_app(storage=f"sqlite:///{database}")
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            headers = {"X-Verdict-Setup": token}
+            stale = await client.post(
+                "/api/monitor/preview",
+                headers=headers,
+                json={
+                    "analysisUnit": "logical_session",
+                    "windowMode": "count",
+                    "evaluatorFingerprint": "f" * 64,
+                },
+            )
+            malformed = await client.post(
+                "/api/monitor/preview",
+                headers=headers,
+                json={
+                    "analysisUnit": "logical_session",
+                    "windowMode": "explicit",
+                    "referenceStart": "not-a-date",
+                },
+            )
+            return stale, malformed
+
+    stale, malformed = asyncio.run(preview())
+
+    assert stale.status_code == malformed.status_code == 400
+    assert stale.json() == {
+        "error": "Selected Agent Turn evaluator is unavailable. Refresh Monitor and try again."
+    }
+    connection = sqlite3.connect(database)
+    try:
+        assert connection.execute("SELECT COUNT(*) FROM monitor_policies").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM monitor_snapshots").fetchone()[0] == 0
+    finally:
+        connection.close()
+
+
+def test_logical_session_preview_uses_only_a_selected_native_turn_evaluator(tmp_path):
+    database = tmp_path / "logical-session-evaluator.db"
+    fingerprint = "e" * 64
+    _insert_logical_session_runs(database, ("session-a", "session-b"))
+    _insert_agent_turn_judgment(database, evaluator_fingerprint=fingerprint)
+
+    async def preview():
+        app = create_app(storage=f"sqlite:///{database}")
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver",
+        ) as client:
+            state = await client.get("/api/monitor")
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            response = await client.post(
+                "/api/monitor/preview",
+                headers={"X-Verdict-Setup": token},
+                json={
+                    "analysisUnit": "logical_session",
+                    "windowMode": "count",
+                    "referenceRatio": 0.5,
+                    "evaluatorFingerprint": fingerprint,
+                },
+            )
+            return state, response
+
+    state, response = asyncio.run(preview())
+
+    assert state.status_code == response.status_code == 200
+    assert state.json()["agentEvaluatorDiscoveryTruncated"] is False
+    assert state.json()["agentEvaluators"] == [{
+        "fingerprint": fingerprint,
+        "label": f"judge · quality v1 · fp {fingerprint[:8]}",
+        "expectedDimensions": ["quality"],
+        "toolEvidence": "none",
+    }]
+    quality = next(
+        metric for metric in response.json()["metrics"]
+        if metric["metric"] == "judge.quality.pass"
+    )
+    assert quality["referenceEvaluable"] == 1
+    assert quality["currentMissing"] == 1
+    assert quality["pValue"] is None
+
+
+def test_monitor_reports_when_agent_evaluator_discovery_is_truncated(
+    tmp_path,
+    monkeypatch,
+):
+    import verdict.storage.sqlite as storage_module
+
+    database = tmp_path / "logical-session-evaluator-bound.db"
+    _insert_logical_session_runs(database, ("session-a",))
+    _insert_agent_turn_judgment(database, evaluator_fingerprint="a" * 64)
+    _insert_agent_turn_judgment(database, evaluator_fingerprint="b" * 64)
+    monkeypatch.setattr(storage_module, "MAX_AGENT_EVALUATOR_IDENTITY_CANDIDATES", 1)
+
+    async def state():
+        app = create_app(storage=f"sqlite:///{database}")
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            return await client.get("/api/monitor")
+
+    response = asyncio.run(state())
+
+    assert response.status_code == 200
+    assert response.json()["agentEvaluatorDiscoveryTruncated"] is True
+    assert len(response.json()["agentEvaluators"]) == 1
+
+
+def test_counts_only_logical_session_preview_tolerates_malformed_event_json(tmp_path):
+    database = tmp_path / "logical-session-malformed-event.db"
+    fingerprint = "e" * 64
+    _insert_logical_session_runs(database, ("session-a",))
+    storage = SQLiteStorage(str(database))
+    try:
+        bundle = storage.get_agent_run_bundle("__verdict_local__", "private-run-0")
+        turn = bundle.turns[0]
+        bundle = replace(bundle, events=(AgentEvent(
+            "private-event",
+            turn.turn_id,
+            0,
+            turn.started_at,
+            AgentEventType.TOOL_RESULT,
+            ExecutionStatus.COMPLETED,
+            "test",
+            {},
+        ),))
+        storage.replace_agent_run_bundle(bundle)
+        counts = TurnToolCounts(event_count=1, results=1, unknown_results=1)
+        judgment = AgentTurnJudgment(
+            tenant_id="__verdict_local__",
+            run_id=turn.run_id,
+            turn_id=turn.turn_id,
+            evaluator_fingerprint=fingerprint,
+            evidence_fingerprint=turn_evidence_fingerprint(turn, counts),
+            evaluator_provider="test",
+            evaluator_config={
+                "tool_evidence_mode": TOOL_EVIDENCE_MODE,
+                "tool_evidence_template": TurnToolCounts.PROMPT_TEMPLATE,
+            },
+            judge_models=["judge"],
+            expected_dimensions=["quality"],
+            rubric_name="quality",
+            rubric_version="1",
+            dimensions=[DimensionScore("quality", Verdict.PASS, "bounded", "judge")],
+        )
+        assert storage.save_agent_turn_judgment_if_current(judgment) == "saved"
+        storage._conn.execute(
+            "UPDATE agent_events SET attributes_json='{malformed' WHERE event_id=?",
+            ("private-event",),
+        )
+        storage._conn.commit()
+    finally:
+        storage.close()
+
+    async def preview():
+        app = create_app(storage=f"sqlite:///{database}")
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            return await client.post(
+                "/api/monitor/preview",
+                headers={"X-Verdict-Setup": token},
+                json={
+                    "analysisUnit": "logical_session",
+                    "windowMode": "count",
+                    "referenceRatio": 0.5,
+                    "evaluatorFingerprint": fingerprint,
+                },
+            )
+
+    response = asyncio.run(preview())
+
+    assert response.status_code == 200
+    metric = next(
+        item for item in response.json()["metrics"]
+        if item["metric"] == "judge.quality.pass"
+    )
+    assert metric["currentEvaluable"] == 1
+    assert "malformed" not in response.text
 
 
 @pytest.mark.parametrize("analysis_unit", ["turn", "run", "session"])

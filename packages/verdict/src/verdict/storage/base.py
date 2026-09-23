@@ -27,6 +27,10 @@ from verdict.schema import (
     SpanRecord,
     Trace,
 )
+from verdict.session_monitoring import (
+    AgentTurnEvaluatorIdentityPage,
+    LogicalSessionEvidence,
+)
 
 
 def _validate_drift_run_snapshot(
@@ -149,6 +153,21 @@ class Storage(Protocol):
         *,
         limit: int = 100,
     ) -> list[AgentRunBundle]: ...
+
+    def load_logical_session_monitor_evidence(
+        self,
+        tenant_id: str,
+        *,
+        evaluator_fingerprint: str | None = None,
+        tool_evidence_mode: str | None = None,
+    ) -> LogicalSessionEvidence: ...
+
+    def list_agent_turn_evaluator_identities(
+        self,
+        tenant_id: str,
+        *,
+        limit: int = 100,
+    ) -> AgentTurnEvaluatorIdentityPage: ...
 
     def has_agent_run_source_kind(self, tenant_id: str, source_kind: str) -> bool: ...
 

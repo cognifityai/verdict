@@ -25,6 +25,7 @@ from datetime import datetime
 from verdict.agent_judgment import (
     TOOL_EVIDENCE_MODE,
     AgentTurnJudgment,
+    TurnToolCounts,
     sanitized_turn_judgment,
     trusted_turn_judgment,
     turn_evidence_fingerprint,
@@ -46,6 +47,7 @@ from verdict.evidence import (
     AgentCaptureBatch,
     AgentRunBundle,
     AgentTurn,
+    ExecutionStatus,
     agent_run_bundle_from_json,
 )
 from verdict.monitoring import (
@@ -107,6 +109,20 @@ from verdict.schema import (
     Verdict,
     cluster_candidate_digest,
     populate_trace_analysis_fields,
+)
+from verdict.session_monitoring import (
+    MAX_AGENT_EVALUATOR_IDENTITY_CANDIDATES,
+    MAX_LOGICAL_SESSION_MONITOR_EVENTS,
+    MAX_LOGICAL_SESSION_MONITOR_JUDGMENT_BYTES,
+    MAX_LOGICAL_SESSION_MONITOR_RUNS,
+    MAX_LOGICAL_SESSION_MONITOR_TURN_TEXT_BYTES,
+    MAX_LOGICAL_SESSION_MONITOR_TURNS,
+    TEXT_STRIP_CHARACTERS,
+    AgentTurnEvaluatorIdentityPage,
+    LogicalSessionEvidence,
+    LogicalSessionRunEvidence,
+    LogicalSessionTurnEvidence,
+    logical_session_turn_evidence,
 )
 from verdict.storage.base import (
     _validate_agent_bundle_query,
@@ -277,6 +293,10 @@ CREATE TABLE IF NOT EXISTS agent_turn_judgments (
     FOREIGN KEY (tenant_id, run_id, turn_id)
         REFERENCES agent_turns(tenant_id, run_id, turn_id) ON DELETE CASCADE
 );
+CREATE INDEX IF NOT EXISTS idx_agent_turn_judgments_tenant_evaluated
+    ON agent_turn_judgments(
+        tenant_id, evaluated_at DESC, evaluator_fingerprint, run_id, turn_id
+    );
 
 CREATE TABLE IF NOT EXISTS agent_events (
     tenant_id TEXT NOT NULL,
@@ -1534,6 +1554,229 @@ class PostgresStorage:
         run_ids = tuple(row[0] for row in rows)
         with self._pool.connection() as conn:
             return self._read_normalized_bundles_connection(conn, tenant_id, run_ids)
+
+    def load_logical_session_monitor_evidence(
+        self,
+        tenant_id: str,
+        *,
+        evaluator_fingerprint: str | None = None,
+        tool_evidence_mode: str | None = None,
+    ) -> LogicalSessionEvidence:
+        _validate_agent_bundle_query(tenant_id, 1)
+        if tool_evidence_mode not in {None, TOOL_EVIDENCE_MODE} or (
+            tool_evidence_mode is not None and evaluator_fingerprint is None
+        ):
+            raise ValueError("invalid logical-session tool evidence mode")
+        if evaluator_fingerprint is not None:
+            _validate_evaluator_judgment_query(
+                tenant_id, evaluator_fingerprint, MAX_LOGICAL_SESSION_MONITOR_TURNS,
+            )
+        with self._pool.connection() as conn, conn.transaction():
+            conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            run_rows = conn.execute(
+                "SELECT run_id,tenant_id,session_id,started_at,status "
+                "FROM agent_runs WHERE tenant_id=%s "
+                "ORDER BY started_at,run_id LIMIT %s",
+                (tenant_id, MAX_LOGICAL_SESSION_MONITOR_RUNS + 1),
+            ).fetchall()
+            if len(run_rows) > MAX_LOGICAL_SESSION_MONITOR_RUNS:
+                raise ValueError("logical-session preview exceeds bounded run limit")
+            turn_bound_fields = (
+                "COUNT(*),COALESCE(SUM("
+                "octet_length(COALESCE(t.user_request_redacted,''))+"
+                "octet_length(COALESCE(t.final_response_redacted,''))),0)"
+                if evaluator_fingerprint is not None else "COUNT(*),0"
+            )
+            turn_bounds = conn.execute(
+                "WITH selected AS (SELECT run_id FROM agent_runs WHERE tenant_id=%s "
+                "ORDER BY started_at,run_id LIMIT %s) SELECT " + turn_bound_fields +
+                " FROM agent_turns t JOIN selected s ON s.run_id=t.run_id "
+                "WHERE t.tenant_id=%s",
+                (tenant_id, MAX_LOGICAL_SESSION_MONITOR_RUNS, tenant_id),
+            ).fetchone()
+            if turn_bounds[0] > MAX_LOGICAL_SESSION_MONITOR_TURNS:
+                raise ValueError("logical-session preview exceeds bounded Turn limit")
+            if evaluator_fingerprint is not None and (
+                turn_bounds[1] > MAX_LOGICAL_SESSION_MONITOR_TURN_TEXT_BYTES
+            ):
+                raise ValueError("logical-session preview exceeds bounded Turn text limit")
+            tool_counts: dict[tuple[str, str], TurnToolCounts] = {}
+            if tool_evidence_mode is not None:
+                event_total = conn.execute(
+                    "WITH selected AS (SELECT run_id FROM agent_runs WHERE tenant_id=%s "
+                    "ORDER BY started_at,run_id LIMIT %s) "
+                    "SELECT COUNT(*) FROM agent_events e JOIN selected s "
+                    "ON s.run_id=e.run_id WHERE e.tenant_id=%s",
+                    (tenant_id, MAX_LOGICAL_SESSION_MONITOR_RUNS, tenant_id),
+                ).fetchone()[0]
+                if event_total > MAX_LOGICAL_SESSION_MONITOR_EVENTS:
+                    raise ValueError("logical-session preview exceeds bounded event limit")
+                rows = conn.execute(
+                    "WITH selected AS (SELECT run_id FROM agent_runs WHERE tenant_id=%s "
+                    "ORDER BY started_at,run_id LIMIT %s) "
+                    "SELECT e.run_id,e.turn_id,COUNT(*) AS event_count,"
+                    "SUM(CASE WHEN e.event_type='tool_call' THEN 1 ELSE 0 END) AS calls,"
+                    "SUM(CASE WHEN e.event_type='tool_result' THEN 1 ELSE 0 END) AS results,"
+                    "SUM(CASE WHEN e.event_type='tool_result' AND ("
+                    "COALESCE(e.attributes_json->'is_error'='true'::jsonb,FALSE) OR "
+                    "e.status IN ('failed','timed_out','cancelled')) THEN 1 ELSE 0 END) "
+                    "AS error_results,"
+                    "SUM(CASE WHEN e.event_type='tool_result' AND NOT ("
+                    "COALESCE(e.attributes_json->'is_error'='true'::jsonb,FALSE) OR "
+                    "e.status IN ('failed','timed_out','cancelled')) AND ("
+                    "e.attributes_json->'is_error' IS DISTINCT FROM 'false'::jsonb OR "
+                    "e.status<>'completed') THEN 1 ELSE 0 END) AS unknown_results "
+                    "FROM agent_events e JOIN selected s ON s.run_id=e.run_id "
+                    "WHERE e.tenant_id=%s GROUP BY e.run_id,e.turn_id",
+                    (tenant_id, MAX_LOGICAL_SESSION_MONITOR_RUNS, tenant_id),
+                ).fetchall()
+                tool_counts = {
+                    (row[0], row[1]): TurnToolCounts(
+                        event_count=row[2], calls=row[3], results=row[4],
+                        error_results=row[5], unknown_results=row[6],
+                    )
+                    for row in rows
+                }
+            if evaluator_fingerprint is None:
+                turn_rows = conn.execute(
+                    "WITH selected AS (SELECT run_id FROM agent_runs WHERE tenant_id=%s "
+                    "ORDER BY started_at,run_id LIMIT %s) "
+                    "SELECT t.run_id,t.turn_id,t.status,"
+                    "CASE WHEN t.response_state='present' AND "
+                    "length(btrim(COALESCE(t.final_response_redacted,''),%s))>0 "
+                    "THEN TRUE ELSE FALSE END AS final_output_present "
+                    "FROM agent_turns t JOIN selected s ON s.run_id=t.run_id "
+                    "WHERE t.tenant_id=%s ORDER BY t.run_id,t.sequence,t.turn_id",
+                    (
+                        tenant_id,
+                        MAX_LOGICAL_SESSION_MONITOR_RUNS,
+                        TEXT_STRIP_CHARACTERS,
+                        tenant_id,
+                    ),
+                ).fetchall()
+            else:
+                turn_rows = conn.execute(
+                    "WITH selected AS (SELECT run_id FROM agent_runs WHERE tenant_id=%s "
+                    "ORDER BY started_at,run_id LIMIT %s) "
+                    "SELECT t.run_id,t.turn_id,t.sequence,t.started_at,t.ended_at,t.status,"
+                    "t.user_request_redacted,t.final_response_redacted,t.request_state,"
+                    "t.response_state,t.request_truncated,t.response_truncated "
+                    "FROM agent_turns t JOIN selected s ON s.run_id=t.run_id "
+                    "WHERE t.tenant_id=%s ORDER BY t.run_id,t.sequence,t.turn_id",
+                    (tenant_id, MAX_LOGICAL_SESSION_MONITOR_RUNS, tenant_id),
+                ).fetchall()
+            turns_by_run: dict[str, list[LogicalSessionTurnEvidence]] = {}
+            for row in turn_rows:
+                if evaluator_fingerprint is None:
+                    projected = LogicalSessionTurnEvidence(
+                        run_id=row[0], turn_id=row[1],
+                        status=ExecutionStatus(row[2]), final_output_present=row[3],
+                    )
+                else:
+                    turn = agent_turn_from_row(dict(zip(
+                        (
+                            "run_id", "turn_id", "sequence", "started_at", "ended_at",
+                            "status", "user_request_redacted", "final_response_redacted",
+                            "request_state", "response_state", "request_truncated",
+                            "response_truncated",
+                        ),
+                        row,
+                        strict=True,
+                    )))
+                    projected = logical_session_turn_evidence(
+                        turn,
+                        calculate_evidence=True,
+                        tool_counts=(
+                            tool_counts.get((turn.run_id, turn.turn_id))
+                            if tool_evidence_mode is not None else None
+                        ),
+                    )
+                turns_by_run.setdefault(projected.run_id, []).append(projected)
+            runs = [
+                LogicalSessionRunEvidence(
+                    run_id=row[0], tenant_id=row[1], session_id=row[2],
+                    started_at=row[3], status=ExecutionStatus(row[4]),
+                    turns=tuple(turns_by_run.get(row[0], ())),
+                )
+                for row in run_rows
+            ]
+            judgments = []
+            if evaluator_fingerprint is not None:
+                judgment_bounds = conn.execute(
+                    "WITH selected AS (SELECT run_id FROM agent_runs WHERE tenant_id=%s "
+                    "ORDER BY started_at,run_id LIMIT %s) "
+                    "SELECT COUNT(*),COALESCE(SUM(octet_length(j.result_json)),0) "
+                    "FROM agent_turn_judgments j JOIN selected s ON s.run_id=j.run_id "
+                    "WHERE j.tenant_id=%s AND j.evaluator_fingerprint=%s",
+                    (
+                        tenant_id,
+                        MAX_LOGICAL_SESSION_MONITOR_RUNS,
+                        tenant_id,
+                        evaluator_fingerprint,
+                    ),
+                ).fetchone()
+                if judgment_bounds[0] > MAX_LOGICAL_SESSION_MONITOR_TURNS:
+                    raise ValueError("logical-session preview exceeds bounded judgment limit")
+                if judgment_bounds[1] > MAX_LOGICAL_SESSION_MONITOR_JUDGMENT_BYTES:
+                    raise ValueError("logical-session preview exceeds bounded judgment limit")
+                rows = conn.execute(
+                    "WITH selected AS (SELECT run_id FROM agent_runs WHERE tenant_id=%s "
+                    "ORDER BY started_at,run_id LIMIT %s) "
+                    "SELECT j.run_id,j.turn_id,j.evidence_fingerprint,j.status,j.result_json "
+                    "FROM agent_turn_judgments j JOIN selected s ON s.run_id=j.run_id "
+                    "WHERE j.tenant_id=%s AND j.evaluator_fingerprint=%s "
+                    "ORDER BY j.evaluated_at,j.run_id,j.turn_id",
+                    (
+                        tenant_id,
+                        MAX_LOGICAL_SESSION_MONITOR_RUNS,
+                        tenant_id,
+                        evaluator_fingerprint,
+                    ),
+                ).fetchall()
+                for run_id, turn_id, evidence_fingerprint, status, result_json in rows:
+                    judgment = trusted_turn_judgment(
+                        result_json,
+                        tenant_id=tenant_id,
+                        run_id=run_id,
+                        turn_id=turn_id,
+                        evaluator_fingerprint=evaluator_fingerprint,
+                        evidence_fingerprint=evidence_fingerprint,
+                        status=status,
+                    )
+                    if judgment is not None:
+                        judgments.append(judgment)
+        return LogicalSessionEvidence(tuple(runs), tuple(judgments))
+
+    def list_agent_turn_evaluator_identities(
+        self,
+        tenant_id: str,
+        *,
+        limit: int = 100,
+    ) -> AgentTurnEvaluatorIdentityPage:
+        _validate_agent_bundle_query(tenant_id, limit)
+        rows = self._fetchall(
+            "SELECT run_id,turn_id,evaluator_fingerprint,evidence_fingerprint,"
+            "status,result_json FROM agent_turn_judgments WHERE tenant_id=%s "
+            "ORDER BY evaluated_at DESC,evaluator_fingerprint,run_id,turn_id LIMIT %s",
+            (tenant_id, MAX_AGENT_EVALUATOR_IDENTITY_CANDIDATES + 1),
+        )
+        truncated = len(rows) > MAX_AGENT_EVALUATOR_IDENTITY_CANDIDATES
+        latest: dict[str, AgentTurnJudgment] = {}
+        for run_id, turn_id, fingerprint, evidence_fingerprint, status, result_json in (
+            rows[:MAX_AGENT_EVALUATOR_IDENTITY_CANDIDATES]
+        ):
+            judgment = trusted_turn_judgment(
+                result_json,
+                tenant_id=tenant_id,
+                run_id=run_id,
+                turn_id=turn_id,
+                evaluator_fingerprint=fingerprint,
+                evidence_fingerprint=evidence_fingerprint,
+                status=status,
+            )
+            if judgment is not None and judgment.evaluator_fingerprint not in latest:
+                latest[judgment.evaluator_fingerprint] = judgment
+        return AgentTurnEvaluatorIdentityPage(tuple(list(latest.values())[:limit]), truncated)
 
     def has_agent_run_source_kind(self, tenant_id: str, source_kind: str) -> bool:
         _validate_agent_bundle_query(tenant_id, 1)

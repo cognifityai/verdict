@@ -181,7 +181,8 @@ produce a bounded warning.
 
 The Monitor UI previews an immutable count-based (older 80% / newer 20% by
 default) or explicit-date policy before activation. One genuine model-call
-Trace is the only currently supported analysis unit. Each metric has its own
+Trace is the only analysis unit supported by the persisted prospective alert
+lifecycle. Each metric has its own
 eligible denominator, Fisher's exact p-value, Benjamini-Hochberg adjustment,
 and effect-size gate. With provider/model or reviewed-cluster grouping, Verdict
 computes separate group-by-metric comparisons and adjusts across the complete
@@ -213,6 +214,22 @@ Grouped monitors are limited to 250 distinct groups. Older stored monitors
 without frozen cohort facts, without evaluator-finalization state when an
 evaluator is selected, or naming a non-Trace analysis unit remain readable but
 require a new reviewed preview before execution.
+
+A separate **Logical session (descriptive)** selection groups native Agent
+runs only by explicit `AgentRun.session_id`. It compares currently terminal
+sessions retrospectively and reports deterministic rates, optional current
+Agent Turn judgment PASS rates, effect sizes, and coverage. Because Verdict
+does not have an authoritative session-finalization signal or an established
+independence premise, this preview has no p-values or alert decision, is not
+persisted, and cannot be activated. Missing identities are reported rather than
+inferred from source sessions, Traces, tags, or process metadata.
+The bounded preview fails closed above 1,000 runs or 10,000 Turns. Selecting a
+Turn evaluator also caps redacted Turn text at 16 MiB and selected judgments at
+10,000 / 16 MiB; counts-only tool evidence additionally caps scanned events at
+100,000. The returned projection contains no Turn text or event bodies and
+never silently samples an incomplete session. Evaluator discovery examines the
+newest 1,000 stored Turn-result slots, exposes at most 100 identities, and marks
+the response when older slots were not inspected.
 
 The dashboard reads key-free findings from immutable analysis snapshots rather
 than recomputing them on every page load. It reports provider outcome,
@@ -319,8 +336,9 @@ prompt; the event projection never includes tool names, arguments, result
 bodies, or URLs. Turns with no recorded tool events or more than 64 events
 are ineligible in this mode. Counts do not establish MCP origin, complete
 tool coverage, citation support, or factual accuracy, and do not enable
-rubric dimensions requiring retrieved context. Citation verification and
-Monitor analysis units remain separate future work.
+rubric dimensions requiring retrieved context. Citation verification remains
+separate future work. Agent Turn judgments may be included in the descriptive
+logical-session Monitor preview, which makes no inferential or activation claim.
 Only the four judge-visible counts bind score currentness: adding an unrelated
 model event below the 64-event limit does not invalidate a score. Total event
 count remains a separate eligibility bound. Preview and Agent Run detail read

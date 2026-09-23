@@ -91,6 +91,18 @@ from verdict.schema import (
     cluster_candidate_digest,
     populate_trace_analysis_fields,
 )
+from verdict.session_monitoring import (
+    MAX_AGENT_EVALUATOR_IDENTITY_CANDIDATES,
+    MAX_LOGICAL_SESSION_MONITOR_EVENTS,
+    MAX_LOGICAL_SESSION_MONITOR_JUDGMENT_BYTES,
+    MAX_LOGICAL_SESSION_MONITOR_RUNS,
+    MAX_LOGICAL_SESSION_MONITOR_TURN_TEXT_BYTES,
+    MAX_LOGICAL_SESSION_MONITOR_TURNS,
+    AgentTurnEvaluatorIdentityPage,
+    LogicalSessionEvidence,
+    LogicalSessionRunEvidence,
+    logical_session_turn_evidence,
+)
 from verdict.storage.base import (
     _validate_agent_bundle_query,
     _validate_agent_bundle_run_id,
@@ -112,6 +124,12 @@ class InMemoryStorage:
         self._agent_runs: dict[tuple[str, str], AgentRun] = {}
         self._agent_turns: dict[tuple[str, str, str], AgentTurn] = {}
         self._agent_turn_judgments: dict[tuple[str, str, str, str], str] = {}
+        self._agent_turn_judgment_times: dict[
+            tuple[str, str, str, str], datetime
+        ] = {}
+        self._agent_turn_judgment_order: dict[
+            str, list[tuple[str, str, str, str]]
+        ] = {}
         self._agent_events: dict[tuple[str, str, str], AgentEvent] = {}
         self._agent_evidence_lock = threading.RLock()
         self._analysis_runs: dict[str, str] = {}
@@ -429,6 +447,18 @@ class InMemoryStorage:
             )
             if decision == "saved":
                 self._agent_turn_judgments[key] = payload
+                self._agent_turn_judgment_times[key] = judgment.evaluated_at
+                order = self._agent_turn_judgment_order.setdefault(
+                    judgment.tenant_id,
+                    [],
+                )
+                if key not in order:
+                    order.append(key)
+                order.sort(key=lambda item: (item[3], item[1], item[2]))
+                order.sort(
+                    key=self._agent_turn_judgment_times.__getitem__,
+                    reverse=True,
+                )
             return decision
 
     def get_agent_turn_evaluation_candidate(
@@ -488,6 +518,152 @@ class InMemoryStorage:
             ]
         bundles.sort(key=lambda bundle: (bundle.run.started_at, bundle.run.run_id), reverse=True)
         return bundles[:limit]
+
+    def load_logical_session_monitor_evidence(
+        self,
+        tenant_id: str,
+        *,
+        evaluator_fingerprint: str | None = None,
+        tool_evidence_mode: str | None = None,
+    ) -> LogicalSessionEvidence:
+        _validate_agent_bundle_query(tenant_id, 1)
+        if tool_evidence_mode not in {None, TOOL_EVIDENCE_MODE} or (
+            tool_evidence_mode is not None and evaluator_fingerprint is None
+        ):
+            raise ValueError("invalid logical-session tool evidence mode")
+        if evaluator_fingerprint is not None:
+            _validate_evaluator_judgment_query(
+                tenant_id, evaluator_fingerprint, MAX_LOGICAL_SESSION_MONITOR_RUNS,
+            )
+        with self._agent_evidence_lock:
+            run_ids = [
+                run_id for scope, run_id in self._agent_runs if scope == tenant_id
+            ]
+            if len(run_ids) > MAX_LOGICAL_SESSION_MONITOR_RUNS:
+                raise ValueError("logical-session preview exceeds bounded run limit")
+            run_id_set = set(run_ids)
+            turns = [
+                turn
+                for (scope, run_id, _turn_id), turn in self._agent_turns.items()
+                if scope == tenant_id and run_id in run_id_set
+            ]
+            if len(turns) > MAX_LOGICAL_SESSION_MONITOR_TURNS:
+                raise ValueError("logical-session preview exceeds bounded Turn limit")
+            if evaluator_fingerprint is not None and sum(
+                len((turn.user_request_redacted or "").encode("utf-8"))
+                + len((turn.final_response_redacted or "").encode("utf-8"))
+                for turn in turns
+            ) > MAX_LOGICAL_SESSION_MONITOR_TURN_TEXT_BYTES:
+                raise ValueError("logical-session preview exceeds bounded Turn text limit")
+            tool_counts = {}
+            if tool_evidence_mode is not None:
+                events = [
+                    (run_id, event)
+                    for (scope, run_id, _event_id), event in self._agent_events.items()
+                    if scope == tenant_id and run_id in run_id_set
+                ]
+                if len(events) > MAX_LOGICAL_SESSION_MONITOR_EVENTS:
+                    raise ValueError("logical-session preview exceeds bounded event limit")
+                rows_by_turn: dict[tuple[str, str], list[tuple[str, str, object]]] = {}
+                for run_id, event in events:
+                    rows_by_turn.setdefault((run_id, event.turn_id), []).append((
+                        event.event_type.value,
+                        event.status.value,
+                        event.attributes.get("is_error"),
+                    ))
+                tool_counts = {
+                    key: tool_counts_from_rows(rows) for key, rows in rows_by_turn.items()
+                }
+            turns_by_run: dict[str, list[AgentTurn]] = {}
+            for turn in turns:
+                turns_by_run.setdefault(turn.run_id, []).append(turn)
+            runs = []
+            for run_id in run_ids:
+                run = self._agent_runs[(tenant_id, run_id)]
+                runs.append(LogicalSessionRunEvidence(
+                    run_id=run.run_id,
+                    tenant_id=run.tenant_id,
+                    session_id=run.session_id,
+                    started_at=run.started_at,
+                    status=run.status,
+                    turns=tuple(
+                        logical_session_turn_evidence(
+                            turn,
+                            calculate_evidence=evaluator_fingerprint is not None,
+                            tool_counts=(
+                                tool_counts.get((turn.run_id, turn.turn_id))
+                                if tool_evidence_mode is not None else None
+                            ),
+                        )
+                        for turn in sorted(
+                            turns_by_run.get(run_id, ()),
+                            key=lambda item: (item.sequence, item.turn_id),
+                        )
+                    ),
+                ))
+            judgments = []
+            if evaluator_fingerprint is not None:
+                matching = [
+                    (run_id, turn_id, fingerprint, raw)
+                    for (scope, run_id, turn_id, fingerprint), raw in (
+                        self._agent_turn_judgments.items()
+                    )
+                    if scope == tenant_id and run_id in run_id_set
+                    and fingerprint == evaluator_fingerprint
+                ]
+                if len(matching) > MAX_LOGICAL_SESSION_MONITOR_TURNS:
+                    raise ValueError("logical-session preview exceeds bounded judgment limit")
+                if sum(len(raw.encode("utf-8")) for *_, raw in matching) > (
+                    MAX_LOGICAL_SESSION_MONITOR_JUDGMENT_BYTES
+                ):
+                    raise ValueError("logical-session preview exceeds bounded judgment limit")
+                for run_id, turn_id, fingerprint, raw in matching:
+                    judgment = trusted_turn_judgment(
+                        raw,
+                        tenant_id=tenant_id,
+                        run_id=run_id,
+                        turn_id=turn_id,
+                        evaluator_fingerprint=fingerprint,
+                    )
+                    if judgment is not None:
+                        judgments.append(judgment)
+        runs.sort(key=lambda run: (run.started_at, run.run_id))
+        judgments.sort(key=lambda judgment: (
+            judgment.evaluated_at, judgment.run_id, judgment.turn_id,
+        ))
+        return LogicalSessionEvidence(tuple(runs), tuple(copy.deepcopy(judgments)))
+
+    def list_agent_turn_evaluator_identities(
+        self,
+        tenant_id: str,
+        *,
+        limit: int = 100,
+    ) -> AgentTurnEvaluatorIdentityPage:
+        _validate_agent_bundle_query(tenant_id, limit)
+        latest: dict[str, AgentTurnJudgment] = {}
+        with self._agent_evidence_lock:
+            keys = self._agent_turn_judgment_order.get(tenant_id, ())
+            slots = [
+                (key, self._agent_turn_judgments[key])
+                for key in keys[:MAX_AGENT_EVALUATOR_IDENTITY_CANDIDATES + 1]
+            ]
+            truncated = len(slots) > MAX_AGENT_EVALUATOR_IDENTITY_CANDIDATES
+            for (_scope, run_id, turn_id, fingerprint), raw in (
+                slots[:MAX_AGENT_EVALUATOR_IDENTITY_CANDIDATES]
+            ):
+                judgment = trusted_turn_judgment(
+                    raw,
+                    tenant_id=tenant_id,
+                    run_id=run_id,
+                    turn_id=turn_id,
+                    evaluator_fingerprint=fingerprint,
+                )
+                if judgment is None:
+                    continue
+                if fingerprint not in latest:
+                    latest[fingerprint] = judgment
+        candidates = tuple(copy.deepcopy(item) for item in latest.values())
+        return AgentTurnEvaluatorIdentityPage(candidates[:limit], truncated)
 
     def has_agent_run_source_kind(self, tenant_id: str, source_kind: str) -> bool:
         _validate_agent_bundle_query(tenant_id, 1)
@@ -1632,6 +1808,8 @@ class InMemoryStorage:
         self._agent_turns.clear()
         self._agent_events.clear()
         self._agent_turn_judgments.clear()
+        self._agent_turn_judgment_times.clear()
+        self._agent_turn_judgment_order.clear()
         self._judgments.clear()
         self._evaluator_health.clear()
         self._signals.clear()
