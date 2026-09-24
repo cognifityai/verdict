@@ -84,7 +84,13 @@ def test_postgres_bounded_tool_projection_reads_full_turn_page():
 
 
 @pytest.mark.skipif(not os.environ.get("VERDICT_TEST_POSTGRES_DSN"), reason="disposable Postgres required")
-def test_postgres_tool_projection_treats_invalid_present_origin_as_unusable():
+@pytest.mark.parametrize(
+    "stored_attributes",
+    ['{"tool_origin":{"private":"CANARY"}}', "[]", "null", '"scalar"'],
+)
+def test_postgres_tool_projection_treats_invalid_present_origin_as_unusable(
+    stored_attributes: str,
+):
     storage = PostgresStorage(os.environ["VERDICT_TEST_POSTGRES_DSN"])
     tenant = f"turn-origin-invalid-{uuid4().hex}"
     try:
@@ -93,10 +99,9 @@ def test_postgres_tool_projection_treats_invalid_present_origin_as_unusable():
         storage.replace_agent_run_bundle(replace(bundle, events=(call,)))
         with storage._pool.connection() as conn:
             conn.execute(
-                "UPDATE agent_events SET attributes_json=jsonb_set("
-                "attributes_json,'{tool_origin}',%s::jsonb) "
+                "UPDATE agent_events SET attributes_json=%s::jsonb "
                 "WHERE tenant_id=%s AND run_id='run' AND event_id='call'",
-                ('{"private":"CANARY"}', tenant),
+                (stored_attributes, tenant),
             )
 
         [(turn, status, counts)], more = storage.list_agent_turn_evaluation_candidates(

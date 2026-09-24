@@ -5,6 +5,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 import httpx
+import pytest
 import verdict
 import verdict.dashboard.analysis_service as analysis_service
 import verdict.dashboard.query as dashboard_query
@@ -20,6 +21,7 @@ from verdict.capture import AgentCaptureService
 from verdict.dashboard import agent_evidence_queries
 from verdict.dashboard.analysis_service import read_latest_analysis, run_analysis
 from verdict.dashboard.app import (
+    _dashboard_agent_event_attributes,
     build_agent_insights_bundle,
     build_agent_run_detail,
     build_agent_runs_bundle,
@@ -214,9 +216,12 @@ def test_run_detail_counts_but_never_displays_malformed_tool_origin(tmp_path):
     with sqlite3.connect(path) as connection:
         connection.execute(
             "UPDATE agent_events SET attributes_json=? WHERE event_id='call'",
-            (json.dumps({"tool_name": "visible-tool", "tool_origin": {
-                "private": "ORIGIN_PAYLOAD_CANARY",
-            }}),),
+            ('{"tool_name":"visible-tool","tool_origin":"mcp",'
+             '"tool_origin":"ORIGIN_PAYLOAD_CANARY"}',),
+        )
+        connection.execute(
+            "UPDATE agent_events SET attributes_json=? WHERE event_id IN ('event-1','event-2')",
+            (json.dumps({"tool_origin": "NON_TOOL_ORIGIN_CANARY"}),),
         )
     storage = SQLiteStorage(str(path))
     [(turn, _status, counts)], _ = storage.list_agent_turn_evaluation_candidates(
@@ -244,6 +249,25 @@ def test_run_detail_counts_but_never_displays_malformed_tool_origin(tmp_path):
     call_event = next(event for event in visible["events"] if event["eventId"] == "call")
     assert "tool_origin" not in call_event["attributes"]
     assert "ORIGIN_PAYLOAD_CANARY" not in serialized
+    assert "NON_TOOL_ORIGIN_CANARY" not in serialized
+    assert all(
+        "tool_origin" not in event["attributes"]
+        for event in visible["events"]
+        if event["eventId"] in {"event-1", "event-2"}
+    )
+
+
+@pytest.mark.parametrize(
+    "event_type",
+    [item.value for item in AgentEventType if item is not AgentEventType.TOOL_CALL],
+)
+def test_dashboard_strips_tool_origin_from_every_non_call_event(event_type: str) -> None:
+    attributes = _dashboard_agent_event_attributes(
+        event_type,
+        json.dumps({"tool_origin": "NON_CALL_ORIGIN_CANARY", "visible": "ok"}),
+    )
+
+    assert attributes == {"visible": "ok"}
 
 
 def test_run_detail_labels_latest_turn_evaluator_and_filters_exact_identity(tmp_path):

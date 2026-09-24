@@ -207,13 +207,45 @@ def _json_value(raw: object, default):
         return default
 
 
+class _JSONObjectPairs(list):
+    """Distinguish decoded JSON objects so top-level duplicate keys stay observable."""
+
+
+def _materialize_json_pairs(value: object) -> object:
+    if isinstance(value, _JSONObjectPairs):
+        return {key: _materialize_json_pairs(item) for key, item in value}
+    if isinstance(value, list):
+        return [_materialize_json_pairs(item) for item in value]
+    return value
+
+
+def _dashboard_event_object(raw: object) -> tuple[dict[str, object], bool]:
+    """Decode one attributes object and report a duplicate top-level origin key."""
+    if not isinstance(raw, str):
+        return (deepcopy(raw), False) if isinstance(raw, dict) else ({}, False)
+    try:
+        parsed = json.loads(raw, object_pairs_hook=_JSONObjectPairs)
+    except (TypeError, json.JSONDecodeError):
+        return {}, False
+    if not isinstance(parsed, _JSONObjectPairs):
+        return {}, False
+    duplicate_origin = sum(key == "tool_origin" for key, _value in parsed) > 1
+    materialized = _materialize_json_pairs(parsed)
+    return (materialized, duplicate_origin) if isinstance(materialized, dict) else ({}, False)
+
+
 def _dashboard_agent_event_attributes(event_type: object, raw: object) -> dict[str, object]:
     """Return display-safe attributes without exposing malformed origin payloads."""
-    attributes = sanitize_agent_event_attributes(event_type, _json_value(raw, {}))
-    if event_type == "tool_call" and "tool_origin" in attributes:
-        origin = attributes["tool_origin"]
-        if not isinstance(origin, str) or origin not in {item.value for item in ToolOrigin}:
-            attributes.pop("tool_origin")
+    decoded, duplicate_origin = _dashboard_event_object(raw)
+    attributes = sanitize_agent_event_attributes(event_type, decoded)
+    origin = attributes.pop("tool_origin", None)
+    if (
+        event_type == "tool_call"
+        and not duplicate_origin
+        and isinstance(origin, str)
+        and origin in {item.value for item in ToolOrigin}
+    ):
+        attributes["tool_origin"] = origin
     return attributes
 
 

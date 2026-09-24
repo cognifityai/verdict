@@ -29,15 +29,21 @@ def tool_origin_code_sql(*, postgres: bool, prefix: str = "") -> str:
     column = f"{prefix}attributes_json"
     if postgres:
         return (
-            f"CASE WHEN NOT jsonb_exists({column},'tool_origin') THEN 'not_captured' "
+            f"CASE WHEN jsonb_typeof({column})<>'object' THEN 'unusable' "
+            f"WHEN NOT jsonb_exists({column},'tool_origin') THEN 'not_captured' "
             f"WHEN jsonb_typeof({column}->'tool_origin')='string' "
             f"AND {column}->>'tool_origin' IN ('mcp','application','provider_hosted') "
             f"THEN {column}->>'tool_origin' ELSE 'unusable' END"
         )
+    origin_count = (
+        f"(SELECT COUNT(*) FROM json_each({column}) WHERE key='tool_origin')"
+    )
     return (
         f"CASE WHEN NOT json_valid({column}) THEN 'unusable' "
-        f"WHEN json_type({column},'$.tool_origin') IS NULL THEN 'not_captured' "
-        f"WHEN json_type({column},'$.tool_origin')='text' "
+        f"WHEN json_type({column})<>'object' THEN 'unusable' "
+        f"WHEN {origin_count}=0 THEN 'not_captured' "
+        f"WHEN {origin_count}=1 "
+        f"AND json_type({column},'$.tool_origin')='text' "
         f"AND json_extract({column},'$.tool_origin') "
         "IN ('mcp','application','provider_hosted') "
         f"THEN json_extract({column},'$.tool_origin') ELSE 'unusable' END"

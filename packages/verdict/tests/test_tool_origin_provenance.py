@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from dataclasses import replace
 from datetime import datetime, timezone
 
@@ -11,6 +12,7 @@ from verdict.agent_judgment import (
     turn_evidence_fingerprint,
 )
 from verdict.evidence import AgentTurn, EvidenceState, ExecutionStatus
+from verdict.storage.turn_tool_evidence import tool_origin_code_sql
 
 
 @pytest.mark.parametrize(
@@ -31,6 +33,33 @@ def test_tool_origin_classification_is_fixed_and_content_free(
     attributes: object, expected: str,
 ) -> None:
     assert classify_tool_origin(attributes) == expected
+
+
+@pytest.mark.parametrize(
+    ("stored", "expected"),
+    [
+        ('{"tool_origin":"mcp"}', "mcp"),
+        ("{}", "not_captured"),
+        ("[]", "unusable"),
+        ("null", "unusable"),
+        ('"scalar"', "unusable"),
+        ("7", "unusable"),
+        ('{"tool_origin":"mcp","tool_origin":"application"}', "unusable"),
+    ],
+)
+def test_sqlite_origin_projection_rejects_nonobjects_and_duplicate_keys(
+    stored: str,
+    expected: str,
+) -> None:
+    expression = tool_origin_code_sql(postgres=False)
+    with sqlite3.connect(":memory:") as connection:
+        row = connection.execute(
+            f"SELECT {expression} FROM (SELECT ? AS attributes_json)",
+            (stored,),
+        ).fetchone()
+
+    assert row is not None
+    assert row[0] == expected
 
 
 def test_tool_counts_partition_every_call_and_warn_about_unobserved_boundaries() -> None:
