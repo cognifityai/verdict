@@ -86,6 +86,14 @@ coverage evidence, not pooled observations. Fixed-window `DriftRun` and
 `DriftSignal` records created by older releases remain readable history, but
 `verdict-pipeline` no longer creates them.
 
+The **Logical session (descriptive)** preview is intentionally outside this
+inferential procedure. It groups native Agent runs only by explicit
+`AgentRun.session_id` and reports reference/current rates, raw effects, and
+coverage as of the preview. Verdict does not yet observe authoritative session
+finalization or establish independence between those units, so it computes no
+Fisher test, adjusted p-value, alert decision, or prospective activation for
+that view.
+
 ---
 
 ## 3. The significance test: Fisher's exact (binary) and Mann-Whitney U (continuous)

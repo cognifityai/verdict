@@ -8,7 +8,7 @@ async function evaluate(expression) {
   const built = await esbuild.build({
     stdin: {
       contents: `
-        import { monitorStateParts } from "./Monitor.jsx";
+        import { canRunActiveMonitor, monitorStateParts } from "./Monitor.jsx";
         export default ${expression};
       `,
       resolveDir: new URL("..", import.meta.url).pathname,
@@ -28,7 +28,7 @@ async function render(component) {
       contents: `
         import React from "react";
         import { renderToStaticMarkup } from "react-dom/server";
-        import { Monitor, MonitorComparisonMetrics } from "./Monitor.jsx";
+        import { AgentEvaluatorDiscoveryNote, LogicalSessionPreview, Monitor, MonitorComparisonMetrics } from "./Monitor.jsx";
         export default renderToStaticMarkup(${component});
       `,
       resolveDir: new URL("..", import.meta.url).pathname,
@@ -58,6 +58,38 @@ test("monitor offers existing evaluators but defaults to deterministic checks", 
   assert.match(html, /provider errors, empty responses, and refusal-like language/);
   assert.match(html, /Preview comparison/);
   assert.doesNotMatch(html, /Preview candidate/);
+});
+
+test("logical-session preview is explicitly descriptive and has no alert claim", async () => {
+  const html = await render(`React.createElement(LogicalSessionPreview, { preview: {
+    reference: { unitCount: 4 }, current: { unitCount: 5 },
+    metrics: [{ metric: "agent.execution_completed", referenceValue: 1,
+      currentValue: 0.8, effect: -0.2, referenceEvaluable: 4, currentEvaluable: 5,
+      referenceUnclear: 0, currentUnclear: 0, referenceMissing: 0,
+      currentMissing: 0, referenceError: 0, currentError: 0,
+      pValue: null, alert: null }],
+    coverage: { runsMissingLogicalSession: 1, sessionsInProgress: 2 },
+  } })`);
+  assert.match(html, /DESCRIPTIVE LOGICAL-SESSION COMPARISON/);
+  assert.match(html, /4 reference → 5 current logical sessions/);
+  assert.match(html, /has no p-values, alert decision, or activation path/);
+  assert.match(html, /difference -20.0pp/);
+  assert.match(html, /1 runs lacked logical-session identity/);
+  assert.doesNotMatch(html, /adjusted p/);
+});
+
+test("active Trace manual run remains available beside a logical-session preview", async () => {
+  assert.equal(await evaluate(`canRunActiveMonitor({ state: "active",
+    policy: { analysis_unit: "trace" } })`), true);
+  assert.equal(await evaluate(`canRunActiveMonitor({ state: "candidate" })`), false);
+});
+
+test("bounded Agent Turn evaluator discovery discloses omitted older identities", async () => {
+  const html = await render(`React.createElement(AgentEvaluatorDiscoveryNote, {
+    truncated: true,
+  })`);
+  assert.match(html, /newest 1,000 stored Turn-result slots/);
+  assert.match(html, /older identities are not shown/);
 });
 
 test("judge comparison renders evaluable and unavailable coverage", async () => {

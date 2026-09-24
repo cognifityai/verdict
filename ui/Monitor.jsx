@@ -19,8 +19,34 @@ const metricLabel = (metric) => {
     provider_error: "Provider error rate",
     response_empty: "Empty-response rate",
     refusal_signature: "Refusal-language rate",
+    "agent.execution_completed": "Completed-execution rate",
+    "agent.final_output_present": "Final-output presence rate",
   })[metric] || metric.replaceAll("_", " ");
 };
+
+export function LogicalSessionPreview({ preview }) {
+  return <section className="border p-5" style={box}>
+    <div className="flex flex-wrap gap-3 items-center justify-between">
+      <div><div className="text-xs font-mono" style={{ color: "#f2b84b" }}>DESCRIPTIVE LOGICAL-SESSION COMPARISON</div><div className="font-semibold mt-1">Observational rates only</div></div>
+      <div className="text-sm" style={{ color: "#94a39d" }}>{preview.reference.unitCount} reference → {preview.current.unitCount} current logical sessions</div>
+    </div>
+    <p className="text-sm mt-3" style={{ color: "#94a39d" }}>Verdict has not established independent sampling or authoritative session finalization. This as-of preview has no p-values, alert decision, or activation path.</p>
+    <div className="mt-4 space-y-2">{preview.metrics.map((metric) => <div key={metric.metric} className="border p-3 text-sm" style={{ borderColor: "#26332e" }}>
+      <span className="font-mono">{metricLabel(metric.metric)}</span>
+      {metric.referenceValue == null || metric.currentValue == null
+        ? <span className="ml-3" style={{ color: "#f2b84b" }}>No complete rate comparison</span>
+        : <span className="ml-3" style={{ color: "#94a39d" }}>{(100 * metric.referenceValue).toFixed(1)}% → {(100 * metric.currentValue).toFixed(1)}% · difference {(100 * metric.effect).toFixed(1)}pp · observational n {metric.referenceEvaluable} → {metric.currentEvaluable}</span>}
+      <div className="text-xs mt-2" style={{ color: "#94a39d" }}>Evidence: {metric.referenceEvaluable} → {metric.currentEvaluable} evaluable · {metric.referenceUnclear} → {metric.currentUnclear} unclear · {metric.referenceMissing} → {metric.currentMissing} missing · {metric.referenceError} → {metric.currentError} evaluator errors</div>
+    </div>)}</div>
+    {(preview.coverage.runsMissingLogicalSession > 0 || preview.coverage.sessionsInProgress > 0) && <p className="text-xs mt-4" style={{ color: "#f2b84b" }}>Coverage: {preview.coverage.runsMissingLogicalSession} runs lacked logical-session identity; {preview.coverage.sessionsInProgress} sessions were still in progress. Neither was guessed into a cohort.</p>}
+  </section>;
+}
+
+export const canRunActiveMonitor = (active) => active?.state === "active";
+
+export function AgentEvaluatorDiscoveryNote({ truncated }) {
+  return truncated ? <span className="block text-xs mt-1" style={{ color: "#f2b84b" }}>Evaluator choices use the newest 1,000 stored Turn-result slots; older identities are not shown.</span> : null;
+}
 
 export function MonitorComparisonMetrics({ comparison }) {
   const keyFor = (item) => JSON.stringify([item.group_id || null, item.metric]);
@@ -97,6 +123,9 @@ export function Monitor({ configUrl, evaluation = {}, initialState = null, view 
   const [token, setToken] = useState(null);
   const [active, setActive] = useState(initialState?.active || null);
   const [candidate, setCandidate] = useState(initialState?.candidate || null);
+  const [descriptive, setDescriptive] = useState(null);
+  const [agentEvaluators, setAgentEvaluators] = useState(initialState?.agentEvaluators || []);
+  const [agentEvaluatorDiscoveryTruncated, setAgentEvaluatorDiscoveryTruncated] = useState(initialState?.agentEvaluatorDiscoveryTruncated || false);
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
   const [form, setForm] = useState({
@@ -115,6 +144,8 @@ export function Monitor({ configUrl, evaluation = {}, initialState = null, view 
       setToken(config.setupToken);
       setActive(state.active);
       setCandidate(state.candidate);
+      setAgentEvaluators(monitor.agentEvaluators || []);
+      setAgentEvaluatorDiscoveryTruncated(Boolean(monitor.agentEvaluatorDiscoveryTruncated));
     })
       .catch((failure) => setError(String(failure)));
   }, [configUrl, root]);
@@ -136,8 +167,15 @@ export function Monitor({ configUrl, evaluation = {}, initialState = null, view 
 
   const update = (name, value) => {
     setCandidate(null);
-    setForm((current) => ({ ...current, [name]: value }));
+    setDescriptive(null);
+    setForm((current) => ({
+      ...current,
+      [name]: value,
+      ...(name === "analysisUnit" ? { evaluatorFingerprint: "", groupingMode: "none" } : {}),
+    }));
   };
+  const logicalSession = form.analysisUnit === "logical_session";
+  const measurements = logicalSession ? agentEvaluators : evaluators;
   const requiresRebootstrap = active?.state === "requires_rebootstrap";
   return <div className="max-w-5xl space-y-4">
     {view === "history" && <section className="border p-5" style={box}>
@@ -147,19 +185,19 @@ export function Monitor({ configUrl, evaluation = {}, initialState = null, view 
       <div className="grid sm:grid-cols-2 gap-4 mt-5">
         <label className="text-sm">Window mode<select value={form.windowMode} onChange={(event) => update("windowMode", event.target.value)} className="block w-full mt-1 border p-2 bg-transparent"><option value="count">Count cohorts</option><option value="explicit">Explicit date ranges</option></select></label>
         {form.windowMode === "count" && <label className="text-sm">Reference share<input type="number" min="0.5" max="0.95" step="0.05" value={form.referenceRatio} onChange={(event) => update("referenceRatio", Number(event.target.value))} className="block w-full mt-1 border p-2 bg-transparent" /></label>}
-        <label className="text-sm">Analysis unit<select value={form.analysisUnit} onChange={(event) => update("analysisUnit", event.target.value)} className="block w-full mt-1 border p-2 bg-transparent"><option value="trace">Genuine model call</option></select></label>
-        <label className="text-sm">Measurement<select value={form.evaluatorFingerprint} onChange={(event) => update("evaluatorFingerprint", event.target.value)} className="block w-full mt-1 border p-2 bg-transparent"><option value="">Deterministic trace checks only</option>{evaluators.map((identity) => <option key={identity.fingerprint} value={identity.fingerprint}>{identity.label}</option>)}</select><span className="block text-xs mt-1" style={{ color: "#94a39d" }}>{form.evaluatorFingerprint ? "Compares existing stored judgments; this monitor makes no judge calls." : "Compares provider errors, empty responses, and refusal-like language."}</span></label>
-        <label className="text-sm">Comparison facet<select value={form.groupingMode} onChange={(event) => update("groupingMode", event.target.value)} className="block w-full mt-1 border p-2 bg-transparent"><option value="none">All eligible calls (recommended)</option><option value="provider_model">Provider and model</option><option value="cluster">Active reviewed cluster</option></select></label>
+        <label className="text-sm">Analysis unit<select value={form.analysisUnit} onChange={(event) => update("analysisUnit", event.target.value)} className="block w-full mt-1 border p-2 bg-transparent"><option value="trace">Genuine model call</option><option value="logical_session">Logical session (descriptive)</option></select></label>
+        <label className="text-sm">Measurement<select value={form.evaluatorFingerprint} onChange={(event) => update("evaluatorFingerprint", event.target.value)} className="block w-full mt-1 border p-2 bg-transparent"><option value="">{logicalSession ? "Deterministic agent checks only" : "Deterministic trace checks only"}</option>{measurements.map((identity) => <option key={identity.fingerprint} value={identity.fingerprint}>{identity.label}</option>)}</select><span className="block text-xs mt-1" style={{ color: "#94a39d" }}>{form.evaluatorFingerprint ? "Compares existing stored judgments; this preview makes no judge calls." : logicalSession ? "Compares completed execution and final-output presence by logical session." : "Compares provider errors, empty responses, and refusal-like language."}</span>{logicalSession && <AgentEvaluatorDiscoveryNote truncated={agentEvaluatorDiscoveryTruncated} />}</label>
+        <label className="text-sm">Comparison facet<select disabled={logicalSession} value={form.groupingMode} onChange={(event) => update("groupingMode", event.target.value)} className="block w-full mt-1 border p-2 bg-transparent"><option value="none">{logicalSession ? "No grouping for logical sessions" : "All eligible calls (recommended)"}</option>{!logicalSession && <><option value="provider_model">Provider and model</option><option value="cluster">Active reviewed cluster</option></>}</select></label>
         {form.windowMode === "explicit" && ["referenceStart", "referenceEnd", "currentStart", "currentEnd"].map((name) => <label key={name} className="text-sm">{name.replace(/([A-Z])/g, " $1")}<input type="datetime-local" value={form[name]} onChange={(event) => update(name, event.target.value)} className="block w-full mt-1 border p-2 bg-transparent" /></label>)}
-        {["minimumReference", "minimumCurrent", "prospectiveTarget"].map((name) => <label key={name} className="text-sm">{name.replace(/([A-Z])/g, " $1")}<input type="number" min="1" value={form[name]} onChange={(event) => update(name, Number(event.target.value))} className="block w-full mt-1 border p-2 bg-transparent" /></label>)}
+        {!logicalSession && ["minimumReference", "minimumCurrent", "prospectiveTarget"].map((name) => <label key={name} className="text-sm">{name.replace(/([A-Z])/g, " $1")}<input type="number" min="1" value={form[name]} onChange={(event) => update(name, Number(event.target.value))} className="block w-full mt-1 border p-2 bg-transparent" /></label>)}
       </div>
       <div className="flex flex-wrap gap-2 mt-5">
-        <button disabled={!token || busy} onClick={async () => { const result = await post("/api/monitor/preview", monitorRequest(form)); if (result) { setCandidate(result); onChanged?.(); } }} className="border px-4 py-2 text-sm">Preview comparison</button>
+        <button disabled={!token || busy} onClick={async () => { const result = await post("/api/monitor/preview", monitorRequest(form)); if (result) { if (result.state === "descriptive") { setDescriptive(result); setCandidate(null); } else { setCandidate(result); setDescriptive(null); } onChanged?.(); } }} className="border px-4 py-2 text-sm">Preview comparison</button>
         {candidate && <button disabled={busy} onClick={async () => {
           const activated = await post("/api/monitor/activate", { policyId: candidate.policy.policy_id, expectedActivePolicyId: active?.policy?.policy_id || null });
           if (activated) { setActive(activated); setCandidate(null); onChanged?.(); }
         }} className="px-4 py-2 text-sm" style={{ background: "#4ee1aa", color: "#0b0e0d" }}>Activate monitor</button>}
-        {active?.state === "active" && <button disabled={busy} onClick={async () => {
+        {canRunActiveMonitor(active) && <button disabled={busy} onClick={async () => {
           const result = await post("/api/monitor/run"); if (result) { setActive(result); onChanged?.(); }
         }} className="border px-4 py-2 text-sm">Run next cohort now</button>}
       </div>
@@ -168,6 +206,7 @@ export function Monitor({ configUrl, evaluation = {}, initialState = null, view 
     {error && <div role="alert" className="border p-4" style={{ ...box, color: "#ff6b6b" }}>{error}</div>}
     {candidate && active && <div role="status" className="border p-4 text-sm" style={{ ...box, color: "#f2b84b" }}>A newer historical candidate is shown below. The existing prospective monitor remains active until you explicitly activate the candidate.</div>}
     {requiresRebootstrap && <div role="alert" className="border p-4" style={{ ...box, color: "#f2b84b" }}>{active.rebootstrapReason} Configure the replacement above and select Preview comparison.</div>}
+    {descriptive && <LogicalSessionPreview preview={descriptive} />}
     {active?.snapshot && <MonitorSnapshot response={active} evaluators={evaluators} fallbackTarget={form.prospectiveTarget} />}
     {candidate?.snapshot && <MonitorSnapshot response={candidate} evaluators={evaluators} fallbackTarget={form.prospectiveTarget} />}
     {active?.approvedHistoricalSnapshot && <section className="border p-5" style={box}>

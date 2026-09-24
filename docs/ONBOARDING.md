@@ -385,6 +385,24 @@ Activation does not promote the historical preview result: it freezes the
 reference and opens an empty prospective current bucket. In-flight traces are
 excluded from monitor evidence.
 
+To inspect native Agent evidence without treating correlated calls as separate
+samples, choose **Logical session (descriptive)**. Verdict groups runs only by
+their explicit `AgentRun.session_id`, excludes currently nonterminal sessions,
+and reports completion/final-output rates, effects, and coverage. You can also
+select one existing Agent Turn evaluator to aggregate current PASS/FAIL results;
+the preview never invokes a judge. Missing session identities remain missing.
+Because a currently terminal session may receive a later run and independence
+is not established, this mode is recomputed as of each preview, is not saved or
+activatable, and returns no p-values or alert decision. Grouping facets are not
+available in this mode.
+One preview accepts at most 1,000 runs or 10,000 Turns. Selecting a Turn
+evaluator also caps redacted Turn text at 16 MiB and selected judgments at
+10,000 / 16 MiB; counts-only tool evidence additionally caps scanned events at
+100,000. The returned projection omits Turn text and event bodies. Larger
+inputs fail closed instead of silently sampling sessions. The selector examines
+the newest 1,000 stored Turn-result slots, exposes at most 100 identities, and
+warns when older slots were not inspected.
+
 To run the active policy from cron, systemd, Kubernetes, or another scheduler:
 
 ```bash
@@ -579,7 +597,9 @@ projection adds no tool names, IDs, arguments, result text, or URLs. This mode
 excludes Turns with no recorded tool events or more than 64 total events.
 Counts do not prove MCP origin, source support, or factual correctness and do not enable rubric
 dimensions that require retrieved context. A changed count makes the prior
-Turn judgment stale. Monitor remains Trace-only.
+Turn judgment stale. Trace remains the only activatable Monitor unit; the
+descriptive logical-session preview can aggregate current Turn judgments
+without producing an alert.
 Concurrent Turn judge requests recheck currentness under a cross-process guard
 before egress. A busy Turn is skipped and reported as `inProgress` ("Judge busy;
 retry" in the dashboard), not counted as evaluated. SQLite uses a separate
@@ -836,9 +856,9 @@ the other captured workloads.
   inject the authorized registry tenant rather than trusting a browser query
   parameter; that same value projects active assignments and stable labels
   throughout the tenant-scoped views.
-- **Cohorts use event time.** Monitor currently supports one genuine model-call
-  Trace per analysis unit. Monitor uses the trace's captured event time, not
-  the time a judgment or import was written. A historical preview freezes its
+- **Cohorts use event time.** The activatable Monitor supports one genuine
+  model-call Trace per analysis unit. Monitor uses the trace's captured event
+  time, not the time a judgment or import was written. A historical preview freezes its
   selected membership and normalized facts. Activation records an event-time
   boundary and opens an empty prospective bucket, so older imported events do
   not become new traffic. A selected evaluator uses the latest attempt per trace
@@ -852,6 +872,12 @@ the other captured workloads.
   dashboard; use the current Monitor workflow instead.
   Stored policies naming a non-Trace analysis unit also remain readable but
   require a new trace-based preview before execution.
+- **Logical-session comparisons are descriptive.** The optional Agent view
+  groups sessions whose observed runs and Turns are terminal by explicit
+  `AgentRun.session_id` and uses the earliest
+  observed run start for retrospective window membership. It is recomputed
+  from current bounded evidence, does not persist a policy or snapshot, and
+  never emits p-values, an alert decision, or an activation control.
 - **Legacy mode is single-tenant per store.** Registry `active` mode requires
   `--tenant-id` and fetches only that authorized trace scope, so an
   unrelated tenant in shared PostgreSQL does not block the run. `off` retains

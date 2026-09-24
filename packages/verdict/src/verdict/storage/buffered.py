@@ -80,6 +80,10 @@ from verdict.schema import (
     SpanRecord,
     Trace,
 )
+from verdict.session_monitoring import (
+    AgentTurnEvaluatorIdentityPage,
+    LogicalSessionEvidence,
+)
 
 
 @dataclass(frozen=True)
@@ -451,6 +455,32 @@ class BufferedStorage:
     ) -> list[AgentRunBundle]:
         return self._read(
             self._inner.list_agent_run_bundles,
+            tenant_id,
+            limit=limit,
+        )
+
+    def load_logical_session_monitor_evidence(
+        self,
+        tenant_id: str,
+        *,
+        evaluator_fingerprint: str | None = None,
+        tool_evidence_mode: str | None = None,
+    ) -> LogicalSessionEvidence:
+        return self._read(
+            self._inner.load_logical_session_monitor_evidence,
+            tenant_id,
+            evaluator_fingerprint=evaluator_fingerprint,
+            tool_evidence_mode=tool_evidence_mode,
+        )
+
+    def list_agent_turn_evaluator_identities(
+        self,
+        tenant_id: str,
+        *,
+        limit: int = 100,
+    ) -> AgentTurnEvaluatorIdentityPage:
+        return self._read(
+            self._inner.list_agent_turn_evaluator_identities,
             tenant_id,
             limit=limit,
         )

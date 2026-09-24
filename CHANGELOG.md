@@ -8,6 +8,17 @@ the product is refined.
 
 ### Added
 
+- Monitor can preview a retrospective, tenant-scoped comparison of currently
+  terminal logical Agent sessions identified by `AgentRun.session_id`. This
+  separate descriptive mode reports rates, effects, coverage, and optional
+  current Agent Turn judgment dimensions without p-values, alerts,
+  persistence, or activation; sessions without an explicit logical identity
+  remain missing coverage rather than being guessed from source or Trace
+  metadata. The storage projection omits Turn text and event bodies unless
+  current judgment evidence requires bounded redacted Turn text; counts-only
+  evaluation reads aggregate event metadata. Evaluator discovery scans at most
+  the newest 1,000 stored Turn-result slots and reports when older identities
+  were not inspected.
 - Agent Turn judging has an opt-in, counts-only tool-evidence mode. It supplies
   bounded recorded call/result/error counts in a separate judge prompt block,
   without tool content or source context. Preview, result currentness, and
