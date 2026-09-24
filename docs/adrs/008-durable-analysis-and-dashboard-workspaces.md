@@ -68,11 +68,12 @@ present those states without treating missing evidence as success or failure.
   Monitor, Report, and Settings. Report summarizes application calls separately
   from evaluator traffic and emits aggregate-only management exports. Monitor
   contains current cohort status, historical comparisons, optional segments,
-  schedules, and read-only legacy history.
-- Fixed-window evaluation signals created by earlier releases remain readable
-  for audit and trace navigation. They are not current status, do not contribute
-  to Overview or navigation alert counts, and are not produced by the current
-  evaluation pipeline.
+  and schedules.
+- Fixed-window evaluation signals created by earlier releases remain in
+  storage and compatibility response fields, but the dashboard and management
+  report do not render them. Old legacy-history links redirect to Monitor's
+  current comparison history. The current evaluation pipeline does not produce
+  fixed-window signals.
 - A prospective cohort distinguishes traffic collection from waiting for
   selected-evaluator results until a persisted comparison completes.
 - Generic change records are a decision log; typed workflows perform actual

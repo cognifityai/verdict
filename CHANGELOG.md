@@ -6,6 +6,13 @@ the product is refined.
 
 ## [Unreleased]
 
+### Removed
+
+- The dashboard no longer renders legacy fixed-window drift history in Monitor
+  or management reports. Existing `DriftRun` and `DriftSignal` storage and
+  dashboard response fields remain available for compatibility; old dashboard
+  links now open Monitor's current comparison history.
+
 ### Added
 
 - Monitor can preview a retrospective, tenant-scoped comparison of currently

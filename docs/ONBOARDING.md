@@ -789,12 +789,14 @@ HTTP Basic authentication for the dashboard shells at `/` and `/dashboard` plus
 trusted reverse proxy. Dashboard time series include only observed hourly bins
 and half-hour latency bins. Presentation data is capped at the latest 100
 observed chart points, 8 providers, 20 usable intent clusters, 12 dimensions,
-20 evaluator identities, 20 models per displayed provider, 40 drift signals,
-and one 30-row page of non-judge application traces. Trace Explorer can page
+20 evaluator identities, 20 models per displayed provider, 40
+compatibility-only legacy drift signals, and one 30-row page of non-judge
+application traces. Trace Explorer can page
 through the remaining application traces. The non-intent `unclustered` bucket
-is excluded from the cluster chart and its cap counts, and capped drift signals
-are ordered by absolute effect size. Full-store totals remain in the summary, while a visible
-banner reports every shown-versus-available capped count. A bundle that still
+is excluded from the cluster chart and its cap counts. Capped legacy drift
+signals are ordered by absolute effect size but are not rendered. Full-store
+totals remain in the summary, while a visible banner reports capped resources
+that have a current dashboard view. A bundle that still
 exceeds the redaction safety budget returns an explicit service error instead
 of an empty successful dashboard.
 
@@ -868,8 +870,10 @@ the other captured workloads.
   error is coverage failure rather than a PASS/FAIL score and is eligible for a
   future retry. Other evaluator definitions remain stored but are excluded.
   Fixed-window rows created by older releases remain read-only legacy records.
-  They have no tenant owner and are therefore suppressed by the tenant-scoped
-  dashboard; use the current Monitor workflow instead.
+  They remain available through storage and compatibility response fields but
+  are not rendered by the dashboard or management report. Old legacy-history
+  links open Monitor's current comparison history. Use the current Monitor
+  workflow instead.
   Stored policies naming a non-Trace analysis unit also remain readable but
   require a new trace-based preview before execution.
 - **Logical-session comparisons are descriptive.** The optional Agent view
