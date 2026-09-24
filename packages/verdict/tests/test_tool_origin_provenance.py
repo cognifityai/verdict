@@ -44,11 +44,12 @@ def test_tool_origin_classification_is_fixed_and_content_free(
         ("null", "unusable"),
         ('"scalar"', "unusable"),
         ("7", "unusable"),
+        (sqlite3.Binary(b'{"tool_origin":"mcp"}'), "unusable"),
         ('{"tool_origin":"mcp","tool_origin":"application"}', "unusable"),
     ],
 )
 def test_sqlite_origin_projection_rejects_nonobjects_and_duplicate_keys(
-    stored: str,
+    stored: object,
     expected: str,
 ) -> None:
     expression = tool_origin_code_sql(postgres=False)

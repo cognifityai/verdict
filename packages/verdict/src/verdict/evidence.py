@@ -683,6 +683,20 @@ def _parse_optional_datetime(value: Any, *, field_name: str) -> datetime | None:
     return None if value is None else _parse_datetime(value, field_name=field_name)
 
 
+class _DuplicateToolOrigin(ValueError):
+    """Reject ambiguous provenance before ordinary JSON last-key-wins parsing."""
+
+
+def _tool_origin_safe_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    if sum(key == "tool_origin" for key, _value in pairs) > 1:
+        raise _DuplicateToolOrigin("duplicate tool_origin keys are ambiguous")
+    return dict(pairs)
+
+
+def _load_json_without_duplicate_tool_origin(payload_json: str) -> Any:
+    return json.loads(payload_json, object_pairs_hook=_tool_origin_safe_object)
+
+
 def _agent_capture_from_json(
     payload_json: str,
     *,
@@ -694,8 +708,8 @@ def _agent_capture_from_json(
     ):
         raise ValueError("agent run bundle JSON must be bounded text")
     try:
-        payload = json.loads(payload_json)
-    except (TypeError, json.JSONDecodeError) as exc:
+        payload = _load_json_without_duplicate_tool_origin(payload_json)
+    except (TypeError, json.JSONDecodeError, _DuplicateToolOrigin) as exc:
         raise ValueError("agent run bundle JSON is malformed") from exc
     if not isinstance(payload, dict) or set(payload) != {"session", "run", "turns", "events"}:
         raise ValueError("agent run bundle JSON has an invalid shape")

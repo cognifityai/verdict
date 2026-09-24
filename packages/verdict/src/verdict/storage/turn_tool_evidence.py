@@ -17,7 +17,7 @@ def _error_flag_sql(postgres: bool) -> str:
             "ELSE NULL END"
         )
     return (
-        "CASE WHEN json_valid(attributes_json) THEN CASE "
+        "CASE WHEN typeof(attributes_json)='text' AND json_valid(attributes_json) THEN CASE "
         "WHEN json_type(attributes_json,'$.is_error')='true' THEN 1 "
         "WHEN json_type(attributes_json,'$.is_error')='false' THEN 0 "
         "ELSE NULL END ELSE NULL END"
@@ -39,7 +39,8 @@ def tool_origin_code_sql(*, postgres: bool, prefix: str = "") -> str:
         f"(SELECT COUNT(*) FROM json_each({column}) WHERE key='tool_origin')"
     )
     return (
-        f"CASE WHEN NOT json_valid({column}) THEN 'unusable' "
+        f"CASE WHEN typeof({column})<>'text' THEN 'unusable' "
+        f"WHEN NOT json_valid({column}) THEN 'unusable' "
         f"WHEN json_type({column})<>'object' THEN 'unusable' "
         f"WHEN {origin_count}=0 THEN 'not_captured' "
         f"WHEN {origin_count}=1 "

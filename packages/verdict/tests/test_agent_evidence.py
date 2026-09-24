@@ -20,6 +20,7 @@ from verdict import (
     agent_run_bundle_to_json,
     stable_evidence_id,
 )
+from verdict.evidence import agent_capture_batch_from_json
 
 NOW = datetime(2026, 8, 31, tzinfo=timezone.utc)
 
@@ -186,6 +187,32 @@ def test_bundle_reader_rejects_unknown_persisted_fields() -> None:
 
     with pytest.raises(ValueError, match="invalid typed fields"):
         agent_run_bundle_from_json(payload)
+
+
+@pytest.mark.parametrize(
+    "loader",
+    [agent_run_bundle_from_json, agent_capture_batch_from_json],
+)
+def test_transport_readers_reject_duplicate_tool_origin_before_last_key_wins(loader) -> None:
+    original = _bundle()
+    tool_call = AgentEvent(
+        event_id="evt_tool",
+        turn_id="turn_1",
+        sequence=0,
+        occurred_at=NOW,
+        event_type=AgentEventType.TOOL_CALL,
+        status=ExecutionStatus.COMPLETED,
+        provenance="unknown-agent:tool",
+        attributes={"tool_name": "lookup", "tool_origin": ToolOrigin.APPLICATION.value},
+        privacy_classification=PrivacyClassification.METADATA,
+    )
+    payload = agent_run_bundle_to_json(replace(original, events=(tool_call,))).replace(
+        '"tool_origin":"application"',
+        '"tool_origin":{"private":"CANARY"},"tool_origin":"application"',
+    )
+
+    with pytest.raises(ValueError, match="malformed"):
+        loader(payload)
 
 
 def test_stable_identity_does_not_expose_source_locator() -> None:
