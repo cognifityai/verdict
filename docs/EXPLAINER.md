@@ -234,8 +234,9 @@ Run, and deterministic-analysis requests, including the Monitor summary
 embedded in `/api/data`; the standalone dashboard uses its configured tenant.
 Without an active registry, stored trace cluster IDs remain the fallback. Every
 trace-derived total, report, sample, and judgment uses that same tenant. Older
-fixed-window drift rows are suppressed because they have no tenant owner; the
-current Monitor data remains tenant-scoped. Request state does not make one
+fixed-window drift rows remain in storage and compatibility response fields but
+are not rendered by the dashboard or management report. Current Monitor data
+remains tenant-scoped. Request state does not make one
 mounted app a dynamic multi-tenant control plane: setup, Evaluator Lab, Monitor
 lifecycle, and control routes remain bound to the configured tenant. Mount one
 app instance per tenant for those mutable workflows.

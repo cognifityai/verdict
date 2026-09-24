@@ -34,7 +34,8 @@ def test_overview_uses_the_canonical_monitor_read_model():
     assert "MonitorOverview({ monitor: DATA.monitor })" in source
     assert 'label="Cohort monitor alerts"' in source
     assert 'label="Evaluation drift signals"' not in source
-    assert '["signals", "Legacy History"]' in source
+    assert '["signals", "Legacy History"]' not in source
+    assert "function DriftSignals" not in source
     assert "LATEST COMPLETED RUN" not in source
 
 

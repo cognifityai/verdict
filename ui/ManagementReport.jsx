@@ -115,7 +115,6 @@ export function ManagementReport({ data, source, onPeriodChange }) {
   const status = [
     ["Evaluator", report.quality.evaluator], ["Evaluation coverage", report.quality.evaluationCoverage],
     ["Current monitor (as of now)", report.quality.monitor], ["Deterministic analysis (as of now)", report.quality.deterministicAnalysis],
-    ["Legacy change history (as of now)", report.quality.legacyChange],
   ];
   return <article className="verdict-report-print space-y-4">
     <header className="border-b pb-5 flex flex-col xl:flex-row xl:items-start justify-between gap-5" style={{ borderColor: C.border }}>

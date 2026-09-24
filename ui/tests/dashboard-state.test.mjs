@@ -28,7 +28,7 @@ function componentStub(names) {
 }
 
 async function loadUiModule() {
-  const source = `${await readFile(UI_SOURCE, "utf8")}\nexport { Dashboard, Overview, DriftSignals, Traces, TraceDetail, TabHelp, Judge, Compare, ManagementReport, mountedApiUrl };\nexport { useOperations } from "./Operations.jsx";\nexport { RegistryView } from "./Registry.jsx";\nexport { EvaluatorLab } from "./EvaluatorLab.jsx";\nexport { Runs } from "./Runs.jsx";\nexport { Insights } from "./Insights.jsx";`;
+  const source = `${await readFile(UI_SOURCE, "utf8")}\nexport { Dashboard, Overview, Traces, TraceDetail, TabHelp, Judge, Compare, ManagementReport, mountedApiUrl };\nexport { useOperations } from "./Operations.jsx";\nexport { RegistryView } from "./Registry.jsx";\nexport { EvaluatorLab } from "./EvaluatorLab.jsx";\nexport { Runs } from "./Runs.jsx";\nexport { Insights } from "./Insights.jsx";`;
   const result = await build({
     stdin: {
       contents: source,
@@ -921,12 +921,12 @@ test("management report does not render unavailable model tokens as zero", async
   assert.equal(textOf(tokenCells[0]).trim(), "—");
 });
 
-test("Monitor keeps fixed-window signals as clearly labeled legacy history", async () => {
+test("retired fixed-window links render Monitor history without legacy UI", async () => {
   const ui = await loadUiModule();
-  let pushed = null;
+  let evaluatorLoads = 0;
   globalThis.window = {
-    location: { hash: "#tab=monitor&section=signals&evaluator=judge-a", pathname: "/dashboard" },
-    history: { pushState: (_state, _title, url) => { pushed = url; }, replaceState() {} },
+    location: { hash: "#tab=monitor&section=signals&evaluator=retired-judge", pathname: "/dashboard" },
+    history: { pushState() {}, replaceState() {} },
     addEventListener() {}, removeEventListener() {},
   };
   try {
@@ -943,28 +943,21 @@ test("Monitor keeps fixed-window signals as clearly labeled legacy history", asy
     data.driftRun = { id: "run-1", signalCount: 1, completedAt: "2026-09-07T22:00:00Z" };
     data.driftAnalysis.runStatus = "completed_with_signals";
     data.evaluation.availableIdentities = [{ id: "judge-a", label: "Response quality", complete: true }];
+    data.truncation = {
+      applied: true,
+      resources: { driftSignals: { available: 60, shown: 40, limit: 40 } },
+    };
 
-    const tree = render(ui.Dashboard, createHooks(), { data, source: "live" });
-    assert.equal(findAll(tree, (node) => node.type === "select" && node.props["aria-label"] === "Evaluator identity").length, 1);
+    const tree = render(ui.Dashboard, createHooks(), {
+      data, source: "live", onEvaluatorChange() { evaluatorLoads += 1; },
+    });
+    const text = textOf(tree);
     const page = findAll(tree,
-      (node) => typeof node.type === "function" && node.type.name === "DriftSignals")[0];
-    assert.ok(page);
-
-    const rendered = render(ui.DriftSignals, createHooks(), page.props);
-    assert.match(textOf(rendered), /Legacy fixed-window history/i);
-    assert.match(textOf(rendered), /read-only/i);
-    assert.match(textOf(rendered), /Instruction.following/);
-    assert.match(textOf(rendered), /Incident response/);
-    assert.match(textOf(rendered), /OpenAI · test-model/);
-    assert.match(textOf(rendered), /Review the response-format regression/);
-    const stats = findAll(rendered,
-      (node) => typeof node.type === "function" && node.type.name === "SignalStat");
-    assert.equal(stats.find((node) => node.props.label === "Samples").props.value, "80 vs 80");
-
-    const traceButton = findAll(rendered,
-      (node) => node.type === "button" && node.props.title === "trace-1")[0];
-    traceButton.props.onClick();
-    assert.equal(pushed, "#tab=explore&section=calls&trace=trace-1&evaluator=judge-a");
+      (node) => typeof node.type === "function" && node.type.name === "Monitor")[0];
+    assert.equal(page.props.view, "history");
+    assert.equal(evaluatorLoads, 0);
+    assert.equal(findAll(tree, (node) => node.type === "select" && node.props["aria-label"] === "Evaluator identity").length, 0);
+    assert.doesNotMatch(text, /Legacy History|fixed-window|drift signals: 40 of 60/i);
   } finally { delete globalThis.window; }
 });
 
@@ -1005,21 +998,6 @@ test("bundled sample demonstrates the current Monitor instead of only legacy sig
   assert.match(textOf(dashboard), /Latest completed prospective comparison/i);
 });
 
-test("legacy signal history distinguishes no run from a completed zero-signal run", async () => {
-  const ui = await loadUiModule();
-  const noRun = textOf(render(ui.DriftSignals, createHooks(), { data: bundle("judge-a") }));
-  assert.match(noRun, /No fixed-window drift analysis has completed/i);
-  assert.match(noRun, /New comparisons are created in Monitor → Compare History/i);
-  assert.doesNotMatch(noRun, /pipeline needs separate/i);
-
-  const completed = bundle("judge-a");
-  completed.driftRun = { id: "run-zero", signalCount: 0, completedAt: "2026-09-07T22:00:00Z" };
-  completed.driftAnalysis.runStatus = "completed_no_signals";
-  const zero = textOf(render(ui.DriftSignals, createHooks(), { data: completed }));
-  assert.match(zero, /Completed with no signals/i);
-  assert.doesNotMatch(zero, /No fixed-window drift analysis has completed/i);
-});
-
 test("an inconsistent legacy run does not advertise its stale signal count", async () => {
   const ui = await loadUiModule();
   const data = bundle("judge-a");
@@ -1041,47 +1019,6 @@ test("an inconsistent legacy run does not advertise its stale signal count", asy
   assert.equal(textOf(monitorButton).trim(), "Monitor");
 });
 
-test("legacy fixed-window totals remain truthful when cards are bounded", async () => {
-  const ui = await loadUiModule();
-  const shownSignals = Array.from({ length: 40 }, (_, index) => ({
-    id: `signal-${index}`, dimension: "relevance", direction: "regression",
-  }));
-  const data = bundle("judge-a", [], shownSignals);
-  data.driftRun = { id: "run-bounded", signalCount: 60 };
-  data.driftAnalysis.runStatus = "completed_with_signals";
-  data.truncation = {
-    applied: true,
-    resources: { driftSignals: { available: 60, shown: 40, limit: 40 } },
-  };
-
-  const page = textOf(render(ui.DriftSignals, createHooks(), { data }));
-  assert.match(page, /60 signals/i);
-  assert.match(page, /showing 40/i);
-
-  const overview = render(ui.Overview, createHooks(), { data, includeMonitor: false });
-  const signalMetric = findAll(overview,
-    (node) => typeof node.type === "function" && node.type.name === "MetricCell")
-    .find((node) => node.props.label === "Evaluation drift signals");
-  assert.equal(signalMetric, undefined);
-});
-
-test("fixed-window signal cards reject malformed unbounded evidence lists", async () => {
-  const ui = await loadUiModule();
-  const data = bundle("judge-a", [], [{
-    id: "malformed", dimension: "custom_dimension", direction: "regression",
-    layers: [null, {}, "valid-layer", ...Array.from({ length: 30 }, (_, index) => `layer-${index}`)],
-    exampleTraceIds: [null, {}, "trace-1", ...Array.from({ length: 30 }, (_, index) => `trace-${index + 2}`)],
-    action: { unexpected: true },
-  }]);
-  data.driftRun = { id: "run-malformed", signalCount: 1 };
-  data.driftAnalysis.runStatus = "completed_with_signals";
-
-  const page = render(ui.DriftSignals, createHooks(), { data });
-  assert.match(textOf(page), /Review the affected traces/);
-  assert.equal(findAll(page,
-    (node) => node.type === "button" && node.props.title?.startsWith("trace-")).length, 5);
-});
-
 test("dashboard exposes only the six product workspaces", async () => {
   const ui = await loadUiModule();
   const tree = render(ui.Dashboard, createHooks(), { data: bundle("judge-a") });
@@ -1091,7 +1028,7 @@ test("dashboard exposes only the six product workspaces", async () => {
   for (const label of ["Overview", "Explore", "Evaluate", "Monitor", "Report", "Settings"]) {
     assert.match(labels, new RegExp(label));
   }
-  for (const oldLabel of ["Findings", "Reliability", "Performance", "Behavior", "Agent runs", "Trace explorer", "Judge scores", "Evaluators", "Compare LLMs"]) {
+  for (const oldLabel of ["Findings", "Reliability", "Performance", "Behavior", "Agent runs", "Trace explorer", "Judge scores", "Evaluators", "Compare LLMs", "Legacy History"]) {
     assert.doesNotMatch(labels, new RegExp(oldLabel));
   }
 });
