@@ -51,14 +51,10 @@ from verdict.dashboard.registry import (
     build_registry_bundle as _build_registry_bundle,
 )
 from verdict.dashboard.storage_url import is_postgres_storage
-from verdict.evidence import EvidenceState
+from verdict.evidence import EvidenceState, ToolOrigin, _load_json_without_duplicate_tool_origin
 from verdict.metrics import ScoreCounts, verdict_label
 from verdict.monitor_inputs import LOCAL_TENANT
-from verdict.normalized_evidence import (
-    agent_turn_from_row,
-    normalized_bundle_digest,
-    stored_agent_event_attributes,
-)
+from verdict.normalized_evidence import agent_turn_from_row, normalized_bundle_digest
 from verdict.redaction import redact, redact_structure, sanitize_agent_event_attributes
 from verdict.telemetry.model import safe_tenant_id
 from verdict.trace_facts import deterministic_trace_facts
@@ -214,10 +210,24 @@ def _json_value(raw: object, default):
 def _dashboard_agent_event_attributes(event_type: object, raw: object) -> dict[str, object]:
     """Return display-safe attributes without exposing malformed origin payloads."""
     try:
-        attributes = stored_agent_event_attributes(event_type, raw)
+        decoded = (
+            _load_json_without_duplicate_tool_origin(raw)
+            if isinstance(raw, str)
+            else deepcopy(raw)
+        )
     except (TypeError, ValueError, json.JSONDecodeError):
         return {}
-    return sanitize_agent_event_attributes(event_type, attributes)
+    if not isinstance(decoded, dict):
+        return {}
+    attributes = sanitize_agent_event_attributes(event_type, decoded)
+    origin = attributes.pop("tool_origin", None)
+    if (
+        event_type == "tool_call"
+        and isinstance(origin, str)
+        and origin in {item.value for item in ToolOrigin}
+    ):
+        attributes["tool_origin"] = origin
+    return attributes
 
 
 def _dashboard_time(value: object) -> str | None:

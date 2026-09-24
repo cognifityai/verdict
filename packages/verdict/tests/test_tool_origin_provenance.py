@@ -12,6 +12,7 @@ from verdict.agent_judgment import (
     turn_evidence_fingerprint,
 )
 from verdict.evidence import AgentTurn, EvidenceState, ExecutionStatus
+from verdict.normalized_evidence import stored_agent_event_attributes
 from verdict.storage.turn_tool_evidence import tool_origin_code_sql
 
 
@@ -61,6 +62,21 @@ def test_sqlite_origin_projection_rejects_nonobjects_and_duplicate_keys(
 
     assert row is not None
     assert row[0] == expected
+
+
+@pytest.mark.parametrize(
+    ("event_type", "attributes"),
+    [
+        ("tool_call", '{"tool_origin":{"private":"CANARY"}}'),
+        ("model_call", '{"tool_origin":"mcp"}'),
+    ],
+)
+def test_normalized_reader_rejects_invalid_origin_instead_of_erasing_it(
+    event_type: str,
+    attributes: str,
+) -> None:
+    with pytest.raises(ValueError, match="invalid tool_origin"):
+        stored_agent_event_attributes(event_type, attributes)
 
 
 def test_tool_counts_partition_every_call_and_warn_about_unobserved_boundaries() -> None:

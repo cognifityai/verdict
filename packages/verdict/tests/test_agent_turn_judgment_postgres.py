@@ -86,7 +86,14 @@ def test_postgres_bounded_tool_projection_reads_full_turn_page():
 @pytest.mark.skipif(not os.environ.get("VERDICT_TEST_POSTGRES_DSN"), reason="disposable Postgres required")
 @pytest.mark.parametrize(
     "stored_attributes",
-    ['{"tool_origin":{"private":"CANARY"}}', "[]", "null", '"scalar"'],
+    [
+        '{"tool_origin":{"private":"CANARY"}}',
+        '{"tool_origin":"unknown"}',
+        '{"tool_origin":null}',
+        "[]",
+        "null",
+        '"scalar"',
+    ],
 )
 def test_postgres_tool_projection_treats_invalid_present_origin_as_unusable(
     stored_attributes: str,
@@ -112,6 +119,16 @@ def test_postgres_tool_projection_treats_invalid_present_origin_as_unusable(
         assert counts.origin_unusable_calls == 1
         assert counts.mcp_calls == counts.origin_not_captured_calls == 0
         assert "CANARY" not in counts.prompt_block()
+        with pytest.raises(ValueError):
+            storage.get_agent_run_bundle(tenant, "run")
+        [(same_turn, same_status, same_counts)], same_more = (
+            storage.list_agent_turn_evaluation_candidates(
+                tenant, "e" * 64, tool_evidence=True,
+            )
+        )
+        assert (same_turn, same_status, same_counts, same_more) == (
+            turn, status, counts, more,
+        )
     finally:
         storage.close()
 

@@ -785,14 +785,13 @@ def stored_agent_event_attributes(
         decoded = deepcopy(value)
     if not isinstance(decoded, dict):
         raise ValueError("stored agent event attributes must be an object")
-    origin = decoded.pop("tool_origin", None)
     event_kind = event_type if isinstance(event_type, str) else event_type.value
-    if (
-        event_kind == AgentEventType.TOOL_CALL.value
-        and isinstance(origin, str)
-        and origin in {item.value for item in ToolOrigin}
+    if "tool_origin" in decoded and (
+        event_kind != AgentEventType.TOOL_CALL.value
+        or not isinstance(decoded["tool_origin"], str)
+        or decoded["tool_origin"] not in {item.value for item in ToolOrigin}
     ):
-        decoded["tool_origin"] = origin
+        raise ValueError("stored agent event has invalid tool_origin provenance")
     return decoded
 
 
