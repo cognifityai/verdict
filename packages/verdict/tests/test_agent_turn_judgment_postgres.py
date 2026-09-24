@@ -45,7 +45,8 @@ def _tool_events():
     return (
         AgentEvent("call", "turn", 0, now, AgentEventType.TOOL_CALL,
                    ExecutionStatus.COMPLETED, "sdk",
-                   {"tool_name": "private_tool", "call_id": "private_id"}),
+                   {"tool_name": "private_tool", "call_id": "private_id",
+                    "tool_origin": "mcp"}),
         AgentEvent("result", "turn", 1, now, AgentEventType.TOOL_RESULT,
                    ExecutionStatus.FAILED, "sdk",
                    {"tool_name": "private_tool", "call_id": "private_id",
@@ -83,13 +84,41 @@ def test_postgres_bounded_tool_projection_reads_full_turn_page():
 
 
 @pytest.mark.skipif(not os.environ.get("VERDICT_TEST_POSTGRES_DSN"), reason="disposable Postgres required")
+def test_postgres_tool_projection_treats_invalid_present_origin_as_unusable():
+    storage = PostgresStorage(os.environ["VERDICT_TEST_POSTGRES_DSN"])
+    tenant = f"turn-origin-invalid-{uuid4().hex}"
+    try:
+        bundle = _bundle(tenant)
+        call, _result = _tool_events()
+        storage.replace_agent_run_bundle(replace(bundle, events=(call,)))
+        with storage._pool.connection() as conn:
+            conn.execute(
+                "UPDATE agent_events SET attributes_json=jsonb_set("
+                "attributes_json,'{tool_origin}',%s::jsonb) "
+                "WHERE tenant_id=%s AND run_id='run' AND event_id='call'",
+                ('{"private":"CANARY"}', tenant),
+            )
+
+        [(turn, status, counts)], more = storage.list_agent_turn_evaluation_candidates(
+            tenant, "e" * 64, tool_evidence=True,
+        )
+        assert not more and status is None
+        assert turn.turn_id == "turn"
+        assert counts.origin_unusable_calls == 1
+        assert counts.mcp_calls == counts.origin_not_captured_calls == 0
+        assert "CANARY" not in counts.prompt_block()
+    finally:
+        storage.close()
+
+
+@pytest.mark.skipif(not os.environ.get("VERDICT_TEST_POSTGRES_DSN"), reason="disposable Postgres required")
 def test_postgres_tool_counts_bind_preview_storage_and_dashboard():
     storage = PostgresStorage(os.environ["VERDICT_TEST_POSTGRES_DSN"])
     tenant = f"turn-tools-{uuid4().hex}"
     try:
         bundle = _bundle(tenant)
         other_tenant = f"turn-tools-other-{uuid4().hex}"
-        call, result = _tool_events()
+        call, _result = _tool_events()
         with_call = replace(bundle, events=(call,))
         storage.replace_agent_run_bundle(with_call)
         storage.replace_agent_run_bundle(replace(_bundle(other_tenant), events=(call,)))
@@ -98,6 +127,7 @@ def test_postgres_tool_counts_bind_preview_storage_and_dashboard():
         )
         assert not more and status is None
         assert (counts.calls, counts.results, counts.error_results) == (1, 0, 0)
+        assert (counts.mcp_calls, counts.origin_not_captured_calls) == (1, 0)
         judgment = AgentTurnJudgment(
             tenant_id=tenant, run_id="run", turn_id="turn", evaluator_fingerprint="c" * 64,
             evidence_fingerprint=turn_evidence_fingerprint(turn, counts),
@@ -114,6 +144,7 @@ def test_postgres_tool_counts_bind_preview_storage_and_dashboard():
                                          tenant=tenant, run_id="run")
         assert visible["turns"][0]["evaluation"]["toolEvidence"] == "counts_v1"
         assert visible["turns"][0]["evaluation"]["toolCounts"]["calls"] == 1
+        assert visible["turns"][0]["evaluation"]["toolCounts"]["mcpCalls"] == 1
         other = build_agent_run_detail(os.environ["VERDICT_TEST_POSTGRES_DSN"],
                                        tenant=other_tenant, run_id="run")
         assert other["turns"][0]["evaluation"] is None
@@ -138,7 +169,15 @@ def test_postgres_tool_counts_bind_preview_storage_and_dashboard():
                 (agent_turn_judgment_to_json(judgment), tenant),
             )
 
-        storage.replace_agent_run_bundle(replace(bundle, events=(call, result)))
+        # Simulate an already-stored origin correction. Normalized Postgres
+        # events are immutable through the public capture API.
+        with storage._pool.connection() as conn:
+            conn.execute(
+                "UPDATE agent_events SET attributes_json=jsonb_set("
+                "attributes_json,'{tool_origin}','\"application\"'::jsonb) "
+                "WHERE tenant_id=%s AND run_id='run' AND event_id='call'",
+                (tenant,),
+            )
         assert storage.save_agent_turn_judgment_if_current(judgment) == "stale"
         rows, _ = storage.list_agent_turn_evaluation_candidates(
             tenant, "c" * 64, tool_evidence=True,

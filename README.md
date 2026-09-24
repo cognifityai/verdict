@@ -139,7 +139,11 @@ verdict.init(storage="sqlite:///./verdict.db", service_name="support-api")
 
 with verdict.agent_run(name="support-agent", session_id=session_id) as run:
     with run.turn(user_input=user_message) as turn:
-        with turn.tool("lookup_order", arguments={"order_id": order_id}) as tool:
+        with turn.tool(
+            "lookup_order",
+            arguments={"order_id": order_id},
+            origin=verdict.ToolOrigin.APPLICATION,
+        ) as tool:
             order = lookup_order(order_id)
             tool.set_output({"found": order is not None})
         answer = respond(user_message, order)  # supported LLM calls auto-link
@@ -161,6 +165,12 @@ contract. If content capture is enabled but `set_output()` is not called, the
 turn records missing response evidence; disabled content is recorded separately
 as not captured. Identifiers such as `tenant_id` and `session_id` must be
 non-sensitive.
+
+`ToolOrigin` records the outer dispatch boundary the application directly
+observes: `MCP`, `PROVIDER_HOSTED`, or `APPLICATION`. Omit `origin` when the
+producer cannot establish it. Verdict never guesses origin from a tool name.
+An application wrapper may still use an unobserved downstream protocol, so an
+application origin does not prove that MCP was absent behind the wrapper.
 
 For application hosts that should not connect to the Verdict database, write
 bounded, redacted, process-owned JSONL segments locally:
@@ -466,12 +476,14 @@ Monitor preview can aggregate current native Turn judgments, but Turn judging
 does not provide tool/citation provenance by default. An explicit
 `toolEvidence: "counts_v1"` Turn option
 sends only bounded counts of recorded tool calls, results, reported errors,
-and unknown outcomes with the redacted Turn text. The tool-event projection
+unknown outcomes, and explicitly recorded dispatch origins with the redacted
+Turn text. Missing or unusable origin metadata is counted separately. The tool-event projection
 does not add names, IDs, arguments, result bodies, or URLs to judge input.
 Turns with no recorded tool events or more than 64 total events are ineligible
-in this mode. Tool counts are not
-retrieved source context and cannot establish MCP origin, citation support,
-claim accuracy, or complete tool coverage; context-required rubric dimensions
+in this mode. Origin counts establish only the producer-recorded outer dispatch
+boundary; they cannot establish hidden downstream protocols. Tool counts are
+not retrieved source context and cannot establish citation support, claim
+accuracy, or complete tool coverage; context-required rubric dimensions
 remain skipped. Preview, approval, durable result, and Turn detail bind the
 same counts snapshot, while default Turn and provider Trace results retain
 their existing identities. Turn judging does not provide citation provenance or

@@ -16,6 +16,11 @@ Runs, turns, and tools. Typed helpers record instruction availability, context,
 commands, tests, artifacts, retries, handoffs, user feedback, and business
 outcomes. Callers supply only facts their application observes; Verdict does
 not infer missing execution success or semantic correctness.
+Tool calls may carry an optional typed outer dispatch origin: MCP,
+provider-hosted, or application-defined. The producer omits the field when it
+cannot directly establish that boundary. Verdict never infers origin from a
+tool name, and an origin does not describe unobserved downstream protocols used
+behind a wrapper.
 An explicit boolean-false business outcome is encoded using the existing failed
 event status and becomes a deterministic Agent Insight. That status remains
 observable when the outcome value itself is omitted by metadata-only capture;
@@ -61,6 +66,9 @@ The SDK appends to the normalized `import_sources`, `agent_runs`,
 database table or column and does not change existing Trace, judgment, cluster,
 monitor, or drift identity. Existing provider-only initialization continues to
 work without an Agent Run context.
+The optional origin is stored in the existing allowlisted Agent Event metadata,
+so no schema migration is required. Events without the field remain readable
+and explicitly represent origin as not captured.
 
 ## Consequences
 

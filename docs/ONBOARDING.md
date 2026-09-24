@@ -161,7 +161,11 @@ import verdict
 verdict.init(storage="sqlite:///./verdict.db", service_name="support-api")
 with verdict.agent_run(name="support-agent", session_id=session_id) as run:
     with run.turn(user_input=user_message) as turn:
-        with turn.tool("lookup_order", arguments={"order_id": order_id}) as tool:
+        with turn.tool(
+            "lookup_order",
+            arguments={"order_id": order_id},
+            origin=verdict.ToolOrigin.APPLICATION,
+        ) as tool:
             order = lookup_order(order_id)
             tool.set_output({"found": order is not None})
         answer = respond(user_message, order)
@@ -182,6 +186,12 @@ response, and raw-message content; the event contains bounded operational
 fields only. Sampling retains or omits the complete run as a unit. With content
 capture enabled, omitting `set_output()` records missing response evidence;
 metadata-only capture records the response as not captured.
+
+Pass `ToolOrigin.MCP`, `ToolOrigin.PROVIDER_HOSTED`, or
+`ToolOrigin.APPLICATION` only when the producer directly observes that outer
+dispatch boundary. Omit `origin` when it cannot. Verdict does not infer origin
+from tool names. A wrapper classified as application may still use an
+unobserved downstream protocol, so the label cannot prove MCP was absent.
 
 For an application host that should not hold database credentials, configure a
 separate local spool directory for each producer process:
@@ -592,11 +602,14 @@ selected; older results are not implied absent. This remains separate from
 Trace coverage. No tool provenance or citation verification is supplied to
 the Turn judge by default. To include bounded tool-use metadata, select
 "Include bounded counts" before previewing Agent Turns. The preview and
-egress consent then cover only recorded call/result/error counts; the event
-projection adds no tool names, IDs, arguments, result text, or URLs. This mode
+egress consent then cover recorded call/result/error counts and explicit
+producer-recorded dispatch-origin counts. Missing and unusable origin metadata
+remain separate buckets; the event projection adds no tool names, IDs,
+arguments, result text, or URLs. This mode
 excludes Turns with no recorded tool events or more than 64 total events.
-Counts do not prove MCP origin, source support, or factual correctness and do not enable rubric
-dimensions that require retrieved context. A changed count makes the prior
+Origins describe only the observed outer dispatch and do not establish hidden
+downstream services or protocols. Counts do not prove source support or factual
+correctness and do not enable rubric dimensions that require retrieved context. A changed count makes the prior
 Turn judgment stale. Trace remains the only activatable Monitor unit; the
 descriptive logical-session preview can aggregate current Turn judgments
 without producing an alert.
@@ -608,11 +621,11 @@ database without blocking evidence capture. The directory must be trusted
 and writable. Postgres guards each Turn/evaluator separately. A crash,
 connection loss, or provider-side retry can still result in an extra charge;
 this is not an exactly-once billing guarantee.
-The four judge-visible counts, not the total event count, bind score
-currentness. An unrelated non-tool event below the 64-event eligibility cap
-does not schedule a new judge call. At more than 64 total events the Turn is
-not eligible for counts-only judging. Preview and Agent Run detail batch the
-bounded event-metadata reads for each Turn page.
+The judge-visible call/result/error and origin counts, not the total event
+count, bind score currentness. An unrelated non-tool event below the 64-event
+eligibility cap does not schedule a new judge call. At more than 64 total events
+the Turn is not eligible for counts-only judging. Preview and Agent Run detail
+batch the bounded event-metadata reads for each Turn page.
 When `OPENAI_BASE_URL` is set, the OpenAI provider uses that compatible endpoint;
 the UI reports only that a custom endpoint is configured and never returns the
 URL. Unknown local model names remain unpriced.

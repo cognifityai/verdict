@@ -60,7 +60,11 @@ import verdict
 verdict.init(storage="sqlite:///./verdict.db", service_name="support-api")
 with verdict.agent_run(name="support-agent", session_id=session_id) as run:
     with run.turn(user_input=user_message) as turn:
-        with turn.tool("lookup_order", arguments={"order_id": order_id}) as tool:
+        with turn.tool(
+            "lookup_order",
+            arguments={"order_id": order_id},
+            origin=verdict.ToolOrigin.APPLICATION,
+        ) as tool:
             order = lookup_order(order_id)
             tool.set_output({"found": order is not None})
         answer = respond(user_message, order)
@@ -79,6 +83,10 @@ commands, tests, artifacts, retries, handoffs, feedback, and outcomes. Sync and
 async context managers share the same API contract. With content capture on, a
 turn whose caller does not provide an output records missing response evidence;
 metadata-only capture records that content as not captured.
+`ToolOrigin` records only an explicitly observed outer dispatch boundary:
+`MCP`, `PROVIDER_HOSTED`, or `APPLICATION`. Omit it when unknown. Verdict never
+infers origin from a tool name, and the label cannot prove which protocols a
+wrapper uses downstream.
 
 ## Stable read port for optional packages
 
@@ -331,15 +339,17 @@ connection loss, or a provider-side retry.
 Agent Runs detail displays the latest valid current result among eight newest
 evaluator slots per Turn, or one selected exact evaluator. Older results may
 exist outside this bounded view. An optional `toolEvidence: "counts_v1"`
-mode adds only bounded recorded tool call/result/error counts to the judge
-prompt; the event projection never includes tool names, arguments, result
-bodies, or URLs. Turns with no recorded tool events or more than 64 events
-are ineligible in this mode. Counts do not establish MCP origin, complete
-tool coverage, citation support, or factual accuracy, and do not enable
-rubric dimensions requiring retrieved context. Citation verification remains
-separate future work. Agent Turn judgments may be included in the descriptive
+mode adds only bounded recorded tool call/result/error counts and explicit
+producer-recorded dispatch-origin counts to the judge prompt; missing and
+unusable origins remain separate buckets. The event projection never includes
+tool names, arguments, result bodies, or URLs. Turns with no recorded tool
+events or more than 64 events are ineligible in this mode. Origin labels
+describe only the observed outer dispatch and cannot establish hidden
+downstream protocols. Counts do not establish complete tool coverage, citation
+support, or factual accuracy, and do not enable rubric dimensions requiring
+retrieved context. Citation verification remains separate future work. Agent Turn judgments may be included in the descriptive
 logical-session Monitor preview, which makes no inferential or activation claim.
-Only the four judge-visible counts bind score currentness: adding an unrelated
+Only judge-visible counts bind score currentness: adding an unrelated
 model event below the 64-event limit does not invalidate a score. Total event
 count remains a separate eligibility bound. Preview and Agent Run detail read
 bounded event metadata for their Turn page in one batched query.

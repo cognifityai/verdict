@@ -136,7 +136,8 @@ def test_run_detail_shows_only_current_tool_count_judgment(tmp_path):
     call = AgentEvent(
         "call", "turn", 2, now, AgentEventType.TOOL_CALL,
         ExecutionStatus.COMPLETED, "sdk",
-        {"tool_name": "secret_tool", "call_id": "secret_id", "arguments": "private"},
+        {"tool_name": "secret_tool", "call_id": "secret_id", "arguments": "private",
+         "tool_origin": "mcp"},
         PrivacyClassification.REDACTED,
     )
     with_call = replace(bundle, events=(*bundle.events, call))
@@ -162,6 +163,8 @@ def test_run_detail_shows_only_current_tool_count_judgment(tmp_path):
     assert visible["turns"][0]["evaluation"]["toolEvidence"] == "counts_v1"
     assert visible["turns"][0]["evaluation"]["toolCounts"] == {
         "calls": 1, "results": 0, "errorResults": 0, "unknownResults": 0,
+        "mcpCalls": 1, "applicationCalls": 0, "providerHostedCalls": 0,
+        "originNotCapturedCalls": 0, "originUnusableCalls": 0,
     }
     assert "secret_tool" not in json.dumps(visible["turns"][0]["evaluation"])
     corrupt = json.loads(agent_turn_judgment_to_json(judgment))
@@ -193,6 +196,54 @@ def test_run_detail_shows_only_current_tool_count_judgment(tmp_path):
     storage.close()
     stale = build_agent_run_detail(path, tenant="local", run_id="r-local")
     assert stale["turns"][0]["evaluation"] is None
+
+
+def test_run_detail_counts_but_never_displays_malformed_tool_origin(tmp_path):
+    path = tmp_path / "malformed-tool-origin.db"
+    storage = SQLiteStorage(str(path))
+    now = datetime(2026, 9, 23, tzinfo=timezone.utc)
+    bundle = _bundle("local", now, with_turn=True)
+    call = AgentEvent(
+        "call", "turn", 2, now, AgentEventType.TOOL_CALL,
+        ExecutionStatus.COMPLETED, "sdk",
+        {"tool_name": "visible-tool", "tool_origin": "application"},
+        PrivacyClassification.REDACTED,
+    )
+    storage.replace_agent_run_bundle(replace(bundle, events=(*bundle.events, call)))
+    storage.close()
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "UPDATE agent_events SET attributes_json=? WHERE event_id='call'",
+            (json.dumps({"tool_name": "visible-tool", "tool_origin": {
+                "private": "ORIGIN_PAYLOAD_CANARY",
+            }}),),
+        )
+    storage = SQLiteStorage(str(path))
+    [(turn, _status, counts)], _ = storage.list_agent_turn_evaluation_candidates(
+        "local", "d" * 64, tool_evidence=True,
+    )
+    assert counts.origin_unusable_calls == 1
+    judgment = AgentTurnJudgment(
+        tenant_id="local", run_id="r-local", turn_id="turn",
+        evaluator_fingerprint="d" * 64,
+        evidence_fingerprint=turn_evidence_fingerprint(turn, counts),
+        evaluator_provider="anthropic", evaluator_config={
+            "tool_evidence_mode": "counts_v1",
+            "tool_evidence_template": TurnToolCounts.PROMPT_TEMPLATE,
+        },
+        judge_models=["test"], expected_dimensions=["relevance"],
+        rubric_name="quality", rubric_version="1",
+        dimensions=[DimensionScore("relevance", Verdict.PASS, "ok", "test")],
+    )
+    assert storage.save_agent_turn_judgment_if_current(judgment) == "saved"
+    storage.close()
+
+    visible = build_agent_run_detail(path, tenant="local", run_id="r-local")
+    serialized = json.dumps(visible)
+    assert visible["turns"][0]["evaluation"]["toolCounts"]["originUnusableCalls"] == 1
+    call_event = next(event for event in visible["events"] if event["eventId"] == "call")
+    assert "tool_origin" not in call_event["attributes"]
+    assert "ORIGIN_PAYLOAD_CANARY" not in serialized
 
 
 def test_run_detail_labels_latest_turn_evaluator_and_filters_exact_identity(tmp_path):

@@ -19,11 +19,14 @@ the product is refined.
   evaluation reads aggregate event metadata. Evaluator discovery scans at most
   the newest 1,000 stored Turn-result slots and reports when older identities
   were not inspected.
-- Agent Turn judging has an opt-in, counts-only tool-evidence mode. It supplies
-  bounded recorded call/result/error counts in a separate judge prompt block,
-  without tool content or source context. Preview, result currentness, and
-  Agent Runs detail use the same evidence projection; Turns with no recorded
-  tool events or more than 64 events are ineligible in this mode.
+- Agent SDK tool calls can record a typed outer dispatch origin (`MCP`,
+  `PROVIDER_HOSTED`, or `APPLICATION`). Agent Turn judging's opt-in,
+  counts-only tool-evidence mode supplies bounded call/result/error and origin
+  counts in a separate judge prompt block, without tool content or source
+  context. Missing and unusable origins remain explicit, and no origin is
+  inferred from names. Preview, result currentness, and Agent Runs detail use
+  the same evidence projection; Turns with no recorded tool events or more
+  than 64 events are ineligible in this mode.
 - Evaluator Lab can judge a completed Agent Turn's present, untruncated
   redacted request and final output as a native unit. Preview is a bounded
   tenant-scoped, at-most-100-candidate keyset page with explicit egress approval. SQLite and Postgres
