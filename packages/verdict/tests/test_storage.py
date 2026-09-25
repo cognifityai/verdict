@@ -593,6 +593,35 @@ def test_evaluator_health_id_cannot_change_tenant(storage):
     assert storage.list_evaluator_health(tenant_id="tenant-b") == []
 
 
+@pytest.mark.parametrize("owner", [None, "tenant-a"])
+def test_evaluator_health_same_owner_update_preserves_owner(storage, owner):
+    first = EvaluatorHealthRecord(
+        health_id="same-owner-id",
+        tenant_id=owner,
+        evaluator_fingerprint="judge",
+        sentinel_set_name="before",
+        sentinel_set_fingerprint="sentinels",
+    )
+    storage.insert_evaluator_health(first)
+    storage.insert_evaluator_health(EvaluatorHealthRecord(
+        health_id=first.health_id,
+        tenant_id=owner,
+        evaluator_fingerprint="judge",
+        sentinel_set_name="after",
+        sentinel_set_fingerprint="sentinels",
+    ))
+    storage.insert_evaluator_health(EvaluatorHealthRecord(
+        health_id=first.health_id,
+        tenant_id="tenant-b" if owner is None else None,
+        evaluator_fingerprint="judge",
+        sentinel_set_name="foreign",
+        sentinel_set_fingerprint="sentinels",
+    ))
+    [stored] = storage.list_evaluator_health()
+    assert stored.tenant_id == owner
+    assert stored.sentinel_set_name == "after"
+
+
 def test_evaluator_health_owner_cannot_change_by_mutating_caller_record(storage):
     record = EvaluatorHealthRecord(
         tenant_id="tenant-b",
@@ -607,6 +636,78 @@ def test_evaluator_health_owner_cannot_change_by_mutating_caller_record(storage)
     stored.tenant_id = "tenant-a"
     assert storage.list_evaluator_health(tenant_id="tenant-a") == []
     assert len(storage.list_evaluator_health(tenant_id="tenant-b")) == 1
+
+
+def test_memory_evaluator_health_collision_is_atomic_across_threads():
+    storage = InMemoryStorage()
+    first_read = threading.Event()
+    release_first = threading.Event()
+    second_read = threading.Event()
+    second_done = threading.Event()
+    errors: list[BaseException] = []
+
+    class PausingHealthDict(dict):
+        def get(self, key, default=None):
+            result = super().get(key, default)
+            if threading.current_thread().name == "first-health-writer":
+                first_read.set()
+                if not release_first.wait(timeout=5):
+                    raise TimeoutError("first health writer was not released")
+            elif threading.current_thread().name == "second-health-writer":
+                second_read.set()
+            return result
+
+    storage._evaluator_health = PausingHealthDict()
+    first = EvaluatorHealthRecord(
+        health_id="shared-health-id", tenant_id="tenant-a",
+        evaluator_fingerprint="judge", sentinel_set_name="first",
+        sentinel_set_fingerprint="sentinels",
+    )
+    second = EvaluatorHealthRecord(
+        health_id="shared-health-id", tenant_id="tenant-b",
+        evaluator_fingerprint="judge", sentinel_set_name="second",
+        sentinel_set_fingerprint="sentinels",
+    )
+
+    def write(record):
+        try:
+            storage.insert_evaluator_health(record)
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            if record is second:
+                second_done.set()
+
+    first_thread = threading.Thread(
+        target=write, args=(first,), name="first-health-writer"
+    )
+    second_thread = threading.Thread(
+        target=write, args=(second,), name="second-health-writer"
+    )
+    try:
+        first_thread.start()
+        assert first_read.wait(timeout=5)
+        second_thread.start()
+        # Before the fix, the second writer can finish after both threads read
+        # an absent ID. With the lock, it cannot enter the dict until first exits.
+        second_reached_read = second_read.wait(timeout=0.5)
+        second_finished_first = second_done.wait(timeout=5) if second_reached_read else False
+    finally:
+        release_first.set()
+        first_thread.join(timeout=5)
+        if second_thread.ident is not None:
+            second_thread.join(timeout=5)
+
+    assert not first_thread.is_alive() and not second_thread.is_alive()
+    assert not errors
+    expected = second if second_finished_first else first
+    [stored] = storage.list_evaluator_health()
+    assert stored.tenant_id == expected.tenant_id
+    assert stored.sentinel_set_name == expected.sentinel_set_name
+    assert storage.list_evaluator_health(
+        tenant_id="tenant-b" if expected is first else "tenant-a"
+    ) == []
+    storage.close()
 
 
 def test_sqlite_legacy_label_health_is_not_treated_as_example_health(tmp_path):
