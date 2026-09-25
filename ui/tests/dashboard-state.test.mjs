@@ -184,7 +184,7 @@ test("Turn tool-count consent binds the displayed preview and disables stale exe
   await preview;
   tree = render(ui.EvaluatorLab, hooks, props);
   assert.match(textOf(tree), /recorded tool-event counts/);
-  assert.match(textOf(tree), /no source verification/);
+  assert.match(textOf(tree), /no downstream or source verification/);
   const consent = findAll(tree, (node) => node.type === "input" && node.props.type === "checkbox").at(-1);
   consent.props.onChange({ target: { checked: true } });
   tree = render(ui.EvaluatorLab, hooks, props);
@@ -1511,7 +1511,9 @@ test("Agent Runs can fetch one exact Turn evaluator without reusing Trace covera
     status: "completed", evaluation: { evaluatorFingerprint: fingerprint,
       status: "completed", rubricName: "quality", rubricVersion: "1", judgeModels: ["test"],
       dimensions: [], toolEvidence: "counts_v1",
-      toolCounts: { calls: 4, results: 4, errorResults: 0, unknownResults: 0 } } }],
+      toolCounts: { calls: 4, results: 4, errorResults: 0, unknownResults: 0,
+        mcpCalls: 2, applicationCalls: 1, providerHostedCalls: 0,
+        originNotCapturedCalls: 1, originUnusableCalls: 0 } } }],
     turnPage: { available: 1, shown: 1, offset: 0, limit: 20, truncated: false },
     events: [], page: { available: 0, shown: 0, offset: 0, limit: 100, truncated: false } });
   await resolveJson(exactB, detailPage(digestB));
@@ -1520,6 +1522,10 @@ test("Agent Runs can fetch one exact Turn evaluator without reusing Trace covera
   detail = findAll(tree, (node) => typeof node.type === "function" && node.type.name === "RunDetail")[0];
   assert.equal(detail.props.detail.data.turns[0].evaluation.evaluatorFingerprint, digestB);
   assert.match(textOf(render(detail.type, createHooks(), detail.props)), /Recorded tool events:\s+4\s+calls/);
+  const toolText = textOf(render(detail.type, createHooks(), detail.props));
+  assert.match(toolText, /Direct dispatch origins:\s+2\s+MCP/);
+  assert.match(toolText, /outer dispatch boundary/);
+  assert.doesNotMatch(toolText, /MCP was not used/);
   const defaultDetail = detailPage(digestB);
   defaultDetail.turns[0].evaluation.toolEvidence = "none";
   const defaultText = textOf(render(detail.type, createHooks(), {

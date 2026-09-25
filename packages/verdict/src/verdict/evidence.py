@@ -62,6 +62,14 @@ class PrivacyClassification(str, Enum):
     OMITTED = "omitted"
 
 
+class ToolOrigin(str, Enum):
+    """The outer tool dispatch boundary directly observed by the producer."""
+
+    MCP = "mcp"
+    PROVIDER_HOSTED = "provider_hosted"
+    APPLICATION = "application"
+
+
 class AgentEventType(str, Enum):
     INSTRUCTION = "instruction"
     CONTEXT = "context"
@@ -93,7 +101,9 @@ _EVENT_FIELDS: dict[AgentEventType, frozenset[str]] = {
             "error",
         }
     ),
-    AgentEventType.TOOL_CALL: frozenset({"tool_name", "arguments", "call_id"}),
+    AgentEventType.TOOL_CALL: frozenset(
+        {"tool_name", "arguments", "call_id", "tool_origin"}
+    ),
     AgentEventType.TOOL_RESULT: frozenset({"tool_name", "result", "call_id", "is_error"}),
     AgentEventType.COMMAND: frozenset({"command", "cwd_hash", "exit_code", "stdout", "stderr"}),
     AgentEventType.TEST_RESULT: frozenset(
@@ -130,6 +140,7 @@ _TEXT_FIELDS = frozenset(
         "finish_reason",
         "error",
         "tool_name",
+        "tool_origin",
         "call_id",
         "command",
         "cwd_hash",
@@ -241,7 +252,11 @@ def _validate_attributes(event_type: AgentEventType, attributes: dict[str, Any])
         )
     for name, value in attributes.items():
         if value is None or name in {"arguments", "result"}:
+            if name == "tool_origin":
+                raise ValueError("event attribute 'tool_origin' must be a ToolOrigin value")
             continue
+        if name == "tool_origin" and value not in {origin.value for origin in ToolOrigin}:
+            raise ValueError("event attribute 'tool_origin' must be a ToolOrigin value")
         if name in _TEXT_FIELDS and not isinstance(value, str):
             raise ValueError(f"event attribute {name!r} must be text")
         if name in _BOOLEAN_FIELDS and not isinstance(value, bool):
@@ -668,6 +683,20 @@ def _parse_optional_datetime(value: Any, *, field_name: str) -> datetime | None:
     return None if value is None else _parse_datetime(value, field_name=field_name)
 
 
+class _DuplicateToolOrigin(ValueError):
+    """Reject ambiguous provenance before ordinary JSON last-key-wins parsing."""
+
+
+def _tool_origin_safe_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    if sum(key == "tool_origin" for key, _value in pairs) > 1:
+        raise _DuplicateToolOrigin("duplicate tool_origin keys are ambiguous")
+    return dict(pairs)
+
+
+def _load_json_without_duplicate_tool_origin(payload_json: str) -> Any:
+    return json.loads(payload_json, object_pairs_hook=_tool_origin_safe_object)
+
+
 def _agent_capture_from_json(
     payload_json: str,
     *,
@@ -679,8 +708,8 @@ def _agent_capture_from_json(
     ):
         raise ValueError("agent run bundle JSON must be bounded text")
     try:
-        payload = json.loads(payload_json)
-    except (TypeError, json.JSONDecodeError) as exc:
+        payload = _load_json_without_duplicate_tool_origin(payload_json)
+    except (TypeError, json.JSONDecodeError, _DuplicateToolOrigin) as exc:
         raise ValueError("agent run bundle JSON is malformed") from exc
     if not isinstance(payload, dict) or set(payload) != {"session", "run", "turns", "events"}:
         raise ValueError("agent run bundle JSON has an invalid shape")

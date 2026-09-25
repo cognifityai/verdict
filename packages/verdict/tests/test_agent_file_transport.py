@@ -23,6 +23,7 @@ from verdict.evidence import (
     AgentTurn,
     ExecutionStatus,
     SourceSession,
+    ToolOrigin,
 )
 from verdict.instrumentors.base import apply_routing_context, safe_persist_trace
 from verdict.schema import Trace
@@ -232,6 +233,7 @@ def test_file_transport_redacts_sensitive_fields_before_spool_and_import(tmp_pat
                     "message": github_token,
                     "detail": f"retrying with api_key={canary}",
                 },
+                origin=ToolOrigin.MCP,
             ) as tool:
                 tool.set_output({"Authorization": f"Basic {canary}"})
             turn.record_instruction(name="password", text=canary)
@@ -270,6 +272,7 @@ def test_file_transport_redacts_sensitive_fields_before_spool_and_import(tmp_pat
     assert tool_call.attributes["arguments"]["AWSSECRETACCESSKEYS"] == "<SECRET>"
     assert tool_call.attributes["arguments"]["XAPIKeys"] == "<SECRET>"
     assert tool_call.attributes["arguments"]["input_tokens"] == 12345678
+    assert tool_call.attributes["tool_origin"] == "mcp"
     assert bundle.run.session_id == "routing-session"
 
 

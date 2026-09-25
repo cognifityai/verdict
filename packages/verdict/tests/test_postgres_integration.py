@@ -1006,7 +1006,8 @@ def test_live_postgres_loads_tenant_scoped_logical_session_monitor_evidence(monk
                 AgentEvent(
                     "call-tools", tool_bundle.turns[0].turn_id, 0, now,
                     AgentEventType.TOOL_CALL, ExecutionStatus.COMPLETED, "test",
-                    {"tool_name": "private-tool", "call_id": "private-call"},
+                    {"tool_name": "private-tool", "call_id": "private-call",
+                     "tool_origin": "mcp"},
                 ),
                 AgentEvent(
                     "result-tools", tool_bundle.turns[0].turn_id, 1, now,
@@ -1023,6 +1024,7 @@ def test_live_postgres_loads_tenant_scoped_logical_session_monitor_evidence(monk
             calls=1,
             results=1,
             unknown_results=1,
+            mcp_calls=1,
         )
         tool_judgment = replace(
             judgment,

@@ -324,7 +324,8 @@ def test_turn_tool_mode_sends_only_recorded_counts_to_judge(tmp_path, backend):
                 event_type=AgentEventType.TOOL_CALL, status=ExecutionStatus.COMPLETED,
                 provenance="sdk", privacy_classification=PrivacyClassification.REDACTED,
                 attributes={"tool_name": "mcp_private_tool", "call_id": "secret-call-id",
-                            "arguments": {"url": "https://private.example/source"}},
+                            "arguments": {"url": "https://private.example/source"},
+                            "tool_origin": "application"},
             ),
             AgentEvent(
                 event_id="result-1", turn_id="turn-1", sequence=1, occurred_at=now,
@@ -364,6 +365,10 @@ def test_turn_tool_mode_sends_only_recorded_counts_to_judge(tmp_path, backend):
         request = str(provider.requests[0].messages)
         assert "Recorded tool calls: 1" in request
         assert "Recorded tool results: 1" in request
+        assert "Directly recorded MCP dispatches: 0" in request
+        assert "Directly recorded application dispatches: 1" in request
+        assert "unobserved downstream service or protocol" in request
+        assert "MCP was not used" not in request
         for forbidden in ("mcp_private_tool", "secret-call-id", "private.example", "CANARY_TOOL_RESULT"):
             assert forbidden not in request
         default = preview_evaluation(
@@ -624,6 +629,43 @@ def test_tool_mode_treats_malformed_stored_error_flag_as_unknown(tmp_path):
         storage.close()
 
 
+def test_tool_mode_treats_malformed_stored_origin_as_unusable_without_egress(tmp_path):
+    storage = SQLiteStorage(str(tmp_path / "malformed-origin.db"))
+    try:
+        bundle = _agent_turn_bundle()
+        call = AgentEvent(
+            event_id="call", turn_id="turn-1", sequence=0,
+            occurred_at=bundle.turns[0].started_at,
+            event_type=AgentEventType.TOOL_CALL, status=ExecutionStatus.COMPLETED,
+            provenance="sdk", attributes={"tool_name": "tool", "call_id": "id"},
+        )
+        storage.replace_agent_run_bundle(replace(bundle, events=(call,)))
+        canary = "PRIVATE_ORIGIN_CANARY"
+        storage._conn.execute(
+            "UPDATE agent_events SET attributes_json=? WHERE tenant_id=? AND run_id=? "
+            "AND event_id=?",
+            (json.dumps({"tool_name": "mcp_private", "tool_origin": {"secret": canary}}),
+             "local", "run-1", "call"),
+        )
+        config = {**_config(), "unit": "agent_turn", "toolEvidence": "counts_v1"}
+        preview = preview_evaluation(storage, tenant_id="local", config=config)
+        provider = CountingProvider()
+        execution = execute_evaluation(
+            storage, tenant_id="local", provider=provider, confirm_external_egress=True,
+            config={**config, "planFingerprint": preview["planFingerprint"],
+                    "plannedTurns": preview["plannedTurns"]},
+        )
+
+        assert execution["completed"] == 1
+        prompt = str(provider.requests[0].messages)
+        assert "Origin unusable: 1" in prompt
+        assert "Directly recorded MCP dispatches: 0" in prompt
+        assert canary not in prompt
+        assert "mcp_private" not in prompt
+    finally:
+        storage.close()
+
+
 @pytest.mark.parametrize("backend", ["memory", "sqlite"])
 @pytest.mark.parametrize("when", ["before", "during"])
 def test_tool_counts_change_invalidates_preview_or_durable_result(tmp_path, backend, when):
@@ -648,6 +690,52 @@ def test_tool_counts_change_invalidates_preview_or_durable_result(tmp_path, back
                         "result": "private"},
         )
         changed = replace(bundle, events=(call, result_event))
+
+        class ChangingProvider(CountingProvider):
+            def complete(self, request):
+                if when == "during":
+                    storage.replace_agent_run_bundle(changed)
+                return super().complete(request)
+
+        provider = ChangingProvider()
+        if when == "before":
+            storage.replace_agent_run_bundle(changed)
+        approved = {**config, "planFingerprint": preview["planFingerprint"],
+                    "plannedTurns": preview["plannedTurns"]}
+        if when == "before":
+            with pytest.raises(ValueError, match="no longer current"):
+                execute_evaluation(storage, tenant_id="local", config=approved,
+                                   provider=provider, confirm_external_egress=True)
+            assert provider.calls == 0
+        else:
+            outcome = execute_evaluation(storage, tenant_id="local", config=approved,
+                                         provider=provider, confirm_external_egress=True)
+            assert outcome["stale"] == 1
+            assert outcome["completed"] == 0
+            assert provider.calls == 1
+    finally:
+        storage.close()
+
+
+@pytest.mark.parametrize("backend", ["memory", "sqlite"])
+@pytest.mark.parametrize("when", ["before", "during"])
+def test_tool_origin_change_invalidates_preview_or_durable_result(tmp_path, backend, when):
+    storage = InMemoryStorage() if backend == "memory" else SQLiteStorage(str(tmp_path / "origin.db"))
+    try:
+        bundle = _agent_turn_bundle()
+        call = AgentEvent(
+            event_id="call", turn_id="turn-1", sequence=0,
+            occurred_at=bundle.turns[0].started_at,
+            event_type=AgentEventType.TOOL_CALL, status=ExecutionStatus.COMPLETED,
+            provenance="sdk", attributes={"tool_name": "tool", "call_id": "id"},
+        )
+        initial = replace(bundle, events=(call,))
+        changed = replace(bundle, events=(replace(
+            call, attributes={**call.attributes, "tool_origin": "mcp"},
+        ),))
+        storage.replace_agent_run_bundle(initial)
+        config = {**_config(), "unit": "agent_turn", "toolEvidence": "counts_v1"}
+        preview = preview_evaluation(storage, tenant_id="local", config=config)
 
         class ChangingProvider(CountingProvider):
             def complete(self, request):

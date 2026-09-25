@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any, ClassVar
@@ -34,7 +35,15 @@ class TurnToolCounts:
         "Recorded tool calls: {calls}\n"
         "Recorded tool results: {results}\n"
         "Recorded error results: {error_results}\n"
-        "Results with unknown error status: {unknown_results}"
+        "Results with unknown error status: {unknown_results}\n"
+        "Directly recorded MCP dispatches: {mcp_calls}\n"
+        "Directly recorded application dispatches: {application_calls}\n"
+        "Directly recorded provider-hosted dispatches: {provider_hosted_calls}\n"
+        "Origin not captured: {origin_not_captured_calls}\n"
+        "Origin unusable: {origin_unusable_calls}\n"
+        "Origin labels describe only the producer-recorded outer dispatch boundary. "
+        "They do not establish whether a tool used an unobserved downstream service or protocol. "
+        "Calls with origin not captured or unusable may have any origin."
     )
 
     event_count: int = 0
@@ -42,6 +51,41 @@ class TurnToolCounts:
     results: int = 0
     error_results: int = 0
     unknown_results: int = 0
+    mcp_calls: int = 0
+    application_calls: int = 0
+    provider_hosted_calls: int = 0
+    origin_not_captured_calls: int = 0
+    origin_unusable_calls: int = 0
+
+    def __post_init__(self) -> None:
+        values = (
+            self.event_count,
+            self.calls,
+            self.results,
+            self.error_results,
+            self.unknown_results,
+            self.mcp_calls,
+            self.application_calls,
+            self.provider_hosted_calls,
+            self.origin_not_captured_calls,
+            self.origin_unusable_calls,
+        )
+        if any(isinstance(value, bool) or not isinstance(value, int) or value < 0
+               for value in values):
+            raise ValueError("tool counts must be non-negative integers")
+        origin_total = (
+            self.mcp_calls
+            + self.application_calls
+            + self.provider_hosted_calls
+            + self.origin_not_captured_calls
+            + self.origin_unusable_calls
+        )
+        # Preserve source compatibility for callers constructing the pre-origin
+        # counts shape while representing the missing classification honestly.
+        if self.calls and origin_total == 0:
+            object.__setattr__(self, "origin_not_captured_calls", self.calls)
+        elif origin_total != self.calls:
+            raise ValueError("tool origin counts must partition recorded calls")
 
     @property
     def unavailable_reason(self) -> str | None:
@@ -57,24 +101,60 @@ class TurnToolCounts:
         return self.PROMPT_TEMPLATE.format(
             calls=self.calls, results=self.results,
             error_results=self.error_results, unknown_results=self.unknown_results,
+            mcp_calls=self.mcp_calls,
+            application_calls=self.application_calls,
+            provider_hosted_calls=self.provider_hosted_calls,
+            origin_not_captured_calls=self.origin_not_captured_calls,
+            origin_unusable_calls=self.origin_unusable_calls,
         )
 
 
-def tool_counts_from_rows(rows: list[tuple[str, str, object]]) -> TurnToolCounts:
+_TOOL_ORIGIN_CODES = frozenset(
+    {"mcp", "application", "provider_hosted", "not_captured", "unusable"}
+)
+
+
+def classify_tool_origin(attributes: object) -> str:
+    """Return one fixed classification code without exposing the raw value."""
+    if not isinstance(attributes, Mapping):
+        return "unusable"
+    if "tool_origin" not in attributes:
+        return "not_captured"
+    value = attributes["tool_origin"]
+    if isinstance(value, str) and value in {"mcp", "application", "provider_hosted"}:
+        return value
+    return "unusable"
+
+
+def tool_counts_from_rows(rows: list[tuple]) -> TurnToolCounts:
     """Reduce no more than N+1 ordered event metadata rows to bounded counts."""
     if len(rows) > MAX_TOOL_EVIDENCE_EVENTS:
         return TurnToolCounts(event_count=len(rows))
     calls = results = errors = unknown = 0
-    for event_type, status, is_error in rows:
+    origins = {code: 0 for code in _TOOL_ORIGIN_CODES}
+    for row in rows:
+        if len(row) not in (3, 4):
+            raise ValueError("invalid tool evidence row")
+        event_type, status, is_error = row[:3]
+        origin = row[3] if len(row) == 4 else "not_captured"
         if event_type == "tool_call":
             calls += 1
+            code = origin if isinstance(origin, str) and origin in _TOOL_ORIGIN_CODES else "unusable"
+            origins[code] += 1
         elif event_type == "tool_result":
             results += 1
             if is_error is True or status in ("failed", "timed_out", "cancelled"):
                 errors += 1
             elif is_error is not False or status != "completed":
                 unknown += 1
-    return TurnToolCounts(len(rows), calls, results, errors, unknown)
+    return TurnToolCounts(
+        len(rows), calls, results, errors, unknown,
+        mcp_calls=origins["mcp"],
+        application_calls=origins["application"],
+        provider_hosted_calls=origins["provider_hosted"],
+        origin_not_captured_calls=origins["not_captured"],
+        origin_unusable_calls=origins["unusable"],
+    )
 
 
 def turn_evidence_fingerprint(turn: AgentTurn, tool_counts: TurnToolCounts | None = None) -> str:
@@ -85,11 +165,15 @@ def turn_evidence_fingerprint(turn: AgentTurn, tool_counts: TurnToolCounts | Non
         turn.request_truncated, turn.response_truncated,
     ]
     if tool_counts is not None:
-        # The total event count bounds eligibility; only these four counts
+        # The total event count bounds eligibility; only these nine counts
         # are visible to the judge and therefore bind score currentness.
         payload.extend([TOOL_EVIDENCE_MODE, [
             tool_counts.calls, tool_counts.results,
             tool_counts.error_results, tool_counts.unknown_results,
+            tool_counts.mcp_calls, tool_counts.application_calls,
+            tool_counts.provider_hosted_calls,
+            tool_counts.origin_not_captured_calls,
+            tool_counts.origin_unusable_calls,
         ]])
     return hashlib.sha256(json.dumps(
         payload, ensure_ascii=False, separators=(",", ":"),

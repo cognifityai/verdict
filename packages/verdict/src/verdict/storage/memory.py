@@ -18,6 +18,7 @@ from verdict.agent_judgment import (
     MAX_TOOL_EVIDENCE_EVENTS,
     TOOL_EVIDENCE_MODE,
     AgentTurnJudgment,
+    classify_tool_origin,
     sanitized_turn_judgment,
     tool_counts_from_rows,
     trusted_turn_judgment,
@@ -392,7 +393,12 @@ class InMemoryStorage:
             key=lambda event: (event.sequence, event.event_id),
         )[:MAX_TOOL_EVIDENCE_EVENTS + 1]
         return tool_counts_from_rows([
-            (event.event_type.value, event.status.value, event.attributes.get("is_error"))
+            (
+                event.event_type.value,
+                event.status.value,
+                event.attributes.get("is_error"),
+                classify_tool_origin(event.attributes),
+            )
             for event in events
         ])
 
@@ -564,12 +570,13 @@ class InMemoryStorage:
                 ]
                 if len(events) > MAX_LOGICAL_SESSION_MONITOR_EVENTS:
                     raise ValueError("logical-session preview exceeds bounded event limit")
-                rows_by_turn: dict[tuple[str, str], list[tuple[str, str, object]]] = {}
+                rows_by_turn: dict[tuple[str, str], list[tuple]] = {}
                 for run_id, event in events:
                     rows_by_turn.setdefault((run_id, event.turn_id), []).append((
                         event.event_type.value,
                         event.status.value,
                         event.attributes.get("is_error"),
+                        classify_tool_origin(event.attributes),
                     ))
                 tool_counts = {
                     key: tool_counts_from_rows(rows) for key, rows in rows_by_turn.items()

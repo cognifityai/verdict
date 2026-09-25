@@ -15,10 +15,12 @@ from verdict import (
     ExecutionStatus,
     PrivacyClassification,
     SourceSession,
+    ToolOrigin,
     agent_run_bundle_from_json,
     agent_run_bundle_to_json,
     stable_evidence_id,
 )
+from verdict.evidence import agent_capture_batch_from_json
 
 NOW = datetime(2026, 8, 31, tzinfo=timezone.utc)
 
@@ -185,6 +187,32 @@ def test_bundle_reader_rejects_unknown_persisted_fields() -> None:
 
     with pytest.raises(ValueError, match="invalid typed fields"):
         agent_run_bundle_from_json(payload)
+
+
+@pytest.mark.parametrize(
+    "loader",
+    [agent_run_bundle_from_json, agent_capture_batch_from_json],
+)
+def test_transport_readers_reject_duplicate_tool_origin_before_last_key_wins(loader) -> None:
+    original = _bundle()
+    tool_call = AgentEvent(
+        event_id="evt_tool",
+        turn_id="turn_1",
+        sequence=0,
+        occurred_at=NOW,
+        event_type=AgentEventType.TOOL_CALL,
+        status=ExecutionStatus.COMPLETED,
+        provenance="unknown-agent:tool",
+        attributes={"tool_name": "lookup", "tool_origin": ToolOrigin.APPLICATION.value},
+        privacy_classification=PrivacyClassification.METADATA,
+    )
+    payload = agent_run_bundle_to_json(replace(original, events=(tool_call,))).replace(
+        '"tool_origin":"application"',
+        '"tool_origin":{"private":"CANARY"},"tool_origin":"application"',
+    )
+
+    with pytest.raises(ValueError, match="malformed"):
+        loader(payload)
 
 
 def test_stable_identity_does_not_expose_source_locator() -> None:
@@ -355,4 +383,35 @@ def test_event_fields_enforce_declared_scalar_types(
             status=ExecutionStatus.UNKNOWN,
             provenance="source:event",
             attributes=attributes,
+        )
+
+
+@pytest.mark.parametrize("origin", list(ToolOrigin))
+def test_tool_call_accepts_only_serialized_tool_origin_values(origin: ToolOrigin) -> None:
+    event = AgentEvent(
+        event_id="evt_origin",
+        turn_id="turn_1",
+        sequence=0,
+        occurred_at=NOW,
+        event_type=AgentEventType.TOOL_CALL,
+        status=ExecutionStatus.COMPLETED,
+        provenance="sdk:tool",
+        attributes={"tool_name": "lookup", "tool_origin": origin.value},
+    )
+
+    assert event.attributes["tool_origin"] == origin.value
+
+
+@pytest.mark.parametrize("origin", [None, "", "unknown", 7, True])
+def test_tool_call_rejects_invalid_present_tool_origin(origin: object) -> None:
+    with pytest.raises(ValueError, match="tool_origin"):
+        AgentEvent(
+            event_id="evt_origin",
+            turn_id="turn_1",
+            sequence=0,
+            occurred_at=NOW,
+            event_type=AgentEventType.TOOL_CALL,
+            status=ExecutionStatus.COMPLETED,
+            provenance="sdk:tool",
+            attributes={"tool_name": "lookup", "tool_origin": origin},
         )

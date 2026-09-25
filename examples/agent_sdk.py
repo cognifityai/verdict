@@ -20,7 +20,11 @@ verdict.init(
 
 with verdict.agent_run(name="example-agent", session_id="example-session") as run:
     with run.turn(user_input="Check the service") as turn:
-        with turn.tool("health_check", arguments={"service": "api"}) as tool:
+        with turn.tool(
+            "health_check",
+            arguments={"service": "api"},
+            origin=verdict.ToolOrigin.APPLICATION,
+        ) as tool:
             tool.set_output({"healthy": True})
         turn.record_test(command="pytest -q", exit_code=0, passed=12)
         turn.set_output(answer_question("Check the service"))

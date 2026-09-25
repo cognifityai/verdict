@@ -15,10 +15,12 @@ from verdict.evidence import (
     EvidenceState,
     ExecutionStatus,
     PrivacyClassification,
+    ToolOrigin,
 )
 from verdict.instrumentors.base import apply_routing_context, safe_persist_trace
 from verdict.read_port import StorageVerdictReadPort
 from verdict.schema import Trace
+from verdict.storage.buffered import BufferedStorage
 from verdict.storage.memory import InMemoryStorage
 
 
@@ -865,3 +867,95 @@ def test_nested_agent_run_restores_parent_turn_context() -> None:
     assert by_name["child"].run.parent_run_id == by_name["parent"].run.run_id
     assert any(event.trace_id == child_trace.trace_id for event in by_name["child"].events)
     assert any(event.trace_id == parent_trace.trace_id for event in by_name["parent"].events)
+
+
+def test_tool_context_records_only_explicit_typed_origin_with_content_disabled() -> None:
+    storage = InMemoryStorage()
+    verdict.init(
+        storage=storage,
+        tenant_id="tenant-a",
+        instrumentors=[],
+        capture_content=False,
+    )
+
+    with verdict.agent_run(name="agent") as run:
+        with run.turn(user_input="private request") as turn:
+            with turn.tool(
+                "wrapper_mentions_mcp",
+                arguments={"url": "https://private.example/mcp"},
+                origin=ToolOrigin.APPLICATION,
+            ) as tool:
+                tool.set_output("private MCP-looking result")
+            with turn.tool("legacy-compatible"):
+                pass
+            turn.set_output("done")
+
+    [bundle] = storage.list_agent_run_bundles("tenant-a")
+    calls = [event for event in bundle.events if event.event_type is AgentEventType.TOOL_CALL]
+    assert calls[0].attributes == {
+        "tool_name": "wrapper_mentions_mcp",
+        "call_id": calls[0].attributes["call_id"],
+        "tool_origin": "application",
+    }
+    assert "tool_origin" not in calls[1].attributes
+    assert "private.example" not in repr(bundle)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (TimeoutError("private downstream timeout"), ExecutionStatus.TIMED_OUT),
+        (asyncio.CancelledError(), ExecutionStatus.CANCELLED),
+    ],
+)
+async def test_async_tool_context_preserves_mcp_origin_on_failure(
+    error: BaseException,
+    expected: ExecutionStatus,
+) -> None:
+    storage = InMemoryStorage()
+    verdict.init(storage=storage, tenant_id="tenant-a", instrumentors=[])
+
+    with pytest.raises(type(error)):
+        async with verdict.agent_run(name="agent") as run:
+            async with run.turn(user_input="request") as turn:
+                async with turn.tool("remote", origin=ToolOrigin.MCP):
+                    raise error
+
+    [bundle] = storage.list_agent_run_bundles("tenant-a")
+    tool_events = [
+        event for event in bundle.events
+        if event.event_type in (AgentEventType.TOOL_CALL, AgentEventType.TOOL_RESULT)
+    ]
+    assert tool_events[0].attributes["tool_origin"] == "mcp"
+    assert "tool_origin" not in tool_events[1].attributes
+    assert tool_events[1].status is expected
+
+
+def test_tool_context_rejects_untyped_origin_strings() -> None:
+    storage = InMemoryStorage()
+    verdict.init(storage=storage, tenant_id="tenant-a", instrumentors=[])
+
+    with verdict.agent_run(name="agent") as run:
+        with run.turn(user_input="request") as turn:
+            with pytest.raises(ValueError, match="ToolOrigin"):
+                turn.tool("lookup", origin="mcp")  # type: ignore[arg-type]
+            turn.set_output("done")
+
+
+def test_buffered_storage_preserves_explicit_tool_origin() -> None:
+    storage = BufferedStorage(InMemoryStorage(), flush_interval=10.0)
+    verdict.init(storage=storage, tenant_id="tenant-a", instrumentors=[])
+
+    with verdict.agent_run(name="agent") as run:
+        with run.turn(user_input="request") as turn:
+            with turn.tool("lookup", origin=ToolOrigin.PROVIDER_HOSTED):
+                pass
+            turn.set_output("done")
+
+    [(turn, _status, counts)], more = storage.list_agent_turn_evaluation_candidates(
+        "tenant-a", "a" * 64, tool_evidence=True,
+    )
+    assert not more
+    assert turn.final_response_redacted == "done"
+    assert counts.provider_hosted_calls == 1

@@ -22,6 +22,8 @@ from verdict.evidence import (
     ExecutionStatus,
     PrivacyClassification,
     SourceSession,
+    ToolOrigin,
+    _load_json_without_duplicate_tool_origin,
 )
 from verdict.redaction import (
     RedactionMode,
@@ -772,10 +774,24 @@ def _datetime(value: object) -> datetime | None:
     raise ValueError("stored agent evidence has an invalid timestamp")
 
 
-def _json_object(value: object) -> dict[str, Any]:
-    decoded = json.loads(value) if isinstance(value, str) else value
+def stored_agent_event_attributes(
+    event_type: AgentEventType | str,
+    value: object,
+) -> dict[str, Any]:
+    """Decode stored attributes while refusing ambiguous tool-origin provenance."""
+    if isinstance(value, str):
+        decoded = _load_json_without_duplicate_tool_origin(value)
+    else:
+        decoded = deepcopy(value)
     if not isinstance(decoded, dict):
         raise ValueError("stored agent event attributes must be an object")
+    event_kind = event_type if isinstance(event_type, str) else event_type.value
+    if "tool_origin" in decoded and (
+        event_kind != AgentEventType.TOOL_CALL.value
+        or not isinstance(decoded["tool_origin"], str)
+        or decoded["tool_origin"] not in {item.value for item in ToolOrigin}
+    ):
+        raise ValueError("stored agent event has invalid tool_origin provenance")
     return decoded
 
 
@@ -867,7 +883,8 @@ def agent_event_from_row(row: Mapping[str, object]) -> AgentEvent:
         status=ExecutionStatus(str(row["status"])),
         provenance=str(row["provenance"]),
         attributes=sanitize_agent_event_attributes(
-            event_type, _json_object(row["attributes_json"])
+            event_type,
+            stored_agent_event_attributes(event_type, row["attributes_json"]),
         ),
         privacy_classification=PrivacyClassification(str(row["privacy_classification"])),
         omission_reason=(

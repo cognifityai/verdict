@@ -5,6 +5,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 import httpx
+import pytest
 import verdict
 import verdict.dashboard.analysis_service as analysis_service
 import verdict.dashboard.query as dashboard_query
@@ -20,6 +21,7 @@ from verdict.capture import AgentCaptureService
 from verdict.dashboard import agent_evidence_queries
 from verdict.dashboard.analysis_service import read_latest_analysis, run_analysis
 from verdict.dashboard.app import (
+    _dashboard_agent_event_attributes,
     build_agent_insights_bundle,
     build_agent_run_detail,
     build_agent_runs_bundle,
@@ -136,7 +138,8 @@ def test_run_detail_shows_only_current_tool_count_judgment(tmp_path):
     call = AgentEvent(
         "call", "turn", 2, now, AgentEventType.TOOL_CALL,
         ExecutionStatus.COMPLETED, "sdk",
-        {"tool_name": "secret_tool", "call_id": "secret_id", "arguments": "private"},
+        {"tool_name": "secret_tool", "call_id": "secret_id", "arguments": "private",
+         "tool_origin": "mcp"},
         PrivacyClassification.REDACTED,
     )
     with_call = replace(bundle, events=(*bundle.events, call))
@@ -162,6 +165,8 @@ def test_run_detail_shows_only_current_tool_count_judgment(tmp_path):
     assert visible["turns"][0]["evaluation"]["toolEvidence"] == "counts_v1"
     assert visible["turns"][0]["evaluation"]["toolCounts"] == {
         "calls": 1, "results": 0, "errorResults": 0, "unknownResults": 0,
+        "mcpCalls": 1, "applicationCalls": 0, "providerHostedCalls": 0,
+        "originNotCapturedCalls": 0, "originUnusableCalls": 0,
     }
     assert "secret_tool" not in json.dumps(visible["turns"][0]["evaluation"])
     corrupt = json.loads(agent_turn_judgment_to_json(judgment))
@@ -193,6 +198,184 @@ def test_run_detail_shows_only_current_tool_count_judgment(tmp_path):
     storage.close()
     stale = build_agent_run_detail(path, tenant="local", run_id="r-local")
     assert stale["turns"][0]["evaluation"] is None
+
+
+def test_run_detail_counts_but_never_displays_malformed_tool_origin(tmp_path):
+    path = tmp_path / "malformed-tool-origin.db"
+    storage = SQLiteStorage(str(path))
+    now = datetime(2026, 9, 23, tzinfo=timezone.utc)
+    bundle = _bundle("local", now, with_turn=True)
+    call = AgentEvent(
+        "call", "turn", 2, now, AgentEventType.TOOL_CALL,
+        ExecutionStatus.COMPLETED, "sdk",
+        {"tool_name": "visible-tool", "tool_origin": "application"},
+        PrivacyClassification.REDACTED,
+    )
+    storage.replace_agent_run_bundle(replace(bundle, events=(*bundle.events, call)))
+    storage.close()
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "UPDATE agent_events SET attributes_json=? WHERE event_id='call'",
+            ('{"tool_name":"visible-tool",'
+             '"tool_origin":{"private":"ORIGIN_PAYLOAD_CANARY"},'
+             '"tool_origin":"application"}',),
+        )
+    storage = SQLiteStorage(str(path))
+    with pytest.raises(ValueError, match="duplicate tool_origin"):
+        storage.get_agent_run_bundle("local", "r-local")
+    storage.close()
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "UPDATE agent_events SET attributes_json=? WHERE event_id IN ('event-1','event-2')",
+            (json.dumps({"tool_origin": "NON_TOOL_ORIGIN_CANARY"}),),
+        )
+    storage = SQLiteStorage(str(path))
+    [(turn, _status, counts)], _ = storage.list_agent_turn_evaluation_candidates(
+        "local", "d" * 64, tool_evidence=True,
+    )
+    assert counts.origin_unusable_calls == 1
+    judgment = AgentTurnJudgment(
+        tenant_id="local", run_id="r-local", turn_id="turn",
+        evaluator_fingerprint="d" * 64,
+        evidence_fingerprint=turn_evidence_fingerprint(turn, counts),
+        evaluator_provider="anthropic", evaluator_config={
+            "tool_evidence_mode": "counts_v1",
+            "tool_evidence_template": TurnToolCounts.PROMPT_TEMPLATE,
+        },
+        judge_models=["test"], expected_dimensions=["relevance"],
+        rubric_name="quality", rubric_version="1",
+        dimensions=[DimensionScore("relevance", Verdict.PASS, "ok", "test")],
+    )
+    assert storage.save_agent_turn_judgment_if_current(judgment) == "saved"
+    storage.close()
+
+    visible = build_agent_run_detail(path, tenant="local", run_id="r-local")
+    serialized = json.dumps(visible)
+    assert visible["turns"][0]["evaluation"]["toolCounts"]["originUnusableCalls"] == 1
+    call_event = next(event for event in visible["events"] if event["eventId"] == "call")
+    assert "tool_origin" not in call_event["attributes"]
+    assert "ORIGIN_PAYLOAD_CANARY" not in serialized
+    assert "NON_TOOL_ORIGIN_CANARY" not in serialized
+    assert all(
+        "tool_origin" not in event["attributes"]
+        for event in visible["events"]
+        if event["eventId"] in {"event-1", "event-2"}
+    )
+
+
+@pytest.mark.parametrize(
+    "event_type",
+    [item.value for item in AgentEventType if item is not AgentEventType.TOOL_CALL],
+)
+def test_dashboard_strips_tool_origin_from_every_non_call_event(event_type: str) -> None:
+    attributes = _dashboard_agent_event_attributes(
+        event_type,
+        json.dumps({"tool_origin": "NON_CALL_ORIGIN_CANARY", "visible": "ok"}),
+    )
+
+    assert attributes == {"visible": "ok"}
+
+
+def test_sqlite_blob_origin_is_unusable_for_preview_currentness_and_dashboard(tmp_path):
+    path = tmp_path / "blob-tool-origin.db"
+    storage = SQLiteStorage(str(path))
+    now = datetime(2026, 9, 23, tzinfo=timezone.utc)
+    bundle = _bundle("local", now, with_turn=True)
+    call = AgentEvent(
+        "call", "turn", 2, now, AgentEventType.TOOL_CALL,
+        ExecutionStatus.COMPLETED, "sdk",
+        {"tool_name": "visible-tool", "tool_origin": "application"},
+        PrivacyClassification.REDACTED,
+    )
+    result = AgentEvent(
+        "result", "turn", 3, now, AgentEventType.TOOL_RESULT,
+        ExecutionStatus.COMPLETED, "sdk",
+        {"tool_name": "visible-tool", "is_error": False},
+        PrivacyClassification.REDACTED,
+    )
+    storage.replace_agent_run_bundle(replace(bundle, events=(*bundle.events, call, result)))
+    storage._conn.execute(
+        "UPDATE agent_events SET attributes_json=? WHERE event_id='call'",
+        (sqlite3.Binary(b'{"tool_origin":"mcp"}'),),
+    )
+    storage._conn.execute(
+        "UPDATE agent_events SET attributes_json=? WHERE event_id='result'",
+        (sqlite3.Binary(b'{"is_error":true}'),),
+    )
+
+    [(turn, _status, counts)], _ = storage.list_agent_turn_evaluation_candidates(
+        "local", "e" * 64, tool_evidence=True,
+    )
+    assert counts.mcp_calls == 0
+    assert counts.origin_unusable_calls == 1
+    assert counts.error_results == 0
+    assert counts.unknown_results == 1
+    false_mcp_counts = replace(counts, mcp_calls=1, origin_unusable_calls=0)
+    stale = AgentTurnJudgment(
+        tenant_id="local", run_id="r-local", turn_id="turn",
+        evaluator_fingerprint="e" * 64,
+        evidence_fingerprint=turn_evidence_fingerprint(turn, false_mcp_counts),
+        evaluator_provider="anthropic", evaluator_config={
+            "tool_evidence_mode": "counts_v1",
+            "tool_evidence_template": TurnToolCounts.PROMPT_TEMPLATE,
+        },
+        judge_models=["test"], expected_dimensions=["relevance"],
+        rubric_name="quality", rubric_version="1",
+        dimensions=[DimensionScore("relevance", Verdict.PASS, "ok", "test")],
+    )
+    assert storage.save_agent_turn_judgment_if_current(stale) == "stale"
+    judgment = AgentTurnJudgment(
+        tenant_id="local", run_id="r-local", turn_id="turn",
+        evaluator_fingerprint="e" * 64,
+        evidence_fingerprint=turn_evidence_fingerprint(turn, counts),
+        evaluator_provider="anthropic", evaluator_config={
+            "tool_evidence_mode": "counts_v1",
+            "tool_evidence_template": TurnToolCounts.PROMPT_TEMPLATE,
+        },
+        judge_models=["test"], expected_dimensions=["relevance"],
+        rubric_name="quality", rubric_version="1",
+        dimensions=[DimensionScore("relevance", Verdict.PASS, "ok", "test")],
+    )
+    assert storage.save_agent_turn_judgment_if_current(judgment) == "saved"
+    storage.close()
+
+    visible = build_agent_run_detail(path, tenant="local", run_id="r-local")
+    assert visible["turns"][0]["evaluation"]["toolCounts"]["mcpCalls"] == 0
+    assert visible["turns"][0]["evaluation"]["toolCounts"]["originUnusableCalls"] == 1
+    blob_events = [
+        event for event in visible["events"] if event["eventId"] in {"call", "result"}
+    ]
+    assert all(event["attributes"] == {} for event in blob_events)
+
+
+def test_sqlite_normalized_read_rejects_invalid_origin_without_changing_counts(tmp_path):
+    path = tmp_path / "invalid-origin-read.db"
+    storage = SQLiteStorage(str(path))
+    now = datetime(2026, 9, 23, tzinfo=timezone.utc)
+    bundle = _bundle("local", now, with_turn=True)
+    call = AgentEvent(
+        "call", "turn", 2, now, AgentEventType.TOOL_CALL,
+        ExecutionStatus.COMPLETED, "sdk",
+        {"tool_name": "visible-tool", "tool_origin": "application"},
+        PrivacyClassification.REDACTED,
+    )
+    storage.replace_agent_run_bundle(replace(bundle, events=(*bundle.events, call)))
+    storage._conn.execute(
+        "UPDATE agent_events SET attributes_json=? WHERE event_id='call'",
+        (json.dumps({"tool_origin": {"private": "CANARY"}}),),
+    )
+
+    [(_turn, _status, before)], _ = storage.list_agent_turn_evaluation_candidates(
+        "local", "f" * 64, tool_evidence=True,
+    )
+    assert before.origin_unusable_calls == 1
+    with pytest.raises(ValueError, match="invalid tool_origin"):
+        storage.get_agent_run_bundle("local", "r-local")
+    [(_turn, _status, after)], _ = storage.list_agent_turn_evaluation_candidates(
+        "local", "f" * 64, tool_evidence=True,
+    )
+    assert after == before
+    storage.close()
 
 
 def test_run_detail_labels_latest_turn_evaluator_and_filters_exact_identity(tmp_path):

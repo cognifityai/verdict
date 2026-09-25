@@ -36,10 +36,12 @@ persisted. If no dimension remains, evaluation fails before provider egress.
 Nonblank explicit context restores the full configured rubric; whitespace is
 not evidence.
 Optional Agent Turn tool-event counts are a separately labeled prompt block,
-not retrieved context. They do not activate context-dependent dimensions or
-prove source support. The counts-only mode and full count-block template are
-part of evaluator identity; the projected counts are in the bounded evidence
-fingerprint. The default judge prompt is unchanged.
+not retrieved context. They include explicit producer-recorded outer dispatch
+origins, with missing and unusable origins counted separately. These origins do
+not establish unobserved downstream protocols. The counts do not activate
+context-dependent dimensions or prove source support. The counts-only mode and
+full count-block template are part of evaluator identity; the projected counts
+are in the bounded evidence fingerprint. The default judge prompt is unchanged.
 
 Bias mitigations include cross-family judging when practical, length-aware
 human review, and per-dimension scoring so one broad score cannot hide the

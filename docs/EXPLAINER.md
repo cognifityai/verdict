@@ -84,10 +84,13 @@ business outcome, Agent Insights surfaces that failure without a judge call.
    A preview scans at most 100 candidate Turns per keyset page, with an
    explicit cursor for older work; it does not claim an all-history denominator.
    Turn judging can optionally include bounded counts of recorded tool calls,
-   results, and errors. Tool-event names, IDs, arguments, result bodies, and URLs
-   are not added to judge input. No tool events or more than 64 total events
-   makes this option ineligible. Counts do not prove MCP origin, complete
-   tool use, citation support, or factual grounding, so context-required
+   results, errors, and explicit producer-recorded dispatch origins. Missing and
+   unusable origins remain separate buckets. Tool-event names, IDs, arguments,
+   result bodies, and URLs are not added to judge input. No tool events or more
+   than 64 total events makes this option ineligible. Origin labels describe
+   only the observed outer dispatch boundary and cannot establish hidden
+   downstream protocols. Counts do not prove complete tool use, citation
+   support, or factual grounding, so context-required
    dimensions remain skipped. Citation evidence and claim support are not
    supplied.
    Capture itself does not make judge calls. Every stored judgment identifies

@@ -28,6 +28,7 @@ from verdict.evidence import (
     ExecutionStatus,
     PrivacyClassification,
     SourceSession,
+    ToolOrigin,
     stable_evidence_id,
 )
 from verdict.redaction import redact, redact_structure, sanitize_agent_event_attributes
@@ -336,6 +337,7 @@ class ToolContext:
         name: str,
         arguments: object,
         call_id: str | None,
+        origin: ToolOrigin | None,
     ) -> None:
         if not isinstance(name, str) or not name:
             raise ValueError("tool name must be non-empty text")
@@ -343,6 +345,9 @@ class ToolContext:
         self._name = _truncate_utf8(name, 256)
         self._arguments = arguments
         self._call_id = call_id or f"call_{uuid4().hex}"
+        if origin is not None and not isinstance(origin, ToolOrigin):
+            raise ValueError("tool origin must be a ToolOrigin or None")
+        self._origin = origin
         self._output: object = None
         self._entered = False
         self._closed = False
@@ -357,13 +362,16 @@ class ToolContext:
         if self._entered:
             raise RuntimeError("tool context cannot be entered twice")
         self._entered = True
+        attributes = {
+            "tool_name": self._name,
+            "arguments": self._arguments,
+            "call_id": self._call_id,
+        }
+        if self._origin is not None:
+            attributes["tool_origin"] = self._origin.value
         event = self._turn._state._event(
             AgentEventType.TOOL_CALL,
-            {
-                "tool_name": self._name,
-                "arguments": self._arguments,
-                "call_id": self._call_id,
-            },
+            attributes,
         )
         self._turn._state.emit(event)
         return self
@@ -472,10 +480,15 @@ class TurnContext:
         self._has_output = True
 
     def tool(
-        self, name: str, *, arguments: object = None, call_id: str | None = None
+        self,
+        name: str,
+        *,
+        arguments: object = None,
+        call_id: str | None = None,
+        origin: ToolOrigin | None = None,
     ) -> ToolContext:
         self._require_active()
-        return ToolContext(self, name, arguments, call_id)
+        return ToolContext(self, name, arguments, call_id, origin)
 
     def _require_active(self) -> None:
         if self._token is None or _active_turn.get() is not self._state:

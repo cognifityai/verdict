@@ -126,6 +126,7 @@ from verdict.storage.base import (
 from verdict.storage.turn_tool_evidence import (
     read_turn_tool_counts,
     read_turn_tool_counts_batch,
+    tool_origin_aggregate_sql,
 )
 
 
@@ -1666,6 +1667,9 @@ class SQLiteStorage:
                     ).fetchone()[0]
                     if event_total > MAX_LOGICAL_SESSION_MONITOR_EVENTS:
                         raise ValueError("logical-session preview exceeds bounded event limit")
+                    origin_aggregates = tool_origin_aggregate_sql(
+                        postgres=False, prefix="e."
+                    )
                     rows = self._conn.execute(
                         "WITH selected AS (SELECT run_id FROM agent_runs WHERE tenant_id=? "
                         "ORDER BY started_at,run_id LIMIT ?) "
@@ -1686,7 +1690,8 @@ class SQLiteStorage:
                         "COALESCE(CASE WHEN json_valid(e.attributes_json) THEN "
                         "json_type(e.attributes_json,'$.is_error') ELSE '' END,'')"
                         "<>'false' OR "
-                        "e.status<>'completed') THEN 1 ELSE 0 END) AS unknown_results "
+                        "e.status<>'completed') THEN 1 ELSE 0 END) AS unknown_results,"
+                        f"{origin_aggregates} "
                         "FROM agent_events e JOIN selected s ON s.run_id=e.run_id "
                         "WHERE e.tenant_id=? GROUP BY e.run_id,e.turn_id",
                         (tenant_id, MAX_LOGICAL_SESSION_MONITOR_RUNS, tenant_id),
@@ -1696,6 +1701,11 @@ class SQLiteStorage:
                             event_count=row["event_count"], calls=row["calls"],
                             results=row["results"], error_results=row["error_results"],
                             unknown_results=row["unknown_results"],
+                            mcp_calls=row["mcp_calls"],
+                            application_calls=row["application_calls"],
+                            provider_hosted_calls=row["provider_hosted_calls"],
+                            origin_not_captured_calls=row["origin_not_captured_calls"],
+                            origin_unusable_calls=row["origin_unusable_calls"],
                         )
                         for row in rows
                     }

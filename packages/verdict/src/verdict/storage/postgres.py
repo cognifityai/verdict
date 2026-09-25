@@ -133,6 +133,7 @@ from verdict.storage.base import (
 from verdict.storage.turn_tool_evidence import (
     read_turn_tool_counts,
     read_turn_tool_counts_batch,
+    tool_origin_aggregate_sql,
 )
 
 
@@ -1611,6 +1612,9 @@ class PostgresStorage:
                 ).fetchone()[0]
                 if event_total > MAX_LOGICAL_SESSION_MONITOR_EVENTS:
                     raise ValueError("logical-session preview exceeds bounded event limit")
+                origin_aggregates = tool_origin_aggregate_sql(
+                    postgres=True, prefix="e."
+                )
                 rows = conn.execute(
                     "WITH selected AS (SELECT run_id FROM agent_runs WHERE tenant_id=%s "
                     "ORDER BY started_at,run_id LIMIT %s) "
@@ -1625,7 +1629,8 @@ class PostgresStorage:
                     "COALESCE(e.attributes_json->'is_error'='true'::jsonb,FALSE) OR "
                     "e.status IN ('failed','timed_out','cancelled')) AND ("
                     "e.attributes_json->'is_error' IS DISTINCT FROM 'false'::jsonb OR "
-                    "e.status<>'completed') THEN 1 ELSE 0 END) AS unknown_results "
+                    "e.status<>'completed') THEN 1 ELSE 0 END) AS unknown_results,"
+                    f"{origin_aggregates} "
                     "FROM agent_events e JOIN selected s ON s.run_id=e.run_id "
                     "WHERE e.tenant_id=%s GROUP BY e.run_id,e.turn_id",
                     (tenant_id, MAX_LOGICAL_SESSION_MONITOR_RUNS, tenant_id),
@@ -1634,6 +1639,10 @@ class PostgresStorage:
                     (row[0], row[1]): TurnToolCounts(
                         event_count=row[2], calls=row[3], results=row[4],
                         error_results=row[5], unknown_results=row[6],
+                        mcp_calls=row[7], application_calls=row[8],
+                        provider_hosted_calls=row[9],
+                        origin_not_captured_calls=row[10],
+                        origin_unusable_calls=row[11],
                     )
                     for row in rows
                 }
