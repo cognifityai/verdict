@@ -6,8 +6,13 @@ the product is refined.
 
 ## [Unreleased]
 
+## [0.1.0a21] - 2026-09-25
+
 ### Added
 
+- Explicit boolean-false Agent business outcomes now produce a deterministic
+  `business_outcome_failed` Insight. Verdict does not infer task success from
+  descriptive or absent outcome evidence.
 - Monitor can preview a retrospective, tenant-scoped comparison of currently
   terminal logical Agent sessions identified by `AgentRun.session_id`. This
   separate descriptive mode reports rates, effects, coverage, and optional
@@ -36,6 +41,17 @@ the product is refined.
 
 ### Fixed
 
+- Evaluator-health aggregates are now tenant-owned. Tenant dashboards cannot
+  display another tenant's health through a shared evaluator fingerprint, and
+  process-bound setup, evaluator, Monitor, and control routes reject a mounted
+  host's mismatched tenant. Older ownerless health records stay hidden in tenant
+  dashboards; rerun sentinel calibration for that tenant after upgrading.
+- Evaluator Lab keeps the selected provider, model, unit, tool-count option,
+  and bounded call scope across a refresh in the same browser session. A fresh
+  preview and explicit egress confirmation are still required before judging.
+- Anthropic judge preview now derives its temperature capability from the
+  installed adapter, so the approved preview and execution use the same
+  evaluator identity across supported SDK versions.
 - Codex local-history capture now reads text blocks from completed `UserMessage`
   items as Agent Turn requests, alongside the earlier `user_message` records.
   A rescan can fill requests previously marked missing; non-text-only requests
@@ -640,7 +656,8 @@ the product is refined.
   retain content must explicitly select metadata-only capture. Redaction remains
   best-effort rather than a compliance control.
 
-[Unreleased]: https://github.com/cognifityai/verdict/compare/v0.1.0a20...HEAD
+[Unreleased]: https://github.com/cognifityai/verdict/compare/v0.1.0a21...HEAD
+[0.1.0a21]: https://github.com/cognifityai/verdict/compare/v0.1.0a20...v0.1.0a21
 [0.1.0a20]: https://github.com/cognifityai/verdict/compare/v0.1.0a19...v0.1.0a20
 [0.1.0a19]: https://github.com/cognifityai/verdict/compare/v0.1.0a18...v0.1.0a19
 [0.1.0a18]: https://github.com/cognifityai/verdict/compare/v0.1.0a17...v0.1.0a18
