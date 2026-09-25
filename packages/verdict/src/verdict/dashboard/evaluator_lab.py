@@ -10,6 +10,7 @@ import os
 import re
 import threading
 from collections import Counter
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,7 @@ from verdict.agent_judgment import (
     turn_evidence_fingerprint,
     turn_evidence_reason,
 )
+from verdict.monitor_inputs import LOCAL_TENANT
 from verdict.pricing import PRICING_LAST_VERIFIED, compute_cost_usd
 from verdict.redaction import redact
 from verdict.schema import Judgment, JudgmentStatus, Trace
@@ -674,6 +676,7 @@ def execute_calibration(
     minimum_examples: int = 30,
     agreement_threshold: float = 0.8,
     provider=None,
+    tenant_id: str = LOCAL_TENANT,
 ) -> dict[str, Any]:
     if confirm_external_egress is not True:
         raise ValueError("external judge egress was not confirmed")
@@ -697,7 +700,7 @@ def execute_calibration(
         minimum_examples=minimum_examples,
         agreement_threshold=agreement_threshold,
     )
-    storage.insert_evaluator_health(health)
+    storage.insert_evaluator_health(replace(health, tenant_id=tenant_id))
     return {
         "setName": health.sentinel_set_name,
         "status": health.status.value,

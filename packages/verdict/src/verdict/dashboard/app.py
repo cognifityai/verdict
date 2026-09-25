@@ -2501,11 +2501,14 @@ def _build(
     has_health_table = _table_exists(cur, "evaluator_health")
     if selected_fingerprint and has_health_table:
         health_columns = cur.columns("evaluator_health")
+    else:
+        health_columns = set()
+    if selected_fingerprint and "tenant_id" in health_columns:
         for row in cur.execute(
             """SELECT * FROM evaluator_health
-                 WHERE evaluator_fingerprint = ?
+                 WHERE evaluator_fingerprint = ? AND tenant_id = ?
                  ORDER BY evaluated_at DESC LIMIT 30""",
-            (selected_fingerprint,),
+            (selected_fingerprint, registry_tenant or LOCAL_TENANT),
         ):
             method_version = (
                 row["method_version"]

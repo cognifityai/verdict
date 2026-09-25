@@ -512,6 +512,7 @@ def test_insert_and_list_judgments_for_cluster(storage):
 
 def test_evaluator_health_round_trip_and_identity_filter(storage):
     older = EvaluatorHealthRecord(
+        tenant_id="tenant-a",
         evaluator_fingerprint="judge-a",
         sentinel_set_name="support-v1",
         sentinel_set_fingerprint="set-a",
@@ -526,6 +527,7 @@ def test_evaluator_health_round_trip_and_identity_filter(storage):
         status=EvaluatorHealthStatus.HEALTHY,
     )
     other = EvaluatorHealthRecord(
+        tenant_id="tenant-b",
         evaluator_fingerprint="judge-b",
         sentinel_set_name="support-v1",
         sentinel_set_fingerprint="set-a",
@@ -551,6 +553,44 @@ def test_evaluator_health_round_trip_and_identity_filter(storage):
     assert fetched[0].health_id == other.health_id
     assert fetched[0].status == EvaluatorHealthStatus.DEGRADED
     assert fetched[0].error_count == 2
+    assert fetched[0].tenant_id == "tenant-b"
+    assert storage.list_evaluator_health(tenant_id="tenant-a") == [older]
+    assert storage.list_evaluator_health(
+        evaluator_fingerprint="judge-b", tenant_id="tenant-a"
+    ) == []
+
+
+def test_evaluator_health_preserves_a20_positional_construction():
+    evaluated_at = datetime(2026, 9, 1, tzinfo=timezone.utc)
+    record = EvaluatorHealthRecord(
+        "old-id", evaluated_at, "judge", "set", "set-fingerprint",
+        1, 1, 1.0, 0.2, 1.0, 2, 2, 1.0,
+        EvaluatorHealthStatus.HEALTHY, 0, "2",
+    )
+    assert record.health_id == "old-id"
+    assert record.method_version == "2"
+    assert record.tenant_id is None
+
+
+def test_evaluator_health_id_cannot_change_tenant(storage):
+    original = EvaluatorHealthRecord(
+        health_id="shared-id",
+        tenant_id="tenant-a",
+        evaluator_fingerprint="same-judge",
+        sentinel_set_name="a-set",
+        sentinel_set_fingerprint="a-fingerprint",
+    )
+    storage.insert_evaluator_health(original)
+    storage.insert_evaluator_health(EvaluatorHealthRecord(
+        health_id="shared-id",
+        tenant_id="tenant-b",
+        evaluator_fingerprint="same-judge",
+        sentinel_set_name="b-set",
+        sentinel_set_fingerprint="b-fingerprint",
+    ))
+    [retained] = storage.list_evaluator_health(tenant_id="tenant-a")
+    assert retained.sentinel_set_name == "a-set"
+    assert storage.list_evaluator_health(tenant_id="tenant-b") == []
 
 
 def test_sqlite_legacy_label_health_is_not_treated_as_example_health(tmp_path):
@@ -615,6 +655,7 @@ def test_sqlite_legacy_label_health_is_not_treated_as_example_health(tmp_path):
     assert record.correct_labels == 200
     assert record.total_labels == 229
     assert record.label_agreement == pytest.approx(200 / 229)
+    assert record.tenant_id is None
 
 
 def test_sqlite_migrates_legacy_judgment_identity_as_explicitly_incomplete(tmp_path):

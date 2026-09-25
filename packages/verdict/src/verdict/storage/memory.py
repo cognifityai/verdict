@@ -1135,12 +1135,16 @@ class InMemoryStorage:
         )
 
     def insert_evaluator_health(self, record: EvaluatorHealthRecord) -> None:
+        existing = self._evaluator_health.get(record.health_id)
+        if existing is not None and existing.tenant_id != record.tenant_id:
+            return
         self._evaluator_health[record.health_id] = record
 
     def list_evaluator_health(
         self,
         *,
         evaluator_fingerprint: str | None = None,
+        tenant_id: str | None = None,
         limit: int = 100,
     ) -> list[EvaluatorHealthRecord]:
         records = sorted(
@@ -1154,6 +1158,8 @@ class InMemoryStorage:
                 for record in records
                 if record.evaluator_fingerprint == evaluator_fingerprint
             ]
+        if tenant_id is not None:
+            records = [record for record in records if record.tenant_id == tenant_id]
         return records[:limit]
 
     def insert_drift_signal(self, signal: DriftSignal) -> None:

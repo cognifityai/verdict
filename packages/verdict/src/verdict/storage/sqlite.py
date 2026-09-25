@@ -428,6 +428,7 @@ CREATE TABLE IF NOT EXISTS evaluator_health (
     health_id TEXT PRIMARY KEY,
     evaluated_at TEXT NOT NULL,
     evaluator_fingerprint TEXT NOT NULL,
+    tenant_id TEXT,
     sentinel_set_name TEXT,
     sentinel_set_fingerprint TEXT NOT NULL,
     correct_examples INTEGER NOT NULL,
@@ -822,6 +823,7 @@ class SQLiteStorage:
                 except sqlite3.OperationalError:
                     pass
             for col, ddl in [
+                ("tenant_id", "TEXT"),
                 ("correct_examples", "INTEGER NOT NULL DEFAULT 0"),
                 ("total_examples", "INTEGER NOT NULL DEFAULT 0"),
                 ("example_agreement", "REAL"),
@@ -2508,18 +2510,36 @@ class SQLiteStorage:
     def insert_evaluator_health(self, record: EvaluatorHealthRecord) -> None:
         with self._lock:
             self._conn.execute(
-                """INSERT OR REPLACE INTO evaluator_health (
-                    health_id, evaluated_at, evaluator_fingerprint,
+                """INSERT INTO evaluator_health (
+                    health_id, evaluated_at, evaluator_fingerprint, tenant_id,
                     sentinel_set_name, sentinel_set_fingerprint,
                     correct_examples, total_examples, example_agreement,
                     example_confidence_low, example_confidence_high,
                     correct_labels, total_labels, label_agreement,
                     status, error_count, method_version
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (health_id) DO UPDATE SET
+                    evaluated_at=excluded.evaluated_at,
+                    evaluator_fingerprint=excluded.evaluator_fingerprint,
+                    sentinel_set_name=excluded.sentinel_set_name,
+                    sentinel_set_fingerprint=excluded.sentinel_set_fingerprint,
+                    correct_examples=excluded.correct_examples,
+                    total_examples=excluded.total_examples,
+                    example_agreement=excluded.example_agreement,
+                    example_confidence_low=excluded.example_confidence_low,
+                    example_confidence_high=excluded.example_confidence_high,
+                    correct_labels=excluded.correct_labels,
+                    total_labels=excluded.total_labels,
+                    label_agreement=excluded.label_agreement,
+                    status=excluded.status,
+                    error_count=excluded.error_count,
+                    method_version=excluded.method_version
+                WHERE evaluator_health.tenant_id IS excluded.tenant_id""",
                 (
                     record.health_id,
                     _iso(record.evaluated_at),
                     record.evaluator_fingerprint,
+                    record.tenant_id,
                     record.sentinel_set_name,
                     record.sentinel_set_fingerprint,
                     record.correct_examples,
@@ -2540,16 +2560,21 @@ class SQLiteStorage:
         self,
         *,
         evaluator_fingerprint: str | None = None,
+        tenant_id: str | None = None,
         limit: int = 100,
     ) -> list[EvaluatorHealthRecord]:
-        where = ""
+        conditions: list[str] = []
         params: list[object] = []
         if evaluator_fingerprint is not None:
-            where = "WHERE evaluator_fingerprint = ?"
+            conditions.append("evaluator_fingerprint = ?")
             params.append(evaluator_fingerprint)
+        if tenant_id is not None:
+            conditions.append("tenant_id = ?")
+            params.append(tenant_id)
+        where = "WHERE " + " AND ".join(conditions) if conditions else ""
         params.append(limit)
         with self._lock:
-            # `where` is one of two fixed strings; fingerprint and limit are bound.
+            # Conditions are fixed strings; filter values and limit are bound.
             sql = (
                 f"SELECT * FROM evaluator_health {where} "  # nosec B608
                 "ORDER BY evaluated_at DESC LIMIT ?"
@@ -2589,6 +2614,7 @@ class SQLiteStorage:
                     ),
                     error_count=row["error_count"],
                     method_version=method_version,
+                    tenant_id=row["tenant_id"],
                 )
             )
         return records
