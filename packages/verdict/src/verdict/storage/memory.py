@@ -143,6 +143,7 @@ class InMemoryStorage:
         self._monitor_lock = threading.RLock()
         self._judgments: dict[str, Judgment] = {}
         self._evaluator_health: dict[str, EvaluatorHealthRecord] = {}
+        self._evaluator_health_lock = threading.Lock()
         self._drift_runs: dict[str, DriftRun] = {}
         self._signals: dict[str, DriftSignal] = {}
         self._drift_lock = threading.RLock()
@@ -1135,10 +1136,12 @@ class InMemoryStorage:
         )
 
     def insert_evaluator_health(self, record: EvaluatorHealthRecord) -> None:
-        existing = self._evaluator_health.get(record.health_id)
-        if existing is not None and existing.tenant_id != record.tenant_id:
-            return
-        self._evaluator_health[record.health_id] = replace(record)
+        snapshot = replace(record)
+        with self._evaluator_health_lock:
+            existing = self._evaluator_health.get(snapshot.health_id)
+            if existing is not None and existing.tenant_id != snapshot.tenant_id:
+                return
+            self._evaluator_health[snapshot.health_id] = snapshot
 
     def list_evaluator_health(
         self,
@@ -1147,8 +1150,10 @@ class InMemoryStorage:
         tenant_id: str | None = None,
         limit: int = 100,
     ) -> list[EvaluatorHealthRecord]:
+        with self._evaluator_health_lock:
+            snapshot = [replace(record) for record in self._evaluator_health.values()]
         records = sorted(
-            self._evaluator_health.values(),
+            snapshot,
             key=lambda record: record.evaluated_at,
             reverse=True,
         )
@@ -1160,7 +1165,7 @@ class InMemoryStorage:
             ]
         if tenant_id is not None:
             records = [record for record in records if record.tenant_id == tenant_id]
-        return [replace(record) for record in records[:limit]]
+        return records[:limit]
 
     def insert_drift_signal(self, signal: DriftSignal) -> None:
         with self._drift_lock:
@@ -1824,7 +1829,8 @@ class InMemoryStorage:
         self._agent_turn_judgment_times.clear()
         self._agent_turn_judgment_order.clear()
         self._judgments.clear()
-        self._evaluator_health.clear()
+        with self._evaluator_health_lock:
+            self._evaluator_health.clear()
         self._signals.clear()
         self._drift_runs.clear()
         self._analysis_runs.clear()
