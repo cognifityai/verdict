@@ -32,7 +32,9 @@ class ControlRoutes:
 
     def register(self, app) -> None:
         @app.get("/api/control")
-        def control_state():
+        def control_state(request: Request):
+            if not self.setup.request_matches_tenant(request):
+                return JSONResponse({"error": "control unavailable"}, status_code=403)
             writable = self.setup.writable_storage()
             try:
                 documents = ControlStore(self.storage_url).list_current(self.tenant_id)

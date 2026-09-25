@@ -545,5 +545,7 @@ class MonitorRoutes:
         app.post("/api/monitor/run")(monitor_run)
 
         @app.get("/api/monitor")
-        def monitor_state():
+        def monitor_state(request: Request):
+            if not self.setup.request_matches_tenant(request):
+                return JSONResponse({"error": "monitor unavailable"}, status_code=403)
             return self.read_state()

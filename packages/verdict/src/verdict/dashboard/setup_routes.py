@@ -56,8 +56,14 @@ class SetupRoutes:
         self._previewed_imports: set[tuple[str, str]] = set()
 
     def authorized(self, request: Request) -> bool:
+        if not self.request_matches_tenant(request):
+            return False
         supplied = request.headers.get("x-verdict-setup", "")
         return bool(supplied) and secrets.compare_digest(supplied, self.setup_token)
+
+    def request_matches_tenant(self, request: Request) -> bool:
+        host_tenant = getattr(request.state, "verdict_registry_tenant", None)
+        return host_tenant is None or host_tenant == self.tenant_id
 
     def roots(self, payload: dict[str, Any]) -> tuple[Path | None, Path | None]:
         roots: list[Path | None] = []
@@ -118,7 +124,9 @@ class SetupRoutes:
 
     def register(self, app) -> None:
         @app.get("/api/setup/token")
-        def setup_token_response():
+        def setup_token_response(request: Request):
+            if not self.request_matches_tenant(request):
+                return JSONResponse({"error": "setup unavailable"}, status_code=403)
             return {"setupToken": self.setup_token}
 
         def setup_preview(request, payload: dict[str, Any]):
