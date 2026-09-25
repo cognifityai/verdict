@@ -788,7 +788,7 @@ multi-tenant control plane: setup, Evaluator Lab, Monitor lifecycle, and control
 routes remain bound to the configured tenant. Mount one app instance per tenant
 for those mutable workflows. A host-routed request for a different tenant cannot
 obtain the setup capability, perform setup-authorized writes, or read the
-process-bound Monitor and control state on that mount.
+process-bound Evaluator, Monitor, and control state on that mount.
 
 The standalone dashboard projects the active registry for its configured
 tenant (`--tenant-id` or `VERDICT_TENANT_ID`); without one, it keeps using each

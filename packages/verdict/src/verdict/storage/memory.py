@@ -1138,7 +1138,7 @@ class InMemoryStorage:
         existing = self._evaluator_health.get(record.health_id)
         if existing is not None and existing.tenant_id != record.tenant_id:
             return
-        self._evaluator_health[record.health_id] = record
+        self._evaluator_health[record.health_id] = replace(record)
 
     def list_evaluator_health(
         self,
@@ -1160,7 +1160,7 @@ class InMemoryStorage:
             ]
         if tenant_id is not None:
             records = [record for record in records if record.tenant_id == tenant_id]
-        return records[:limit]
+        return [replace(record) for record in records[:limit]]
 
     def insert_drift_signal(self, signal: DriftSignal) -> None:
         with self._drift_lock:

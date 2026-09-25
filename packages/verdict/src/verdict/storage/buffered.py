@@ -61,7 +61,7 @@ import queue
 import threading
 from collections.abc import Callable
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Any
 
@@ -334,7 +334,7 @@ class BufferedStorage:
         self._enqueue(self._inner.insert_judgment, judgment)
 
     def insert_evaluator_health(self, record: EvaluatorHealthRecord) -> None:
-        self._enqueue(self._inner.insert_evaluator_health, record)
+        self._enqueue(self._inner.insert_evaluator_health, replace(record))
 
     def insert_drift_signal(self, signal: DriftSignal) -> None:
         self._enqueue(self._inner.insert_drift_signal, signal)

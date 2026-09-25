@@ -549,8 +549,8 @@ dynamic multi-tenant control plane: setup, Evaluator Lab, Monitor lifecycle,
 and control routes remain bound to the process-selected tenant. Mount one app
 instance per tenant when those mutable workflows must be tenant-specific.
 When a host supplies a different tenant for a request, setup capability and
-its write actions, plus process-bound Monitor and control reads, are unavailable
-for that request.
+its write actions, plus process-bound Evaluator, Monitor, and control reads,
+are unavailable for that request.
 
 The Overview and explorer APIs do not mutate trace/judgment history. Setup,
 capture, import, and Monitor actions are explicit write operations; do not

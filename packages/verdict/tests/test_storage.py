@@ -593,6 +593,22 @@ def test_evaluator_health_id_cannot_change_tenant(storage):
     assert storage.list_evaluator_health(tenant_id="tenant-b") == []
 
 
+def test_evaluator_health_owner_cannot_change_by_mutating_caller_record(storage):
+    record = EvaluatorHealthRecord(
+        tenant_id="tenant-b",
+        evaluator_fingerprint="judge",
+        sentinel_set_name="b-set",
+        sentinel_set_fingerprint="b-fingerprint",
+    )
+    storage.insert_evaluator_health(record)
+    record.tenant_id = "tenant-a"
+    assert storage.list_evaluator_health(tenant_id="tenant-a") == []
+    [stored] = storage.list_evaluator_health(tenant_id="tenant-b")
+    stored.tenant_id = "tenant-a"
+    assert storage.list_evaluator_health(tenant_id="tenant-a") == []
+    assert len(storage.list_evaluator_health(tenant_id="tenant-b")) == 1
+
+
 def test_sqlite_legacy_label_health_is_not_treated_as_example_health(tmp_path):
     path = tmp_path / "legacy-health.db"
     connection = sqlite3.connect(path)
