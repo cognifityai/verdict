@@ -1861,6 +1861,100 @@ def test_read_only_dashboard_hides_health_when_a20_schema_lacks_tenant_column(tm
     assert build_bundle(path, registry_tenant="customer-a")["evaluatorHealth"] == []
 
 
+def test_host_routed_tenant_cannot_calibrate_process_tenant_health(
+    tmp_path, monkeypatch
+):
+    import httpx
+    from fastapi import FastAPI, Request
+
+    path = tmp_path / "host-routed-health.db"
+    storage = SQLiteStorage(str(path))
+    for tenant_id in ("customer-a", "customer-b"):
+        trace = Trace(tenant_id=tenant_id, provider="openai")
+        storage.insert_trace(trace)
+        storage.insert_judgment(Judgment(
+            trace_id=trace.trace_id,
+            evaluator_provider="fake",
+            evaluator_fingerprint="shared-fingerprint",
+            expected_dimensions=["quality"],
+            judge_models=["shared-judge"],
+            dimensions=[DimensionScore(name="quality", verdict=Verdict.PASS)],
+        ))
+    storage.close()
+
+    def calibration_stub(writable, *, tenant_id, **_kwargs):
+        writable.insert_evaluator_health(EvaluatorHealthRecord(
+            tenant_id=tenant_id,
+            evaluator_fingerprint="shared-fingerprint",
+            sentinel_set_name="calibration-result",
+            sentinel_set_fingerprint="set",
+        ))
+        return {"status": "healthy"}
+
+    monkeypatch.setattr(
+        "verdict.dashboard.evaluator_lab.execute_calibration", calibration_stub
+    )
+    host = FastAPI()
+
+    @host.middleware("http")
+    async def authorize_tenant(request: Request, call_next):
+        request.state.verdict_registry_tenant = request.headers.get("x-test-tenant")
+        return await call_next(request)
+
+    host.mount("/verdict", create_app(
+        storage=f"sqlite:///{path}", tenant_id="customer-a"
+    ))
+
+    async def request_data():
+        transport = httpx.ASGITransport(app=host)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
+            token_response = await client.get(
+                "/verdict/api/setup/token", headers={"x-test-tenant": "customer-a"}
+            )
+            token = token_response.json()["setupToken"]
+            headers_b = {"x-test-tenant": "customer-b", "x-verdict-setup": token}
+            headers_a = {"x-test-tenant": "customer-a", "x-verdict-setup": token}
+            foreign_token = await client.get(
+                "/verdict/api/setup/token", headers=headers_b
+            )
+            foreign_run = await client.post(
+                "/verdict/api/evaluators/calibration/run", headers=headers_b,
+                json={"labelSetPath": "unused"},
+            )
+            own_run = await client.post(
+                "/verdict/api/evaluators/calibration/run", headers=headers_a,
+                json={"labelSetPath": "unused"},
+            )
+            own_data = await client.get("/verdict/api/data", headers=headers_a)
+            foreign_data = await client.get("/verdict/api/data", headers=headers_b)
+            foreign_control = await client.get("/verdict/api/control", headers=headers_b)
+            foreign_monitor = await client.get("/verdict/api/monitor", headers=headers_b)
+            own_control = await client.get("/verdict/api/control", headers=headers_a)
+            own_monitor = await client.get("/verdict/api/monitor", headers=headers_a)
+            return (
+                foreign_token, foreign_run, own_run, own_data, foreign_data,
+                foreign_control, foreign_monitor, own_control, own_monitor,
+            )
+
+    (
+        foreign_token, foreign_run, own_run, own_data, foreign_data,
+        foreign_control, foreign_monitor, own_control, own_monitor,
+    ) = asyncio.run(request_data())
+    assert foreign_token.status_code == 403
+    assert foreign_run.status_code == 403
+    assert own_run.status_code == 200
+    assert [row["sentinelSetName"] for row in own_data.json()["evaluatorHealth"]] == [
+        "calibration-result"
+    ]
+    assert foreign_data.json()["evaluatorHealth"] == []
+    assert foreign_control.status_code == 403
+    assert foreign_monitor.status_code == 403
+    assert own_control.status_code == 200
+    assert own_monitor.status_code == 200
+
+
 def test_bundle_excludes_unclear_from_every_pass_rate_denominator(tmp_path):
     """P0-3: PASS / (PASS + FAIL); UNCLEAR is coverage, not failure."""
     path = tmp_path / "unclear-denominators.db"
