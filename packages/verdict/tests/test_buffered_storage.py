@@ -1,7 +1,7 @@
 """Tests for BufferedStorage — the async/batched write buffer.
 
 These run under pytest, but also stand alone (``python3 test_buffered_storage.py``)
-using only the stdlib, wrapping the real InMemoryStorage. No scipy/sklearn/wrapt.
+using only the stdlib with real in-memory and SQLite adapters. No scipy/sklearn/wrapt.
 
 Coverage:
   * writes are eventually visible after flush(); many concurrent writers all land
@@ -9,6 +9,7 @@ Coverage:
   * close() flushes remaining writes
   * queue-full fallback: some writes go dropped_to_sync, but NONE are lost
   * a background write exception is counted, thread survives, later writes work
+  * queued evaluator-health ownership is fixed at write acceptance
 """
 
 from __future__ import annotations
