@@ -17,7 +17,9 @@ _log = logging.getLogger("verdict.dashboard")
 
 def register_lab_routes(app, setup: SetupRoutes) -> None:
     @app.get("/api/evaluators")
-    def evaluator_status():
+    def evaluator_status(request: Request):
+        if not setup.request_matches_tenant(request):
+            return JSONResponse({"error": "evaluator unavailable"}, status_code=403)
         from verdict.dashboard.evaluator_lab import evaluator_environment
 
         return evaluator_environment()

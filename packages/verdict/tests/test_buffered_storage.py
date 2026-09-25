@@ -18,9 +18,10 @@ import time
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from verdict.schema import DriftRun, DriftSignal, Trace
+from verdict.schema import DriftRun, DriftSignal, EvaluatorHealthRecord, Trace
 from verdict.storage.buffered import BufferedStorage
 from verdict.storage.memory import InMemoryStorage
+from verdict.storage.sqlite import SQLiteStorage
 
 
 def _trace(trace_id: str | None = None) -> Trace:
@@ -70,6 +71,40 @@ def test_each_queued_operation_reaches_inner_exactly_once():
         assert inner.insert_calls == 1
         assert buf.written == 1
     finally:
+        buf.close()
+
+
+def test_queued_evaluator_health_keeps_accepted_tenant_owner(tmp_path):
+    class ControlledSQLite(SQLiteStorage):
+        def __init__(self, path):
+            super().__init__(path)
+            self.write_started = threading.Event()
+            self.release_write = threading.Event()
+
+        def insert_evaluator_health(self, record):
+            self.write_started.set()
+            assert self.release_write.wait(timeout=2.0)
+            super().insert_evaluator_health(record)
+
+    inner = ControlledSQLite(str(tmp_path / "buffered-health.db"))
+    buf = BufferedStorage(inner, flush_interval=10.0)
+    record = EvaluatorHealthRecord(
+        tenant_id="tenant-b",
+        evaluator_fingerprint="shared-judge",
+        sentinel_set_name="b-set",
+        sentinel_set_fingerprint="b-fingerprint",
+    )
+    try:
+        buf.insert_evaluator_health(record)
+        assert inner.write_started.wait(timeout=1.0)
+        record.tenant_id = "tenant-a"
+        inner.release_write.set()
+        buf.flush()
+        assert inner.list_evaluator_health(tenant_id="tenant-a") == []
+        [stored] = inner.list_evaluator_health(tenant_id="tenant-b")
+        assert stored.sentinel_set_name == "b-set"
+    finally:
+        inner.release_write.set()
         buf.close()
 
 

@@ -1931,16 +1931,24 @@ def test_host_routed_tenant_cannot_calibrate_process_tenant_health(
             foreign_data = await client.get("/verdict/api/data", headers=headers_b)
             foreign_control = await client.get("/verdict/api/control", headers=headers_b)
             foreign_monitor = await client.get("/verdict/api/monitor", headers=headers_b)
+            foreign_evaluators = await client.get(
+                "/verdict/api/evaluators", headers=headers_b
+            )
             own_control = await client.get("/verdict/api/control", headers=headers_a)
             own_monitor = await client.get("/verdict/api/monitor", headers=headers_a)
+            own_evaluators = await client.get(
+                "/verdict/api/evaluators", headers=headers_a
+            )
             return (
                 foreign_token, foreign_run, own_run, own_data, foreign_data,
-                foreign_control, foreign_monitor, own_control, own_monitor,
+                foreign_control, foreign_monitor, foreign_evaluators,
+                own_control, own_monitor, own_evaluators,
             )
 
     (
         foreign_token, foreign_run, own_run, own_data, foreign_data,
-        foreign_control, foreign_monitor, own_control, own_monitor,
+        foreign_control, foreign_monitor, foreign_evaluators,
+        own_control, own_monitor, own_evaluators,
     ) = asyncio.run(request_data())
     assert foreign_token.status_code == 403
     assert foreign_run.status_code == 403
@@ -1951,8 +1959,10 @@ def test_host_routed_tenant_cannot_calibrate_process_tenant_health(
     assert foreign_data.json()["evaluatorHealth"] == []
     assert foreign_control.status_code == 403
     assert foreign_monitor.status_code == 403
+    assert foreign_evaluators.status_code == 403
     assert own_control.status_code == 200
     assert own_monitor.status_code == 200
+    assert own_evaluators.status_code == 200
 
 
 def test_bundle_excludes_unclear_from_every_pass_rate_denominator(tmp_path):
