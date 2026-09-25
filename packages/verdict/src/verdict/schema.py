@@ -370,6 +370,7 @@ class EvaluatorHealthRecord:
     status: EvaluatorHealthStatus = EvaluatorHealthStatus.INSUFFICIENT_DATA
     error_count: int = 0
     method_version: str = "2"
+    tenant_id: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.status, EvaluatorHealthStatus):

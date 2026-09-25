@@ -1719,6 +1719,7 @@ def test_customer_label_set_can_be_previewed_and_calibrated(tmp_path):
 
     result = execute_calibration(
         storage,
+        tenant_id="__verdict_local__",
         path=label_set,
         config=_config(),
         provider=provider,
@@ -1734,3 +1735,4 @@ def test_customer_label_set_can_be_previewed_and_calibrated(tmp_path):
     assert result["status"] == "degraded"  # Wilson lower bound is below .5 at n=1
     [health] = storage.list_evaluator_health(limit=10)
     assert health.sentinel_set_name == "customer-v1"
+    assert health.tenant_id == "__verdict_local__"

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import os
+from dataclasses import replace
 from datetime import datetime, timezone
 
 
@@ -525,7 +526,7 @@ def _run(args) -> int:
         except (OSError, ValueError) as exc:
             print(f"ERROR: invalid judge sentinel set: {exc}")
             return 2
-        storage.insert_evaluator_health(health)
+        storage.insert_evaluator_health(replace(health, tenant_id=tenant_scope))
         low = health.example_confidence_low or 0.0
         high = health.example_confidence_high or 0.0
         print(

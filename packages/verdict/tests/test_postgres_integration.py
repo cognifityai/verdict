@@ -34,7 +34,7 @@ from verdict.analysis_records import (
     NotificationDeliveryAttempt,
 )
 from verdict.dashboard.analysis_service import read_latest_analysis, run_analysis
-from verdict.dashboard.app import build_agent_run_detail
+from verdict.dashboard.app import build_agent_run_detail, build_bundle
 from verdict.evidence import (
     AgentCaptureBatch,
     AgentEvent,
@@ -1838,6 +1838,7 @@ def test_live_postgres_migrates_legacy_tables_before_creating_indexes():
                 ("drift_signals", "wasserstein_distance"),
                 ("drift_signals", "psi"),
                 ("evaluator_health", "correct_examples"),
+                ("evaluator_health", "tenant_id"),
                 ("evaluator_health", "total_examples"),
                 ("evaluator_health", "example_agreement"),
                 ("evaluator_health", "method_version"),
@@ -1882,6 +1883,10 @@ def test_live_postgres_migrates_legacy_tables_before_creating_indexes():
             assert legacy_health.total_examples == 0
             assert legacy_health.example_agreement is None
             assert legacy_health.label_agreement is None
+            assert legacy_health.tenant_id is None
+            assert storage.list_evaluator_health(
+                evaluator_fingerprint="legacy-evaluator", tenant_id="tenant-upgrade"
+            ) == []
 
             trace = Trace(
                 trace_id=f"legacy-upgrade-{uuid4().hex}",
@@ -1897,6 +1902,53 @@ def test_live_postgres_migrates_legacy_tables_before_creating_indexes():
             admin.execute(
                 sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema))
             )
+
+
+def test_live_postgres_health_is_scoped_before_dashboard_limit():
+    with isolated_test_dsn(DSN) as scoped_dsn:
+        storage = PostgresStorage(scoped_dsn, min_pool=1, max_pool=2)
+        fingerprint = "shared-health-fingerprint"
+        try:
+            for tenant_id in ("customer-a", "customer-b"):
+                trace = Trace(tenant_id=tenant_id, provider="openai")
+                storage.insert_trace(trace)
+                storage.insert_judgment(Judgment(
+                    trace_id=trace.trace_id,
+                    evaluator_provider="fake",
+                    evaluator_fingerprint=fingerprint,
+                    expected_dimensions=["quality"],
+                    judge_models=["shared-judge"],
+                    dimensions=[DimensionScore(name="quality", verdict=Verdict.PASS)],
+                ))
+            storage.insert_evaluator_health(EvaluatorHealthRecord(
+                health_id="shared-id",
+                tenant_id="customer-a",
+                evaluator_fingerprint=fingerprint,
+                sentinel_set_name="customer-a-set",
+                sentinel_set_fingerprint="a-set",
+            ))
+            storage.insert_evaluator_health(EvaluatorHealthRecord(
+                health_id="shared-id",
+                tenant_id="customer-b",
+                evaluator_fingerprint=fingerprint,
+                sentinel_set_name="foreign-upsert",
+                sentinel_set_fingerprint="foreign-set",
+            ))
+            assert storage.list_evaluator_health(tenant_id="customer-b") == []
+            for index in range(31):
+                storage.insert_evaluator_health(EvaluatorHealthRecord(
+                    tenant_id="customer-b",
+                    evaluator_fingerprint=fingerprint,
+                    sentinel_set_name=f"customer-b-set-{index}",
+                    sentinel_set_fingerprint=f"b-set-{index}",
+                ))
+        finally:
+            storage.close()
+
+        bundle = build_bundle(scoped_dsn, registry_tenant="customer-a")
+        assert [row["sentinelSetName"] for row in bundle["evaluatorHealth"]] == [
+            "customer-a-set"
+        ]
 
 
 def test_live_postgres_round_trip_and_mutation_contracts():
@@ -1988,6 +2040,7 @@ def test_live_postgres_round_trip_and_mutation_contracts():
 
         health = EvaluatorHealthRecord(
             health_id=f"{prefix}-health",
+            tenant_id="tenant-a",
             evaluator_fingerprint=fingerprint,
             sentinel_set_name="anchors",
             sentinel_set_fingerprint=f"{prefix}-anchors",
@@ -2003,8 +2056,11 @@ def test_live_postgres_round_trip_and_mutation_contracts():
         )
         storage.insert_evaluator_health(health)
         assert storage.list_evaluator_health(
-            evaluator_fingerprint=fingerprint
+            evaluator_fingerprint=fingerprint, tenant_id="tenant-a"
         )[0].status is EvaluatorHealthStatus.HEALTHY
+        assert storage.list_evaluator_health(
+            evaluator_fingerprint=fingerprint, tenant_id="tenant-b"
+        ) == []
 
         signal = DriftSignal(
             signal_id=f"{prefix}-signal",

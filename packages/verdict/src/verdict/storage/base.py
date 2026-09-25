@@ -308,6 +308,7 @@ class Storage(Protocol):
         self,
         *,
         evaluator_fingerprint: str | None = None,
+        tenant_id: str | None = None,
         limit: int = 100,
     ) -> list[EvaluatorHealthRecord]: ...
 

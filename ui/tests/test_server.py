@@ -1684,6 +1684,7 @@ def test_bundle_exposes_only_selected_evaluator_sentinel_health(tmp_path):
     ))
     storage.insert_evaluator_health(EvaluatorHealthRecord(
         evaluator_fingerprint="selected-fingerprint",
+        tenant_id="__verdict_local__",
         sentinel_set_name="support-v1",
         sentinel_set_fingerprint="set-one",
         correct_examples=27,
@@ -1698,6 +1699,7 @@ def test_bundle_exposes_only_selected_evaluator_sentinel_health(tmp_path):
     ))
     storage.insert_evaluator_health(EvaluatorHealthRecord(
         evaluator_fingerprint="other-fingerprint",
+        tenant_id="__verdict_local__",
         sentinel_set_name="other-v1",
         sentinel_set_fingerprint="set-two",
         correct_examples=0,
@@ -1734,6 +1736,129 @@ def test_bundle_exposes_only_selected_evaluator_sentinel_health(tmp_path):
         "errorCount": 0,
         "methodVersion": "2",
     }]
+
+
+def test_tenant_dashboard_does_not_expose_ownerless_evaluator_health(tmp_path):
+    """A shared fingerprint must not turn an unowned a20 row into tenant data."""
+    import httpx
+
+    path = tmp_path / "shared-health.db"
+    storage = SQLiteStorage(str(path))
+    trace = Trace(tenant_id="customer-a", provider="openai")
+    storage.insert_trace(trace)
+    storage.insert_judgment(Judgment(
+        trace_id=trace.trace_id,
+        evaluator_provider="fake",
+        evaluator_fingerprint="shared-fingerprint",
+        expected_dimensions=["quality"],
+        judge_models=["shared-judge"],
+        dimensions=[DimensionScore(name="quality", verdict=Verdict.PASS)],
+    ))
+    storage.insert_evaluator_health(EvaluatorHealthRecord(
+        evaluator_fingerprint="shared-fingerprint",
+        sentinel_set_name="TENANT_B_HEALTH_CANARY",
+        sentinel_set_fingerprint="foreign-set",
+    ))
+    storage.close()
+
+    async def request_data():
+        transport = httpx.ASGITransport(app=create_app(
+            storage=f"sqlite:///{path}", tenant_id="customer-a"
+        ))
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
+            return await client.get("/api/data")
+
+    response = asyncio.run(request_data())
+    assert response.status_code == 200
+    assert response.json()["evaluatorHealth"] == []
+
+
+def test_tenant_dashboard_filters_health_before_limit_with_shared_fingerprint(tmp_path):
+    import httpx
+
+    path = tmp_path / "tenant-health.db"
+    storage = SQLiteStorage(str(path))
+    fingerprint = "shared-fingerprint"
+    for tenant_id in ("customer-a", "customer-b"):
+        trace = Trace(tenant_id=tenant_id, provider="openai")
+        storage.insert_trace(trace)
+        storage.insert_judgment(Judgment(
+            trace_id=trace.trace_id,
+            evaluator_provider="fake",
+            evaluator_fingerprint=fingerprint,
+            expected_dimensions=["quality"],
+            judge_models=["shared-judge"],
+            dimensions=[DimensionScore(name="quality", verdict=Verdict.PASS)],
+        ))
+    now = datetime.now(timezone.utc)
+    storage.insert_evaluator_health(EvaluatorHealthRecord(
+        tenant_id="customer-a",
+        evaluated_at=now,
+        evaluator_fingerprint=fingerprint,
+        sentinel_set_name="customer-a-set",
+        sentinel_set_fingerprint="a-set",
+    ))
+    for index in range(35):
+        storage.insert_evaluator_health(EvaluatorHealthRecord(
+            tenant_id="customer-b",
+            evaluated_at=now + timedelta(seconds=index + 1),
+            evaluator_fingerprint=fingerprint,
+            sentinel_set_name=f"customer-b-set-{index}",
+            sentinel_set_fingerprint=f"b-set-{index}",
+        ))
+    storage.close()
+
+    async def request_data(tenant_id):
+        transport = httpx.ASGITransport(app=create_app(
+            storage=f"sqlite:///{path}", tenant_id=tenant_id
+        ))
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
+            return await client.get("/api/data")
+
+    customer_a = asyncio.run(request_data("customer-a"))
+    customer_b = asyncio.run(request_data("customer-b"))
+    assert customer_a.status_code == customer_b.status_code == 200
+    assert [row["sentinelSetName"] for row in customer_a.json()["evaluatorHealth"]] == [
+        "customer-a-set"
+    ]
+    assert len(customer_b.json()["evaluatorHealth"]) == 30
+    assert all(
+        row["sentinelSetName"].startswith("customer-b-set-")
+        for row in customer_b.json()["evaluatorHealth"]
+    )
+    assert [row["sentinelSetName"] for row in build_bundle(
+        path, registry_tenant="customer-a"
+    )["evaluatorHealth"]] == ["customer-a-set"]
+
+
+def test_read_only_dashboard_hides_health_when_a20_schema_lacks_tenant_column(tmp_path):
+    path = tmp_path / "old-schema-health.db"
+    storage = SQLiteStorage(str(path))
+    trace = Trace(tenant_id="customer-a", provider="openai")
+    storage.insert_trace(trace)
+    storage.insert_judgment(Judgment(
+        trace_id=trace.trace_id,
+        evaluator_provider="fake",
+        evaluator_fingerprint="old-schema-judge",
+        expected_dimensions=["quality"],
+        judge_models=["shared-judge"],
+        dimensions=[DimensionScore(name="quality", verdict=Verdict.PASS)],
+    ))
+    storage.insert_evaluator_health(EvaluatorHealthRecord(
+        tenant_id="customer-a",
+        evaluator_fingerprint="old-schema-judge",
+        sentinel_set_name="old-schema-set",
+        sentinel_set_fingerprint="old-schema-set",
+    ))
+    storage.close()
+    with sqlite3.connect(path) as connection:
+        connection.execute("ALTER TABLE evaluator_health DROP COLUMN tenant_id")
+
+    assert build_bundle(path, registry_tenant="customer-a")["evaluatorHealth"] == []
 
 
 def test_bundle_excludes_unclear_from_every_pass_rate_denominator(tmp_path):

@@ -726,6 +726,7 @@ def test_pipeline_persists_sentinel_health_separately_from_judgments(
     finally:
         check.close()
     assert len(health) == 1
+    assert health[0].tenant_id == "__verdict_local__"
     assert health[0].total_labels == 150
     assert len(judgments) == 1
     assert judgments[0].trace_id != "sentinel:anchor-1"

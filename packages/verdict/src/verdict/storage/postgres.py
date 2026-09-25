@@ -418,6 +418,7 @@ CREATE TABLE IF NOT EXISTS evaluator_health (
     health_id                TEXT PRIMARY KEY,
     evaluated_at             TIMESTAMPTZ NOT NULL,
     evaluator_fingerprint    TEXT NOT NULL,
+    tenant_id                TEXT,
     sentinel_set_name        TEXT,
     sentinel_set_fingerprint TEXT NOT NULL,
     correct_examples         INTEGER NOT NULL,
@@ -688,6 +689,7 @@ class PostgresStorage:
                 ]:
                     cur.execute(f"ALTER TABLE judgments ADD COLUMN IF NOT EXISTS {col} {ddl}")
                 for col, ddl in [
+                    ("tenant_id", "TEXT"),
                     ("correct_examples", "INTEGER NOT NULL DEFAULT 0"),
                     ("total_examples", "INTEGER NOT NULL DEFAULT 0"),
                     ("example_agreement", "DOUBLE PRECISION"),
@@ -2449,13 +2451,13 @@ class PostgresStorage:
     def insert_evaluator_health(self, record: EvaluatorHealthRecord) -> None:
         self._exec(
             """INSERT INTO evaluator_health (
-                health_id, evaluated_at, evaluator_fingerprint,
+                health_id, evaluated_at, evaluator_fingerprint, tenant_id,
                 sentinel_set_name, sentinel_set_fingerprint,
                 correct_examples, total_examples, example_agreement,
                 example_confidence_low, example_confidence_high,
                 correct_labels, total_labels, label_agreement,
                 status, error_count, method_version
-            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             ON CONFLICT (health_id) DO UPDATE SET
                 evaluated_at = EXCLUDED.evaluated_at,
                 evaluator_fingerprint = EXCLUDED.evaluator_fingerprint,
@@ -2471,11 +2473,13 @@ class PostgresStorage:
                 label_agreement = EXCLUDED.label_agreement,
                 status = EXCLUDED.status,
                 error_count = EXCLUDED.error_count,
-                method_version = EXCLUDED.method_version""",
+                method_version = EXCLUDED.method_version
+            WHERE evaluator_health.tenant_id IS NOT DISTINCT FROM EXCLUDED.tenant_id""",
             (
                 record.health_id,
                 record.evaluated_at,
                 record.evaluator_fingerprint,
+                record.tenant_id,
                 record.sentinel_set_name,
                 record.sentinel_set_fingerprint,
                 record.correct_examples,
@@ -2496,17 +2500,22 @@ class PostgresStorage:
         self,
         *,
         evaluator_fingerprint: str | None = None,
+        tenant_id: str | None = None,
         limit: int = 100,
     ) -> list[EvaluatorHealthRecord]:
-        where = ""
+        conditions: list[str] = []
         params: list[object] = []
         if evaluator_fingerprint is not None:
-            where = "WHERE evaluator_fingerprint = %s"
+            conditions.append("evaluator_fingerprint = %s")
             params.append(evaluator_fingerprint)
+        if tenant_id is not None:
+            conditions.append("tenant_id = %s")
+            params.append(tenant_id)
+        where = "WHERE " + " AND ".join(conditions) if conditions else ""
         params.append(limit)
-        # `where` is one of two fixed strings; fingerprint and limit are bound.
+        # Conditions are fixed strings; filter values and limit are bound.
         sql = (
-            "SELECT health_id, evaluated_at, evaluator_fingerprint, "
+            "SELECT health_id, evaluated_at, evaluator_fingerprint, tenant_id, "
             "sentinel_set_name, sentinel_set_fingerprint, correct_examples, "
             "total_examples, example_agreement, example_confidence_low, "
             "example_confidence_high, correct_labels, total_labels, "
@@ -2520,29 +2529,30 @@ class PostgresStorage:
         )
         records = []
         for row in rows:
-            legacy = (row[15] or "1") == "1"
+            legacy = (row[16] or "1") == "1"
             records.append(
                 EvaluatorHealthRecord(
                     health_id=row[0],
                     evaluated_at=row[1],
                     evaluator_fingerprint=row[2],
-                    sentinel_set_name=row[3] or "",
-                    sentinel_set_fingerprint=row[4],
-                    correct_examples=0 if legacy else row[5],
-                    total_examples=0 if legacy else row[6],
-                    example_agreement=None if legacy else row[7],
-                    example_confidence_low=None if legacy else row[8],
-                    example_confidence_high=None if legacy else row[9],
-                    correct_labels=row[10],
-                    total_labels=row[11],
-                    label_agreement=None if legacy else row[12],
+                    tenant_id=row[3],
+                    sentinel_set_name=row[4] or "",
+                    sentinel_set_fingerprint=row[5],
+                    correct_examples=0 if legacy else row[6],
+                    total_examples=0 if legacy else row[7],
+                    example_agreement=None if legacy else row[8],
+                    example_confidence_low=None if legacy else row[9],
+                    example_confidence_high=None if legacy else row[10],
+                    correct_labels=row[11],
+                    total_labels=row[12],
+                    label_agreement=None if legacy else row[13],
                     status=(
                         EvaluatorHealthStatus.INSUFFICIENT_DATA
                         if legacy
-                        else EvaluatorHealthStatus(row[13])
+                        else EvaluatorHealthStatus(row[14])
                     ),
-                    error_count=row[14],
-                    method_version=row[15] or "1",
+                    error_count=row[15],
+                    method_version=row[16] or "1",
                 )
             )
         return records

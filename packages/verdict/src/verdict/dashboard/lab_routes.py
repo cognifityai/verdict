@@ -126,6 +126,7 @@ def register_lab_routes(app, setup: SetupRoutes) -> None:
             writable = setup.writable_storage()
             return execute_calibration(
                 writable,
+                tenant_id=setup.tenant_id,
                 path=path,
                 config=payload,
                 confirm_external_egress=payload.get("confirmExternalEgress") is True,

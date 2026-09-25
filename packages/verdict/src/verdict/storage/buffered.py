@@ -654,11 +654,13 @@ class BufferedStorage:
         self,
         *,
         evaluator_fingerprint: str | None = None,
+        tenant_id: str | None = None,
         limit: int = 100,
     ) -> list[EvaluatorHealthRecord]:
         return self._read(
             self._inner.list_evaluator_health,
             evaluator_fingerprint=evaluator_fingerprint,
+            tenant_id=tenant_id,
             limit=limit,
         )
 
