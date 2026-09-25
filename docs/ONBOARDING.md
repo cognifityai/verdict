@@ -720,7 +720,8 @@ prevents a `healthy` status: too few usable examples remain `insufficient_data`;
 otherwise the status is `degraded`. When the sentinel option is
 present, `degraded` or `insufficient_data` status is a hard gate: the command
 persists the health record, exits 2, and does not write production judgments.
-New health records belong to the selected tenant. The dashboard will not show
+New CLI and dashboard calibration health records belong to the selected tenant.
+The dashboard will not show
 older, ownerless health records after an upgrade; rerun the sentinel check or
 dashboard calibration for that tenant to restore its judge-health display.
 

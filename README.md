@@ -839,8 +839,9 @@ source. See [`ADR-013`](docs/adrs/013-stable-dependent-package-read-port.md).
   Monitor policies carry that selected evaluator fingerprint; incomplete
   historical identities and other evaluator definitions are excluded.
   Optional fixed human-labeled sentinel runs monitor that fingerprint separately
-  from production drift. Each new health aggregate is owned by the selected
-  tenant; the dashboard shows it only for that tenant, even when another tenant
+  from production drift. Pipeline and dashboard calibration runs stamp their
+  health aggregate with the selected tenant; the dashboard shows it only for
+  that tenant, even when another tenant
   uses the same evaluator fingerprint. Health aggregates written before tenant
   ownership was recorded are hidden in tenant dashboards and require a new
   sentinel run to appear there. When `--judge-sentinel-file` is supplied, the
