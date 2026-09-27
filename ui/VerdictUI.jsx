@@ -21,7 +21,7 @@ import { ManagementReport } from "./ManagementReport.jsx";
 import { ControlCenter } from "./ControlCenter.jsx";
 import { SetupWizard } from "./SetupWizard.jsx";
 import { initialDashboardTab } from "./source-state.mjs";
-import { Monitor, MonitorComparisonMetrics } from "./Monitor.jsx";
+import { Monitor, metricLabel } from "./Monitor.jsx";
 import {
   canonicalDashboardHash, parseDashboardRoute, parseDashboardSelection,
   serializeDashboardRoute,
@@ -1042,11 +1042,11 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
         {tab === "evaluate" && route.section === "lab" && <EvaluatorLab configUrl={mountedConfigUrl()} onOpenEvaluated={(evaluatorId) => { onEvaluatorChange?.(evaluatorId); commitRoute({ ...route, tab: "explore", section: "calls", evaluatorId, traceJudgeStatus: "judged", traceId: null }); }} />}
         {tab === "evaluate" && route.section === "inspect" && <InspectLab configUrl={mountedConfigUrl()} />}
         {tab === "evaluate" && route.section === "review" && <ControlCenter section="review" configUrl={mountedConfigUrl()} onNavigate={(target) => navigateWorkflow(commitRoute, route, target)} />}
-        {tab === "monitor" && route.section === "status" && <Monitor view="status" initialState={DATA.monitor} configUrl={mountedConfigUrl()} evaluation={data.evaluation} onChanged={onReload} />}
+        {tab === "monitor" && route.section === "status" && <Monitor view="status" initialState={DATA.monitor} configUrl={mountedConfigUrl()} evaluation={data.evaluation} onChanged={onReload} onOpenTrace={(traceId) => commitRoute({ ...route, tab: "explore", section: "calls", traceId })} />}
         {tab === "monitor" && route.section === "signals" && <DriftSignals data={DATA}
           onOpenTrace={(traceId) => commitRoute({ ...route, tab: "explore", section: "calls", traceId })}
           onOpenOperations={operationsUrl ? () => commitRoute({ ...route, tab: "settings", section: "integrations" }) : null} />}
-        {tab === "monitor" && route.section === "history" && <Monitor view="history" initialState={DATA.monitor} configUrl={mountedConfigUrl()} evaluation={data.evaluation} onChanged={onReload} />}
+        {tab === "monitor" && route.section === "history" && <Monitor view="history" initialState={DATA.monitor} configUrl={mountedConfigUrl()} evaluation={data.evaluation} onChanged={onReload} onOpenTrace={(traceId) => commitRoute({ ...route, tab: "explore", section: "calls", traceId })} />}
         {tab === "monitor" && route.section === "segments" && <Registry url={mountedRegistryUrl()} operationsUrl={operationsUrl} configUrl={mountedConfigUrl()} />}
         {tab === "monitor" && route.section === "schedule" && <ControlCenter section="schedule" configUrl={mountedConfigUrl()} />}
         {tab === "report" && route.section === "management" && <ManagementReport data={DATA} source={source} onPeriodChange={onReload} />}
@@ -1101,7 +1101,11 @@ function MonitorResult({ current }) {
       </div>
       {manifest && <div className="text-sm" style={{ color: C.sub }}>{manifest.reference_unit_ids.length} reference → {manifest.current_unit_ids.length} current</div>}
     </div>
-    {comparison && !collecting && MonitorComparisonMetrics({ comparison })}
+    {comparison && !collecting && <div className="mt-3 space-y-1">
+      {(comparison.metrics || []).map((metric) => <div key={`${metric.group_id || "all"}:${metric.metric}`} className="text-sm" style={{ color: metric.alert ? C.red : C.sub }}>
+        {metric.group_id ? `${metric.group_id} · ` : ""}{metricLabel(metric.metric)} · {(100 * metric.reference_value).toFixed(1)}% → {(100 * metric.current_value).toFixed(1)}%
+      </div>)}
+    </div>}
   </Panel>;
 }
 

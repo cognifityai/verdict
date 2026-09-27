@@ -144,6 +144,54 @@ test("grouped comparison renders reviewed labels instead of opaque identities", 
   assert.doesNotMatch(html, />clu_internal</);
 });
 
+test("alert comparison leads with drift analysis, charts both cohorts, and links evidence", async () => {
+  const response = {
+    state: "candidate",
+    policy: { prospective_target: 10, grouping_mode: "cluster" },
+    snapshot: {
+      manifest: {
+        reference_unit_ids: Array(10).fill("r"),
+        current_unit_ids: Array(10).fill("c"),
+        prospective_open: false,
+        comparison_index: 0,
+      },
+      comparison: {
+        status: "alert", alpha_threshold: 0.05,
+        groups: [{ group_id: "launch", label: "Launch planning",
+          reference_units: 10, current_units: 10 }],
+        metrics: [{ group_id: "launch", metric: "judge.groundedness.pass",
+          alert: true, reference_value: 1, current_value: 0.7, effect: -0.3,
+          p_value: 0.002, p_adjusted: 0.008,
+          reference_n: 10, current_n: 10,
+          reference_evidence_unit_ids: ["reference-good"],
+          current_evidence_unit_ids: ["current-failed"] }],
+        metric_coverage: [{ group_id: "launch", metric: "judge.groundedness.pass",
+          reference_evaluable: 10, current_evaluable: 10,
+          reference_unclear: 0, current_unclear: 0,
+          reference_missing: 0, current_missing: 0,
+          reference_error: 0, current_error: 0 }],
+        unseen_group_share: 0,
+      },
+    },
+  };
+  const html = await render(`React.createElement(Monitor, {
+    configUrl: "/api/config", view: "history",
+    initialState: { candidate: ${JSON.stringify(response)} },
+    onOpenTrace() {},
+  })`);
+
+  assert.ok(html.indexOf("DRIFT ANALYSIS") < html.indexOf("COMPARISON SETTINGS"));
+  assert.match(html, /1 drift signal across 1 affected segment/);
+  assert.match(html, /Launch planning/);
+  assert.match(html, /Reference.*100\.0%/);
+  assert.match(html, /Current.*70\.0%/);
+  assert.match(html, /Raw p-value.*0\.002/);
+  assert.match(html, /Adjusted p-value.*0\.008/);
+  assert.match(html, /reference-good/);
+  assert.match(html, /current-failed/);
+  assert.match(html, /Investigation next step/);
+});
+
 test("monitor status shows active authority beside a newer candidate", async () => {
   const response = (state, metric) => ({
     state,

@@ -4,6 +4,10 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from verdict.monitoring import (
     AnalysisUnitRecord,
+    CohortManifest,
+    FrozenCohortSummary,
+    FrozenMetricCounts,
+    MetricComparison,
     MonitorPolicy,
     MonitorStatus,
     WindowMode,
@@ -1090,6 +1094,132 @@ def test_policy_and_snapshot_canonical_round_trip() -> None:
     assert monitor_snapshot_from_json(
         monitor_snapshot_to_json(manifest, comparison)
     ) == (manifest, comparison)
+
+
+def test_alert_freezes_bounded_trace_evidence_with_the_compared_facts() -> None:
+    reference = tuple(
+        AnalysisUnitRecord(
+            f"reference-{index}", NOW + timedelta(minutes=index),
+            {"judge.quality.pass": True},
+            metric_states={"judge.quality.pass": "pass"},
+        )
+        for index in range(10)
+    )
+    current = tuple(
+        AnalysisUnitRecord(
+            f"current-{index}", NOW + timedelta(days=1, minutes=index),
+            {"judge.quality.pass": index >= 8},
+            metric_states={
+                "judge.quality.pass": "pass" if index >= 8 else "fail",
+            },
+        )
+        for index in range(10)
+    )
+    units = (*reference, *current)
+    policy = MonitorPolicy(
+        "p", "scope", reference_ratio=0.5,
+        minimum_reference=5, minimum_current=5, minimum_effect=0.1,
+    )
+    manifest = plan_historical_manifest(
+        units, policy, cutoff=NOW + timedelta(days=2),
+    )
+
+    comparison = compare_manifest(units, manifest, policy)
+    metric = comparison.metrics[0]
+
+    assert metric.alert is True
+    assert metric.reference_evidence_unit_ids == tuple(
+        f"reference-{index}" for index in range(5)
+    )
+    assert metric.current_evidence_unit_ids == tuple(
+        f"current-{index}" for index in range(5)
+    )
+    assert monitor_snapshot_from_json(
+        monitor_snapshot_to_json(manifest, comparison)
+    ) == (manifest, comparison)
+
+    changed = tuple(
+        AnalysisUnitRecord(
+            unit.unit_id, unit.event_time,
+            {"judge.quality.pass": not unit.metrics["judge.quality.pass"]},
+            metric_states={
+                "judge.quality.pass": (
+                    "fail" if unit.metrics["judge.quality.pass"] else "pass"
+                ),
+            },
+        )
+        for unit in units
+    )
+    assert compare_manifest(changed, manifest, policy) == comparison
+
+
+def test_snapshot_without_evidence_ids_remains_readable() -> None:
+    units = _units(20, failures_from=15)
+    policy = MonitorPolicy(
+        "p", "scope", reference_ratio=0.5,
+        minimum_reference=5, minimum_current=5,
+    )
+    manifest = plan_historical_manifest(units, policy, cutoff=NOW + timedelta(days=30))
+    comparison = compare_manifest(units, manifest, policy)
+    payload = json.loads(monitor_snapshot_to_json(manifest, comparison))
+    for summary_name in ("reference_summary", "current_summary"):
+        for metric in payload["manifest"][summary_name]["metrics"]:
+            metric.pop("true_unit_ids", None)
+            metric.pop("false_unit_ids", None)
+        payload["manifest"][summary_name]["evidence_digest"] = None
+    for metric in payload["comparison"]["metrics"]:
+        metric.pop("reference_evidence_unit_ids", None)
+        metric.pop("current_evidence_unit_ids", None)
+
+    # Recreate the pre-evidence digest rather than accepting an invalid digest.
+    for summary_name in ("reference_summary", "current_summary"):
+        summary_payload = payload["manifest"][summary_name]
+        summary = FrozenCohortSummary(
+            summary_payload["unit_count"],
+            summary_payload["unassigned_unit_count"],
+            manifest.reference_summary.groups
+            if summary_name == "reference_summary"
+            else manifest.current_summary.groups,
+            tuple(FrozenMetricCounts(**{"group_id": None, **item})
+                  for item in summary_payload["metrics"]),
+        )
+        summary_payload["evidence_digest"] = summary.evidence_digest
+
+    restored_manifest, restored_comparison = monitor_snapshot_from_json(
+        json.dumps(payload)
+    )
+
+    assert restored_manifest.reference_summary.metrics[0].true_unit_ids == ()
+    assert restored_comparison.metrics[0].reference_evidence_unit_ids == ()
+
+
+def test_metric_evidence_ids_are_bounded_unique_and_cohort_owned() -> None:
+    with pytest.raises(ValueError, match="bounded and unique"):
+        FrozenMetricCounts(
+            None, "quality", 6, 0,
+            true_unit_ids=tuple(f"trace-{index}" for index in range(6)),
+        )
+    with pytest.raises(ValueError, match="bounded and unique"):
+        MetricComparison(
+            "quality", 1, 1, 1.0, 0.0, -1.0, 0.01, 0.01, True,
+            reference_evidence_unit_ids=("trace-1", "trace-1"),
+        )
+
+    reference_summary = FrozenCohortSummary(
+        1, 0, (),
+        (FrozenMetricCounts(
+            None, "quality", 1, 0,
+            true_unit_ids=("foreign-trace",),
+        ),),
+    )
+    current_summary = FrozenCohortSummary(0, 0, (), ())
+    with pytest.raises(ValueError, match="belong to its cohort"):
+        CohortManifest(
+            "a" * 64, "b" * 64, NOW,
+            ("owned-trace",), (), ("owned-trace",),
+            reference_summary=reference_summary,
+            current_summary=current_summary,
+        )
 
 
 def test_cluster_policy_pins_one_registry_version_in_identity_and_json() -> None:

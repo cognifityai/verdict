@@ -742,8 +742,12 @@ use the selected period and contain aggregates only. Dates are displayed in a
 readable format: period boundaries use UTC, while capture and generation times
 use the browser's local time. **Monitor → Compare History** previews a reviewed
 reference/current comparison; **Monitor → Status** shows the active prospective
-cohort. Each alert includes its metric, reference/current rates, adjusted
-p-value, sample counts, and optional facet. Clusters are not required.
+cohort. Completed results appear before the comparison settings. Each alert
+charts its reference/current rates and includes its effect, raw and adjusted
+p-values, sample counts, optional facet, evidence coverage, and up to five
+frozen trace examples from each cohort. Those examples identify records to
+inspect; they do not establish why the change occurred. Clusters are not
+required.
 
 The dashboard reads SQLite or PostgreSQL directly. If more than one evaluator
 identity is in the database, select one before reading judgment results or

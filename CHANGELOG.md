@@ -6,6 +6,15 @@ the product is refined.
 
 ## [Unreleased]
 
+### Added
+
+- Monitor comparisons now lead with a drift-analysis result instead of the
+  policy form. Alert cards chart reference versus current rates, report raw and
+  adjusted p-values, effect and eligible counts, keep stable controls separate,
+  and link up to five immutable reference and current evidence traces per alert.
+  The evidence references are frozen with the cohort facts; Verdict does not
+  present them as an automated root-cause conclusion.
+
 ## [0.1.0a21] - 2026-09-25
 
 ### Added

@@ -481,9 +481,12 @@ telemetry remains in aggregate cost and store totals but does not displace
 application traces from this view. A `Historical
 metadata-only trace` means content was not captured when that specific trace was
 recorded; it does not report the application's current capture setting. Monitor
-previews show eligible evidence for the selected count-based or explicit
-event-time cohorts. Fixed-window results produced by older releases remain
-available only as read-only legacy history.
+previews lead with the comparison result for the selected count-based or
+explicit event-time cohorts. Alert cards chart reference and current rates,
+show the statistical gates and coverage, and link bounded evidence traces when
+the snapshot contains them. Those frozen examples are investigation aids, not
+an automated root-cause claim. Fixed-window results produced by older releases
+remain available only as read-only legacy history.
 
 For a one-off export that is not in the Verdict store, open **Evaluate →
 Inspect JSON**. Paste JSON or choose a local export file; both use the same
