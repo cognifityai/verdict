@@ -319,18 +319,9 @@ def test_live_postgres_and_sqlite_produce_the_same_dashboard_bundle(
         assert judge_trace.trace_id not in {
             sample["trace_id"] for sample in postgres_bundle["samples"]
         }
-        assert postgres_bundle["driftAnalysis"] == {
-            "runStatus": "completed_with_signals",
-            "readinessStatus": "not_enough_current",
-            "current": 2,
-            "baseline": 0,
-            "minimum": 30,
-            "currentHours": 24,
-            "baselineLagHours": 24,
-            "baselineDays": 7,
-        }
+        assert "driftAnalysis" not in postgres_bundle
         assert postgres_bundle["providers"][0]["rawProvider"] == "custom-provider"
-        assert postgres_bundle["driftSignals"][0]["id"] == signal.signal_id
+        assert "driftSignals" not in postgres_bundle
     finally:
         if sqlite is not None:
             sqlite.close()
@@ -598,8 +589,8 @@ def test_live_postgres_and_sqlite_registry_dashboard_shapes_match(tmp_path) -> N
                 "n": 64,
             }
         ]
-        assert postgres_data["driftSignals"] == []
-        assert postgres_data["driftRun"] is None
+        assert "driftSignals" not in postgres_data
+        assert "driftRun" not in postgres_data
     finally:
         if sqlite is not None:
             sqlite.close()

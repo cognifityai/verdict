@@ -135,7 +135,7 @@ def test_every_generated_adapter_reaches_cluster_judge_monitor_and_dashboard(
     dashboard = build_bundle(storage_url)
     assert dashboard["meta"]["totalTraces"] == 80
     assert dashboard["meta"]["totalJudged"] == 80
-    assert dashboard["driftAnalysis"]["runStatus"] == "no_completed_run"
+    assert "driftAnalysis" not in dashboard
     assert len(dashboard["samples"]) == 30
     assert all(sample["input_tokens"] is not None for sample in dashboard["samples"])
     assert all(sample["output_tokens"] is not None for sample in dashboard["samples"])

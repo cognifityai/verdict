@@ -754,15 +754,13 @@ identity is in the database, select one before reading judgment results or
 creating an evaluator-backed Monitor comparison. Identity
 includes provider, model list, rubric name/version, behavior-relevant config,
 expected dimensions, and a prompt/rubric fingerprint. Fixed-window drift rows
-created by older releases have no tenant owner, so the tenant-scoped dashboard
-suppresses them. They remain read-only in storage and are never treated as a
-current zero or alert.
-If retention removes the last defining judgment, a retained run remains
-selectable by its fingerprint as a historical incomplete identity; unavailable
-provider, model, and rubric details are not reconstructed.
+created by older releases have no tenant owner, so `/api/data` and the UI
+exclude them. They remain readable through the Python storage API and are
+never treated as a current zero or alert. Old drift bookmarks open Monitor
+History.
 Evaluator requests are sequenced and cancelled so an older response cannot
 replace a newer selection. If a load fails, the dashboard explicitly names the
-last confirmed evaluator that remains on screen, and trace/drift detail is
+last confirmed evaluator that remains on screen, and trace detail is
 derived from IDs in that confirmed snapshot.
 
 Trace Explorer pages newest-first through every stored non-judge application
@@ -813,12 +811,12 @@ HTTP Basic authentication for the dashboard shells at `/` and `/dashboard` plus
 trusted reverse proxy. Dashboard time series include only observed hourly bins
 and half-hour latency bins. Presentation data is capped at the latest 100
 observed chart points, 8 providers, 20 usable intent clusters, 12 dimensions,
-20 evaluator identities, 20 models per displayed provider, 40 drift signals,
+20 evaluator identities, 20 models per displayed provider,
 and one 30-row page of non-judge application traces. Trace Explorer can page
 through the remaining application traces. The non-intent `unclustered` bucket
-is excluded from the cluster chart and its cap counts, and capped drift signals
-are ordered by absolute effect size. Full-store totals remain in the summary, while a visible
-banner reports every shown-versus-available capped count. A bundle that still
+is excluded from the cluster chart and its cap counts. Full-store totals remain
+in the summary, while a visible banner reports every shown-versus-available
+capped count. A bundle that still
 exceeds the redaction safety budget returns an explicit service error instead
 of an empty successful dashboard.
 
@@ -891,9 +889,9 @@ the other captured workloads.
   expected dimensions, and immutable prompt/rubric fingerprint. A latest judge
   error is coverage failure rather than a PASS/FAIL score and is eligible for a
   future retry. Other evaluator definitions remain stored but are excluded.
-  Fixed-window rows created by older releases remain read-only legacy records.
-  They have no tenant owner and are therefore suppressed by the tenant-scoped
-  dashboard; use the current Monitor workflow instead.
+  Fixed-window rows created by older releases remain readable through the
+  Python storage API. They have no tenant owner and are excluded from
+  `/api/data` and the UI; use the current Monitor workflow instead.
   Stored policies naming a non-Trace analysis unit also remain readable but
   require a new trace-based preview before execution.
 - **Logical-session comparisons are descriptive.** The optional Agent view

@@ -8,13 +8,11 @@ import verdict.dashboard.app as server_module
 from verdict.dashboard.app import (
     _CSP,
     _cluster_health,
-    _signal_provider,
     build_bundle,
     create_app,
 )
 from verdict.schema import (
     DimensionScore,
-    DriftDirection,
     DriftRun,
     DriftSignal,
     EvaluatorHealthRecord,
@@ -46,31 +44,65 @@ def _persist_drift_snapshot(storage, *signals, run_id=None, analysis_time=None):
     )
 
 
-def test_signal_provider_resolves_demo_alias():
-    assert _signal_provider("haiku", {"anthropic"}, {}) == "anthropic"
+def test_retired_drift_rows_do_not_change_current_dashboard_and_remain_stored(tmp_path):
+    import httpx
 
+    path = tmp_path / "retired-drift.db"
+    storage = SQLiteStorage(str(path))
+    for provider in ("anthropic", "openai"):
+        trace = Trace(
+            trace_id=f"{provider}-trace",
+            provider=provider,
+            request_model=f"{provider}-model",
+            prompt_redacted="Prompt",
+            response_redacted="Response",
+        )
+        storage.insert_trace(trace)
+        storage.insert_judgment(Judgment(
+            trace_id=trace.trace_id,
+            evaluator_provider="fake",
+            evaluator_fingerprint="current-judge",
+            expected_dimensions=["quality"],
+            judge_models=["judge-model"],
+            dimensions=[DimensionScore(name="quality", verdict=Verdict.PASS)],
+        ))
+    before = build_bundle(path)
+    signal = DriftSignal(
+        signal_id="retired-signal",
+        cluster_id="openai",
+        dimension="quality",
+        evaluator_fingerprint="retired-judge",
+    )
+    _persist_drift_snapshot(storage, signal)
+    storage.close()
 
-def test_signal_provider_rejects_demo_alias_when_provider_is_absent():
-    assert _signal_provider("haiku", {"openai"}, {}) is None
+    unscoped = build_bundle(path)
+    assert unscoped["evaluation"] == before["evaluation"]
+    assert unscoped["focusProvider"] == before["focusProvider"]
+    assert unscoped["haikuDim"] == before["haikuDim"]
 
+    async def request_data():
+        transport = httpx.ASGITransport(app=create_app(storage=f"sqlite:///{path}"))
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            return await client.get("/api/data")
 
-def test_signal_provider_prefers_factual_cluster_provider_over_demo_alias():
-    clusters = {"haiku": {"openai"}}
-    assert _signal_provider("haiku", {"anthropic", "openai"}, clusters) == "openai"
+    response = asyncio.run(request_data())
+    assert response.status_code == 200
+    after = response.json()
+    assert after["evaluation"] == before["evaluation"]
+    assert after["focusProvider"] == before["focusProvider"]
+    assert after["haikuDim"] == before["haikuDim"]
+    for legacy_key in ("driftSignals", "driftRun", "driftAnalysis"):
+        assert legacy_key not in after
+    assert "driftSignals" not in after["truncation"]["resources"]
+    assert "driftStatus" not in after["evaluation"]
+    assert "unattributedDriftSignals" not in after["evaluation"]
 
-
-def test_signal_provider_accepts_direct_provider_key():
-    assert _signal_provider("anthropic", {"anthropic", "openai"}, {}) == "anthropic"
-
-
-def test_signal_provider_accepts_single_provider_cluster():
-    clusters = {"billing": {"openai"}}
-    assert _signal_provider("billing", {"anthropic", "openai"}, clusters) == "openai"
-
-
-def test_signal_provider_rejects_mixed_provider_cluster():
-    clusters = {"billing": {"anthropic", "openai"}}
-    assert _signal_provider("billing", {"anthropic", "openai"}, clusters) is None
+    reopened = SQLiteStorage(str(path))
+    run, signals = reopened.get_latest_drift_run_snapshot("retired-judge")
+    assert run.signal_count == 1
+    assert [item.signal_id for item in signals] == ["retired-signal"]
+    reopened.close()
 
 
 def test_cluster_health_exposes_fragmentation_to_dashboard():
@@ -167,7 +199,7 @@ def test_dashboard_zero_counts_are_scoped_to_selected_tenant(tmp_path):
     assert "foreign-trace-canary" not in response.text
 
 
-def test_bundle_marks_unknown_cost_and_exposes_signal_examples(tmp_path):
+def test_bundle_marks_unknown_cost(tmp_path):
     path = tmp_path / "verdict.db"
     storage = SQLiteStorage(str(path))
     trace = Trace(
@@ -188,19 +220,12 @@ def test_bundle_marks_unknown_cost_and_exposes_signal_examples(tmp_path):
         judge_models=["judge-model"],
         dimensions=[DimensionScore(name="relevance", verdict=Verdict.FAIL)],
     ))
-    _persist_drift_snapshot(storage, DriftSignal(
-        cluster_id="support",
-        dimension="relevance",
-        evaluator_fingerprint="cost-test-evaluator",
-        example_trace_ids=[trace.trace_id],
-    ))
     storage.close()
 
     bundle = build_bundle(path)
 
     assert bundle["meta"]["totalCost"] is None
     assert bundle["meta"]["totalCostStatus"] == "unavailable"
-    assert bundle["driftSignals"][0]["exampleTraceIds"] == [trace.trace_id]
 
 
 def test_dashboard_api_preserves_captured_empty_content(tmp_path):
@@ -325,8 +350,6 @@ def test_dashboard_api_paginates_application_traces_with_deterministic_ties(tmp_
         "providers",
         "clusters",
         "dimensionOverall",
-        "driftSignals",
-        "driftAnalysis",
         "scoreCoverage",
     ):
         assert first.json()[field] == second.json()[field] == third.json()[field]
@@ -489,102 +512,6 @@ def test_trace_explorer_prioritizes_newest_traces_with_deterministic_ties(tmp_pa
     }
 
 
-def test_dashboard_reports_global_content_availability_without_claiming_readiness(
-    monkeypatch,
-    tmp_path,
-):
-    path = tmp_path / "content-readiness.db"
-    storage = SQLiteStorage(str(path))
-    analysis_time = datetime(2026, 8, 23, 12, tzinfo=timezone.utc)
-    monkeypatch.setattr(
-        server_module,
-        "_now_utc",
-        lambda: analysis_time,
-        raising=False,
-    )
-    for index in range(29):
-        storage.insert_trace(Trace(
-            trace_id=f"current-{index:02d}",
-            started_at=analysis_time - timedelta(hours=1),
-            prompt_redacted="current prompt",
-            response_redacted="current response",
-            tags={"verdict.workload": "agent"},
-        ))
-    for index in range(30):
-        storage.insert_trace(Trace(
-            trace_id=f"baseline-{index:02d}",
-            started_at=analysis_time - timedelta(days=2),
-            prompt_redacted="baseline prompt",
-            response_redacted="baseline response",
-            tags={"verdict.workload": "agent"},
-        ))
-    storage.insert_trace(Trace(
-        trace_id="current-metadata-only",
-        started_at=analysis_time - timedelta(hours=1),
-        tags={"verdict.workload": "agent"},
-    ))
-    storage.insert_trace(Trace(
-        trace_id="current-failed-with-content",
-        started_at=analysis_time - timedelta(hours=1),
-        prompt_redacted="captured prompt",
-        response_redacted="partial response",
-        error="provider failed",
-        tags={"verdict.workload": "agent"},
-    ))
-    storage.insert_trace(Trace(
-        trace_id="current-empty-error",
-        started_at=analysis_time - timedelta(hours=1),
-        prompt_redacted="captured prompt",
-        response_redacted="captured response",
-        error="",
-        tags={"verdict.workload": "agent"},
-    ))
-    python_whitespace = "".join(
-        chr(codepoint)
-        for codepoint in range(0x110000)
-        if chr(codepoint).isspace()
-    )
-    for index, whitespace in enumerate(
-        ("\t", "\n", "\N{NO-BREAK SPACE}", python_whitespace)
-    ):
-        storage.insert_trace(Trace(
-            trace_id=f"current-whitespace-only-{index}",
-            started_at=analysis_time - timedelta(hours=1),
-            prompt_redacted=whitespace,
-            response_redacted="captured response",
-            tags={"verdict.workload": "agent"},
-        ))
-    storage.insert_trace(Trace(
-        trace_id="current-judge-workload",
-        started_at=analysis_time - timedelta(hours=1),
-        prompt_redacted="judge prompt",
-        response_redacted="judge response",
-        tags={"verdict.workload": "judge"},
-    ))
-    storage.insert_trace(Trace(
-        trace_id="outside-window",
-        started_at=analysis_time - timedelta(days=9),
-        prompt_redacted="old prompt",
-        response_redacted="old response",
-        tags={"verdict.workload": "agent"},
-    ))
-    storage.close()
-
-    bundle = build_bundle(path)
-
-    assert bundle["meta"]["workload"] == "agent"
-    assert bundle["driftAnalysis"] == {
-        "runStatus": "no_completed_run",
-        "readinessStatus": "global_minimum_met",
-        "current": 30,
-        "baseline": 30,
-        "minimum": 30,
-        "currentHours": 24,
-        "baselineLagHours": 24,
-        "baselineDays": 7,
-    }
-
-
 def test_dashboard_uses_neutral_identity_for_mixed_or_secret_shaped_workloads(
     tmp_path,
 ):
@@ -604,68 +531,6 @@ def test_dashboard_uses_neutral_identity_for_mixed_or_secret_shaped_workloads(
 
     assert bundle["meta"]["workload"] is None
     assert "123-45-6789" not in str(bundle)
-
-
-def test_dashboard_distinguishes_completed_zero_signal_and_signaling_runs(
-    monkeypatch,
-    tmp_path,
-):
-    path = tmp_path / "drift-run-states.db"
-    storage = SQLiteStorage(str(path))
-    analysis_time = datetime(2026, 8, 23, 12, tzinfo=timezone.utc)
-    monkeypatch.setattr(
-        server_module,
-        "_now_utc",
-        lambda: analysis_time,
-        raising=False,
-    )
-    trace = Trace(
-        trace_id="evaluated-trace",
-        started_at=analysis_time - timedelta(hours=1),
-        prompt_redacted="safe prompt",
-        response_redacted="safe response",
-    )
-    storage.insert_trace(trace)
-    storage.insert_judgment(Judgment(
-        trace_id=trace.trace_id,
-        evaluator_provider="fake",
-        evaluator_fingerprint="run-state-evaluator",
-        expected_dimensions=["quality"],
-        judge_models=["judge-model"],
-        dimensions=[DimensionScore(name="quality", verdict=Verdict.PASS)],
-    ))
-    zero_run = DriftRun(
-        run_id="completed-zero",
-        analysis_time=analysis_time,
-        completed_at=analysis_time + timedelta(seconds=1),
-        evaluator_fingerprint="run-state-evaluator",
-        signal_count=0,
-    )
-    storage.replace_drift_run(zero_run, [])
-
-    zero_bundle = build_bundle(path)
-    assert zero_bundle["driftAnalysis"]["runStatus"] == "completed_no_signals"
-
-    signal = DriftSignal(
-        signal_id="completed-signal",
-        run_id="completed-with-signal",
-        detected_at=analysis_time + timedelta(hours=1),
-        cluster_id="support",
-        dimension="quality",
-        evaluator_fingerprint="run-state-evaluator",
-    )
-    signal_run = DriftRun(
-        run_id=signal.run_id,
-        analysis_time=signal.detected_at,
-        completed_at=signal.detected_at + timedelta(seconds=1),
-        evaluator_fingerprint="run-state-evaluator",
-        signal_count=1,
-    )
-    storage.replace_drift_run(signal_run, [signal])
-    storage.close()
-
-    signal_bundle = build_bundle(path)
-    assert signal_bundle["driftAnalysis"]["runStatus"] == "completed_with_signals"
 
 
 def test_dashboard_app_can_be_mounted_below_a_host_application(tmp_path):
@@ -950,8 +815,8 @@ def test_configured_dashboard_tenant_scopes_every_trace_derived_view(tmp_path):
         identity["fingerprint"]
         for identity in payload["evaluation"]["availableIdentities"]
     ] == ["a" * 64]
-    assert payload["driftSignals"] == []
-    assert payload["driftRun"] is None
+    assert "driftSignals" not in payload
+    assert "driftRun" not in payload
     assert "B_PRIVATE" not in json.dumps(payload)
 
 
@@ -1247,7 +1112,7 @@ def test_bundle_reports_every_high_cardinality_presentation_axis(tmp_path):
         "shown": 20,
         "limit": 20,
     }
-    assert resources["driftSignals"] == {"available": 60, "shown": 40, "limit": 40}
+    assert "driftSignals" not in resources
     assert resources["traceSamples"] == {"available": 100, "shown": 30, "limit": 30}
     assert bundle["meta"]["providers"] == 76
     assert bundle["meta"]["clusters"] == 100
@@ -1275,76 +1140,6 @@ def test_cluster_cap_excludes_unclustered_from_both_count_and_payload(tmp_path):
         "limit": 20,
     }
     assert bundle["truncation"]["applied"] is False
-
-
-def _bundle_with_drift_effects(tmp_path, effects):
-    path = tmp_path / "drift-priority.db"
-    storage = SQLiteStorage(str(path))
-    trace = Trace(cluster_id="support")
-    storage.insert_trace(trace)
-    storage.insert_judgment(Judgment(
-        trace_id=trace.trace_id,
-        evaluator_provider="fake",
-        evaluator_fingerprint="drift-priority-evaluator",
-        expected_dimensions=["quality"],
-        judge_models=["judge-model"],
-        dimensions=[DimensionScore(name="quality", verdict=Verdict.PASS)],
-    ))
-    signals = []
-    for index, (direction, effect) in enumerate(effects):
-        signals.append(DriftSignal(
-            signal_id=f"priority-signal-{index:03d}",
-            cluster_id="support",
-            dimension="quality",
-            direction=direction,
-            evaluator_fingerprint="drift-priority-evaluator",
-            effect_size_cliffs_delta=effect,
-        ))
-    _persist_drift_snapshot(storage, *signals)
-    storage.close()
-    return build_bundle(path)
-
-
-def test_drift_cap_keeps_strongest_improvements(tmp_path):
-    effects = [
-        (DriftDirection.IMPROVEMENT, index / 100)
-        for index in range(1, 61)
-    ]
-
-    bundle = _bundle_with_drift_effects(tmp_path, effects)
-    shown = [signal["cliffsDelta"] for signal in bundle["driftSignals"]]
-
-    assert len(shown) == 40
-    assert shown == [index / 100 for index in range(60, 20, -1)]
-
-
-def test_drift_cap_keeps_strongest_regressions(tmp_path):
-    effects = [
-        (DriftDirection.REGRESSION, -(index / 100))
-        for index in range(1, 61)
-    ]
-
-    bundle = _bundle_with_drift_effects(tmp_path, effects)
-    shown = [signal["cliffsDelta"] for signal in bundle["driftSignals"]]
-
-    assert shown == [-(index / 100) for index in range(60, 20, -1)]
-
-
-def test_drift_cap_uses_effect_magnitude_for_mixed_directions(tmp_path):
-    effects = [
-        (DriftDirection.REGRESSION, -(index / 100))
-        for index in range(1, 22)
-    ] + [
-        (DriftDirection.IMPROVEMENT, index / 100)
-        for index in range(1, 22)
-    ]
-
-    bundle = _bundle_with_drift_effects(tmp_path, effects)
-    shown = [signal["cliffsDelta"] for signal in bundle["driftSignals"]]
-
-    assert len(shown) == 40
-    assert all(abs(effect) >= 0.02 for effect in shown)
-    assert {-0.21, 0.21}.issubset(shown)
 
 
 def test_fragmented_single_provider_store_has_bounded_cluster_matrix(tmp_path):
@@ -1445,142 +1240,11 @@ def test_composite_presentation_limits_stay_below_redaction_budget(tmp_path):
     assert len(bundle["tsRows"]) == 100
     assert len(bundle["passrate"]) == 100
     assert len(bundle["haikuDim"]) == 100
-    assert len(bundle["driftSignals"]) == 40
+    assert "driftSignals" not in bundle
     assert len(bundle["samples"]) == 30
     # Keep headroom below the 10,000-node redaction boundary after including
     # bounded management application/model summaries.
     assert count_nodes(bundle) < 9500
-
-
-def test_bundle_filters_drift_by_selected_evaluator_and_excludes_historical_rows(tmp_path):
-    path = tmp_path / "mixed-drift-evaluators.db"
-    storage = SQLiteStorage(str(path))
-    for suffix, fingerprint, verdict in (
-        ("a", "fingerprint-a", Verdict.PASS),
-        ("b", "fingerprint-b", Verdict.FAIL),
-    ):
-        trace = Trace(
-            trace_id=f"trace-{suffix}",
-            started_at=datetime(2026, 8, 15, 10, tzinfo=timezone.utc),
-            provider="openai",
-            cluster_id="support",
-            prompt_redacted="Prompt",
-            response_redacted="Response",
-        )
-        storage.insert_trace(trace)
-        storage.insert_judgment(Judgment(
-            trace_id=trace.trace_id,
-            evaluator_provider="fake",
-            evaluator_config={"temperature": 0},
-            evaluator_fingerprint=fingerprint,
-            expected_dimensions=["quality"],
-            judge_models=[f"judge-{suffix}"],
-            dimensions=[DimensionScore(name="quality", verdict=verdict)],
-        ))
-        _persist_drift_snapshot(storage, DriftSignal(
-            signal_id=f"signal-{suffix}",
-            cluster_id="support",
-            dimension=f"quality-{suffix}",
-            evaluator_fingerprint=fingerprint,
-        ))
-    storage.insert_drift_signal(DriftSignal(
-        signal_id="historical-signal",
-        cluster_id="support",
-        dimension="historical",
-    ))
-    assert storage.prune_before("2026-08-16T00:00:00+00:00") == 2
-    storage.insert_trace(Trace(
-        trace_id="trace-after-multi-retention",
-        started_at=datetime(2026, 8, 16, 13, tzinfo=timezone.utc),
-        prompt_redacted="New prompt",
-        response_redacted="New response",
-    ))
-    storage.close()
-
-    ambiguous = build_bundle(path)
-    assert ambiguous["evaluation"]["status"] == "selection_required"
-    assert ambiguous["evaluation"]["driftStatus"] == "selection_required"
-    assert ambiguous["driftAnalysis"]["runStatus"] == "selection_required"
-    assert ambiguous["driftSignals"] == []
-    assert all(
-        identity["complete"] is False
-        for identity in ambiguous["evaluation"]["availableIdentities"]
-    )
-
-    evaluator_a = next(
-        identity for identity in ambiguous["evaluation"]["availableIdentities"]
-        if identity["fingerprint"] == "fingerprint-a"
-    )
-    selected = build_bundle(path, evaluator_id=evaluator_a["id"])
-    assert [signal["id"] for signal in selected["driftSignals"]] == ["signal-a"]
-    assert selected["evaluation"]["driftStatus"] == "selected"
-    assert selected["evaluation"]["unattributedDriftSignals"] == 1
-
-
-def test_bundle_uses_latest_completed_drift_run_even_when_it_has_zero_signals(tmp_path):
-    path = tmp_path / "latest-zero-drift.db"
-    storage = SQLiteStorage(str(path))
-    trace = Trace(
-        trace_id="trace-latest-run",
-        started_at=datetime(2026, 8, 15, 10, tzinfo=timezone.utc),
-        provider="openai",
-        cluster_id="support",
-        prompt_redacted="Prompt",
-        response_redacted="Response",
-    )
-    storage.insert_trace(trace)
-    storage.insert_judgment(Judgment(
-        trace_id=trace.trace_id,
-        evaluator_provider="fake",
-        evaluator_config={"temperature": 0},
-        evaluator_fingerprint="latest-run-evaluator",
-        expected_dimensions=["quality"],
-        judge_models=["judge"],
-        dimensions=[DimensionScore(name="quality", verdict=Verdict.PASS)],
-    ))
-    historical_signal = DriftSignal(
-        signal_id="historical-drift",
-        detected_at=datetime(2026, 8, 15, 12, tzinfo=timezone.utc),
-        cluster_id="support",
-        dimension="quality",
-        evaluator_fingerprint="latest-run-evaluator",
-    )
-    _persist_drift_snapshot(
-        storage,
-        historical_signal,
-        run_id="historical-run",
-        analysis_time=historical_signal.detected_at,
-    )
-    latest_time = datetime(2026, 8, 16, 12, tzinfo=timezone.utc)
-    storage.replace_drift_run(
-        DriftRun(
-            run_id="latest-zero-run",
-            analysis_time=latest_time,
-            completed_at=latest_time + timedelta(minutes=1),
-            evaluator_fingerprint="latest-run-evaluator",
-            signal_count=0,
-        ),
-        [],
-    )
-    assert storage.prune_before("2026-08-16T00:00:00+00:00") == 1
-    storage.insert_trace(Trace(
-        trace_id="trace-after-retention",
-        started_at=datetime(2026, 8, 16, 13, tzinfo=timezone.utc),
-        prompt_redacted="New prompt",
-        response_redacted="New response",
-    ))
-    storage.close()
-
-    bundle = build_bundle(path)
-
-    assert bundle["driftSignals"] == []
-    assert bundle["driftRun"]["id"] == "latest-zero-run"
-    assert bundle["driftRun"]["signalCount"] == 0
-    assert bundle["evaluation"]["driftStatus"] == "selected"
-    assert bundle["evaluation"]["selectedIdentity"]["complete"] is False
-    assert bundle["evaluation"]["selectedIdentity"]["fingerprint"] == (
-        "latest-run-evaluator"
-    )
 
 
 def test_bundle_builds_independent_cluster_pass_rate_series(tmp_path):
@@ -2233,144 +1897,8 @@ def test_bundle_supports_database_without_historical_drift_table(tmp_path):
 
     bundle = build_bundle(path)
 
-    assert bundle["driftSignals"] == []
-    assert bundle["evaluation"]["driftStatus"] == "empty"
-    assert bundle["evaluation"]["unattributedDriftSignals"] == 0
-
-
-def test_bundle_preserves_nullable_historical_drift_statistics(tmp_path):
-    path = tmp_path / "nullable-drift.db"
-    storage = SQLiteStorage(str(path))
-    trace = Trace(
-        provider="openai",
-        cluster_id="support",
-        prompt_redacted="Prompt",
-    )
-    storage.insert_trace(trace)
-    storage.insert_judgment(Judgment(
-        trace_id=trace.trace_id,
-        evaluator_provider="fake",
-        evaluator_fingerprint="nullable-evaluator",
-        evaluator_config={"temperature": 0},
-        expected_dimensions=["quality"],
-        judge_models=["judge"],
-        dimensions=[DimensionScore(name="quality", verdict=Verdict.PASS)],
-    ))
-    _persist_drift_snapshot(storage, DriftSignal(
-        signal_id="legacy-null",
-        cluster_id="support",
-        dimension="quality",
-        evaluator_fingerprint="nullable-evaluator",
-    ))
-    storage.close()
-    connection = sqlite3.connect(path)
-    try:
-        connection.execute(
-            "UPDATE drift_signals SET statistic_value=NULL, "
-            "effect_size_cliffs_delta=NULL, effect_size_cohens_d=NULL "
-            "WHERE signal_id='legacy-null'"
-        )
-        connection.commit()
-    finally:
-        connection.close()
-
-    signal = build_bundle(path)["driftSignals"][0]
-
-    assert signal["stat"] is None
-    assert signal["cliffsDelta"] is None
-    assert signal["cohensD"] is None
-
-
-def test_dashboard_bounds_legacy_drift_signal_evidence_lists(tmp_path):
-    path = tmp_path / "bounded-signal-evidence.db"
-    storage = SQLiteStorage(str(path))
-    storage.insert_trace(Trace(
-        trace_id="trace-1",
-        provider="openai",
-        prompt_redacted="prompt",
-        response_redacted="response",
-    ))
-    storage.insert_judgment(Judgment(
-        trace_id="trace-1",
-        evaluator_provider="fake",
-        evaluator_fingerprint="bounded-evaluator",
-        expected_dimensions=["relevance"],
-        judge_models=["judge"],
-        dimensions=[DimensionScore(name="relevance", verdict=Verdict.FAIL)],
-    ))
-    _persist_drift_snapshot(storage, DriftSignal(
-        signal_id="bounded-signal",
-        cluster_id="support",
-        dimension="relevance",
-        evaluator_fingerprint="bounded-evaluator",
-    ))
-    storage.close()
-
-    connection = sqlite3.connect(path)
-    try:
-        connection.execute(
-            """UPDATE drift_signals
-                  SET contributing_layers_json=?, example_trace_ids_json=?,
-                      recommended_action=?
-                WHERE signal_id='bounded-signal'""",
-            (
-                json.dumps([None, {}, "valid", *[
-                    f"layer-{index}" for index in range(30)
-                ]]),
-                json.dumps([None, {}, "trace-1", *[
-                    f"trace-{index}" for index in range(30)
-                ]]),
-                "x" * 5000,
-            ),
-        )
-        connection.commit()
-    finally:
-        connection.close()
-
-    signal = build_bundle(path)["driftSignals"][0]
-
-    assert signal["layers"] == [
-        "valid", *[f"layer-{index}" for index in range(11)]
-    ]
-    assert signal["exampleTraceIds"] == [
-        "trace-1", *[f"trace-{index}" for index in range(4)]
-    ]
-    assert len(signal["action"]) == 1000
-
-
-def test_bundle_preserves_unclear_coverage_statistic_precision(tmp_path):
-    path = tmp_path / "coverage-drift.db"
-    storage = SQLiteStorage(str(path))
-    trace = Trace(provider="openai", cluster_id="support", prompt_redacted="Prompt")
-    storage.insert_trace(trace)
-    storage.insert_judgment(Judgment(
-        trace_id=trace.trace_id,
-        evaluator_provider="fake",
-        evaluator_fingerprint="coverage-evaluator",
-        evaluator_config={"temperature": 0},
-        expected_dimensions=["quality"],
-        judge_models=["judge"],
-        dimensions=[DimensionScore(name="quality", verdict=Verdict.PASS)],
-    ))
-    coverage_signals = [
-        DriftSignal(
-            signal_id=signal_id,
-            cluster_id="support",
-            dimension="quality",
-            evaluator_fingerprint="coverage-evaluator",
-            statistic_name="unclear_rate_increase",
-            statistic_value=statistic,
-        )
-        for signal_id, statistic in (("coverage-42", 0.42), ("coverage-37", 0.37))
-    ]
-    _persist_drift_snapshot(storage, *coverage_signals)
-    storage.close()
-
-    statistics = {
-        signal["id"]: signal["stat"] for signal in build_bundle(path)["driftSignals"]
-    }
-
-    assert statistics == {"coverage-42": 0.42, "coverage-37": 0.37}
+    assert bundle["meta"]["totalTraces"] == 1
+    assert "driftSignals" not in bundle
 
 
 def test_nameless_historical_dimension_remains_unclear_in_trace_summary(tmp_path):
@@ -2424,124 +1952,6 @@ def test_nameless_historical_dimension_remains_unclear_in_trace_summary(tmp_path
     assert sample["judgment"]["dims"] == [{
         "name": "quality", "verdict": "pass", "reasoning": "",
     }]
-
-
-def test_bundle_treats_malformed_historical_drift_numbers_as_unavailable(tmp_path):
-    path = tmp_path / "malformed-drift.db"
-    storage = SQLiteStorage(str(path))
-    trace = Trace(provider="openai", cluster_id="support", prompt_redacted="Prompt")
-    storage.insert_trace(trace)
-    storage.insert_judgment(Judgment(
-        trace_id=trace.trace_id,
-        evaluator_provider="fake",
-        evaluator_fingerprint="malformed-number-evaluator",
-        evaluator_config={"temperature": 0},
-        expected_dimensions=["quality"],
-        judge_models=["judge"],
-        dimensions=[DimensionScore(name="quality", verdict=Verdict.PASS)],
-    ))
-    _persist_drift_snapshot(storage, DriftSignal(
-        signal_id="legacy-malformed-number",
-        cluster_id="support",
-        dimension="quality",
-        evaluator_fingerprint="malformed-number-evaluator",
-    ))
-    storage.close()
-    connection = sqlite3.connect(path)
-    try:
-        connection.execute(
-            "UPDATE drift_signals SET statistic_value='not-a-number', "
-            "effect_size_cliffs_delta='not-a-number', "
-            "effect_size_cohens_d='not-a-number' "
-            "WHERE signal_id='legacy-malformed-number'"
-        )
-        connection.commit()
-    finally:
-        connection.close()
-
-    signal = build_bundle(path)["driftSignals"][0]
-
-    assert signal["stat"] is None
-    assert signal["cliffsDelta"] is None
-    assert signal["cohensD"] is None
-
-
-def test_bundle_excludes_legacy_drift_table_missing_run_metadata(tmp_path):
-    path = tmp_path / "pre-effect-columns.db"
-    storage = SQLiteStorage(str(path))
-    trace = Trace(
-        provider="openai",
-        cluster_id="support",
-        prompt_redacted="Prompt",
-    )
-    storage.insert_trace(trace)
-    storage.insert_judgment(Judgment(
-        trace_id=trace.trace_id,
-        evaluator_provider="fake",
-        evaluator_fingerprint="legacy-effects-evaluator",
-        evaluator_config={"temperature": 0},
-        expected_dimensions=["quality"],
-        judge_models=["judge"],
-        dimensions=[DimensionScore(name="quality", verdict=Verdict.PASS)],
-    ))
-    storage.close()
-    connection = sqlite3.connect(path)
-    try:
-        connection.execute("DROP TABLE drift_signals")
-        connection.executescript(
-            """
-            CREATE TABLE drift_signals (
-                signal_id TEXT PRIMARY KEY,
-                detected_at TEXT NOT NULL,
-                cluster_id TEXT,
-                dimension TEXT,
-                direction TEXT,
-                evaluator_fingerprint TEXT,
-                statistic_name TEXT,
-                statistic_value REAL,
-                p_value REAL,
-                p_value_adjusted REAL,
-                effect_size_cohens_d REAL,
-                sample_size_current INTEGER,
-                sample_size_baseline INTEGER,
-                contributing_layers_json TEXT,
-                example_trace_ids_json TEXT,
-                recommended_action TEXT
-            );
-            """
-        )
-        connection.execute(
-            """INSERT INTO drift_signals (
-                signal_id, detected_at, cluster_id, dimension, direction,
-                evaluator_fingerprint, statistic_name, statistic_value,
-                p_value, p_value_adjusted, effect_size_cohens_d,
-                sample_size_current, sample_size_baseline
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                "legacy-effects",
-                "2026-08-01T00:00:00+00:00",
-                "support",
-                "quality",
-                "regression",
-                "legacy-effects-evaluator",
-                "mann_whitney_u",
-                8.0,
-                0.01,
-                0.02,
-                -0.4,
-                30,
-                30,
-            ),
-        )
-        connection.commit()
-    finally:
-        connection.close()
-
-    bundle = build_bundle(path)
-
-    assert bundle["driftSignals"] == []
-    assert bundle["driftRun"] is None
-    assert bundle["evaluation"]["driftStatus"] == "historical_without_run"
 
 
 def test_bundle_normalizes_mixed_naive_and_aware_historical_timestamps(tmp_path):
@@ -2673,7 +2083,7 @@ def test_bundle_handles_historical_database_without_judgments_table(tmp_path):
     assert bundle["evaluation"]["status"] == "empty"
 
 
-def test_mixed_provider_lead_signal_falls_back_to_real_chart_series(tmp_path):
+def test_mixed_provider_chart_selects_real_series_despite_retired_signal(tmp_path):
     path = tmp_path / "mixed-provider-focus.db"
     storage = SQLiteStorage(str(path))
     started = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -2704,7 +2114,7 @@ def test_mixed_provider_lead_signal_falls_back_to_real_chart_series(tmp_path):
 
     bundle = build_bundle(path)
 
-    assert bundle["driftSignals"][0]["provider"] == ""
+    assert "driftSignals" not in bundle
     assert bundle["focusProvider"] == "anthropic"
     assert bundle["focusProviderLabel"] == "anthropic"
     assert any(row["relevance"] == 100.0 for row in bundle["haikuDim"])
@@ -2816,33 +2226,6 @@ def test_dashboard_reads_pre_cluster_schema_without_503_or_mutating_it(tmp_path)
     assert path.read_bytes() == before
 
 
-def test_fisher_odds_ratio_keeps_small_nonzero_value(tmp_path):
-    path = tmp_path / "odds-ratio.db"
-    storage = SQLiteStorage(str(path))
-    trace = Trace(provider="openai", cluster_id="support")
-    storage.insert_trace(trace)
-    storage.insert_judgment(Judgment(
-        trace_id=trace.trace_id,
-        evaluator_provider="fake",
-        evaluator_fingerprint="evaluator",
-        evaluator_config={"temperature": 0},
-        expected_dimensions=["quality"],
-        judge_models=["judge"],
-        dimensions=[DimensionScore(name="quality", verdict=Verdict.FAIL)],
-    ))
-    _persist_drift_snapshot(storage, DriftSignal(
-        cluster_id="support",
-        dimension="quality",
-        evaluator_fingerprint="evaluator",
-        statistic_name="fisher_exact",
-        statistic_value=0.04,
-    ))
-    storage.close()
-
-    bundle = build_bundle(path)
-    assert bundle["driftSignals"][0]["stat"] == 0.04
-
-
 def test_custom_provider_late_trace_is_selected_using_chart_safe_key(tmp_path):
     path = tmp_path / "custom-provider-late.db"
     storage = SQLiteStorage(str(path))
@@ -2881,7 +2264,7 @@ def test_custom_provider_late_trace_is_selected_using_chart_safe_key(tmp_path):
 
     bundle = build_bundle(path)
 
-    assert bundle["driftSignals"][0]["provider"].startswith("provider_")
+    assert "driftSignals" not in bundle
     assert "late-custom" in {sample["trace_id"] for sample in bundle["samples"]}
 
 

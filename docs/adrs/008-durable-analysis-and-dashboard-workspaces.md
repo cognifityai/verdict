@@ -68,11 +68,11 @@ present those states without treating missing evidence as success or failure.
   Monitor, Report, and Settings. Report summarizes application calls separately
   from evaluator traffic and emits aggregate-only management exports. Monitor
   contains current cohort status, historical comparisons, optional segments,
-  schedules, and read-only legacy history.
+  schedules.
 - Fixed-window evaluation signals created by earlier releases remain readable
-  for audit and trace navigation. They are not current status, do not contribute
-  to Overview or navigation alert counts, and are not produced by the current
-  evaluation pipeline.
+  through the Python storage API. They are excluded from `/api/data` and the
+  UI because their rows have no tenant owner. The current pipeline does not
+  produce them.
 - A prospective cohort distinguishes traffic collection from waiting for
   selected-evaluator results until a persisted comparison completes.
 - Every Monitor cohort-summary cell retains the first bounded true and false
@@ -100,8 +100,12 @@ receiver must honor the idempotency key for end-to-end deduplication.
 - Existing public constructors remain backward compatible. Trace appends
   optional `service_name` and `environment` fields after its published
   positional fields; the other constructors are unchanged.
-- Existing dashboard response fields remain available while explicit status and
-  coverage fields are added.
+- The dashboard `/api/data` response excludes the fixed-window fields
+  `driftSignals`, `driftRun`, and `driftAnalysis`; the nested
+  `evaluation.driftStatus` and `evaluation.unattributedDriftSignals`; and
+  `truncation.resources.driftSignals`. Monitor owns current drift status and
+  history. Stored fixed-window records remain readable through the Python
+  storage API.
 - Monitor snapshot JSON adds evaluator-finalization state. PostgreSQL schema
   initialization also adds a generated snapshot write sequence to resolve
   timestamp ties deterministically; existing rows are backfilled automatically.

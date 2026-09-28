@@ -126,7 +126,8 @@ test("report presents one consistent application-only executive summary", () => 
   assert.equal(report.models.rows[1].provider, "custom-provider");
   assert.match(report.attention.join(" "), /1 failed application call/);
   assert.match(report.attention.join(" "), /Select one evaluator/);
-  assert.match(report.attention.join(" "), /2 signals in legacy/);
+  assert.doesNotMatch(report.attention.join(" "), /legacy|fixed-window/i);
+  assert.equal(report.quality.legacyChange, undefined);
 });
 
 test("chart and exports retain dates while excluding sensitive trace fields", () => {
@@ -143,6 +144,7 @@ test("chart and exports retain dates while excluding sensitive trace fields", ()
   assert.match(exportedHtml, /Model performance and throughput/);
   assert.match(exportedHtml, /Tokens processed/);
   assert.match(exportedHtml, /560 uncached input · 2,240 cached input/);
+  assert.doesNotMatch(exportedHtml, /legacy|fixed-window/i);
   assert.doesNotMatch(exportedHtml, /simulator|type="range"/i);
   assert.match(exportedHtml,
     /<section><h2>LLM request volume[\s\S]*<\/section><section><h2>Report scope/);

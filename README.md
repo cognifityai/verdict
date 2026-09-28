@@ -82,9 +82,9 @@ previously missing text; non-text-only requests remain unavailable.
 The findings-first dashboard has six top-level workspaces: **Overview**,
 **Explore**, **Evaluate**, **Monitor**, **Report**, and **Settings**. Overview
 contains Summary, Reliability, Performance, and Behavior. Monitor contains current
-cohort status, historical comparisons, optional segments, and schedules. Legacy
-fixed-window rows have no tenant owner, so the tenant-scoped dashboard does not
-display them. Cluster and
+cohort status, historical comparisons, optional segments, and schedules. Old
+fixed-window drift rows remain readable through the Python storage API, but
+do not appear in the dashboard. Cluster and
 monitor activation are explicit transitions; a stored historical candidate is
 shown separately from the active prospective monitor and survives page reload.
 Report presents application-only request, tokens processed, latency, cost,
@@ -538,8 +538,8 @@ totals, reports, trace/judgment samples, Agent Run reads, setup/import,
 Evaluator Lab, clusters, Monitor, and control actions. Browser `tenant=`
 parameters are ignored. The reserved default remains `__verdict_local__` and
 includes historical tenantless traces; changing the selection does not move or
-rewrite existing rows. Legacy fixed-window drift rows are hidden because their
-schema does not record a tenant; use the current tenant-scoped Monitor workflow.
+rewrite existing rows. Legacy fixed-window drift rows have no tenant owner and
+do not appear in `/api/data` or the UI; use the current tenant-scoped Monitor workflow.
 
 An authenticated FastAPI host may set
 `request.state.verdict_registry_tenant` to choose the authorized tenant for
@@ -833,8 +833,9 @@ source. See [`ADR-013`](docs/adrs/013-stable-dependent-package-read-port.md).
   imported later are excluded from that bucket. Historical and prospective
   comparisons use the same result contract, all traffic is the default, and
   provider/model or reviewed clusters are optional facets. Existing
-  fixed-window `DriftRun` and `DriftSignal` rows are read-only legacy records;
-  the tenant-scoped dashboard suppresses them because they have no tenant owner.
+  fixed-window `DriftRun` and `DriftSignal` rows remain readable through the
+  Python storage API. They are excluded from `/api/data` and the dashboard
+  because they have no tenant owner. Old drift bookmarks open Monitor History.
   Each Monitor cohort-summary metric freezes the first five true and first five
   false unit identities in cohort order. Those summaries are the single stored
   owner of the evidence IDs; the dashboard selects the relevant side for an
@@ -888,11 +889,10 @@ source. See [`ADR-013`](docs/adrs/013-stable-dependent-package-read-port.md).
 - Dashboard responses keep full-store totals but bound presentation data to the
   latest 100 observed chart points, 8 providers, 20 usable intent clusters,
   12 dimensions, 20 models per displayed provider, 20 evaluator identities,
-  40 drift signals, and one 30-row page of non-judge application traces. Trace
+  and one 30-row page of non-judge application traces. Trace
   Explorer can page through the remaining application traces. The non-intent
   `unclustered` bucket
-  is outside the cluster chart and its cap counts. Drift-signal truncation keeps
-  the largest absolute effect sizes. A visible banner reports every capped
+  is outside the cluster chart and its cap counts. A visible banner reports every capped
   count; a bundle that still exceeds the redaction safety budget returns an
   explicit service error instead of an empty successful dashboard.
 
