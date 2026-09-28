@@ -18,6 +18,10 @@ Usage (offline, FakeProvider judge — runs without API keys):
 Usage (live judge):
     verdict-pipeline --storage sqlite:///./verdict.db \\
         --judge-provider anthropic --judge-model claude-haiku-4-5
+
+Usage (Jev judge):
+    verdict-pipeline --storage sqlite:///./verdict.db \\
+        --judge-provider jev --judge-model jev-1.13.0
 """
 
 from __future__ import annotations
@@ -50,7 +54,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--judge-provider",
         default="fake",
-        choices=["fake", "anthropic", "openai", "google"],
+        choices=["fake", "anthropic", "openai", "google", "jev"],
         help="Provider for the judge LLM.",
     )
     p.add_argument(
@@ -205,6 +209,24 @@ def _exclude_internal_workloads(traces):
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.capture_judge_telemetry and args.judge_provider == "jev":
+        print("ERROR: Jev judge telemetry capture is unavailable")
+        return 2
+    if args.judge_provider == "jev":
+        if args.judge_model != "jev-1.13.0":
+            print("ERROR: unsupported Jev model")
+            return 2
+        if not os.environ.get("TYPESAFE_API_KEY"):
+            print("ERROR: TYPESAFE_API_KEY is not configured")
+            return 2
+        try:
+            import typesafe_sdk
+
+            if not hasattr(typesafe_sdk, "TypeSafeClient"):
+                raise ImportError
+        except ImportError:
+            print("ERROR: install cognifity-verdict-eval[jev]")
+            return 2
     if not args.capture_judge_telemetry:
         return _run(args)
 
@@ -476,33 +498,38 @@ def _run(args) -> int:
     from verdict_eval.judge import DEFAULT_RUBRIC, Judge
     from verdict_eval.providers import FakeProvider
 
-    if args.judge_provider == "fake":
-        # Offline path: synthesize a judge that scores every dimension PASS.
-        # Useful for exercising the pipeline before live keys are wired.
-        import json
+    if args.judge_provider == "jev":
+        from verdict_eval.jev_judge import JevJudge
 
-        provider = FakeProvider(
-            json.dumps(
-                {
-                    d.name: {"reasoning": "fake-judge default PASS", "verdict": "PASS"}
-                    for d in DEFAULT_RUBRIC.dimensions
-                }
-            )
-        )
-    elif args.judge_provider == "anthropic":
-        from verdict_eval.providers import AnthropicAdapter
-
-        provider = AnthropicAdapter()
-    elif args.judge_provider == "openai":
-        from verdict_eval.providers import OpenAIAdapter
-
-        provider = OpenAIAdapter()
+        judge = JevJudge(model=args.judge_model, rubric=DEFAULT_RUBRIC)
     else:
-        from verdict_eval.providers import GoogleAdapter
+        if args.judge_provider == "fake":
+            # Offline path: synthesize a judge that scores every dimension PASS.
+            # Useful for exercising the pipeline before live keys are wired.
+            import json
 
-        provider = GoogleAdapter()
+            provider = FakeProvider(
+                json.dumps(
+                    {
+                        d.name: {"reasoning": "fake-judge default PASS", "verdict": "PASS"}
+                        for d in DEFAULT_RUBRIC.dimensions
+                    }
+                )
+            )
+        elif args.judge_provider == "anthropic":
+            from verdict_eval.providers import AnthropicAdapter
 
-    judge = Judge(provider=provider, model=args.judge_model, rubric=DEFAULT_RUBRIC)
+            provider = AnthropicAdapter()
+        elif args.judge_provider == "openai":
+            from verdict_eval.providers import OpenAIAdapter
+
+            provider = OpenAIAdapter()
+        else:
+            from verdict_eval.providers import GoogleAdapter
+
+            provider = GoogleAdapter()
+
+        judge = Judge(provider=provider, model=args.judge_model, rubric=DEFAULT_RUBRIC)
     current_evaluator = judge.evaluator_identity(context=None)
 
     # A fixed human-labeled sentinel set is the independent anchor for judge

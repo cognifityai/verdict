@@ -32,6 +32,22 @@ Dimensions marked `requires_context=True` can be skipped when a caller enables
 `skip_context_dependent_when_missing`. If every dimension requires unavailable
 context, evaluation fails before a provider call.
 
+## Jev judge
+
+Install `cognifity-verdict-eval[jev]` and set `TYPESAFE_API_KEY` in the process
+running the judge. In Evaluator Lab, select Jev, preview the planned calls, and
+approve the external transfer. The equivalent CLI choice is
+`verdict-pipeline --judge-provider jev --judge-model jev-1.13.0`; its optional
+judge-telemetry capture flag is unavailable for Jev.
+
+Jev receives redacted request and response text as a structured state and one
+Choice question per rubric dimension. It returns PASS, FAIL, or UNCLEAR without
+explanatory reasoning. The requested model and exact dimension set are checked
+before a result is stored. Evaluator fingerprints separate Jev from other
+judges and prompt/rubric versions. Calibrate it on held-out human labels for
+the intended workload before relying on its quality scores. Monitor's cohort
+comparison and Fisher test remain unchanged.
+
 ## Clustering and semantic analysis
 
 The versioned registry requires an explicit `verdict-cluster fit --strategy`

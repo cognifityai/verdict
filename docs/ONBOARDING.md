@@ -8,8 +8,8 @@ provider key (bring your own — Verdict never ships one).
 
 - **Python 3.10+.** On macOS the system `/usr/bin/python3` is often 3.9 and
   will fail — use `brew install python@3.12`, `pyenv`, or `uv`.
-- Optional: a provider key (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or
-  `GOOGLE_API_KEY`) if you want the judge / quality-drift layer. Everything
+- Optional: a provider key (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
+  `GOOGLE_API_KEY`, or `TYPESAFE_API_KEY` for Jev) if you want the judge / quality-drift layer. Everything
   else works without one.
 
 ## 1. Install (one chain covers all three packages)
@@ -589,6 +589,11 @@ bucket against the frozen reference.
 
 Evaluator Lab shows NOT_EVALUABLE reasons before any model call, reads provider
 keys only from environment variables, and requires an explicit egress approval.
+For Jev, install `cognifity-verdict-eval[jev]`, set `TYPESAFE_API_KEY` in the
+dashboard process, select **Jev** and preview before running. The model is fixed
+to the tested `jev-1.13.0` version. Jev returns labels without explanations;
+Verdict does not estimate Jev charges. The existing Monitor statistics remain
+unchanged. Jev supports final Turn text but not the recorded tool-count option.
 Select provider Trace (the backward-compatible default) for an individual
 model exchange, or Agent Turn for a completed final output. The Turn path
 requires present, untruncated redacted request/response text and does not
@@ -676,6 +681,8 @@ Add `--capture-judge-telemetry` only when you intentionally want judge model
 cost/latency traces written to the same store. Those traces are tagged as the
 `judge` workload and excluded from future drift inputs so the evaluator does not
 become part of the workload it evaluates. The flag is off by default.
+This flag is unavailable for Jev because its Choice API is not captured by the
+supported provider instrumentors.
 
 For PostgreSQL, install `cognifity-verdict[dashboard,postgres]==0.1.0a22` and pass
 the same protected storage URL used by the SDK. Evidence tables use Verdict's
