@@ -6,6 +6,8 @@ the product is refined.
 
 ## [Unreleased]
 
+## [0.1.0a22] - 2026-09-28
+
 ### Added
 
 - Monitor comparisons now lead with a drift-analysis result instead of the
@@ -679,7 +681,8 @@ the product is refined.
   retain content must explicitly select metadata-only capture. Redaction remains
   best-effort rather than a compliance control.
 
-[Unreleased]: https://github.com/cognifityai/verdict/compare/v0.1.0a21...HEAD
+[Unreleased]: https://github.com/cognifityai/verdict/compare/v0.1.0a22...HEAD
+[0.1.0a22]: https://github.com/cognifityai/verdict/compare/v0.1.0a21...v0.1.0a22
 [0.1.0a21]: https://github.com/cognifityai/verdict/compare/v0.1.0a20...v0.1.0a21
 [0.1.0a20]: https://github.com/cognifityai/verdict/compare/v0.1.0a19...v0.1.0a20
 [0.1.0a19]: https://github.com/cognifityai/verdict/compare/v0.1.0a18...v0.1.0a19
