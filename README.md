@@ -835,7 +835,9 @@ source. See [`ADR-013`](docs/adrs/013-stable-dependent-package-read-port.md).
   provider/model or reviewed clusters are optional facets. Existing
   fixed-window `DriftRun` and `DriftSignal` rows remain readable through the
   Python storage API. They are excluded from `/api/data` and the dashboard
-  because they have no tenant owner. Old drift bookmarks open Monitor History.
+  because they have no tenant owner. Old drift and Monitor Signals bookmarks
+  open Monitor History, except drift-cluster bookmarks, which open Monitor
+  Segments.
   Each Monitor cohort-summary metric freezes the first five true and first five
   false unit identities in cohort order. Those summaries are the single stored
   owner of the evidence IDs; the dashboard selects the relevant side for an
