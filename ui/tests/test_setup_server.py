@@ -366,7 +366,7 @@ def test_setup_imports_a_bounded_historical_directory(tmp_path):
     response = asyncio.run(setup())
     assert response.status_code == 200
     assert response.json()["summary"] == {
-        "files": 2, "seen": 2, "stored": 2, "skipped": 0, "skipReasons": {},
+        "files": 2, "seen": 2, "stored": 2, "skipped": 0, "skipReasons": {}, "sessionsStored": 2,
     }
     storage = SQLiteStorage(str(database))
     assert len(storage.list_traces(limit=10)) == 2

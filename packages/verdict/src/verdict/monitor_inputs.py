@@ -31,11 +31,30 @@ class MonitorProjectionPending(ValueError):
 
 
 def select_monitor_evaluator(
-    storage, *, tenant_id: str, evaluator_fingerprint: str | None
+    storage, *, tenant_id: str, evaluator_fingerprint: str | None, analysis_unit: str = "trace", response_aggregation: str | None = None
 ) -> tuple[str | None, tuple[str, ...]]:
     """Resolve one stored evaluator identity for a new monitor policy."""
     if evaluator_fingerprint in (None, ""):
         return None, ()
+    if analysis_unit == "conversation":
+        from verdict.sessions import select_assessments
+        rows = select_assessments(storage.list_session_assessments(tenant_id, evaluator_fingerprint=evaluator_fingerprint, limit=5001))
+        if len(rows) > 5000 or not rows:
+            raise ValueError("selected conversation evaluator is unavailable or exceeds limit")
+        if any(a["rubric"]["target"] == "response" for a in rows):
+            if response_aggregation != "all_completed_replies_v1":
+                raise ValueError("conversation monitor requires a whole-conversation evaluator or explicit response aggregation")
+            if any(a["rubric"].get("profile") or any(d["type"] != "binary" for d in a["rubric"]["dimensions"]) for a in rows):
+                raise ValueError("response monitoring supports binary-only rubrics")
+        elif response_aggregation is not None:
+            raise ValueError("response aggregation requires a response rubric")
+        definitions = set()
+        for a in rows:
+            r = a["rubric"]
+            definitions.add(tuple([*r["catalog"], "overall", "unsafe"] if r.get("profile") else [d["name"] for d in r["dimensions"]]))
+        if len(definitions) != 1:
+            raise ValueError("selected evaluator dimensions are inconsistent")
+        return evaluator_fingerprint, definitions.pop()
     judgments = _evaluator_judgments(
         storage,
         tenant_id=tenant_id,
@@ -83,6 +102,19 @@ def _evaluator_judgments(
 def load_monitor_units(storage, policy: MonitorPolicy, *, tenant_id: str):
     """Load one bounded, evaluator- and grouping-aware monitor input set."""
     validate_monitor_analysis_unit(policy)
+    if policy.analysis_unit == "conversation":
+        from verdict.sessions import session_monitor_units
+        if policy.evaluator_fingerprint:
+            _, dimensions = select_monitor_evaluator(storage,tenant_id=tenant_id,evaluator_fingerprint=policy.evaluator_fingerprint,analysis_unit="conversation",response_aggregation=policy.response_aggregation)
+            if dimensions != policy.evaluator_dimensions:
+                raise ValueError("conversation evaluator dimensions changed")
+        elif policy.response_aggregation:
+            raise ValueError("response aggregation requires an evaluator")
+        sessions = storage.list_sessions(tenant_id, limit=5001)
+        assessments = storage.list_session_assessments(tenant_id, evaluator_fingerprint=policy.evaluator_fingerprint, limit=5001) if policy.evaluator_fingerprint else []
+        if len(sessions) > 5000 or len(assessments) > 5000:
+            raise ValueError("conversation monitor exceeds bounded input limit")
+        return session_monitor_units(sessions, assessments, policy)[0]
     traces = storage.list_traces(
         tenant_id=tenant_id, limit=MAX_MONITOR_INPUTS + 1,
     )
@@ -92,8 +124,7 @@ def load_monitor_units(storage, policy: MonitorPolicy, *, tenant_id: str):
     judgments_by_trace = None
     if policy.evaluator_fingerprint is not None:
         judgments = _evaluator_judgments(
-            storage,
-            tenant_id=tenant_id,
+            storage, tenant_id=tenant_id,
             evaluator_fingerprint=policy.evaluator_fingerprint,
             expected_dimensions=policy.evaluator_dimensions,
         )
@@ -170,6 +201,7 @@ def load_monitor_units(storage, policy: MonitorPolicy, *, tenant_id: str):
         judgments_by_trace=judgments_by_trace,
         evaluator_dimensions=policy.evaluator_dimensions,
         cluster_labels=cluster_labels,
+        conversation_history_mode=judgments[0].evaluator_config.get("conversation_history_mode") if policy.evaluator_fingerprint and judgments else None,
     )
 
 

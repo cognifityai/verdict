@@ -2841,6 +2841,7 @@ def create_app(
         core_path = path in {"/", "/dashboard", "/api/config"} or path.startswith(
             (
                 "/api/data",
+                "/api/compare",
                 "/api/registry",
                 "/api/runs",
                 "/api/insights",

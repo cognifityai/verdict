@@ -496,7 +496,7 @@ def test_monitor_preview_rejects_unsupported_analysis_units(
 
     assert response.status_code == 400
     assert response.json() == {
-        "error": "Monitor currently supports only the trace analysis unit."
+        "error": "Monitor supports trace or conversation analysis units."
     }
     connection = sqlite3.connect(database)
     try:
@@ -941,11 +941,28 @@ def test_monitor_preview_names_pending_selected_evaluator_work(tmp_path):
     response = asyncio.run(preview())
 
     assert response.status_code == 409
-    assert response.json() == {
-        "error": "Run the selected evaluator for 1 eligible trace, then preview "
-        "this monitor again.",
-        "state": "evaluator_pending",
-    }
+    body = response.json()
+    assert body["error"] == (
+        "Run the selected evaluator for 1 eligible trace, then preview "
+        "this monitor again."
+    )
+    assert body["state"] == "evaluator_pending"
+    exploration = body["exploration"]
+    assert exploration["state"] == "descriptive"
+    assert exploration["activationAllowed"] is False
+    assert exploration["populationCounts"] == {"reference": 1, "current": 1}
+    assert exploration["pendingCounts"] == {"reference": 0, "current": 1}
+    quality = next(row for row in exploration["earlyIndicators"]
+                   if row["metric"].startswith("judge."))
+    assert quality["reference_n"] == 1
+    assert quality["reference_value"] == 1.0
+    assert quality["current_n"] == 0
+    assert quality["current_value"] is None
+    assert not {"manifest", "policy", "snapshot", "policy_id"} & body.keys()
+    assert all("p_value" not in row for row in exploration["earlyIndicators"])
+    storage = SQLiteStorage(str(database))
+    assert storage.get_active_monitor_policy("__verdict_local__:application:trace") is None
+    storage.close()
 
 
 def test_monitor_candidate_survives_reload_and_matches_dashboard_status(tmp_path):

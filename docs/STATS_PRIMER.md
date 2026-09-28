@@ -5,6 +5,13 @@ A plain-language explanation of every statistical method Verdict uses — what i
 You should be able to read this in 30-40 minutes and come away understanding
 the statistics behind Monitor, semantic drift, and judge calibration.
 
+The local conversation candidate additionally tests raw rubric scores with a
+tie-corrected, continuity-corrected Mann–Whitney rank comparison. Its signed
+rank effect controls direction and effect thresholds; medians are descriptive.
+It requires at least 30 scored conversations per group/window and shares one
+Benjamini–Hochberg adjustment with eligible binary cells. See [conversation evaluation](session-evaluation.md)
+for methodology, sampling assumptions, missing evidence and sequential limits.
+
 ---
 
 ## Contents

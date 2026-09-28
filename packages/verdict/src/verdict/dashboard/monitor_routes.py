@@ -27,6 +27,7 @@ from verdict.monitoring import (
     MonitorStateConflict,
     WindowMode,
     compare_manifest,
+    describe_historical,
     monitor_policy_to_json,
     monitor_requires_rebootstrap,
     monitor_snapshot_to_json,
@@ -44,8 +45,8 @@ _BOUNDED_MONITOR_ERRORS = {
         "Monitor snapshots are limited to 4 MiB. Reduce the cohort size, "
         "number of groups, or evaluator dimensions."
     ),
-    "Monitor currently supports only the trace analysis unit.": (
-        "Monitor currently supports only the trace analysis unit."
+    "Monitor supports trace or conversation analysis units.": (
+        "Monitor supports trace or conversation analysis units."
     ),
     "monitor grouping exceeds 250 groups": (
         "Monitor supports at most 250 groups. Choose no grouping or reduce the "
@@ -132,7 +133,7 @@ class MonitorRoutes:
         mode = WindowMode(payload.get("windowMode", "count"))
         values: dict[str, Any] = {
             "policy_id": policy_id,
-            "scope_key": self.scope,
+            "scope_key": f"{self.tenant_id}:application:{payload.get('analysisUnit', 'trace')}",
             "window_mode": mode,
             "reference_ratio": float(payload.get("referenceRatio", 0.8)),
             "minimum_reference": int(payload.get("minimumReference", 30)),
@@ -142,6 +143,8 @@ class MonitorRoutes:
             "minimum_effect": float(payload.get("minimumEffect", 0.1)),
             "maximum_unseen_group_share": float(payload.get("maximumUnseenShare", 0.2)),
             "analysis_unit": payload.get("analysisUnit", "trace"),
+            "numeric_method": "mann_whitney_asymptotic_v1" if payload.get("analysisUnit") == "conversation" else None,
+            "response_aggregation": payload.get("responseAggregation"),
             "grouping_mode": payload.get("groupingMode", "none"),
             "evaluator_fingerprint": evaluator_fingerprint,
             "evaluator_dimensions": evaluator_dimensions,
@@ -258,8 +261,8 @@ class MonitorRoutes:
         )
         return preview_logical_sessions(evidence, **values).as_dict()
 
-    @staticmethod
     def response(
+        self,
         policy, state, manifest=None, comparison=None, *, approved_historical=None,
         policy_state=None,
     ) -> dict[str, object]:
@@ -278,12 +281,34 @@ class MonitorRoutes:
             result["approvedHistoricalSnapshot"] = json.loads(
                 monitor_snapshot_to_json(*approved_historical)
             )
+        if policy.analysis_unit == "conversation":
+            from verdict.sessions import session_monitor_units
+            writable = self.setup.writable_storage()
+            try:
+                sessions = writable.list_sessions(self.tenant_id, limit=5001)
+                results = writable.list_session_assessments(self.tenant_id, evaluator_fingerprint=policy.evaluator_fingerprint, limit=5001) if policy.evaluator_fingerprint else []
+                _, result["coverage"] = session_monitor_units(sessions, results, policy)
+            finally:
+                writable.close()
+            if manifest and manifest.reference_summary and manifest.current_summary:
+                from verdict.numeric_monitoring import early_indicators
+                early = early_indicators(manifest.reference_summary, manifest.current_summary)
+                a={(m.group_id,m.metric):m for m in manifest.reference_summary.metrics}
+                b={(m.group_id,m.metric):m for m in manifest.current_summary.metrics}
+                for identity in sorted(set(a)|set(b),key=lambda k:(k[0] or "",k[1])):
+                    if identity[1].startswith("score."):
+                        continue
+                    x,y=a.get(identity),b.get(identity)
+                    n=x.true_count+x.false_count if x else 0
+                    m=y.true_count+y.false_count if y else 0
+                    early.append({"group_id":identity[0],"metric":identity[1],"kind":"binary","reference_n":n,"current_n":m,"reference_value":x.true_count/n if n else None,"current_value":y.true_count/m if m else None})
+                result["earlyIndicators"] = early
         if state == "requires_rebootstrap":
             result["rebootstrapRequired"] = True
             result["rebootstrapReason"] = (
                 "This monitor uses an unsupported analysis unit. Preview and "
                 "activate a trace-based replacement before running it again."
-                if policy.analysis_unit != "trace"
+                if policy.analysis_unit not in {"trace", "conversation"}
                 else "This monitor predates immutable cohort evidence. Preview and "
                 "activate a replacement before running it again."
             )
@@ -323,7 +348,7 @@ class MonitorRoutes:
             ),
         )
 
-    def read_state(self, tenant_id: str | None = None) -> dict[str, object]:
+    def read_state(self, tenant_id: str | None = None, analysis_unit: str = "trace") -> dict[str, object]:
         """Return the one durable read model used by every monitor surface."""
         writable = self.setup.writable_storage()
         try:
@@ -331,7 +356,7 @@ class MonitorRoutes:
                 writable,
                 tenant_id or self.tenant_id,
             )
-            scope = f"{tenant_id or self.tenant_id}:application:trace"
+            scope = f"{tenant_id or self.tenant_id}:application:{analysis_unit}"
             active_policy = writable.get_active_monitor_policy(scope)
             candidate_policy = writable.get_latest_monitor_candidate(scope)
             active = (
@@ -381,7 +406,11 @@ class MonitorRoutes:
                     writable,
                     tenant_id=self.tenant_id,
                     evaluator_fingerprint=payload.get("evaluatorFingerprint"),
+                    analysis_unit=policy.analysis_unit,
+                    response_aggregation=policy.response_aggregation,
                 )
+                if policy.response_aggregation and fingerprint is None:
+                    raise ValueError("response aggregation requires an evaluator")
                 cluster_version = self.cluster_registry_selection(writable, payload)
                 policy = replace(
                     policy,
@@ -405,7 +434,7 @@ class MonitorRoutes:
                 )
             except MonitorEvaluatorPending as exc:
                 return JSONResponse(
-                    {"error": str(exc), "state": "evaluator_pending"},
+                    {"error": str(exc), "state": "evaluator_pending", "exploration":{**describe_historical(units,policy,cutoff=cutoff),"repair":str(exc)}},
                     status_code=409,
                 )
             except (KeyError, OSError, TypeError, UnicodeError, ValueError) as exc:
@@ -432,7 +461,7 @@ class MonitorRoutes:
                     raise ValueError("invalid activation")
                 writable = self.setup.writable_storage()
                 stored = writable.get_monitor_policy(policy_id)
-                if stored is None or stored[1] != "candidate":
+                if stored is None or stored[1] != "candidate" or stored[0].scope_key not in {f"{self.tenant_id}:application:trace",f"{self.tenant_id}:application:conversation"}:
                     raise ValueError("unknown policy")
                 historical = writable.get_initial_monitor_snapshot(policy_id)
                 if monitor_requires_rebootstrap(
@@ -452,15 +481,18 @@ class MonitorRoutes:
                         {"error": "monitor requires re-bootstrap"},
                         status_code=409,
                     )
+                units = self.bounded_units(writable, stored[0]) if stored[0].analysis_unit == "conversation" else ()
+                if stored[0].analysis_unit == "conversation":
+                    compare_manifest(units, historical[0], stored[0])
                 prepared = _prepared_activation_snapshot(historical, latest)
                 if prepared is None:
                     manifest = plan_prospective_manifest(
                         historical[0],
-                        (),
+                        units,
                         stored[0],
                         prospective_start_at=datetime.now(timezone.utc),
                     )
-                    comparison = compare_manifest((), manifest, stored[0])
+                    comparison = compare_manifest(units, manifest, stored[0])
                     try:
                         writable.save_monitor_successor(
                             policy_id,
@@ -492,6 +524,8 @@ class MonitorRoutes:
                     {"error": str(exc), "state": "projection_pending"},
                     status_code=409,
                 )
+            except MonitorRebootstrapRequired as exc:
+                return JSONResponse({"error": str(exc), "state":"requires_rebootstrap"}, status_code=409)
             except (OSError, TypeError, UnicodeError, ValueError) as exc:
                 return _error_response(exc, "invalid monitor activation")
             finally:
@@ -509,7 +543,10 @@ class MonitorRoutes:
             writable = None
             try:
                 writable = self.setup.writable_storage()
-                policy = writable.get_active_monitor_policy(self.scope)
+                unit = request.query_params.get("unit", "trace")
+                if unit not in {"trace", "conversation"}:
+                    raise ValueError("invalid monitor unit")
+                policy = writable.get_active_monitor_policy(f"{self.tenant_id}:application:{unit}")
                 if policy is None:
                     return JSONResponse({"error": "no active monitor"}, status_code=409)
                 previous = writable.get_latest_monitor_snapshot(policy.policy_id)
@@ -552,4 +589,7 @@ class MonitorRoutes:
         def monitor_state(request: Request):
             if not self.setup.request_matches_tenant(request):
                 return JSONResponse({"error": "monitor unavailable"}, status_code=403)
-            return self.read_state()
+            unit = request.query_params.get("unit", "trace")
+            if unit not in {"trace", "conversation"}:
+                return JSONResponse({"error": "invalid monitor unit"}, status_code=400)
+            return self.read_state(analysis_unit=unit)

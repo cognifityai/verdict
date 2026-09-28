@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
+import { MatchedComparison } from "./MatchedComparison.jsx";
 import {
   LineChart, Line, AreaChart, Area, BarChart, Bar, XAxis, YAxis, CartesianGrid,
   Tooltip, ResponsiveContainer, ReferenceLine, Cell,
@@ -966,7 +967,7 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
             ...route, tab: "explore", section: "calls", traceJudgeStatus, traceId: null,
           })}
           onSelectTrace={(traceId) => commitRoute({ ...route, tab: "explore", section: "calls", traceId })} />}
-        {tab === "explore" && route.section === "compare" && <Compare data={DATA} source={source} />}
+        {tab === "explore" && route.section === "compare" && <Compare data={DATA} source={source} configUrl={mountedConfigUrl()} />}
         {tab === "evaluate" && route.section === "results" && <Judge data={DATA} onOpenOperations={operationsUrl ? () => commitRoute({ ...route, tab: "settings", section: "integrations" }) : null} />}
         {tab === "evaluate" && route.section === "lab" && <EvaluatorLab configUrl={mountedConfigUrl()} onOpenEvaluated={(evaluatorId) => { onEvaluatorChange?.(evaluatorId); commitRoute({ ...route, tab: "explore", section: "calls", evaluatorId, traceJudgeStatus: "judged", traceId: null }); }} />}
         {tab === "evaluate" && route.section === "inspect" && <InspectLab configUrl={mountedConfigUrl()} />}
@@ -1649,7 +1650,7 @@ function Judge({ data = SEED, onOpenOperations = null }) {
 }
 
 /* --------------------------------------------------------------- COMPARE */
-function Compare({ data = SEED, source = "sample" }) {
+function Compare({ data = SEED, source = "sample", configUrl }) {
   const DATA = data;
   const codexRuns = (DATA.meta.agentRunSources || []).find((item) => item.sourceKind === "codex")?.runs || 0;
   const provs = DATA.providers.map((provider) => ({
@@ -1665,6 +1666,7 @@ function Compare({ data = SEED, source = "sample" }) {
   const tokData = provs.map((p) => ({ name: p.presentation.short, v: p.outTok, key: p.key, color: p.presentation.color }));
   return (
     <div className="space-y-5">
+      {source === "live" && configUrl && <MatchedComparison root={configUrl.replace(/\/api\/config$/, "")} evaluators={(DATA.evaluation?.availableIdentities || []).filter((identity) => identity.complete)} />}
       <div className="text-sm" style={{ color: C.sub }}>
         {source === "sample"
           ? "Bundled synthetic sample: the same prompt set is shown across three providers to demonstrate comparison views. Connect live data before drawing provider conclusions."

@@ -50,6 +50,7 @@ dogfood_report.md
 research/results/
 drift_report*.md
 *.jsonl
+!/examples/session-evaluation/conversation.jsonl
 *.csv
 *.tsv
 *.parquet

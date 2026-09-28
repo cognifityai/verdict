@@ -144,6 +144,19 @@ def _trace_tenant_clause(requested: str, column: str = "tenant_id") -> str:
 
 
 _SCHEMA = """
+CREATE TABLE IF NOT EXISTS session_snapshots (
+    tenant_id TEXT NOT NULL, session_id TEXT NOT NULL, revision TEXT NOT NULL,
+    is_current BOOLEAN NOT NULL, payload TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, session_id, revision)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS session_current ON session_snapshots(tenant_id,session_id) WHERE is_current;
+CREATE TABLE IF NOT EXISTS session_assessments (
+    tenant_id TEXT NOT NULL, assessment_id TEXT NOT NULL, session_id TEXT NOT NULL,
+    revision TEXT NOT NULL, evaluator_fingerprint TEXT NOT NULL, evaluated_at TEXT NOT NULL,
+    payload TEXT NOT NULL, PRIMARY KEY (tenant_id, assessment_id),
+    FOREIGN KEY (tenant_id,session_id,revision) REFERENCES session_snapshots(tenant_id,session_id,revision)
+);
+CREATE INDEX IF NOT EXISTS session_assessment_lookup ON session_assessments(tenant_id,evaluator_fingerprint,session_id);
 CREATE TABLE IF NOT EXISTS traces (
     trace_id          TEXT PRIMARY KEY,
     parent_span_id    TEXT,
@@ -802,7 +815,7 @@ class PostgresStorage:
         analysis_raw_messages_utf8_bytes, analysis_raw_messages_state,
         service_name, environment"""
 
-    def _insert_trace_cursor(self, cur, trace: Trace) -> None:
+    def _insert_trace_cursor(self, cur, trace: Trace, *, preserve_voice_evidence=False) -> None:
         # Only the fixed, class-owned column list is interpolated; every trace
         # value remains a driver-bound parameter.
         sql = (
@@ -823,6 +836,18 @@ class PostgresStorage:
             "cluster_id = COALESCE(EXCLUDED.cluster_id, traces.cluster_id), "
             "cost_usd = EXCLUDED.cost_usd"
         )
+        if preserve_voice_evidence:
+            sql += (
+                " WHERE traces.tenant_id IS NOT DISTINCT FROM EXCLUDED.tenant_id"
+                " AND traces.session_id IS NOT DISTINCT FROM EXCLUDED.session_id"
+                " AND traces.provider IS NOT DISTINCT FROM EXCLUDED.provider"
+                " AND traces.operation IS NOT DISTINCT FROM EXCLUDED.operation"
+                " AND traces.request_model IS NOT DISTINCT FROM EXCLUDED.request_model"
+                " AND traces.response_model IS NOT DISTINCT FROM EXCLUDED.response_model"
+                " AND traces.prompt_redacted IS NOT DISTINCT FROM EXCLUDED.prompt_redacted"
+                " AND traces.response_redacted IS NOT DISTINCT FROM EXCLUDED.response_redacted"
+                " AND traces.raw_messages IS NOT DISTINCT FROM EXCLUDED.raw_messages"
+            )
         cur.execute(
             sql,
             (
@@ -864,6 +889,13 @@ class PostgresStorage:
         populate_trace_analysis_fields(trace)
         with self._pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
             self._insert_trace_cursor(cur, trace)
+
+    def insert_voice_trace_if_coherent(self, trace: Trace) -> bool:
+        sanitize_trace(trace)
+        populate_trace_analysis_fields(trace)
+        with self._pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
+            self._insert_trace_cursor(cur, trace, preserve_voice_evidence=True)
+            return cur.rowcount == 1
 
     def _row_to_trace(self, row) -> Trace:
         return Trace(
@@ -3567,6 +3599,79 @@ class PostgresStorage:
                     ),
                 )
         return len(rows)
+
+    def save_session(self, session: dict) -> None:
+        from verdict.sessions import canonical, validate_session
+        value = validate_session(session)
+        identity = (value["tenant_id"], value["id"], value["revision"])
+        lock_id = int(hashlib.sha256(repr(identity[:2]).encode()).hexdigest()[:15], 16)
+        with self._pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
+            cur.execute("SELECT pg_advisory_xact_lock(%s)", (lock_id,))
+            cur.execute("SELECT payload FROM session_snapshots WHERE tenant_id=%s AND session_id=%s AND revision=%s", identity)
+            if cur.fetchone() is None:
+                cur.execute("UPDATE session_snapshots SET is_current=FALSE WHERE tenant_id=%s AND session_id=%s", identity[:2])
+                cur.execute("INSERT INTO session_snapshots VALUES (%s,%s,%s,TRUE,%s)", (*identity, canonical(value)))
+
+    def get_session(self, tenant_id: str, session_id: str, revision: str | None = None):
+        from verdict.sessions import key, validate_query, validate_session
+        validate_query(tenant_id)
+        key(session_id)
+        where, args = ("revision=%s", (key(revision),)) if revision is not None else ("is_current=TRUE", ())
+        with self._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT payload FROM session_snapshots WHERE tenant_id=%s AND session_id=%s AND " + where,
+                        (tenant_id, session_id, *args))
+            row = cur.fetchone()
+            return validate_session(json.loads(row[0])) if row else None
+
+    def list_sessions(self, tenant_id: str, *, limit: int = 100):
+        from verdict.sessions import validate_query, validate_session
+        validate_query(tenant_id, limit)
+        with self._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT payload FROM session_snapshots WHERE tenant_id=%s AND is_current=TRUE ORDER BY session_id LIMIT %s", (tenant_id, limit))
+            return [validate_session(json.loads(r[0])) for r in cur.fetchall()]
+
+    def save_session_assessment(self, assessment: dict) -> bool:
+        from verdict.sessions import (
+            canonical,
+            check_assessment_evidence,
+            validate_assessment,
+            validate_session,
+        )
+        value = validate_assessment(assessment)
+        identity = (value["tenant_id"], value["session_id"])
+        lock_id = int(hashlib.sha256(repr(identity).encode()).hexdigest()[:15], 16)
+        with self._pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
+            cur.execute("SELECT pg_advisory_xact_lock(%s)", (lock_id,))
+            cur.execute("SELECT payload FROM session_snapshots WHERE tenant_id=%s AND session_id=%s AND is_current=TRUE FOR UPDATE", identity)
+            row = cur.fetchone()
+            current = validate_session(json.loads(row[0])) if row else None
+            if current is None or current["revision"] != value["session_revision"]:
+                return False
+            check_assessment_evidence(value, current)
+            cur.execute("SELECT payload FROM session_assessments WHERE tenant_id=%s AND assessment_id=%s", (value["tenant_id"], value["id"]))
+            old_row = cur.fetchone()
+            if old_row:
+                old = json.loads(old_row[0])
+                if {k:v for k,v in old.items() if k != "evaluated_at"} != {k:v for k,v in value.items() if k != "evaluated_at"}:
+                    raise ValueError("conflicting immutable assessment")
+            else:
+                cur.execute("INSERT INTO session_assessments VALUES (%s,%s,%s,%s,%s,%s,%s)",
+                    (value["tenant_id"], value["id"], value["session_id"], value["session_revision"],
+                     value["evaluator_fingerprint"], value["evaluated_at"], canonical(value)))
+            return True
+
+    def list_session_assessments(self, tenant_id: str, *, evaluator_fingerprint=None, session_id=None, limit=100):
+        from verdict.sessions import key, validate_assessment, validate_query
+        validate_query(tenant_id, limit)
+        where, args = ["tenant_id=%s"], [tenant_id]
+        for column, value in (("evaluator_fingerprint", evaluator_fingerprint), ("session_id", session_id)):
+            if value is not None:
+                where.append(column + "=%s")
+                args.append(key(value))
+        with self._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT payload FROM session_assessments WHERE " + " AND ".join(where) +
+                        " ORDER BY evaluated_at DESC,assessment_id LIMIT %s", (*args, limit))
+            return [validate_assessment(json.loads(r[0])) for r in cur.fetchall()]
 
     def close(self) -> None:
         try:

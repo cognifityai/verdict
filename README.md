@@ -267,7 +267,9 @@ identity. They use stored judgments only and never invoke a judge implicitly.
 Stored monitors that predate frozen cohort facts remain readable but must be
 re-created from a reviewed preview before they can run again. The same applies
 to older evaluator-backed monitors that cannot represent pending finalization
-and to stored policies naming a non-Trace analysis unit.
+and to stored policies naming an unsupported analysis unit. The local candidate
+also supports closed, timed conversation observations; see
+[conversation evaluation](docs/session-evaluation.md) for its input and limits.
 
 Monitor also offers a separate **Logical session (descriptive)** preview for
 native Agent evidence. It groups runs only by an explicit `AgentRun.session_id`
@@ -918,3 +920,10 @@ Read [`CONTRIBUTING.md`](CONTRIBUTING.md) before opening a pull request. Major
 decisions are documented in [`docs/adrs/`](docs/adrs/), known limits are in
 [`docs/v1-roadmap.md`](docs/v1-roadmap.md), and community expectations are in
 [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md).
+
+## Local conversation-evaluation candidate
+
+This checkout extends existing Voice ingestion, Evaluator Lab and Monitor for
+versioned transcript snapshots, response/conversation rubric files, numeric
+scores and explicit conversation populations. These additions are not in the
+published a21 wheel. See [workflow, contracts and limits](docs/session-evaluation.md).

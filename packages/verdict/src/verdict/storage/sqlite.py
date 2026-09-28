@@ -137,6 +137,19 @@ def _trace_tenant_clause(requested: str, column: str = "tenant_id") -> str:
 
 
 _SCHEMA = """
+CREATE TABLE IF NOT EXISTS session_snapshots (
+    tenant_id TEXT NOT NULL, session_id TEXT NOT NULL, revision TEXT NOT NULL,
+    is_current BOOLEAN NOT NULL, payload TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, session_id, revision)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS session_current ON session_snapshots(tenant_id,session_id) WHERE is_current;
+CREATE TABLE IF NOT EXISTS session_assessments (
+    tenant_id TEXT NOT NULL, assessment_id TEXT NOT NULL, session_id TEXT NOT NULL,
+    revision TEXT NOT NULL, evaluator_fingerprint TEXT NOT NULL, evaluated_at TEXT NOT NULL,
+    payload TEXT NOT NULL, PRIMARY KEY (tenant_id, assessment_id),
+    FOREIGN KEY (tenant_id,session_id,revision) REFERENCES session_snapshots(tenant_id,session_id,revision)
+);
+CREATE INDEX IF NOT EXISTS session_assessment_lookup ON session_assessments(tenant_id,evaluator_fingerprint,session_id);
 CREATE TABLE IF NOT EXISTS traces (
     trace_id TEXT PRIMARY KEY,
     parent_span_id TEXT,
@@ -1200,6 +1213,12 @@ class SQLiteStorage:
     # -- Traces ------------------------------------------------------------
 
     def insert_trace(self, trace: Trace) -> None:
+        self._insert_trace(trace)
+
+    def insert_voice_trace_if_coherent(self, trace: Trace) -> bool:
+        return self._insert_trace(trace, preserve_voice_evidence=True)
+
+    def _insert_trace(self, trace: Trace, *, preserve_voice_evidence=False) -> bool:
         sanitize_trace(trace)
         populate_trace_analysis_fields(trace)
         with self._lock:
@@ -1210,7 +1229,7 @@ class SQLiteStorage:
             # re-written row (notably cluster_id, assigned later by the intent
             # clusterer). COALESCE(excluded.cluster_id, traces.cluster_id) keeps
             # an already-assigned cluster_id when a later write carries NULL.
-            self._conn.execute(
+            cursor = self._conn.execute(
                 """INSERT INTO traces (
                     trace_id, parent_span_id, started_at, ended_at, provider, operation,
                     request_model, response_model, input_tokens, output_tokens,
@@ -1243,7 +1262,18 @@ class SQLiteStorage:
                         excluded.parent_span_id, traces.parent_span_id
                     ),
                     cluster_id        = COALESCE(excluded.cluster_id, traces.cluster_id),
-                    cost_usd          = excluded.cost_usd""",
+                    cost_usd          = excluded.cost_usd""" + (
+                    " WHERE traces.tenant_id IS excluded.tenant_id"
+                    " AND traces.session_id IS excluded.session_id"
+                    " AND traces.provider IS excluded.provider"
+                    " AND traces.operation IS excluded.operation"
+                    " AND traces.request_model IS excluded.request_model"
+                    " AND traces.response_model IS excluded.response_model"
+                    " AND traces.prompt_redacted IS excluded.prompt_redacted"
+                    " AND traces.response_redacted IS excluded.response_redacted"
+                    " AND traces.raw_messages_json IS excluded.raw_messages_json"
+                    if preserve_voice_evidence else ""
+                ),
                 {
                     "trace_id": trace.trace_id,
                     "parent_span_id": trace.parent_span_id,
@@ -1279,6 +1309,7 @@ class SQLiteStorage:
                     "environment": trace.environment,
                 },
             )
+            return cursor.rowcount == 1
 
     def _row_to_trace(self, row: sqlite3.Row) -> Trace:
         return Trace(
@@ -3715,6 +3746,78 @@ class SQLiteStorage:
                 self._conn.execute("ROLLBACK")
                 raise
         return len(rows)
+
+    def save_session(self, session: dict) -> None:
+        from verdict.sessions import canonical, validate_session
+        value = validate_session(session)
+        identity = (value["tenant_id"], value["id"], value["revision"])
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                exists = self._conn.execute("SELECT payload FROM session_snapshots WHERE tenant_id=? AND session_id=? AND revision=?", identity).fetchone()
+                if exists is None:
+                    self._conn.execute("UPDATE session_snapshots SET is_current=0 WHERE tenant_id=? AND session_id=?", identity[:2])
+                    self._conn.execute("INSERT INTO session_snapshots VALUES (?,?,?,1,?)", (*identity, canonical(value)))
+                self._conn.commit()
+            except BaseException:
+                self._conn.rollback()
+                raise
+
+    def get_session(self, tenant_id: str, session_id: str, revision: str | None = None):
+        from verdict.sessions import key, validate_query, validate_session
+        validate_query(tenant_id)
+        key(session_id)
+        with self._lock:
+            where, args = ("revision=?", (key(revision),)) if revision is not None else ("is_current=1", ())
+            row = self._conn.execute("SELECT payload FROM session_snapshots WHERE tenant_id=? AND session_id=? AND " + where,
+                                     (tenant_id, session_id, *args)).fetchone()
+            return validate_session(json.loads(row[0])) if row else None
+
+    def list_sessions(self, tenant_id: str, *, limit: int = 100):
+        from verdict.sessions import validate_query, validate_session
+        validate_query(tenant_id, limit)
+        with self._lock:
+            rows = self._conn.execute("SELECT payload FROM session_snapshots WHERE tenant_id=? AND is_current=1 ORDER BY session_id LIMIT ?", (tenant_id, limit)).fetchall()
+            return [validate_session(json.loads(r[0])) for r in rows]
+
+    def save_session_assessment(self, assessment: dict) -> bool:
+        from verdict.sessions import canonical, check_assessment_evidence, validate_assessment
+        value = validate_assessment(assessment)
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                current = self.get_session(value["tenant_id"], value["session_id"])
+                if current is None or current["revision"] != value["session_revision"]:
+                    self._conn.rollback()
+                    return False
+                check_assessment_evidence(value, current)
+                row = self._conn.execute("SELECT payload FROM session_assessments WHERE tenant_id=? AND assessment_id=?", (value["tenant_id"], value["id"])).fetchone()
+                if row:
+                    old = json.loads(row[0])
+                    if {k:v for k,v in old.items() if k != "evaluated_at"} != {k:v for k,v in value.items() if k != "evaluated_at"}:
+                        raise ValueError("conflicting immutable assessment")
+                else:
+                    self._conn.execute("INSERT INTO session_assessments VALUES (?,?,?,?,?,?,?)",
+                        (value["tenant_id"], value["id"], value["session_id"], value["session_revision"],
+                         value["evaluator_fingerprint"], value["evaluated_at"], canonical(value)))
+                self._conn.commit()
+                return True
+            except BaseException:
+                self._conn.rollback()
+                raise
+
+    def list_session_assessments(self, tenant_id: str, *, evaluator_fingerprint=None, session_id=None, limit=100):
+        from verdict.sessions import key, validate_assessment, validate_query
+        validate_query(tenant_id, limit)
+        where, args = ["tenant_id=?"], [tenant_id]
+        for column, value in (("evaluator_fingerprint", evaluator_fingerprint), ("session_id", session_id)):
+            if value is not None:
+                where.append(column + "=?")
+                args.append(key(value))
+        with self._lock:
+            rows = self._conn.execute("SELECT payload FROM session_assessments WHERE " + " AND ".join(where) +
+                                     " ORDER BY evaluated_at DESC,assessment_id LIMIT ?", (*args, limit)).fetchall()
+            return [validate_assessment(json.loads(r[0])) for r in rows]
 
     def close(self) -> None:
         with self._lock:

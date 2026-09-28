@@ -95,3 +95,30 @@ def gwet_ac1(
     if expected >= 1.0:
         return 1.0
     return (observed - expected) / (1.0 - expected)
+
+
+def mann_whitney_rank(reference, current):
+    """Asymptotic two-sided U with ties/continuity; signed current rank effect.
+
+    Version: mann_whitney_asymptotic_v1. This tests distributions/ranks, not
+    medians. Minimum sample eligibility is enforced by the Monitor owner.
+    """
+    from collections import Counter
+    a, b = list(reference), list(current)
+    if not a or not b or len(a) + len(b) > 100_000:
+        raise ValueError("rank samples must be nonempty and bounded")
+    if any(type(v) not in (int, float) or not math.isfinite(v) for v in a + b):
+        raise ValueError("rank samples must contain finite numbers")
+    counts = Counter(a + b)
+    ranks, prior = {}, 0
+    for value, count in sorted(counts.items()):
+        ranks[value] = prior + (count + 1) / 2
+        prior += count
+    n, m, total = len(a), len(b), len(a) + len(b)
+    u = sum(ranks[v] for v in b) - m * (m + 1) / 2
+    effect = 2 * u / (n * m) - 1
+    variance = n * m / 12 * (total + 1 - sum(c**3 - c for c in counts.values()) / (total * (total - 1)))
+    if variance <= 0:
+        return 1.0, 0.0
+    z = (abs(u - n * m / 2) - .5) / math.sqrt(variance)
+    return min(1.0, math.erfc(z / math.sqrt(2))), effect

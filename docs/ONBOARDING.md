@@ -610,9 +610,10 @@ excludes Turns with no recorded tool events or more than 64 total events.
 Origins describe only the observed outer dispatch and do not establish hidden
 downstream services or protocols. Counts do not prove source support or factual
 correctness and do not enable rubric dimensions that require retrieved context. A changed count makes the prior
-Turn judgment stale. Trace remains the only activatable Monitor unit; the
-descriptive logical-session preview can aggregate current Turn judgments
-without producing an alert.
+Turn judgment stale. Agent Turn judgments can feed the descriptive logical-session
+preview without producing an alert. Activatable Trace monitoring uses genuine
+model calls; separately imported conversation snapshots use the native
+conversation monitoring contract in [conversation evaluation](session-evaluation.md).
 Concurrent Turn judge requests recheck currentness under a cross-process guard
 before egress. A busy Turn is skipped and reported as `inProgress` ("Judge busy;
 retry" in the dashboard), not counted as evaluated. SQLite uses a separate
@@ -742,12 +743,14 @@ use the selected period and contain aggregates only. Dates are displayed in a
 readable format: period boundaries use UTC, while capture and generation times
 use the browser's local time. **Monitor → Compare History** previews a reviewed
 reference/current comparison; **Monitor → Status** shows the active prospective
-cohort. Completed results appear before the comparison settings. Each alert
-charts its reference/current rates and includes its effect, raw and adjusted
-p-values, sample counts, optional facet, evidence coverage, and up to five
-frozen trace examples from each cohort. Those examples identify records to
-inspect; they do not establish why the change occurred. Clusters are not
-required.
+cohort. Both use the same analysis-unit selector; select Conversation to inspect
+and run a saved conversation monitor after a refresh. Trace and conversation
+policies remain separate scopes. Completed results appear before the comparison
+settings. Each supported alert shows its reference/current measurement, effect,
+raw and adjusted p-values, sample counts, optional facet, and evidence coverage.
+Trace alerts can link to up to five frozen examples from each cohort. Those
+examples identify records to inspect; they do not establish why the change
+occurred. Clusters are not required.
 
 The dashboard reads SQLite or PostgreSQL directly. If more than one evaluator
 identity is in the database, select one before reading judgment results or
@@ -879,7 +882,11 @@ the other captured workloads.
   parameter; that same value projects active assignments and stable labels
   throughout the tenant-scoped views.
 - **Cohorts use event time.** The activatable Monitor supports one genuine
-  model-call Trace per analysis unit. Monitor uses the trace's captured event
+  model-call Trace, or one explicitly closed, timed conversation per analysis
+  unit. The local conversation candidate uses the existing Voice telemetry
+  importer and has additional rubric, revision and coverage requirements;
+  see [conversation evaluation](session-evaluation.md) for the exact input,
+  numeric-score methodology and limits. Monitor uses the captured source event
   time, not the time a judgment or import was written. A historical preview freezes its
   selected membership and normalized facts. Activation records an event-time
   boundary and opens an empty prospective bucket, so older imported events do
@@ -892,8 +899,8 @@ the other captured workloads.
   Fixed-window rows created by older releases remain readable through the
   Python storage API. They have no tenant owner and are excluded from
   `/api/data` and the UI; use the current Monitor workflow instead.
-  Stored policies naming a non-Trace analysis unit also remain readable but
-  require a new trace-based preview before execution.
+  Stored policies naming an unsupported analysis unit remain readable but
+  require a supported replacement preview before execution.
 - **Logical-session comparisons are descriptive.** The optional Agent view
   groups sessions whose observed runs and Turns are terminal by explicit
   `AgentRun.session_id` and uses the earliest

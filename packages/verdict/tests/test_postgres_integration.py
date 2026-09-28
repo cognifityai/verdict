@@ -1407,7 +1407,7 @@ def test_live_postgres_monitor_policy_activation_and_snapshot():
             scope_key=f"{scope}:unsupported",
             analysis_unit="session",
         )
-        with pytest.raises(ValueError, match="only the trace analysis unit"):
+        with pytest.raises(ValueError, match="trace or conversation analysis units"):
             storage.save_monitor_policy(unsupported)
         assert storage.get_monitor_policy(unsupported.policy_id) is None
         storage.save_monitor_policy(second)

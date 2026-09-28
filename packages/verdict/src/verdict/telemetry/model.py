@@ -108,10 +108,13 @@ class MappingResult:
 
     trace: Trace | None = None
     skip_reason: str | None = None
+    session: dict | None = None
 
     def __post_init__(self) -> None:
-        if (self.trace is None) == (self.skip_reason is None):
+        if (self.trace is None) == (self.skip_reason is None) and self.session is None:
             raise ValueError("mapping result must contain exactly one trace or skip reason")
+        if self.trace is not None and self.skip_reason is not None:
+            raise ValueError("trace and skip outcomes are exclusive")
 
     @classmethod
     def mapped(cls, trace: Trace) -> MappingResult:
@@ -132,6 +135,7 @@ class ImportSummary:
     stored: int = 0
     skipped: int = 0
     skip_reasons: dict[str, int] = field(default_factory=dict)
+    sessions_stored: int = 0
 
     def add_skip(self, reason: str) -> None:
         self.skipped += 1

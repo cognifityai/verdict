@@ -18,6 +18,7 @@ export function SetupWizard({ configUrl, onComplete, onNavigate, onRefresh, agen
   const [codexRoot, setCodexRoot] = useState("~/.codex/sessions");
   const [filePath, setFilePath] = useState("");
   const [fileFormat, setFileFormat] = useState("auto");
+  const [sourceScope, setSourceScope] = useState("telemetry-feed");
   const [previewedLocal, setPreviewedLocal] = useState(null);
   const [previewedImport, setPreviewedImport] = useState(null);
   const hasAgentRuns = Number(agentSummary.totalAgentRuns) > 0;
@@ -60,7 +61,7 @@ export function SetupWizard({ configUrl, onComplete, onNavigate, onRefresh, agen
     ["sdk", "Live app through SDK"], ["database", "Existing Verdict database"],
   ];
   const localKey = JSON.stringify([claudeRoot, codexRoot]);
-  const importKey = JSON.stringify([filePath, fileFormat]);
+  const importKey = JSON.stringify([filePath, fileFormat, sourceScope]);
   if (hasObservedStore && !editing) {
     const sourceText = (Array.isArray(agentSummary.agentRunSources) ? agentSummary.agentRunSources : [])
       .filter((item) => typeof item?.sourceKind === "string" && item.sourceKind && Number.isInteger(Number(item.runs)) && Number(item.runs) > 0)
@@ -115,12 +116,13 @@ export function SetupWizard({ configUrl, onComplete, onNavigate, onRefresh, agen
         <div className="text-xs font-mono" style={{ color: "#56b6ff" }}>2 · HISTORICAL IMPORT</div>
         <p className="text-sm mt-2" style={{ color: "#94a39d" }}>Uses Verdict's canonical bounded importer and preserves source event time.</p>
         <input value={filePath} onChange={(event) => { setFilePath(event.target.value); setPreviewedImport(null); }} placeholder="/path/to/export.jsonl or /path/to/export-directory" className="block w-full mt-4 border p-2 bg-transparent" />
+        <label className="block text-sm mt-3">Stable feed name<input value={sourceScope} onChange={(e) => { setSourceScope(e.target.value); setPreviewedImport(null); }} className="block w-full border p-2 mt-1 bg-transparent" /><span className="text-xs">Use the same name for each daily export. Conversation IDs must be unique within this feed.</span></label>
         <select value={fileFormat} onChange={(event) => { setFileFormat(event.target.value); setPreviewedImport(null); }} className="mt-3 border p-2 bg-transparent">
           {["auto", "otlp", "langfuse", "langsmith", "datadog", "phoenix", "opik", "mlflow", "voice"].map((name) => <option key={name}>{name}</option>)}
         </select>
         <div className="flex gap-2 mt-4">
-          <button disabled={!token || !filePath || busy} onClick={async () => { const data = await post(`${root}/api/setup/import/preview`, { path: filePath, format: fileFormat }); if (data) setPreviewedImport(importKey); }} className="border px-4 py-2 text-sm">Preview import</button>
-          <button disabled={!token || !filePath || busy || previewedImport !== importKey} onClick={async () => { const data = await post(`${root}/api/setup/import`, { path: filePath, format: fileFormat }); if (data) onRefresh?.(); }} className="px-4 py-2 text-sm" style={{ background: "#4ee1aa", color: "#0b0e0d" }}>Approve and import</button>
+          <button disabled={!token || !filePath || busy} onClick={async () => { const data = await post(`${root}/api/setup/import/preview`, { path: filePath, format: fileFormat, sourceScope }); if (data) setPreviewedImport(importKey); }} className="border px-4 py-2 text-sm">Preview import</button>
+          <button disabled={!token || !filePath || busy || previewedImport !== importKey} onClick={async () => { const data = await post(`${root}/api/setup/import`, { path: filePath, format: fileFormat, sourceScope }); if (data) onRefresh?.(); }} className="px-4 py-2 text-sm" style={{ background: "#4ee1aa", color: "#0b0e0d" }}>Approve and import</button>
         </div>
       </section>}
 
@@ -140,7 +142,7 @@ export function SetupWizard({ configUrl, onComplete, onNavigate, onRefresh, agen
       {result && <section className={panel} style={style}>
         <div className="text-xs font-mono" style={{ color: "#4ee1aa" }}>RESULT</div>
         <pre className="mt-3 text-xs overflow-x-auto">{JSON.stringify(result, null, 2)}</pre>
-        {(result.summary?.stored > 0) && <div className="mt-4"><div className="text-xs font-mono" style={{ color: "#56b6ff" }}>3 · INITIAL ANALYSIS</div><p className="text-sm mt-2" style={{ color: "#94a39d" }}>Capture/import is complete. Review deterministic findings and evidence coverage first; a judge and clusters are optional next decisions.</p><div className="flex flex-wrap gap-2 mt-3"><button onClick={() => onNavigate?.("insights")} className="px-4 py-2 text-sm" style={{ background: "#4ee1aa", color: "#0b0e0d" }}>Review findings</button><button onClick={() => onNavigate?.("evaluators")} className="border px-4 py-2 text-sm">Configure judge</button><button onClick={() => onNavigate?.("explore")} className="border px-4 py-2 text-sm">Explore cohorts / clusters</button><button onClick={() => onNavigate?.("control")} className="border px-4 py-2 text-sm">Schedule production monitoring</button></div></div>}
+        {(result.summary?.stored > 0 || result.summary?.sessionsStored > 0) && <div className="mt-4"><div className="text-xs font-mono" style={{ color: "#56b6ff" }}>3 · INITIAL ANALYSIS</div><p className="text-sm mt-2" style={{ color: "#94a39d" }}>Capture/import is complete. Review deterministic findings and evidence coverage first; a judge and clusters are optional next decisions.</p><div className="flex flex-wrap gap-2 mt-3"><button onClick={() => onNavigate?.("insights")} className="px-4 py-2 text-sm" style={{ background: "#4ee1aa", color: "#0b0e0d" }}>Review findings</button><button onClick={() => onNavigate?.("evaluators")} className="border px-4 py-2 text-sm">Configure judge</button><button onClick={() => onNavigate?.("explore")} className="border px-4 py-2 text-sm">Explore cohorts / clusters</button><button onClick={() => onNavigate?.("control")} className="border px-4 py-2 text-sm">Schedule production monitoring</button></div></div>}
       </section>}
     </div>
   );

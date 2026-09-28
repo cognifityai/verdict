@@ -43,7 +43,7 @@ def _add_api_window(parser: argparse.ArgumentParser) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="verdict-import",
-        description="Import existing LLM telemetry into Verdict's current Trace storage.",
+        description="Import existing LLM telemetry; Voice also stores versioned conversation snapshots.",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 

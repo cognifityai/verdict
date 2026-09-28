@@ -220,7 +220,7 @@ evaluator, dimensions, grouping version, and trace selection as the dashboard.
 The approved baseline membership and normalized metric counts are immutable.
 Grouped monitors are limited to 250 distinct groups. Older stored monitors
 without frozen cohort facts, without evaluator-finalization state when an
-evaluator is selected, or naming a non-Trace analysis unit remain readable but
+evaluator is selected, or naming an unsupported analysis unit remain readable but
 require a new reviewed preview before execution.
 
 A separate **Logical session (descriptive)** selection groups native Agent
@@ -571,3 +571,10 @@ picture, the [architecture decisions](https://github.com/cognifityai/verdict/tre
 and the [examples](https://github.com/cognifityai/verdict/tree/main/examples).
 
 Apache 2.0.
+
+## Local conversation-evaluation candidate
+
+This checkout extends existing Voice ingestion, Evaluator Lab and Monitor for
+versioned transcript snapshots, response/conversation rubric files, numeric
+scores and explicit conversation populations. These additions are not in the
+published a21 wheel. See [workflow, contracts and limits](../../docs/session-evaluation.md).

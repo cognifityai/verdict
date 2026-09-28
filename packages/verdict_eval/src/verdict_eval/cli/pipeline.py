@@ -27,6 +27,8 @@ import os
 from dataclasses import replace
 from datetime import datetime, timezone
 
+from verdict.trace_facts import trace_conversation_history
+
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser()
@@ -102,6 +104,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Analysis time as an ISO-8601 timestamp. Defaults to now. "
         "Useful for reproducible reruns and backfills.",
     )
+    p.add_argument("--conversation-history", action="store_true", help="Include captured prior messages; creates a distinct evaluator identity.")
     p.add_argument(
         "--min-sample-size",
         type=int,
@@ -502,7 +505,8 @@ def _run(args) -> int:
 
         provider = GoogleAdapter()
 
-    judge = Judge(provider=provider, model=args.judge_model, rubric=DEFAULT_RUBRIC)
+    judge = Judge(provider=provider, model=args.judge_model, rubric=DEFAULT_RUBRIC,
+                  conversation_history_mode="prior_messages_v1" if args.conversation_history else None)
     current_evaluator = judge.evaluator_identity(context=None)
 
     # A fixed human-labeled sentinel set is the independent anchor for judge
@@ -641,6 +645,7 @@ def _run(args) -> int:
                 query=t.prompt_redacted or "",
                 response=t.response_redacted or "",
                 trace_id=t.trace_id,
+                history=trace_conversation_history(t) if args.conversation_history else None,
             )
             storage.insert_judgment(j)
             judged += 1

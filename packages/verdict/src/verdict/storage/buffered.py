@@ -330,6 +330,9 @@ class BufferedStorage:
     def insert_trace(self, trace: Trace) -> None:
         self._enqueue(self._inner.insert_trace, trace)
 
+    def insert_voice_trace_if_coherent(self, trace: Trace) -> bool:
+        return self._maintenance(self._inner.insert_voice_trace_if_coherent, trace)
+
     def insert_judgment(self, judgment: Judgment) -> None:
         self._enqueue(self._inner.insert_judgment, judgment)
 
@@ -439,6 +442,23 @@ class BufferedStorage:
 
     def get_trace(self, trace_id: str) -> Trace | None:
         return self._read(self._inner.get_trace, trace_id)
+
+    # Offline session writes are synchronous; enqueue acknowledgement is not durability.
+    def save_session(self, session):
+        return self._read(self._inner.save_session, session)
+
+    def get_session(self, tenant_id, session_id, revision=None):
+        return self._read(self._inner.get_session, tenant_id, session_id, revision)
+
+    def list_sessions(self, tenant_id, *, limit=100):
+        return self._read(self._inner.list_sessions, tenant_id, limit=limit)
+
+    def save_session_assessment(self, assessment):
+        return self._read(self._inner.save_session_assessment, assessment)
+
+    def list_session_assessments(self, tenant_id, *, evaluator_fingerprint=None, session_id=None, limit=100):
+        return self._read(self._inner.list_session_assessments, tenant_id, evaluator_fingerprint=evaluator_fingerprint,
+                          session_id=session_id, limit=limit)
 
     def get_agent_run_bundle(
         self,

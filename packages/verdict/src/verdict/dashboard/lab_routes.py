@@ -16,6 +16,124 @@ _log = logging.getLogger("verdict.dashboard")
 
 
 def register_lab_routes(app, setup: SetupRoutes) -> None:
+    @app.post("/api/evaluators/rubric/validate")
+    def rubric_validate(request: Request, payload: dict[str, Any]):
+        if not setup.authorized(request):
+            return JSONResponse({"error": "evaluator authorization required"}, status_code=403)
+        try:
+            from verdict.sessions import validate_rubric
+            return validate_rubric(payload.get("document"))
+        except (KeyError, TypeError, ValueError, UnicodeError):
+            return JSONResponse({"error": "invalid executable rubric JSON"}, status_code=400)
+
+    @app.post("/api/evaluators/import")
+    def import_assessment(request: Request, payload: dict[str, Any]):
+        if not setup.authorized(request):
+            return JSONResponse({"error": "evaluator authorization required"}, status_code=403)
+        writable = None
+        try:
+            from verdict_eval.providers import FakeProvider
+            from verdict_eval.session_evaluation import assess_snapshot
+
+            from verdict.sessions import validate_rubric
+            writable = setup.writable_storage()
+            row = writable.get_session(setup.tenant_id, payload["sessionId"])
+            if row is None or row["revision"] != payload["revision"]:
+                return JSONResponse({"error": "session revision changed; review current evidence"}, status_code=409)
+            result = assess_snapshot(row, validate_rubric(payload["rubric"]), provider=FakeProvider(), model=payload["model"],
+                imported_findings=payload["findings"], source_provider=payload["provider"], target_message_id=payload.get("targetMessageId"))
+            if not writable.save_session_assessment(result):
+                return JSONResponse({"error": "session revision changed"}, status_code=409)
+            return result
+        except (KeyError, TypeError, ValueError, UnicodeError):
+            return JSONResponse({"error": "invalid imported grader findings"}, status_code=400)
+        finally:
+            if writable is not None:
+                writable.close()
+
+    @app.get("/api/data/sessions")
+    def sessions_data(request: Request, evaluator: str | None = None):
+        if not setup.request_matches_tenant(request):
+            return JSONResponse({"error": "data unavailable"}, status_code=403)
+        writable = setup.writable_storage()
+        try:
+            from verdict.sessions import MAX_SESSIONS, select_assessments
+            rows = writable.list_sessions(setup.tenant_id, limit=MAX_SESSIONS + 1)
+            assessments = writable.list_session_assessments(setup.tenant_id, limit=MAX_SESSIONS + 1)
+            if len(rows) > MAX_SESSIONS or len(assessments) > MAX_SESSIONS:
+                return JSONResponse({"error": "session data exceeds bounded review limit"}, status_code=503)
+            identities = {}
+            for result in assessments:
+                identities[result["evaluator_fingerprint"]] = {"fingerprint": result["evaluator_fingerprint"],
+                    "rubric": result["rubric"]["name"], "version": result["rubric"]["version"],
+                    "target": result["rubric"]["target"], "provider": result["evaluator"].get("provider"),
+                    "model": result["evaluator"].get("model"), "source": result["source"]}
+            if evaluator is None and len(identities) == 1:
+                evaluator = next(iter(identities))
+            selected = [a for a in select_assessments(assessments) if a["evaluator_fingerprint"] == evaluator]
+            issues = {}
+            summaries = []
+            for row in rows:
+                matched = [a for a in selected if a["session_id"] == row["id"] and a["session_revision"] == row["revision"]]
+                for result in matched:
+                    if result["status"] != "completed":
+                        continue
+                    for finding in result["findings"]:
+                        deficient = finding.get("adequacy") in {"borderline", "inadequate", "critical"} or result["dimensions"][finding["dimension"]]["state"] == "fail"
+                        if deficient:
+                            issue = finding.get("issue", finding["dimension"])
+                            issues.setdefault(issue, set()).add(row["id"])
+                summaries.append({**{k:v for k,v in row.items() if k != "messages"}, "messageCount": len(row["messages"]),
+                                  "assessments": matched})
+            return {"sessions": summaries, "evaluatorIdentities": list(identities.values()), "selectedEvaluator": evaluator,
+                    "issues": [{"issue": issue, "conversations": len(ids), "sessionIds": sorted(ids)} for issue, ids in sorted(issues.items(), key=lambda p:-len(p[1]))],
+                    "coverage": {"captured": len(rows), "untimed": sum(r["event_at"] is None for r in rows),
+                                 "unknownEnding": sum(r["end_status"] in {"unknown", "open"} for r in rows),
+                                 "judged": sum(any(a["status"] == "completed" for a in r["assessments"]) for r in summaries)}}
+        finally:
+            writable.close()
+
+    @app.get("/api/data/sessions/{session_id}")
+    def session_detail(request: Request, session_id: str, revision: str | None = None):
+        if not setup.request_matches_tenant(request):
+            return JSONResponse({"error": "session unavailable"}, status_code=403)
+        writable = setup.writable_storage()
+        try:
+            row = writable.get_session(setup.tenant_id, session_id, revision)
+            if row is None:
+                return JSONResponse({"error": "session unavailable"}, status_code=404)
+            assessments = writable.list_session_assessments(setup.tenant_id, session_id=session_id, limit=5001)
+            if len(assessments) > 5000:
+                return JSONResponse({"error": "session history exceeds bounded review limit"}, status_code=503)
+            return {"session": row, "assessments": assessments}
+        except (TypeError, ValueError):
+            return JSONResponse({"error": "invalid session request"}, status_code=400)
+        finally:
+            writable.close()
+
+    @app.get("/api/compare/matched")
+    def matched_replies(request: Request, left: str | None = None, right: str | None = None, evaluator: str | None = None):
+        if not setup.request_matches_tenant(request):
+            return JSONResponse({"error":"comparison unavailable"},status_code=403)
+        writable=setup.writable_storage()
+        try:
+            from verdict.matched_comparison import compare_saved_replies
+            traces=writable.list_traces(tenant_id=setup.tenant_id,limit=5001)
+            if len(traces)>5000:
+                raise ValueError("matched comparison exceeds bounded input limit")
+            models=sorted({f"{t.provider}/{t.response_model or t.request_model}" for t in traces})
+            if evaluator is None or left is None or right is None:
+                return {"models":models,"status":"select_models_and_evaluator"}
+            if left not in models or right not in models:
+                raise ValueError("selected model is unavailable")
+            from verdict.monitor_inputs import _evaluator_judgments
+            judgments=_evaluator_judgments(writable,tenant_id=setup.tenant_id,evaluator_fingerprint=evaluator)
+            return {"models":models,"evaluatorFingerprint":evaluator,**compare_saved_replies(traces,judgments,left,right)}
+        except (TypeError,ValueError):
+            return JSONResponse({"error":"comparison requires two captured models and one exact stored evaluator"},status_code=400)
+        finally:
+            writable.close()
+
     @app.get("/api/evaluators")
     def evaluator_status(request: Request):
         if not setup.request_matches_tenant(request):

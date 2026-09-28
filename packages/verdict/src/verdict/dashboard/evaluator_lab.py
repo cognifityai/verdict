@@ -28,7 +28,7 @@ from verdict.pricing import PRICING_LAST_VERIFIED, compute_cost_usd
 from verdict.redaction import redact
 from verdict.schema import Judgment, JudgmentStatus, Trace
 from verdict.storage.base import Storage
-from verdict.trace_facts import trace_evidence_reason
+from verdict.trace_facts import trace_conversation_history, trace_evidence_reason
 
 _NAME = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _PROVIDER_KEYS = {
@@ -189,6 +189,7 @@ def _judge(provider, model, rubric, max_output, *, tool_evidence=False):
         max_tokens=max_output,
         tool_evidence_mode=TOOL_EVIDENCE_MODE if tool_evidence else None,
         tool_evidence_template=TurnToolCounts.PROMPT_TEMPLATE if tool_evidence else None,
+        conversation_history_mode="prior_messages_v1",
     )
 
 
@@ -227,7 +228,7 @@ def _pending(
 
 def _planned_trace(trace: Trace) -> dict[str, str]:
     evidence = json.dumps(
-        [trace.trace_id, trace.prompt_redacted, trace.response_redacted],
+        [trace.trace_id, trace.prompt_redacted, trace.response_redacted, trace_conversation_history(trace)],
         ensure_ascii=False,
         separators=(",", ":"),
     )
@@ -383,6 +384,9 @@ def _approved_trace_ids(config, evaluator_fingerprint, max_calls, eligible):
 def preview_evaluation(
     storage: Storage, *, tenant_id: str, config: dict[str, Any]
 ) -> dict[str, Any]:
+    if config.get("unit") == "conversation":
+        from verdict_eval.session_evaluation import preview_evaluation as preview_sessions
+        return preview_sessions(storage, tenant_id=tenant_id, config=config)
     provider, model, max_calls, max_output, rubric = _validated_config(config)
     if config.get("unit") == "agent_turn":
         return _turn_preview(storage, tenant_id, config, provider, model, max_calls, max_output, rubric)
@@ -432,16 +436,8 @@ def preview_evaluation(
 
 
 def _provider(name: str):
-    if not os.environ.get(_PROVIDER_KEYS[name]):
-        raise ValueError(f"{_PROVIDER_KEYS[name]} is not configured")
-    if name == "anthropic":
-        from verdict_eval.providers import AnthropicAdapter
-        return AnthropicAdapter()
-    if name == "openai":
-        from verdict_eval.providers import OpenAIAdapter
-        return OpenAIAdapter()
-    from verdict_eval.providers import GoogleAdapter
-    return GoogleAdapter()
+    from verdict_eval.providers import get_provider
+    return get_provider(name)
 
 
 def execute_evaluation(
@@ -472,6 +468,10 @@ def _execute_evaluation(
 ) -> dict[str, Any]:
     if confirm_external_egress is not True:
         raise ValueError("external judge egress was not confirmed")
+    if config.get("unit") == "conversation":
+        from verdict_eval.session_evaluation import execute_evaluation as execute_sessions
+        return execute_sessions(storage, tenant_id=tenant_id, config=config,
+                                confirm_external_egress=confirm_external_egress, provider=provider)
     provider_name, model, max_calls, _max_output, rubric = _validated_config(config)
     if config.get("unit") == "agent_turn":
         return _execute_turn_evaluation(storage, tenant_id, config, provider_name,
@@ -513,6 +513,7 @@ def _execute_evaluation(
                 query=trace.prompt_redacted or "",
                 response=trace.response_redacted or "",
                 trace_id=trace.trace_id,
+                history=trace_conversation_history(trace),
             ))
             completed += 1
         except Exception as exc:

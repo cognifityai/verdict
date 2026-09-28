@@ -35,8 +35,11 @@ present those states without treating missing evidence as success or failure.
 11. Monitor is the only current drift workflow. Activation stores an immutable
     event-time boundary and creates an empty prospective cohort; evidence whose
     event time predates that boundary never enters a later current cohort.
-12. Trace remains the only persisted, activatable Monitor unit. A native Agent
-    logical-session comparison is an ephemeral retrospective projection over
+12. Genuine Trace calls and native closed, timed conversation snapshots are
+    separate persisted, activatable Monitor scopes. Conversation assessment
+    evidence and population eligibility follow the
+    [conversation evaluation contract](../session-evaluation.md).
+    A native Agent logical-session comparison is an ephemeral retrospective projection over
     explicit `AgentRun.session_id` values. It reports descriptive rates,
     effects, and coverage only because session finalization and independence
     are not established. Its purpose-limited storage projection omits Turn text

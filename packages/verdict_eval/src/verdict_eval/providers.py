@@ -353,3 +353,15 @@ class GoogleAdapter:
             output_tokens=getattr(usage, "candidates_token_count", None) if usage else None,
             finish_reason=finish,
         )
+
+
+def get_provider(name):
+    """Create a provider from operator-managed environment credentials."""
+    import os
+    adapters={"openai":(OpenAIAdapter,"OPENAI_API_KEY"),"anthropic":(AnthropicAdapter,"ANTHROPIC_API_KEY"),"google":(GoogleAdapter,"GOOGLE_API_KEY")}
+    if name not in adapters:
+        raise ValueError("unsupported inference provider")
+    adapter,reference=adapters[name]
+    if not os.environ.get(reference):
+        raise ValueError(f"{reference} is not configured")
+    return adapter()

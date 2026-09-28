@@ -38,6 +38,7 @@ dev = [
 ]
 
 [project.scripts]
+verdict-session-evaluate = "verdict_eval.cli.sessions:main"
 verdict-pipeline = "verdict_eval.cli.pipeline:main"
 verdict-cluster = "verdict_eval.cli.cluster:main"
 

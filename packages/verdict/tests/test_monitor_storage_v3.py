@@ -97,13 +97,13 @@ def test_storage_rejects_new_non_trace_monitor_policies(
 ) -> None:
     policy = replace(_policy(), analysis_unit=analysis_unit)
 
-    with pytest.raises(ValueError, match="only the trace analysis unit"):
+    with pytest.raises(ValueError, match="trace or conversation analysis units"):
         storage.save_monitor_policy(policy)
 
     assert storage.get_monitor_policy(policy.policy_id) is None
 
     manifest, comparison = _snapshot(_policy())
-    with pytest.raises(ValueError, match="only the trace analysis unit"):
+    with pytest.raises(ValueError, match="trace or conversation analysis units"):
         storage.save_monitor_candidate(policy, manifest, comparison)
 
     assert storage.get_monitor_policy(policy.policy_id) is None
@@ -134,7 +134,7 @@ def test_non_trace_monitor_projection_fails_before_storage_read(
 
     policy = replace(_policy(), analysis_unit=analysis_unit)
 
-    with pytest.raises(ValueError, match="only the trace analysis unit"):
+    with pytest.raises(ValueError, match="trace or conversation analysis units"):
         load_monitor_units(
             StorageReadMustNotRun(),
             policy,
@@ -166,15 +166,15 @@ def test_non_trace_monitor_direct_calculations_are_rejected(
         policy_fingerprint=policy.fingerprint,
     )
 
-    with pytest.raises(ValueError, match="only the trace analysis unit"):
+    with pytest.raises(ValueError, match="trace or conversation analysis units"):
         plan_historical_manifest(
             units,
             policy,
             cutoff=NOW + timedelta(hours=1),
         )
-    with pytest.raises(ValueError, match="only the trace analysis unit"):
+    with pytest.raises(ValueError, match="trace or conversation analysis units"):
         plan_prospective_manifest(claimed_manifest, (), policy)
-    with pytest.raises(ValueError, match="only the trace analysis unit"):
+    with pytest.raises(ValueError, match="trace or conversation analysis units"):
         compare_manifest(units, claimed_manifest, policy)
 
 

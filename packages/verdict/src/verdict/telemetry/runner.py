@@ -33,11 +33,23 @@ def import_into_storage(results: Iterable[MappingResult], storage: Storage) -> I
         except Exception as exc:
             raise ImportRunError("source", summary, exc) from exc
         summary.seen += 1
+        if result.session is not None:
+            try:
+                storage.save_session(result.session)
+            except Exception as exc:
+                raise ImportRunError("session_storage", summary, exc) from exc
+            summary.sessions_stored += 1
         if result.trace is None:
-            summary.add_skip(result.skip_reason or "unknown_skip")
+            if result.skip_reason is not None:
+                summary.add_skip(result.skip_reason)
             continue
         try:
-            storage.insert_trace(result.trace)
+            if result.trace.tags.get("verdict.source") == "voice":
+                if not storage.insert_voice_trace_if_coherent(result.trace):
+                    summary.add_skip("voice_reply_revision_retained")
+                    continue
+            else:
+                storage.insert_trace(result.trace)
         except Exception as exc:
             raise ImportRunError("storage", summary, exc) from exc
         summary.stored += 1

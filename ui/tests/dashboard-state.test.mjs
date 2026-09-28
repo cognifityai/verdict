@@ -627,6 +627,134 @@ function deferredFetches() {
   return requests;
 }
 
+const monitorUnitControl = (tree) => findAll(tree, (node) => node.type === "select"
+  && findAll(node, (option) => option.type === "option" && option.props.value === "conversation").length)[0];
+const monitorRunButton = (tree) => findAll(tree, (node) => node.type === "button"
+  && textOf(node).trim() === "Run next cohort now")[0];
+
+test("Monitor Status can reload and run a saved conversation monitor", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const props = { configUrl: "/api/config", view: "status" };
+  let tree = render(ui.Monitor, hooks, props);
+  assert.ok(monitorUnitControl(tree));
+  hooks.flushEffects();
+  await resolveJson(requests[0], { setupToken: "setup-token" });
+  await resolveJson(requests[1], { active: null, candidate: null });
+  assert.equal(requests.length, 2, "Trace Status must not depend on a native catalog request");
+  tree = render(ui.Monitor, hooks, props);
+  monitorUnitControl(tree).props.onChange({ target: { value: "conversation" } });
+  tree = render(ui.Monitor, hooks, props);
+  hooks.flushEffects();
+  assert.match(requests[3].url, /unit=conversation$/);
+  await resolveJson(requests[2], { setupToken: "setup-token" });
+  await resolveJson(requests[3], { active: { state: "active", policy: { analysis_unit: "conversation" } } });
+  await resolveJson(requests[4], { evaluatorIdentities: [] });
+  tree = render(ui.Monitor, hooks, props);
+  assert.ok(monitorRunButton(tree));
+  const pending = monitorRunButton(tree).props.onClick();
+  assert.match(requests[5].url, /\/api\/monitor\/run\?unit=conversation$/);
+  await resolveJson(requests[5], { state: "active", policy: { analysis_unit: "conversation" } });
+  await pending;
+  assert.doesNotMatch(textOf(render(ui.Monitor, hooks, props)), /No comparison configured/);
+});
+
+test("Dashboard navigation keeps Monitor in one reconciliation slot", async () => {
+  const ui = await loadUiModule();
+  const previousWindow = globalThis.window;
+  globalThis.window = {
+    location: { hash: "#tab=monitor&section=status", search: "", pathname: "/dashboard" },
+    history: { pushState() {}, replaceState() {} },
+  };
+  const pathToMonitor = (node, path = []) => {
+    if (Array.isArray(node)) {
+      for (let index = 0; index < node.length; index++) {
+        const found = pathToMonitor(node[index], [...path, index]);
+        if (found) return found;
+      }
+    } else if (node && typeof node === "object") {
+      if (node.type === ui.Monitor) return path;
+      return pathToMonitor(node.props?.children, [...path, "children"]);
+    }
+    return null;
+  };
+  try {
+    const hooks = createHooks();
+    const props = { data: bundle("judge-a"), source: "live" };
+    let tree = render(ui.Dashboard, hooks, props);
+    const statusPath = pathToMonitor(tree);
+    assert.ok(statusPath);
+    let navigation = findAll(tree, (node) => node.type?.name === "WorkspaceNav")[0];
+    findAll(navigation.type(navigation.props), (node) => node.type === "button" && textOf(node).trim() === "Compare History")[0].props.onClick();
+    tree = render(ui.Dashboard, hooks, props);
+    assert.equal(findAll(tree, (node) => node.type === ui.Monitor)[0].props.view, "history");
+    assert.deepEqual(pathToMonitor(tree), statusPath, "different sibling slots remount the unit/form owner");
+    navigation = findAll(tree, (node) => node.type?.name === "WorkspaceNav")[0];
+    findAll(navigation.type(navigation.props), (node) => node.type === "button" && textOf(node).trim() === "Status")[0].props.onClick();
+    tree = render(ui.Dashboard, hooks, props);
+    assert.deepEqual(pathToMonitor(tree), statusPath);
+  } finally {
+    if (previousWindow === undefined) delete globalThis.window;
+    else globalThis.window = previousWindow;
+  }
+});
+
+test("Monitor scope switches discard old reads and pending run errors", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const props = { configUrl: "/api/config", view: "status" };
+  let tree = render(ui.Monitor, hooks, props);
+  hooks.flushEffects();
+  assert.ok(monitorUnitControl(tree));
+  monitorUnitControl(tree).props.onChange({ target: { value: "conversation" } });
+  tree = render(ui.Monitor, hooks, props);
+  hooks.flushEffects();
+  await resolveJson(requests[2], { setupToken: "setup-token" });
+  await resolveJson(requests[3], { active: { state: "active", policy: { analysis_unit: "conversation" } } });
+  await resolveJson(requests[4], { evaluatorIdentities: [] });
+  await resolveJson(requests[0], { setupToken: "obsolete-token" });
+  await resolveJson(requests[1], { active: null, candidate: null });
+  tree = render(ui.Monitor, hooks, props);
+  const pending = monitorRunButton(tree).props.onClick();
+  assert.equal(requests[5].options.headers["X-Verdict-Setup"], "setup-token");
+  monitorUnitControl(tree).props.onChange({ target: { value: "trace" } });
+  tree = render(ui.Monitor, hooks, props);
+  assert.equal(monitorRunButton(tree), undefined);
+  hooks.flushEffects();
+  requests[5].reject(new Error("obsolete-conversation-error"));
+  await pending;
+  await resolveJson(requests[6], { setupToken: "trace-token" });
+  await resolveJson(requests[7], { active: { state: "active", policy: { analysis_unit: "trace" } } });
+  tree = render(ui.Monitor, hooks, props);
+  assert.ok(monitorRunButton(tree));
+  assert.equal(monitorRunButton(tree).props.disabled, false);
+  assert.doesNotMatch(textOf(tree), /obsolete-conversation-error/);
+});
+
+test("descriptive logical sessions never display or run the Trace monitor", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const props = { configUrl: "/api/config", view: "status" };
+  let tree = render(ui.Monitor, hooks, props);
+  hooks.flushEffects();
+  await resolveJson(requests[0], { setupToken: "setup-token" });
+  await resolveJson(requests[1], { active: { state: "active", policy: { analysis_unit: "trace" } } });
+  tree = render(ui.Monitor, hooks, props);
+  assert.ok(monitorRunButton(tree));
+  monitorUnitControl(tree).props.onChange({ target: { value: "logical_session" } });
+  tree = render(ui.Monitor, hooks, props);
+  assert.equal(monitorRunButton(tree), undefined);
+  hooks.flushEffects();
+  await resolveJson(requests[2], { setupToken: "setup-token" });
+  await resolveJson(requests[3], { active: { state: "active", policy: { analysis_unit: "trace" } } });
+  tree = render(ui.Monitor, hooks, props);
+  assert.equal(monitorRunButton(tree), undefined);
+  assert.match(textOf(tree), /descriptive only/i);
+});
+
 test("Insights reloads the normalized snapshot after an error retry", async () => {
   const ui = await loadUiModule();
   const hooks = createEffectHooks();

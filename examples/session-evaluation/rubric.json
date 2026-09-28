@@ -1,0 +1,10 @@
+{
+  "name": "workflow_quality",
+  "version": "1",
+  "target": "conversation",
+  "instructions": "Evaluate only recorded text and the stated synthetic workflow. Do not infer missing facts. Explain each finding and cite an exact message when possible.",
+  "dimensions": [
+    {"name": "repetition", "description": "The assistant avoids repeating already answered questions.", "type": "binary"},
+    {"name": "summary", "description": "The final summary accurately reflects the stated information. Score from 0 (contradicts it) to 100 (accurate and complete).", "type": "number", "min": 0, "max": 100, "direction": "higher_is_better"}
+  ]
+}

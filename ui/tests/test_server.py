@@ -2313,16 +2313,18 @@ def test_basic_auth_gates_dashboard_shells_and_data_but_not_health(monkeypatch):
                 await client.get("/dashboard"),
                 await client.get("/api/data"),
                 await client.get("/api/registry"),
+                await client.get("/api/compare/matched"),
                 await client.get("/dashboard", headers={"Authorization": f"Basic {token}"}),
             )
 
-    landing, health, dashboard, data, registry, authenticated = asyncio.run(requests())
+    landing, health, dashboard, data, registry, matched, authenticated = asyncio.run(requests())
 
     assert landing.status_code == 401
     assert health.status_code == 200
     assert dashboard.status_code == 401
     assert data.status_code == 401
     assert registry.status_code == 401
+    assert matched.status_code == 401
     assert dashboard.headers["www-authenticate"] == 'Basic realm="Verdict"'
     assert landing.headers["www-authenticate"] == 'Basic realm="Verdict"'
     assert authenticated.status_code == 200

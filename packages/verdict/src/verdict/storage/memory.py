@@ -120,6 +120,9 @@ class InMemoryStorage:
     """Process-local, non-persistent storage. Loses everything on close()."""
 
     def __init__(self) -> None:
+        self._sessions: dict[tuple, str] = {}
+        self._session_heads: dict[tuple, str] = {}
+        self._session_assessments: dict[tuple, str] = {}
         self._traces: dict[str, Trace] = {}
         self._import_sources: dict[tuple[str, str], SourceSession] = {}
         self._agent_runs: dict[tuple[str, str], AgentRun] = {}
@@ -192,6 +195,19 @@ class InMemoryStorage:
                 trace.parent_span_id = existing.parent_span_id
         with self._cluster_v2_lock:
             self._traces[trace.trace_id] = trace
+
+    def insert_voice_trace_if_coherent(self, trace: Trace) -> bool:
+        sanitize_trace(trace)
+        with self._cluster_v2_lock:
+            existing = self._traces.get(trace.trace_id)
+            if existing is not None and any(
+                getattr(existing, name) != getattr(trace, name)
+                for name in ("tenant_id", "session_id", "provider", "operation", "request_model",
+                             "response_model", "prompt_redacted", "response_redacted", "raw_messages")
+            ):
+                return False
+            self.insert_trace(trace)
+            return True
 
     def _agent_bundle(self, tenant_id: str, run_id: str) -> AgentRunBundle | None:
         run = self._agent_runs.get((tenant_id, run_id))
@@ -1818,6 +1834,58 @@ class InMemoryStorage:
         for trace in pending[:limit]:
             populate_trace_analysis_fields(trace)
         return min(len(pending), limit)
+
+    def save_session(self, session):
+        from verdict.sessions import canonical, validate_session
+        value = validate_session(session)
+        identity = (value["tenant_id"], value["id"], value["revision"])
+        with self._agent_evidence_lock:
+            if identity not in self._sessions:
+                self._sessions[identity] = canonical(value)
+                self._session_heads[identity[:2]] = identity[2]
+
+    def get_session(self, tenant_id, session_id, revision=None):
+        from verdict.sessions import key, validate_query
+        validate_query(tenant_id)
+        key(session_id)
+        with self._agent_evidence_lock:
+            revision = revision or self._session_heads.get((tenant_id, session_id))
+            payload = self._sessions.get((tenant_id, session_id, revision))
+            return json.loads(payload) if payload else None
+
+    def list_sessions(self, tenant_id, *, limit=100):
+        from verdict.sessions import validate_query
+        validate_query(tenant_id, limit)
+        with self._agent_evidence_lock:
+            return [self.get_session(tenant_id, sid) for tenant, sid in sorted(self._session_heads) if tenant == tenant_id][:limit]
+
+    def save_session_assessment(self, assessment):
+        from verdict.sessions import canonical, check_assessment_evidence, validate_assessment
+        value = validate_assessment(assessment)
+        with self._agent_evidence_lock:
+            current = self.get_session(value["tenant_id"], value["session_id"])
+            if current is None or current["revision"] != value["session_revision"]:
+                return False
+            check_assessment_evidence(value, current)
+            identity = (value["tenant_id"], value["id"])
+            if identity in self._session_assessments:
+                old = json.loads(self._session_assessments[identity])
+                if {k:v for k,v in old.items() if k != "evaluated_at"} != {k:v for k,v in value.items() if k != "evaluated_at"}:
+                    raise ValueError("conflicting immutable assessment")
+            else:
+                self._session_assessments[identity] = canonical(value)
+            return True
+
+    def list_session_assessments(self, tenant_id, *, evaluator_fingerprint=None, session_id=None, limit=100):
+        from verdict.sessions import key, validate_query
+        validate_query(tenant_id, limit)
+        if evaluator_fingerprint is not None:
+            key(evaluator_fingerprint)
+        if session_id is not None:
+            key(session_id)
+        with self._agent_evidence_lock:
+            rows = [json.loads(p) for (tenant, _), p in self._session_assessments.items() if tenant == tenant_id]
+            return sorted([r for r in rows if (evaluator_fingerprint is None or r["evaluator_fingerprint"] == evaluator_fingerprint) and (session_id is None or r["session_id"] == session_id)], key=lambda r:r["evaluated_at"], reverse=True)[:limit]
 
     def close(self) -> None:
         self._traces.clear()

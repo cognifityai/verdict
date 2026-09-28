@@ -94,3 +94,10 @@ See the [repository README](https://github.com/cognifityai/verdict#readme),
 and the [verification scripts](https://github.com/cognifityai/verdict/tree/main/scripts).
 
 Apache 2.0.
+
+## Local conversation-evaluation candidate
+
+This checkout extends existing Voice ingestion, Evaluator Lab and Monitor for
+versioned transcript snapshots, response/conversation rubric files, numeric
+scores and explicit conversation populations. These additions are not in the
+published a21 wheel. See [workflow, contracts and limits](../../docs/session-evaluation.md).

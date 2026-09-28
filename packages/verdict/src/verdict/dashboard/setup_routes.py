@@ -53,7 +53,7 @@ class SetupRoutes:
         self.setup_token = setup_token
         self.tenant_id = tenant_id
         self._previewed_local_roots: set[tuple[str | None, str | None]] = set()
-        self._previewed_imports: set[tuple[str, str]] = set()
+        self._previewed_imports: set[tuple[str, str, str | None]] = set()
 
     def authorized(self, request: Request) -> bool:
         if not self.request_matches_tenant(request):
@@ -247,10 +247,14 @@ class SetupRoutes:
                 )
             try:
                 path, file_format, candidates = self._import_candidates(payload)
+                source_scope = payload.get("sourceScope")
+                if source_scope is not None:
+                    from verdict.sessions import key
+                    source_scope = key(source_scope)
                 modified = [candidate.stat().st_mtime for candidate in candidates]
                 total_bytes = sum(candidate.stat().st_size for candidate in candidates)
                 self._previewed_imports.clear()
-                self._previewed_imports.add((str(path.resolve()), file_format))
+                self._previewed_imports.add((str(path.resolve()), file_format, source_scope))
                 return {
                     "approvedPath": str(path),
                     "format": file_format,
@@ -284,7 +288,11 @@ class SetupRoutes:
                 )
             try:
                 path, file_format, candidates = self._import_candidates(payload)
-                import_key = (str(path.resolve()), file_format)
+                source_scope = payload.get("sourceScope")
+                if source_scope is not None:
+                    from verdict.sessions import key
+                    source_scope = key(source_scope)
+                import_key = (str(path.resolve()), file_format, source_scope)
                 if import_key not in self._previewed_imports:
                     return JSONResponse(
                         {"error": "preview this exact import path and format first"},
@@ -292,12 +300,12 @@ class SetupRoutes:
                     )
                 writable = self.writable_storage()
                 try:
-                    seen = stored = skipped = 0
+                    seen = stored = skipped = sessions_stored = 0
                     reasons: Counter[str] = Counter()
                     for candidate in candidates:
                         context = ImportContext(
                             adapter="file",
-                            source_scope=str(candidate.resolve()),
+                            source_scope=source_scope or str(candidate.resolve()),
                             tenant_id=self.tenant_id,
                         )
                         summary = import_into_storage(
@@ -306,6 +314,7 @@ class SetupRoutes:
                             ),
                             writable,
                         )
+                        sessions_stored += summary.sessions_stored
                         seen += summary.seen
                         stored += summary.stored
                         skipped += summary.skipped
@@ -318,6 +327,7 @@ class SetupRoutes:
                     "summary": {
                         "files": len(candidates),
                         "seen": seen,
+                        "sessionsStored": sessions_stored,
                         "stored": stored,
                         "skipped": skipped,
                         "skipReasons": dict(sorted(reasons.items())),

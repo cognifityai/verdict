@@ -20,6 +20,38 @@ def text_is_present(value: object) -> bool:
     return isinstance(value, str) and bool(value.strip())
 
 
+def trace_conversation_history(trace) -> str | None:
+    """Return bounded prior messages; canonical imports append the target output."""
+    rows = trace.raw_messages
+    if not isinstance(rows, list) or not rows:
+        if trace.tags.get("verdict.source") == "voice":
+            raise ValueError("incoherent imported voice reply evidence")
+        return None
+    messages = [{"role": m["role"], "content": m["content"]} for m in rows
+                if isinstance(m, dict) and m.get("role") in {"user", "assistant", "system", "tool"}
+                and isinstance(m.get("content"), str)]
+    if trace.tags.get("verdict.source") == "voice":
+        from verdict.redaction import redact
+        from verdict.telemetry.normalize import message_text
+
+        # Published imports project user text, then storage redacts the joined
+        # prompt. Validate both sides before using legacy rows as judge context.
+        if (
+            len(messages) != len(rows) or not messages
+            or messages[-1]["role"] != "assistant"
+            or redact(message_text(messages[-1:], "assistant")) != trace.response_redacted
+            or redact(message_text(messages[:-1], "user")) != trace.prompt_redacted
+        ):
+            raise ValueError("incoherent imported voice reply evidence")
+    if trace.tags.get("verdict.source") and messages and messages[-1]["role"] == "assistant" and messages[-1]["content"] == trace.response_redacted:
+        messages = messages[:-1]
+    # No tail truncation: it could discard the initial instruction or role order.
+    encoded = json.dumps(messages, ensure_ascii=False, separators=(",", ":"))
+    if len(encoded.encode()) > 512_000:
+        raise ValueError("conversation history exceeds judge evidence budget")
+    return encoded if messages else None
+
+
 def trace_evidence_reason(*, error: object, prompt: object, response: object) -> str | None:
     """Return the first reason a trace is not eligible for response judging."""
     if error:
@@ -31,9 +63,11 @@ def trace_evidence_reason(*, error: object, prompt: object, response: object) ->
     return None
 
 
-def trace_judge_evidence_digest(*, error: object, prompt: object, response: object) -> str:
+def trace_judge_evidence_digest(*, error: object, prompt: object, response: object, history: str | None = None) -> str:
     """Identify the exact response-judge evidence without retaining its content."""
     payload = [_JUDGE_EVIDENCE_DIGEST_VERSION, error, prompt, response]
+    if history is not None:
+        payload = ["trace_response_history_v2", error, prompt, response, history]
     return hashlib.sha256(
         json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode()
     ).hexdigest()

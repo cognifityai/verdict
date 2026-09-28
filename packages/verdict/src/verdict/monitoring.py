@@ -66,6 +66,8 @@ class AnalysisUnitRecord:
     group_model: str | None = None
     evaluator_state: str = "not_requested"
     evaluator_evidence_digest: str | None = None
+    source_revision: str | None = None
+    numeric_metrics: Mapping[str, tuple] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.unit_id, str) or not self.unit_id:
@@ -81,6 +83,9 @@ class AnalysisUnitRecord:
                     "monitor metrics must be boolean; continuous values require "
                     "an explicitly versioned statistical contract"
                 )
+        if self.numeric_metrics:
+            from verdict.numeric_monitoring import validate_numeric
+            validate_numeric([{"group_id":self.group_id,"metric":name,"spec":list(spec[1:]),"values":[] if spec[0] is None else [[self.unit_id,spec[0]]]} for name,spec in self.numeric_metrics.items()])
         if self.metric_states is None:
             object.__setattr__(self, "metric_states", {})
         elif not isinstance(self.metric_states, Mapping):
@@ -156,6 +161,8 @@ class MonitorPolicy:
     evaluator_fingerprint: str | None = None
     evaluator_dimensions: tuple[str, ...] = ()
     cluster_registry_version_id: str | None = None
+    numeric_method: str | None = None
+    response_aggregation: str | None = None
 
     def __post_init__(self) -> None:
         for name, maximum in (("policy_id", 256), ("scope_key", 512)):
@@ -175,9 +182,9 @@ class MonitorPolicy:
             value = getattr(self, name)
             if not isinstance(value, (int, float)) or not 0 <= value <= 1:
                 raise ValueError(f"{name} must be between zero and one")
-        if self.analysis_unit not in {"trace", "turn", "run", "session"}:
+        if self.analysis_unit not in {"trace", "turn", "run", "session", "conversation"}:
             raise ValueError("analysis_unit is unsupported")
-        if self.grouping_mode not in {"none", "provider_model", "cluster"}:
+        if self.grouping_mode not in {"none", "provider_model", "cluster", "population"}:
             raise ValueError("grouping_mode is unsupported")
         if self.cluster_registry_version_id is not None:
             version_id = self.cluster_registry_version_id
@@ -189,6 +196,10 @@ class MonitorPolicy:
                 or len(version_id.encode("utf-8")) > 64
             ):
                 raise ValueError("cluster registry version is invalid")
+        if self.response_aggregation is not None and (self.analysis_unit != "conversation" or self.response_aggregation != "all_completed_replies_v1"):
+            raise ValueError("unsupported response aggregation")
+        if self.numeric_method is not None and (self.analysis_unit != "conversation" or self.numeric_method != "mann_whitney_asymptotic_v1"):
+            raise ValueError("unsupported numeric monitor methodology")
         if self.sequential_method != "quadratic_alpha_spending_v1":
             raise ValueError("sequential_method is unsupported")
         if self.evaluator_fingerprint is None:
@@ -242,6 +253,8 @@ class MonitorPolicy:
                     self.evaluator_fingerprint is None
                     and item.name in {"evaluator_fingerprint", "evaluator_dimensions"}
                 )
+                or (item.name == "numeric_method" and self.numeric_method is None)
+                or (item.name == "response_aggregation" and self.response_aggregation is None)
                 or (
                     self.cluster_registry_version_id is None
                     and item.name == "cluster_registry_version_id"
@@ -256,8 +269,10 @@ class MonitorPolicy:
 
 def validate_monitor_analysis_unit(policy: MonitorPolicy) -> None:
     """Reject new execution or persistence for unsupported monitor units."""
-    if policy.analysis_unit != "trace":
-        raise ValueError("Monitor currently supports only the trace analysis unit.")
+    if policy.analysis_unit not in {"trace", "conversation"}:
+        raise ValueError("Monitor supports trace or conversation analysis units.")
+    if policy.grouping_mode == "population" and policy.analysis_unit != "conversation":
+        raise ValueError("population grouping requires conversation observations")
 
 
 @dataclass(frozen=True, slots=True)
@@ -333,8 +348,14 @@ class FrozenCohortSummary:
     unassigned_unit_count: int
     groups: tuple[FrozenGroupCount, ...]
     metrics: tuple[FrozenMetricCounts, ...]
+    source_revisions: tuple[tuple[str, str], ...] = ()
+    numeric_evidence: tuple[dict, ...] = ()
 
     def __post_init__(self) -> None:
+        from verdict.numeric_monitoring import validate_numeric
+        validate_numeric(self.numeric_evidence)
+        if len(set(identity for identity,_ in self.source_revisions)) != len(self.source_revisions):
+            raise ValueError("frozen source revision identities must be unique")
         for name in ("unit_count", "unassigned_unit_count"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
@@ -456,8 +477,14 @@ class MetricComparison:
     p_adjusted: float
     alert: bool
     group_id: str | None = None
+    kind: str = "binary"
+    method: str = "fisher_exact_v1"
+    direction: str | None = None
+    movement: str | None = None
 
     def __post_init__(self) -> None:
+        if self.kind not in {"binary", "number"} or self.method not in {"fisher_exact_v1", "mann_whitney_asymptotic_v1"}:
+            raise ValueError("unsupported metric contrast methodology")
         if not self.metric or min(self.reference_n, self.current_n) < 0:
             raise ValueError("metric comparison identity and counts are invalid")
         values = (
@@ -608,6 +635,8 @@ def _ordered(units) -> list[AnalysisUnitRecord]:
 
 def _summary_payload(summary: FrozenCohortSummary) -> dict[str, object]:
     return {
+        **({"source_revisions": summary.source_revisions} if summary.source_revisions else {}),
+        **({"numeric_evidence": summary.numeric_evidence} if summary.numeric_evidence else {}),
         "unit_count": summary.unit_count,
         "unassigned_unit_count": summary.unassigned_unit_count,
         "groups": [
@@ -652,6 +681,8 @@ def _summary_from_payload(payload: object) -> FrozenCohortSummary:
         tuple(
             FrozenMetricCounts(**{"group_id": None, **dict(item)}) for item in payload["metrics"]
         ),
+        tuple(tuple(item) for item in payload.get("source_revisions", ())),
+        tuple(payload.get("numeric_evidence", ())),
     )
     if digest != summary.evidence_digest:
         raise ValueError("frozen cohort evidence digest changed")
@@ -663,6 +694,7 @@ def _freeze_cohort(
     *,
     grouped: bool,
 ) -> FrozenCohortSummary:
+    from verdict.numeric_monitoring import freeze_numeric
     selected: dict[str | None, list[AnalysisUnitRecord]] = {}
     group_metadata: dict[str, AnalysisUnitRecord] = {}
     unassigned = 0
@@ -730,6 +762,8 @@ def _freeze_cohort(
         unassigned,
         groups,
         tuple(metric_counts),
+        tuple(sorted((u.unit_id, u.source_revision) for u in units if u.source_revision)),
+        freeze_numeric(units, grouped=grouped),
     )
 
 
@@ -737,6 +771,7 @@ def _merge_summaries(
     first: FrozenCohortSummary,
     second: FrozenCohortSummary,
 ) -> FrozenCohortSummary:
+    from verdict.numeric_monitoring import merge_numeric
     groups: dict[str, FrozenGroupCount] = {item.group_id: item for item in first.groups}
     for item in second.groups:
         previous = groups.get(item.group_id)
@@ -779,6 +814,8 @@ def _merge_summaries(
         first.unassigned_unit_count + second.unassigned_unit_count,
         tuple(sorted(groups.values(), key=lambda item: item.group_id)),
         tuple(sorted(metrics.values(), key=lambda item: (item.group_id or "", item.metric))),
+        tuple(sorted((*first.source_revisions, *second.source_revisions))),
+        merge_numeric(first.numeric_evidence, second.numeric_evidence),
     )
 
 
@@ -824,12 +861,12 @@ def _replace_evaluator_state(
             )
         values[prior_name] -= 1
         values[f"state_{state}"] += 1
-        if state == "pass":
+        if state == "pass" and not metric.startswith("score."):
             values["true_count"] += 1
             values["true_unit_ids"] = _bounded_evidence_ids(
                 values["true_unit_ids"], (pending.unit_id,),
             )
-        elif state == "fail":
+        elif state == "fail" and not metric.startswith("score."):
             values["false_count"] += 1
             values["false_unit_ids"] = _bounded_evidence_ids(
                 values["false_unit_ids"], (pending.unit_id,),
@@ -843,6 +880,8 @@ def _advance_pending_evaluator_units(
     units_by_id: Mapping[str, AnalysisUnitRecord],
     dimensions: tuple[str, ...],
 ) -> tuple[FrozenCohortSummary, tuple[FrozenPendingEvaluatorUnit, ...]]:
+    from verdict.numeric_monitoring import freeze_numeric, merge_numeric
+    numeric = summary.numeric_evidence
     remaining = []
     metrics = {(item.group_id, item.metric): item for item in summary.metrics}
     changed = False
@@ -853,12 +892,9 @@ def _advance_pending_evaluator_units(
                 "pending evaluator evidence is unavailable or changed; re-bootstrap the monitor"
             )
         if unit.evaluator_state == "completed":
-            states = {
-                f"judge.{dimension}.pass": unit.metric_states[
-                    f"judge.{dimension}.pass"
-                ]
-                for dimension in dimensions
-            }
+            states = {name:state for name,state in unit.metric_states.items() if name.startswith(("judge.","score."))}
+            if unit.numeric_metrics:
+                numeric = merge_numeric(numeric, freeze_numeric([unit], grouped=item.group_id is not None))
             _replace_evaluator_state(metrics, item, states)
             changed = True
             continue
@@ -867,7 +903,7 @@ def _advance_pending_evaluator_units(
                 "pending evaluator evidence is no longer evaluable; re-bootstrap the monitor"
             )
         if unit.evaluator_state == "error" and item.prior_state == "missing":
-            states = {f"judge.{dimension}.pass": "error" for dimension in dimensions}
+            states = {name:"error" for group,name in metrics if group == item.group_id and name.startswith(("judge.","score."))}
             _replace_evaluator_state(metrics, item, states)
             changed = True
             item = FrozenPendingEvaluatorUnit(
@@ -882,6 +918,8 @@ def _advance_pending_evaluator_units(
             tuple(sorted(
                 metrics.values(), key=lambda item: (item.group_id or "", item.metric),
             )),
+            summary.source_revisions,
+            numeric,
         )
     return summary, tuple(remaining)
 
@@ -983,8 +1021,7 @@ def _manifest(
     )
 
 
-def plan_historical_manifest(units, policy: MonitorPolicy, *, cutoff: datetime) -> CohortManifest:
-    """Choose historical membership first, then freeze its normalized facts."""
+def _historical_cohorts(units, policy, cutoff):
     validate_monitor_analysis_unit(policy)
     _aware(cutoff, "cutoff")
     rows = [unit for unit in _ordered(units) if unit.event_time <= cutoff]
@@ -1000,6 +1037,38 @@ def plan_historical_manifest(units, policy: MonitorPolicy, *, cutoff: datetime) 
             unit for unit in rows
             if policy.current_start <= unit.event_time < policy.current_end
         ]
+    return reference, current
+
+
+def describe_historical(units, policy, *, cutoff):
+    """Descriptive evidence only: no manifest, candidate, p-value or activation."""
+    from verdict.numeric_monitoring import early_indicators
+    from verdict.statistics import wilson_interval
+    reference,current = _historical_cohorts(units,policy,cutoff)
+    left,right = _freeze_cohort(reference,grouped=policy.grouping_mode != "none"),_freeze_cohort(current,grouped=policy.grouping_mode != "none")
+    rows=early_indicators(left,right)
+    a={(m.group_id,m.metric):m for m in left.metrics}
+    b={(m.group_id,m.metric):m for m in right.metrics}
+    coverage=[]
+    for identity in sorted(set(a)|set(b),key=lambda k:(k[0] or "",k[1])):
+        x,y=a.get(identity),b.get(identity)
+        if not identity[1].startswith("score."):
+            n=x.true_count+x.false_count if x else 0
+            m=y.true_count+y.false_count if y else 0
+            rows.append({"group_id":identity[0],"metric":identity[1],"kind":"binary","reference_n":n,"current_n":m,"reference_value":x.true_count/n if n else None,"current_value":y.true_count/m if m else None,"reference_ci":wilson_interval(x.true_count,n) if n else None,"current_ci":wilson_interval(y.true_count,m) if m else None})
+        coverage.append({
+            "group_id":identity[0],"metric":identity[1],
+            "reference_missing":x.state_missing if x else 0,"current_missing":y.state_missing if y else 0,
+            "reference_error":x.state_error if x else 0,"current_error":y.state_error if y else 0,
+            "reference_unclear":x.state_unclear if x else 0,"current_unclear":y.state_unclear if y else 0})
+    return {"state":"descriptive","activationAllowed":False,"analysisUnit":policy.analysis_unit,"evaluatorFingerprint":policy.evaluator_fingerprint,"earlyIndicators":rows,"metricCoverage":coverage,
+            "populationCounts":{"reference":left.unit_count,"current":right.unit_count},
+            "pendingCounts":{"reference":sum(u.evaluator_state in {"pending","error"} for u in reference),"current":sum(u.evaluator_state in {"pending","error"} for u in current)}}
+
+
+def plan_historical_manifest(units, policy: MonitorPolicy, *, cutoff: datetime) -> CohortManifest:
+    """Choose historical membership first, then freeze its normalized facts."""
+    reference, current = _historical_cohorts(units, policy, cutoff)
     consumed = tuple(unit.unit_id for unit in (*reference, *current))
     reference_group_ids = None
     shared_group_ids = None
@@ -1020,7 +1089,7 @@ def plan_historical_manifest(units, policy: MonitorPolicy, *, cutoff: datetime) 
         ),
     )
     if policy.evaluator_fingerprint is not None and pending:
-        noun = "trace" if len(pending) == 1 else "traces"
+        noun = ("conversation" if len(pending) == 1 else "conversations") if policy.analysis_unit == "conversation" else ("trace" if len(pending) == 1 else "traces")
         raise MonitorEvaluatorPending(
             f"Run the selected evaluator for {len(pending)} eligible {noun}, "
             "then preview this monitor again."
@@ -1035,7 +1104,7 @@ def monitor_requires_rebootstrap(
     active: bool = False,
 ) -> bool:
     """Return whether a legacy policy lacks immutable execution evidence."""
-    if policy.analysis_unit != "trace":
+    if policy.analysis_unit not in {"trace", "conversation"}:
         return True
     if manifest is None:
         return active
@@ -1062,6 +1131,8 @@ def plan_prospective_manifest(
     prospective_start_at: datetime | None = None,
 ) -> CohortManifest:
     """Freeze the next non-overlapping current bucket against one reference."""
+    units = tuple(units)
+    _check_source_revisions(units, previous)
     validate_monitor_analysis_unit(policy)
     if previous.policy_fingerprint != policy.fingerprint:
         raise ValueError("policy fingerprint changed; create a candidate policy")
@@ -1149,8 +1220,17 @@ def plan_prospective_manifest(
     )
 
 
+def _check_source_revisions(units, manifest):
+    revisions = {u.unit_id: u.source_revision for u in units}
+    for summary in (manifest.reference_summary, manifest.current_summary):
+        for identity, revision in summary.source_revisions if summary else ():
+            if revisions.get(identity) != revision:
+                raise MonitorRebootstrapRequired("frozen conversation evidence changed or disappeared; re-bootstrap the monitor")
+
+
 def compare_manifest(units, manifest: CohortManifest, policy: MonitorPolicy) -> MonitorComparison:
     """Compare immutable cohort summaries; never reload approved outcomes."""
+    _check_source_revisions(units, manifest)
     validate_monitor_analysis_unit(policy)
     if manifest.policy_fingerprint != policy.fingerprint:
         raise ValueError("manifest and policy do not match")
@@ -1282,6 +1362,13 @@ def compare_manifest(units, manifest: CohortManifest, policy: MonitorPolicy) -> 
                     p_value,
                 )
             )
+    numeric_keys = set()
+    numeric_specs = {(c["group_id"],c["metric"]):c["spec"] for c in reference.numeric_evidence}
+    if policy.numeric_method:
+        from verdict.numeric_monitoring import numeric_contrasts
+        numeric_rows = numeric_contrasts(reference.numeric_evidence, current.numeric_evidence, comparison_groups, policy.minimum_reference, policy.minimum_current)
+        numeric_keys = {(r[0],r[1]) for r in numeric_rows}
+        raw.extend(numeric_rows)
     adjusted = benjamini_hochberg([item[-1] for item in raw])
 
     metrics = tuple(
@@ -1290,6 +1377,10 @@ def compare_manifest(units, manifest: CohortManifest, policy: MonitorPolicy) -> 
             effect, p_value, p_adjusted,
             is_alert,
             group_id,
+            "number" if (group_id,name) in numeric_keys else "binary",
+            "mann_whitney_asymptotic_v1" if (group_id,name) in numeric_keys else "fisher_exact_v1",
+            numeric_specs[(group_id,name)][2] if (group_id,name) in numeric_keys else None,
+            ("unchanged" if effect == 0 else "improved" if effect * (1 if numeric_specs[(group_id,name)][2] == "higher_is_better" else -1) > 0 else "deteriorated") if (group_id,name) in numeric_keys else None,
         )
         for (
             group_id, name, reference_n, current_n, reference_value,
@@ -1392,11 +1483,16 @@ def trace_monitor_units(
     judgments_by_trace: Mapping[str, object] | None = None,
     evaluator_dimensions: tuple[str, ...] = (),
     cluster_labels: Mapping[str, str] | None = None,
+    conversation_history_mode: str | None = None,
 ) -> tuple[AnalysisUnitRecord, ...]:
     """Project genuine LLM calls and one frozen evaluator into monitor units."""
     from verdict.schema import JudgmentStatus
     from verdict.structural import is_refusal
-    from verdict.trace_facts import trace_evidence_reason, trace_judge_evidence_digest
+    from verdict.trace_facts import (
+        trace_conversation_history,
+        trace_evidence_reason,
+        trace_judge_evidence_digest,
+    )
 
     units = []
     for trace in traces:
@@ -1420,6 +1516,7 @@ def trace_monitor_units(
                 error=trace.error,
                 prompt=trace.prompt_redacted,
                 response=trace.response_redacted,
+                history=trace_conversation_history(trace) if conversation_history_mode == "prior_messages_v1" or (judgment and judgment.evaluator_config.get("conversation_history_mode") == "prior_messages_v1") else None,
             )
             evidence_reason = trace_evidence_reason(
                 error=trace.error,
@@ -1508,7 +1605,7 @@ def monitor_policy_to_json(policy: MonitorPolicy) -> str:
         )
         for item in fields(policy)
         for value in (getattr(policy, item.name),)
-        if not (item.name == "cluster_registry_version_id" and value is None)
+        if not (item.name in {"cluster_registry_version_id", "numeric_method", "response_aggregation"} and value is None)
     }
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 

@@ -222,6 +222,50 @@ test("improvement evidence uses failed reference and passing current examples", 
   assert.doesNotMatch(html, /current-failing/);
 });
 
+test("numeric conversation alert shows score evidence without rate bars or trace links", async () => {
+  const html = await render(`React.createElement(MonitorComparisonMetrics, {
+    comparison: {
+      metrics: [{ metric: "score.summary", kind: "number", alert: true,
+        movement: "deteriorated", reference_value: 85, current_value: 60,
+        effect: -0.38, p_value: 0.002, p_adjusted: 0.008,
+        reference_n: 35, current_n: 35 }],
+      metric_coverage: [], groups: [],
+    },
+    referenceSummary: { metrics: [{ metric: "score.summary",
+      true_unit_ids: ["not-a-trace"] }] },
+    currentSummary: { metrics: [{ metric: "score.summary",
+      false_unit_ids: ["also-not-a-trace"] }] },
+    onOpenTrace() {},
+  })`);
+
+  assert.match(html, /Reference median.*85\.0/);
+  assert.match(html, /Current median.*60\.0/);
+  assert.match(html, /Rank effect.*-0\.380.*deteriorated/);
+  assert.match(html, /REGRESSION/);
+  assert.doesNotMatch(html, /85\.0%|60\.0%|not-a-trace/);
+});
+
+test("conversation population coverage names the actual analysis unit", async () => {
+  const response = {
+    state: "candidate",
+    policy: { analysis_unit: "conversation", grouping_mode: "population",
+      prospective_target: 30 },
+    snapshot: {
+      manifest: { reference_unit_ids: ["r"], current_unit_ids: ["c"],
+        prospective_open: false, comparison_index: 0 },
+      comparison: { status: "reference_stale", alpha_threshold: 0.05,
+        metrics: [], metric_coverage: [], unseen_group_share: 0.25,
+        unassigned_group_share: 0 },
+    },
+  };
+  const html = await render(`React.createElement(Monitor, {
+    configUrl: "/api/config", view: "status",
+    initialState: { candidate: ${JSON.stringify(response)} },
+  })`);
+  assert.match(html, /25\.0% of current conversations are outside the frozen language\/workflow reference/);
+  assert.doesNotMatch(html, /current traces/);
+});
+
 test("monitor status shows active authority beside a newer candidate", async () => {
   const response = (state, metric) => ({
     state,
