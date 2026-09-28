@@ -883,7 +883,7 @@ the other captured workloads.
   throughout the tenant-scoped views.
 - **Cohorts use event time.** The activatable Monitor supports one genuine
   model-call Trace, or one explicitly closed, timed conversation per analysis
-  unit. The local conversation candidate uses the existing Voice telemetry
+  unit. Conversation evaluation uses the existing Voice telemetry
   importer and has additional rubric, revision and coverage requirements;
   see [conversation evaluation](session-evaluation.md) for the exact input,
   numeric-score methodology and limits. Monitor uses the captured source event

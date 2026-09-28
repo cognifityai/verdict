@@ -1,8 +1,8 @@
 # Conversation evaluation in the existing Verdict workflow
 
-This is a local candidate rebased onto current mainline; these additions are not
-in the published a21 wheel. Build this checkout to exercise them. No private data or credentials
-are supplied in the image or examples.
+These additions are source-only relative to the published `0.1.0a22` packages;
+build this checkout to exercise them. No private data or credentials are supplied
+in the examples.
 
 ## One data path
 
@@ -194,7 +194,7 @@ Evaluator Lab Trace preview explicitly uses prior-message evidence.
 
 Core SDK imports remain independent of eval/dashboard provider dependencies.
 SQLite, memory, buffered storage and Postgres implement the same session contract.
-This candidate bounds snapshots to 1,000 messages/512 KB, rubric files to 512 KB,
+This workflow bounds snapshots to 1,000 messages/512 KB, rubric files to 512 KB,
 review/planning to 5,000 conversations or stored assessment attempts per scan, numeric snapshots
 to 60,000 values and serialized Monitor snapshots to 4 MiB. Oversize inputs fail
 visibly; they are not silently used for complete-conversation claims. Plan retention

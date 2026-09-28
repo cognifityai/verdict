@@ -224,12 +224,13 @@ Restart an older producer with the upgraded SDK before enabling shipping;
 shipping itself does not run analysis, judges, clustering, or monitors. See
 [`examples/agent_sdk.py`](examples/agent_sdk.py) for a runnable local example.
 
-An activatable monitor proposal uses one genuine model-call Trace per analysis unit
-and exact event-time membership. Trace is the only unit supported by the
-persisted prospective alert lifecycle. The count-mode
+An activatable monitor proposal uses one genuine model-call Trace or one
+explicitly closed, timed conversation per analysis unit, with exact event-time
+membership. Logical agent sessions remain descriptive only. The count-mode
 default is an older 80% reference and newer 20% current cohort; explicit date
 ranges are also supported. Membership and the normalized metric counts used by
-the comparison are frozen together. In-flight traces are excluded. An ongoing
+the comparison are frozen together. In-flight traces and open conversations are
+excluded. An ongoing
 cohort that uses a selected evaluator keeps its membership fixed while it waits
 for stored evaluator results needed by like-for-like metric cells; it cannot
 report “no drift” while those results are pending. Unassigned and new groups
@@ -267,8 +268,8 @@ identity. They use stored judgments only and never invoke a judge implicitly.
 Stored monitors that predate frozen cohort facts remain readable but must be
 re-created from a reviewed preview before they can run again. The same applies
 to older evaluator-backed monitors that cannot represent pending finalization
-and to stored policies naming an unsupported analysis unit. The local candidate
-also supports closed, timed conversation observations; see
+and to stored policies naming an unsupported analysis unit. Conversation
+monitoring also supports closed, timed observations; see
 [conversation evaluation](docs/session-evaluation.md) for its input and limits.
 
 Monitor also offers a separate **Logical session (descriptive)** preview for
@@ -921,9 +922,10 @@ decisions are documented in [`docs/adrs/`](docs/adrs/), known limits are in
 [`docs/v1-roadmap.md`](docs/v1-roadmap.md), and community expectations are in
 [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md).
 
-## Local conversation-evaluation candidate
+## Conversation evaluation
 
 This checkout extends existing Voice ingestion, Evaluator Lab and Monitor for
 versioned transcript snapshots, response/conversation rubric files, numeric
-scores and explicit conversation populations. These additions are not in the
-published a21 wheel. See [workflow, contracts and limits](docs/session-evaluation.md).
+scores and explicit conversation populations. See
+[workflow, contracts and limits](docs/session-evaluation.md). These additions
+are source-only relative to the published `0.1.0a22` packages.

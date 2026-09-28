@@ -1379,6 +1379,33 @@ test("Compare explains Codex diagnostic model-call coverage", async () => {
   assert.match(textOf(tree), /Agent-run and model-call counts can differ/i);
 });
 
+test("live Compare mounts matched results from the dashboard route", async () => {
+  const ui = await loadUiModule();
+  const previousWindow = globalThis.window;
+  globalThis.window = {
+    location: { hash: "#tab=explore&section=compare", search: "", pathname: "/preview/dashboard" },
+    history: { pushState() {}, replaceState() {} },
+  };
+  try {
+    const data = bundle(null);
+    data.evaluation.availableIdentities = [
+      { id: "complete", complete: true },
+      { id: "pending", complete: false },
+    ];
+    const dashboard = render(ui.Dashboard, createHooks(), { data, source: "live" });
+    const compare = findAll(dashboard, (node) => node.type === ui.Compare)[0];
+    assert.ok(compare, "the selected route should render Compare");
+    const compareTree = render(compare.type, createHooks(), compare.props);
+    const matched = findAll(compareTree, (node) => node.type?.name === "MatchedComparison");
+    assert.equal(matched.length, 1);
+    assert.equal(matched[0].props.root, "/preview");
+    assert.deepEqual(matched[0].props.evaluators.map((identity) => identity.id), ["complete"]);
+  } finally {
+    if (previousWindow === undefined) delete globalThis.window;
+    else globalThis.window = previousWindow;
+  }
+});
+
 test("Reliability heading exposes a visible, accessible evidence explanation", async () => {
   const ui = await loadUiModule();
   const hooks = createHooks();

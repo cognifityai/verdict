@@ -100,12 +100,13 @@ business outcome, Agent Insights surfaces that failure without a judge call.
    Evaluator Lab runs display activity and elapsed time while completed results
    are stored.
 5. **Monitor**: preview count-based or explicit event-time reference/current
-   cohorts of genuine model-call Traces, then optionally activate the reviewed
-   policy. Trace is the only unit supported by the prospective alert lifecycle. Activation opens an
+   cohorts of genuine model-call Traces or explicitly closed, timed conversations,
+   then optionally activate the reviewed policy. Activation opens an
    empty prospective bucket at a stored event-time boundary, so older imported
-   history cannot become new traffic. Fisher's exact test, practical-effect
-   thresholds, and multiple-testing correction are applied to eligible binary
-   metrics. Grouping is optional. A separate descriptive view groups native
+   history cannot become new traffic. Fisher's exact test applies to eligible
+   binary metrics; numeric conversation scores use Mann–Whitney. Practical-effect
+   thresholds and multiple-testing correction apply to eligible tests.
+   Grouping is optional. A separate descriptive view groups native
    Agent runs by explicit logical session identity and reports rates, effects,
    and coverage without p-values, alerts, persistence, or activation.
 6. **Inspect**: use the CLI, Python APIs, or dashboard to review traces, scores,

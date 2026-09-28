@@ -188,15 +188,17 @@ write failures increment the process-local `capture.dropped_records` metric and
 produce a bounded warning.
 
 The Monitor UI previews an immutable count-based (older 80% / newer 20% by
-default) or explicit-date policy before activation. One genuine model-call
-Trace is the only analysis unit supported by the persisted prospective alert
-lifecycle. Each metric has its own
-eligible denominator, Fisher's exact p-value, Benjamini-Hochberg adjustment,
-and effect-size gate. With provider/model or reviewed-cluster grouping, Verdict
-computes separate group-by-metric comparisons and adjusts across the complete
-tested family; it does not pool the selected groups. The Measurement selector
-defaults to deterministic trace checks and can explicitly add stored PASS/FAIL
-results from one complete evaluator identity without
+default) or explicit-date policy before activation. A genuine model-call Trace
+or an explicitly closed, timed conversation is one analysis unit in the
+persisted prospective alert lifecycle. Each metric has its own eligible
+denominator and effect-size gate; binary metrics use Fisher's exact test, while
+numeric conversation scores use Mann–Whitney. Eligible tests receive
+Benjamini-Hochberg adjustment. Trace policies can group by provider/model or
+reviewed cluster; conversation policies can group by provider/model or captured
+language and workflow. Verdict compares each selected group separately and
+adjusts across the tested family. Trace Measurement defaults to deterministic
+checks; conversation Measurement defaults to recorded completion. Either can
+explicitly select stored judgments from one complete evaluator identity without
 running or paying for a judge. That evaluator fingerprint and its expected
 dimensions become immutable policy
 inputs. A reviewed-cluster policy also pins its registry version and completes
@@ -572,9 +574,10 @@ and the [examples](https://github.com/cognifityai/verdict/tree/main/examples).
 
 Apache 2.0.
 
-## Local conversation-evaluation candidate
+## Conversation evaluation
 
 This checkout extends existing Voice ingestion, Evaluator Lab and Monitor for
 versioned transcript snapshots, response/conversation rubric files, numeric
-scores and explicit conversation populations. These additions are not in the
-published a21 wheel. See [workflow, contracts and limits](../../docs/session-evaluation.md).
+scores and explicit conversation populations. See
+[workflow, contracts and limits](../../docs/session-evaluation.md). These additions
+are source-only relative to the published `0.1.0a22` packages.
