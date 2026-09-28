@@ -456,8 +456,6 @@ class MetricComparison:
     p_adjusted: float
     alert: bool
     group_id: str | None = None
-    reference_evidence_unit_ids: tuple[str, ...] = ()
-    current_evidence_unit_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.metric or min(self.reference_n, self.current_n) < 0:
@@ -473,10 +471,6 @@ class MetricComparison:
         if not isinstance(self.alert, bool):
             raise ValueError("metric alert must be boolean")
         _validate_group_id(self.group_id)
-        for name in ("reference_evidence_unit_ids", "current_evidence_unit_ids"):
-            value = tuple(getattr(self, name))
-            _validate_evidence_unit_ids(value)
-            object.__setattr__(self, name, value)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1290,29 +1284,12 @@ def compare_manifest(units, manifest: CohortManifest, policy: MonitorPolicy) -> 
             )
     adjusted = benjamini_hochberg([item[-1] for item in raw])
 
-    def evidence_ids(
-        counts: FrozenMetricCounts | None,
-        *,
-        value: bool,
-    ) -> tuple[str, ...]:
-        if counts is None:
-            return ()
-        return counts.true_unit_ids if value else counts.false_unit_ids
-
     metrics = tuple(
         MetricComparison(
             name, reference_n, current_n, reference_value, current_value,
             effect, p_value, p_adjusted,
             is_alert,
             group_id,
-            evidence_ids(
-                reference_metrics.get((group_id, name)),
-                value=effect < 0,
-            ) if is_alert else (),
-            evidence_ids(
-                current_metrics.get((group_id, name)),
-                value=effect >= 0,
-            ) if is_alert else (),
         )
         for (
             group_id, name, reference_n, current_n, reference_value,
@@ -1583,16 +1560,7 @@ def monitor_snapshot_to_json(
                 {
                     item.name: getattr(metric, item.name)
                     for item in fields(metric)
-                    if not (
-                        (item.name == "group_id" and getattr(metric, item.name) is None)
-                        or (
-                            item.name in {
-                                "reference_evidence_unit_ids",
-                                "current_evidence_unit_ids",
-                            }
-                            and not getattr(metric, item.name)
-                        )
-                    )
+                    if not (item.name == "group_id" and getattr(metric, item.name) is None)
                 }
                 for metric in comparison.metrics
             ],

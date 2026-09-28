@@ -154,6 +154,14 @@ test("alert comparison leads with drift analysis, charts both cohorts, and links
         current_unit_ids: Array(10).fill("c"),
         prospective_open: false,
         comparison_index: 0,
+        reference_summary: {
+          metrics: [{ group_id: "launch", metric: "judge.groundedness.pass",
+            true_unit_ids: ["reference-good"], false_unit_ids: [] }],
+        },
+        current_summary: {
+          metrics: [{ group_id: "launch", metric: "judge.groundedness.pass",
+            true_unit_ids: [], false_unit_ids: ["current-failed"] }],
+        },
       },
       comparison: {
         status: "alert", alpha_threshold: 0.05,
@@ -162,9 +170,7 @@ test("alert comparison leads with drift analysis, charts both cohorts, and links
         metrics: [{ group_id: "launch", metric: "judge.groundedness.pass",
           alert: true, reference_value: 1, current_value: 0.7, effect: -0.3,
           p_value: 0.002, p_adjusted: 0.008,
-          reference_n: 10, current_n: 10,
-          reference_evidence_unit_ids: ["reference-good"],
-          current_evidence_unit_ids: ["current-failed"] }],
+          reference_n: 10, current_n: 10 }],
         metric_coverage: [{ group_id: "launch", metric: "judge.groundedness.pass",
           reference_evaluable: 10, current_evaluable: 10,
           reference_unclear: 0, current_unclear: 0,
@@ -190,6 +196,30 @@ test("alert comparison leads with drift analysis, charts both cohorts, and links
   assert.match(html, /reference-good/);
   assert.match(html, /current-failed/);
   assert.match(html, /Investigation next step/);
+});
+
+test("improvement evidence uses failed reference and passing current examples", async () => {
+  const html = await render(`React.createElement(MonitorComparisonMetrics, {
+    comparison: {
+      metrics: [{ metric: "judge.quality.pass", alert: true,
+        reference_value: 0.2, current_value: 0.8, effect: 0.6,
+        p_value: 0.001, p_adjusted: 0.002,
+        reference_n: 10, current_n: 10 }],
+      metric_coverage: [], groups: [],
+    },
+    referenceSummary: { metrics: [{ metric: "judge.quality.pass",
+      true_unit_ids: ["reference-passing"],
+      false_unit_ids: ["reference-failing"] }] },
+    currentSummary: { metrics: [{ metric: "judge.quality.pass",
+      true_unit_ids: ["current-passing"],
+      false_unit_ids: ["current-failing"] }] },
+    onOpenTrace() {},
+  })`);
+
+  assert.match(html, /reference-failing/);
+  assert.match(html, /current-passing/);
+  assert.doesNotMatch(html, /reference-passing/);
+  assert.doesNotMatch(html, /current-failing/);
 });
 
 test("monitor status shows active authority beside a newer candidate", async () => {

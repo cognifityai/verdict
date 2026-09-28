@@ -75,10 +75,12 @@ present those states without treating missing evidence as success or failure.
   evaluation pipeline.
 - A prospective cohort distinguishes traffic collection from waiting for
   selected-evaluator results until a persisted comparison completes.
-- Alerted Monitor cells retain a bounded set of cohort-owned evidence unit IDs
-  inside the existing immutable snapshot document. The dashboard presents the
-  result before policy controls and uses those IDs only for trace navigation;
-  it does not infer causality from the examples.
+- Every Monitor cohort-summary cell retains the first bounded true and false
+  unit IDs in cohort order inside the existing immutable snapshot document and
+  is their single persisted owner. The dashboard selects the relevant IDs for
+  alerted comparison cells, presents the result before policy controls, and
+  uses those IDs only for trace navigation; it does not infer causality from
+  the examples.
 - Generic change records are a decision log; typed workflows perform actual
   evaluator, cluster, or monitor activation.
 

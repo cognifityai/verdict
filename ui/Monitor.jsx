@@ -91,7 +91,10 @@ function EvidenceLinks({ label, unitIds, onOpenTrace }) {
   </div>;
 }
 
-function MetricComparisonCard({ metric, evidence, group, onOpenTrace }) {
+function MetricComparisonCard({
+  metric, evidence, group, referenceEvidenceUnitIds, currentEvidenceUnitIds,
+  onOpenTrace,
+}) {
   const direction = metric.effect * changeDirection(metric.metric);
   const regression = direction < 0;
   const signalColor = regression ? "#ff6b6b" : "#4ee1aa";
@@ -118,14 +121,37 @@ function MetricComparisonCard({ metric, evidence, group, onOpenTrace }) {
       <div className="text-xs font-medium" style={{ color: "#f2b84b" }}>Investigation next step</div>
       <div className="text-sm mt-1">Compare the current examples with the reference examples, then check model, prompt, and configuration changes before acting. Verdict has detected a change; it has not assigned a root cause.</div>
     </div>}
-    {metric.alert && (metric.reference_evidence_unit_ids?.length > 0 || metric.current_evidence_unit_ids?.length > 0) && <div className="grid sm:grid-cols-2 gap-4 mt-4 pt-4 border-t" style={{ borderColor: "#26332e" }}>
-      <EvidenceLinks label="Reference examples" unitIds={metric.reference_evidence_unit_ids} onOpenTrace={onOpenTrace} />
-      <EvidenceLinks label="Current examples" unitIds={metric.current_evidence_unit_ids} onOpenTrace={onOpenTrace} />
+    {metric.alert && (referenceEvidenceUnitIds.length > 0 || currentEvidenceUnitIds.length > 0) && <div className="grid sm:grid-cols-2 gap-4 mt-4 pt-4 border-t" style={{ borderColor: "#26332e" }}>
+      <EvidenceLinks label="Reference examples" unitIds={referenceEvidenceUnitIds} onOpenTrace={onOpenTrace} />
+      <EvidenceLinks label="Current examples" unitIds={currentEvidenceUnitIds} onOpenTrace={onOpenTrace} />
     </div>}
   </article>;
 }
 
-export function MonitorComparisonMetrics({ comparison, onOpenTrace = null }) {
+const evidenceTraceOpener = (onOpenTrace, evaluators, policy) => {
+  if (!onOpenTrace) return null;
+  if (!policy?.evaluator_fingerprint) {
+    return (traceId) => onOpenTrace(traceId, null);
+  }
+  const identity = evaluators.find(
+    (candidate) => candidate.fingerprint === policy.evaluator_fingerprint,
+  );
+  return identity?.id
+    ? (traceId) => onOpenTrace(traceId, identity.id)
+    : null;
+};
+
+const frozenEvidenceIds = (summary, metric, value) => {
+  const counts = (summary?.metrics || []).find(
+    (item) => (item.group_id || null) === (metric.group_id || null)
+      && item.metric === metric.metric,
+  );
+  return (value ? counts?.true_unit_ids : counts?.false_unit_ids) || [];
+};
+
+export function MonitorComparisonMetrics({
+  comparison, referenceSummary = null, currentSummary = null, onOpenTrace = null,
+}) {
   const keyFor = (item) => JSON.stringify([item.group_id || null, item.metric]);
   const coverage = new Map(
     (comparison?.metric_coverage || []).map((item) => [keyFor(item), item]),
@@ -146,7 +172,10 @@ export function MonitorComparisonMetrics({ comparison, onOpenTrace = null }) {
     const row = metric || evidence;
     const group = groups.get(row.group_id);
     return metric
-      ? <MetricComparisonCard key={key} metric={metric} evidence={evidence} group={group} onOpenTrace={onOpenTrace} />
+      ? <MetricComparisonCard key={key} metric={metric} evidence={evidence} group={group}
+        referenceEvidenceUnitIds={metric.alert ? frozenEvidenceIds(referenceSummary, metric, metric.effect < 0) : []}
+        currentEvidenceUnitIds={metric.alert ? frozenEvidenceIds(currentSummary, metric, metric.effect >= 0) : []}
+        onOpenTrace={onOpenTrace} />
       : <div key={key} className="border p-3 text-sm" style={{ borderColor: "#26332e" }}>
         {row.group_id && <div className="text-xs mb-2" style={{ color: "#94a39d" }}>Group: <span title={row.group_id}>{group?.label || row.group_id}</span></div>}
         <span className="font-mono">{metricLabel(row.metric)}</span>
@@ -172,6 +201,7 @@ function MonitorSnapshot({ response, evaluators, fallbackTarget, onOpenTrace }) 
   const measurement = evaluators.find(
     (identity) => identity.fingerprint === policy?.evaluator_fingerprint,
   );
+  const openEvidenceTrace = evidenceTraceOpener(onOpenTrace, evaluators, policy);
   const collecting = manifest.prospective_open === true;
   const pendingEvaluations = manifest.pending_evaluator_units?.length || 0;
   const target = policy?.prospective_target || fallbackTarget;
@@ -197,7 +227,10 @@ function MonitorSnapshot({ response, evaluators, fallbackTarget, onOpenTrace }) 
     </div>
     <div className="mt-2 text-xs" style={{ color: "#94a39d" }}>Measurement: {policy?.evaluator_fingerprint ? (measurement?.label || `stored evaluator ${policy.evaluator_fingerprint.slice(0, 8)}`) : "deterministic trace checks only"}</div>
     <div className="mt-1 text-xs" style={{ color: "#94a39d" }}>Facet: {policy?.grouping_mode === "cluster" ? `frozen clusters · ${policy.cluster_registry_version_id || "registry unavailable"}` : policy?.grouping_mode === "provider_model" ? "provider and model" : "all eligible calls"}</div>
-    <MonitorComparisonMetrics comparison={comparison} onOpenTrace={onOpenTrace} />
+    <MonitorComparisonMetrics comparison={comparison}
+      referenceSummary={manifest.reference_summary}
+      currentSummary={manifest.current_summary}
+      onOpenTrace={openEvidenceTrace} />
     {comparison.status === "insufficient" && <p className="text-sm mt-4" style={{ color: "#f2b84b" }}>{awaitingEvaluator ? "Run the selected evaluator, then run this monitor again. To stop measuring that evaluator, preview and activate a replacement monitor." : collecting ? "No statistical test was run because the prospective bucket is still collecting." : "The bucket closed, but no metric met its configured eligible-unit minimums; no alert/no-alert conclusion was produced."}</p>}
     {comparison.unseen_group_share > 0 && <p className="text-sm mt-4" style={{ color: "#f2b84b" }}>{comparison.status === "reference_stale" ? "Comparison suspended" : "Coverage note"}: {(100 * comparison.unseen_group_share).toFixed(1)}% of current traces are outside the frozen {policy?.grouping_mode === "cluster" ? "cluster" : "provider/model"} reference{comparison.unassigned_group_share > 0 ? ` (${(100 * comparison.unassigned_group_share).toFixed(1)}% are unassigned)` : ""}.{comparison.status === "reference_stale" ? " Review the policy before creating a new candidate; Verdict did not silently rebase it." : " These traces were excluded from like-for-like metric tests."}</p>}
   </section>;
@@ -305,7 +338,10 @@ export function Monitor({ configUrl, evaluation = {}, initialState = null, view 
       <div className="font-semibold mt-1">{active.approvedHistoricalSnapshot.comparison.status.replaceAll("_", " ")}</div>
       <p className="text-sm mt-2" style={{ color: "#94a39d" }}>This is the historical comparison used to approve the policy. Activation froze its reference cohort and opened a new prospective bucket; it did not reuse the historical current cohort as new traffic.</p>
       <div className="text-sm mt-3">{active.approvedHistoricalSnapshot.manifest.reference_unit_ids.length} historical reference → {active.approvedHistoricalSnapshot.manifest.current_unit_ids.length} historical current</div>
-      <MonitorComparisonMetrics comparison={active.approvedHistoricalSnapshot.comparison} onOpenTrace={onOpenTrace} />
+      <MonitorComparisonMetrics comparison={active.approvedHistoricalSnapshot.comparison}
+        referenceSummary={active.approvedHistoricalSnapshot.manifest.reference_summary}
+        currentSummary={active.approvedHistoricalSnapshot.manifest.current_summary}
+        onOpenTrace={evidenceTraceOpener(onOpenTrace, evaluators, active.policy)} />
     </section>}
   </div>;
 }

@@ -28,7 +28,7 @@ function componentStub(names) {
 }
 
 async function loadUiModule() {
-  const source = `${await readFile(UI_SOURCE, "utf8")}\nexport { Dashboard, Overview, DriftSignals, Traces, TraceDetail, TabHelp, Judge, Compare, ManagementReport, mountedApiUrl };\nexport { useOperations } from "./Operations.jsx";\nexport { RegistryView } from "./Registry.jsx";\nexport { EvaluatorLab } from "./EvaluatorLab.jsx";\nexport { Runs } from "./Runs.jsx";\nexport { Insights } from "./Insights.jsx";`;
+  const source = `${await readFile(UI_SOURCE, "utf8")}\nexport { Dashboard, Overview, DriftSignals, Traces, TraceDetail, TabHelp, Judge, Compare, ManagementReport, mountedApiUrl, Monitor };\nexport { useOperations } from "./Operations.jsx";\nexport { RegistryView } from "./Registry.jsx";\nexport { EvaluatorLab } from "./EvaluatorLab.jsx";\nexport { Runs } from "./Runs.jsx";\nexport { Insights } from "./Insights.jsx";`;
   const result = await build({
     stdin: {
       contents: source,
@@ -1109,10 +1109,13 @@ test("overview prioritizes a stored historical monitor alert over absent legacy 
         manifest: { reference_unit_ids: Array(80).fill("r"), current_unit_ids: Array(20).fill("c") },
         comparison: {
           status: "alert", alpha_threshold: 0.05,
-          metrics: [{ metric: "judge.safety.pass", alert: true,
+          metrics: [{ group_id: "provider_model:opaque", metric: "judge.safety.pass", alert: true,
             reference_value: 0.9, current_value: 0.6, effect: -0.3,
             p_adjusted: 0.01, reference_n: 80, current_n: 20 }],
-          metric_coverage: [], groups: [],
+          metric_coverage: [], groups: [{
+            group_id: "provider_model:opaque", label: "openai / gpt-4.1",
+            reference_units: 80, current_units: 20,
+          }],
         },
       },
     },
@@ -1121,7 +1124,121 @@ test("overview prioritizes a stored historical monitor alert over absent legacy 
   const text = textOf(render(ui.Overview, createHooks(), { data }));
   assert.match(text, /exploratory historical comparison/i);
   assert.match(text, /safety pass rate/i);
+  assert.match(text, /openai \/ gpt-4\.1/i);
+  assert.doesNotMatch(text, /provider_model:opaque/i);
   assert.doesNotMatch(text, /No completed run/i);
+});
+
+test("candidate and active evidence links carry their own evaluator identity", async () => {
+  const ui = await loadUiModule();
+  const opened = [];
+  const fingerprintA = "a".repeat(64);
+  const fingerprintB = "b".repeat(64);
+  const response = (state, fingerprint, traceId) => ({
+    state,
+    policy: {
+      evaluator_fingerprint: fingerprint,
+      grouping_mode: "none",
+      prospective_target: 10,
+    },
+    snapshot: {
+      manifest: {
+        reference_unit_ids: Array(10).fill("reference"),
+        current_unit_ids: Array(10).fill("current"),
+        prospective_open: false,
+        comparison_index: 0,
+        reference_summary: {
+          metrics: [{ metric: "judge.quality.pass",
+            true_unit_ids: [`reference-${traceId}`], false_unit_ids: [] }],
+        },
+        current_summary: {
+          metrics: [{ metric: "judge.quality.pass",
+            true_unit_ids: [], false_unit_ids: [traceId] }],
+        },
+      },
+      comparison: {
+        status: "alert", alpha_threshold: 0.05,
+        metrics: [{ metric: "judge.quality.pass", alert: true,
+          reference_value: 1, current_value: 0, effect: -1,
+          p_value: 0.001, p_adjusted: 0.001,
+          reference_n: 10, current_n: 10 }],
+        metric_coverage: [], groups: [], unseen_group_share: 0,
+      },
+    },
+  });
+  const tree = render(ui.Monitor, createHooks(), {
+    configUrl: "/api/config",
+    view: "status",
+    evaluation: {
+      selectedId: "judge-a-id",
+      availableIdentities: [
+        { id: "judge-a-id", complete: true, fingerprint: fingerprintA,
+          label: "Judge A" },
+        { id: "judge-b-id", complete: true, fingerprint: fingerprintB,
+          label: "Judge B" },
+      ],
+    },
+    initialState: {
+      active: response("active", fingerprintA, "active-trace"),
+      candidate: response("candidate", fingerprintB, "candidate-trace"),
+    },
+    onOpenTrace: (traceId, evaluatorId) => opened.push({ traceId, evaluatorId }),
+  });
+
+  const snapshots = findAll(tree,
+    (node) => typeof node.type === "function" && node.type.name === "MonitorSnapshot");
+  assert.equal(snapshots.length, 2);
+  for (const snapshot of snapshots) {
+    const snapshotTree = render(snapshot.type, createHooks(), snapshot.props);
+    const comparison = findAll(snapshotTree,
+      (node) => typeof node.type === "function" && node.type.name === "MonitorComparisonMetrics")[0];
+    const comparisonTree = render(comparison.type, createHooks(), comparison.props);
+    const card = findAll(comparisonTree,
+      (node) => typeof node.type === "function" && node.type.name === "MetricComparisonCard")[0];
+    const cardTree = render(card.type, createHooks(), card.props);
+    const currentExamples = findAll(cardTree,
+      (node) => typeof node.type === "function" && node.type.name === "EvidenceLinks"
+        && node.props.label === "Current examples")[0];
+    const linksTree = render(currentExamples.type, createHooks(), currentExamples.props);
+    findAll(linksTree, (node) => node.type === "button")[0].props.onClick();
+  }
+
+  assert.deepEqual(opened, [
+    { traceId: "candidate-trace", evaluatorId: "judge-b-id" },
+    { traceId: "active-trace", evaluatorId: "judge-a-id" },
+  ]);
+});
+
+test("monitor trace navigation replaces an unrelated selected evaluator", async () => {
+  const ui = await loadUiModule();
+  for (const [section, traceId, evaluatorId] of [
+    ["history", "candidate-trace", "judge-b-id"],
+    ["status", "active-trace", "judge-a-id"],
+  ]) {
+    let pushed = null;
+    globalThis.window = {
+      location: {
+        hash: `#tab=monitor&section=${section}&evaluator=unrelated-judge`,
+        pathname: "/dashboard",
+      },
+      history: { pushState: (_state, _title, url) => { pushed = url; }, replaceState() {} },
+      addEventListener() {}, removeEventListener() {},
+    };
+    try {
+      const tree = render(ui.Dashboard, createHooks(), {
+        data: bundle("unrelated-judge"), source: "live",
+      });
+      const monitor = findAll(tree,
+        (node) => typeof node.type === "function" && node.type.name === "Monitor")[0];
+      monitor.props.onOpenTrace(traceId, evaluatorId);
+      assert.equal(
+        pushed,
+        `#tab=explore&section=calls&trace=${traceId}&evaluator=${evaluatorId}`,
+      );
+    } finally {
+      delete globalThis.window;
+    }
+  }
 });
 
 test("overview shows the authoritative active monitor beside a newer preview", async () => {

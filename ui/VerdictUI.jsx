@@ -1042,11 +1042,11 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
         {tab === "evaluate" && route.section === "lab" && <EvaluatorLab configUrl={mountedConfigUrl()} onOpenEvaluated={(evaluatorId) => { onEvaluatorChange?.(evaluatorId); commitRoute({ ...route, tab: "explore", section: "calls", evaluatorId, traceJudgeStatus: "judged", traceId: null }); }} />}
         {tab === "evaluate" && route.section === "inspect" && <InspectLab configUrl={mountedConfigUrl()} />}
         {tab === "evaluate" && route.section === "review" && <ControlCenter section="review" configUrl={mountedConfigUrl()} onNavigate={(target) => navigateWorkflow(commitRoute, route, target)} />}
-        {tab === "monitor" && route.section === "status" && <Monitor view="status" initialState={DATA.monitor} configUrl={mountedConfigUrl()} evaluation={data.evaluation} onChanged={onReload} onOpenTrace={(traceId) => commitRoute({ ...route, tab: "explore", section: "calls", traceId })} />}
+        {tab === "monitor" && route.section === "status" && <Monitor view="status" initialState={DATA.monitor} configUrl={mountedConfigUrl()} evaluation={data.evaluation} onChanged={onReload} onOpenTrace={(traceId, evaluatorId) => commitRoute({ ...route, tab: "explore", section: "calls", traceId, evaluatorId })} />}
         {tab === "monitor" && route.section === "signals" && <DriftSignals data={DATA}
           onOpenTrace={(traceId) => commitRoute({ ...route, tab: "explore", section: "calls", traceId })}
           onOpenOperations={operationsUrl ? () => commitRoute({ ...route, tab: "settings", section: "integrations" }) : null} />}
-        {tab === "monitor" && route.section === "history" && <Monitor view="history" initialState={DATA.monitor} configUrl={mountedConfigUrl()} evaluation={data.evaluation} onChanged={onReload} onOpenTrace={(traceId) => commitRoute({ ...route, tab: "explore", section: "calls", traceId })} />}
+        {tab === "monitor" && route.section === "history" && <Monitor view="history" initialState={DATA.monitor} configUrl={mountedConfigUrl()} evaluation={data.evaluation} onChanged={onReload} onOpenTrace={(traceId, evaluatorId) => commitRoute({ ...route, tab: "explore", section: "calls", traceId, evaluatorId })} />}
         {tab === "monitor" && route.section === "segments" && <Registry url={mountedRegistryUrl()} operationsUrl={operationsUrl} configUrl={mountedConfigUrl()} />}
         {tab === "monitor" && route.section === "schedule" && <ControlCenter section="schedule" configUrl={mountedConfigUrl()} />}
         {tab === "report" && route.section === "management" && <ManagementReport data={DATA} source={source} onPeriodChange={onReload} />}
@@ -1079,6 +1079,9 @@ function MonitorResult({ current }) {
   const comparison = snapshot?.comparison;
   const collecting = manifest?.prospective_open === true;
   const pendingEvaluations = manifest?.pending_evaluator_units?.length || 0;
+  const groupLabels = new Map(
+    (comparison?.groups || []).map((group) => [group.group_id, group.label]),
+  );
   const target = current.policy?.prospective_target || 0;
   const awaitingEvaluator = collecting
     && manifest.current_unit_ids.length >= target && pendingEvaluations > 0;
@@ -1103,7 +1106,7 @@ function MonitorResult({ current }) {
     </div>
     {comparison && !collecting && <div className="mt-3 space-y-1">
       {(comparison.metrics || []).map((metric) => <div key={`${metric.group_id || "all"}:${metric.metric}`} className="text-sm" style={{ color: metric.alert ? C.red : C.sub }}>
-        {metric.group_id ? `${metric.group_id} · ` : ""}{metricLabel(metric.metric)} · {(100 * metric.reference_value).toFixed(1)}% → {(100 * metric.current_value).toFixed(1)}%
+        {metric.group_id ? `${groupLabels.get(metric.group_id) || metric.group_id} · ` : ""}{metricLabel(metric.metric)} · {(100 * metric.reference_value).toFixed(1)}% → {(100 * metric.current_value).toFixed(1)}%
       </div>)}
     </div>}
   </Panel>;

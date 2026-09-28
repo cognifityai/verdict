@@ -835,10 +835,12 @@ source. See [`ADR-013`](docs/adrs/013-stable-dependent-package-read-port.md).
   provider/model or reviewed clusters are optional facets. Existing
   fixed-window `DriftRun` and `DriftSignal` rows are read-only legacy records;
   the tenant-scoped dashboard suppresses them because they have no tenant owner.
-  Each alerted Monitor metric freezes up to five true/false unit identities
-  with the cohort summary, so the dashboard's reference and current examples
-  cannot be silently rewritten by a later judgment. Older snapshots without
-  evidence identities remain readable and simply omit the trace links.
+  Each Monitor cohort-summary metric freezes the first five true and first five
+  false unit identities in cohort order. Those summaries are the single stored
+  owner of the evidence IDs; the dashboard selects the relevant side for an
+  alerted comparison and shows it as reference and current examples. Later
+  judgments therefore cannot silently rewrite the links. Older snapshots
+  without evidence identities remain readable and simply omit the trace links.
   Evaluator requests are sequenced and cancelled; a failed switch explicitly
   retains and names the last confirmed snapshot, and detail selections are
   re-derived from that snapshot rather than retaining stale objects.

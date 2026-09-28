@@ -7,7 +7,6 @@ from verdict.monitoring import (
     CohortManifest,
     FrozenCohortSummary,
     FrozenMetricCounts,
-    MetricComparison,
     MonitorPolicy,
     MonitorStatus,
     WindowMode,
@@ -1128,12 +1127,15 @@ def test_alert_freezes_bounded_trace_evidence_with_the_compared_facts() -> None:
     metric = comparison.metrics[0]
 
     assert metric.alert is True
-    assert metric.reference_evidence_unit_ids == tuple(
+    assert manifest.reference_summary.metrics[0].true_unit_ids == tuple(
         f"reference-{index}" for index in range(5)
     )
-    assert metric.current_evidence_unit_ids == tuple(
+    assert manifest.current_summary.metrics[0].false_unit_ids == tuple(
         f"current-{index}" for index in range(5)
     )
+    payload = json.loads(monitor_snapshot_to_json(manifest, comparison))
+    assert "reference_evidence_unit_ids" not in payload["comparison"]["metrics"][0]
+    assert "current_evidence_unit_ids" not in payload["comparison"]["metrics"][0]
     assert monitor_snapshot_from_json(
         monitor_snapshot_to_json(manifest, comparison)
     ) == (manifest, comparison)
@@ -1153,6 +1155,162 @@ def test_alert_freezes_bounded_trace_evidence_with_the_compared_facts() -> None:
     assert compare_manifest(changed, manifest, policy) == comparison
 
 
+def test_rising_bad_when_high_metric_selects_clean_and_error_evidence() -> None:
+    reference = tuple(
+        AnalysisUnitRecord(
+            f"reference-clean-{index}", NOW + timedelta(minutes=index),
+            {"provider_error": False},
+        )
+        for index in range(10)
+    )
+    current = tuple(
+        AnalysisUnitRecord(
+            f"current-{index}", NOW + timedelta(days=1, minutes=index),
+            {"provider_error": index < 6},
+        )
+        for index in range(10)
+    )
+    policy = MonitorPolicy(
+        "p", "scope", reference_ratio=0.5,
+        minimum_reference=5, minimum_current=5, minimum_effect=0.1,
+    )
+    manifest = plan_historical_manifest(
+        (*reference, *current), policy, cutoff=NOW + timedelta(days=2),
+    )
+
+    metric = compare_manifest((*reference, *current), manifest, policy).metrics[0]
+
+    assert metric.metric == "provider_error"
+    assert metric.effect > 0
+    assert metric.alert is True
+    assert manifest.reference_summary.metrics[0].false_unit_ids == tuple(
+        f"reference-clean-{index}" for index in range(5)
+    )
+    assert manifest.current_summary.metrics[0].true_unit_ids == tuple(
+        f"current-{index}" for index in range(5)
+    )
+
+
+def test_prospective_evidence_merges_batches_and_resolved_pending_states() -> None:
+    fingerprint = "a" * 64
+    policy = MonitorPolicy(
+        "p", "scope", reference_ratio=0.5,
+        minimum_reference=10, minimum_current=10, prospective_target=20,
+        minimum_effect=0.1, evaluator_fingerprint=fingerprint,
+        evaluator_dimensions=("quality",),
+    )
+    baseline = tuple(
+        AnalysisUnitRecord(
+            f"baseline-{index}", NOW + timedelta(minutes=index),
+            {"judge.quality.pass": True},
+            metric_states={"judge.quality.pass": "pass"},
+            evaluator_state="completed",
+            evaluator_evidence_digest=f"{index:064x}",
+        )
+        for index in range(40)
+    )
+    historical = plan_historical_manifest(
+        baseline, policy, cutoff=NOW + timedelta(hours=1),
+    )
+    first_batch = (
+        *(
+            AnalysisUnitRecord(
+                f"first-fail-{index}", NOW + timedelta(hours=2, minutes=index),
+                {"judge.quality.pass": False},
+                metric_states={"judge.quality.pass": "fail"},
+                evaluator_state="completed",
+                evaluator_evidence_digest=f"{100 + index:064x}",
+            )
+            for index in range(2)
+        ),
+        *(
+            AnalysisUnitRecord(
+                f"first-pass-{index}", NOW + timedelta(hours=2, minutes=2 + index),
+                {"judge.quality.pass": True},
+                metric_states={"judge.quality.pass": "pass"},
+                evaluator_state="completed",
+                evaluator_evidence_digest=f"{150 + index:064x}",
+            )
+            for index in range(2)
+        ),
+    )
+    collecting = plan_prospective_manifest(
+        historical, (*baseline, *first_batch), policy,
+    )
+    pending = tuple(
+        AnalysisUnitRecord(
+            f"pending-{index}", NOW + timedelta(hours=3, minutes=index),
+            {}, metric_states={"judge.quality.pass": "missing"},
+            evaluator_state="pending",
+            evaluator_evidence_digest=f"{200 + index:064x}",
+        )
+        for index in range(16)
+    )
+    waiting = plan_prospective_manifest(
+        collecting, (*baseline, *first_batch, *pending), policy,
+    )
+    resolved = tuple(
+        AnalysisUnitRecord(
+            unit.unit_id, unit.event_time,
+            {"judge.quality.pass": index >= 10},
+            metric_states={
+                "judge.quality.pass": "pass" if index >= 10 else "fail",
+            },
+            evaluator_state="completed",
+            evaluator_evidence_digest=unit.evaluator_evidence_digest,
+        )
+        for index, unit in enumerate(pending)
+    )
+
+    closed = plan_prospective_manifest(
+        waiting, (*baseline, *first_batch, *resolved), policy,
+    )
+    metric_counts = closed.current_summary.metrics[0]
+    metric = compare_manifest(
+        (*baseline, *first_batch, *resolved), closed, policy,
+    ).metrics[0]
+
+    assert metric_counts.true_unit_ids == (
+        "first-pass-0", "first-pass-1", "pending-10", "pending-11", "pending-12",
+    )
+    assert metric_counts.false_unit_ids == (
+        "first-fail-0", "first-fail-1", "pending-0", "pending-1", "pending-2",
+    )
+    assert set((*metric_counts.true_unit_ids, *metric_counts.false_unit_ids)) <= set(
+        closed.current_unit_ids
+    )
+    assert metric.alert is True
+    assert metric.effect < 0
+
+
+def test_non_alert_metric_keeps_evidence_only_in_the_frozen_summary() -> None:
+    units = tuple(
+        AnalysisUnitRecord(
+            f"trace-{index}", NOW + timedelta(minutes=index),
+            {"provider_error": index % 2 == 0},
+        )
+        for index in range(20)
+    )
+    policy = MonitorPolicy(
+        "p", "scope", reference_ratio=0.5,
+        minimum_reference=5, minimum_current=5, minimum_effect=0.1,
+    )
+    manifest = plan_historical_manifest(
+        units, policy, cutoff=NOW + timedelta(hours=1),
+    )
+
+    metric = compare_manifest(units, manifest, policy).metrics[0]
+
+    assert manifest.reference_summary.metrics[0].true_unit_ids
+    assert manifest.current_summary.metrics[0].false_unit_ids
+    assert metric.alert is False
+    serialized_metric = json.loads(
+        monitor_snapshot_to_json(manifest, compare_manifest(units, manifest, policy))
+    )["comparison"]["metrics"][0]
+    assert "reference_evidence_unit_ids" not in serialized_metric
+    assert "current_evidence_unit_ids" not in serialized_metric
+
+
 def test_snapshot_without_evidence_ids_remains_readable() -> None:
     units = _units(20, failures_from=15)
     policy = MonitorPolicy(
@@ -1167,10 +1325,6 @@ def test_snapshot_without_evidence_ids_remains_readable() -> None:
             metric.pop("true_unit_ids", None)
             metric.pop("false_unit_ids", None)
         payload["manifest"][summary_name]["evidence_digest"] = None
-    for metric in payload["comparison"]["metrics"]:
-        metric.pop("reference_evidence_unit_ids", None)
-        metric.pop("current_evidence_unit_ids", None)
-
     # Recreate the pre-evidence digest rather than accepting an invalid digest.
     for summary_name in ("reference_summary", "current_summary"):
         summary_payload = payload["manifest"][summary_name]
@@ -1190,7 +1344,7 @@ def test_snapshot_without_evidence_ids_remains_readable() -> None:
     )
 
     assert restored_manifest.reference_summary.metrics[0].true_unit_ids == ()
-    assert restored_comparison.metrics[0].reference_evidence_unit_ids == ()
+    assert restored_comparison == comparison
 
 
 def test_metric_evidence_ids_are_bounded_unique_and_cohort_owned() -> None:
@@ -1199,12 +1353,6 @@ def test_metric_evidence_ids_are_bounded_unique_and_cohort_owned() -> None:
             None, "quality", 6, 0,
             true_unit_ids=tuple(f"trace-{index}" for index in range(6)),
         )
-    with pytest.raises(ValueError, match="bounded and unique"):
-        MetricComparison(
-            "quality", 1, 1, 1.0, 0.0, -1.0, 0.01, 0.01, True,
-            reference_evidence_unit_ids=("trace-1", "trace-1"),
-        )
-
     reference_summary = FrozenCohortSummary(
         1, 0, (),
         (FrozenMetricCounts(

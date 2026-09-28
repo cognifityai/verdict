@@ -499,11 +499,13 @@ For each binary metric in an eligible Monitor group:
 6. alert only when both the adjusted p-value and minimum absolute rate-change
    thresholds pass.
 
-For an alerted cell, the frozen cohort summary also retains at most five unit
-identities from the changed Boolean state in each cohort. They let the dashboard
-open representative reference and current traces without recomputing the
-comparison after later judgment changes. They are examples for investigation,
-not a statistical explanation or root-cause result.
+For every metric cell, the frozen cohort summary also retains the first five
+true and first five false unit identities in cohort order. The summaries are the
+single stored owner of those identities. For an alert, the dashboard selects
+the relevant Boolean state from each cohort so it can open those reference and
+current traces without recomputing the comparison after later judgment changes.
+They are examples for investigation, not a statistical explanation or
+root-cause result.
 
 `UNCLEAR`, missing judgments, and judge errors remain explicit coverage states
 outside the PASS/FAIL denominator. Insufficient evidence and stale reference
