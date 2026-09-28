@@ -13,8 +13,8 @@ source checkout is required.
 
 ## Before the session
 
-1. Install or refresh the `0.1.0a21` skill using a native skill installer or the
-   tagged archive below. An older copied skill does not update itself.
+1. Install the `0.1.0a21` skill using a native skill installer or the tagged
+   archive below.
 2. Create a reversible branch in the customer application.
 3. Use a non-production environment first.
 4. Decide who can approve code edits, dependencies, content capture, storage,
@@ -22,7 +22,7 @@ source checkout is required.
 5. Keep credentials in the customer's existing secret manager or environment.
    Do not paste keys into the prompt or generated documentation.
 
-## Install or refresh the skill without cloning Verdict
+## Install the skill without cloning Verdict
 
 If the coding agent has no native GitHub skill installer, create a dedicated
 skill parent directory and extract the tagged skill from the release archive:
@@ -65,26 +65,23 @@ separately.
 Agents with a native skill installer may install the
 tagged `skills/verdict-instrument-app` directory using that host's documented
 mechanism. A skill install does not install Python dependencies. The skill first
-inspects the customer application's interpreter, then proposes a fresh install,
-`0.1.0a5` through `0.1.0a20` upgrade, synchronized repair, or no package change.
-It must obtain approval before running that command. The registry, pipeline, Inspect, and
+inspects the customer application's interpreter and installed packages, then
+proposes the exact dependency action. It must obtain approval before running
+that command. The registry, pipeline, Inspect, and
 dashboard commands come from the installed packages and do not need a Verdict source
 checkout. The direct-file prompt above remains the cross-host fallback.
 
 ## What happens when the skill runs again
 
-The read-only environment inspector distinguishes an absent install,
-synchronized `0.1.0a5`–`0.1.0a20` upgrade, current `0.1.0a21`, mixed-package
-repair, and collision with the unrelated `verdict` distribution. It reports whether the
+The read-only environment inspector reports installed package state and any
+collision with the unrelated `verdict` distribution. It reports whether the
 active `VERDICT_STORAGE` backend is SQLite or PostgreSQL without printing the
 URL.
 
 The skill preserves the existing backend by default. It asks about PostgreSQL
 only when a new shared or multi-instance deployment needs it, or when the
-existing backend is ambiguous. For an existing PostgreSQL deployment it keeps
-the same secret DSN and adds the `postgres` extra if required. It never upgrades
-the PostgreSQL server or treats a package upgrade as a SQLite-to-PostgreSQL
-migration.
+existing backend is ambiguous. For a PostgreSQL deployment it keeps the same
+secret DSN and adds the `postgres` extra if required.
 
 ## Expect three separate milestones
 
@@ -134,12 +131,9 @@ The skill can direct the agent to:
 The skill cannot make unsupported SDK methods capturable, guarantee redaction,
 invent an intent field absent from captured data, calibrate a judge without
 independent labels, make correlated turns statistically independent, configure
-schedules through the dashboard, or send outbound alerts that Verdict `0.1.0a21`
-does not ship.
+schedules through the dashboard, or send outbound alerts that Verdict does not ship.
 
 ## Release-specific boundary
 
 The skill targets public Verdict `0.1.0a21`; its capture-method evidence is the
-bounded `0.1.0a21` [POC release profile](POC_RELEASE_PROFILE.md). Re-inspect
-all commands and provider entry points before using the skill with a later
-release.
+bounded [POC release profile](POC_RELEASE_PROFILE.md).

@@ -29,6 +29,10 @@ python -m pip install \
   "cognifity-verdict-inspect==0.1.0a21"
 ```
 
+Before opening an existing Verdict store with this build, back it up. For a
+shared store, stop every Verdict writer first; resume capture only when all
+writers use the same package set. Mixed builds can reject records.
+
 For a customer POC on the public alpha, use the pinned commands and provider
 coverage matrix in [`POC_RELEASE_PROFILE.md`](POC_RELEASE_PROFILE.md).
 
@@ -40,10 +44,6 @@ Minimal alternative without the local semantic model:
 ```bash
 python -m pip install "cognifity-verdict-eval==0.1.0a21"  # lexical hash fallback
 ```
-
-Already on an earlier synchronized alpha? Use the upgrade command in the repository
-[README](../README.md#upgrade-from-an-earlier-synchronized-alpha). It preserves the selected SQLite or
-PostgreSQL store and does not require deleting or recloning an existing checkout.
 
 ## 2. Confirm it's healthy (30 seconds, no key)
 
@@ -70,7 +70,7 @@ the capture. Bounded redacted content retention is on by default; clear it only
 for an intentional metadata-only run. The server rejects capture when those
 exact paths were not previewed in the current process. Source files are
 read-only and repeated rescans are idempotent.
-Codex Turn requests are taken from text in either legacy `user_message`
+Codex Turn requests are taken from text in either `user_message`
 records or completed `UserMessage` items. Non-text-only messages remain
 missing evidence; Verdict does not turn image or attachment metadata into
 request text. Rescanning with content capture enabled can fill a request that
@@ -104,13 +104,7 @@ empty while agent evidence is useful.
 
 Agent timelines are stored as normalized source/run/turn/event rows. Genuine
 model calls link to existing `Trace` records rather than copying their content
-into event storage. When upgrading an existing SQLite or PostgreSQL store, stop
-older Verdict processes and take a backup before the first new process opens
-the store; that first open transactionally migrates legacy serialized agent
-bundles. Do not run old and new Verdict writers against the same store.
-The migrated store rejects writes from an older process rather than silently
-hiding them; upgrade every SDK, collector, service, and CLI writer that shares
-the database before resuming capture.
+into event storage.
 
 Local-history token counts are usage evidence, not billing evidence. Codex
 counts are derived from within-turn cumulative-counter deltas. Claude counts
@@ -223,8 +217,8 @@ process-local `capture.dropped_records` runtime metric for records rejected by a
 full or failed spool; equivalent failures produce one bounded warning per
 failure class.
 
-For a central PostgreSQL deployment, install `0.1.0a21` with its `postgres`
-extra and start the authenticated collector:
+For a central PostgreSQL deployment, install the `postgres` extra and start
+the authenticated collector:
 
 ```bash
 export VERDICT_STORAGE='postgresql://verdict@db/verdict'
@@ -250,8 +244,7 @@ Run with `--once` for a scheduler-managed cycle; without it the shipper polls
 continuously. It uploads complete records from active files, advances its local
 checkpoint only after validating the collector acknowledgement, and deletes
 only sealed segments whose records were all accepted. A rejected segment is
-retained with a `.rejected` suffix for recovery or manual import. Restart an
-older producer with the upgraded SDK before enabling shipping. Shipping itself
+retained with a `.rejected` suffix for recovery or manual import. Shipping
 does not run analysis, evaluation, clustering, or monitoring. Inspect local
 delivery health without a collector connection or secret:
 
@@ -334,10 +327,10 @@ commands require `--from` and `--to` so every run is bounded:
 | `phoenix --base-url URL --project NAME` | optional `PHOENIX_API_KEY` | `/v1/projects/{project}/traces` |
 | `opik --project NAME` | optional `OPIK_API_KEY`, `OPIK_WORKSPACE` | `/v1/private/spans/search` |
 
-Langfuse's legacy `/api/public/traces` read is not used. Langfuse now marks it
+Langfuse's `/api/public/traces` read is not used. Langfuse marks it
 deprecated and recommends the bounded v2 Observations API; observations also
 preserve one Verdict row per generation/embedding instead of a trace-level
-aggregate. Langfuse v4 is the supported API-reader contract. For older
+aggregate. Langfuse v4 is the supported API-reader contract. For other
 self-hosted exports, use a supported file/OTLP path or validate that deployment
 before relying on the importer.
 
@@ -433,9 +426,8 @@ Repeating the command without new eligible traffic returns the same snapshot
 identity instead of duplicating work. The reference does not silently move or
 recluster; create and review a new candidate when the comparison contract must
 change. A grouped monitor can contain at most 250 distinct groups. A stored
-monitor without frozen cohort facts remains readable but must be replaced from
-a new reviewed preview before it can execute. The same applies to an older
-evaluator-backed monitor that cannot represent pending finalization.
+policy needs frozen cohort facts and evaluator-finalization state when an
+evaluator is selected before it can execute.
 
 Safety limits are 64 MiB per JSON file or hosted API response, 16 MiB per
 NDJSON row, and 16 MiB per OTLP receiver request by default (including bounded
@@ -504,15 +496,15 @@ a linear `@`-anchored scanner to keep malformed and long inputs bounded. It
 remains best effort, not a compliance control, and opaque metadata such as
 tenant/session/cluster IDs must be non-sensitive. Set `capture_content=False`
 when the approved customer boundary is metadata-only; error categories remain
-available, but provider and manual-span exception messages are omitted. The `0.1.0a21` POC profile also keeps
-`buffered_writes=False`; buffered mode requires an explicit `shutdown()`
+available, but provider and manual-span exception messages are omitted. The
+POC profile keeps `buffered_writes=False`; buffered mode requires an explicit `shutdown()`
 imported from `verdict.client` before process exit.
 
 Use only the provider methods listed in the
-[`POC release profile`](POC_RELEASE_PROFILE.md). Release `0.1.0a21` includes the
+[`POC release profile`](POC_RELEASE_PROFILE.md). Supported calls include the
 Anthropic `messages.stream(...)` helper plus OpenAI `responses.create(...)`,
 `responses.parse(...)`, and `responses.stream(...)` for new or existing
-responses, in addition to the earlier Chat/Google paths. OpenAI's
+responses, as well as the Chat/Google paths. OpenAI's
 `responses.with_streaming_response` raw-response manager and the separate
 experimental `client.beta.responses` multi-agent resource are not instrumented.
 
@@ -552,8 +544,7 @@ python scripts/verify_rubric_alignment.py --labeled labels.jsonl --provider anth
 ```
 
 `sample_to_label.py` reapplies Verdict's best-effort redaction at the JSONL
-output boundary, including for legacy SQLite rows written before the current
-storage sanitizer. Continue to handle the exported file as sensitive.
+output boundary. Continue to handle the exported file as sensitive.
 
 You hand-label PASS/FAIL **blind** (before the judge runs), then the harness
 reports per-dimension and pooled agreement with 95% bootstrap CIs. A threshold
@@ -693,8 +684,8 @@ For a private full-page Operations application, the host composition root
 mounts that package's authenticated routes and assets at `/operations`, then
 passes `operations_page_url="/operations"` to `create_app()`. This adds only the
 top-level link and `/api/config` field; Verdict does not load or discover the
-private package. The legacy `operations_url` Settings integration remains a
-separate, unchanged option.
+private package. The `operations_url` Settings integration remains a
+separate option.
 
 For independent judge-health trending, add a fixed human-labeled JSONL anchor
 set. Its first optional row is `{"set_name":"support-v1"}`; each remaining row
@@ -720,10 +711,8 @@ prevents a `healthy` status: too few usable examples remain `insufficient_data`;
 otherwise the status is `degraded`. When the sentinel option is
 present, `degraded` or `insufficient_data` status is a hard gate: the command
 persists the health record, exits 2, and does not write production judgments.
-New CLI and dashboard calibration health records belong to the selected tenant.
-The dashboard will not show
-older, ownerless health records after an upgrade; rerun the sentinel check or
-dashboard calibration for that tenant to restore its judge-health display.
+CLI and dashboard calibration health records belong to the selected tenant.
+The dashboard shows only health records owned by that tenant.
 
 The dashboard shows per-provider traffic, optional intent clusters, and pass
 rates by rubric dimension. **Report** shows application-only request, tokens
@@ -753,11 +742,7 @@ The dashboard reads SQLite or PostgreSQL directly. If more than one evaluator
 identity is in the database, select one before reading judgment results or
 creating an evaluator-backed Monitor comparison. Identity
 includes provider, model list, rubric name/version, behavior-relevant config,
-expected dimensions, and a prompt/rubric fingerprint. Fixed-window drift rows
-created by older releases have no tenant owner, so `/api/data` and the UI
-exclude them. They remain readable through the Python storage API and are
-never treated as a current zero or alert. Old drift bookmarks open Monitor
-History.
+expected dimensions, and a prompt/rubric fingerprint.
 Evaluator requests are sequenced and cancelled so an older response cannot
 replace a newer selection. If a load fails, the dashboard explicitly names the
 last confirmed evaluator that remains on screen, and trace detail is
@@ -838,8 +823,8 @@ the other captured workloads.
   status for fragmentation or underpowered clusters. If you change the
   threshold or embedding model, bump `--clustering-version`; Verdict rejects a
   reused registry whose recorded threshold or embedding dimension does not match.
-  When upgrading an existing store, run once with `--recluster` so old trace IDs
-  are rebuilt under the new registry. Use `--trust-existing-clusters` only when
+  If trace IDs lack assignments in the selected registry, use `--recluster` to
+  rebuild them. Use `--trust-existing-clusters` only when
   every judgeable trace was assigned by your own stable external clusterer.
   For the versioned registry, `verdict-cluster fit` requires a deliberate
   strategy: `explicit` is supported, while automatic `semantic` and `hybrid`
@@ -854,8 +839,8 @@ the other captured workloads.
   extra is installed. Traces imported after the fit are assigned incrementally
   and do not change the reviewed fit membership during activation.
   The supported explicit CLI workflow stamps calls with
-  `verdict.intent_context("billing.v1")`, normalizes upgraded stores in bounded
-  pages, then runs fit, assign, validate, and activate. Active mode follows the
+  `verdict.intent_context("billing.v1")`, normalizes the store in bounded pages,
+  then runs fit, assign, validate, and activate. Active mode follows the
   tenant pointer. Shadow analysis is disabled pending the tenant-isolation fix
   tracked in Verdict issue #24. Tenantless Memory/SQLite uses the reserved
   `__verdict_local__` registry scope. See `packages/verdict_eval/README.md` for
@@ -889,11 +874,7 @@ the other captured workloads.
   expected dimensions, and immutable prompt/rubric fingerprint. A latest judge
   error is coverage failure rather than a PASS/FAIL score and is eligible for a
   future retry. Other evaluator definitions remain stored but are excluded.
-  Fixed-window rows created by older releases remain readable through the
-  Python storage API. They have no tenant owner and are excluded from
-  `/api/data` and the UI; use the current Monitor workflow instead.
-  Stored policies naming a non-Trace analysis unit also remain readable but
-  require a new trace-based preview before execution.
+  Monitor policies use Trace as the analysis unit.
 - **Logical-session comparisons are descriptive.** The optional Agent view
   groups sessions whose observed runs and Turns are terminal by explicit
   `AgentRun.session_id` and uses the earliest

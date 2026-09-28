@@ -9,6 +9,10 @@ python -m pip install cognifity-verdict
 verdict
 ```
 
+Before opening an existing Verdict store with this build, back it up. For a
+shared store, stop every Verdict writer first; resume capture only when all
+writers use the same package set. Mixed builds can reject records.
+
 The initial setup page can approve and rescan local Claude Code/Codex histories,
 import supported telemetry files, show the SDK snippet, or open an existing
 store. Local histories are persisted as typed `AgentRun`/`AgentTurn`/
@@ -39,7 +43,7 @@ activity totals are not a quality ranking: latency, price, judging, and model
 comparisons still use genuine `Trace` records only.
 
 Codex Turn requests include text from completed `UserMessage` items and the
-older `user_message` format. Rescanning can fill previously missing request
+`user_message` records. Rescanning can fill previously missing request
 text; non-text-only messages remain missing evidence.
 
 For automation, the equivalent commands are:
@@ -218,10 +222,9 @@ a one-shot idempotent runner. It and `verdict-service` use the same stored
 evaluator, dimensions, grouping version, and trace selection as the dashboard.
 `verdict-service` executes the dashboard's saved schedule once or continuously.
 The approved baseline membership and normalized metric counts are immutable.
-Grouped monitors are limited to 250 distinct groups. Older stored monitors
-without frozen cohort facts, without evaluator-finalization state when an
-evaluator is selected, or naming a non-Trace analysis unit remain readable but
-require a new reviewed preview before execution.
+Grouped monitors are limited to 250 distinct groups. A policy needs frozen
+cohort facts, evaluator-finalization state when an evaluator is selected, and
+a Trace analysis unit before it can execute.
 
 A separate **Logical session (descriptive)** selection groups native Agent
 runs only by explicit `AgentRun.session_id`. It compares currently terminal
@@ -258,9 +261,6 @@ traces without an explicit service identity appear as **Unattributed**. HTML,
 CSV, and browser Print/Save PDF outputs use the selected period and contain
 aggregates only. Monitor is the current drift workflow: it shows reviewed
 historical comparisons, the active prospective policy, and optional facets.
-Results created by older fixed-window pipeline releases have no tenant owner;
-the dashboard excludes them from `/api/data` and the UI. They remain readable
-through the Python storage API.
 
 The Verdict Python SDK. Auto-instruments your LLM calls via `wrapt` and
 captures them into a vendor-neutral `Trace` schema (attribute *names* follow
@@ -359,8 +359,8 @@ The Langfuse reader targets the supported v4 Observations API v2, not the
 deprecated trace-list endpoint, so Verdict receives one record per actual
 generation or embedding rather than a trace aggregate.
 
-For a customer proof of concept, follow the versioned
-[`0.1.0a21 POC release profile`](https://github.com/cognifityai/verdict/blob/v0.1.0a21/docs/POC_RELEASE_PROFILE.md).
+For a customer proof of concept, follow the
+[`POC release profile`](https://github.com/cognifityai/verdict/blob/main/docs/POC_RELEASE_PROFILE.md).
 It pins the package set, provider entry points, persistence mode, and privacy
 boundary used for release verification.
 
@@ -410,12 +410,9 @@ each ended span is persisted once independently of provider success. `flush()` i
 a FIFO point-in-time barrier and accepts an optional timeout. `close()` rejects
 new reads/writes, drains every accepted FIFO write, stops and joins the worker,
 then closes the inner adapter; post-close `flush()` is an idempotent no-op.
-The `0.1.0a21` POC profile uses `buffered_writes=False`. Buffered mode requires
+The POC profile uses `buffered_writes=False`. Buffered mode requires
 an explicit `shutdown()` imported from `verdict.client` before process exit.
-Fixed-window `DriftRun` snapshots created by older releases remain readable for
-compatibility; the current pipeline does not create or replace them.
-`prune_before()`
-removes expired standalone and orphan span rows while preserving an old span
+`prune_before()` removes expired standalone and orphan span rows while preserving a span
 referenced by a retained Trace. SQLite and PostgreSQL execute multi-table trace
 deletion and pruning atomically and serialize concurrent trace writers while
 they decide which shared parent spans must survive.
@@ -449,7 +446,7 @@ client = Anthropic()
 # Use Anthropic normally — supported SDK calls are captured.
 ```
 
-Install and run the version-matched dashboard without a source checkout:
+Install and run the dashboard without a source checkout:
 
 ```bash
 python -m pip install "cognifity-verdict[dashboard]==0.1.0a21"
@@ -463,15 +460,15 @@ PostgreSQL; it does not return a database path or DSN to the browser.
 
 If capture/import used an explicit tenant, pass the same `--tenant-id` to the
 dashboard or set `VERDICT_TENANT_ID`. The default remains
-`__verdict_local__`; selecting another tenant requires no data migration and
-does not relabel existing rows. Dashboard-selectable tenant IDs contain at most
+`__verdict_local__`; selecting another tenant does not relabel stored rows.
+Dashboard-selectable tenant IDs contain at most
 128 ASCII letters, digits, `.`, `_`, `:`, or `-` and begin with a letter or
 digit. Existing telemetry imports retain the published 256-character routing
 boundary; use at most 128 characters for a new standalone dashboard workspace.
 Browser `tenant=` parameters do not select a workspace.
 
 Add the `postgres` extra for a PostgreSQL store. Verdict requires PostgreSQL
-databases to use UTF-8 encoding. Legacy SQL_ASCII databases are not supported.
+databases to use UTF-8 encoding. SQL_ASCII databases are not supported.
 Dashboard analytics are read-only; the setup/import and Monitor controls are
 explicit storage mutations. The app can also be mounted with
 `verdict.dashboard.create_app()` behind an existing
@@ -487,9 +484,7 @@ explicit event-time cohorts. Alert cards chart reference and current rates,
 show the statistical gates and coverage, and link bounded evidence traces when
 the snapshot contains them. Cohort summaries retain the first bounded true and
 false trace IDs for every metric cell as their single stored owner; alert cards
-select the relevant side for investigation rather than claiming an automated root cause. Fixed-window
-results produced by older releases remain readable through the Python storage
-API and do not appear in the dashboard.
+select the relevant side for investigation rather than claiming an automated root cause.
 
 For a one-off export that is not in the Verdict store, open **Evaluate →
 Inspect JSON**. Paste JSON or choose a local export file; both use the same
@@ -497,17 +492,6 @@ bounded request path. Verdict does not save the upload or the resulting
 report. Analysis runs on the Verdict dashboard host; semantic analysis and the
 external judge are separate opt-ins. The judge also requires an explicit
 confirmation before any content is sent to its provider.
-
-Upgrade an existing synchronized `0.1.0a5` through `0.1.0a20` environment with
-`python -m pip install --upgrade`
-and the same provider, dashboard, semantic, and storage extras already in use.
-The published wheels replace editable installs without a new clone and reuse the
-selected SQLite file or PostgreSQL tables in place. See the repository
-[upgrade instructions](https://github.com/cognifityai/verdict#upgrade-from-an-earlier-synchronized-alpha)
-for the synchronized three-package command and verification steps.
-All writers sharing a store must be stopped and upgraded together when the store
-first moves to normalized agent evidence; migrated stores reject legacy bundle
-writes.
 
 An authenticated host may add infrastructure and job evidence under
 **Settings → Integrations** by passing a same-origin API path:
@@ -530,7 +514,7 @@ composition root and pass `operations_page_url="/operations"` to
 `create_app()`. Verdict then adds one same-tab top-level **Operations** control
 and the same path to `/api/config`; it does not discover, import, or start the
 private package. Omitting the argument leaves the route, control, and config
-field absent. The older `operations_url` Settings adapter above is unchanged.
+field absent. The `operations_url` Settings adapter remains available.
 
 The dashboard's **Monitor → Segments** workspace is a bounded view of the Task 5
 tenant/version registry. It shows active and preview versions, stable display
@@ -551,11 +535,11 @@ value wins; browser query input is ignored. Mounted mutation buttons use the
 same-origin Operations adapter. Semantic and hybrid fallback retain their experimental
 disclosure. When a mounted host supplies that authorized tenant, Overview,
 Trace Explorer, and cluster pass-rate charts project assignments
-and stable labels from the same active registry. Standalone and legacy stores
+and stable labels from the same active registry. Standalone stores
 without an active registry for the selected tenant continue to use
 `Trace.cluster_id`.
 
-For published release `0.1.0a21`, the bounded POC entry points include Anthropic
+Supported POC entry points include Anthropic
 `messages.create(...)` (including `stream=True`), OpenAI
 `chat.completions.create(...)` and its stream helper, and Google
 `models.generate_content(...)` / `generate_content_stream(...)`, plus the
