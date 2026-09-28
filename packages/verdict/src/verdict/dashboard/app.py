@@ -2127,7 +2127,6 @@ def _build(
         {}, {}, {}, {}, defaultdict(set), {}
     )
     provider_trace_counts = Counter()
-    content_bearing_predicate = cur.content_bearing_predicate("traces")
     for r in cur.execute(
         # ``cluster_select`` is selected from the two literals above; it never
         # contains request data or a database value.
@@ -2135,9 +2134,7 @@ def _build(
         f"{response_model_column}, started_at, "  # nosec B608
         "input_tokens, output_tokens, error, latency_ms, cost_usd, "
         f"{cluster_select}, {tags_column} AS workload_tags, "  # nosec B608
-        f"{service_column}, {environment_column}, "  # nosec B608
-        f"CASE WHEN {content_bearing_predicate} "  # nosec B608
-        "THEN 1 ELSE 0 END AS content_bearing FROM traces "
+        f"{service_column}, {environment_column} FROM traces "  # nosec B608
         f"WHERE {trace_scope}",  # nosec B608 -- fixed tenant predicate
         trace_scope_params,
     ):

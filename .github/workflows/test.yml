@@ -349,8 +349,8 @@ jobs:
           assert [len(page["samples"]) for page in pages] == [30, 30, 20]
           assert pages[0]["meta"]["totalTraces"] == 80
           assert pages[0]["meta"]["totalJudged"] == 80
-          assert pages[0]["driftRun"] is None
-          assert pages[0]["driftAnalysis"]["runStatus"] == "no_completed_run"
+          assert "driftRun" not in pages[0]
+          assert "driftAnalysis" not in pages[0]
           with urlopen(f"{base_url}/dashboard", timeout=10) as response:
               assert response.status == 200
               assert b"<!doctype html>" in response.read(256)
