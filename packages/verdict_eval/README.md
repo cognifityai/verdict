@@ -66,8 +66,11 @@ verdict-pipeline --storage sqlite:///verdict.db --registry-mode active \
   --tenant-id tenant-a
 ```
 
-The pipeline prepares clusters and judgments. Monitor owns reviewed cohort
-comparisons and drift results.
+The pipeline prepares clusters and judgments. It does not publish a separate
+fixed-window drift run. Monitor owns current reviewed cohort comparisons;
+fixed-window rows written by older releases remain readable through the Python
+storage API but are excluded from `/api/data` and the UI because they have no
+tenant owner.
 
 ## Calibration
 

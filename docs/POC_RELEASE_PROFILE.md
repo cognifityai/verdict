@@ -1,7 +1,8 @@
 # Run a customer POC with Verdict 0.1.0a21
 
 Use this profile to demonstrate Verdict on verified provider calls without
-presenting the public alpha as production-ready.
+presenting the public alpha as production-ready. The historical `0.1.0a4`
+profile remains available from its release tag.
 
 ## 1. Install the exact synchronized release
 
@@ -18,10 +19,9 @@ python -c "import verdict, verdict_eval, verdict_inspect; print(verdict.__versio
 ```
 
 The final command must print `0.1.0a21 0.1.0a21 0.1.0a21`. Add the `postgres`
-extra only when the deployment uses PostgreSQL.
-Before opening an existing Verdict store with this build, back it up. For a
-shared store, stop every Verdict writer first; resume capture only when all
-writers use the same package set. Mixed builds can reject records.
+extra only when the existing deployment uses PostgreSQL. Back up an existing
+store and dependency lockfile before upgrading; the additive migrations
+preserve existing trace and evaluation tables.
 
 ## 2. Use a released provider entry point
 
@@ -66,7 +66,7 @@ in the skill file, repository, SQLite database, screenshots, or support bundle.
 ## 4. Use supported intent grouping deliberately
 
 The supported versioned-registry path is exact-key `explicit` grouping. Stamp a
-validated key around the provider call, then run
+validated key around the provider call, then normalize upgraded stores and run
 the bounded lifecycle:
 
 ```python

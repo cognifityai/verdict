@@ -100,8 +100,12 @@ receiver must honor the idempotency key for end-to-end deduplication.
 - Existing public constructors remain backward compatible. Trace appends
   optional `service_name` and `environment` fields after its published
   positional fields; the other constructors are unchanged.
-- Existing dashboard response fields remain available while explicit status and
-  coverage fields are added.
+- The dashboard `/api/data` response excludes the fixed-window fields
+  `driftSignals`, `driftRun`, and `driftAnalysis`; the nested
+  `evaluation.driftStatus` and `evaluation.unattributedDriftSignals`; and
+  `truncation.resources.driftSignals`. Monitor owns current drift status and
+  history. Stored fixed-window records remain readable through the Python
+  storage API.
 - Monitor snapshot JSON adds evaluator-finalization state. PostgreSQL schema
   initialization also adds a generated snapshot write sequence to resolve
   timestamp ties deterministically; existing rows are backfilled automatically.

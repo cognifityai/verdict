@@ -75,8 +75,8 @@ retains those source paths in the local control store so `verdict-service` can
 rescan them; that durable schedule is configuration, not captured evidence.
 When the source records child execution identity, local capture retains it as a
 separate child run instead of folding its turns into the parent.
-For Codex histories, text in completed `UserMessage` items and `user_message`
-records is captured as the Turn request. A rescan can fill
+For Codex histories, text in completed `UserMessage` items is captured as the
+Turn request alongside the older `user_message` format. A rescan can fill
 previously missing text; non-text-only requests remain unavailable.
 
 The findings-first dashboard has six top-level workspaces: **Overview**,
@@ -220,7 +220,8 @@ records is retained with a `.rejected` suffix for inspection or manual import.
 `verdict-shipper --spool-directory /var/spool/verdict/worker-1 --status --json`
 reports local backlog, pending bytes, segment state, last append, receipt, and
 bounded error without needing the collector or its key.
-Shipping does not run analysis, judges, clustering, or monitors. See
+Restart an older producer with the upgraded SDK before enabling shipping;
+shipping itself does not run analysis, judges, clustering, or monitors. See
 [`examples/agent_sdk.py`](examples/agent_sdk.py) for a runnable local example.
 
 An activatable monitor proposal uses one genuine model-call Trace per analysis unit
@@ -263,8 +264,10 @@ verdict-monitor run --storage sqlite:///./verdict.db
 The dashboard, one-shot monitor command, manual scheduled cycle, and continuous
 service all construct monitor inputs from the same frozen evaluator and grouping
 identity. They use stored judgments only and never invoke a judge implicitly.
-A policy needs frozen cohort facts, evaluator-finalization state when an
-evaluator is selected, and a Trace analysis unit before it can run.
+Stored monitors that predate frozen cohort facts remain readable but must be
+re-created from a reviewed preview before they can run again. The same applies
+to older evaluator-backed monitors that cannot represent pending finalization
+and to stored policies naming a non-Trace analysis unit.
 
 Monitor also offers a separate **Logical session (descriptive)** preview for
 native Agent evidence. It groups runs only by an explicit `AgentRun.session_id`
@@ -321,11 +324,7 @@ python -m pip install \
   "cognifity-verdict-inspect==0.1.0a21"
 ```
 
-Before opening an existing Verdict store with this build, back it up. For a
-shared store, stop every Verdict writer first; resume capture only when all
-writers use the same package set. Mixed builds can reject records.
-
-For a customer proof of concept, follow the bounded
+For a customer proof of concept on `0.1.0a21`, follow the bounded
 [`POC release profile`](docs/POC_RELEASE_PROFILE.md). It names the provider
 entry points exercised for this release, keeps persistence synchronous, and
 separates a workflow demonstration from a production-readiness claim.
@@ -350,9 +349,41 @@ python -m pip install \
 ```
 
 The dashboard server is part of the core distribution because the core
-`verdict` command launches it. The `dashboard` extra is an empty selector;
-`all` adds provider, PostgreSQL, telemetry, and eval
+`verdict` command launches it. The `dashboard` extra is retained as an empty
+compatibility selector; `all` adds provider, PostgreSQL, telemetry, and eval
 dependencies on top of that core runtime.
+
+### Upgrade from an earlier synchronized alpha
+
+Upgrade the synchronized distributions in the application's existing virtual
+environment. This also replaces editable installs from an existing Verdict clone;
+do not delete or reclone it:
+
+```bash
+python -m pip install --upgrade \
+  "cognifity-verdict[anthropic,openai,google,dashboard]==0.1.0a21" \
+  "cognifity-verdict-eval[semantic]==0.1.0a21" \
+  "cognifity-verdict-inspect==0.1.0a21"
+
+python -m pip check
+python -c "import verdict, verdict_eval, verdict_inspect; print(verdict.__version__, verdict_eval.__version__, verdict_inspect.__version__)"
+```
+
+Add the same provider, semantic, and PostgreSQL extras that deployment already
+uses. The upgrade reuses existing SQLite files and PostgreSQL tables in place;
+it does not delete or rewrite traces, judgments, calibration records, drift
+runs, or dashboard history. It does not move SQLite data to PostgreSQL or upgrade
+a PostgreSQL server. Preserve the existing backend unless a separate migration is
+approved. Installed deployments use the `verdict-pipeline` and
+`verdict-dashboard` commands rather than source-tree wrappers.
+If an older alpha created a `user_signals` table, the upgrade leaves it in place
+as unread legacy data; no destructive migration is run.
+Back up the store and lockfile before any alpha upgrade, then run the pipeline
+and dashboard smoke checks against a non-production copy.
+When upgrading a shared store to normalized agent evidence, stop and upgrade
+every Verdict writer before resuming capture. The migrated database rejects
+legacy agent-bundle writes rather than accepting evidence that current readers
+cannot see.
 
 An unrelated project owns the `verdict` distribution on PyPI and exposes the
 same top-level `verdict` import. Do not install that distribution in the same
@@ -505,9 +536,10 @@ verdict-dashboard --storage sqlite:///./verdict.db --tenant-id support
 The process-selected tenant is one standalone workspace boundary for dashboard
 totals, reports, trace/judgment samples, Agent Run reads, setup/import,
 Evaluator Lab, clusters, Monitor, and control actions. Browser `tenant=`
-parameters are ignored. The reserved default is `__verdict_local__` and
-includes traces without a tenant ID; changing the selection does not move or
-rewrite stored rows.
+parameters are ignored. The reserved default remains `__verdict_local__` and
+includes historical tenantless traces; changing the selection does not move or
+rewrite existing rows. Legacy fixed-window drift rows have no tenant owner and
+do not appear in `/api/data` or the UI; use the current tenant-scoped Monitor workflow.
 
 An authenticated FastAPI host may set
 `request.state.verdict_registry_tenant` to choose the authorized tenant for
@@ -549,7 +581,7 @@ mount path, so the packaged UI and server stay on the same version. When the
 authenticated host supplies `request.state.verdict_registry_tenant`, dashboard
 data, Registry, Agent Run, and deterministic-analysis requests use that tenant,
 including assignments and stable labels from its active registry. Standalone
-stores use the dashboard's configured tenant and project its active
+and legacy stores use the dashboard's configured tenant and project its active
 registry when one exists; without an active registry, they continue to use the
 trace's stored `cluster_id`.
 
@@ -580,8 +612,8 @@ unacceptable; provider and manual-span failures then retain an error category
 without exception message content. IPv6 validation preserves trailing text that is not part of the
 validated address; clock values such as `12:34:56` are not treated as IPv6. Use
 non-sensitive tenant/session/cluster IDs. `sample_rate`
-controls what fraction of supported calls is retained. The POC profile keeps
-`buffered_writes=False`, so a normal process exit cannot strand
+controls what fraction of supported calls is retained. The `0.1.0a21` POC
+profile keeps `buffered_writes=False`, so a normal process exit cannot strand
 queued telemetry. `buffered_writes=True` moves writes to a background batched
 writer but requires an explicit `shutdown()` imported from `verdict.client`
 before process exit. The storage wrapper's `close()` drains every accepted
@@ -620,7 +652,8 @@ python scripts/verify_rubric_alignment.py --labeled labels.jsonl --provider anth
 ```
 
 `sample_to_label.py` reapplies Verdict's best-effort redaction at the JSONL
-output boundary. Treat the resulting file as sensitive despite that pass.
+output boundary, including for legacy SQLite rows written before the current
+storage sanitizer. Treat the resulting file as sensitive despite that pass.
 
 You hand-label a sample PASS/FAIL (blind, before the judge runs), then the harness reports per-dimension and pooled agreement with 95 % bootstrap CIs. A threshold is "cleared" only when the **CI lower bound** clears it, not the point estimate.
 
@@ -751,9 +784,9 @@ source. See [`ADR-013`](docs/adrs/013-stable-dependent-package-read-port.md).
   dashboard's cluster-health warning and bump `--clustering-version` whenever
   you deliberately change the threshold or embedding model. The runner rejects
   a registry whose recorded threshold or embedding dimension is incompatible.
-  Traces whose IDs are absent from the selected registry also fail closed. Use
-  `--recluster` to rebuild assignments or `--trust-existing-clusters` only for
-  stable clusters assigned outside Verdict.
+  Existing traces whose IDs are absent from the selected registry also fail
+  closed: use a one-time `--recluster` after a Verdict clustering migration, or
+  `--trust-existing-clusters` only for stable clusters assigned outside Verdict.
 - Versioned-registry `explicit` clustering is supported. Automatic `semantic`
   clustering and `hybrid` semantic fallback are experimental, opt-in alpha
   features: `verdict-cluster fit` requires an explicit strategy, and
@@ -799,25 +832,31 @@ source. See [`ADR-013`](docs/adrs/013-stable-dependent-package-read-port.md).
   activation event time and starts an empty prospective bucket. Older events
   imported later are excluded from that bucket. Historical and prospective
   comparisons use the same result contract, all traffic is the default, and
-  provider/model or reviewed clusters are optional facets.
+  provider/model or reviewed clusters are optional facets. Existing
+  fixed-window `DriftRun` and `DriftSignal` rows remain readable through the
+  Python storage API. They are excluded from `/api/data` and the dashboard
+  because they have no tenant owner. Old drift bookmarks open Monitor History.
   Each Monitor cohort-summary metric freezes the first five true and first five
   false unit identities in cohort order. Those summaries are the single stored
   owner of the evidence IDs; the dashboard selects the relevant side for an
   alerted comparison and shows it as reference and current examples. Later
-  judgments therefore cannot silently rewrite the links.
+  judgments therefore cannot silently rewrite the links. Older snapshots
+  without evidence identities remain readable and simply omit the trace links.
   Evaluator requests are sequenced and cancelled; a failed switch explicitly
   retains and names the last confirmed snapshot, and detail selections are
   re-derived from that snapshot rather than retaining stale objects.
   The runner reuses and aggregates at most one judgment per trace for
   one complete evaluator identity (provider, model list, rubric name/version,
   behavior-relevant config, expected dimensions, and prompt/rubric fingerprint);
-  Monitor policies carry that selected evaluator fingerprint; other evaluator
-  definitions are excluded.
+  Monitor policies carry that selected evaluator fingerprint; incomplete
+  historical identities and other evaluator definitions are excluded.
   Optional fixed human-labeled sentinel runs monitor that fingerprint separately
   from production drift. Pipeline and dashboard calibration runs stamp their
   health aggregate with the selected tenant; the dashboard shows it only for
   that tenant, even when another tenant
-  uses the same evaluator fingerprint. When `--judge-sentinel-file` is supplied, the
+  uses the same evaluator fingerprint. Health aggregates written before tenant
+  ownership was recorded are hidden in tenant dashboards and require a new
+  sentinel run to appear there. When `--judge-sentinel-file` is supplied, the
   runner persists the aggregate and blocks production judging unless the status is
   `healthy`; `degraded` and `insufficient_data` both exit with status 2. The
   health gate treats one independently judged sentinel example as one trial: an
@@ -826,9 +865,9 @@ source. See [`ADR-013`](docs/adrs/013-stable-dependent-package-read-port.md).
   agreement remains a separate diagnostic. Any sentinel execution error
   prevents a `healthy` status: too few usable examples remain
   `insufficient_data`; otherwise the result is `degraded`.
-- Monitor's inferential drift comparison assumes independently sampled calls.
+- The `0.1.0a21` POC drift demonstration assumes independently sampled calls.
   Do not treat repeated turns from the same conversation as independent
-  evidence. Use Monitor's
+  evidence or use that profile for a production decision. Use Monitor's
   descriptive logical-session preview to inspect session-level rates and
   coverage; it deliberately omits inferential significance and alert claims.
 - The current local Monitor scope is tenant-bound and rejects mixed-tenant

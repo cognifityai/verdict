@@ -28,7 +28,7 @@ business outcome, Agent Insights surfaces that failure without a judge call.
   Observability, Phoenix, Opik, MLflow, and bounded voice transcript records
   without storing a second raw vendor envelope.
 - Supports non-streaming and streaming responses for the supported SDK paths.
-  The [`POC release profile`](POC_RELEASE_PROFILE.md) names
+  The versioned [`0.1.0a21 POC release profile`](POC_RELEASE_PROFILE.md) names
   the released entry points explicitly, including Anthropic
   `messages.stream(...)` and OpenAI Responses create, parse, and helper paths.
 - Stores traces in SQLite by default, with Postgres support for deployments that
@@ -70,7 +70,7 @@ business outcome, Agent Insights surfaces that failure without a judge call.
 2. **Store**: traces are written through a storage interface. SQLite is the
    default local store; Postgres is available for shared environments. Optional
    buffered writes move persistence to a background batched writer and require
-   explicit client shutdown. The POC profile uses synchronous writes.
+   explicit client shutdown. The `0.1.0a21` POC profile uses synchronous writes.
 3. **Group when useful**: reviewed provider/model or cluster facets can isolate
    a workload, but the default Monitor comparison covers all eligible traffic.
    Exact-key `explicit` clustering is supported; automatic MiniLM `semantic`
@@ -130,7 +130,7 @@ For a visual overview, see `docs/architecture-current.svg`.
 - Use `scripts/sample_to_label.py`, `scripts/label_ui.py`, and
   `scripts/verify_rubric_alignment.py` to measure judge agreement on your own
   labeled examples. The sampler reapplies best-effort redaction when it writes
-  JSONL before the file leaves the store.
+  JSONL so legacy database rows do not bypass the current storage sanitizer.
 - Use **Evaluate → Inspect JSON** or `verdict-inspect` for one-off exports; use
   Trace Explorer and Monitor for evidence already in the Verdict store.
 - Run the test suite before changing instrumentation or evaluation behavior.
@@ -236,8 +236,9 @@ packaged Verdict UI run together. A host-authorized
 Run, and deterministic-analysis requests, including the Monitor summary
 embedded in `/api/data`; the standalone dashboard uses its configured tenant.
 Without an active registry, stored trace cluster IDs remain the fallback. Every
-trace-derived total, report, sample, and judgment uses that same tenant.
-Monitor data remains tenant-scoped. Request state does not make one
+trace-derived total, report, sample, and judgment uses that same tenant. Older
+fixed-window drift rows are excluded from `/api/data` because they have no
+tenant owner; the current Monitor data remains tenant-scoped. Request state does not make one
 mounted app a dynamic multi-tenant control plane: setup, Evaluator Lab, Monitor
 lifecycle, and control routes remain bound to the configured tenant. Mount one
 app instance per tenant for those mutable workflows.
@@ -250,8 +251,8 @@ An authenticated host may also mount a private, full-page application at the
 fixed `/operations` path and pass `operations_page_url="/operations"`. Verdict
 then advertises and links to that same-origin page without importing private
 code or starting a collector. When omitted, the page route, navigation entry,
-and config field do not exist. The optional `operations_url` Settings adapter
-is separate.
+and config field do not exist. This is independent of the legacy
+`operations_url` Settings adapter.
 When `VERDICT_USER` and `VERDICT_PASS` are both set, HTTP Basic authentication
 gates the dashboard shells at `/` and `/dashboard` plus `/api/data`, while
 `/api/health` remains public. Chart series contain observed bins only. The response keeps full-store
@@ -260,7 +261,8 @@ providers, 20 usable intent clusters, 12 dimensions, 20 evaluator identities,
 20 models per displayed provider and one 30-row page of
 non-judge application traces. Trace Explorer can page through the remaining
 application traces. The non-intent `unclustered` bucket is outside the cluster chart
-and cap counts. The UI reports
+and cap counts;
+capped legacy rows retain the largest absolute effect sizes. The UI reports
 shown-versus-available counts whenever a bound applies.
 
 ## Validation Position
