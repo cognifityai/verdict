@@ -40,6 +40,10 @@ TENANT = LOCAL_TENANT
 SCOPE = LOCAL_TRACE_SCOPE
 
 _BOUNDED_MONITOR_ERRORS = {
+    "monitor snapshot exceeds the 4 MiB storage contract": (
+        "Monitor snapshots are limited to 4 MiB. Reduce the cohort size, "
+        "number of groups, or evaluator dimensions."
+    ),
     "Monitor currently supports only the trace analysis unit.": (
         "Monitor currently supports only the trace analysis unit."
     ),

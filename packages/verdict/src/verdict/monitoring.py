@@ -33,6 +33,7 @@ class MonitorStatus(str, Enum):
 MAX_MONITOR_GROUPS = 250
 MAX_MONITOR_GROUP_METRICS = 4_000
 MAX_MONITOR_SNAPSHOT_BYTES = 4_194_304
+MAX_MONITOR_EVIDENCE_UNIT_IDS = 5
 EVIDENCE_FINALIZATION_VERSION = 1
 
 
@@ -290,6 +291,8 @@ class FrozenMetricCounts:
     state_unclear: int = 0
     state_missing: int = 0
     state_error: int = 0
+    true_unit_ids: tuple[str, ...] = ()
+    false_unit_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         _validate_group_id(self.group_id)
@@ -301,11 +304,15 @@ class FrozenMetricCounts:
         ):
             raise ValueError("frozen metric identity is required")
         for item in fields(self):
-            if item.name in {"group_id", "metric"}:
+            if item.name in {"group_id", "metric", "true_unit_ids", "false_unit_ids"}:
                 continue
             value = getattr(self, item.name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ValueError("frozen metric counts must be non-negative integers")
+        for name in ("true_unit_ids", "false_unit_ids"):
+            value = tuple(getattr(self, name))
+            _validate_evidence_unit_ids(value)
+            object.__setattr__(self, name, value)
 
     @property
     def reports_coverage(self) -> bool:
@@ -413,6 +420,17 @@ class CohortManifest:
                 raise ValueError("reference summary does not match membership")
             if self.current_summary.unit_count != len(self.current_unit_ids):
                 raise ValueError("current summary does not match membership")
+            for summary, membership in (
+                (self.reference_summary, reference),
+                (self.current_summary, current),
+            ):
+                evidence_ids = {
+                    unit_id
+                    for metric in summary.metrics
+                    for unit_id in (*metric.true_unit_ids, *metric.false_unit_ids)
+                }
+                if not evidence_ids <= membership:
+                    raise ValueError("frozen metric evidence must belong to its cohort")
         pending_ids = tuple(item.unit_id for item in self.pending_evaluator_units)
         if len(set(pending_ids)) != len(pending_ids) or not set(pending_ids) <= current:
             raise ValueError("pending evaluator units must be unique current members")
@@ -562,6 +580,25 @@ def _validate_optional_text(value: str | None, name: str, *, maximum: int) -> No
         raise ValueError(f"{name} must be bounded text")
 
 
+def _validate_evidence_unit_ids(values: tuple[str, ...]) -> None:
+    if len(values) > MAX_MONITOR_EVIDENCE_UNIT_IDS or len(set(values)) != len(values):
+        raise ValueError("metric evidence identities must be bounded and unique")
+    if any(
+        not isinstance(value, str)
+        or not value
+        or "\x00" in value
+        or len(value.encode("utf-8")) > 512
+        for value in values
+    ):
+        raise ValueError("metric evidence identity must be bounded text")
+
+
+def _bounded_evidence_ids(*groups: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(dict.fromkeys(unit_id for group in groups for unit_id in group))[
+        :MAX_MONITOR_EVIDENCE_UNIT_IDS
+    ]
+
+
 def _ordered(units) -> list[AnalysisUnitRecord]:
     rows = list(units)
     if len({unit.unit_id for unit in rows}) != len(rows):
@@ -585,7 +622,13 @@ def _summary_payload(summary: FrozenCohortSummary) -> dict[str, object]:
             {
                 item.name: getattr(metric, item.name)
                 for item in fields(metric)
-                if not (item.name == "group_id" and getattr(metric, item.name) is None)
+                if not (
+                    (item.name == "group_id" and getattr(metric, item.name) is None)
+                    or (
+                        item.name in {"true_unit_ids", "false_unit_ids"}
+                        and not getattr(metric, item.name)
+                    )
+                )
             }
             for metric in summary.metrics
         ],
@@ -670,6 +713,16 @@ def _freeze_cohort(
                     state_counts["unclear"],
                     state_counts["missing"],
                     state_counts["error"],
+                    tuple(
+                        unit.unit_id
+                        for unit in rows
+                        if unit.metrics.get(name) is True
+                    )[:MAX_MONITOR_EVIDENCE_UNIT_IDS],
+                    tuple(
+                        unit.unit_id
+                        for unit in rows
+                        if unit.metrics.get(name) is False
+                    )[:MAX_MONITOR_EVIDENCE_UNIT_IDS],
                 )
             )
     return FrozenCohortSummary(
@@ -718,6 +771,8 @@ def _merge_summaries(
                 previous.state_unclear + item.state_unclear,
                 previous.state_missing + item.state_missing,
                 previous.state_error + item.state_error,
+                _bounded_evidence_ids(previous.true_unit_ids, item.true_unit_ids),
+                _bounded_evidence_ids(previous.false_unit_ids, item.false_unit_ids),
             )
     return FrozenCohortSummary(
         first.unit_count + second.unit_count,
@@ -771,8 +826,14 @@ def _replace_evaluator_state(
         values[f"state_{state}"] += 1
         if state == "pass":
             values["true_count"] += 1
+            values["true_unit_ids"] = _bounded_evidence_ids(
+                values["true_unit_ids"], (pending.unit_id,),
+            )
         elif state == "fail":
             values["false_count"] += 1
+            values["false_unit_ids"] = _bounded_evidence_ids(
+                values["false_unit_ids"], (pending.unit_id,),
+            )
         metrics[key] = FrozenMetricCounts(**values)
 
 
@@ -1222,11 +1283,12 @@ def compare_manifest(units, manifest: CohortManifest, policy: MonitorPolicy) -> 
                 )
             )
     adjusted = benjamini_hochberg([item[-1] for item in raw])
+
     metrics = tuple(
         MetricComparison(
             name, reference_n, current_n, reference_value, current_value,
             effect, p_value, p_adjusted,
-            p_adjusted <= alpha_threshold and abs(effect) >= policy.minimum_effect,
+            is_alert,
             group_id,
         )
         for (
@@ -1234,6 +1296,9 @@ def compare_manifest(units, manifest: CohortManifest, policy: MonitorPolicy) -> 
             current_value, effect, p_value,
         ), p_adjusted
         in zip(raw, adjusted, strict=True)
+        for is_alert in (
+            p_adjusted <= alpha_threshold and abs(effect) >= policy.minimum_effect,
+        )
     )
     if not metrics:
         return MonitorComparison(
@@ -1495,9 +1560,7 @@ def monitor_snapshot_to_json(
                 {
                     item.name: getattr(metric, item.name)
                     for item in fields(metric)
-                    if not (
-                        item.name == "group_id" and getattr(metric, item.name) is None
-                    )
+                    if not (item.name == "group_id" and getattr(metric, item.name) is None)
                 }
                 for metric in comparison.metrics
             ],

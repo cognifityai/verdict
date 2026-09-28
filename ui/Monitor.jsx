@@ -11,7 +11,7 @@ export function monitorStateParts(monitor) {
   };
 }
 
-const metricLabel = (metric) => {
+export const metricLabel = (metric) => {
   if (metric.startsWith("judge.") && metric.endsWith(".pass")) {
     return `${metric.slice(6, -5).replaceAll("_", " ")} pass rate`;
   }
@@ -48,7 +48,110 @@ export function AgentEvaluatorDiscoveryNote({ truncated }) {
   return truncated ? <span className="block text-xs mt-1" style={{ color: "#f2b84b" }}>Evaluator choices use the newest 1,000 stored Turn-result slots; older identities are not shown.</span> : null;
 }
 
-export function MonitorComparisonMetrics({ comparison }) {
+const pct = (value) => `${(100 * value).toFixed(1)}%`;
+
+const pValue = (value) => {
+  if (!Number.isFinite(value)) return "unavailable";
+  if (value === 0) return "0";
+  if (value < 0.001) return value.toExponential(2);
+  return String(Number(value.toPrecision(3)));
+};
+
+const goodWhenHigh = (metric) => metric.startsWith("judge.")
+  || ["agent.execution_completed", "agent.final_output_present"].includes(metric);
+
+const changeDirection = (metric) => goodWhenHigh(metric) ? 1 : -1;
+
+const shortId = (value) => value.length <= 20
+  ? value
+  : `${value.slice(0, 10)}…${value.slice(-6)}`;
+
+function ComparisonBar({ label, value, color }) {
+  return <div className="grid grid-cols-[72px_minmax(0,1fr)_56px] items-center gap-3 text-xs">
+    <span style={{ color: "#94a39d" }}>{label}</span>
+    <div className="h-3 overflow-hidden" style={{ background: "#26332e", borderRadius: 2 }}>
+      <div style={{ width: `${Math.max(0, Math.min(100, 100 * value))}%`, height: "100%", background: color }} />
+    </div>
+    <span className="text-right font-mono">{pct(value)}</span>
+  </div>;
+}
+
+function EvidenceLinks({ label, unitIds, onOpenTrace }) {
+  if (!unitIds?.length) return null;
+  return <div>
+    <div className="text-xs" style={{ color: "#94a39d" }}>{label}</div>
+    <div className="flex flex-wrap gap-2 mt-2">
+      {unitIds.map((unitId) => <button type="button" key={unitId} title={unitId}
+        onClick={onOpenTrace ? () => onOpenTrace(unitId) : undefined}
+        disabled={!onOpenTrace} className="border px-2 py-1 text-xs font-mono disabled:cursor-default"
+        style={{ color: "#4ee1aa", borderColor: "#26332e", borderRadius: 3 }}>
+        {shortId(unitId)}
+      </button>)}
+    </div>
+  </div>;
+}
+
+function MetricComparisonCard({
+  metric, evidence, group, referenceEvidenceUnitIds, currentEvidenceUnitIds,
+  onOpenTrace,
+}) {
+  const direction = metric.effect * changeDirection(metric.metric);
+  const regression = direction < 0;
+  const signalColor = regression ? "#ff6b6b" : "#4ee1aa";
+  return <article className="border p-4" style={{ borderColor: metric.alert ? signalColor : "#26332e", background: "#0e1412" }}>
+    <div className="flex flex-wrap items-start justify-between gap-3">
+      <div>
+        {metric.group_id && <div className="text-xs mb-1" style={{ color: "#94a39d" }}>Group: <span title={metric.group_id}>{group?.label || metric.group_id}</span></div>}
+        <div className="font-semibold">{metricLabel(metric.metric)}</div>
+      </div>
+      {metric.alert && <span className="text-xs font-mono px-2 py-1" style={{ color: signalColor, background: regression ? "rgba(255,107,107,.1)" : "rgba(78,225,170,.1)", borderRadius: 2 }}>{regression ? "REGRESSION" : "IMPROVEMENT"}</span>}
+    </div>
+    <div className="space-y-2 mt-4" aria-label="Reference and current comparison chart">
+      <ComparisonBar label="Reference" value={metric.reference_value} color="#57746a" />
+      <ComparisonBar label="Current" value={metric.current_value} color={signalColor} />
+    </div>
+    <div className="grid grid-cols-2 lg:grid-cols-4 gap-px mt-4" style={{ background: "#26332e" }}>
+      <div className="p-3" style={{ background: "#111715" }}><div className="text-xs" style={{ color: "#94a39d" }}>Change</div><div className="font-semibold mt-1" style={{ color: signalColor }}>{metric.effect >= 0 ? "+" : ""}{(100 * metric.effect).toFixed(1)}pp</div></div>
+      <div className="p-3" style={{ background: "#111715" }}><div className="text-xs" style={{ color: "#94a39d" }}>Raw p-value</div><div className="font-semibold mt-1">{pValue(metric.p_value)}</div></div>
+      <div className="p-3" style={{ background: "#111715" }}><div className="text-xs" style={{ color: "#94a39d" }}>Adjusted p-value</div><div className="font-semibold mt-1">{pValue(metric.p_adjusted)}</div></div>
+      <div className="p-3" style={{ background: "#111715" }}><div className="text-xs" style={{ color: "#94a39d" }}>Eligible samples</div><div className="font-semibold mt-1">{metric.reference_n} → {metric.current_n}</div></div>
+    </div>
+    {evidence && <div className="text-xs mt-3" style={{ color: "#94a39d" }}>Evidence coverage: {evidence.reference_evaluable} → {evidence.current_evaluable} evaluable · {evidence.reference_unclear} → {evidence.current_unclear} unclear · {evidence.reference_missing} → {evidence.current_missing} not judged · {evidence.reference_error} → {evidence.current_error} judge errors</div>}
+    {metric.alert && <div className="mt-4 p-3 border" style={{ borderColor: "#26332e", background: "#111715" }}>
+      <div className="text-xs font-medium" style={{ color: "#f2b84b" }}>Investigation next step</div>
+      <div className="text-sm mt-1">Compare the current examples with the reference examples, then check model, prompt, and configuration changes before acting. Verdict has detected a change; it has not assigned a root cause.</div>
+    </div>}
+    {metric.alert && (referenceEvidenceUnitIds.length > 0 || currentEvidenceUnitIds.length > 0) && <div className="grid sm:grid-cols-2 gap-4 mt-4 pt-4 border-t" style={{ borderColor: "#26332e" }}>
+      <EvidenceLinks label="Reference examples" unitIds={referenceEvidenceUnitIds} onOpenTrace={onOpenTrace} />
+      <EvidenceLinks label="Current examples" unitIds={currentEvidenceUnitIds} onOpenTrace={onOpenTrace} />
+    </div>}
+  </article>;
+}
+
+const evidenceTraceOpener = (onOpenTrace, evaluators, policy) => {
+  if (!onOpenTrace) return null;
+  if (!policy?.evaluator_fingerprint) {
+    return (traceId) => onOpenTrace(traceId, null);
+  }
+  const identity = evaluators.find(
+    (candidate) => candidate.fingerprint === policy.evaluator_fingerprint,
+  );
+  return identity?.id
+    ? (traceId) => onOpenTrace(traceId, identity.id)
+    : null;
+};
+
+const frozenEvidenceIds = (summary, metric, value) => {
+  const counts = (summary?.metrics || []).find(
+    (item) => (item.group_id || null) === (metric.group_id || null)
+      && item.metric === metric.metric,
+  );
+  return (value ? counts?.true_unit_ids : counts?.false_unit_ids) || [];
+};
+
+export function MonitorComparisonMetrics({
+  comparison, referenceSummary = null, currentSummary = null, onOpenTrace = null,
+}) {
   const keyFor = (item) => JSON.stringify([item.group_id || null, item.metric]);
   const coverage = new Map(
     (comparison?.metric_coverage || []).map((item) => [keyFor(item), item]),
@@ -59,24 +162,37 @@ export function MonitorComparisonMetrics({ comparison }) {
   const groups = new Map(
     (comparison?.groups || []).map((item) => [item.group_id, item]),
   );
-  const cells = [...new Set([...metrics.keys(), ...coverage.keys()])];
-  return <div className="mt-4 space-y-2">{cells.map((key) => {
+  const cells = [...new Set([...metrics.keys(), ...coverage.keys()])]
+    .sort((left, right) => Number(Boolean(metrics.get(right)?.alert)) - Number(Boolean(metrics.get(left)?.alert)));
+  const alerted = cells.filter((key) => metrics.get(key)?.alert);
+  const stable = cells.filter((key) => !metrics.get(key)?.alert);
+  const renderCell = (key) => {
     const metric = metrics.get(key);
     const evidence = coverage.get(key);
     const row = metric || evidence;
     const group = groups.get(row.group_id);
-    return <div key={key} className="border p-3 text-sm" style={{ borderColor: "#26332e" }}>
-      {row.group_id && <div className="text-xs mb-2" style={{ color: "#94a39d" }}>Group: <span title={row.group_id}>{group?.label || row.group_id}</span></div>}
-      <span className="font-mono">{metricLabel(row.metric)}</span>
-      {metric
-        ? <span className="ml-3" style={{ color: metric.alert ? "#ff6b6b" : "#94a39d" }}>{(100 * metric.reference_value).toFixed(1)}% → {(100 * metric.current_value).toFixed(1)}% · effect {(100 * metric.effect).toFixed(1)}pp · adjusted p {metric.p_adjusted.toPrecision(3)} · eligible n {metric.reference_n} → {metric.current_n}</span>
-        : <span className="ml-3" style={{ color: "#f2b84b" }}>No PASS/FAIL comparison yet</span>}
-      {evidence && <div className="text-xs mt-2" style={{ color: "#94a39d" }}>Evidence: {evidence.reference_evaluable} → {evidence.current_evaluable} evaluable · {evidence.reference_unclear} → {evidence.current_unclear} unclear · {evidence.reference_missing} → {evidence.current_missing} not judged · {evidence.reference_error} → {evidence.current_error} judge errors</div>}
-    </div>;
-  })}</div>;
+    return metric
+      ? <MetricComparisonCard key={key} metric={metric} evidence={evidence} group={group}
+        referenceEvidenceUnitIds={metric.alert ? frozenEvidenceIds(referenceSummary, metric, metric.effect < 0) : []}
+        currentEvidenceUnitIds={metric.alert ? frozenEvidenceIds(currentSummary, metric, metric.effect >= 0) : []}
+        onOpenTrace={onOpenTrace} />
+      : <div key={key} className="border p-3 text-sm" style={{ borderColor: "#26332e" }}>
+        {row.group_id && <div className="text-xs mb-2" style={{ color: "#94a39d" }}>Group: <span title={row.group_id}>{group?.label || row.group_id}</span></div>}
+        <span className="font-mono">{metricLabel(row.metric)}</span>
+        <span className="ml-3" style={{ color: "#f2b84b" }}>No PASS/FAIL comparison yet</span>
+        <div className="text-xs mt-2" style={{ color: "#94a39d" }}>Evidence coverage: {evidence.reference_evaluable} → {evidence.current_evaluable} evaluable · {evidence.reference_unclear} → {evidence.current_unclear} unclear · {evidence.reference_missing} → {evidence.current_missing} not judged · {evidence.reference_error} → {evidence.current_error} judge errors</div>
+      </div>;
+  };
+  return <div className="mt-4 space-y-3">
+    {alerted.map(renderCell)}
+    {stable.length > 0 && <details open={alerted.length === 0} className="border" style={{ borderColor: "#26332e" }}>
+      <summary className="p-3 text-sm cursor-pointer" style={{ color: "#94a39d" }}>{stable.length} stable or incomplete comparison{stable.length === 1 ? "" : "s"}</summary>
+      <div className="space-y-3 p-3 pt-0">{stable.map(renderCell)}</div>
+    </details>}
+  </div>;
 }
 
-function MonitorSnapshot({ response, evaluators, fallbackTarget }) {
+function MonitorSnapshot({ response, evaluators, fallbackTarget, onOpenTrace }) {
   const snapshot = response.snapshot;
   const manifest = snapshot.manifest;
   const comparison = snapshot.comparison;
@@ -85,6 +201,7 @@ function MonitorSnapshot({ response, evaluators, fallbackTarget }) {
   const measurement = evaluators.find(
     (identity) => identity.fingerprint === policy?.evaluator_fingerprint,
   );
+  const openEvidenceTrace = evidenceTraceOpener(onOpenTrace, evaluators, policy);
   const collecting = manifest.prospective_open === true;
   const pendingEvaluations = manifest.pending_evaluator_units?.length || 0;
   const target = policy?.prospective_target || fallbackTarget;
@@ -95,9 +212,11 @@ function MonitorSnapshot({ response, evaluators, fallbackTarget }) {
       : collecting ? `Collecting ${manifest.current_unit_ids.length}/${target}`
       : comparison.status === "insufficient" ? "Insufficient evidence"
         : comparison.status.replaceAll("_", " ");
+  const alertMetrics = (comparison.metrics || []).filter((metric) => metric.alert);
+  const affectedGroups = new Set(alertMetrics.map((metric) => metric.group_id || "all-traffic"));
   return <section className="border p-5" style={box}>
     <div className="flex flex-wrap gap-3 items-center justify-between">
-      <div><div className="text-xs font-mono" style={{ color: candidate ? "#f2b84b" : "#4ee1aa" }}>{candidate ? "EXPLORATORY HISTORICAL COMPARISON" : "ACTIVE PROSPECTIVE MONITOR"}</div><div className="font-semibold mt-1">{label}</div></div>
+      <div><div className="text-xs font-mono" style={{ color: candidate ? "#f2b84b" : "#4ee1aa" }}>DRIFT ANALYSIS · {candidate ? "EXPLORATORY HISTORICAL COMPARISON" : "ACTIVE PROSPECTIVE MONITOR"}</div><div className="font-semibold mt-1">{alertMetrics.length > 0 ? `${alertMetrics.length} drift signal${alertMetrics.length === 1 ? "" : "s"} across ${affectedGroups.size} affected segment${affectedGroups.size === 1 ? "" : "s"}` : label}</div></div>
       <div className="text-sm" style={{ color: "#94a39d" }}>{manifest.reference_unit_ids.length} reference → {manifest.current_unit_ids.length} current</div>
     </div>
     <div className="mt-4 h-8 flex overflow-hidden border" style={{ borderColor: "#26332e" }}><div style={{ width: `${100 * manifest.reference_unit_ids.length / Math.max(1, manifest.reference_unit_ids.length + manifest.current_unit_ids.length)}%`, background: "#1f5f4b" }} /><div className="flex-1" style={{ background: "#295a78" }} /></div>
@@ -108,13 +227,16 @@ function MonitorSnapshot({ response, evaluators, fallbackTarget }) {
     </div>
     <div className="mt-2 text-xs" style={{ color: "#94a39d" }}>Measurement: {policy?.evaluator_fingerprint ? (measurement?.label || `stored evaluator ${policy.evaluator_fingerprint.slice(0, 8)}`) : "deterministic trace checks only"}</div>
     <div className="mt-1 text-xs" style={{ color: "#94a39d" }}>Facet: {policy?.grouping_mode === "cluster" ? `frozen clusters · ${policy.cluster_registry_version_id || "registry unavailable"}` : policy?.grouping_mode === "provider_model" ? "provider and model" : "all eligible calls"}</div>
-    <MonitorComparisonMetrics comparison={comparison} />
+    <MonitorComparisonMetrics comparison={comparison}
+      referenceSummary={manifest.reference_summary}
+      currentSummary={manifest.current_summary}
+      onOpenTrace={openEvidenceTrace} />
     {comparison.status === "insufficient" && <p className="text-sm mt-4" style={{ color: "#f2b84b" }}>{awaitingEvaluator ? "Run the selected evaluator, then run this monitor again. To stop measuring that evaluator, preview and activate a replacement monitor." : collecting ? "No statistical test was run because the prospective bucket is still collecting." : "The bucket closed, but no metric met its configured eligible-unit minimums; no alert/no-alert conclusion was produced."}</p>}
     {comparison.unseen_group_share > 0 && <p className="text-sm mt-4" style={{ color: "#f2b84b" }}>{comparison.status === "reference_stale" ? "Comparison suspended" : "Coverage note"}: {(100 * comparison.unseen_group_share).toFixed(1)}% of current traces are outside the frozen {policy?.grouping_mode === "cluster" ? "cluster" : "provider/model"} reference{comparison.unassigned_group_share > 0 ? ` (${(100 * comparison.unassigned_group_share).toFixed(1)}% are unassigned)` : ""}.{comparison.status === "reference_stale" ? " Review the policy before creating a new candidate; Verdict did not silently rebase it." : " These traces were excluded from like-for-like metric tests."}</p>}
   </section>;
 }
 
-export function Monitor({ configUrl, evaluation = {}, initialState = null, view = "history", onChanged = null }) {
+export function Monitor({ configUrl, evaluation = {}, initialState = null, view = "history", onChanged = null, onOpenTrace = null }) {
   const root = configUrl.replace(/\/api\/config$/, "");
   const evaluators = (evaluation.availableIdentities || []).filter(
     (identity, index, rows) => identity.complete && identity.fingerprint
@@ -178,8 +300,16 @@ export function Monitor({ configUrl, evaluation = {}, initialState = null, view 
   const measurements = logicalSession ? agentEvaluators : evaluators;
   const requiresRebootstrap = active?.state === "requires_rebootstrap";
   return <div className="max-w-5xl space-y-4">
-    {view === "history" && <section className="border p-5" style={box}>
-      <div className="text-xs font-mono" style={{ color: "#4ee1aa" }}>POLICY LIFECYCLE</div>
+    {view === "status" && !active && !candidate && <section className="border p-5" style={box}><div className="text-xs font-mono" style={{ color: "#f2b84b" }}>MONITORING</div><h2 className="text-lg font-semibold mt-1">No comparison configured</h2><p className="text-sm mt-2" style={{ color: "#94a39d" }}>Open Compare History to create a historical comparison. Activate it only if new traffic will continue arriving.</p></section>}
+    {error && <div role="alert" className="border p-4" style={{ ...box, color: "#ff6b6b" }}>{error}</div>}
+    {candidate && active && <div role="status" className="border p-4 text-sm" style={{ ...box, color: "#f2b84b" }}>A newer historical candidate is shown first. The existing prospective monitor remains active until you explicitly activate the candidate.</div>}
+    {requiresRebootstrap && <div role="alert" className="border p-4" style={{ ...box, color: "#f2b84b" }}>{active.rebootstrapReason} Configure the replacement in Comparison settings below and select Preview comparison.</div>}
+    {descriptive && <LogicalSessionPreview preview={descriptive} />}
+    {candidate?.snapshot && <MonitorSnapshot response={candidate} evaluators={evaluators} fallbackTarget={form.prospectiveTarget} onOpenTrace={onOpenTrace} />}
+    {active?.snapshot && <MonitorSnapshot response={active} evaluators={evaluators} fallbackTarget={form.prospectiveTarget} onOpenTrace={onOpenTrace} />}
+    {view === "history" && <details open={!candidate && !active && !descriptive} className="border" style={box}>
+      <summary className="p-5 cursor-pointer"><span className="text-xs font-mono" style={{ color: "#4ee1aa" }}>COMPARISON SETTINGS</span><span className="block text-sm mt-1" style={{ color: "#94a39d" }}>Choose cohorts, measurement, and activation policy</span></summary>
+      <div className="px-5 pb-5 border-t" style={{ borderColor: "#26332e" }}>
       <h2 className="text-lg font-semibold mt-1">Explore first, then activate one immutable monitor</h2>
       <p className="text-sm mt-2" style={{ color: "#94a39d" }}>Membership is chosen from event time before metric outcomes are compared. No clustering is required. Preview is exploratory; only an activated policy can become authoritative.</p>
       <div className="grid sm:grid-cols-2 gap-4 mt-5">
@@ -201,20 +331,17 @@ export function Monitor({ configUrl, evaluation = {}, initialState = null, view 
           const result = await post("/api/monitor/run"); if (result) { setActive(result); onChanged?.(); }
         }} className="border px-4 py-2 text-sm">Run next cohort now</button>}
       </div>
-    </section>}
-    {view === "status" && !active && !candidate && <section className="border p-5" style={box}><div className="text-xs font-mono" style={{ color: "#f2b84b" }}>MONITORING</div><h2 className="text-lg font-semibold mt-1">No comparison configured</h2><p className="text-sm mt-2" style={{ color: "#94a39d" }}>Open Compare History to create a historical comparison. Activate it only if new traffic will continue arriving.</p></section>}
-    {error && <div role="alert" className="border p-4" style={{ ...box, color: "#ff6b6b" }}>{error}</div>}
-    {candidate && active && <div role="status" className="border p-4 text-sm" style={{ ...box, color: "#f2b84b" }}>A newer historical candidate is shown below. The existing prospective monitor remains active until you explicitly activate the candidate.</div>}
-    {requiresRebootstrap && <div role="alert" className="border p-4" style={{ ...box, color: "#f2b84b" }}>{active.rebootstrapReason} Configure the replacement above and select Preview comparison.</div>}
-    {descriptive && <LogicalSessionPreview preview={descriptive} />}
-    {active?.snapshot && <MonitorSnapshot response={active} evaluators={evaluators} fallbackTarget={form.prospectiveTarget} />}
-    {candidate?.snapshot && <MonitorSnapshot response={candidate} evaluators={evaluators} fallbackTarget={form.prospectiveTarget} />}
+      </div>
+    </details>}
     {active?.approvedHistoricalSnapshot && <section className="border p-5" style={box}>
       <div className="text-xs font-mono" style={{ color: "#f2b84b" }}>APPROVED HISTORICAL PREVIEW</div>
       <div className="font-semibold mt-1">{active.approvedHistoricalSnapshot.comparison.status.replaceAll("_", " ")}</div>
       <p className="text-sm mt-2" style={{ color: "#94a39d" }}>This is the historical comparison used to approve the policy. Activation froze its reference cohort and opened a new prospective bucket; it did not reuse the historical current cohort as new traffic.</p>
       <div className="text-sm mt-3">{active.approvedHistoricalSnapshot.manifest.reference_unit_ids.length} historical reference → {active.approvedHistoricalSnapshot.manifest.current_unit_ids.length} historical current</div>
-      <MonitorComparisonMetrics comparison={active.approvedHistoricalSnapshot.comparison} />
+      <MonitorComparisonMetrics comparison={active.approvedHistoricalSnapshot.comparison}
+        referenceSummary={active.approvedHistoricalSnapshot.manifest.reference_summary}
+        currentSummary={active.approvedHistoricalSnapshot.manifest.current_summary}
+        onOpenTrace={evidenceTraceOpener(onOpenTrace, evaluators, active.policy)} />
     </section>}
   </div>;
 }

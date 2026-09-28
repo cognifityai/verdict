@@ -14,6 +14,7 @@ from verdict.agent_judgment import (
     turn_evidence_fingerprint,
 )
 from verdict.dashboard.app import create_app
+from verdict.dashboard.monitor_routes import _error_response
 from verdict.evidence import (
     AgentEvent,
     AgentEventType,
@@ -1423,6 +1424,19 @@ def test_monitor_explains_group_cardinality_limit(tmp_path):
             "the number of provider/model or cluster groups."
         ),
     }
+
+
+def test_monitor_explains_snapshot_storage_limit() -> None:
+    response = _error_response(
+        ValueError("monitor snapshot exceeds the 4 MiB storage contract"),
+        "invalid monitor request",
+    )
+
+    assert response.status_code == 400
+    assert response.body == (
+        b'{"error":"Monitor snapshots are limited to 4 MiB. Reduce the cohort '
+        b'size, number of groups, or evaluator dimensions."}'
+    )
 
 
 def test_active_monitor_uses_approved_judgment_facts_after_rejudge_and_delete(tmp_path):

@@ -567,7 +567,12 @@ verdict-pipeline --storage sqlite:///./verdict.db \
 
 This command prepares clusters and judgments; it does not create a second set
 of drift results. Use **Monitor → Compare History** to choose the reference and
-current cohorts, then activate that reviewed policy for new traffic.
+current cohorts, inspect the alert-first drift analysis, then activate that
+reviewed policy for new traffic. Completed comparisons chart reference against
+current rates and report effect, raw and adjusted p-values, eligible counts,
+coverage, and up to five frozen evidence traces from each cohort for every
+alert. Evidence examples support investigation; Verdict does not claim they
+establish a root cause.
 
 The same command accepts a PostgreSQL URL when the `postgres` extra is
 installed. Applications can instead mount `verdict.dashboard.create_app()`
@@ -830,6 +835,12 @@ source. See [`ADR-013`](docs/adrs/013-stable-dependent-package-read-port.md).
   provider/model or reviewed clusters are optional facets. Existing
   fixed-window `DriftRun` and `DriftSignal` rows are read-only legacy records;
   the tenant-scoped dashboard suppresses them because they have no tenant owner.
+  Each Monitor cohort-summary metric freezes the first five true and first five
+  false unit identities in cohort order. Those summaries are the single stored
+  owner of the evidence IDs; the dashboard selects the relevant side for an
+  alerted comparison and shows it as reference and current examples. Later
+  judgments therefore cannot silently rewrite the links. Older snapshots
+  without evidence identities remain readable and simply omit the trace links.
   Evaluator requests are sequenced and cancelled; a failed switch explicitly
   retains and names the last confirmed snapshot, and detail selections are
   re-derived from that snapshot rather than retaining stale objects.
