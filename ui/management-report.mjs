@@ -125,11 +125,6 @@ function qualityStatus(data, scope) {
   const coverage = data?.coverage?.evaluation;
   const reportJudged = whole(scope?.judgedCalls);
   const reportCalls = whole(scope?.calls);
-  const driftSignals = Array.isArray(data?.driftSignals) ? data.driftSignals : [];
-  const availableSignals = Math.max(
-    driftSignals.length,
-    whole(data?.truncation?.resources?.driftSignals?.available) ?? 0,
-  );
   return {
     evaluator: evaluation.status === "selected"
       ? boundedText(evaluation.selectedIdentity?.label || evaluation.selectedId)
@@ -141,11 +136,6 @@ function qualityStatus(data, scope) {
     deterministicAnalysis: data?.coverage?.deterministicAnalysis?.status === "completed"
       ? `${data.coverage.deterministicAnalysis.complete ? "Complete" : "Partial"} snapshot`
       : "No completed deterministic analysis snapshot",
-    legacyChange: data?.driftAnalysis?.runStatus === "completed_with_signals"
-      ? `${formatNumber(availableSignals)} signal${availableSignals === 1 ? "" : "s"}`
-      : data?.driftAnalysis?.runStatus === "completed_no_signals"
-        ? "No signals in latest legacy comparison" : "No completed legacy comparison",
-    availableSignals,
   };
 }
 
@@ -200,7 +190,6 @@ export function buildManagementReport(data = {}, { source = "live", generatedAt 
   const judgeErrors = whole(rawScope.judgeErrorCalls)
     ?? whole(data?.coverage?.evaluation?.judgeErrors) ?? 0;
   if (calls && judgeErrors) attention.push(`${judgeErrors} evaluator call${judgeErrors === 1 ? "" : "s"} ended in error.`);
-  if (calls && data?.driftAnalysis?.runStatus === "completed_with_signals" && quality.availableSignals) attention.push(`${quality.availableSignals} signal${quality.availableSignals === 1 ? "" : "s"} in legacy fixed-window history.`);
   if (calls && data?.coverage?.deterministicAnalysis?.status !== "completed") attention.push("No completed deterministic analysis snapshot is available.");
   const generated = readableDate(generatedAt || new Date().toISOString(), true);
   const periodRange = period.startDate && period.endDate
@@ -304,6 +293,6 @@ export function managementReportHtml(report) {
   const bars = report.timeline.rows.map((point) => `<div class="bar-cell" title="${html(`${readableDate(point.date)}: ${point.calls} calls, ${point.totalTokens} captured tokens`)}"><b>${formatNumber(point.calls)}</b><div class="bar" style="height:${Math.max(4, Math.round(100 * point.calls / maxCalls))}%"></div><small>${html(point.label)}</small></div>`).join("");
   const cards = report.kpis.map((item) => `<div class="card"><small>${html(item.label)}</small><strong>${html(item.value)}</strong><span>${html(item.note)}</span></div>`).join("");
   const facts = [["Success rate", report.summary.success], ["Estimated cost", report.summary.cost], ["Input token breakdown", report.summary.inputBreakdown], ["Token coverage", report.summary.tokenCoverage], ["Latency coverage", report.summary.latencyCoverage], ["First capture", report.summary.firstCapture], ["Latest capture", report.summary.latestCapture]].map(([label, value]) => `<div><small>${label}</small><b>${html(value)}</b></div>`).join("");
-  const status = [["Evaluator", report.quality.evaluator], ["Evaluation coverage", report.quality.evaluationCoverage], ["Current monitor (as of now)", report.quality.monitor], ["Deterministic analysis (as of now)", report.quality.deterministicAnalysis], ["Legacy change history (as of now)", report.quality.legacyChange]].map(([label, value]) => `<div><small>${label}</small><b>${html(value)}</b></div>`).join("");
+  const status = [["Evaluator", report.quality.evaluator], ["Evaluation coverage", report.quality.evaluationCoverage], ["Current monitor (as of now)", report.quality.monitor], ["Deterministic analysis (as of now)", report.quality.deterministicAnalysis]].map(([label, value]) => `<div><small>${label}</small><b>${html(value)}</b></div>`).join("");
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${html(report.title)}</title><style>:root{color-scheme:light}*{box-sizing:border-box}body{margin:0;background:#f4f7f5;color:#17211d;font:14px system-ui,sans-serif}main{max-width:1180px;margin:auto;padding:32px}header{display:flex;justify-content:space-between;gap:24px;align-items:start;border-bottom:1px solid #d8e0dd;padding-bottom:22px}.eyebrow,small{color:#687871}h1{margin:4px 0 8px;font-size:28px}.actions a{display:inline-block;background:#176b52;color:white;padding:10px 14px;text-decoration:none}.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:24px 0}.card,section{background:white;border:1px solid #d8e0dd;border-radius:8px;padding:18px}.card strong{display:block;font-size:26px;margin:8px 0}.card span{font-size:12px;color:#687871}section{margin:14px 0}h2{font-size:17px;margin:0 0 5px}.chart{height:190px;display:grid;grid-template-columns:36px 1fr;gap:8px;margin-top:18px}.axis{display:flex;flex-direction:column;justify-content:space-between;text-align:right;color:#7b8983;font-size:11px;padding-bottom:24px}.bars{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(28px,1fr);align-items:end;border-bottom:1px solid #cbd6d1;gap:5px;overflow-x:auto}.bar-cell{height:100%;display:grid;grid-template-rows:18px 1fr 22px;align-items:end;text-align:center;font-size:10px}.bar-cell>b{color:#176b52;font-size:10px}.bar{background:#20b486;min-height:4px;border-radius:3px 3px 0 0}.bar-cell small{font-size:9px;white-space:nowrap}.facts{display:grid;grid-template-columns:1fr;gap:11px}.facts div{border-top:1px solid #e2e9e6;padding-top:8px}.facts b{display:block;margin-top:3px}table{border-collapse:collapse;width:100%;margin-top:14px}th,td{text-align:right;border-top:1px solid #e2e9e6;padding:10px}th:first-child,td:first-child{text-align:left}td small{display:block;margin-top:3px}ul{margin-bottom:0;padding-left:20px}li{margin:7px 0}@media(max-width:760px){main{padding:16px}.grid{grid-template-columns:1fr 1fr}header{display:block}.actions{margin-top:16px}section{overflow-x:auto}table{min-width:720px}}@media print{body{background:white}main{padding:0}.actions{display:none}.card,section{break-inside:avoid}}</style></head><body><main><header><div><div class="eyebrow">${html(report.source)}</div><h1>${html(report.title)}</h1><div class="eyebrow">${html(report.range)} · generated ${html(report.generatedAt)}</div></div><div class="actions"><a download="verdict-management-report.csv" href="${csvUrl}">Download CSV</a></div></header><div class="grid">${cards}</div><section><h2>LLM request volume</h2><small>${html(report.timeline.scope)} · application calls only</small><div class="chart"><div class="axis"><span>${formatNumber(maxCalls)}</span><span>${formatNumber(Math.round(maxCalls / 2))}</span><span>0</span></div><div class="bars">${bars || "No application activity"}</div></div></section><section><h2>Report scope</h2><div class="facts">${facts}</div></section><section><h2>Application LLM utilization by environment</h2><small>${html(report.applications.scope)}</small>${htmlTable(report.applications.rows, "application")}</section><section><h2>Model performance and throughput</h2><small>${html(report.models.scope)}</small>${htmlTable(report.models.rows, "model")}</section><section><h2>Verdict status</h2><div class="facts">${status}</div></section><section><h2>Management attention</h2><ul>${report.attention.map((item) => `<li>${html(item)}</li>`).join("")}</ul></section></main></body></html>`;
 }

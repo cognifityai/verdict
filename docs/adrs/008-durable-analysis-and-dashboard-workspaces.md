@@ -68,11 +68,11 @@ present those states without treating missing evidence as success or failure.
   Monitor, Report, and Settings. Report summarizes application calls separately
   from evaluator traffic and emits aggregate-only management exports. Monitor
   contains current cohort status, historical comparisons, optional segments,
-  schedules, and read-only legacy history.
+  schedules.
 - Fixed-window evaluation signals created by earlier releases remain readable
-  for audit and trace navigation. They are not current status, do not contribute
-  to Overview or navigation alert counts, and are not produced by the current
-  evaluation pipeline.
+  through the Python storage API. They are excluded from `/api/data` and the
+  UI because their rows have no tenant owner. The current pipeline does not
+  produce them.
 - A prospective cohort distinguishes traffic collection from waiting for
   selected-evaluator results until a persisted comparison completes.
 - Every Monitor cohort-summary cell retains the first bounded true and false

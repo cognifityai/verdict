@@ -68,8 +68,9 @@ verdict-pipeline --storage sqlite:///verdict.db --registry-mode active \
 
 The pipeline prepares clusters and judgments. It does not publish a separate
 fixed-window drift run. Monitor owns current reviewed cohort comparisons;
-fixed-window rows written by older releases remain read-only in storage but are
-suppressed by the tenant-scoped dashboard because they have no tenant owner.
+fixed-window rows written by older releases remain readable through the Python
+storage API but are excluded from `/api/data` and the UI because they have no
+tenant owner.
 
 ## Calibration
 

@@ -83,7 +83,8 @@ New traffic is fully projected through a pinned cluster version before its
 monitor membership is saved, without refitting. Clustering is optional; without
 a facet, Monitor compares all eligible traffic. Unassigned or new groups are
 coverage evidence, not pooled observations. Fixed-window `DriftRun` and
-`DriftSignal` records created by older releases remain readable history, but
+`DriftSignal` records created by older releases remain readable through the
+Python storage API. They are excluded from the dashboard, and
 `verdict-pipeline` no longer creates them.
 
 The **Logical session (descriptive)** preview is intentionally outside this

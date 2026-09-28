@@ -259,7 +259,8 @@ CSV, and browser Print/Save PDF outputs use the selected period and contain
 aggregates only. Monitor is the current drift workflow: it shows reviewed
 historical comparisons, the active prospective policy, and optional facets.
 Results created by older fixed-window pipeline releases have no tenant owner;
-the tenant-scoped dashboard suppresses them rather than risk mixing workspaces.
+the dashboard excludes them from `/api/data` and the UI. They remain readable
+through the Python storage API.
 
 The Verdict Python SDK. Auto-instruments your LLM calls via `wrapt` and
 captures them into a vendor-neutral `Trace` schema (attribute *names* follow
@@ -487,8 +488,8 @@ show the statistical gates and coverage, and link bounded evidence traces when
 the snapshot contains them. Cohort summaries retain the first bounded true and
 false trace IDs for every metric cell as their single stored owner; alert cards
 select the relevant side for investigation rather than claiming an automated root cause. Fixed-window
-results produced by older releases remain available only as read-only legacy
-history.
+results produced by older releases remain readable through the Python storage
+API and do not appear in the dashboard.
 
 For a one-off export that is not in the Verdict store, open **Evaluate →
 Inspect JSON**. Paste JSON or choose a local export file; both use the same

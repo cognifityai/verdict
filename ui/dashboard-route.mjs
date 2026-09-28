@@ -2,7 +2,7 @@ const SECTIONS = {
   overview: new Set(["summary", "reliability", "performance", "behavior"]),
   explore: new Set(["runs", "calls", "compare"]),
   evaluate: new Set(["results", "lab", "inspect", "review"]),
-  monitor: new Set(["status", "signals", "history", "segments", "schedule"]),
+  monitor: new Set(["status", "history", "segments", "schedule"]),
   report: new Set(["management"]),
   settings: new Set(["sources", "alerts", "integrations", "privacy"]),
 };
@@ -90,6 +90,9 @@ export function parseDashboardSelection(search) {
 
 function normalizedDestination(params, fallbackTab) {
   const requested = params.get("tab");
+  if (requested === "monitor" && params.get("section") === "signals") {
+    return ["monitor", "history"];
+  }
   if (SECTIONS[requested]) {
     const section = params.get("section");
     return [requested, SECTIONS[requested].has(section) ? section : DEFAULT_SECTION[requested]];
@@ -98,7 +101,7 @@ function normalizedDestination(params, fallbackTab) {
     const drift = params.get("drift");
     if (drift === "clusters") return ["monitor", "segments"];
     if (drift === "explore") return ["monitor", "history"];
-    return ["monitor", "signals"];
+    return ["monitor", "history"];
   }
   if (LEGACY_ROUTES[requested]) return LEGACY_ROUTES[requested];
   if (SECTIONS[fallbackTab]) return [fallbackTab, DEFAULT_SECTION[fallbackTab]];
@@ -110,6 +113,8 @@ export function parseDashboardRoute(hash, fallbackTab = "overview") {
   const source = typeof hash === "string" ? hash.replace(/^#\??/, "") : "";
   const params = new URLSearchParams(source);
   const requestedTab = params.get("tab");
+  const retiredDriftRoute = requestedTab === "drift"
+    || (requestedTab === "monitor" && params.get("section") === "signals");
   const [tab, section] = normalizedDestination(params, fallbackTab);
   const runIds = [...new Set(params.getAll("run")
     .map((value) => bounded(value, 256)).filter(Boolean))].slice(0, 50);
@@ -128,7 +133,7 @@ export function parseDashboardRoute(hash, fallbackTab = "overview") {
     runIdsTruncated: params.get("truncated") === "1",
     traceJudgeStatus,
     traceId: bounded(params.get("trace"), 256),
-    evaluatorId: bounded(params.get("evaluator"), 64),
+    evaluatorId: retiredDriftRoute ? null : bounded(params.get("evaluator"), 64),
     eventId: tab === "explore" && section === "runs" && selectedRunId
       ? selectionId(params.get("event_id")) : null,
   };
@@ -139,6 +144,9 @@ export function canonicalDashboardHash(hash, fallbackTab = "overview") {
   const params = new URLSearchParams(source);
   const requested = params.get("tab");
   if (SECTIONS[requested]?.has(params.get("section"))) return null;
+  if (requested === "monitor" && params.get("section") === "signals") {
+    return serializeDashboardRoute(parseDashboardRoute(hash, fallbackTab));
+  }
   if (requested !== "drift" && !LEGACY_ROUTES[requested]) return null;
   return serializeDashboardRoute(parseDashboardRoute(hash, fallbackTab));
 }

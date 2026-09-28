@@ -96,10 +96,6 @@ PRETTY = {
     "gemini-2.5-flash": "Gemini 2.5 Flash",
 }
 PROVIDER_ORDER = ["anthropic", "openai", "google"]
-# drift signals tag the regressed stream in cluster_id; map those aliases back
-# to a provider key so the UI can attribute the signal.
-PROVIDER_ALIAS = {"haiku": "anthropic", "gpt": "openai", "gpt-4o-mini": "openai",
-                  "gemini": "google", "flash": "google"}
 DIM_ORDER = ["groundedness", "relevance", "completeness", "safety", "instruction_following"]
 MAX_SERIES_POINTS = 100
 MAX_DASHBOARD_PROVIDERS = 8
@@ -107,10 +103,6 @@ MAX_DASHBOARD_CLUSTERS = 20
 MAX_DASHBOARD_DIMENSIONS = 12
 MAX_TURN_DETAIL_EVALUATORS = 8
 MAX_DASHBOARD_EVALUATORS = 20
-MAX_DASHBOARD_DRIFT_SIGNALS = 40
-MAX_DRIFT_SIGNAL_LAYERS = 12
-MAX_DRIFT_SIGNAL_EXAMPLE_TRACES = 5
-MAX_DRIFT_SIGNAL_ACTION_CHARS = 1000
 MAX_PROVIDER_MODELS = 20
 MAX_MANAGEMENT_REPORT_ROWS = 20
 MAX_MANAGEMENT_TIMELINE_DATES = 31
@@ -122,10 +114,6 @@ MAX_TRACE_SAMPLES = 30
 # without weakening the default fail-closed budget used by capture paths.
 MAX_AGENT_DETAIL_REDACTION_NODES = 50_000
 MAX_AGENT_DETAIL_REDACTION_CHARACTERS = 16_000_000
-DRIFT_CURRENT_HOURS = 24
-DRIFT_BASELINE_LAG_HOURS = 24
-DRIFT_BASELINE_DAYS = 7
-DRIFT_MIN_SAMPLE_SIZE = 30
 _DISPLAY_WORKLOAD = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,63}")
 _FINDING_SUMMARIES = {
     "run_status_unknown": "The source does not expose a terminal status for these agent sessions.",
@@ -242,29 +230,6 @@ def _json_column(row: Mapping[str, Any], name: str, default):
     return _json_value(raw, default)
 
 
-def _bounded_signal_strings(
-    value: object,
-    *,
-    limit: int,
-    max_chars: int,
-    truncate: bool,
-) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    result: list[str] = []
-    for item in value:
-        if not isinstance(item, str) or not item:
-            continue
-        if len(item) > max_chars:
-            if not truncate:
-                continue
-            item = item[:max_chars]
-        result.append(item)
-        if len(result) == limit:
-            break
-    return result
-
-
 def evaluator_identity(row: Mapping[str, Any]) -> dict:
     """Build a stable evaluator discriminator, including legacy rows.
 
@@ -367,47 +332,6 @@ def _truncation_metadata(resources: dict[str, dict[str, int]]) -> dict:
         ),
         "resources": resources,
     }
-
-
-def _drift_analysis(
-    *,
-    current: int,
-    baseline: int,
-    run_status: str,
-) -> dict[str, Any]:
-    if current < DRIFT_MIN_SAMPLE_SIZE:
-        readiness_status = "not_enough_current"
-    elif baseline < DRIFT_MIN_SAMPLE_SIZE:
-        readiness_status = "not_enough_baseline"
-    else:
-        readiness_status = "global_minimum_met"
-    return {
-        "runStatus": run_status,
-        "readinessStatus": readiness_status,
-        "current": current,
-        "baseline": baseline,
-        "minimum": DRIFT_MIN_SAMPLE_SIZE,
-        "currentHours": DRIFT_CURRENT_HOURS,
-        "baselineLagHours": DRIFT_BASELINE_LAG_HOURS,
-        "baselineDays": DRIFT_BASELINE_DAYS,
-    }
-
-
-def _signal_provider(
-    alias: str,
-    provider_keys: set[str],
-    cluster_providers: dict[str, set[str]],
-) -> str | None:
-    if alias in provider_keys:
-        return alias
-
-    providers = cluster_providers.get(alias, set())
-    if providers:
-        return next(iter(providers)) if len(providers) == 1 else None
-    if alias in PROVIDER_ALIAS:
-        mapped = PROVIDER_ALIAS[alias]
-        return mapped if mapped in provider_keys else None
-    return None
 
 
 def resolve_db() -> Path:
@@ -1652,7 +1576,6 @@ def _empty_bundle(
         "clusters": _resource_limit(0, 0, MAX_DASHBOARD_CLUSTERS),
         "dimensions": _resource_limit(0, 0, MAX_DASHBOARD_DIMENSIONS),
         "evaluatorIdentities": _resource_limit(0, 0, MAX_DASHBOARD_EVALUATORS),
-        "driftSignals": _resource_limit(0, 0, MAX_DASHBOARD_DRIFT_SIGNALS),
         "latencyPoints": _resource_limit(0, 0, MAX_SERIES_POINTS),
         "hourlyPoints": _resource_limit(0, 0, MAX_SERIES_POINTS),
         "traceSamples": _resource_limit(0, 0, MAX_TRACE_SAMPLES),
@@ -1681,20 +1604,11 @@ def _empty_bundle(
         },
         "providers": [],
         "clusters": [],
-        "driftSignals": [],
-        "driftRun": None,
-        "driftAnalysis": _drift_analysis(
-            current=0,
-            baseline=0,
-            run_status="no_completed_run",
-        ),
         "clusterHealth": _cluster_health([]),
         "evaluation": {
             "status": "empty",
             "selectedId": None,
             "availableIdentities": [],
-            "driftStatus": "empty",
-            "unattributedDriftSignals": 0,
         },
         "evaluatorHealth": [],
         "scoreCoverage": {
@@ -1954,7 +1868,6 @@ def _time_series_read_model(
     all_keys: list[str],
     clusters: list[dict[str, Any]],
     dims_present: list[str],
-    drift: list[dict[str, Any]],
     raw_provider_of: dict[str, object],
     model_of: dict[str, str],
 ) -> dict[str, Any]:
@@ -2003,8 +1916,7 @@ def _time_series_read_model(
     provider_rates = defaultdict(lambda: defaultdict(Counter))
     cluster_rates = defaultdict(lambda: defaultdict(Counter))
     dimension_rates = defaultdict(lambda: defaultdict(Counter))
-    drift_focus = drift[0].get("provider") if drift else None
-    focus = drift_focus if drift_focus in keys else (keys[0] if keys else None)
+    focus = keys[0] if keys else None
     focus_provider_label = (
         _label_for(str(raw_provider_of.get(focus) or ""), model_of.get(focus, ""))
         if focus is not None else None
@@ -2206,11 +2118,6 @@ def _build(
     total_cost = 0.0
     priced_traces = 0
 
-    current_start = analysis_time - timedelta(hours=DRIFT_CURRENT_HOURS)
-    baseline_end = analysis_time - timedelta(hours=DRIFT_BASELINE_LAG_HOURS)
-    baseline_start = baseline_end - timedelta(days=DRIFT_BASELINE_DAYS)
-    current_content_traces = 0
-    baseline_content_traces = 0
     display_workloads: set[str] = set()
     has_undisplayable_workload = False
     explorer_trace_ids: list[str] = []
@@ -2312,12 +2219,6 @@ def _build(
             display_workloads.add(workload)
         elif workload_present and workload != "judge":
             has_undisplayable_workload = True
-        if workload != "judge" and r["content_bearing"]:
-            started_at = _dt(r["started_at"])
-            if current_start <= started_at <= analysis_time:
-                current_content_traces += 1
-            elif baseline_start <= started_at < baseline_end:
-                baseline_content_traces += 1
         cost_counts[group]["traces"] += 1
         cost = _round_or_none(r["cost_usd"], 9)
         if cost is not None:
@@ -2345,18 +2246,8 @@ def _build(
                 for trace_id in tcluster
             }
 
-    # Legacy fixed-window drift records predate tenant ownership. Keep them for
-    # the unscoped direct read model, but never guess ownership in a configured
-    # tenant workspace. Current Monitor records are tenant-scoped separately.
-    legacy_drift_enabled = registry_tenant is None
-    has_drift_table = legacy_drift_enabled and _table_exists(cur, "drift_signals")
-    has_drift_run_table = legacy_drift_enabled and _table_exists(cur, "drift_runs")
-    drift_columns = cur.columns("drift_signals") if has_drift_table else set()
-
     # Group persisted judgments by evaluator identity before calculating any
-    # score. Multiple identities require an explicit API/UI selection. Retention
-    # may remove the last judgment while intentionally preserving its completed
-    # run; keep that fingerprint selectable as an explicitly incomplete identity.
+    # score. Multiple identities require an explicit API/UI selection.
     identity_rows: list[tuple[dict, Mapping[str, Any]]] = []
     identity_by_id: dict[str, dict] = {}
     judgment_scope, judgment_scope_params = _trace_tenant_scope(
@@ -2380,33 +2271,6 @@ def _build(
         identity = evaluator_identity(row)
         identity_by_id.setdefault(identity["id"], identity)
         identity_rows.append((identity, row))
-    known_fingerprints = {
-        identity["fingerprint"]
-        for identity in identity_by_id.values()
-        if identity["fingerprint"]
-    }
-    retained_fingerprints = set()
-    if has_drift_run_table:
-        retained_fingerprints.update(
-            row["evaluator_fingerprint"]
-            for row in cur.execute(
-                """SELECT DISTINCT evaluator_fingerprint FROM drift_runs
-                     WHERE evaluator_fingerprint IS NOT NULL
-                       AND evaluator_fingerprint != ''"""
-            )
-        )
-    if has_drift_table and "evaluator_fingerprint" in drift_columns:
-        retained_fingerprints.update(
-            row["evaluator_fingerprint"]
-            for row in cur.execute(
-                """SELECT DISTINCT evaluator_fingerprint FROM drift_signals
-                     WHERE evaluator_fingerprint IS NOT NULL
-                       AND evaluator_fingerprint != ''"""
-            )
-        )
-    for fingerprint in sorted(retained_fingerprints - known_fingerprints):
-        identity = evaluator_identity({"evaluator_fingerprint": fingerprint})
-        identity_by_id[identity["id"]] = identity
     all_available_identities = sorted(
         identity_by_id.values(), key=lambda identity: (identity["label"], identity["id"])
     )
@@ -2453,51 +2317,6 @@ def _build(
     selected_fingerprint = (
         selected_identity.get("fingerprint") if selected_identity else None
     )
-    drift_signal_count = (
-        cur.execute("SELECT COUNT(*) AS n FROM drift_signals").fetchone()["n"]
-        if has_drift_table
-        else 0
-    )
-    if has_drift_table and "evaluator_fingerprint" in drift_columns:
-        unattributed_drift = cur.execute(
-            """SELECT COUNT(*) AS n FROM drift_signals
-                 WHERE evaluator_fingerprint IS NULL OR evaluator_fingerprint = ''"""
-        ).fetchone()["n"]
-    else:
-        unattributed_drift = drift_signal_count
-    drift_run = None
-    if selected_fingerprint and has_drift_run_table:
-        latest_run = cur.execute(
-            """SELECT * FROM drift_runs
-                 WHERE evaluator_fingerprint = ?
-                 ORDER BY analysis_time DESC, completed_at DESC, run_id DESC
-                 LIMIT 1""",
-            (selected_fingerprint,),
-        ).fetchone()
-        if latest_run is not None:
-            drift_run = {
-                "id": latest_run["run_id"],
-                "analysisTime": latest_run["analysis_time"],
-                "completedAt": latest_run["completed_at"],
-                "signalCount": latest_run["signal_count"],
-            }
-    if selected_id is None and (drift_signal_count or has_drift_run_table):
-        drift_status = evaluation_status
-    elif not selected_fingerprint or "evaluator_fingerprint" not in drift_columns:
-        drift_status = "historical_unattributed" if drift_signal_count else "empty"
-    elif drift_run is not None:
-        drift_status = "selected"
-    elif cur.execute(
-        "SELECT COUNT(*) AS n FROM drift_signals WHERE evaluator_fingerprint = ?",
-        (selected_fingerprint,),
-    ).fetchone()["n"]:
-        drift_status = "historical_without_run"
-    else:
-        drift_status = "empty"
-    evaluation.update({
-        "driftStatus": drift_status,
-        "unattributedDriftSignals": unattributed_drift,
-    })
     has_health_table = _table_exists(cur, "evaluator_health")
     if selected_fingerprint and has_health_table:
         health_columns = cur.columns("evaluator_health")
@@ -2651,15 +2470,6 @@ def _build(
         ),
     )
     keys = _provider_order(ranked_provider_keys[:MAX_DASHBOARD_PROVIDERS])
-    # Providers present in each cluster. Used ONLY to attribute a drift signal
-    # to a provider when the attribution is factual (cluster is single-provider).
-    # Drift is detected per (cluster, dimension) and may span providers; the
-    # detector does not establish a causal provider, so we never guess one.
-    cluster_providers: dict[str, set] = {}
-    for trace_id, cluster_id in tcluster.items():
-        if cluster_id:
-            cluster_providers.setdefault(cluster_id, set()).add(tp[trace_id])
-
     # ---- providers ----
     providers = []
     for p in keys:
@@ -2720,81 +2530,6 @@ def _build(
     cluster_ids = list(tcluster.values())
     cluster_health = _cluster_health(cluster_ids)
 
-    # ---- drift signals ----
-    drift = []
-    drift_rows = []
-    if drift_run is not None and "run_id" in drift_columns:
-        drift_rows = list(cur.execute(
-            """SELECT * FROM drift_signals
-                 WHERE run_id = ? AND evaluator_fingerprint = ?
-                 ORDER BY signal_id""",
-            (drift_run["id"], selected_fingerprint),
-        ))
-        if len(drift_rows) != drift_run["signalCount"]:
-            drift_rows = []
-            evaluation["driftStatus"] = "inconsistent_run"
-    for s in drift_rows:
-        s = dict(s)
-        alias = s.get("cluster_id") or "unknown cluster"
-        # Attribute a provider only when it is a fact, not an inference:
-        #   1. demo alias mapping (cluster IS a provider bucket), or
-        #   2. cluster_id is itself a provider key, or
-        #   3. every trace in the cluster comes from one provider.
-        # Otherwise attribute to the cluster itself — the detector's real unit.
-        prov = _signal_provider(alias, set(keys), cluster_providers)
-        drift.append({
-            "id": s.get("signal_id") or "unknown-signal", "clusterId": alias,
-            "clusterLabel": cluster_labels.get(alias, alias),
-            "dimension": s.get("dimension") or "unknown",
-            "direction": s.get("direction") or "change",
-            "provider": prov or "",
-            "providerLabel": (_label_for(prov, model_of.get(prov, "")) if prov
-                              else f"cluster {cluster_labels.get(alias, alias)} (mixed providers)"),
-            "statName": s.get("statistic_name") or "unknown",
-            "stat": _round_or_none(
-                s.get("statistic_value"),
-                6,
-            ),
-            "p": s.get("p_value"), "pAdj": s.get("p_value_adjusted"),
-            "cliffsDelta": _round_or_none(s.get("effect_size_cliffs_delta"), 3),
-            "cohensD": _round_or_none(s.get("effect_size_cohens_d"), 2),
-            "nCur": s.get("sample_size_current"),
-            "nBase": s.get("sample_size_baseline"),
-            "layers": _bounded_signal_strings(
-                _json_column(s, "contributing_layers", []),
-                limit=MAX_DRIFT_SIGNAL_LAYERS,
-                max_chars=64,
-                truncate=True,
-            ),
-            "exampleTraceIds": _bounded_signal_strings(
-                _json_column(s, "example_trace_ids", []),
-                limit=MAX_DRIFT_SIGNAL_EXAMPLE_TRACES,
-                max_chars=256,
-                truncate=False,
-            ),
-            "action": (
-                s["recommended_action"][:MAX_DRIFT_SIGNAL_ACTION_CHARS]
-                if isinstance(s.get("recommended_action"), str)
-                and s["recommended_action"]
-                else "Review the affected traces."
-            ),
-            "detectedAt": s.get("detected_at"),
-        })
-    # Keep the largest effects under the cap for both regressions and
-    # improvements. The database's signal-id ordering breaks equal-magnitude
-    # ties deterministically.
-    drift.sort(key=lambda x: (
-        -abs(
-            x["cliffsDelta"]
-            if x["cliffsDelta"] is not None
-            else x["cohensD"]
-            if x["cohensD"] is not None
-            else 0.0
-        )
-    ))
-    total_drift_signals = len(drift)
-    drift = drift[:MAX_DASHBOARD_DRIFT_SIGNALS]
-
     # ---- dimension overall ----
     all_dims_present = [d for d in DIM_ORDER if d in dim_overall] + \
                        [d for d in dim_overall if d not in DIM_ORDER]
@@ -2836,7 +2571,6 @@ def _build(
         all_keys=all_keys,
         clusters=clusters,
         dims_present=dims_present,
-        drift=drift,
         raw_provider_of=raw_provider_of,
         model_of=model_of,
     )
@@ -2892,11 +2626,6 @@ def _build(
             len(all_available_identities),
             len(available_identities),
             MAX_DASHBOARD_EVALUATORS,
-        ),
-        "driftSignals": _resource_limit(
-            total_drift_signals,
-            len(drift),
-            MAX_DASHBOARD_DRIFT_SIGNALS,
         ),
         "latencyPoints": _resource_limit(
             series["availableLatencyPoints"],
@@ -3028,21 +2757,6 @@ def _build(
         "evaluatorHealth": evaluator_health,
         "scoreCoverage": dict(score_coverage),
         "coverage": coverage,
-        "driftSignals": drift,
-        "driftRun": drift_run,
-        "driftAnalysis": _drift_analysis(
-            current=current_content_traces,
-            baseline=baseline_content_traces,
-            run_status=(
-                evaluation["status"]
-                if evaluation["status"] in {"selection_required", "invalid_selection"}
-                else "completed_with_signals"
-                if evaluation["driftStatus"] == "selected" and total_drift_signals
-                else "completed_no_signals"
-                if evaluation["driftStatus"] == "selected" and drift_run is not None
-                else "no_completed_run"
-            ),
-        ),
         "dimensionOverall": dimensionOverall,
         "tsRows": series["latencyRows"],
         "passrate": series["passrate"],
