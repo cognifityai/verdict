@@ -929,6 +929,7 @@ def test_live_postgres_loads_tenant_scoped_logical_session_monitor_evidence(monk
             rubric_name="quality",
             rubric_version="1",
             dimensions=[DimensionScore("quality", Verdict.PASS, "bounded", "judge")],
+            evaluated_at=now,
         )
         assert storage.save_agent_turn_judgment_if_current(judgment) == "saved"
 
