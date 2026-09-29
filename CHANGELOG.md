@@ -6,6 +6,15 @@ the product is refined.
 
 ## [Unreleased]
 
+## [0.1.0b1] - 2026-09-29
+
+### Changed
+
+- The three synchronized packages declare `Development Status :: 4 - Beta` and
+  version `0.1.0b1`. Install pins, the container tag, and the agent skill target
+  the new version; the skill treats synchronized `0.1.0a5` through `0.1.0a23`
+  installs as in-place upgrades.
+
 ### Fixed
 
 - Redaction now removes unlabeled vendor credentials that have a distinctive

@@ -43,7 +43,7 @@ Conversation grading supports Anthropic, OpenAI, and Google providers; Jev is
 available for Trace and Turn evaluation only.
 This does not execute a custom scoring formula or establish agreement with
 human labels. See the repository's example rubric and onboarding guide.
-This conversation unit is included in the synchronized `0.1.0a23` core and eval builds.
+This conversation unit is included in the synchronized `0.1.0b1` core and eval builds.
 
 ## Jev judge
 

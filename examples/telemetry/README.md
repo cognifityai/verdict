@@ -13,7 +13,7 @@ envelope. MLflow and Phoenix keep their trace/span nesting. Voice transcripts
 contain text only; Verdict never imports audio bytes or audio URLs. Voice import
 also keeps one current, bounded conversation snapshot in storage for later
 review. Evaluator Lab can grade clean, closed snapshots with an uploaded JSON
-rubric in synchronized `0.1.0a23` source builds. Monitor can compare stored
+rubric in synchronized `0.1.0b1` source builds. Monitor can compare stored
 whole-conversation binary grades in two historical windows. An optional
 top-level `labels` object, for example `{"persona":"example_avatar","group":"example_workflow"}`,
 lets that comparison show source-group mix and within-group rates; keys must

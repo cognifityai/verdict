@@ -1,6 +1,6 @@
 # Contributing to Verdict
 
-Thank you for helping improve Verdict. This project is an early public alpha,
+Thank you for helping improve Verdict. This project is an early public beta,
 so focused bug fixes, tests, documentation corrections, and narrowly scoped
 features are especially useful.
 

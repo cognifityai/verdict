@@ -1,6 +1,6 @@
 [project]
 name = "cognifity-verdict-inspect"
-version = "0.1.0a23"
+version = "0.1.0b1"
 description = "Verdict Inspect — analyze chat exports for drift, hedging, refusals, and quality. Drop in a conversations.json from ChatGPT/Claude/Cursor, get a report."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -9,7 +9,7 @@ license-files = ["LICENSE", "NOTICE"]
 authors = [{name = "Cognifity AI"}]
 keywords = ["llm", "chat-export", "drift-detection", "evaluation", "reporting"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Environment :: Console",
     "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
@@ -20,7 +20,7 @@ classifiers = [
 ]
 
 dependencies = [
-    "cognifity-verdict-eval>=0.1.0a23,<0.1.0a24",
+    "cognifity-verdict-eval>=0.1.0b1,<0.1.0b2",
     "click>=8.1",
 ]
 
