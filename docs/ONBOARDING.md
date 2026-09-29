@@ -492,8 +492,10 @@ For this workflow, `OPENAI_BASE_URL` and `ANTHROPIC_BASE_URL` select custom
 judge endpoints. The consent screen identifies the configured destination
 without returning its URL. Numeric rubric bounds and thresholds must be finite
 numbers; invalid values receive a validation error before any judge call.
-If a stored end time is corrupted into a noncanonical offset representation,
-the preview fails closed; reimport the source record.
+Imports normalize source end times to UTC before storage. Preview rejects a
+returned row with a noncanonical end time. A direct database change can make a
+row sort outside the selected window before preview sees it; reimport the
+source record to repair its snapshot.
 This workflow requires synchronized `0.1.0a23` core and eval builds. The
 published `0.1.0a22` install commands above do not include it; use a source
 checkout until `0.1.0a23` is published.
