@@ -2432,6 +2432,74 @@ class PostgresStorage:
                   "dimension_type", "dimension_state")
         return [dict(zip(fields, row, strict=True)) for row in rows]
 
+    def load_matched_conversation_rows(self, query: dict, *, limit: int) -> list[dict]:
+        from verdict.matched_conversations import validate_storage_query
+
+        value = validate_storage_query(query, limit)
+        rows = self._fetchall(
+            """WITH selected AS (
+                   SELECT conversation_id,
+                          (payload::jsonb)->>'event_at' AS event_at,
+                          (payload::jsonb)->>'revision' AS revision,
+                          ((payload::jsonb)->'labels')::text AS labels,
+                          (payload::jsonb)->>'end_status' AS end_status,
+                          jsonb_array_length((payload::jsonb)->'input_issues') AS issue_count,
+                          (SELECT MIN(message.position)
+                             FROM jsonb_array_elements((conversation_snapshots.payload::jsonb)->'messages')
+                               WITH ORDINALITY AS message(value, position)
+                            WHERE message.value->>'role'='user'
+                              AND message.value->>'status'='completed') AS first_user,
+                          (SELECT MAX(message.position)
+                             FROM jsonb_array_elements((conversation_snapshots.payload::jsonb)->'messages')
+                               WITH ORDINALITY AS message(value, position)
+                            WHERE message.value->>'role'='assistant'
+                              AND message.value->>'status'='completed') AS last_assistant
+                     FROM conversation_snapshots
+                    WHERE tenant_id=%s AND ((payload::jsonb)->>'event_at') COLLATE "C">=%s
+                      AND ((payload::jsonb)->>'event_at') COLLATE "C"<%s
+                      AND (payload::jsonb)->'labels'->>%s IN (%s, %s)
+                    ORDER BY ((payload::jsonb)->>'event_at') COLLATE "C", conversation_id LIMIT %s
+               )
+               SELECT selected.conversation_id, selected.event_at, selected.revision,
+                      selected.labels, selected.end_status, selected.issue_count,
+                      selected.first_user, selected.last_assistant,
+                      (grade.payload::jsonb)->>'status' AS assessment_status,
+                      (grade.payload::jsonb)->'rubric'->>'target' AS rubric_target,
+                      (SELECT definition.value->>'type'
+                         FROM jsonb_array_elements((grade.payload::jsonb)->'rubric'->'dimensions')
+                           AS definition(value)
+                        WHERE definition.value->>'name'=%s LIMIT 1) AS dimension_type,
+                      (SELECT definition.value->>'direction'
+                         FROM jsonb_array_elements((grade.payload::jsonb)->'rubric'->'dimensions')
+                           AS definition(value)
+                        WHERE definition.value->>'name'=%s LIMIT 1) AS dimension_direction,
+                      (SELECT definition.value->>'min'
+                         FROM jsonb_array_elements((grade.payload::jsonb)->'rubric'->'dimensions')
+                           AS definition(value)
+                        WHERE definition.value->>'name'=%s LIMIT 1) AS dimension_min,
+                      (SELECT definition.value->>'max'
+                         FROM jsonb_array_elements((grade.payload::jsonb)->'rubric'->'dimensions')
+                           AS definition(value)
+                        WHERE definition.value->>'name'=%s LIMIT 1) AS dimension_max,
+                      (grade.payload::jsonb)->'dimensions'->%s->>'state' AS dimension_state,
+                      (grade.payload::jsonb)->'dimensions'->%s->>'score' AS dimension_score
+                 FROM selected LEFT JOIN conversation_assessments AS grade
+                   ON grade.tenant_id=%s AND grade.conversation_id=selected.conversation_id
+                  AND grade.evaluator_fingerprint=%s AND grade.target_position=-1
+                  AND grade.revision=selected.revision
+                ORDER BY selected.event_at COLLATE "C", selected.conversation_id LIMIT %s""",
+            (value["tenant_id"], value["window_start"], value["window_end"],
+             value["variant_key"], value["left_variant"], value["right_variant"], limit,
+             value["dimension"], value["dimension"], value["dimension"], value["dimension"],
+             value["dimension"], value["dimension"],
+             value["tenant_id"], value["evaluator_fingerprint"], limit),
+        )
+        fields = ("id", "event_at", "revision", "labels", "end_status", "issue_count",
+                  "first_user", "last_assistant", "assessment_status", "rubric_target",
+                  "dimension_type", "dimension_direction", "dimension_min", "dimension_max",
+                  "dimension_state", "dimension_score")
+        return [dict(zip(fields, row, strict=True)) for row in rows]
+
     def delete_conversation(self, tenant_id: str, conversation_id: str) -> None:
         from verdict.conversations import validate_conversation_query
 

@@ -1102,6 +1102,46 @@ class InMemoryStorage:
                 })
         return sorted(rows, key=lambda row: (row["event_at"], row["id"]))[:limit]
 
+    def load_matched_conversation_rows(self, query: dict, *, limit: int) -> list[dict]:
+        from verdict.conversation_assessments import evaluation_targets
+        from verdict.matched_conversations import validate_storage_query
+
+        value = validate_storage_query(query, limit)
+        rows = []
+        with self._agent_evidence_lock:
+            for (tenant_id, conversation_id), (payload, _) in self._conversations.items():
+                if tenant_id != value["tenant_id"]:
+                    continue
+                snapshot = json.loads(payload)
+                event_at = snapshot["event_at"]
+                if event_at is None or not value["window_start"] <= event_at < value["window_end"]:
+                    continue
+                labels = snapshot.get("labels") or {}
+                if labels.get(value["variant_key"]) not in (value["left_variant"], value["right_variant"]):
+                    continue
+                assessment_json = self._conversation_assessments.get((
+                    tenant_id, conversation_id, value["evaluator_fingerprint"], -1,
+                ))
+                assessment = json.loads(assessment_json) if assessment_json else None
+                if assessment is not None and assessment["revision"] != snapshot["revision"]:
+                    assessment = None
+                _, reason = evaluation_targets(snapshot, {"target": "conversation"})
+                definition = next((dimension for dimension in assessment["rubric"]["dimensions"]
+                                   if dimension["name"] == value["dimension"]), None) if assessment else None
+                result = assessment["dimensions"].get(value["dimension"], {}) if assessment else {}
+                rows.append({
+                    "id": conversation_id, "event_at": event_at, "revision": snapshot["revision"],
+                    "labels": labels, "end_status": snapshot["end_status"], "ineligible_reason": reason,
+                    "assessment_status": assessment["status"] if assessment else None,
+                    "rubric_target": assessment["rubric"]["target"] if assessment else None,
+                    "dimension_type": definition["type"] if definition else None,
+                    "dimension_direction": definition.get("direction") if definition else None,
+                    "dimension_min": definition.get("min") if definition else None,
+                    "dimension_max": definition.get("max") if definition else None,
+                    "dimension_state": result.get("state"), "dimension_score": result.get("score"),
+                })
+        return sorted(rows, key=lambda row: (row["event_at"], row["id"]))[:limit]
+
     def get_conversation(self, tenant_id: str, conversation_id: str) -> dict | None:
         from verdict.conversations import validate_conversation_query
 

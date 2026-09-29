@@ -16,6 +16,22 @@ _log = logging.getLogger("verdict.dashboard")
 
 
 def register_lab_routes(app, setup: SetupRoutes) -> None:
+    @app.post("/api/compare/conversations/matched")
+    def compare_matched_conversations(request: Request, payload: dict[str, Any]):
+        if not setup.authorized(request):
+            return JSONResponse({"error": "comparison authorization required"}, status_code=403)
+        writable = None
+        try:
+            from verdict.matched_conversations import preview_matched_conversations
+
+            writable = setup.writable_storage()
+            return preview_matched_conversations(writable, tenant_id=setup.tenant_id, payload=payload)
+        except (TypeError, ValueError, UnicodeError) as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        finally:
+            if writable is not None:
+                writable.close()
+
     @app.post("/api/evaluators/rubric/validate")
     def validate_conversation_rubric(request: Request, payload: dict[str, Any]):
         if not setup.authorized(request):

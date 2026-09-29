@@ -28,7 +28,7 @@ function componentStub(names) {
 }
 
 async function loadUiModule() {
-  const source = `${await readFile(UI_SOURCE, "utf8")}\nexport { Dashboard, Overview, Traces, TraceDetail, TabHelp, Judge, Compare, ManagementReport, mountedApiUrl, Monitor };\nexport { useOperations } from "./Operations.jsx";\nexport { RegistryView } from "./Registry.jsx";\nexport { EvaluatorLab } from "./EvaluatorLab.jsx";\nexport { ConversationEvaluation } from "./ConversationEvaluation.jsx";\nexport { Runs } from "./Runs.jsx";\nexport { Insights } from "./Insights.jsx";`;
+  const source = `${await readFile(UI_SOURCE, "utf8")}\nexport { Dashboard, Overview, Traces, TraceDetail, TabHelp, Judge, Compare, ManagementReport, mountedApiUrl, Monitor };\nexport { useOperations } from "./Operations.jsx";\nexport { RegistryView } from "./Registry.jsx";\nexport { EvaluatorLab } from "./EvaluatorLab.jsx";\nexport { ConversationEvaluation } from "./ConversationEvaluation.jsx";\nexport { MatchedConversationCompare } from "./MatchedConversationCompare.jsx";\nexport { Runs } from "./Runs.jsx";\nexport { Insights } from "./Insights.jsx";`;
   const result = await build({
     stdin: {
       contents: source,
@@ -1604,6 +1604,74 @@ async function resolveJson(request, payload) {
   request.resolve({ ok: true, json: async () => payload });
   for (let index = 0; index < 6; index += 1) await Promise.resolve();
 }
+
+test("matched conversation comparison uses current paired grades and rejects stale drilldown", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const props = { configUrl: "/api/config", source: "live" };
+  let tree = render(ui.MatchedConversationCompare, hooks, props);
+  hooks.flushEffects();
+  await resolveJson(requests[0], { setupToken: "setup-token" });
+  const values = { windowStart: "2026-09-01", windowEnd: "2026-09-04",
+    evaluatorFingerprint: "a".repeat(64), dimension: "quality",
+    leftVariant: "left", rightVariant: "right" };
+  const labels = { windowStart: "Start date (UTC, inclusive)", windowEnd: "End date (UTC, exclusive)",
+    evaluatorFingerprint: "Evaluator fingerprint", dimension: "Rubric dimension",
+    leftVariant: "First variant value", rightVariant: "Second variant value" };
+  for (const [field, value] of Object.entries(values)) {
+    tree = render(ui.MatchedConversationCompare, hooks, props);
+    findAll(tree, (node) => node.type === "input" && node.props["aria-label"] === labels[field])[0]
+      .props.onChange({ target: { value } });
+  }
+  tree = render(ui.MatchedConversationCompare, hooks, props);
+  const comparing = findAll(tree, (node) => node.type === "form")[0]
+    .props.onSubmit({ preventDefault() {} });
+  assert.equal(requests[1].url, "/api/compare/conversations/matched");
+  assert.equal(requests[1].options.headers["X-Verdict-Setup"], "setup-token");
+  assert.equal(JSON.parse(requests[1].options.body).windowEnd, "2026-09-04T00:00:00Z");
+  const left = { id: "1".repeat(32), revision: "b".repeat(64), status: "completed",
+    state: "pass", score: null, type: "binary", direction: null, min: null, max: null };
+  const right = { ...left, id: "2".repeat(32), revision: "c".repeat(64), state: "fail" };
+  await resolveJson(requests[1], { evaluatorFingerprint: "a".repeat(64), dimension: "quality",
+    pairKey: "pair_id", variantKey: "variant", leftVariant: "left", rightVariant: "right",
+    candidateRows: 2, declaredPairs: 1, usablePairs: 1, technicalFailurePairs: 0, dimensionType: "binary",
+    exclusions: {}, binary: { bothPass: 0, bothFail: 0, leftPassRightFail: 1,
+      leftFailRightPass: 0 }, numeric: null, examples: [{ pairId: "case_1", left, right }] });
+  await comparing;
+  tree = render(ui.MatchedConversationCompare, hooks, props);
+  assert.match(textOf(tree), /First passes, second fails:\s+1/);
+  const opening = findAll(tree, (node) => node.type === "button" && textOf(node).includes("case_1"))[0].props.onClick();
+  const detail = (side, variant) => ({ conversation: { id: side.id, revision: side.revision,
+    labels: { pair_id: "case_1", variant }, messages: [{ role: "user", content: "Synthetic question." }] },
+    assessments: [{ evaluator_fingerprint: "a".repeat(64), target_position: null,
+      revision: side.revision, status: "completed",
+      rubric: { target: "conversation", dimensions: [{ name: "quality", type: "binary" }] },
+      dimensions: { quality: { state: side.state, score: null } } }] });
+  await resolveJson(requests[2], detail(left, "left"));
+  await resolveJson(requests[3], detail(right, "right"));
+  await opening;
+  tree = render(ui.MatchedConversationCompare, hooks, props);
+  assert.match(textOf(tree), /Synthetic question/);
+  const reopening = findAll(tree, (node) => node.type === "button" && textOf(node).includes("case_1"))[0].props.onClick();
+  await resolveJson(requests[4], detail(left, "left"));
+  await resolveJson(requests[5], { ...detail(right, "right"), conversation: {
+    ...detail(right, "right").conversation, revision: "d".repeat(64) } });
+  await reopening;
+  tree = render(ui.MatchedConversationCompare, hooks, props);
+  assert.match(textOf(tree), /changed.*Run the comparison again/);
+  assert.doesNotMatch(textOf(tree), /Synthetic question/);
+  const oldRequest = findAll(tree, (node) => node.type === "form")[0]
+    .props.onSubmit({ preventDefault() {} });
+  tree = render(ui.MatchedConversationCompare, hooks, props);
+  findAll(tree, (node) => node.type === "input" && node.props["aria-label"] === "Second variant value")[0]
+    .props.onChange({ target: { value: "new_variant" } });
+  await resolveJson(requests[6], { candidateRows: 2, declaredPairs: 1, usablePairs: 1,
+    exclusions: {}, examples: [], binary: { bothPass: 1 } });
+  await oldRequest;
+  tree = render(ui.MatchedConversationCompare, hooks, props);
+  assert.doesNotMatch(textOf(tree), /Selected variant rows/);
+});
 
 function runListRow(runId) {
   return {

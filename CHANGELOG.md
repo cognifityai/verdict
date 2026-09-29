@@ -18,12 +18,19 @@ the product is refined.
   completed assistant reply. Conversation review shows missing, error, partial,
   and complete coverage against the current transcript revision. Corrections,
   deletion, and retention invalidate or remove grades with the snapshot.
-  Matched model comparison is not included yet.
+  A separate exploratory Compare view can inspect source-declared matched
+  conversations after both variants have current whole-conversation grades.
 - Monitor can compare current whole-conversation binary grades across two
   historical windows and an optional explicit Voice source label. It shows
   rate and eligibility/grade coverage, group mix, and within-group changes with links to current
   evidence. This descriptive view creates no prospective alert or semantic
   cluster and rejects windows above 10,000 conversations.
+- Explore → Compare can compare two source-declared variants of the same opaque
+  case ID in one UTC end-time window. It excludes duplicate, unmatched, and
+  ungraded pairs, supports binary and bounded numeric conversation dimensions,
+  and opens both current transcripts together. Numeric paired differences show
+  a conservative bounded-score interval. The result is descriptive, unsaved,
+  and does not claim a model winner or trigger an alert.
 - Conversation grade detail shows only results for its returned transcript
   revision. Judge findings reject unrecognized fields and bind their dimension
   to the enclosing rubric result. Core and eval release dependencies now
