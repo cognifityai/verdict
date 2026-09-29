@@ -712,8 +712,11 @@ source. See [`ADR-013`](docs/adrs/013-stable-dependent-package-read-port.md).
   documented generic schema before relying on it. Conversation snapshots are
   available through the storage API and Evaluator Lab can grade clean, closed
   snapshots using an uploaded JSON rubric. The review screen shows coverage
-  and the current transcript with its grades. Conversation monitoring and
-  model comparison are not included yet. `delete_trace` deletes only a Trace;
+  and the current transcript with its grades. Monitor can compare current
+  whole-conversation binary grades across two historical windows, optionally
+  by an explicit source label. This is descriptive: it creates no prospective
+  alert, and source labels are not semantic clusters. Matched model comparison
+  is not included yet. `delete_trace` deletes only a Trace;
   use `delete_conversation` for its separate snapshot. `prune_before` removes
   snapshots whose source end time, or first import time when absent, is before
   the cutoff while still returning only the number of deleted Traces. Supply
@@ -742,6 +745,29 @@ judge calls; move through the ID-ordered pages explicitly. Full coverage means
 every eligible reply was completed by that evaluator; UNCLEAR remains visible
 but does not count as PASS or FAIL. Judge agreement with human labels must be
 checked before treating scores as a quality measurement.
+
+To explore conversation quality, open **Monitor → Compare History**, select
+**Conversation grade (descriptive)**, and enter the evaluator fingerprint shown
+in the Evaluator Lab preview plus the name of one binary dimension from its
+whole-conversation rubric. Enter two non-overlapping date ranges in local time
+(the result displays their UTC boundaries) and, optionally, a source label key
+such as `group` or `persona`. Voice imports may
+include a top-level `labels` object with up to eight short string values; missing
+values appear as a separate group. The comparison reads stored current grades
+without calling a judge. It shows captured, eligible, not-evaluable, PASS,
+FAIL, UNCLEAR, judge-error, and ungraded-eligible counts; PASS rates use only
+PASS and FAIL grades. A missing evaluator in both windows is called out rather
+than silently treated as a coverage failure. Group shares are based on eligible
+conversations, so inspect both mix changes and within-group
+rates before interpreting an overall change. A corrected transcript or label
+invalidates its old grade and can change a later preview. Choose narrower
+windows if they contain more than 10,000 conversations. Conversations without
+a usable source end time cannot enter a dated window. This exploratory result
+is not saved or used for alerts.
+Imports normalize source end times to UTC before storage. If a returned stored
+row has a noncanonical end time, preview fails closed. Direct database changes
+can make a row sort outside the requested window before preview sees it; repair
+such snapshots by reimporting the source record.
 - Trace Explorer pages through every stored non-judge application trace in
   30-row pages. Search and provider/content-state filters apply to the current
   page; dashboard aggregates continue to use the complete store. Selecting a

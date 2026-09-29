@@ -98,6 +98,45 @@ def test_voice_trace_projection_stays_published_while_conversation_is_captured(s
     assert rows[0]["end_status"] == "complete"
 
 
+def test_explicit_voice_labels_are_bounded_and_part_of_snapshot_revision(storage):
+    source = _source()
+    source["labels"] = {"persona": "avatar_a", "group": "site_one"}
+    import_into_storage(map_voice_conversation(source, _context()), storage)
+    [original], _ = storage.list_conversations("tenant-a")
+    assert original["labels"] == {"group": "site_one", "persona": "avatar_a"}
+    import_into_storage(map_voice_conversation(source, _context()), storage)
+    [same], _ = storage.list_conversations("tenant-a")
+    assert same["revision"] == original["revision"]
+    source["labels"]["group"] = "site_two"
+    import_into_storage(map_voice_conversation(source, _context()), storage)
+    [changed], _ = storage.list_conversations("tenant-a")
+    assert changed["labels"]["group"] == "site_two"
+    assert changed["revision"] != original["revision"]
+
+
+@pytest.mark.parametrize("labels", [
+    {"Bad key": "one"}, {"group": ""}, {"group": "x" * 129},
+    {f"key_{chr(97 + index)}": "value" for index in range(9)},
+    {"patient_123456789": "one"},
+])
+def test_invalid_voice_labels_do_not_create_snapshot(storage, labels):
+    source = _source()
+    source["labels"] = labels
+    mapped = map_voice_conversation(source, _context())
+    assert any(item.skip_reason == "invalid_conversation_snapshot" for item in mapped)
+    import_into_storage(mapped, storage)
+    assert storage.list_conversations("tenant-a")[0] == []
+
+
+def test_voice_label_value_is_redacted_before_storage(storage):
+    source = _source()
+    source["labels"] = {"group": "person@example.com"}
+    import_into_storage(map_voice_conversation(source, _context()), storage)
+    [row], _ = storage.list_conversations("tenant-a")
+    assert "person@example.com" not in repr(row)
+    assert "person@example.com" not in repr(storage.get_conversation("tenant-a", row["id"]))
+
+
 def test_last_successful_reimport_sets_current_but_never_extends_retention(storage):
     source = _source()
     first = map_voice_conversation(source, _context())

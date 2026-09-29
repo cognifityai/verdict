@@ -201,6 +201,83 @@ test("conversation approval is cleared after failed navigation and run", async (
     .props.checked, false);
 });
 
+test("Monitor compares conversation grades and detects changed example evidence", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const props = { configUrl: "/api/config", view: "history" };
+  render(ui.Monitor, hooks, props);
+  hooks.flushEffects();
+  await resolveJson(requests[0], { setupToken: "setup-token" });
+  await resolveJson(requests[1], { state: "not_configured", active: null, candidate: null,
+    agentEvaluators: [] });
+  let tree = render(ui.Monitor, hooks, props);
+  findAll(tree, (node) => node.type === "select" && findAll(node,
+    (child) => child.type === "option" && child.props.value === "conversation").length)[0]
+    .props.onChange({ target: { value: "conversation" } });
+  tree = render(ui.Monitor, hooks, props);
+  const field = (placeholder) => findAll(tree, (node) => node.type === "input" &&
+    node.props.placeholder?.includes(placeholder))[0];
+  field("64-character").props.onChange({ target: { value: "a".repeat(64) } });
+  field("e.g. quality").props.onChange({ target: { value: "quality" } });
+  field("e.g. group").props.onChange({ target: { value: "group" } });
+  const dates = findAll(tree, (node) => node.type === "input" && node.props.type === "datetime-local");
+  ["2026-09-01T00:00", "2026-09-03T00:00", "2026-09-03T00:00", "2026-09-05T00:00"]
+    .forEach((value, index) => dates[index].props.onChange({ target: { value } }));
+  tree = render(ui.Monitor, hooks, props);
+  const pending = findAll(tree, (node) => node.type === "button" &&
+    textOf(node) === "Run historical comparison")[0].props.onClick();
+  const submitted = JSON.parse(requests[2].options.body);
+  assert.deepEqual(Object.keys(submitted).sort(), ["analysisUnit", "currentEnd", "currentStart",
+    "dimension", "evaluatorFingerprint", "labelKey", "referenceEnd", "referenceStart"].sort());
+  assert.equal(submitted.dimension, "quality");
+  assert.equal(submitted.labelKey, "group");
+  const empty = { pass: [], fail: [], unclear: [], error: [], ungraded: [], ineligible: [] };
+  const base = { captured: 2, eligible: 2, ineligible: 0, pass: 1, fail: 0, unclear: 0, error: 1, ungraded: 0,
+    evaluable: 1, passRate: 1, interval: [0.2, 1],
+    examples: { ...empty, pass: [{ id: "b".repeat(32), revision: "old", qualityState: "pass" }],
+      error: [{ id: "d".repeat(32), revision: "same", qualityState: "error" }] } };
+  const current = { ...base, pass: 0, fail: 1, passRate: 0, interval: [0, 0.8],
+    examples: { ...empty, fail: [{ id: "c".repeat(32), revision: "current", qualityState: "fail" }] } };
+  await resolveJson(requests[2], { state: "descriptive", unit: "conversation",
+    method: "current_snapshot_binary_v1", evaluatorFingerprint: "a".repeat(64),
+    dimension: "quality", labelKey: "group",
+    referenceStart: submitted.referenceStart, referenceEnd: submitted.referenceEnd,
+    currentStart: submitted.currentStart, currentEnd: submitted.currentEnd,
+    reference: base, current, effect: -1, gradeEvidenceCount: 3, groups: [] });
+  await pending;
+  tree = render(ui.Monitor, hooks, props);
+  const preview = findAll(tree, (node) => node.type?.name === "ConversationPreview")[0];
+  assert.ok(preview);
+  const rendered = render(preview.type, createHooks(), preview.props);
+  assert.match(textOf(rendered), /does not create an alert/);
+  const noGrades = render(preview.type, createHooks(), { ...preview.props,
+    preview: { ...preview.props.preview, gradeEvidenceCount: 0 } });
+  assert.match(textOf(noGrades), /Check the fingerprint and dates/);
+  const rate = findAll(rendered, (node) => node.type?.name === "ConversationRate")[0];
+  const rateTree = render(rate.type, createHooks(), rate.props);
+  findAll(rateTree, (node) => node.type === "button")[0].props.onClick();
+  await resolveJson(requests[3], { conversation: { revision: "old", messages: [
+    { role: "user", content: "Question." }, { role: "assistant", content: "Answer." },
+  ] }, assessments: [{ status: "completed", dimensions: { quality: { state: "pass" } } }] });
+  tree = render(ui.Monitor, hooks, props);
+  assert.match(textOf(tree), /Answer\./);
+  findAll(rateTree, (node) => node.type === "button")[0].props.onClick();
+  await resolveJson(requests[4], { conversation: { revision: "new", messages: [
+    { role: "user", content: "Question." }, { role: "assistant", content: "Changed answer." },
+  ] }, assessments: [] });
+  tree = render(ui.Monitor, hooks, props);
+  assert.match(textOf(tree), /transcript changed since the comparison/);
+  findAll(rateTree, (node) => node.type === "button")[1].props.onClick();
+  await resolveJson(requests[5], { conversation: { revision: "same", messages: [
+    { role: "user", content: "Question." }, { role: "assistant", content: "Answer." },
+  ] }, assessments: [{ status: "completed", target_position: null,
+    dimensions: { quality: { state: "pass" } } }] });
+  tree = render(ui.Monitor, hooks, props);
+  assert.match(textOf(tree), /grade changed since the comparison/);
+  assert.doesNotMatch(textOf(tree), /Changed answer\./);
+});
+
 test("conversation evaluation requires a supported provider after Jev selection", async () => {
   const ui = await loadUiModule();
   const selected = [];
