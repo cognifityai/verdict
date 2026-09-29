@@ -150,6 +150,14 @@ CREATE TABLE IF NOT EXISTS conversation_snapshots (
     PRIMARY KEY (tenant_id, conversation_id)
 );
 CREATE INDEX IF NOT EXISTS conversation_retention ON conversation_snapshots(retention_at);
+CREATE TABLE IF NOT EXISTS conversation_assessments (
+    tenant_id TEXT NOT NULL, conversation_id TEXT NOT NULL,
+    evaluator_fingerprint TEXT NOT NULL, target_position INTEGER NOT NULL,
+    revision TEXT NOT NULL, payload TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, conversation_id, evaluator_fingerprint, target_position),
+    FOREIGN KEY (tenant_id, conversation_id)
+      REFERENCES conversation_snapshots(tenant_id, conversation_id) ON DELETE CASCADE
+);
 CREATE TABLE IF NOT EXISTS traces (
     trace_id          TEXT PRIMARY KEY,
     parent_span_id    TEXT,
@@ -2243,14 +2251,74 @@ class PostgresStorage:
 
         value = validate_conversation(conversation)
         retention_at = value["event_at"] or datetime.now(timezone.utc).isoformat()
-        self._exec(
-            """INSERT INTO conversation_snapshots (tenant_id, conversation_id, retention_at, payload)
-               VALUES (%s, %s, %s::timestamptz, %s)
-               ON CONFLICT (tenant_id, conversation_id) DO UPDATE SET
-                 retention_at=LEAST(conversation_snapshots.retention_at, EXCLUDED.retention_at),
-                 payload=EXCLUDED.payload""",
-            (value["tenant_id"], value["id"], retention_at, _json(value)),
+        with self._lock, self._pool.connection() as conn, conn.transaction():
+            with conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO conversation_snapshots (tenant_id, conversation_id, retention_at, payload)
+                       VALUES (%s, %s, %s::timestamptz, %s)
+                       ON CONFLICT (tenant_id, conversation_id) DO UPDATE SET
+                         retention_at=LEAST(conversation_snapshots.retention_at, EXCLUDED.retention_at),
+                         payload=EXCLUDED.payload""",
+                    (value["tenant_id"], value["id"], retention_at, _json(value)),
+                )
+                cur.execute(
+                    """DELETE FROM conversation_assessments WHERE tenant_id=%s
+                       AND conversation_id=%s AND revision<>%s""",
+                    (value["tenant_id"], value["id"], value["revision"]),
+                )
+
+    def save_conversation_assessment(self, assessment: dict) -> bool:
+        from verdict.conversation_assessments import should_store_assessment, validate_assessment
+        from verdict.conversations import _json, validate_conversation_query
+
+        if not isinstance(assessment, dict):
+            raise ValueError("invalid conversation assessment")
+        tenant_id, conversation_id = assessment.get("tenant_id"), assessment.get("conversation_id")
+        validate_conversation_query(tenant_id, 1, conversation_id)
+        with self._lock, self._pool.connection() as conn, conn.transaction():
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT payload FROM conversation_snapshots
+                       WHERE tenant_id=%s AND conversation_id=%s FOR UPDATE""",
+                    (tenant_id, conversation_id),
+                )
+                current = cur.fetchone()
+                if current is None:
+                    raise ValueError("conversation assessment revision unavailable")
+                value = validate_assessment(assessment, json.loads(current[0]))
+                target = -1 if value["target_position"] is None else value["target_position"]
+                key = (tenant_id, conversation_id, value["evaluator_fingerprint"], target)
+                cur.execute(
+                    """SELECT payload FROM conversation_assessments WHERE tenant_id=%s
+                       AND conversation_id=%s AND evaluator_fingerprint=%s AND target_position=%s""",
+                    key,
+                )
+                previous = cur.fetchone()
+                if not should_store_assessment(json.loads(previous[0]) if previous else None, value):
+                    return False
+                cur.execute(
+                    """INSERT INTO conversation_assessments
+                       (tenant_id, conversation_id, evaluator_fingerprint, target_position, revision, payload)
+                       VALUES (%s, %s, %s, %s, %s, %s)
+                       ON CONFLICT (tenant_id, conversation_id, evaluator_fingerprint, target_position)
+                       DO UPDATE SET revision=EXCLUDED.revision, payload=EXCLUDED.payload""",
+                    (*key, value["revision"], _json(value)),
+                )
+                return True
+
+    def list_conversation_assessments(
+        self, tenant_id: str, conversation_id: str, evaluator_fingerprint: str, *, limit: int = 1_000
+    ) -> list[dict]:
+        from verdict.conversation_assessments import validate_assessment_query
+
+        validate_assessment_query(tenant_id, conversation_id, evaluator_fingerprint, limit)
+        rows = self._fetchall(
+            """SELECT payload FROM conversation_assessments WHERE tenant_id=%s
+               AND conversation_id=%s AND evaluator_fingerprint=%s
+               ORDER BY target_position LIMIT %s""",
+            (tenant_id, conversation_id, evaluator_fingerprint, limit),
         )
+        return [json.loads(row[0]) for row in rows]
 
     def get_conversation(self, tenant_id: str, conversation_id: str) -> dict | None:
         from verdict.conversations import validate_conversation_query

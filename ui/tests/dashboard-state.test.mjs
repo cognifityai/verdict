@@ -28,7 +28,7 @@ function componentStub(names) {
 }
 
 async function loadUiModule() {
-  const source = `${await readFile(UI_SOURCE, "utf8")}\nexport { Dashboard, Overview, Traces, TraceDetail, TabHelp, Judge, Compare, ManagementReport, mountedApiUrl, Monitor };\nexport { useOperations } from "./Operations.jsx";\nexport { RegistryView } from "./Registry.jsx";\nexport { EvaluatorLab } from "./EvaluatorLab.jsx";\nexport { Runs } from "./Runs.jsx";\nexport { Insights } from "./Insights.jsx";`;
+  const source = `${await readFile(UI_SOURCE, "utf8")}\nexport { Dashboard, Overview, Traces, TraceDetail, TabHelp, Judge, Compare, ManagementReport, mountedApiUrl, Monitor };\nexport { useOperations } from "./Operations.jsx";\nexport { RegistryView } from "./Registry.jsx";\nexport { EvaluatorLab } from "./EvaluatorLab.jsx";\nexport { ConversationEvaluation } from "./ConversationEvaluation.jsx";\nexport { Runs } from "./Runs.jsx";\nexport { Insights } from "./Insights.jsx";`;
   const result = await build({
     stdin: {
       contents: source,
@@ -93,6 +93,61 @@ test("Evaluator Lab starts with a neutral response-quality rubric name", async (
   const openAIOption = findAll(tree,
     (node) => node.type === "option" && textOf(node).includes("compatible endpoint"))[0];
   assert.equal(openAIOption.props.value, "openai");
+});
+
+test("conversation upload, approved run, and partial coverage refresh", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const props = { root: "", token: "setup-token", provider: "openai", model: "synthetic",
+    providerState: { configured: true }, updatePreferences: () => {} };
+  const document = { name: "reply_quality", version: "1", target: "response",
+    dimensions: [{ name: "relevance", description: "Addresses the request.", type: "binary" }] };
+  let tree = render(ui.ConversationEvaluation, hooks, props);
+  const file = findAll(tree, (node) => node.type === "input" && node.props.type === "file")[0];
+  const uploading = file.props.onChange({ target: { files: [{ size: 200,
+    text: async () => JSON.stringify(document) }] } });
+  await new Promise(setImmediate);
+  await resolveJson(requests[0], { ...document, fingerprint: "a".repeat(64) });
+  await uploading;
+
+  tree = render(ui.ConversationEvaluation, hooks, props);
+  const previewButton = findAll(tree, (node) => node.type === "button" &&
+    textOf(node).includes("Preview first page"))[0];
+  const loading = previewButton.props.onClick();
+  await resolveJson(requests[1], { target: "response", scannedConversations: 1,
+    eligibleTargets: 2, alreadyJudged: 0, plannedCalls: 1, retryableErrors: 0,
+    notEvaluableReasons: {}, plannedTargets: [{ conversationId: "a", revision: "one",
+      targetPosition: 1 }], planFingerprint: "plan", evaluatorFingerprint: "b".repeat(64) });
+  await resolveJson(requests[2], { conversations: [{ id: "a".repeat(32),
+    event_at: "2026-09-01T00:00:00Z", end_status: "complete", input_issues: [],
+    coverage: { targets: 2, completed: 0, error: 0, missing: 2, fullyGraded: false } }] });
+  await loading;
+
+  tree = render(ui.ConversationEvaluation, hooks, props);
+  findAll(tree, (node) => node.type === "input" && node.props.type === "checkbox")[0]
+    .props.onChange({ target: { checked: true } });
+  tree = render(ui.ConversationEvaluation, hooks, props);
+  const runButton = findAll(tree, (node) => node.type === "button" &&
+    /Run\s+1\s+judge calls/.test(textOf(node)))[0];
+  assert.ok(runButton, textOf(tree));
+  const running = runButton.props.onClick();
+  assert.equal(JSON.parse(requests[3].options.body).planFingerprint, "plan");
+  assert.equal(JSON.parse(requests[3].options.body).confirmExternalEgress, true);
+  await resolveJson(requests[3], { completed: 1, errors: 0, stale: 0 });
+  await resolveJson(requests[4], { target: "response", scannedConversations: 1,
+    eligibleTargets: 2, alreadyJudged: 1, plannedCalls: 1, retryableErrors: 0,
+    notEvaluableReasons: {}, plannedTargets: [{ conversationId: "a", revision: "one",
+      targetPosition: 3 }], planFingerprint: "plan-next", evaluatorFingerprint: "b".repeat(64) });
+  await resolveJson(requests[5], { conversations: [{ id: "a".repeat(32),
+    event_at: "2026-09-01T00:00:00Z", end_status: "complete", input_issues: [],
+    coverage: { targets: 2, completed: 1, error: 0, missing: 1, fullyGraded: false } }] });
+  await running;
+  tree = render(ui.ConversationEvaluation, hooks, props);
+  assert.match(textOf(tree), /1\/2 completed/);
+  assert.match(textOf(tree), /Saved:\s+1/);
+  assert.doesNotMatch(textOf(tree), /Fully graded/);
+  assert.equal(requests.length, 6);
 });
 
 test("Evaluator Lab previews a native Turn page and sends its approved identities", async () => {

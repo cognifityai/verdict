@@ -462,7 +462,16 @@ time governs retention when present; otherwise the first import time does.
 The snapshot is capped at 512,000 stored bytes; longer transcripts keep an
 incomplete prefix and the reply Trace mapping continues.
 Use the storage API's tenant-scoped `list_conversations` cursor to review these
-records. Conversation evaluation and drift analysis are not available yet.
+records. In **Evaluate → Evaluator Lab**, select **Conversation or reply** to
+upload a JSON rubric and preview a bounded page. The reviewer sees excluded
+conversations and partial reply coverage. A judge call requires explicit
+approval of the previewed provider, endpoint, and call count. Only clean,
+closed snapshots with a completed assistant reply after a user message are
+eligible. Correcting a transcript invalidates its previous grades. The example
+rubrics are at `examples/telemetry/conversation-rubric.example.json` and
+`examples/telemetry/response-rubric.example.json`; custom
+weighted totals are outside this generic schema. Conversation drift analysis
+is not available yet.
 
 ## 5. Instrument your own app (the five-line pattern)
 

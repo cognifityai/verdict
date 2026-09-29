@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { AlertTriangle, CheckCircle2, FlaskConical, LoaderCircle } from "lucide-react";
+import { ConversationEvaluation } from "./ConversationEvaluation.jsx";
 
 const C = { panel: "#111715", border: "#26332e", sub: "#94a39d", faint: "#68766f", green: "#4ee1aa", amber: "#f2b84b", red: "#ff6b6b" };
 const DEFAULT_DIMENSIONS = [
@@ -27,7 +28,7 @@ function readPreferences() {
       model: typeof saved.model === "string" && saved.model.length > 0
         && new TextEncoder().encode(saved.model).length <= 256
         ? saved.model : DEFAULT_PREFERENCES.model,
-      unit: ["trace", "agent_turn"].includes(saved.unit) ? saved.unit : DEFAULT_PREFERENCES.unit,
+      unit: ["trace", "agent_turn", "conversation"].includes(saved.unit) ? saved.unit : DEFAULT_PREFERENCES.unit,
       includeToolCounts: typeof saved.includeToolCounts === "boolean"
         ? saved.includeToolCounts : DEFAULT_PREFERENCES.includeToolCounts,
       judgeAll: typeof saved.judgeAll === "boolean" ? saved.judgeAll : DEFAULT_PREFERENCES.judgeAll,
@@ -113,13 +114,17 @@ export function EvaluatorLab({ configUrl, onOpenEvaluated }) {
   const destinationLabel = providerState?.customEndpointConfigured
     ? "the configured OpenAI-compatible endpoint"
     : provider;
+  if (unit === "conversation") return <ConversationEvaluation
+    root={root} token={token} provider={provider} model={model}
+    providerState={providerState} updatePreferences={updatePreferences}
+  />;
   return <fieldset disabled={busy} className="max-w-5xl space-y-4" style={{ border: 0, margin: 0, padding: 0 }}>
     <section className="border p-5" style={{ borderColor: C.border, background: C.panel }}>
       <div className="text-xs font-mono" style={{ color: C.green }}>EVIDENCE-AWARE EVALUATOR LAB</div>
       <h2 className="text-lg font-semibold mt-1">Configure and preflight a judge</h2>
       <p className="text-sm mt-2" style={{ color: C.sub }}>Choose provider Trace for individual model calls or Agent Turn for a completed, untruncated request and final output. Optional recorded tool-event counts can accompany a Turn; direct origin labels describe only the observed outer dispatch and cannot verify downstream protocols, citations, or factual claims. Preview does not send data externally.</p>
       <div className="grid sm:grid-cols-2 gap-4 mt-5">
-        <label className="text-sm">Evaluation unit<select value={unit} onChange={(event) => { updatePreferences({ unit: event.target.value }); setTurnCursor(null); setPreview(null); setConfirmed(false); }} className="block w-full border p-2 mt-1 bg-transparent"><option value="trace">Provider Trace</option><option value="agent_turn">Agent Turn (final output)</option></select></label>
+        <label className="text-sm">Evaluation unit<select value={unit} onChange={(event) => { updatePreferences({ unit: event.target.value }); setTurnCursor(null); setPreview(null); setConfirmed(false); }} className="block w-full border p-2 mt-1 bg-transparent"><option value="trace">Provider Trace</option><option value="agent_turn">Agent Turn (final output)</option><option value="conversation">Conversation or reply</option></select></label>
         <label className="text-sm">Provider<select value={provider} onChange={(event) => updatePreferences({ provider: event.target.value })} className="block w-full border p-2 mt-1 bg-transparent">{PROVIDERS.map((name) => <option key={name} value={name}>{name === "openai" ? "openai / compatible endpoint" : name}</option>)}</select></label>
         <label className="text-sm">Model<input value={model} onChange={(event) => updatePreferences({ model: event.target.value })} className="block w-full border p-2 mt-1 bg-transparent" /></label>
         <label className="text-sm">Rubric name<input value={rubricName} onChange={(event) => setRubricName(event.target.value)} className="block w-full border p-2 mt-1 bg-transparent" /></label>

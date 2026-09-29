@@ -1,0 +1,22 @@
+{
+  "name": "sample_conversation_quality",
+  "version": "1",
+  "target": "conversation",
+  "instructions": "Use the available transcript only. Mark unsupported claims unclear.",
+  "dimensions": [
+    {
+      "name": "task_completion",
+      "description": "Did the assistant address the user's request?",
+      "type": "binary"
+    },
+    {
+      "name": "clarity",
+      "description": "How clear was the assistant's communication?",
+      "type": "number",
+      "min": 1,
+      "max": 5,
+      "direction": "higher_is_better",
+      "passThreshold": 4
+    }
+  ]
+}

@@ -16,6 +16,75 @@ _log = logging.getLogger("verdict.dashboard")
 
 
 def register_lab_routes(app, setup: SetupRoutes) -> None:
+    @app.post("/api/evaluators/rubric/validate")
+    def validate_conversation_rubric(request: Request, payload: dict[str, Any]):
+        if not setup.authorized(request):
+            return JSONResponse({"error": "evaluator authorization required"}, status_code=403)
+        try:
+            from verdict.conversation_assessments import validate_rubric
+
+            return validate_rubric(payload.get("document"))
+        except (TypeError, ValueError, UnicodeError):
+            return JSONResponse({"error": "invalid executable rubric JSON"}, status_code=400)
+
+    @app.post("/api/data/conversations/review")
+    def review_conversations(request: Request, payload: dict[str, Any]):
+        if not setup.authorized(request):
+            return JSONResponse({"error": "evaluator authorization required"}, status_code=403)
+        writable = None
+        try:
+            from verdict_eval.conversation_judge import preview_evaluation
+
+            from verdict.conversation_assessments import assessment_coverage
+
+            config = {key: value for key, value in payload.items() if key != "unit"}
+            writable = setup.writable_storage()
+            preview = preview_evaluation(writable, tenant_id=setup.tenant_id, config=config)
+            rows, cursor = writable.list_conversations(
+                setup.tenant_id, after=config.get("after"), limit=config.get("scanLimit", 20)
+            )
+            summaries = []
+            for row in rows:
+                assessments = writable.list_conversation_assessments(
+                    setup.tenant_id, row["id"], preview["evaluatorFingerprint"]
+                )
+                summaries.append({
+                    "id": row["id"], "revision": row["revision"],
+                    "event_at": row["event_at"], "end_status": row["end_status"],
+                    "input_issues": row["input_issues"], "messageCount": len(row["messages"]),
+                    "coverage": assessment_coverage(
+                        row, preview["rubric"], preview["evaluatorFingerprint"], assessments
+                    ),
+                })
+            return {"conversations": summaries, "nextCursor": cursor,
+                    "order": "conversation_id", "evaluatorFingerprint": preview["evaluatorFingerprint"]}
+        except (TypeError, ValueError, UnicodeError, ImportError):
+            return JSONResponse({"error": "conversation review unavailable"}, status_code=400)
+        finally:
+            if writable is not None:
+                writable.close()
+
+    @app.get("/api/data/conversations/{conversation_id}")
+    def conversation_detail(request: Request, conversation_id: str, evaluator: str | None = None):
+        if not setup.request_matches_tenant(request):
+            return JSONResponse({"error": "conversation unavailable"}, status_code=403)
+        writable = None
+        try:
+            writable = setup.writable_storage()
+            row = writable.get_conversation(setup.tenant_id, conversation_id)
+            if row is None:
+                return JSONResponse({"error": "conversation unavailable"}, status_code=404)
+            assessments = (
+                writable.list_conversation_assessments(setup.tenant_id, row["id"], evaluator)
+                if evaluator else []
+            )
+            return {"conversation": row, "assessments": assessments}
+        except (TypeError, ValueError, UnicodeError):
+            return JSONResponse({"error": "invalid conversation request"}, status_code=400)
+        finally:
+            if writable is not None:
+                writable.close()
+
     @app.get("/api/evaluators")
     def evaluator_status(request: Request):
         if not setup.request_matches_tenant(request):
@@ -31,9 +100,16 @@ def register_lab_routes(app, setup: SetupRoutes) -> None:
             )
         writable = None
         try:
+            writable = setup.writable_storage()
+            if payload.get("unit") == "conversation":
+                from verdict_eval.conversation_judge import preview_evaluation
+
+                return preview_evaluation(
+                    writable, tenant_id=setup.tenant_id,
+                    config={key: value for key, value in payload.items() if key != "unit"},
+                )
             from verdict.dashboard.evaluator_lab import preview_evaluation
 
-            writable = setup.writable_storage()
             return preview_evaluation(
                 writable, tenant_id=setup.tenant_id, config=payload
             )
@@ -72,9 +148,17 @@ def register_lab_routes(app, setup: SetupRoutes) -> None:
             )
         writable = None
         try:
+            writable = setup.writable_storage()
+            if payload.get("unit") == "conversation":
+                from verdict_eval.conversation_judge import execute_evaluation
+
+                return execute_evaluation(
+                    writable, tenant_id=setup.tenant_id,
+                    config={key: value for key, value in payload.items() if key != "unit"},
+                    confirm_external_egress=payload.get("confirmExternalEgress") is True,
+                )
             from verdict.dashboard.evaluator_lab import execute_evaluation
 
-            writable = setup.writable_storage()
             return execute_evaluation(
                 writable,
                 tenant_id=setup.tenant_id,

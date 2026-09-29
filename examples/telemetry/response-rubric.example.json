@@ -1,0 +1,13 @@
+{
+  "name": "sample_reply_quality",
+  "version": "1",
+  "target": "response",
+  "instructions": "Judge only the selected assistant reply using the preceding messages for context.",
+  "dimensions": [
+    {
+      "name": "relevance",
+      "description": "Does this reply address the most recent user request?",
+      "type": "binary"
+    }
+  ]
+}
