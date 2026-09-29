@@ -470,8 +470,21 @@ closed snapshots with a completed assistant reply after a user message are
 eligible. Correcting a transcript invalidates its previous grades. The example
 rubrics are at `examples/telemetry/conversation-rubric.example.json` and
 `examples/telemetry/response-rubric.example.json`; custom
-weighted totals are outside this generic schema. Conversation drift analysis
-is not available yet.
+weighted totals are outside this generic schema. To explore quality over time,
+open **Monitor → Compare History**, choose **Conversation grade (descriptive)**,
+copy the evaluator fingerprint from the Lab preview, enter a binary dimension
+from a whole-conversation rubric, and select two non-overlapping windows in
+local time. The result displays their UTC boundaries.
+The optional source label key partitions both windows and shows group mix and
+within-group PASS rates. A Voice record can supply a top-level `labels` object
+with up to eight keys (`[a-z][a-z0-9_]{0,31}`) and redacted string values of
+at most 128 UTF-8 bytes. Missing values have their own group; changing a label
+invalidates the old grade. The comparison makes no judge calls, supports at
+most 10,000 selected conversations, and shows UNCLEAR, judge errors, and
+ungraded records separately. PASS rates use only PASS/FAIL grades. This is a
+historical, current-state view: correcting source data can change a later
+preview, and it does not create a prospective drift alert or semantic cluster.
+Records without a usable source end time cannot enter a dated window.
 For this workflow, `OPENAI_BASE_URL` and `ANTHROPIC_BASE_URL` select custom
 judge endpoints. The consent screen identifies the configured destination
 without returning its URL. Numeric rubric bounds and thresholds must be finite

@@ -2,6 +2,7 @@
   "conversation_id": "demo-voice-session",
   "provider": "voice-agent",
   "model": "realtime-model",
+  "labels": {"persona": "example_avatar", "group": "example_workflow"},
   "turns": [
     {"id": "voice-turn-1", "speaker": "caller", "started_at": "2026-08-01T12:08:00Z", "ended_at": "2026-08-01T12:08:01Z", "text": "I need to reschedule"},
     {"id": "voice-turn-2", "speaker": "agent", "started_at": "2026-08-01T12:08:01Z", "ended_at": "2026-08-01T12:08:02Z", "text": "What date works for you?", "status": "completed", "input_tokens": 12, "output_tokens": 7},

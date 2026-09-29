@@ -80,6 +80,18 @@ _BOUNDED_MONITOR_ERRORS = {
         "Logical-session preview supports at most 10,000 selected judgments and 16 MiB "
         "of judgment data in one tenant snapshot."
     ),
+    "selected conversation windows exceed 10,000 rows; choose narrower dates": (
+        "Selected windows contain more than 10,000 conversations. Choose narrower dates."
+    ),
+    "selected evaluator dimension is not a whole-conversation binary grade": (
+        "Select a binary dimension from a whole-conversation rubric."
+    ),
+    "comparison windows must be ordered and nonoverlapping": (
+        "Base and Current must be valid, non-overlapping time ranges."
+    ),
+    "selected label has more than 100 groups": (
+        "The selected label has more than 100 values. Use another label or narrower dates."
+    ),
 }
 
 
@@ -369,6 +381,13 @@ class MonitorRoutes:
                 )
             writable = None
             try:
+                if payload.get("analysisUnit") == "conversation":
+                    from verdict.conversation_monitoring import preview_conversation_comparison
+
+                    writable = self.setup.writable_storage()
+                    return preview_conversation_comparison(
+                        writable, tenant_id=self.tenant_id, payload=payload,
+                    )
                 if payload.get("analysisUnit", "trace") == "logical_session":
                     writable = self.setup.writable_storage()
                     return self.logical_session_preview(writable, payload)

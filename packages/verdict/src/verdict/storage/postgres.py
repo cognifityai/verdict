@@ -150,6 +150,8 @@ CREATE TABLE IF NOT EXISTS conversation_snapshots (
     PRIMARY KEY (tenant_id, conversation_id)
 );
 CREATE INDEX IF NOT EXISTS conversation_retention ON conversation_snapshots(retention_at);
+CREATE INDEX IF NOT EXISTS conversation_event_window ON conversation_snapshots
+    (tenant_id, (((payload::jsonb)->>'event_at') COLLATE "C"), conversation_id);
 CREATE TABLE IF NOT EXISTS conversation_assessments (
     tenant_id TEXT NOT NULL, conversation_id TEXT NOT NULL,
     evaluator_fingerprint TEXT NOT NULL, target_position INTEGER NOT NULL,
@@ -2351,6 +2353,57 @@ class PostgresStorage:
             value["retention_at"] = retention_at.astimezone(timezone.utc).isoformat()
             page.append(value)
         return page, page[-1]["id"] if len(rows) > limit else None
+
+    def load_conversation_comparison_rows(self, query: dict, *, limit: int) -> list[dict]:
+        from verdict.conversation_monitoring import validate_storage_query
+
+        value = validate_storage_query(query, limit)
+        rows = self._fetchall(
+            """WITH reference AS (
+                   SELECT conversation_id,
+                          (payload::jsonb)->>'event_at' AS event_at,
+                          (payload::jsonb)->>'revision' AS revision,
+                          ((payload::jsonb)->'labels')::text AS labels
+                     FROM conversation_snapshots
+                    WHERE tenant_id=%s AND ((payload::jsonb)->>'event_at') COLLATE "C">=%s
+                      AND ((payload::jsonb)->>'event_at') COLLATE "C"<%s
+                    ORDER BY ((payload::jsonb)->>'event_at') COLLATE "C", conversation_id LIMIT %s
+               ), current AS (
+                   SELECT conversation_id,
+                          (payload::jsonb)->>'event_at' AS event_at,
+                          (payload::jsonb)->>'revision' AS revision,
+                          ((payload::jsonb)->'labels')::text AS labels
+                     FROM conversation_snapshots
+                    WHERE tenant_id=%s AND ((payload::jsonb)->>'event_at') COLLATE "C">=%s
+                      AND ((payload::jsonb)->>'event_at') COLLATE "C"<%s
+                    ORDER BY ((payload::jsonb)->>'event_at') COLLATE "C", conversation_id LIMIT %s
+               ), selected AS (
+                   SELECT * FROM reference UNION ALL SELECT * FROM current
+               )
+               SELECT selected.conversation_id, selected.event_at, selected.revision, selected.labels,
+                      (grade.payload::jsonb)->>'status' AS assessment_status,
+                      (grade.payload::jsonb)->'rubric'->>'target' AS rubric_target,
+                      (SELECT definition.value->>'type'
+                         FROM jsonb_array_elements(
+                           (grade.payload::jsonb)->'rubric'->'dimensions'
+                         ) AS definition(value)
+                        WHERE definition.value->>'name'=%s LIMIT 1) AS dimension_type,
+                      (grade.payload::jsonb)->'dimensions'->%s->>'state' AS dimension_state
+                 FROM selected LEFT JOIN conversation_assessments AS grade
+                   ON grade.tenant_id=%s AND grade.conversation_id=selected.conversation_id
+                  AND grade.evaluator_fingerprint=%s AND grade.target_position=-1
+                  AND grade.revision=selected.revision
+                ORDER BY selected.event_at COLLATE "C", selected.conversation_id LIMIT %s""",
+            (
+                value["tenant_id"], value["reference_start"], value["reference_end"], limit,
+                value["tenant_id"], value["current_start"], value["current_end"], limit,
+                value["dimension"], value["dimension"],
+                value["tenant_id"], value["evaluator_fingerprint"], limit,
+            ),
+        )
+        fields = ("id", "event_at", "revision", "labels", "assessment_status", "rubric_target",
+                  "dimension_type", "dimension_state")
+        return [dict(zip(fields, row, strict=True)) for row in rows]
 
     def delete_conversation(self, tenant_id: str, conversation_id: str) -> None:
         from verdict.conversations import validate_conversation_query

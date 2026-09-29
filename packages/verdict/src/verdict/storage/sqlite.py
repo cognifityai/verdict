@@ -143,6 +143,8 @@ CREATE TABLE IF NOT EXISTS conversation_snapshots (
     PRIMARY KEY (tenant_id, conversation_id)
 );
 CREATE INDEX IF NOT EXISTS conversation_retention ON conversation_snapshots(retention_at);
+CREATE INDEX IF NOT EXISTS conversation_event_window ON conversation_snapshots
+    (tenant_id, json_extract(payload, '$.event_at'), conversation_id);
 CREATE TABLE IF NOT EXISTS conversation_assessments (
     tenant_id TEXT NOT NULL, conversation_id TEXT NOT NULL,
     evaluator_fingerprint TEXT NOT NULL, target_position INTEGER NOT NULL,
@@ -2425,6 +2427,57 @@ class SQLiteStorage:
             value["retention_at"] = row["retention_at"]
             page.append(value)
         return page, page[-1]["id"] if len(rows) > limit else None
+
+    def load_conversation_comparison_rows(self, query: dict, *, limit: int) -> list[dict]:
+        from verdict.conversation_monitoring import validate_storage_query
+
+        value = validate_storage_query(query, limit)
+        sql = """
+            WITH reference AS (
+                SELECT conversation_id,
+                       json_extract(payload, '$.event_at') AS event_at,
+                       json_extract(payload, '$.revision') AS revision,
+                       json_extract(payload, '$.labels') AS labels
+                  FROM conversation_snapshots
+                 WHERE tenant_id=? AND json_extract(payload, '$.event_at')>=?
+                   AND json_extract(payload, '$.event_at')<?
+                 ORDER BY json_extract(payload, '$.event_at'), conversation_id LIMIT ?
+            ), current AS (
+                SELECT conversation_id,
+                       json_extract(payload, '$.event_at') AS event_at,
+                       json_extract(payload, '$.revision') AS revision,
+                       json_extract(payload, '$.labels') AS labels
+                  FROM conversation_snapshots
+                 WHERE tenant_id=? AND json_extract(payload, '$.event_at')>=?
+                   AND json_extract(payload, '$.event_at')<?
+                 ORDER BY json_extract(payload, '$.event_at'), conversation_id LIMIT ?
+            ), selected AS (
+                SELECT * FROM reference UNION ALL SELECT * FROM current
+            )
+            SELECT selected.conversation_id AS id, selected.event_at, selected.revision,
+                   selected.labels,
+                   json_extract(grade.payload, '$.status') AS assessment_status,
+                   json_extract(grade.payload, '$.rubric.target') AS rubric_target,
+                   (SELECT json_extract(definition.value, '$.type')
+                      FROM json_each(grade.payload, '$.rubric.dimensions') AS definition
+                     WHERE json_extract(definition.value, '$.name')=? LIMIT 1)
+                     AS dimension_type,
+                   json_extract(grade.payload, ?) AS dimension_state
+              FROM selected
+              LEFT JOIN conversation_assessments AS grade
+                ON grade.tenant_id=? AND grade.conversation_id=selected.conversation_id
+               AND grade.evaluator_fingerprint=? AND grade.target_position=-1
+               AND grade.revision=selected.revision
+             ORDER BY selected.event_at, selected.conversation_id LIMIT ?
+        """
+        parameters = (
+            value["tenant_id"], value["reference_start"], value["reference_end"], limit,
+            value["tenant_id"], value["current_start"], value["current_end"], limit,
+            value["dimension"], f'$.dimensions."{value["dimension"]}".state',
+            value["tenant_id"], value["evaluator_fingerprint"], limit,
+        )
+        with self._lock:
+            return [dict(row) for row in self._conn.execute(sql, parameters).fetchall()]
 
     def delete_conversation(self, tenant_id: str, conversation_id: str) -> None:
         from verdict.conversations import validate_conversation_query

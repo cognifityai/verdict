@@ -1,7 +1,12 @@
 import React, { useEffect, useState } from "react";
-import { monitorRequest } from "./monitor-form.mjs";
+import { conversationMonitorRequest, monitorRequest } from "./monitor-form.mjs";
 
 const box = { borderColor: "#26332e", background: "#111715" };
+
+const utcWindowTime = (value) => new Date(value).toLocaleString(undefined, {
+  timeZone: "UTC", year: "numeric", month: "short", day: "numeric",
+  hour: "2-digit", minute: "2-digit", timeZoneName: "short",
+});
 
 export function monitorStateParts(monitor) {
   const legacy = monitor?.policy && monitor?.snapshot ? monitor : null;
@@ -39,6 +44,36 @@ export function LogicalSessionPreview({ preview }) {
       <div className="text-xs mt-2" style={{ color: "#94a39d" }}>Evidence: {metric.referenceEvaluable} → {metric.currentEvaluable} evaluable · {metric.referenceUnclear} → {metric.currentUnclear} unclear · {metric.referenceMissing} → {metric.currentMissing} missing · {metric.referenceError} → {metric.currentError} evaluator errors</div>
     </div>)}</div>
     {(preview.coverage.runsMissingLogicalSession > 0 || preview.coverage.sessionsInProgress > 0) && <p className="text-xs mt-4" style={{ color: "#f2b84b" }}>Coverage: {preview.coverage.runsMissingLogicalSession} runs lacked logical-session identity; {preview.coverage.sessionsInProgress} sessions were still in progress. Neither was guessed into a cohort.</p>}
+  </section>;
+}
+
+function ConversationRate({ label, summary, onOpen }) {
+  return <article className="border p-3 text-sm" style={box}>
+    <div className="font-semibold">{label}</div>
+    <div className="mt-1">{summary.passRate == null ? "No PASS/FAIL grades" : `${pct(summary.passRate)} PASS · 95% interval ${pct(summary.interval[0])}–${pct(summary.interval[1])}`}</div>
+    <div className="text-xs mt-1" style={{ color: "#94a39d" }}>Captured {summary.captured} · PASS {summary.pass} · FAIL {summary.fail} · UNCLEAR {summary.unclear} · judge errors {summary.error} · ungraded {summary.ungraded}. Rate denominator: {summary.evaluable} PASS/FAIL grades.</div>
+    <div className="flex flex-wrap gap-2 mt-2">{["fail", "pass", "unclear", "error", "ungraded"].flatMap((state) =>
+      summary.examples[state].map((example) => <button key={`${state}-${example.id}`} type="button"
+        className="underline text-xs font-mono" onClick={() => onOpen(example)}
+        title={example.id}>{state}: {example.id.slice(-8)}</button>))}</div>
+  </article>;
+}
+
+export function ConversationPreview({ preview, onOpen }) {
+  return <section className="border p-5 space-y-3" style={box}>
+    <div className="text-xs font-mono" style={{ color: "#f2b84b" }}>DESCRIPTIVE CONVERSATION QUALITY</div>
+    <h2 className="font-semibold">{preview.dimension} · Base versus Current</h2>
+    <p className="text-sm" style={{ color: "#94a39d" }}>Current stored grades in the selected UTC windows. This comparison makes no judge calls and does not create an alert. Transcript corrections can change the next result; source labels are not semantic clusters.</p>
+    <div className="grid sm:grid-cols-2 gap-3">
+      <ConversationRate label={`Base · ${utcWindowTime(preview.referenceStart)} to ${utcWindowTime(preview.referenceEnd)}`} summary={preview.reference} onOpen={onOpen} />
+      <ConversationRate label={`Current · ${utcWindowTime(preview.currentStart)} to ${utcWindowTime(preview.currentEnd)}`} summary={preview.current} onOpen={onOpen} />
+    </div>
+    <p className="text-sm">{preview.effect == null ? "No complete rate comparison" : `Measured PASS-rate change: ${(100 * preview.effect).toFixed(1)} percentage points`} · {preview.reference.evaluable} versus {preview.current.evaluable} graded conversations.</p>
+    {preview.groups.length > 0 && <div className="space-y-3"><h3 className="font-semibold">By source label: {preview.labelKey}</h3>{preview.groups.map((group) => <div key={group.value == null ? "missing-label" : `value:${group.value}`} className="border p-3" style={box}>
+      <div className="font-semibold">{group.label} · share of selected conversations {group.referenceShare == null ? "—" : pct(group.referenceShare)} → {group.currentShare == null ? "—" : pct(group.currentShare)}</div>
+      <div className="text-sm mt-1">{group.effect == null ? "No complete within-group rate comparison" : `Within-group PASS-rate change: ${(100 * group.effect).toFixed(1)} percentage points`}</div>
+      <div className="grid sm:grid-cols-2 gap-3 mt-2"><ConversationRate label="Base" summary={group.reference} onOpen={onOpen} /><ConversationRate label="Current" summary={group.current} onOpen={onOpen} /></div>
+    </div>)}</div>}
   </section>;
 }
 
@@ -246,6 +281,7 @@ export function Monitor({ configUrl, evaluation = {}, initialState = null, view 
   const [active, setActive] = useState(initialState?.active || null);
   const [candidate, setCandidate] = useState(initialState?.candidate || null);
   const [descriptive, setDescriptive] = useState(null);
+  const [conversationDetail, setConversationDetail] = useState(null);
   const [agentEvaluators, setAgentEvaluators] = useState(initialState?.agentEvaluators || []);
   const [agentEvaluatorDiscoveryTruncated, setAgentEvaluatorDiscoveryTruncated] = useState(initialState?.agentEvaluatorDiscoveryTruncated || false);
   const [error, setError] = useState(null);
@@ -255,6 +291,7 @@ export function Monitor({ configUrl, evaluation = {}, initialState = null, view 
     minimumCurrent: 30, prospectiveTarget: 30, minimumEffect: 0.1,
     analysisUnit: "trace", groupingMode: "none",
     evaluatorFingerprint: "",
+    dimension: "", labelKey: "",
     referenceStart: "", referenceEnd: "", currentStart: "", currentEnd: "",
   });
   useEffect(() => {
@@ -286,17 +323,31 @@ export function Monitor({ configUrl, evaluation = {}, initialState = null, view 
     } catch (failure) { setError(String(failure)); return null; }
     finally { setBusy(false); }
   }
+  async function openConversation(example) {
+    if (busy || !descriptive || descriptive.unit !== "conversation") return;
+    setBusy(true); setError(null); setConversationDetail(null);
+    try {
+      const response = await fetch(`${root}/api/data/conversations/${encodeURIComponent(example.id)}?evaluator=${encodeURIComponent(descriptive.evaluatorFingerprint)}`, { credentials: "same-origin" });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
+      setConversationDetail({ ...body, expectedRevision: example.revision });
+    } catch (failure) { setError(String(failure)); }
+    finally { setBusy(false); }
+  }
 
   const update = (name, value) => {
     setCandidate(null);
     setDescriptive(null);
+    setConversationDetail(null);
     setForm((current) => ({
       ...current,
       [name]: value,
-      ...(name === "analysisUnit" ? { evaluatorFingerprint: "", groupingMode: "none" } : {}),
+      ...(name === "analysisUnit" ? { evaluatorFingerprint: "", groupingMode: "none",
+        windowMode: value === "conversation" ? "explicit" : current.windowMode } : {}),
     }));
   };
   const logicalSession = form.analysisUnit === "logical_session";
+  const conversation = form.analysisUnit === "conversation";
   const measurements = logicalSession ? agentEvaluators : evaluators;
   const requiresRebootstrap = active?.state === "requires_rebootstrap";
   return <div className="max-w-5xl space-y-4">
@@ -304,25 +355,39 @@ export function Monitor({ configUrl, evaluation = {}, initialState = null, view 
     {error && <div role="alert" className="border p-4" style={{ ...box, color: "#ff6b6b" }}>{error}</div>}
     {candidate && active && <div role="status" className="border p-4 text-sm" style={{ ...box, color: "#f2b84b" }}>A newer historical candidate is shown first. The existing prospective monitor remains active until you explicitly activate the candidate.</div>}
     {requiresRebootstrap && <div role="alert" className="border p-4" style={{ ...box, color: "#f2b84b" }}>{active.rebootstrapReason} Configure the replacement in Comparison settings below and select Preview comparison.</div>}
-    {descriptive && <LogicalSessionPreview preview={descriptive} />}
+    {descriptive?.unit === "conversation" && <ConversationPreview preview={descriptive} onOpen={openConversation} />}
+    {descriptive && descriptive.unit !== "conversation" && <LogicalSessionPreview preview={descriptive} />}
+    {conversationDetail && <section className="border p-5 space-y-2" style={box}>
+      <div className="flex justify-between"><h3 className="font-semibold">Conversation evidence</h3><button className="underline" onClick={() => setConversationDetail(null)}>Close</button></div>
+      {conversationDetail.conversation.revision !== conversationDetail.expectedRevision
+        ? <p role="alert" style={{ color: "#f2b84b" }}>This transcript changed since the comparison. Run the comparison again to inspect current evidence.</p>
+        : <><div className="text-xs">{conversationDetail.assessments.map((grade) => `${grade.status}: ${Object.entries(grade.dimensions).map(([name, result]) => `${name} ${result.state}`).join(", ")}`).join(" · ") || "No current grade"}</div>
+          {conversationDetail.conversation.messages.map((message, index) => <div key={index} className="border p-3 text-sm" style={box}><strong>{index + 1} · {message.role}</strong><p dir="auto" className="whitespace-pre-wrap mt-1">{message.content}</p></div>)}</>}
+    </section>}
     {candidate?.snapshot && <MonitorSnapshot response={candidate} evaluators={evaluators} fallbackTarget={form.prospectiveTarget} onOpenTrace={onOpenTrace} />}
     {active?.snapshot && <MonitorSnapshot response={active} evaluators={evaluators} fallbackTarget={form.prospectiveTarget} onOpenTrace={onOpenTrace} />}
     {view === "history" && <details open={!candidate && !active && !descriptive} className="border" style={box}>
-      <summary className="p-5 cursor-pointer"><span className="text-xs font-mono" style={{ color: "#4ee1aa" }}>COMPARISON SETTINGS</span><span className="block text-sm mt-1" style={{ color: "#94a39d" }}>Choose cohorts, measurement, and activation policy</span></summary>
+      <summary className="p-5 cursor-pointer"><span className="text-xs font-mono" style={{ color: "#4ee1aa" }}>COMPARISON SETTINGS</span><span className="block text-sm mt-1" style={{ color: "#94a39d" }}>{conversation ? "Choose historical windows, grade, and source label" : "Choose cohorts, measurement, and activation policy"}</span></summary>
       <div className="px-5 pb-5 border-t" style={{ borderColor: "#26332e" }}>
-      <h2 className="text-lg font-semibold mt-1">Explore first, then activate one immutable monitor</h2>
-      <p className="text-sm mt-2" style={{ color: "#94a39d" }}>Membership is chosen from event time before metric outcomes are compared. No clustering is required. Preview is exploratory; only an activated policy can become authoritative.</p>
+      <h2 className="text-lg font-semibold mt-1">{conversation ? "Compare current conversation grades" : "Explore first, then activate one immutable monitor"}</h2>
+      <p className="text-sm mt-2" style={{ color: "#94a39d" }}>{conversation ? "Choose two historical date ranges in your local time, one exact whole-conversation binary grade, and an optional source label. Results show UTC dates. This view has no activation or alert." : "Membership is chosen from event time before metric outcomes are compared. No clustering is required. Preview is exploratory; only an activated policy can become authoritative."}</p>
       <div className="grid sm:grid-cols-2 gap-4 mt-5">
-        <label className="text-sm">Window mode<select value={form.windowMode} onChange={(event) => update("windowMode", event.target.value)} className="block w-full mt-1 border p-2 bg-transparent"><option value="count">Count cohorts</option><option value="explicit">Explicit date ranges</option></select></label>
+        {!conversation && <label className="text-sm">Window mode<select value={form.windowMode} onChange={(event) => update("windowMode", event.target.value)} className="block w-full mt-1 border p-2 bg-transparent"><option value="count">Count cohorts</option><option value="explicit">Explicit date ranges</option></select></label>}
         {form.windowMode === "count" && <label className="text-sm">Reference share<input type="number" min="0.5" max="0.95" step="0.05" value={form.referenceRatio} onChange={(event) => update("referenceRatio", Number(event.target.value))} className="block w-full mt-1 border p-2 bg-transparent" /></label>}
-        <label className="text-sm">Analysis unit<select value={form.analysisUnit} onChange={(event) => update("analysisUnit", event.target.value)} className="block w-full mt-1 border p-2 bg-transparent"><option value="trace">Genuine model call</option><option value="logical_session">Logical session (descriptive)</option></select></label>
-        <label className="text-sm">Measurement<select value={form.evaluatorFingerprint} onChange={(event) => update("evaluatorFingerprint", event.target.value)} className="block w-full mt-1 border p-2 bg-transparent"><option value="">{logicalSession ? "Deterministic agent checks only" : "Deterministic trace checks only"}</option>{measurements.map((identity) => <option key={identity.fingerprint} value={identity.fingerprint}>{identity.label}</option>)}</select><span className="block text-xs mt-1" style={{ color: "#94a39d" }}>{form.evaluatorFingerprint ? "Compares existing stored judgments; this preview makes no judge calls." : logicalSession ? "Compares completed execution and final-output presence by logical session." : "Compares provider errors, empty responses, and refusal-like language."}</span>{logicalSession && <AgentEvaluatorDiscoveryNote truncated={agentEvaluatorDiscoveryTruncated} />}</label>
-        <label className="text-sm">Comparison facet<select disabled={logicalSession} value={form.groupingMode} onChange={(event) => update("groupingMode", event.target.value)} className="block w-full mt-1 border p-2 bg-transparent"><option value="none">{logicalSession ? "No grouping for logical sessions" : "All eligible calls (recommended)"}</option>{!logicalSession && <><option value="provider_model">Provider and model</option><option value="cluster">Active reviewed cluster</option></>}</select></label>
+        <label className="text-sm">Analysis unit<select value={form.analysisUnit} onChange={(event) => update("analysisUnit", event.target.value)} className="block w-full mt-1 border p-2 bg-transparent"><option value="trace">Genuine model call</option><option value="logical_session">Logical session (descriptive)</option><option value="conversation">Conversation grade (descriptive)</option></select></label>
+        {conversation ? <>
+          <label className="text-sm">Evaluator fingerprint<input value={form.evaluatorFingerprint} onChange={(event) => update("evaluatorFingerprint", event.target.value)} placeholder="64-character fingerprint from Evaluator Lab" className="block w-full mt-1 border p-2 bg-transparent" /></label>
+          <label className="text-sm">Binary rubric dimension<input value={form.dimension} onChange={(event) => update("dimension", event.target.value)} placeholder="e.g. quality" className="block w-full mt-1 border p-2 bg-transparent" /></label>
+          <label className="text-sm">Source label key (optional)<input value={form.labelKey} onChange={(event) => update("labelKey", event.target.value)} placeholder="e.g. group" className="block w-full mt-1 border p-2 bg-transparent" /></label>
+        </> : <>
+          <label className="text-sm">Measurement<select value={form.evaluatorFingerprint} onChange={(event) => update("evaluatorFingerprint", event.target.value)} className="block w-full mt-1 border p-2 bg-transparent"><option value="">{logicalSession ? "Deterministic agent checks only" : "Deterministic trace checks only"}</option>{measurements.map((identity) => <option key={identity.fingerprint} value={identity.fingerprint}>{identity.label}</option>)}</select><span className="block text-xs mt-1" style={{ color: "#94a39d" }}>{form.evaluatorFingerprint ? "Compares existing stored judgments; this preview makes no judge calls." : logicalSession ? "Compares completed execution and final-output presence by logical session." : "Compares provider errors, empty responses, and refusal-like language."}</span>{logicalSession && <AgentEvaluatorDiscoveryNote truncated={agentEvaluatorDiscoveryTruncated} />}</label>
+          <label className="text-sm">Comparison facet<select disabled={logicalSession} value={form.groupingMode} onChange={(event) => update("groupingMode", event.target.value)} className="block w-full mt-1 border p-2 bg-transparent"><option value="none">{logicalSession ? "No grouping for logical sessions" : "All eligible calls (recommended)"}</option>{!logicalSession && <><option value="provider_model">Provider and model</option><option value="cluster">Active reviewed cluster</option></>}</select></label>
+        </>}
         {form.windowMode === "explicit" && ["referenceStart", "referenceEnd", "currentStart", "currentEnd"].map((name) => <label key={name} className="text-sm">{name.replace(/([A-Z])/g, " $1")}<input type="datetime-local" value={form[name]} onChange={(event) => update(name, event.target.value)} className="block w-full mt-1 border p-2 bg-transparent" /></label>)}
-        {!logicalSession && ["minimumReference", "minimumCurrent", "prospectiveTarget"].map((name) => <label key={name} className="text-sm">{name.replace(/([A-Z])/g, " $1")}<input type="number" min="1" value={form[name]} onChange={(event) => update(name, Number(event.target.value))} className="block w-full mt-1 border p-2 bg-transparent" /></label>)}
+        {!logicalSession && !conversation && ["minimumReference", "minimumCurrent", "prospectiveTarget"].map((name) => <label key={name} className="text-sm">{name.replace(/([A-Z])/g, " $1")}<input type="number" min="1" value={form[name]} onChange={(event) => update(name, Number(event.target.value))} className="block w-full mt-1 border p-2 bg-transparent" /></label>)}
       </div>
       <div className="flex flex-wrap gap-2 mt-5">
-        <button disabled={!token || busy} onClick={async () => { const result = await post("/api/monitor/preview", monitorRequest(form)); if (result) { if (result.state === "descriptive") { setDescriptive(result); setCandidate(null); } else { setCandidate(result); setDescriptive(null); } onChanged?.(); } }} className="border px-4 py-2 text-sm">Preview comparison</button>
+        <button disabled={!token || busy} onClick={async () => { const result = await post("/api/monitor/preview", conversation ? conversationMonitorRequest(form) : monitorRequest(form)); if (result) { if (result.state === "descriptive") { setDescriptive(result); setCandidate(null); } else { setCandidate(result); setDescriptive(null); } onChanged?.(); } }} className="border px-4 py-2 text-sm">{conversation ? "Run historical comparison" : "Preview comparison"}</button>
         {candidate && <button disabled={busy} onClick={async () => {
           const activated = await post("/api/monitor/activate", { policyId: candidate.policy.policy_id, expectedActivePolicyId: active?.policy?.policy_id || null });
           if (activated) { setActive(activated); setCandidate(null); onChanged?.(); }

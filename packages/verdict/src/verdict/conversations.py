@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from datetime import timezone
 
 from verdict.redaction import redact
@@ -22,6 +23,7 @@ _ISSUES = {
     "unknown_message_status", "truncated_transcript", "unknown_end_status",
     "invalid_end_time",
 }
+_LABEL_KEY = re.compile(r"[a-z][a-z0-9_]{0,31}\Z")
 
 
 def _json(value: object) -> str:
@@ -92,6 +94,19 @@ def validate_conversation(value: dict) -> dict:
         raise ValueError("invalid end status")
     if issues:
         end_status = "incomplete"
+    raw_labels = value.get("labels", {})
+    if not isinstance(raw_labels, dict) or len(raw_labels) > 8:
+        raise ValueError("invalid conversation labels")
+    labels = {}
+    for key, raw_label in raw_labels.items():
+        if not isinstance(key, str) or _LABEL_KEY.fullmatch(key) is None:
+            raise ValueError("invalid conversation label key")
+        if not isinstance(raw_label, str) or len(raw_label.encode("utf-8")) > 128:
+            raise ValueError("invalid conversation label value")
+        label = _text(raw_label)
+        if len(label.encode("utf-8")) > 128:
+            raise ValueError("invalid conversation label value")
+        labels[key] = label
     result = {
         "id": value["id"],
         "tenant_id": value["tenant_id"],
@@ -101,6 +116,8 @@ def validate_conversation(value: dict) -> dict:
         "end_status": end_status,
         "input_issues": sorted(set(issues)),
     }
+    if labels:
+        result["labels"] = {key: labels[key] for key in sorted(labels)}
     payload = _json(result)
     if len(payload.encode("utf-8")) > MAX_CONVERSATION_BYTES:
         raise ValueError("conversation exceeds limit")
@@ -189,6 +206,7 @@ def conversation_from_voice(record: dict, context: ImportContext) -> dict | None
             "event_at": _time(source_time),
             "end_status": end_status,
             "input_issues": sorted(set(issues)),
+            **({"labels": record["labels"]} if "labels" in record else {}),
         }
     )
 

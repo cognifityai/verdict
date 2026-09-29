@@ -195,3 +195,57 @@ async def test_review_and_preview_page_after_5000_conversations(tmp_path):
         assert preview.status_code == review.status_code == 200
         assert preview.json()["plannedCalls"] == 1
         assert [row["id"] for row in review.json()["conversations"]] == [f"{5000:032x}"]
+
+
+@pytest.mark.asyncio
+async def test_monitor_previews_current_conversation_grades_without_activation(tmp_path):
+    path = tmp_path / "comparison.db"
+    store = SQLiteStorage(str(path))
+    rubric = validate_rubric({
+        "name": "quality", "version": "1", "target": "conversation",
+        "dimensions": [{"name": "helpful", "description": "Addresses the request."}],
+    })
+    identity = {"provider": "local", "model": "synthetic", "rubric_fingerprint": rubric["fingerprint"],
+                "prompt_version": "conversation_v1", "max_output_tokens": 2048}
+    grades = []
+    for index, (event_at, state) in enumerate([
+        ("2026-09-01T12:00:00Z", "pass"), ("2026-09-03T12:00:00Z", "fail"),
+    ]):
+        row = validate_conversation({
+            "id": f"{index + 1:032x}", "tenant_id": "alpha", "source_scope": "b" * 16,
+            "messages": [{"role": "user", "content": "Question."},
+                         {"role": "assistant", "content": "Answer."}],
+            "event_at": event_at, "end_status": "complete", "input_issues": [],
+            "labels": {"group": "one"},
+        })
+        store.save_conversation(row)
+        result = validate_assessment({
+            "tenant_id": "alpha", "conversation_id": row["id"], "revision": row["revision"],
+            "target_position": None, "rubric": rubric, "evaluator": identity,
+            "status": "completed", "dimensions": {"helpful": {"state": state,
+            "reason": "Synthetic judgment."}}, "findings": [],
+            "evaluated_at": "2026-09-05T00:00:00Z",
+        }, row)
+        store.save_conversation_assessment(result)
+        grades.append(result)
+    store.close()
+    app = create_app(storage=f"sqlite:///{path}", tenant_id="alpha")
+    payload = {"analysisUnit": "conversation", "referenceStart": "2026-09-01T00:00:00Z",
+               "referenceEnd": "2026-09-03T00:00:00Z", "currentStart": "2026-09-03T00:00:00Z",
+               "currentEnd": "2026-09-05T00:00:00Z",
+               "evaluatorFingerprint": grades[0]["evaluator_fingerprint"],
+               "dimension": "helpful", "labelKey": "group"}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1") as client:
+        denied = await client.post("/api/monitor/preview", json=payload)
+        assert denied.status_code == 403
+        token = (await client.get("/api/setup/token")).json()["setupToken"]
+        response = await client.post("/api/monitor/preview", json=payload,
+                                     headers={"X-Verdict-Setup": token})
+        assert response.status_code == 200
+        body = response.json()
+        assert body["unit"] == "conversation"
+        assert body["reference"]["passRate"] == 1.0
+        assert body["current"]["passRate"] == 0.0
+        assert body["effect"] == -1.0
+        assert body["groups"][0]["label"] == "one"
+        assert "pValue" not in body and "alert" not in body

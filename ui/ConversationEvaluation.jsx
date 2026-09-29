@@ -112,6 +112,7 @@ export function ConversationEvaluation({ root, token, provider, model, providerS
     </section>
     {preview && <section className="border p-5 space-y-3" style={{ borderColor: C.border, background: C.panel }}>
       <h3 className="font-semibold">Preview · {preview.target} rubric</h3>
+      <p className="text-xs font-mono break-all" style={{ color: C.sub }}>Evaluator fingerprint for Monitor: {preview.evaluatorFingerprint}</p>
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-sm">{[["Conversations scanned", preview.scannedConversations], ["Eligible targets", preview.eligibleTargets], ["Already graded", preview.alreadyJudged], ["Planned calls", preview.plannedCalls]].map(([label, value]) => <div key={label} className="border p-3" style={{ borderColor: C.border }}><div style={{ color: C.sub }}>{label}</div><strong>{value}</strong></div>)}</div>
       <p className="text-sm" style={{ color: C.sub }}>Not evaluable: {Object.entries(preview.notEvaluableReasons).map(([reason, count]) => `${reason}: ${count}`).join(" · ") || "none"}. Retryable judge errors: {preview.retryableErrors}.</p>
       {!current && <p className="text-sm" style={{ color: C.amber }}>Configuration changed. Preview again before running.</p>}
