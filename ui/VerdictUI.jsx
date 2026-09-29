@@ -1520,7 +1520,7 @@ function Judge({ data = SEED, onOpenOperations = null }) {
     return (
       <div className="space-y-5">
         <div className="text-sm" style={{ color: C.sub }}>
-          Judged responses are scored on configured rubric dimensions, with reasoning stored beside each PASS/FAIL decision.
+          Judged responses are scored on configured rubric dimensions. Some judges include explanations; Jev returns labels only.
         </div>
         <Panel className="p-5">
           <div className="flex items-start gap-3">
@@ -1547,7 +1547,7 @@ function Judge({ data = SEED, onOpenOperations = null }) {
   return (
     <div className="space-y-5">
       <div className="text-sm" style={{ color: C.sub }}>
-        Judged responses are scored on configured rubric dimensions, with reasoning stored beside each PASS/FAIL decision.
+        Judged responses are scored on configured rubric dimensions. Some judges include explanations; Jev returns labels only.
       </div>
       <Panel className="p-4">
         <div className="font-semibold text-sm">Evaluation coverage</div>

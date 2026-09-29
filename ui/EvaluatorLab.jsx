@@ -14,7 +14,11 @@ const DEFAULT_PREFERENCES = {
   provider: "anthropic", model: "claude-haiku-4-5", unit: "trace",
   includeToolCounts: false, judgeAll: true, maxCalls: 100,
 };
-const PROVIDERS = ["anthropic", "openai", "google"];
+const PROVIDERS = ["anthropic", "openai", "google", "jev"];
+const DEFAULT_MODELS = {
+  anthropic: "claude-haiku-4-5", openai: "gpt-4o-mini",
+  google: "gemini-2.5-flash", jev: "jev-1.13.0",
+};
 
 function readPreferences() {
   if (typeof window === "undefined") return DEFAULT_PREFERENCES;
@@ -27,9 +31,10 @@ function readPreferences() {
       provider: PROVIDERS.includes(saved.provider) ? saved.provider : DEFAULT_PREFERENCES.provider,
       model: typeof saved.model === "string" && saved.model.length > 0
         && new TextEncoder().encode(saved.model).length <= 256
-        ? saved.model : DEFAULT_PREFERENCES.model,
+        ? saved.model : saved.provider === "jev" ? DEFAULT_MODELS.jev : DEFAULT_PREFERENCES.model,
       unit: ["trace", "agent_turn", "conversation"].includes(saved.unit) ? saved.unit : DEFAULT_PREFERENCES.unit,
-      includeToolCounts: typeof saved.includeToolCounts === "boolean"
+      includeToolCounts: saved.provider === "jev" ? false
+        : typeof saved.includeToolCounts === "boolean"
         ? saved.includeToolCounts : DEFAULT_PREFERENCES.includeToolCounts,
       judgeAll: typeof saved.judgeAll === "boolean" ? saved.judgeAll : DEFAULT_PREFERENCES.judgeAll,
       maxCalls: Number.isInteger(saved.maxCalls) && saved.maxCalls >= 1 && saved.maxCalls <= 10000
@@ -63,6 +68,13 @@ export function EvaluatorLab({ configUrl, onOpenEvaluated }) {
   const [evaluationElapsedSeconds, setEvaluationElapsedSeconds] = useState(0);
   const [error, setError] = useState(null);
   const requestInFlight = useRef(false);
+  const changeProvider = (next) => {
+    updatePreferences({ provider: next,
+      ...(next === "jev" ? { model: DEFAULT_MODELS.jev, includeToolCounts: false }
+        : provider === "jev" ? { model: DEFAULT_MODELS[next] || "" } : {}),
+    });
+    setPreview(null); setCalibration(null); setConfirmed(false);
+  };
   useEffect(() => {
     if (typeof window === "undefined") return;
     try { window.sessionStorage.setItem(PREFERENCES_KEY, JSON.stringify(preferences)); }
@@ -112,15 +124,18 @@ export function EvaluatorLab({ configUrl, onOpenEvaluated }) {
   const busy = busyAction != null;
   const evaluationRunning = busyAction === "evaluation";
   const destinationLabel = providerState?.customEndpointConfigured
-    ? "the configured OpenAI-compatible endpoint"
-    : provider;
+    ? provider === "anthropic" ? "the configured Anthropic endpoint" : "the configured OpenAI-compatible endpoint"
+    : provider === "jev" ? "Jev" : provider;
+  const calibrationPreviewCurrent = calibration?.previewKey === JSON.stringify({
+    config: payload(), labelSetPath,
+  });
   if (unit === "conversation") {
     if (environment && !environment.conversationEvalAvailable) return <section role="alert" className="max-w-5xl border p-5" style={{ borderColor: C.amber, background: C.panel }}>
       Conversation grading requires matching Verdict core and eval packages. Install the same release of both, then reload.
       <button className="block underline mt-3" onClick={() => updatePreferences({ unit: "trace" })}>Return to Trace evaluation</button>
     </section>;
     return <ConversationEvaluation root={root} token={token} provider={provider} model={model}
-      providerState={providerState} updatePreferences={updatePreferences} />;
+      providerState={providerState} updatePreferences={updatePreferences} changeProvider={changeProvider} />;
   }
   return <fieldset disabled={busy} className="max-w-5xl space-y-4" style={{ border: 0, margin: 0, padding: 0 }}>
     <section className="border p-5" style={{ borderColor: C.border, background: C.panel }}>
@@ -129,46 +144,49 @@ export function EvaluatorLab({ configUrl, onOpenEvaluated }) {
       <p className="text-sm mt-2" style={{ color: C.sub }}>Choose provider Trace for individual model calls or Agent Turn for a completed, untruncated request and final output. Optional recorded tool-event counts can accompany a Turn; direct origin labels describe only the observed outer dispatch and cannot verify downstream protocols, citations, or factual claims. Preview does not send data externally.</p>
       <div className="grid sm:grid-cols-2 gap-4 mt-5">
         <label className="text-sm">Evaluation unit<select value={unit} onChange={(event) => { updatePreferences({ unit: event.target.value }); setTurnCursor(null); setPreview(null); setConfirmed(false); }} className="block w-full border p-2 mt-1 bg-transparent"><option value="trace">Provider Trace</option><option value="agent_turn">Agent Turn (final output)</option><option value="conversation">Conversation or reply</option></select></label>
-        <label className="text-sm">Provider<select value={provider} onChange={(event) => updatePreferences({ provider: event.target.value })} className="block w-full border p-2 mt-1 bg-transparent">{PROVIDERS.map((name) => <option key={name} value={name}>{name === "openai" ? "openai / compatible endpoint" : name}</option>)}</select></label>
+        <label className="text-sm">Provider<select value={provider} onChange={(event) => changeProvider(event.target.value)} className="block w-full border p-2 mt-1 bg-transparent">{PROVIDERS.map((name) => <option key={name} value={name}>{name === "openai" ? "openai / compatible endpoint" : name === "jev" ? "Jev" : name}</option>)}</select></label>
         <label className="text-sm">Model<input value={model} onChange={(event) => updatePreferences({ model: event.target.value })} className="block w-full border p-2 mt-1 bg-transparent" /></label>
         <label className="text-sm">Rubric name<input value={rubricName} onChange={(event) => setRubricName(event.target.value)} className="block w-full border p-2 mt-1 bg-transparent" /></label>
         <label className="text-sm">Rubric version<input value={rubricVersion} onChange={(event) => setRubricVersion(event.target.value)} className="block w-full border p-2 mt-1 bg-transparent" /></label>
         <label className="text-sm">Evaluation scope<select value={judgeAll ? "all" : "limit"} onChange={(event) => updatePreferences({ judgeAll: event.target.value === "all" })} className="block w-full border p-2 mt-1 bg-transparent"><option value="all">All eligible in this bounded scan</option><option value="limit">Limit judge calls</option></select>{!judgeAll && <input aria-label="Maximum judge calls" type="number" min="1" max="10000" value={maxCalls} onChange={(event) => updatePreferences({ maxCalls: Number(event.target.value) })} className="block w-full border p-2 mt-2 bg-transparent" />}<span className="block text-xs mt-1" style={{ color: C.faint }}>{unit === "agent_turn" ? "Scans at most 100 candidate Turns per page, including ineligible Turns. Continue to older Turns explicitly." : "Scans at most 10,000 Traces."}</span></label>
-        <div className="text-sm"><div>Secret reference</div><div className="border p-2 mt-1 font-mono" style={{ color: providerState?.configured ? C.green : C.amber }}>{providerState?.secretReference || "loading"} · {providerState?.configured ? "configured" : "not configured"}{providerState?.customEndpointConfigured ? " · custom endpoint configured by OPENAI_BASE_URL" : ""}</div></div>
+        <div className="text-sm"><div>Secret reference</div><div className="border p-2 mt-1 font-mono" style={{ color: providerState?.configured && providerState?.sdkAvailable !== false ? C.green : C.amber }}>{providerState?.secretReference || "loading"} · {providerState?.configured ? "configured" : "not configured"}{providerState?.sdkAvailable === false ? " · install Jev SDK" : ""}{providerState?.customEndpointConfigured ? " · custom endpoint configured by OPENAI_BASE_URL" : ""}</div></div>
       </div>
-      {unit === "agent_turn" && <label className="flex gap-2 mt-4 text-sm"><input type="checkbox" checked={includeToolCounts} onChange={(event) => { updatePreferences({ includeToolCounts: event.target.checked }); setConfirmed(false); setCalibration(null); }} />Include bounded counts of recorded tool calls, results, errors, and producer-recorded dispatch origins in judge input. Turns with no recorded tool events or more than 64 total events are not evaluable in this mode. The projection adds no names, arguments, results, IDs, or URLs. Origin labels describe only the outer dispatch boundary, not unobserved downstream services or protocols.</label>}
+      {provider === "jev" && <p className="text-xs mt-3" style={{ color: C.faint }}>Enter a versioned Jev model ID (for example, jev-1.13.0). Moving aliases such as jev-latest cannot be calibrated as one fixed evaluator. Jev returns labels without explanatory reasoning.</p>}
+      {unit === "agent_turn" && provider === "jev" && <p className="text-xs mt-4" style={{ color: C.faint }}>Jev scores the Turn request and final response; recorded tool counts are unavailable for this judge.</p>}
+      {unit === "agent_turn" && provider !== "jev" && <label className="flex gap-2 mt-4 text-sm"><input type="checkbox" checked={includeToolCounts} onChange={(event) => { updatePreferences({ includeToolCounts: event.target.checked }); setConfirmed(false); setCalibration(null); }} />Include bounded counts of recorded tool calls, results, errors, and producer-recorded dispatch origins in judge input. Turns with no recorded tool events or more than 64 total events are not evaluable in this mode. The projection adds no names, arguments, results, IDs, or URLs. Origin labels describe only the outer dispatch boundary, not unobserved downstream services or protocols.</label>}
       <h3 className="font-semibold mt-5">Rubric dimensions</h3>
       <div className="mt-2 space-y-2">{dimensions.map(([name, description], index) => <div key={index} className="grid sm:grid-cols-[180px_minmax(0,1fr)] gap-2"><input value={name} onChange={(event) => setDimensions((items) => items.map((item, i) => i === index ? [event.target.value, item[1]] : item))} className="border p-2 bg-transparent text-sm" /><textarea value={description} onChange={(event) => setDimensions((items) => items.map((item, i) => i === index ? [item[0], event.target.value] : item))} className="border p-2 bg-transparent text-sm" /></div>)}</div>
-      <button disabled={!token} onClick={async () => { const request = payload(); const data = await post("/api/evaluators/preview", request, "preview"); if (data) { setPreview(data); setPreviewConfigKey(JSON.stringify(request)); setResult(null); setConfirmed(false); } }} className="mt-5 border px-4 py-2 text-sm">Preview eligibility and cost estimate</button>
+      <button disabled={!token} onClick={async () => { const request = payload(); const data = await post("/api/evaluators/preview", request, "preview"); if (data) { setPreview(data); setPreviewConfigKey(JSON.stringify(request)); setResult(null); setConfirmed(false); } }} className="mt-5 border px-4 py-2 text-sm">Preview eligible calls</button>
     </section>
     {preview && <section className="border p-5" style={{ borderColor: C.border, background: C.panel }}>
       <div className="text-xs" style={{ color: C.sub }}>Unit: {preview.unit === "agent_turn" ? "Agent Turn" : "provider Trace"} · {preview.unit === "agent_turn" ? preview.availableTurns : preview.availableTraces} tenant-visible candidates in this scan.</div>
-      <div className="grid sm:grid-cols-5 gap-3"><Metric label="Eligible" value={preview.eligible} /><Metric label="Already evaluated by this evaluator" value={preview.alreadyJudged} /><Metric label="Not evaluable" value={preview.notEvaluable} /><Metric label="Planned calls" value={preview.plannedCalls} /><Metric label="Cost estimate (not a cap)" value={preview.estimatedMaximumCostUsd == null ? "Unavailable" : `$${preview.estimatedMaximumCostUsd.toFixed(4)}`} /></div>
-      <div className="text-xs mt-3" style={{ color: C.faint }}>Rough static-price estimate from text length and a {preview.maximumOutputTokens.toLocaleString()}-token output allowance. Actual tokenization and provider billing can exceed it.</div>
+      <div className="grid sm:grid-cols-5 gap-3"><Metric label="Eligible" value={preview.eligible} /><Metric label="Already evaluated by this evaluator" value={preview.alreadyJudged} /><Metric label="Not evaluable" value={preview.notEvaluable} /><Metric label="Planned calls" value={preview.plannedCalls} /><Metric label={preview.estimatedMaximumCostUsd == null ? "Provider cost" : "Cost estimate (not a cap)"} value={preview.estimatedMaximumCostUsd == null ? "Unavailable" : `$${preview.estimatedMaximumCostUsd.toFixed(4)}`} /></div>
+      <div className="text-xs mt-3" style={{ color: C.faint }}>{preview.maximumOutputTokens == null ? "Provider pricing unavailable in Verdict; check Jev usage with the provider." : `Rough static-price estimate from text length and a ${preview.maximumOutputTokens.toLocaleString()}-token output allowance. Actual tokenization and provider billing can exceed it.`}</div>
       {preview.rubric && <div className="text-sm mt-3" style={{ color: C.sub }}>Evaluated dimensions: {preview.rubric.dimensions.join(" · ")}</div>}
       {preview.rubric?.skippedDimensions?.length > 0 && <div className="text-sm mt-2" style={{ color: C.amber }}>Skipped without retrieved context: {preview.rubric.skippedDimensions.join(" · ")}</div>}
       {preview.unit === "agent_turn" && <div className="text-xs mt-2" style={{ color: C.sub }}>Tool evidence: {preview.toolEvidence === "counts_v1" ? "recorded counts and direct dispatch origins only; no downstream or source verification" : "not included"}.</div>}
       <div className="text-xs mt-2" style={{ color: C.faint }}>Coverage applies to this exact provider, model, rubric, version, dimensions, and evaluator configuration. Results from other evaluators remain separate.</div>
       <div className="text-sm mt-3" style={{ color: C.sub }}>Not evaluable: {Object.entries(preview.notEvaluableReasons).map(([reason, count]) => `${reason}: ${count}`).join(" · ") || "none"}</div>
       {!previewCurrent && <div className="text-sm mt-3" style={{ color: C.amber }}>Configuration changed. Preview again before approval.</div>}
-      <label className="flex gap-2 mt-4 text-sm"><input disabled={!previewCurrent} type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} />I approve sending the selected redacted {unit === "agent_turn" ? `Turn request/final output${preview.toolEvidence === "counts_v1" ? " and recorded tool-event counts" : ""}` : "Trace prompt/response"} evidence to {destinationLabel} for the displayed call count. The cost is an estimate, not a billing cap.</label>
-      <button disabled={!previewCurrent || !confirmed || !providerState?.configured || preview.plannedCalls === 0} onClick={async () => { const data = await post("/api/evaluators/run", { ...payload(), planFingerprint: preview.planFingerprint, ...(unit === "agent_turn" ? { plannedTurns: preview.plannedTurns } : { plannedTraces: preview.plannedTraces }), confirmExternalEgress: true }, "evaluation"); if (data) setResult(data); }} className="mt-4 px-4 py-2 text-sm" style={{ background: C.green, color: "#0b0e0d" }}>{evaluationRunning ? <span className="flex items-center gap-2"><LoaderCircle aria-hidden="true" size={15} className="animate-spin" />Running {preview.plannedCalls.toLocaleString()} judge calls…</span> : `Run ${preview.plannedCalls} judge calls`}</button>
+      <label className="flex gap-2 mt-4 text-sm"><input disabled={!previewCurrent} type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} />I approve sending the selected redacted {unit === "agent_turn" ? `Turn request/final output${preview.toolEvidence === "counts_v1" ? " and recorded tool-event counts" : ""}` : "Trace prompt/response"} evidence to {preview.destination || destinationLabel} for the displayed call count. {preview.estimatedMaximumCostUsd == null ? "Verdict cannot estimate provider charges for this judge." : "The cost is an estimate, not a billing cap."}</label>
+      <button disabled={!previewCurrent || !confirmed || !providerState?.configured || providerState?.sdkAvailable === false || preview.plannedCalls === 0} onClick={async () => { const data = await post("/api/evaluators/run", { ...payload(), planFingerprint: preview.planFingerprint, ...(unit === "agent_turn" ? { plannedTurns: preview.plannedTurns } : { plannedTraces: preview.plannedTraces }), confirmExternalEgress: true }, "evaluation"); if (data) setResult(data); }} className="mt-4 px-4 py-2 text-sm" style={{ background: C.green, color: "#0b0e0d" }}>{evaluationRunning ? <span className="flex items-center gap-2"><LoaderCircle aria-hidden="true" size={15} className="animate-spin" />Running {preview.plannedCalls.toLocaleString()} judge calls…</span> : `Run ${preview.plannedCalls} judge calls`}</button>
       {preview.unit === "agent_turn" && preview.hasMore && <button className="ml-3 border px-4 py-2 text-sm" onClick={async () => { const next = preview.nextCursor; const request = payload(next); const data = await post("/api/evaluators/preview", request, "preview"); if (data) { setTurnCursor(next); setPreview(data); setPreviewConfigKey(JSON.stringify(request)); setResult(null); setConfirmed(false); } }}>Preview older Turns</button>}
       {evaluationRunning && <div role="status" aria-live="polite" className="border p-4 mt-4 flex gap-3 text-sm" style={{ borderColor: C.green }}><LoaderCircle aria-hidden="true" size={18} className="animate-spin shrink-0" style={{ color: C.green }} /><div><div className="font-semibold">Evaluation running · {preview.plannedCalls.toLocaleString()} planned calls · elapsed {formatElapsed(evaluationElapsedSeconds)}</div><div className="text-xs mt-1" style={{ color: C.sub }}>Completed results are saved as they arrive. Final totals will appear here when the run finishes.</div></div></div>}
     </section>}
     {result && <section className="border p-5" style={{ borderColor: C.border, background: C.panel }}><div className="flex gap-2 items-center"><CheckCircle2 size={16} style={{ color: result.errors || result.stale || result.inProgress ? C.amber : C.green }} /><span className="font-semibold">Evaluation completed</span></div><div className="grid sm:grid-cols-3 gap-3 mt-4"><Metric label="Eligible" value={result.eligible} /><Metric label="Evaluated now" value={result.completed} /><Metric label="Already evaluated" value={result.alreadyJudged} /><Metric label="Judge errors" value={result.errors} /><Metric label="Not evaluable" value={result.notEvaluable} /><Metric label={result.unit === "agent_turn" ? "Available Turns" : "Available traces"} value={result.unit === "agent_turn" ? result.availableTurns : result.availableTraces} />{result.unit === "agent_turn" && <Metric label="Stale during judging" value={result.stale} />}{result.unit === "agent_turn" && <Metric label="Judge busy; retry" value={result.inProgress ?? 0} />}</div><div className="text-sm mt-3" style={{ color: C.sub }}>Not evaluable: {Object.entries(result.notEvaluableReasons).map(([reason, count]) => `${reason}: ${count}`).join(" · ") || "none"}</div><div className="font-mono text-xs mt-2" style={{ color: C.faint }}>{result.evaluatorFingerprint}</div>{result.unit === "agent_turn" ? <div className="text-xs mt-3" style={{ color: C.sub }}>Current Turn scores appear on the Agent Runs detail page. Provider Trace coverage is separate.</div> : onOpenEvaluated && <button onClick={() => onOpenEvaluated(result.evaluatorId)} className="mt-4 border px-4 py-2 text-sm" style={{ borderColor: C.green, color: C.green }}>View evaluated traces</button>}</section>}
     <section className="border p-5" style={{ borderColor: C.border, background: C.panel }}>
-      <div className="text-xs font-mono" style={{ color: C.green }}>CUSTOMER LABEL CALIBRATION</div>
+      <div className="text-xs font-mono" style={{ color: C.green }}>LABEL SET CALIBRATION</div>
       <h2 className="font-semibold mt-1">Validate this evaluator against a JSONL label set</h2>
-      <p className="text-sm mt-2" style={{ color: C.sub }}>The file stays external. Verdict persists only the aggregate agreement, confidence interval, evaluator fingerprint, and set fingerprint—not raw examples or labels.</p>
+      <p className="text-sm mt-2" style={{ color: C.sub }}>The file stays local. Calibration sends its query and response text plus the rubric to the selected judge without Verdict redaction. Inspect the file before approving. Optional context and human labels are not sent. Verdict persists only aggregate results and fingerprints.</p>
       {unit === "agent_turn" && includeToolCounts && <p className="text-xs mt-2" style={{ color: C.amber }}>Label-set calibration has no recorded Turn tool counts. Turn off the tool-count option to calibrate the default judge behavior.</p>}
-      <input value={labelSetPath} onChange={(event) => setLabelSetPath(event.target.value)} placeholder="/path/to/customer-labels.jsonl" className="block w-full border p-2 mt-4 bg-transparent" />
-      <button disabled={!labelSetPath || !token || (unit === "agent_turn" && includeToolCounts)} onClick={async () => { const data = await post("/api/evaluators/calibration/preview", { ...payload(), labelSetPath }, "calibration-preview"); if (data) setCalibration({ preview: data, result: null, confirmed: false }); }} className="border px-4 py-2 text-sm mt-3">Preview label set</button>
+      <input value={labelSetPath} onChange={(event) => setLabelSetPath(event.target.value)} placeholder="/path/to/labels.jsonl" className="block w-full border p-2 mt-4 bg-transparent" />
+      <button disabled={!labelSetPath || !token || (unit === "agent_turn" && includeToolCounts)} onClick={async () => { const request = { ...payload(), labelSetPath }; const data = await post("/api/evaluators/calibration/preview", request, "calibration-preview"); if (data) setCalibration({ preview: data, previewKey: JSON.stringify({ config: payload(), labelSetPath }), result: null, confirmed: false }); }} className="border px-4 py-2 text-sm mt-3">Preview label set</button>
       {calibration?.preview && <div className="border p-4 mt-4" style={{ borderColor: C.border }}>
         <div className="text-sm">{calibration.preview.setName} · {calibration.preview.examples} examples · {calibration.preview.plannedCalls} calls</div>
         <div className="text-xs mt-2" style={{ color: C.sub }}>{Object.entries(calibration.preview.labelCounts).map(([name, count]) => `${name}: ${count}`).join(" · ")}</div>
-        <label className="flex gap-2 mt-3 text-sm"><input type="checkbox" checked={calibration.confirmed} onChange={(event) => setCalibration((value) => ({ ...value, confirmed: event.target.checked }))} />I approve sending these redacted examples to {provider} for calibration.</label>
-        <button disabled={!calibration.confirmed || !providerState?.configured || (unit === "agent_turn" && includeToolCounts)} onClick={async () => { const data = await post("/api/evaluators/calibration/run", { ...payload(), labelSetPath, confirmExternalEgress: true, minimumExamples: 30, agreementThreshold: 0.8 }, "calibration"); if (data) setCalibration((value) => ({ ...value, result: data })); }} className="px-4 py-2 text-sm mt-3" style={{ background: C.green, color: "#0b0e0d" }}>Run calibration</button>
+        {!calibrationPreviewCurrent && <div className="text-sm mt-2" style={{ color: C.amber }}>Configuration or file path changed. Preview again before approval.</div>}
+        <label className="flex gap-2 mt-3 text-sm"><input type="checkbox" disabled={!calibrationPreviewCurrent} checked={calibration.confirmed && calibrationPreviewCurrent} onChange={(event) => setCalibration((value) => ({ ...value, confirmed: event.target.checked }))} />I approve sending the query and response text in this file and the rubric without Verdict redaction to {calibration.preview.destination || destinationLabel} for calibration. Optional context and human labels stay local.</label>
+        <button disabled={!calibrationPreviewCurrent || !calibration.confirmed || !providerState?.configured || providerState?.sdkAvailable === false || (unit === "agent_turn" && includeToolCounts)} onClick={async () => { const data = await post("/api/evaluators/calibration/run", { ...payload(), labelSetPath, planFingerprint: calibration.preview.planFingerprint, confirmExternalEgress: true, minimumExamples: 30, agreementThreshold: 0.8 }, "calibration"); if (data) setCalibration((value) => ({ ...value, result: data })); }} className="px-4 py-2 text-sm mt-3" style={{ background: C.green, color: "#0b0e0d" }}>Run calibration</button>
         {calibration.result && <div className="text-sm mt-3">Status: {calibration.result.status} · example agreement {(100 * calibration.result.exampleAgreement).toFixed(1)}% · {calibration.result.totalExamples} completed · {calibration.result.errors} errors</div>}
       </div>}
     </section>
