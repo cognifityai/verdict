@@ -2358,3 +2358,30 @@ def test_basic_auth_compares_both_credentials_without_username_short_circuit(mon
 
     assert response.status_code == 401
     assert calls == [("wrong", "reviewer"), ("also-wrong", "secret")]
+
+
+def test_missing_sqlite_store_reports_a_first_run_state_without_the_path(tmp_path):
+    from fastapi.testclient import TestClient
+
+    missing = tmp_path / "not-created-yet" / "verdict.db"
+    client = TestClient(create_app(storage=str(missing)))
+
+    response = client.get("/api/data")
+
+    assert response.status_code == 503
+    assert response.json() == {"error": "data unavailable", "state": "store_not_created"}
+    assert str(tmp_path) not in response.text
+    assert not missing.exists()
+
+
+def test_unreadable_sqlite_store_is_not_reported_as_a_first_run_state(tmp_path):
+    from fastapi.testclient import TestClient
+
+    corrupt = tmp_path / "verdict.db"
+    corrupt.write_bytes(b"this is not a sqlite database" * 64)
+    client = TestClient(create_app(storage=str(corrupt)))
+
+    response = client.get("/api/data")
+
+    assert response.status_code == 503
+    assert response.json() == {"error": "data unavailable"}

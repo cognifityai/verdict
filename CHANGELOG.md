@@ -15,6 +15,19 @@ the product is refined.
   `API_KEY=`. They use the existing `<PROVIDER_KEY>` placeholder. Rows written
   by earlier releases are not rewritten. Stripe publishable keys and ordinary
   identifiers that share a prefix are left readable.
+- A new install no longer shows "Could not load the default evaluator" before
+  any data exists. `/api/data` adds `"state": "store_not_created"` to its
+  existing 503 response when the SQLite store has not been created yet; the
+  status code and error text are unchanged. A failed first load no longer claims
+  that an earlier snapshot is still displayed.
+- Settings → Data Sources shows a status line while it previews, captures, or
+  imports, and warns that large histories can take several minutes.
+- Tool, command, and test failure counts read "Not reported by source" ("—" in
+  the per-source table) when no event of that type reported success or failure,
+  instead of 0. Agent insights now include `toolOutcomesReported`,
+  `commandOutcomesReported`, and `testOutcomesReported`. Analysis snapshots saved
+  by earlier releases lack these counts and keep their stored values until the
+  analysis is run again.
 
 ## [0.1.0a23] - 2026-09-29
 

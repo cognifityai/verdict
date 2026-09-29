@@ -95,7 +95,10 @@ paths again. The header reports Agent Runs and LLM Calls separately.
 
 The Agent runs view shows source sessions, typed turns and observable events,
 tool/command failures, completion evidence, possible repeated-tool loops, and
-what cannot be evaluated. Source-identified Claude sidechains and Codex child
+what cannot be evaluated. A failure count is shown only when the source reports
+success or failure for that event type; otherwise it reads **Not reported by
+source**. Current Codex tool output and Claude Code shell commands carry no exit
+status, so their failures cannot be counted. Source-identified Claude sidechains and Codex child
 histories remain separate linked runs rather than being folded into a parent.
 A parent reference can remain unresolved if the source no longer contains that
 parent history. Local sources that do not expose a genuine provider

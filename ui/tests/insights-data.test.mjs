@@ -5,6 +5,7 @@ import {
   agentEvidenceValue,
   datasetActivitySummary,
   datasetEvidenceRows,
+  failureCountValue,
   sourceTokenValue,
 } from "../insights-data.mjs";
 
@@ -74,4 +75,14 @@ test("source token activity distinguishes unavailable, reported zero, and partia
     sourceTokenValue({ tokenUsageState: "partial", totalTokens: null }),
     "Components captured (partial)",
   );
+});
+
+test("a zero failure count needs at least one reported outcome", () => {
+  assert.equal(failureCountValue(0, 0), "Not reported by source");
+  assert.equal(failureCountValue(0, 0, "—"), "—");
+  assert.equal(failureCountValue(0, 12), 0);
+  assert.equal(failureCountValue(3, 12), 3);
+  // Snapshots written before outcome counts existed keep their stored value.
+  assert.equal(failureCountValue(0, undefined), 0);
+  assert.equal(failureCountValue(4, null), 4);
 });

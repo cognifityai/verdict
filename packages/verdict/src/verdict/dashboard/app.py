@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from verdict.analysis import analyze_agent_run
+from verdict.analysis import analyze_agent_run, outcome_reported
 from verdict.analysis_records import analysis_run_from_json
 from verdict.cluster_health import UNCLUSTERED_ID, assess_cluster_health
 from verdict.dashboard import agent_evidence_queries
@@ -1200,6 +1200,10 @@ def build_agent_insights_bundle(
                 elif event.event_type.value == "retry":
                     totals["retries"] += 1
                     source_metrics[source]["retries"] += 1
+                reported_metric = _OUTCOME_REPORTED_METRICS.get(event.event_type.value)
+                if reported_metric is not None and outcome_reported(event):
+                    totals[reported_metric] += 1
+                    source_metrics[source][reported_metric] += 1
             for name in ("tool_errors", "command_failures", "test_failures"):
                 value = analysis.metrics.get(name)
                 if isinstance(value, int):
@@ -1240,6 +1244,9 @@ def build_agent_insights_bundle(
                 "toolErrors": metrics["tool_errors"],
                 "commandFailures": metrics["command_failures"],
                 "testFailures": metrics["test_failures"],
+                "toolOutcomesReported": metrics["tool_outcomes_reported"],
+                "commandOutcomesReported": metrics["command_outcomes_reported"],
+                "testOutcomesReported": metrics["test_outcomes_reported"],
                 "inputTokens": (
                     metrics["input_tokens"] if metrics["input_tokens_known"] else None
                 ),
@@ -1332,6 +1339,9 @@ def build_agent_insights_bundle(
                 "toolErrors": totals["tool_errors"],
                 "commandFailures": totals["command_failures"],
                 "testFailures": totals["test_failures"],
+                "toolOutcomesReported": totals["tool_outcomes_reported"],
+                "commandOutcomesReported": totals["command_outcomes_reported"],
+                "testOutcomesReported": totals["test_outcomes_reported"],
                 "retries": totals["retries"],
             },
             "performance": {
@@ -1400,6 +1410,14 @@ def build_agent_insights_bundle(
     return redacted
 
 
+# Failure counts are only meaningful when the source reported outcomes.
+_OUTCOME_REPORTED_METRICS = {
+    "tool_result": "tool_outcomes_reported",
+    "command": "command_outcomes_reported",
+    "test_result": "test_outcomes_reported",
+}
+
+
 def _empty_agent_insights() -> dict:
     return {
         "schema": "agent-insights-v2",
@@ -1419,6 +1437,8 @@ def _empty_agent_insights() -> dict:
         "reliability": {
             "runOutcomes": {}, "turnOutcomes": {}, "traceOutcomes": {},
             "toolErrors": 0, "commandFailures": 0, "testFailures": 0, "retries": 0,
+            "toolOutcomesReported": 0, "commandOutcomesReported": 0,
+            "testOutcomesReported": 0,
         },
         "performance": {
             "modelCalls": 0, "toolCalls": 0, "inputTokens": None, "outputTokens": None,
@@ -2959,8 +2979,13 @@ def create_app(
             # Do NOT leak the absolute DB path in the HTTP body — log it
             # server-side and return a generic 503 so the dashboard degrades
             # gracefully instead of crashing or exposing the filesystem layout.
+            # The state lets the UI treat a store that setup has not created
+            # yet as first run rather than as a failed read.
             _log.warning("dashboard data unavailable: SQLite database not found")
-            return JSONResponse({"error": "data unavailable"}, status_code=503)
+            return JSONResponse(
+                {"error": "data unavailable", "state": "store_not_created"},
+                status_code=503,
+            )
         try:
             authorized_tenant = _authorized_tenant(request)
         except ValueError:

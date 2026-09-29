@@ -2272,3 +2272,50 @@ def test_default_capture_and_findings_path_makes_no_external_network_call(
 
     assert summary.stored == 1
     assert insights["scope"]["availableRuns"] == 1
+
+
+def _source_activity_for(tmp_path: Path, name: str, **roots: Path) -> tuple[dict, dict]:
+    from verdict.dashboard.app import build_agent_insights_bundle
+
+    database = tmp_path / f"{name}.db"
+    storage = SQLiteStorage(str(database))
+    assert capture_local_agents(storage, tenant_id="local", **roots).skipped == 0
+    storage.close()
+    insights = build_agent_insights_bundle(database, tenant="local")
+    [activity] = insights["sourceActivity"]
+    return activity, insights["reliability"]
+
+
+def test_failure_counts_state_whether_the_source_reported_any_outcome(tmp_path: Path) -> None:
+    claude_root = tmp_path / "claude"
+    _write_jsonl(claude_root / "session.jsonl", _claude_records())
+    claude, _ = _source_activity_for(tmp_path, "claude", claude_root=claude_root)
+    # The Claude tool result reports is_error=false; its Bash command has no exit status.
+    assert claude["toolOutcomesReported"] >= 1
+    assert claude["commandOutcomesReported"] == 0
+    assert claude["testOutcomesReported"] == 0
+
+    reported_root = tmp_path / "codex-reported"
+    _write_jsonl(reported_root / "session.jsonl", _codex_records())
+    reported, reported_totals = _source_activity_for(
+        tmp_path, "codex-reported", codex_root=reported_root,
+    )
+    assert reported["toolErrors"] >= 1
+    assert reported["toolOutcomesReported"] >= reported["toolErrors"]
+    assert reported_totals["toolOutcomesReported"] == reported["toolOutcomesReported"]
+
+    # Current Codex rollouts return plain text tool output without an exit code.
+    unreported_records = _codex_records()
+    for record in unreported_records:
+        payload = record.get("payload") or {}
+        if payload.get("type") == "function_call_output":
+            payload["output"] = [{"type": "input_text", "text": "Script completed\nOutput:\nok"}]
+    unreported_root = tmp_path / "codex-unreported"
+    _write_jsonl(unreported_root / "session.jsonl", unreported_records)
+    unreported, unreported_totals = _source_activity_for(
+        tmp_path, "codex-unreported", codex_root=unreported_root,
+    )
+    assert unreported["toolCalls"] >= 1
+    assert unreported["toolErrors"] == 0
+    assert unreported["toolOutcomesReported"] == 0
+    assert unreported_totals["toolOutcomesReported"] == 0
