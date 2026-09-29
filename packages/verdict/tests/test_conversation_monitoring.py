@@ -134,6 +134,21 @@ def test_labels_only_correction_removes_old_grade_from_comparison(kind, tmp_path
         assert result["groups"][0]["label"] == "two"
 
 
+def test_noncanonical_stored_event_time_cannot_enter_wrong_utc_window(tmp_path):
+    with adapter("sqlite", tmp_path) as store:
+        row = snapshot(801, "2026-09-02T12:00:00Z")
+        stored = grade(row, "pass")
+        store.save_conversation(row)
+        store.save_conversation_assessment(stored)
+        store._conn.execute(
+            "UPDATE conversation_snapshots SET payload=json_set(payload, '$.event_at', '2026-09-02T23:00:00-03:00') "
+            "WHERE tenant_id=? AND conversation_id=?", ("alpha", row["id"]),
+        )
+        with pytest.raises(ValueError, match="noncanonical event time"):
+            preview_conversation_comparison(store, tenant_id="alpha",
+                payload=request(stored["evaluator_fingerprint"], label_key=""))
+
+
 @pytest.mark.parametrize("boundary", ["2026-09-03T00:00:00Z", "2026-09-02T00:00:00Z"])
 def test_comparison_rejects_overlapping_or_reversed_windows(boundary):
     payload = request("a" * 64)

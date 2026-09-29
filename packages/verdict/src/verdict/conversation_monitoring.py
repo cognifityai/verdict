@@ -124,6 +124,8 @@ def preview_conversation_comparison(storage, *, tenant_id: str, payload: dict) -
     grade_evidence_count = 0
     for row in rows:
         event_at = row["event_at"]
+        if _boundary(event_at) != event_at:
+            raise ValueError("stored comparison row has noncanonical event time")
         if query["reference_start"] <= event_at < query["reference_end"]:
             bucket = reference
             group_side = 0

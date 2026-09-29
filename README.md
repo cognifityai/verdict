@@ -746,6 +746,8 @@ invalidates its old grade and can change a later preview. Choose narrower
 windows if they contain more than 10,000 conversations. Conversations without
 a usable source end time cannot enter a dated window. This exploratory result
 is not saved or used for alerts.
+Corrupted stored end times that are not canonical UTC make the preview fail
+closed; reimport the source record to repair its snapshot.
 - Trace Explorer pages through every stored non-judge application trace in
   30-row pages. Search and provider/content-state filters apply to the current
   page; dashboard aggregates continue to use the complete store. Selecting a
