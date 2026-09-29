@@ -11,7 +11,7 @@ ENV PYTHONUNBUFFERED=1 \
 WORKDIR /app
 
 RUN pip install --no-cache-dir \
-    "cognifity-verdict[dashboard,postgres,eval]==${VERDICT_VERSION}"
+    "cognifity-verdict[dashboard,postgres,eval,anthropic,openai,google]==${VERDICT_VERSION}"
 
 # A maintainer may place verdict.db in docker-db/ before building. A clean
 # checkout creates an empty schema through the real storage adapter instead of

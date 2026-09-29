@@ -6,8 +6,12 @@ the product is refined.
 
 ## [Unreleased]
 
+## [0.1.0a23] - 2026-09-29
+
 ### Added
 
+- The release workflow publishes the version-checked dashboard image to
+  `ghcr.io/cognifityai/verdict:0.1.0a23` after the synchronized PyPI packages.
 - Voice file import now stores a bounded, redacted current conversation snapshot
   alongside the existing completed-assistant Trace rows. Conversation reads use
   tenant-scoped cursor pages; explicit conversation deletion and normal storage
@@ -722,7 +726,8 @@ the product is refined.
   retain content must explicitly select metadata-only capture. Redaction remains
   best-effort rather than a compliance control.
 
-[Unreleased]: https://github.com/cognifityai/verdict/compare/v0.1.0a22...HEAD
+[Unreleased]: https://github.com/cognifityai/verdict/compare/v0.1.0a23...HEAD
+[0.1.0a23]: https://github.com/cognifityai/verdict/compare/v0.1.0a22...v0.1.0a23
 [0.1.0a22]: https://github.com/cognifityai/verdict/compare/v0.1.0a21...v0.1.0a22
 [0.1.0a21]: https://github.com/cognifityai/verdict/compare/v0.1.0a20...v0.1.0a21
 [0.1.0a20]: https://github.com/cognifityai/verdict/compare/v0.1.0a19...v0.1.0a20

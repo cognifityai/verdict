@@ -204,11 +204,12 @@ jobs:
           print-hash: true
 
   verify-default-container:
-    name: verify the published default container
+    name: verify and publish the default container
     needs: publish-inspect
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      packages: write
 
     steps:
       - name: Check out the release
@@ -217,7 +218,10 @@ jobs:
           persist-credentials: false
 
       - name: Build the default standalone image
-        run: docker build --pull --tag verdict-release:${GITHUB_REF_NAME} .
+        run: >-
+          docker build --pull
+          --label org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}
+          --tag verdict-release:${GITHUB_REF_NAME} .
 
       - name: Verify the installed release version
         run: |
@@ -225,3 +229,13 @@ jobs:
           docker run --rm --entrypoint python \
             verdict-release:${GITHUB_REF_NAME} -c \
             "import verdict; assert verdict.__version__ == '$expected'"
+
+      - name: Publish the verified image to GitHub Container Registry
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          image="ghcr.io/${GITHUB_REPOSITORY,,}:${version}"
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker tag "verdict-release:${GITHUB_REF_NAME}" "$image"
+          docker push "$image"
