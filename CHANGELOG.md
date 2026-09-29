@@ -31,7 +31,8 @@ the product is refined.
   and opens both current transcripts together. Numeric paired differences show
   a conservative bounded-score interval. The result is descriptive, unsaved,
   and does not claim a model winner or trigger an alert.
-  Malformed stored scores and noncanonical stored end times fail closed;
+  Malformed stored scores or score bounds fail closed, as do returned rows
+  with noncanonical stored end times;
   extremely wide valid numeric ranges retain inspectable pairs without a
   finite aggregate.
 - Conversation grade detail shows only results for its returned transcript

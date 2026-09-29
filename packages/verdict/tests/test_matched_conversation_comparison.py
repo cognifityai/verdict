@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from contextlib import contextmanager
 
@@ -247,6 +248,38 @@ def test_corrupt_boolean_score_fails_closed_at_api_boundary(tmp_path):
             "WHERE tenant_id=? AND conversation_id=?", ("alpha", right["id"]),
         )
         with pytest.raises(ValueError, match="numeric score"):
+            preview_matched_conversations(store, tenant_id="alpha",
+                payload=request(grade(left, 2, numeric=True)["evaluator_fingerprint"]))
+
+
+@pytest.mark.parametrize("kind", ["memory", "sqlite", "postgres"])
+@pytest.mark.parametrize("bound,replacement", [("min", True), ("max", True), ("min", "0"), ("max", "5")])
+def test_corrupt_numeric_rubric_bounds_fail_closed(kind, bound, replacement, tmp_path):
+    with store_for(kind, tmp_path) as store:
+        left = conversation(9620, pair="corrupt_range")
+        right = conversation(9621, pair="corrupt_range", variant="right")
+        for row, score in ((left, 2), (right, 4)):
+            store.save_conversation(row)
+            store.save_conversation_assessment(grade(row, score, numeric=True))
+        path = f"$.rubric.dimensions[0].{bound}"
+        if kind == "sqlite":
+            store._conn.execute(
+                "UPDATE conversation_assessments SET payload=json_set(payload, ?, json(?)) "
+                "WHERE tenant_id=? AND conversation_id=?",
+                (path, json.dumps(replacement), "alpha", right["id"]),
+            )
+        elif kind == "postgres":
+            store._exec(
+                "UPDATE conversation_assessments SET payload=jsonb_set(payload::jsonb, "
+                "%s::text[], %s::jsonb)::text WHERE tenant_id=%s AND conversation_id=%s",
+                (["rubric", "dimensions", "0", bound], json.dumps(replacement), "alpha", right["id"]),
+            )
+        else:
+            key = ("alpha", right["id"], grade(right, 4, numeric=True)["evaluator_fingerprint"], -1)
+            payload = json.loads(store._conversation_assessments[key])
+            payload["rubric"]["dimensions"][0][bound] = replacement
+            store._conversation_assessments[key] = json.dumps(payload)
+        with pytest.raises(ValueError, match="numeric range"):
             preview_matched_conversations(store, tenant_id="alpha",
                 payload=request(grade(left, 2, numeric=True)["evaluator_fingerprint"]))
 

@@ -109,6 +109,9 @@ def _grade(row: dict) -> dict:
     if kind == "binary" and (score is not None or direction is not None or low is not None or high is not None):
         raise ValueError("stored binary grade is invalid")
     if kind == "number":
+        if (row.get("dimension_min_type") not in {"number", "integer", "real"}
+                or row.get("dimension_max_type") not in {"number", "integer", "real"}):
+            raise ValueError("stored numeric range is invalid")
         try:
             low, high = float(low), float(high)
         except (TypeError, ValueError) as exc:

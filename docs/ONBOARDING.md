@@ -511,6 +511,9 @@ whether the variant is the assigned or actually used configuration. Verdict
 does not verify identical turns or claim a model winner. A corrected transcript
 or label invalidates its grade; the unsaved comparison must then be rerun.
 Both variants must end within the selected window, which uses source end time.
+Imported end times are normalized to UTC. A returned row with a noncanonical
+stored time is rejected, but a direct database change can make a row sort
+outside the requested window before comparison sees it.
 For extremely wide numeric rubric bounds, individual scores remain visible
 when the aggregate cannot be represented as a finite number.
 This workflow requires synchronized `0.1.0a23` core and eval builds. The

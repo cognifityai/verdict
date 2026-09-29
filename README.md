@@ -774,6 +774,9 @@ call a judge, save a result, generate an alert, verify identical interactive
 turns, or establish a model winner. Source corrections or label edits remove
 old grades and can change a later comparison; earlier reimports under the
 same source ID are overwritten and cannot be detected as duplicates.
+Imports normalize source end times to UTC before storage. A returned row with
+a noncanonical stored time is rejected. Direct changes to the database can
+make a row sort outside the requested window before comparison sees it.
 If a valid numeric rubric's bounds exceed finite aggregate arithmetic, the
 paired scores remain inspectable but the aggregate and interval are unavailable.
 - Trace Explorer pages through every stored non-judge application trace in

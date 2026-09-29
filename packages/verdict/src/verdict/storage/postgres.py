@@ -2477,10 +2477,18 @@ class PostgresStorage:
                          FROM jsonb_array_elements((grade.payload::jsonb)->'rubric'->'dimensions')
                            AS definition(value)
                         WHERE definition.value->>'name'=%s LIMIT 1) AS dimension_min,
+                      (SELECT jsonb_typeof(definition.value->'min')
+                         FROM jsonb_array_elements((grade.payload::jsonb)->'rubric'->'dimensions')
+                           AS definition(value)
+                        WHERE definition.value->>'name'=%s LIMIT 1) AS dimension_min_type,
                       (SELECT definition.value->>'max'
                          FROM jsonb_array_elements((grade.payload::jsonb)->'rubric'->'dimensions')
                            AS definition(value)
                         WHERE definition.value->>'name'=%s LIMIT 1) AS dimension_max,
+                      (SELECT jsonb_typeof(definition.value->'max')
+                         FROM jsonb_array_elements((grade.payload::jsonb)->'rubric'->'dimensions')
+                           AS definition(value)
+                        WHERE definition.value->>'name'=%s LIMIT 1) AS dimension_max_type,
                       (grade.payload::jsonb)->'dimensions'->%s->>'state' AS dimension_state,
                       (grade.payload::jsonb)->'dimensions'->%s->>'score' AS dimension_score,
                       jsonb_typeof((grade.payload::jsonb)->'dimensions'->%s->'score') AS dimension_score_type
@@ -2492,12 +2500,14 @@ class PostgresStorage:
             (value["tenant_id"], value["window_start"], value["window_end"],
              value["variant_key"], value["left_variant"], value["right_variant"], limit,
              value["dimension"], value["dimension"], value["dimension"], value["dimension"],
+             value["dimension"], value["dimension"],
              value["dimension"], value["dimension"], value["dimension"],
              value["tenant_id"], value["evaluator_fingerprint"], limit),
         )
         fields = ("id", "event_at", "revision", "labels", "end_status", "issue_count",
                   "first_user", "last_assistant", "assessment_status", "rubric_target",
-                  "dimension_type", "dimension_direction", "dimension_min", "dimension_max",
+                  "dimension_type", "dimension_direction", "dimension_min", "dimension_min_type",
+                  "dimension_max", "dimension_max_type",
                   "dimension_state", "dimension_score", "dimension_score_type")
         return [dict(zip(fields, row, strict=True)) for row in rows]
 

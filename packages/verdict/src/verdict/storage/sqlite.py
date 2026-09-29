@@ -2540,9 +2540,15 @@ class SQLiteStorage:
                    (SELECT json_extract(definition.value, '$.min')
                       FROM json_each(grade.payload, '$.rubric.dimensions') AS definition
                      WHERE json_extract(definition.value, '$.name')=? LIMIT 1) AS dimension_min,
+                   (SELECT json_type(definition.value, '$.min')
+                      FROM json_each(grade.payload, '$.rubric.dimensions') AS definition
+                     WHERE json_extract(definition.value, '$.name')=? LIMIT 1) AS dimension_min_type,
                    (SELECT json_extract(definition.value, '$.max')
                       FROM json_each(grade.payload, '$.rubric.dimensions') AS definition
                      WHERE json_extract(definition.value, '$.name')=? LIMIT 1) AS dimension_max,
+                   (SELECT json_type(definition.value, '$.max')
+                      FROM json_each(grade.payload, '$.rubric.dimensions') AS definition
+                     WHERE json_extract(definition.value, '$.name')=? LIMIT 1) AS dimension_max_type,
                    json_extract(grade.payload, ?) AS dimension_state,
                    json_extract(grade.payload, ?) AS dimension_score,
                    json_type(grade.payload, ?) AS dimension_score_type
@@ -2558,6 +2564,7 @@ class SQLiteStorage:
             f'$.labels."{value["variant_key"]}"', value["left_variant"],
             value["right_variant"], limit,
             value["dimension"], value["dimension"], value["dimension"], value["dimension"],
+            value["dimension"], value["dimension"],
             f'$.dimensions."{value["dimension"]}".state',
             f'$.dimensions."{value["dimension"]}".score',
             f'$.dimensions."{value["dimension"]}".score',
