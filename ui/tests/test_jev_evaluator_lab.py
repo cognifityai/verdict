@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import datetime, timezone
 
+import httpx
 import httpx2
 import pytest
 import typesafe_sdk
+from verdict.dashboard.app import create_app
 from verdict.dashboard.evaluator_lab import (
     evaluator_environment,
     execute_calibration,
@@ -24,7 +27,7 @@ from verdict.evidence import (
     SourceSession,
 )
 from verdict.schema import JudgmentStatus, Trace, Verdict
-from verdict.storage import InMemoryStorage
+from verdict.storage import InMemoryStorage, SQLiteStorage
 
 
 def _config() -> dict:
@@ -44,6 +47,7 @@ def _wire_sdk(monkeypatch, *, omit: str | None = None):
 
     def respond(request):
         body = json.loads(request.content)
+        body["__request_url__"] = str(request.url)
         requests.append(body)
         answers = {name: {
             "type": "choice", "choice": "pass", "confidence": 0.8,
@@ -199,6 +203,193 @@ def test_jev_calibration_uses_same_judge(monkeypatch, tmp_path):
     assert result["totalExamples"] == 1
     assert result["errors"] == 0
     assert len(requests) == 1
+    storage = InMemoryStorage()
+    storage.insert_trace(_trace())
+    production = preview_evaluation(storage, tenant_id="local", config=_config())
+    judged = execute_evaluation(
+        storage, tenant_id="local", confirm_external_egress=True,
+        config={**_config(), "planFingerprint": production["planFingerprint"],
+                "plannedTraces": production["plannedTraces"]},
+    )
+    assert result["evaluatorFingerprint"] == judged["evaluatorFingerprint"]
+
+
+def test_jev_calibration_uses_production_context_free_evidence(monkeypatch, tmp_path):
+    monkeypatch.setenv("TYPESAFE_API_KEY", "ts_test_key")
+    requests = _wire_sdk(monkeypatch)
+    labels = tmp_path / "labels.jsonl"
+    labels.write_text(
+        '{"sentinel_id":"one","query":"Contact alice@example.com",'
+        '"response":"Answered alice@example.com",'
+        '"context":"Context with bob@example.com",'
+        '"labels":{"relevance":"pass","completeness":"pass"}}\n'
+    )
+    storage = InMemoryStorage()
+    result = execute_calibration(
+        storage, path=labels, config=_config(),
+        confirm_external_egress=True, minimum_examples=1,
+    )
+    assert result["errors"] == 0
+    assert requests[0]["state"]["user_query"] == "Contact alice@example.com"
+    assert requests[0]["state"]["assistant_response"] == "Answered alice@example.com"
+    assert requests[0]["state"]["retrieved_context"] == ""
+    assert "alice@example.com" not in str(storage.list_evaluator_health(limit=10))
+
+
+def test_jev_calibration_rejects_labels_for_dimensions_absent_from_production(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.setenv("TYPESAFE_API_KEY", "ts_test_key")
+    labels = tmp_path / "labels.jsonl"
+    labels.write_text(
+        '{"sentinel_id":"one","query":"q","response":"a",'
+        '"context":"evidence","labels":{"groundedness":"pass"}}\n'
+    )
+    config = {**_config(), "rubric": {
+        "name": "quality", "version": "1", "dimensions": [
+            {"name": "groundedness", "description": "Supported by context.",
+             "requiresContext": True},
+            {"name": "relevance", "description": "Answers the request."},
+        ],
+    }}
+    with pytest.raises(ValueError, match="production evaluator"):
+        preview_calibration(path=labels, config=config)
+
+
+def test_jev_endpoint_is_approved_identity_and_run_target(monkeypatch):
+    monkeypatch.setenv("TYPESAFE_API_KEY", "ts_test_key")
+    monkeypatch.setenv("TYPESAFE_BASE_URL", "https://judge-a.example/api/")
+    requests = _wire_sdk(monkeypatch)
+    storage = InMemoryStorage()
+    storage.insert_trace(_trace())
+    config = _config()
+    preview = preview_evaluation(storage, tenant_id="local", config=config)
+    assert preview["destination"] == "https://judge-a.example/api"
+    jev = next(item for item in evaluator_environment()["providers"]
+               if item["provider"] == "jev")
+    assert "destination" not in jev
+
+    monkeypatch.setenv("TYPESAFE_BASE_URL", "https://judge-b.example/api")
+    other_preview = preview_evaluation(storage, tenant_id="local", config=config)
+    assert other_preview["planFingerprint"] != preview["planFingerprint"]
+    with pytest.raises(ValueError, match="approved preview"):
+        execute_evaluation(
+            storage, tenant_id="local", confirm_external_egress=True,
+            config={**config, "planFingerprint": preview["planFingerprint"],
+                    "plannedTraces": preview["plannedTraces"]},
+        )
+    assert requests == []
+
+    execute_evaluation(
+        storage, tenant_id="local", confirm_external_egress=True,
+        config={**config, "planFingerprint": other_preview["planFingerprint"],
+                "plannedTraces": other_preview["plannedTraces"]},
+    )
+    assert requests[0]["state"]["assistant_response"] == "Returns are allowed."
+    assert requests[0]["__request_url__"].startswith("https://judge-b.example/api/")
+    [saved] = storage.list_judgments_for_trace("trace-1")
+    assert saved.evaluator_config["base_url"] == "https://judge-b.example/api"
+
+
+def test_jev_calibration_rejects_changed_approved_file_or_destination(monkeypatch, tmp_path):
+    monkeypatch.setenv("TYPESAFE_API_KEY", "ts_test_key")
+    monkeypatch.setenv("TYPESAFE_BASE_URL", "https://judge-a.example")
+    requests = _wire_sdk(monkeypatch)
+    labels = tmp_path / "labels.jsonl"
+    labels.write_text(
+        '{"sentinel_id":"one","query":"q","response":"a",'
+        '"labels":{"relevance":"pass","completeness":"pass"}}\n'
+    )
+    config = _config()
+    preview = preview_calibration(path=labels, config=config)
+    assert preview["destination"] == "https://judge-a.example"
+
+    monkeypatch.setenv("TYPESAFE_BASE_URL", "https://judge-b.example")
+    with pytest.raises(ValueError, match="approved preview"):
+        execute_calibration(
+            InMemoryStorage(), path=labels,
+            config={**config, "planFingerprint": preview["planFingerprint"]},
+            confirm_external_egress=True, minimum_examples=1,
+        )
+    monkeypatch.setenv("TYPESAFE_BASE_URL", "https://judge-a.example")
+    labels.write_text(labels.read_text().replace('"query":"q"', '"query":"changed"'))
+    with pytest.raises(ValueError, match="approved preview"):
+        execute_calibration(
+            InMemoryStorage(), path=labels,
+            config={**config, "planFingerprint": preview["planFingerprint"]},
+            confirm_external_egress=True, minimum_examples=1,
+        )
+    assert requests == []
+
+
+def test_dashboard_api_calibration_approval_and_health_match_production(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.setenv("TYPESAFE_API_KEY", "ts_test_key")
+    monkeypatch.setenv("TYPESAFE_BASE_URL", "https://judge-a.example")
+    requests = _wire_sdk(monkeypatch)
+    labels = tmp_path / "labels.jsonl"
+    labels.write_text(
+        '{"sentinel_id":"one","query":"Contact alice@example.com",'
+        '"response":"A reply",'
+        '"labels":{"relevance":"pass","completeness":"pass"}}\n'
+    )
+    db = tmp_path / "dashboard.db"
+    storage = SQLiteStorage(str(db))
+    storage.insert_trace(_trace())
+    storage.close()
+    app = create_app(storage=f"sqlite:///{db}", tenant_id="local")
+    config = _config()
+
+    async def run():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            headers = {"X-Verdict-Setup": token}
+            preview = await client.post(
+                "/api/evaluators/calibration/preview", headers=headers,
+                json={**config, "labelSetPath": str(labels)},
+            )
+            assert preview.status_code == 200
+            assert preview.json()["destination"] == "https://judge-a.example"
+            monkeypatch.setenv("TYPESAFE_BASE_URL", "https://judge-b.example")
+            stale = await client.post(
+                "/api/evaluators/calibration/run", headers=headers,
+                json={**config, "labelSetPath": str(labels),
+                      "planFingerprint": preview.json()["planFingerprint"],
+                      "confirmExternalEgress": True, "minimumExamples": 1},
+            )
+            assert stale.status_code == 400
+            assert requests == []
+            monkeypatch.setenv("TYPESAFE_BASE_URL", "https://judge-a.example")
+            approved = await client.post(
+                "/api/evaluators/calibration/run", headers=headers,
+                json={**config, "labelSetPath": str(labels),
+                      "planFingerprint": preview.json()["planFingerprint"],
+                      "confirmExternalEgress": True, "minimumExamples": 1},
+            )
+            assert approved.status_code == 200
+            production_preview = await client.post(
+                "/api/evaluators/preview", headers=headers, json=config,
+            )
+            assert production_preview.status_code == 200
+            judged = await client.post(
+                "/api/evaluators/run", headers=headers,
+                json={**config,
+                      "planFingerprint": production_preview.json()["planFingerprint"],
+                      "plannedTraces": production_preview.json()["plannedTraces"],
+                      "confirmExternalEgress": True},
+            )
+            assert judged.status_code == 200
+            data = await client.get("/api/data", headers=headers)
+            return approved.json(), judged.json(), data.text
+
+    health, judged, data = asyncio.run(run())
+    assert health["evaluatorFingerprint"] == judged["evaluatorFingerprint"]
+    assert requests[0]["state"]["user_query"] == "Contact alice@example.com"
+    assert requests[0]["__request_url__"].startswith("https://judge-a.example/")
+    assert "alice@example.com" not in data
+    assert b"alice@example.com" not in db.read_bytes()
 
 
 def test_jev_rejects_tool_counts_and_reports_secret_reference(monkeypatch):

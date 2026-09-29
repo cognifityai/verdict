@@ -40,11 +40,18 @@ approve the external transfer. The equivalent CLI choice is
 `verdict-pipeline --judge-provider jev --judge-model jev-1.13.0`; its optional
 judge-telemetry capture flag is unavailable for Jev.
 
-Jev receives redacted request and response text as a structured state and one
-Choice question per rubric dimension. It returns PASS, FAIL, or UNCLEAR without
+For production judgments, Jev receives redacted request and response text as a
+structured state and one Choice question per rubric dimension. It returns PASS,
+FAIL, or UNCLEAR without
 explanatory reasoning. The requested model and exact dimension set are checked
 before a result is stored. Evaluator fingerprints separate Jev from other
-judges and prompt/rubric versions. Calibrate it on held-out human labels for
+judges, endpoint URLs, and prompt/rubric versions. Set `TYPESAFE_BASE_URL` only
+when using a custom Jev endpoint; Evaluator Lab shows the effective URL before
+approval and pins it for the call. Dashboard calibration sends label-set query
+and response text plus the rubric without Verdict redaction. It ignores optional
+context to match production judging; labels for context-required dimensions are
+rejected, and the set fingerprint excludes ignored context. Inspect the file
+before approving. Calibrate on held-out human labels for
 the intended workload before relying on its quality scores. Monitor's cohort
 comparison and Fisher test remain unchanged.
 

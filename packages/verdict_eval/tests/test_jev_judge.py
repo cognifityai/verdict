@@ -7,6 +7,7 @@ import json
 import httpx2
 import pytest
 import typesafe_sdk
+from typesafe_sdk.constants import DEFAULT_BASE_URL
 from verdict.schema import Verdict
 from verdict_eval.cli.pipeline import build_parser, main
 from verdict_eval.jev_judge import JevJudge
@@ -19,6 +20,7 @@ def _wire_judge(monkeypatch, *, labels=None, response_model="jev-1.13.0"):
 
     def handle(request):
         body = json.loads(request.content)
+        body["__request_url__"] = str(request.url)
         requests.append(body)
         answers = {
             name: {
@@ -113,3 +115,41 @@ def test_pipeline_rejects_missing_jev_key_before_opening_storage(monkeypatch, tm
         "--judge-provider", "jev", "--judge-model", "jev-1.13.0",
     ]) == 2
     assert not path.exists()
+
+
+def test_jev_default_and_custom_endpoint_are_part_of_identity(monkeypatch):
+    monkeypatch.delenv("TYPESAFE_BASE_URL", raising=False)
+    default = JevJudge()
+    assert default.evaluator_identity()["evaluator_config"]["base_url"] == DEFAULT_BASE_URL
+    monkeypatch.setenv("TYPESAFE_BASE_URL", "  https://judge-a.example/api/  ")
+    custom = JevJudge()
+    assert custom.evaluator_identity()["evaluator_config"]["base_url"] == (
+        "https://judge-a.example/api"
+    )
+    assert custom.evaluator_identity()["evaluator_fingerprint"] != (
+        default.evaluator_identity()["evaluator_fingerprint"]
+    )
+
+
+def test_jev_call_keeps_the_endpoint_captured_before_environment_change(monkeypatch):
+    monkeypatch.setenv("TYPESAFE_BASE_URL", "https://judge-a.example/api")
+    requests = _wire_judge(monkeypatch)
+    judge = JevJudge()
+    monkeypatch.setenv("TYPESAFE_BASE_URL", "https://judge-b.example/api")
+    judge.judge(query="Question", response="Answer")
+    assert requests[0]["__request_url__"].startswith("https://judge-a.example/api/")
+
+
+@pytest.mark.parametrize("endpoint", [
+    "https://user:password@judge.example",
+    "https://judge.example/?api_key=secret",
+    "https://judge.example/#fragment",
+    "file:///tmp/socket",
+    "https://judge.example:invalid",
+    "https://judge.example\\@elsewhere.example",
+    pytest.param("https://judge.example/" + "a" * 2050, id="oversized"),
+])
+def test_jev_rejects_endpoint_values_that_cannot_be_safely_disclosed(monkeypatch, endpoint):
+    monkeypatch.setenv("TYPESAFE_BASE_URL", endpoint)
+    with pytest.raises(ValueError, match="Jev endpoint"):
+        JevJudge()

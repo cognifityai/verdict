@@ -358,6 +358,7 @@ def _turn_preview(storage, tenant_id, config, provider, model, max_calls, max_ou
         "estimatedMaximumCostUsd": (None if provider == "jev" else
                                     compute_cost_usd(model, input_estimate, max_output * len(selected))),
         "costIsStaticEstimate": provider != "jev", "externalEgressRequired": True,
+        "destination": identity["evaluator_config"]["base_url"] if provider == "jev" else None,
     }
 
 
@@ -450,6 +451,7 @@ def preview_evaluation(
                                     compute_cost_usd(model, input_estimate, output_maximum)),
         "costIsStaticEstimate": provider != "jev",
         "externalEgressRequired": True,
+        "destination": identity["evaluator_config"]["base_url"] if provider == "jev" else None,
     }
 
 
@@ -669,11 +671,38 @@ def _label_set(path: str | Path, rubric):
     return set_name, examples
 
 
-def preview_calibration(*, path: str | Path, config: dict[str, Any]) -> dict[str, Any]:
+def _calibration_plan(path: str | Path, config: dict[str, Any]):
     provider_name, model, _max_calls, max_output, rubric = _validated_config(config)
     if config.get("toolEvidence") is not None:
         raise ValueError("calibration examples do not contain Agent Turn tool evidence")
-    set_name, examples = _label_set(path, rubric)
+    set_name, source_examples = _label_set(path, rubric)
+    identity = _judge(
+        _IdentityOnlyProvider(provider_name), model, rubric, max_output,
+    ).evaluator_identity(context=None)
+    production_dimensions = set(identity["expected_dimensions"])
+    for example in source_examples:
+        if set(example.labels) - production_dimensions:
+            raise ValueError("label set contains dimensions absent from the production evaluator")
+    # Dashboard Trace and Turn judging have no retrieved context. Keep the
+    # calibration input and fingerprint on that same effective evidence path.
+    examples = [replace(example, context=None) for example in source_examples]
+    from verdict_eval.judge_health import sentinel_set_fingerprint
+
+    plan = {
+        "evaluator": identity["evaluator_fingerprint"],
+        "setName": set_name,
+        "setFingerprint": sentinel_set_fingerprint(examples),
+    }
+    fingerprint = hashlib.sha256(json.dumps(
+        plan, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")).hexdigest()
+    return provider_name, model, max_output, rubric, set_name, examples, identity, fingerprint
+
+
+def preview_calibration(*, path: str | Path, config: dict[str, Any]) -> dict[str, Any]:
+    provider_name, model, max_output, _rubric, set_name, examples, identity, fingerprint = (
+        _calibration_plan(path, config)
+    )
     label_counts: Counter[str] = Counter()
     estimated_input = 0
     for example in examples:
@@ -691,6 +720,9 @@ def preview_calibration(*, path: str | Path, config: dict[str, Any]) -> dict[str
                                     compute_cost_usd(model, estimated_input, maximum_output)),
         "externalEgressRequired": True,
         "rawLabelsPersisted": False,
+        "planFingerprint": fingerprint,
+        "destination": (identity["evaluator_config"]["base_url"]
+                        if provider_name == "jev" else None),
     }
 
 
@@ -707,15 +739,19 @@ def execute_calibration(
 ) -> dict[str, Any]:
     if confirm_external_egress is not True:
         raise ValueError("external judge egress was not confirmed")
-    provider_name, model, _max_calls, max_output, rubric = _validated_config(config)
-    if config.get("toolEvidence") is not None:
-        raise ValueError("calibration examples do not contain Agent Turn tool evidence")
-    set_name, examples = _label_set(path, rubric)
+    provider_name, model, max_output, rubric, set_name, examples, identity, fingerprint = (
+        _calibration_plan(path, config)
+    )
+    if config.get("planFingerprint") is not None and config["planFingerprint"] != fingerprint:
+        raise ValueError("calibration plan does not match the approved preview")
     from verdict_eval.judge_health import evaluate_judge_health
     judge = _judge(
         provider or _provider(provider_name), model, rubric, max_output,
-        skip_context_dependent_when_missing=False,
     )
+    if judge.evaluator_identity(context=None)["evaluator_fingerprint"] != (
+        identity["evaluator_fingerprint"]
+    ):
+        raise ValueError("judge provider behavior changed after preview")
     health = evaluate_judge_health(
         judge,
         examples,

@@ -316,6 +316,12 @@ without explanatory reasoning. Its pricing is unavailable in Verdict, so the
 preview does not show a cost estimate. Jev supports Trace and final Agent Turn
 text judging and label-set calibration; recorded Turn tool counts are unavailable.
 Monitor continues to use its existing cohort comparison and Fisher test.
+The optional `TYPESAFE_BASE_URL` selects a Jev endpoint. Evaluator Lab shows the
+effective URL before approval and keeps results from different URLs in separate
+evaluator identities. Dashboard calibration sends the label set's query and
+response text plus the rubric without applying Verdict redaction; inspect the
+file before approving. Optional context is ignored because dashboard production
+judging has no retrieved context, and human labels stay local.
 
 The judge can use Anthropic, OpenAI, Google, Jev, or a local/self-hosted OpenAI-compatible model. Jev uses its structured Choice API; the other built-in judges use provider completions. Validate the chosen judge against held-out labels from the intended workload before relying on quality alerts.
 

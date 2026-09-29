@@ -123,6 +123,7 @@ test("Evaluator Lab selects Jev and runs only the approved preview", async () =>
   await resolveJson(requests[2], {
     unit: "trace", availableTraces: 1, eligible: 1, alreadyJudged: 0,
     notEvaluable: 0, notEvaluableReasons: {}, plannedCalls: 1,
+    destination: "https://judge-a.example",
     estimatedMaximumCostUsd: null, maximumOutputTokens: null,
     rubric: { dimensions: ["relevance"], skippedDimensions: [] },
     planFingerprint: "jev-plan", plannedTraces: [{ traceId: "trace-1",
@@ -131,6 +132,7 @@ test("Evaluator Lab selects Jev and runs only the approved preview", async () =>
   await preview;
   tree = render(ui.EvaluatorLab, hooks, props);
   assert.match(textOf(tree), /Provider pricing unavailable/);
+  assert.match(textOf(tree), /https:\/\/judge-a\.example/);
   assert.doesNotMatch(textOf(tree), /512-token output allowance/);
   const consent = findAll(tree, (node) => node.type === "input" &&
     node.props.type === "checkbox").at(-1);
@@ -147,6 +149,59 @@ test("Evaluator Lab selects Jev and runs only the approved preview", async () =>
     notEvaluable: 0, notEvaluableReasons: {}, evaluatorFingerprint: "a".repeat(64) });
   await run;
   assert.match(textOf(render(ui.EvaluatorLab, hooks, props)), /Evaluation completed/);
+});
+
+test("Evaluator Lab calibration discloses unredacted text and binds the approved endpoint", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const props = { configUrl: "/api/config" };
+  render(ui.EvaluatorLab, hooks, props);
+  hooks.flushEffects();
+  await resolveJson(requests[0], { setupToken: "setup-token" });
+  await resolveJson(requests[1], { evalPackageAvailable: true,
+    providers: [{ provider: "jev", configured: true, sdkAvailable: true,
+      secretReference: "TYPESAFE_API_KEY" }] });
+
+  let tree = render(ui.EvaluatorLab, hooks, props);
+  const provider = findAll(tree, (node) => node.type === "select" &&
+    findAll(node, (child) => child.type === "option" && child.props.value === "jev").length)[0];
+  provider.props.onChange({ target: { value: "jev" } });
+  tree = render(ui.EvaluatorLab, hooks, props);
+  const path = findAll(tree, (node) => node.type === "input" &&
+    node.props.placeholder === "/path/to/labels.jsonl")[0];
+  path.props.onChange({ target: { value: "/tmp/labels.jsonl" } });
+  tree = render(ui.EvaluatorLab, hooks, props);
+  const preview = findAll(tree, (node) => node.type === "button" &&
+    textOf(node).includes("Preview label set"))[0].props.onClick();
+  await resolveJson(requests[2], { setName: "labels", examples: 1, plannedCalls: 1,
+    labelCounts: { relevance: 1 }, destination: "https://judge-a.example",
+    planFingerprint: "calibration-plan" });
+  await preview;
+
+  tree = render(ui.EvaluatorLab, hooks, props);
+  assert.match(textOf(tree), /without Verdict redaction/);
+  assert.match(textOf(tree), /https:\/\/judge-a\.example/);
+  const changedPath = findAll(tree, (node) => node.type === "input" &&
+    node.props.placeholder === "/path/to/labels.jsonl")[0];
+  changedPath.props.onChange({ target: { value: "/tmp/other-labels.jsonl" } });
+  tree = render(ui.EvaluatorLab, hooks, props);
+  assert.equal(findAll(tree, (node) => node.type === "button" &&
+    textOf(node).includes("Run calibration"))[0].props.disabled, true);
+  changedPath.props.onChange({ target: { value: "/tmp/labels.jsonl" } });
+  tree = render(ui.EvaluatorLab, hooks, props);
+  const consent = findAll(tree, (node) => node.type === "input" &&
+    node.props.type === "checkbox").at(-1);
+  consent.props.onChange({ target: { checked: true } });
+  tree = render(ui.EvaluatorLab, hooks, props);
+  const run = findAll(tree, (node) => node.type === "button" &&
+    textOf(node).includes("Run calibration"))[0].props.onClick();
+  const approved = JSON.parse(requests[3].options.body);
+  assert.equal(approved.planFingerprint, "calibration-plan");
+  assert.equal(approved.labelSetPath, "/tmp/labels.jsonl");
+  await resolveJson(requests[3], { status: "insufficient_data", exampleAgreement: 1,
+    totalExamples: 1, errors: 0 });
+  await run;
 });
 
 test("Evaluator Lab previews a native Turn page and sends its approved identities", async () => {

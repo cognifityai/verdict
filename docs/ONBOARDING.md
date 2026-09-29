@@ -594,6 +594,14 @@ dashboard process, select **Jev** and preview before running. The model is fixed
 to the tested `jev-1.13.0` version. Jev returns labels without explanations;
 Verdict does not estimate Jev charges. The existing Monitor statistics remain
 unchanged. Jev supports final Turn text but not the recorded tool-count option.
+If `TYPESAFE_BASE_URL` is set, the preview and approval show its effective URL;
+Verdict pins that URL in the Jev evaluator identity and in the SDK call.
+Dashboard label-set calibration sends query/response text and the rubric without
+automatic redaction. Inspect the file before approving. Optional context is
+ignored to match the dashboard's production judge, and labels remain local.
+Labels for context-required dimensions cannot calibrate that context-free judge.
+The stored label-set fingerprint covers the effective examples, excluding the
+ignored context.
 Select provider Trace (the backward-compatible default) for an individual
 model exchange, or Agent Turn for a completed final output. The Turn path
 requires present, untruncated redacted request/response text and does not

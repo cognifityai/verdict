@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 
 from verdict.client import workload_context
 from verdict.schema import DimensionScore, Judgment, Verdict
@@ -21,6 +23,32 @@ _CRITERIA = {
     "fail": "The assistant response violates this dimension.",
     "unclear": "The dimension cannot be assessed from the supplied information.",
 }
+_DEFAULT_BASE_URL = "https://api.typesafe.ai"
+
+
+def resolve_jev_base_url(value: str | None = None) -> str:
+    """Resolve the destination once so approval, identity, and SDK use one URL."""
+    candidate = (value if value is not None else os.environ.get("TYPESAFE_BASE_URL", ""))
+    candidate = candidate.strip() or _DEFAULT_BASE_URL
+    candidate = candidate.rstrip("/")
+    try:
+        size = len(candidate.encode("utf-8"))
+        parts = urlsplit(candidate)
+        valid_port = parts.port is None or 1 <= parts.port <= 65535
+    except (UnicodeError, ValueError):
+        size = 2049
+        valid_port = False
+        parts = None
+    if (
+        size > 2048
+        or any(character.isspace() or ord(character) < 32 for character in candidate)
+        or "?" in candidate or "#" in candidate or "\\" in candidate
+        or parts is None or parts.scheme not in {"http", "https"}
+        or not parts.hostname or parts.username is not None or parts.password is not None
+        or not valid_port
+    ):
+        raise ValueError("Jev endpoint must be an HTTP(S) URL without credentials or query")
+    return candidate
 
 
 @dataclass
@@ -28,6 +56,10 @@ class JevJudge:
     model: str = "jev-1.13.0"
     rubric: Rubric = DEFAULT_RUBRIC
     skip_context_dependent_when_missing: bool = False
+    base_url: str | None = None
+
+    def __post_init__(self) -> None:
+        self.base_url = resolve_jev_base_url(self.base_url)
 
     def _effective_rubric(self, context: str | None) -> Rubric:
         if self.skip_context_dependent_when_missing and not (context or "").strip():
@@ -43,6 +75,7 @@ class JevJudge:
         config = {
             "answer_type": "choice",
             "skip_context_dependent_when_missing": self.skip_context_dependent_when_missing,
+            "base_url": self.base_url,
         }
         payload = {
             "provider": "jev",
@@ -103,7 +136,9 @@ class JevJudge:
             "retrieved_context": (context or "").strip(),
         }
         try:
-            with workload_context("judge"), TypeSafeClient(timeout=15.0) as client:
+            with workload_context("judge"), TypeSafeClient(
+                timeout=15.0, base_url=self.base_url,
+            ) as client:
                 result = client.system_one(state=state, questions=questions, model=self.model)
         except Exception:
             # SDK errors may include request content, server bodies, or credentials.
