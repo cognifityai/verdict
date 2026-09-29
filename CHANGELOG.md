@@ -34,7 +34,8 @@ the product is refined.
   Malformed stored scores or score bounds fail closed, as do returned rows
   with noncanonical stored end times;
   extremely wide valid numeric ranges retain inspectable pairs without a
-  finite aggregate.
+  finite aggregate. Invalid comparison errors do not return internal error
+  text to the browser; an overlarge selection retains its date-range guidance.
 - Conversation grade detail shows only results for its returned transcript
   revision. Judge findings reject unrecognized fields and bind their dimension
   to the enclosing rubric result. Core and eval release dependencies now

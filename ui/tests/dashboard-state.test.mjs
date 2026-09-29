@@ -1682,6 +1682,16 @@ test("matched conversation comparison uses current paired grades and rejects sta
   await extremeRequest;
   tree = render(ui.MatchedConversationCompare, hooks, props);
   assert.match(textOf(tree), /numeric range is too large for a finite aggregate/);
+  const numericRequest = findAll(tree, (node) => node.type === "form")[0]
+    .props.onSubmit({ preventDefault() {} });
+  await resolveJson(requests[8], { candidateRows: 2, declaredPairs: 1, usablePairs: 1,
+    exclusions: {}, dimensionType: "number", direction: "higher_is_better",
+    numeric: { leftMean: 2, rightMean: 4, meanRightMinusLeft: 2,
+      deltaInterval95: [-5, 5] }, binary: null, examples: [] });
+  await numericRequest;
+  tree = render(ui.MatchedConversationCompare, hooks, props);
+  assert.match(textOf(tree), /Mean score on paired cases: first\s+2\s+, second\s+4/);
+  assert.match(textOf(tree), /second minus first\s+2/);
 });
 
 function runListRow(runId) {

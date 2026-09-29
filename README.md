@@ -779,6 +779,8 @@ a noncanonical stored time is rejected. Direct changes to the database can
 make a row sort outside the requested window before comparison sees it.
 If a valid numeric rubric's bounds exceed finite aggregate arithmetic, the
 paired scores remain inspectable but the aggregate and interval are unavailable.
+Invalid comparison requests return a generic error without exposing stored
+error details; an overlarge selection asks you to choose narrower dates.
 - Trace Explorer pages through every stored non-judge application trace in
   30-row pages. Search and provider/content-state filters apply to the current
   page; dashboard aggregates continue to use the complete store. Selecting a

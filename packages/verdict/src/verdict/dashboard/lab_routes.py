@@ -27,7 +27,9 @@ def register_lab_routes(app, setup: SetupRoutes) -> None:
             writable = setup.writable_storage()
             return preview_matched_conversations(writable, tenant_id=setup.tenant_id, payload=payload)
         except (TypeError, ValueError, UnicodeError) as exc:
-            return JSONResponse({"error": str(exc)}, status_code=400)
+            limit_error = "selected matched comparison exceeds 10,000 variant rows; choose narrower dates"
+            message = limit_error if str(exc) == limit_error else "invalid matched conversation comparison"
+            return JSONResponse({"error": message}, status_code=400)
         finally:
             if writable is not None:
                 writable.close()

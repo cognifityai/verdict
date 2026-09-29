@@ -379,3 +379,62 @@ async def test_dashboard_pair_api_requires_setup_token_and_tenant_scope(tmp_path
                                      headers={"X-Verdict-Setup": token})
         assert response.status_code == 200
         assert response.json()["candidateRows"] == 0
+
+
+@pytest.mark.asyncio
+async def test_dashboard_pair_api_hides_internal_error_text(tmp_path, monkeypatch):
+    import verdict.matched_conversations as matching
+
+    app = create_app(storage=f"sqlite:///{tmp_path / 'pair-error.db'}", tenant_id="alpha")
+    payload = request("a" * 64)
+    canary = "private-transcript-and-key-canary"
+
+    def fails(_storage, *, tenant_id, payload):
+        raise ValueError(f"invalid stored row: {canary}")
+
+    monkeypatch.setattr(matching, "preview_matched_conversations", fails)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1") as client:
+        token = (await client.get("/api/setup/token")).json()["setupToken"]
+        response = await client.post("/api/compare/conversations/matched", json=payload,
+                                     headers={"X-Verdict-Setup": token})
+        assert response.status_code == 400
+        assert response.json() == {"error": "invalid matched conversation comparison"}
+        assert canary not in response.text
+
+        def too_many(_storage, *, tenant_id, payload):
+            raise ValueError("selected matched comparison exceeds 10,000 variant rows; choose narrower dates")
+
+        monkeypatch.setattr(matching, "preview_matched_conversations", too_many)
+        bounded = await client.post("/api/compare/conversations/matched", json=payload,
+                                    headers={"X-Verdict-Setup": token})
+        assert bounded.status_code == 400
+        assert bounded.json() == {
+            "error": "selected matched comparison exceeds 10,000 variant rows; choose narrower dates"
+        }
+
+
+@pytest.mark.asyncio
+async def test_dashboard_pair_api_reports_synthetic_numeric_scores(tmp_path):
+    path = tmp_path / "numeric-pair.db"
+    store = SQLiteStorage(str(path))
+    left = conversation(8100, pair="numeric-case")
+    right = conversation(8101, pair="numeric-case", variant="right")
+    for row, score in ((left, 2), (right, 4)):
+        store.save_conversation(row)
+        store.save_conversation_assessment(grade(row, score, numeric=True, threshold=False))
+    store.close()
+    payload = request(grade(left, 2, numeric=True, threshold=False)["evaluator_fingerprint"])
+    app = create_app(storage=f"sqlite:///{path}", tenant_id="alpha")
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1") as client:
+        token = (await client.get("/api/setup/token")).json()["setupToken"]
+        response = await client.post("/api/compare/conversations/matched", json=payload,
+                                     headers={"X-Verdict-Setup": token})
+    assert response.status_code == 200
+    result = response.json()
+    assert result["usablePairs"] == 1
+    assert result["dimensionType"] == "number"
+    assert result["numeric"]["leftMean"] == 2
+    assert result["numeric"]["rightMean"] == 4
+    assert result["numeric"]["meanRightMinusLeft"] == 2
+    assert result["examples"][0]["left"]["score"] == 2
+    assert result["examples"][0]["right"]["score"] == 4
