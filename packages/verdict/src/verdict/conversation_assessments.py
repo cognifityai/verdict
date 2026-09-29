@@ -100,21 +100,39 @@ def validate_rubric(value: object) -> dict:
     return result
 
 
+def conversation_eligibility_reason(
+    end_status: str | None, issue_count: int, first_user: int | None, last_assistant: int | None,
+) -> str | None:
+    """Decide eligibility from fields projected by every storage adapter."""
+    if issue_count or end_status == "incomplete":
+        return "incomplete_evidence"
+    if end_status not in _CLOSED:
+        return "not_closed"
+    if first_user is None or last_assistant is None or first_user >= last_assistant:
+        return "no_completed_reply"
+    return None
+
+
 def evaluation_targets(conversation: dict, rubric: dict) -> tuple[tuple[int | None, ...], str | None]:
     """One shared eligibility rule for preview, storage, review and Monitor."""
-    if conversation.get("input_issues") or conversation.get("end_status") == "incomplete":
-        return (), "incomplete_evidence"
-    if conversation.get("end_status") not in _CLOSED:
-        return (), "not_closed"
     seen_user = False
+    first_user = last_assistant = None
     replies: list[int] = []
     for position, message in enumerate(conversation["messages"]):
         if message["role"] == "user" and message["status"] == "completed":
             seen_user = True
-        elif message["role"] == "assistant" and message["status"] == "completed" and seen_user:
-            replies.append(position)
-    if not replies:
-        return (), "no_completed_reply"
+            if first_user is None:
+                first_user = position
+        elif message["role"] == "assistant" and message["status"] == "completed":
+            last_assistant = position
+            if seen_user:
+                replies.append(position)
+    reason = conversation_eligibility_reason(
+        conversation.get("end_status"), len(conversation.get("input_issues") or []),
+        first_user, last_assistant,
+    )
+    if reason is not None:
+        return (), reason
     if rubric["target"] == "response":
         return tuple(replies), None
     return (None,), None

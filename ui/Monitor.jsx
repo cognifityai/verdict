@@ -8,6 +8,13 @@ const utcWindowTime = (value) => new Date(value).toLocaleString(undefined, {
   hour: "2-digit", minute: "2-digit", timeZoneName: "short",
 });
 
+function detailGradeState(detail, dimension) {
+  const grade = detail.assessments.find((item) => item.target_position == null);
+  if (!grade) return "ungraded";
+  if (grade.status === "error") return "error";
+  return grade.status === "completed" ? grade.dimensions?.[dimension]?.state ?? "invalid" : "invalid";
+}
+
 export function monitorStateParts(monitor) {
   const legacy = monitor?.policy && monitor?.snapshot ? monitor : null;
   return {
@@ -51,8 +58,8 @@ function ConversationRate({ label, summary, onOpen }) {
   return <article className="border p-3 text-sm" style={box}>
     <div className="font-semibold">{label}</div>
     <div className="mt-1">{summary.passRate == null ? "No PASS/FAIL grades" : `${pct(summary.passRate)} PASS · 95% interval ${pct(summary.interval[0])}–${pct(summary.interval[1])}`}</div>
-    <div className="text-xs mt-1" style={{ color: "#94a39d" }}>Captured {summary.captured} · PASS {summary.pass} · FAIL {summary.fail} · UNCLEAR {summary.unclear} · judge errors {summary.error} · ungraded {summary.ungraded}. Rate denominator: {summary.evaluable} PASS/FAIL grades.</div>
-    <div className="flex flex-wrap gap-2 mt-2">{["fail", "pass", "unclear", "error", "ungraded"].flatMap((state) =>
+    <div className="text-xs mt-1" style={{ color: "#94a39d" }}>Captured {summary.captured} · eligible {summary.eligible} · PASS {summary.pass} · FAIL {summary.fail} · UNCLEAR {summary.unclear} · judge errors {summary.error} · ungraded eligible {summary.ungraded} · not evaluable {summary.ineligible}. Rate denominator: {summary.evaluable} PASS/FAIL grades.</div>
+    <div className="flex flex-wrap gap-2 mt-2">{["fail", "pass", "unclear", "error", "ungraded", "ineligible"].flatMap((state) =>
       summary.examples[state].map((example) => <button key={`${state}-${example.id}`} type="button"
         className="underline text-xs font-mono" onClick={() => onOpen(example)}
         title={example.id}>{state}: {example.id.slice(-8)}</button>))}</div>
@@ -61,16 +68,17 @@ function ConversationRate({ label, summary, onOpen }) {
 
 export function ConversationPreview({ preview, onOpen }) {
   return <section className="border p-5 space-y-3" style={box}>
-    <div className="text-xs font-mono" style={{ color: "#f2b84b" }}>DESCRIPTIVE CONVERSATION QUALITY</div>
+    <div className="text-xs font-mono" style={{ color: "#f2b84b" }}>DESCRIPTIVE STORED GRADES</div>
     <h2 className="font-semibold">{preview.dimension} · Base versus Current</h2>
-    <p className="text-sm" style={{ color: "#94a39d" }}>Current stored grades in the selected UTC windows. This comparison makes no judge calls and does not create an alert. Transcript corrections can change the next result; source labels are not semantic clusters.</p>
+    <p className="text-sm" style={{ color: "#94a39d" }}>Current stored grades in the selected UTC windows. This result is not saved, makes no judge calls, and does not create an alert. Grade accuracy requires human-label calibration. Transcript corrections can change the next result; source labels are not semantic clusters.</p>
+    {preview.gradeEvidenceCount === 0 && <p role="alert" className="text-sm" style={{ color: "#f2b84b" }}>No grades from this evaluator in the selected windows. Check the fingerprint and dates, or grade eligible conversations in Evaluator Lab.</p>}
     <div className="grid sm:grid-cols-2 gap-3">
       <ConversationRate label={`Base · ${utcWindowTime(preview.referenceStart)} to ${utcWindowTime(preview.referenceEnd)}`} summary={preview.reference} onOpen={onOpen} />
       <ConversationRate label={`Current · ${utcWindowTime(preview.currentStart)} to ${utcWindowTime(preview.currentEnd)}`} summary={preview.current} onOpen={onOpen} />
     </div>
-    <p className="text-sm">{preview.effect == null ? "No complete rate comparison" : `Measured PASS-rate change: ${(100 * preview.effect).toFixed(1)} percentage points`} · {preview.reference.evaluable} versus {preview.current.evaluable} graded conversations.</p>
+    <p className="text-sm">{preview.effect == null ? "No complete rate comparison" : `Stored-grade PASS-rate change: ${(100 * preview.effect).toFixed(1)} percentage points`} · {preview.reference.evaluable} versus {preview.current.evaluable} graded conversations.</p>
     {preview.groups.length > 0 && <div className="space-y-3"><h3 className="font-semibold">By source label: {preview.labelKey}</h3>{preview.groups.map((group) => <div key={group.value == null ? "missing-label" : `value:${group.value}`} className="border p-3" style={box}>
-      <div className="font-semibold">{group.label} · share of selected conversations {group.referenceShare == null ? "—" : pct(group.referenceShare)} → {group.currentShare == null ? "—" : pct(group.currentShare)}</div>
+      <div className="font-semibold">{group.label} · share of eligible conversations {group.referenceShare == null ? "—" : pct(group.referenceShare)} → {group.currentShare == null ? "—" : pct(group.currentShare)}</div>
       <div className="text-sm mt-1">{group.effect == null ? "No complete within-group rate comparison" : `Within-group PASS-rate change: ${(100 * group.effect).toFixed(1)} percentage points`}</div>
       <div className="grid sm:grid-cols-2 gap-3 mt-2"><ConversationRate label="Base" summary={group.reference} onOpen={onOpen} /><ConversationRate label="Current" summary={group.current} onOpen={onOpen} /></div>
     </div>)}</div>}
@@ -330,7 +338,8 @@ export function Monitor({ configUrl, evaluation = {}, initialState = null, view 
       const response = await fetch(`${root}/api/data/conversations/${encodeURIComponent(example.id)}?evaluator=${encodeURIComponent(descriptive.evaluatorFingerprint)}`, { credentials: "same-origin" });
       const body = await response.json();
       if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
-      setConversationDetail({ ...body, expectedRevision: example.revision });
+      setConversationDetail({ ...body, expectedRevision: example.revision,
+        expectedState: example.qualityState, expectedReason: example.ineligibleReason });
     } catch (failure) { setError(String(failure)); }
     finally { setBusy(false); }
   }
@@ -361,7 +370,10 @@ export function Monitor({ configUrl, evaluation = {}, initialState = null, view 
       <div className="flex justify-between"><h3 className="font-semibold">Conversation evidence</h3><button className="underline" onClick={() => setConversationDetail(null)}>Close</button></div>
       {conversationDetail.conversation.revision !== conversationDetail.expectedRevision
         ? <p role="alert" style={{ color: "#f2b84b" }}>This transcript changed since the comparison. Run the comparison again to inspect current evidence.</p>
+        : conversationDetail.expectedState !== "ineligible" && detailGradeState(conversationDetail, descriptive.dimension) !== conversationDetail.expectedState
+          ? <p role="alert" style={{ color: "#f2b84b" }}>This grade changed since the comparison. Run the comparison again to inspect current evidence.</p>
         : <><div className="text-xs">{conversationDetail.assessments.map((grade) => `${grade.status}: ${Object.entries(grade.dimensions).map(([name, result]) => `${name} ${result.state}`).join(", ")}`).join(" · ") || "No current grade"}</div>
+          {conversationDetail.expectedReason && <p className="text-xs">Not evaluable: {conversationDetail.expectedReason.replaceAll("_", " ")}</p>}
           {conversationDetail.conversation.messages.map((message, index) => <div key={index} className="border p-3 text-sm" style={box}><strong>{index + 1} · {message.role}</strong><p dir="auto" className="whitespace-pre-wrap mt-1">{message.content}</p></div>)}</>}
     </section>}
     {candidate?.snapshot && <MonitorSnapshot response={candidate} evaluators={evaluators} fallbackTarget={form.prospectiveTarget} onOpenTrace={onOpenTrace} />}
@@ -387,7 +399,7 @@ export function Monitor({ configUrl, evaluation = {}, initialState = null, view 
         {!logicalSession && !conversation && ["minimumReference", "minimumCurrent", "prospectiveTarget"].map((name) => <label key={name} className="text-sm">{name.replace(/([A-Z])/g, " $1")}<input type="number" min="1" value={form[name]} onChange={(event) => update(name, Number(event.target.value))} className="block w-full mt-1 border p-2 bg-transparent" /></label>)}
       </div>
       <div className="flex flex-wrap gap-2 mt-5">
-        <button disabled={!token || busy} onClick={async () => { const result = await post("/api/monitor/preview", conversation ? conversationMonitorRequest(form) : monitorRequest(form)); if (result) { if (result.state === "descriptive") { setDescriptive(result); setCandidate(null); } else { setCandidate(result); setDescriptive(null); } onChanged?.(); } }} className="border px-4 py-2 text-sm">{conversation ? "Run historical comparison" : "Preview comparison"}</button>
+        <button disabled={!token || busy} onClick={async () => { const result = await post("/api/monitor/preview", conversation ? conversationMonitorRequest(form) : monitorRequest(form)); if (result) { setConversationDetail(null); if (result.state === "descriptive") { setDescriptive(result); setCandidate(null); } else { setCandidate(result); setDescriptive(null); } onChanged?.(); } }} className="border px-4 py-2 text-sm">{conversation ? "Run historical comparison" : "Preview comparison"}</button>
         {candidate && <button disabled={busy} onClick={async () => {
           const activated = await post("/api/monitor/activate", { policyId: candidate.policy.policy_id, expectedActivePolicyId: active?.policy?.policy_id || null });
           if (activated) { setActive(activated); setCandidate(null); onChanged?.(); }

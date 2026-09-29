@@ -5,14 +5,14 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 
-from verdict.conversation_assessments import _name
+from verdict.conversation_assessments import _name, conversation_eligibility_reason
 from verdict.conversations import _LABEL_KEY
 from verdict.statistics import wilson_interval
 from verdict.telemetry.model import safe_routing_id
 
 MAX_COMPARISON_ROWS = 10_000
 MAX_GROUPS = 100
-_STATES = ("pass", "fail", "unclear", "error", "ungraded")
+_STATES = ("pass", "fail", "unclear", "error", "ungraded", "ineligible")
 
 
 def _boundary(value: object) -> str:
@@ -24,7 +24,10 @@ def _boundary(value: object) -> str:
         raise ValueError("comparison window requires an ISO-8601 time") from exc
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise ValueError("comparison window requires a timezone")
-    return parsed.astimezone(timezone.utc).isoformat()
+    try:
+        return parsed.astimezone(timezone.utc).isoformat()
+    except OverflowError as exc:
+        raise ValueError("comparison window is out of range") from exc
 
 
 def comparison_query(tenant_id: str, payload: dict) -> dict:
@@ -41,7 +44,8 @@ def comparison_query(tenant_id: str, payload: dict) -> dict:
     ):
         raise ValueError("conversation comparison requires an evaluator fingerprint")
     dimension = _name(payload.get("dimension"))
-    label_key = payload.get("labelKey") or None
+    raw_label_key = payload.get("labelKey")
+    label_key = None if raw_label_key in (None, "") else raw_label_key
     if label_key is not None and (
         not isinstance(label_key, str) or _LABEL_KEY.fullmatch(label_key) is None
     ):
@@ -83,15 +87,22 @@ def validate_storage_query(query: dict, limit: int) -> dict:
 def _summary(rows: list[dict]) -> dict:
     counts = {state: 0 for state in _STATES}
     examples = {state: [] for state in _STATES}
+    reasons = {reason: 0 for reason in ("incomplete_evidence", "not_closed", "no_completed_reply")}
     for row in rows:
         state = row["quality_state"]
         counts[state] += 1
+        if state == "ineligible":
+            reasons[row["ineligible_reason"]] += 1
         if len(examples[state]) < 5:
-            examples[state].append({"id": row["id"], "revision": row["revision"]})
+            examples[state].append({"id": row["id"], "revision": row["revision"],
+                                    "qualityState": state,
+                                    "ineligibleReason": row["ineligible_reason"]})
     total = counts["pass"] + counts["fail"]
     interval = wilson_interval(counts["pass"], total)
     return {
-        "captured": len(rows), "pass": counts["pass"], "fail": counts["fail"],
+        "captured": len(rows), "eligible": len(rows) - counts["ineligible"],
+        "ineligible": counts["ineligible"], "ineligibleReasons": reasons,
+        "pass": counts["pass"], "fail": counts["fail"],
         "unclear": counts["unclear"], "error": counts["error"],
         "ungraded": counts["ungraded"], "evaluable": total,
         "passRate": counts["pass"] / total if total else None,
@@ -110,6 +121,7 @@ def preview_conversation_comparison(storage, *, tenant_id: str, payload: dict) -
     reference: list[dict] = []
     current: list[dict] = []
     grouped: dict[str | None, tuple[list[dict], list[dict]]] = {}
+    grade_evidence_count = 0
     for row in rows:
         event_at = row["event_at"]
         if query["reference_start"] <= event_at < query["reference_end"]:
@@ -120,10 +132,19 @@ def preview_conversation_comparison(storage, *, tenant_id: str, payload: dict) -
             group_side = 1
         else:
             raise ValueError("stored comparison row is outside selected windows")
+        reason = row.get("ineligible_reason")
+        if "ineligible_reason" not in row:
+            reason = conversation_eligibility_reason(
+                row["end_status"], row["issue_count"],
+                row["first_user"], row["last_assistant"],
+            )
         status = row["assessment_status"]
-        if status is None:
+        if reason is not None:
+            state = "ineligible"
+        elif status is None:
             state = "ungraded"
         else:
+            grade_evidence_count += 1
             if row["rubric_target"] != "conversation" or row["dimension_type"] != "binary":
                 raise ValueError("selected evaluator dimension is not a whole-conversation binary grade")
             if status == "error":
@@ -132,7 +153,8 @@ def preview_conversation_comparison(storage, *, tenant_id: str, payload: dict) -
                 state = row["dimension_state"]
             else:
                 raise ValueError("stored conversation grade is invalid")
-        selected = {"id": row["id"], "revision": row["revision"], "quality_state": state}
+        selected = {"id": row["id"], "revision": row["revision"],
+                    "quality_state": state, "ineligible_reason": reason}
         bucket.append(selected)
         if query["label_key"] is not None:
             labels = row.get("labels") or {}
@@ -155,8 +177,8 @@ def preview_conversation_comparison(storage, *, tenant_id: str, payload: dict) -
         groups.append({
             "value": value, "label": value if value is not None else "(missing label)",
             "reference": left, "current": right,
-            "referenceShare": len(base_rows) / len(reference) if reference else None,
-            "currentShare": len(current_rows) / len(current) if current else None,
+            "referenceShare": left["eligible"] / base["eligible"] if base["eligible"] else None,
+            "currentShare": right["eligible"] / now["eligible"] if now["eligible"] else None,
             "effect": right["passRate"] - left["passRate"]
             if left["passRate"] is not None and right["passRate"] is not None else None,
         })
@@ -167,6 +189,7 @@ def preview_conversation_comparison(storage, *, tenant_id: str, payload: dict) -
         "referenceStart": query["reference_start"], "referenceEnd": query["reference_end"],
         "currentStart": query["current_start"], "currentEnd": query["current_end"],
         "reference": base, "current": now,
+        "gradeEvidenceCount": grade_evidence_count,
         "effect": now["passRate"] - base["passRate"]
         if base["passRate"] is not None and now["passRate"] is not None else None,
         "groups": groups,

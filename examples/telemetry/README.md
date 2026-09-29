@@ -17,7 +17,7 @@ rubric in synchronized `0.1.0a23` source builds. Monitor can compare stored
 whole-conversation binary grades in two historical windows. An optional
 top-level `labels` object, for example `{"persona":"example_avatar","group":"example_workflow"}`,
 lets that comparison show source-group mix and within-group rates; keys must
-match `[a-z][a-z0-9_]{0,31}`, with at most eight keys and 128 UTF-8 bytes per
+match `[a-z][a-z_]{0,31}`, with at most eight nonsensitive keys and 128 UTF-8 bytes per
 redacted string value. Changing a label invalidates the old grade. The view
 does not create a prospective alert or semantic cluster. The published
 `0.1.0a22` packages do not store these snapshots.

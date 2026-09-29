@@ -477,11 +477,14 @@ from a whole-conversation rubric, and select two non-overlapping windows in
 local time. The result displays their UTC boundaries.
 The optional source label key partitions both windows and shows group mix and
 within-group PASS rates. A Voice record can supply a top-level `labels` object
-with up to eight keys (`[a-z][a-z0-9_]{0,31}`) and redacted string values of
+with up to eight nonsensitive keys (`[a-z][a-z_]{0,31}`) and redacted string values of
 at most 128 UTF-8 bytes. Missing values have their own group; changing a label
 invalidates the old grade. The comparison makes no judge calls, supports at
-most 10,000 selected conversations, and shows UNCLEAR, judge errors, and
-ungraded records separately. PASS rates use only PASS/FAIL grades. This is a
+most 10,000 selected conversations, and shows not-evaluable, UNCLEAR, judge
+errors, and ungraded-eligible records separately. PASS rates use only PASS/FAIL
+grades; source-group shares use eligible conversations. If no grade from the
+selected evaluator is present in either window, check the fingerprint and dates.
+This is a
 historical, current-state view: correcting source data can change a later
 preview, and it does not create a prospective drift alert or semantic cluster.
 Records without a usable source end time cannot enter a dated window.

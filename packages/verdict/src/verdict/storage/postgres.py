@@ -2363,7 +2363,19 @@ class PostgresStorage:
                    SELECT conversation_id,
                           (payload::jsonb)->>'event_at' AS event_at,
                           (payload::jsonb)->>'revision' AS revision,
-                          ((payload::jsonb)->'labels')::text AS labels
+                          ((payload::jsonb)->'labels')::text AS labels,
+                          (payload::jsonb)->>'end_status' AS end_status,
+                          jsonb_array_length((payload::jsonb)->'input_issues') AS issue_count,
+                          (SELECT MIN(message.position)
+                             FROM jsonb_array_elements((conversation_snapshots.payload::jsonb)->'messages')
+                               WITH ORDINALITY AS message(value, position)
+                            WHERE message.value->>'role'='user'
+                              AND message.value->>'status'='completed') AS first_user,
+                          (SELECT MAX(message.position)
+                             FROM jsonb_array_elements((conversation_snapshots.payload::jsonb)->'messages')
+                               WITH ORDINALITY AS message(value, position)
+                            WHERE message.value->>'role'='assistant'
+                              AND message.value->>'status'='completed') AS last_assistant
                      FROM conversation_snapshots
                     WHERE tenant_id=%s AND ((payload::jsonb)->>'event_at') COLLATE "C">=%s
                       AND ((payload::jsonb)->>'event_at') COLLATE "C"<%s
@@ -2372,7 +2384,19 @@ class PostgresStorage:
                    SELECT conversation_id,
                           (payload::jsonb)->>'event_at' AS event_at,
                           (payload::jsonb)->>'revision' AS revision,
-                          ((payload::jsonb)->'labels')::text AS labels
+                          ((payload::jsonb)->'labels')::text AS labels,
+                          (payload::jsonb)->>'end_status' AS end_status,
+                          jsonb_array_length((payload::jsonb)->'input_issues') AS issue_count,
+                          (SELECT MIN(message.position)
+                             FROM jsonb_array_elements((conversation_snapshots.payload::jsonb)->'messages')
+                               WITH ORDINALITY AS message(value, position)
+                            WHERE message.value->>'role'='user'
+                              AND message.value->>'status'='completed') AS first_user,
+                          (SELECT MAX(message.position)
+                             FROM jsonb_array_elements((conversation_snapshots.payload::jsonb)->'messages')
+                               WITH ORDINALITY AS message(value, position)
+                            WHERE message.value->>'role'='assistant'
+                              AND message.value->>'status'='completed') AS last_assistant
                      FROM conversation_snapshots
                     WHERE tenant_id=%s AND ((payload::jsonb)->>'event_at') COLLATE "C">=%s
                       AND ((payload::jsonb)->>'event_at') COLLATE "C"<%s
@@ -2381,6 +2405,8 @@ class PostgresStorage:
                    SELECT * FROM reference UNION ALL SELECT * FROM current
                )
                SELECT selected.conversation_id, selected.event_at, selected.revision, selected.labels,
+                      selected.end_status, selected.issue_count,
+                      selected.first_user, selected.last_assistant,
                       (grade.payload::jsonb)->>'status' AS assessment_status,
                       (grade.payload::jsonb)->'rubric'->>'target' AS rubric_target,
                       (SELECT definition.value->>'type'
@@ -2401,7 +2427,8 @@ class PostgresStorage:
                 value["tenant_id"], value["evaluator_fingerprint"], limit,
             ),
         )
-        fields = ("id", "event_at", "revision", "labels", "assessment_status", "rubric_target",
+        fields = ("id", "event_at", "revision", "labels", "end_status", "issue_count",
+                  "first_user", "last_assistant", "assessment_status", "rubric_target",
                   "dimension_type", "dimension_state")
         return [dict(zip(fields, row, strict=True)) for row in rows]
 

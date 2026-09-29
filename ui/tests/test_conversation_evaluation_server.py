@@ -249,3 +249,7 @@ async def test_monitor_previews_current_conversation_grades_without_activation(t
         assert body["effect"] == -1.0
         assert body["groups"][0]["label"] == "one"
         assert "pValue" not in body and "alert" not in body
+        payload["referenceStart"] = "0001-01-01T00:00:00+23:59"
+        invalid = await client.post("/api/monitor/preview", json=payload,
+                                    headers={"X-Verdict-Setup": token})
+        assert invalid.status_code == 400

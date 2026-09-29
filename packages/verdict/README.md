@@ -332,8 +332,9 @@ The storage API provides `get_conversation`, tenant-scoped
 grade eligible snapshots using a local JSON rubric and review current evidence
 with full or partial coverage. Monitor provides a descriptive comparison of
 current whole-conversation binary grades in two historical windows, with
-optional grouping by explicit Voice source label. It reports PASS/FAIL,
-UNCLEAR, judge-error, and ungraded coverage separately. The PASS rate uses only
+optional grouping by explicit Voice source label. It reports eligible,
+not-evaluable, PASS/FAIL, UNCLEAR, judge-error, and ungraded-eligible coverage
+separately. The PASS rate uses only
 PASS and FAIL grades; changing a transcript or label invalidates its old grade.
 This comparison does not create a prospective alert or discover semantic
 clusters. Matched model comparison is not included yet.

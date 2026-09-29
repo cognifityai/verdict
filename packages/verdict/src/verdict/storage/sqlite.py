@@ -2437,7 +2437,17 @@ class SQLiteStorage:
                 SELECT conversation_id,
                        json_extract(payload, '$.event_at') AS event_at,
                        json_extract(payload, '$.revision') AS revision,
-                       json_extract(payload, '$.labels') AS labels
+                       json_extract(payload, '$.labels') AS labels,
+                       json_extract(payload, '$.end_status') AS end_status,
+                       json_array_length(payload, '$.input_issues') AS issue_count,
+                       (SELECT MIN(CAST(message.key AS INTEGER))
+                          FROM json_each(conversation_snapshots.payload, '$.messages') AS message
+                         WHERE json_extract(message.value, '$.role')='user'
+                           AND json_extract(message.value, '$.status')='completed') AS first_user,
+                       (SELECT MAX(CAST(message.key AS INTEGER))
+                          FROM json_each(conversation_snapshots.payload, '$.messages') AS message
+                         WHERE json_extract(message.value, '$.role')='assistant'
+                           AND json_extract(message.value, '$.status')='completed') AS last_assistant
                   FROM conversation_snapshots
                  WHERE tenant_id=? AND json_extract(payload, '$.event_at')>=?
                    AND json_extract(payload, '$.event_at')<?
@@ -2446,7 +2456,17 @@ class SQLiteStorage:
                 SELECT conversation_id,
                        json_extract(payload, '$.event_at') AS event_at,
                        json_extract(payload, '$.revision') AS revision,
-                       json_extract(payload, '$.labels') AS labels
+                       json_extract(payload, '$.labels') AS labels,
+                       json_extract(payload, '$.end_status') AS end_status,
+                       json_array_length(payload, '$.input_issues') AS issue_count,
+                       (SELECT MIN(CAST(message.key AS INTEGER))
+                          FROM json_each(conversation_snapshots.payload, '$.messages') AS message
+                         WHERE json_extract(message.value, '$.role')='user'
+                           AND json_extract(message.value, '$.status')='completed') AS first_user,
+                       (SELECT MAX(CAST(message.key AS INTEGER))
+                          FROM json_each(conversation_snapshots.payload, '$.messages') AS message
+                         WHERE json_extract(message.value, '$.role')='assistant'
+                           AND json_extract(message.value, '$.status')='completed') AS last_assistant
                   FROM conversation_snapshots
                  WHERE tenant_id=? AND json_extract(payload, '$.event_at')>=?
                    AND json_extract(payload, '$.event_at')<?
@@ -2455,7 +2475,8 @@ class SQLiteStorage:
                 SELECT * FROM reference UNION ALL SELECT * FROM current
             )
             SELECT selected.conversation_id AS id, selected.event_at, selected.revision,
-                   selected.labels,
+                   selected.labels, selected.end_status, selected.issue_count,
+                   selected.first_user, selected.last_assistant,
                    json_extract(grade.payload, '$.status') AS assessment_status,
                    json_extract(grade.payload, '$.rubric.target') AS rubric_target,
                    (SELECT json_extract(definition.value, '$.type')

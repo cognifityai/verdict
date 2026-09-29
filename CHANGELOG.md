@@ -21,7 +21,7 @@ the product is refined.
   Matched model comparison is not included yet.
 - Monitor can compare current whole-conversation binary grades across two
   historical windows and an optional explicit Voice source label. It shows
-  rate and coverage, group mix, and within-group changes with links to current
+  rate and eligibility/grade coverage, group mix, and within-group changes with links to current
   evidence. This descriptive view creates no prospective alert or semantic
   cluster and rejects windows above 10,000 conversations.
 - Conversation grade detail shows only results for its returned transcript

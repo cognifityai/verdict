@@ -232,24 +232,28 @@ test("Monitor compares conversation grades and detects changed example evidence"
     "dimension", "evaluatorFingerprint", "labelKey", "referenceEnd", "referenceStart"].sort());
   assert.equal(submitted.dimension, "quality");
   assert.equal(submitted.labelKey, "group");
-  const empty = { pass: [], fail: [], unclear: [], error: [], ungraded: [] };
-  const base = { captured: 1, pass: 1, fail: 0, unclear: 0, error: 0, ungraded: 0,
+  const empty = { pass: [], fail: [], unclear: [], error: [], ungraded: [], ineligible: [] };
+  const base = { captured: 2, eligible: 2, ineligible: 0, pass: 1, fail: 0, unclear: 0, error: 1, ungraded: 0,
     evaluable: 1, passRate: 1, interval: [0.2, 1],
-    examples: { ...empty, pass: [{ id: "b".repeat(32), revision: "old" }] } };
+    examples: { ...empty, pass: [{ id: "b".repeat(32), revision: "old", qualityState: "pass" }],
+      error: [{ id: "d".repeat(32), revision: "same", qualityState: "error" }] } };
   const current = { ...base, pass: 0, fail: 1, passRate: 0, interval: [0, 0.8],
-    examples: { ...empty, fail: [{ id: "c".repeat(32), revision: "current" }] } };
+    examples: { ...empty, fail: [{ id: "c".repeat(32), revision: "current", qualityState: "fail" }] } };
   await resolveJson(requests[2], { state: "descriptive", unit: "conversation",
     method: "current_snapshot_binary_v1", evaluatorFingerprint: "a".repeat(64),
     dimension: "quality", labelKey: "group",
     referenceStart: submitted.referenceStart, referenceEnd: submitted.referenceEnd,
     currentStart: submitted.currentStart, currentEnd: submitted.currentEnd,
-    reference: base, current, effect: -1, groups: [] });
+    reference: base, current, effect: -1, gradeEvidenceCount: 3, groups: [] });
   await pending;
   tree = render(ui.Monitor, hooks, props);
   const preview = findAll(tree, (node) => node.type?.name === "ConversationPreview")[0];
   assert.ok(preview);
   const rendered = render(preview.type, createHooks(), preview.props);
   assert.match(textOf(rendered), /does not create an alert/);
+  const noGrades = render(preview.type, createHooks(), { ...preview.props,
+    preview: { ...preview.props.preview, gradeEvidenceCount: 0 } });
+  assert.match(textOf(noGrades), /Check the fingerprint and dates/);
   const rate = findAll(rendered, (node) => node.type?.name === "ConversationRate")[0];
   const rateTree = render(rate.type, createHooks(), rate.props);
   findAll(rateTree, (node) => node.type === "button")[0].props.onClick();
@@ -264,6 +268,13 @@ test("Monitor compares conversation grades and detects changed example evidence"
   ] }, assessments: [] });
   tree = render(ui.Monitor, hooks, props);
   assert.match(textOf(tree), /transcript changed since the comparison/);
+  findAll(rateTree, (node) => node.type === "button")[1].props.onClick();
+  await resolveJson(requests[5], { conversation: { revision: "same", messages: [
+    { role: "user", content: "Question." }, { role: "assistant", content: "Answer." },
+  ] }, assessments: [{ status: "completed", target_position: null,
+    dimensions: { quality: { state: "pass" } } }] });
+  tree = render(ui.Monitor, hooks, props);
+  assert.match(textOf(tree), /grade changed since the comparison/);
   assert.doesNotMatch(textOf(tree), /Changed answer\./);
 });
 

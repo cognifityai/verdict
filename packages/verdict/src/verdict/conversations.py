@@ -23,7 +23,7 @@ _ISSUES = {
     "unknown_message_status", "truncated_transcript", "unknown_end_status",
     "invalid_end_time",
 }
-_LABEL_KEY = re.compile(r"[a-z][a-z0-9_]{0,31}\Z")
+_LABEL_KEY = re.compile(r"[a-z][a-z_]{0,31}\Z")
 
 
 def _json(value: object) -> str:
@@ -99,7 +99,7 @@ def validate_conversation(value: dict) -> dict:
         raise ValueError("invalid conversation labels")
     labels = {}
     for key, raw_label in raw_labels.items():
-        if not isinstance(key, str) or _LABEL_KEY.fullmatch(key) is None:
+        if not isinstance(key, str) or _LABEL_KEY.fullmatch(key) is None or redact(key) != key:
             raise ValueError("invalid conversation label key")
         if not isinstance(raw_label, str) or len(raw_label.encode("utf-8")) > 128:
             raise ValueError("invalid conversation label value")

@@ -146,6 +146,15 @@ def test_comparison_rejects_overlapping_or_reversed_windows(boundary):
         comparison_query("alpha", payload)
 
 
+@pytest.mark.parametrize("boundary", ["0001-01-01T00:00:00+23:59",
+                                        "9999-12-31T23:59:59-23:59"])
+def test_extreme_offset_is_a_bounded_validation_error(boundary):
+    payload = request("a" * 64)
+    payload["referenceStart"] = boundary
+    with pytest.raises(ValueError, match="out of range"):
+        comparison_query("alpha", payload)
+
+
 @pytest.mark.parametrize("kind", ["memory", "sqlite", "postgres"])
 def test_numeric_and_response_grades_never_become_binary_conversation_observations(kind, tmp_path):
     with adapter(kind, tmp_path) as store:
@@ -216,6 +225,54 @@ def test_dimension_path_and_tenant_isolation(kind, tmp_path):
         assert result["effect"] is None
 
 
+@pytest.mark.parametrize("kind", ["memory", "sqlite", "postgres"])
+def test_ungradable_rows_are_not_counted_as_pending_grades_or_group_mix(kind, tmp_path):
+    with adapter(kind, tmp_path) as store:
+        valid = snapshot(401, "2026-09-01T12:00:00Z", labels={"group": "valid"})
+        no_reply = validate_conversation({
+            "id": f"{402:032x}", "tenant_id": "alpha", "source_scope": "b" * 16,
+            "messages": [{"role": "user", "content": "Synthetic request."}],
+            "event_at": "2026-09-01T12:00:00Z", "end_status": "complete", "input_issues": [],
+            "labels": {"group": "invalid"},
+        })
+        incomplete = validate_conversation({
+            "id": f"{403:032x}", "tenant_id": "alpha", "source_scope": "b" * 16,
+            "messages": [{"role": "user", "content": "Synthetic request."},
+                         {"role": "assistant", "content": "Synthetic reply."}],
+            "event_at": "2026-09-01T12:00:00Z", "end_status": "incomplete", "input_issues": [],
+            "labels": {"group": "invalid"},
+        })
+        open_row = validate_conversation({
+            "id": f"{404:032x}", "tenant_id": "alpha", "source_scope": "b" * 16,
+            "messages": [{"role": "user", "content": "Synthetic request."},
+                         {"role": "assistant", "content": "Synthetic reply."}],
+            "event_at": "2026-09-01T12:00:00Z", "end_status": "open", "input_issues": [],
+            "labels": {"group": "invalid"},
+        })
+        out_of_order = validate_conversation({
+            "id": f"{405:032x}", "tenant_id": "alpha", "source_scope": "b" * 16,
+            "messages": [{"role": "assistant", "content": "Synthetic reply."},
+                         {"role": "user", "content": "Synthetic request."}],
+            "event_at": "2026-09-01T12:00:00Z", "end_status": "complete", "input_issues": [],
+            "labels": {"group": "invalid"},
+        })
+        for row in (valid, no_reply, incomplete, open_row, out_of_order):
+            store.save_conversation(row)
+        result = preview_conversation_comparison(store, tenant_id="alpha",
+            payload=request("a" * 64))
+        assert result["reference"]["captured"] == 5
+        assert result["reference"]["eligible"] == 1
+        assert result["reference"]["ungraded"] == 1
+        assert result["reference"]["ineligible"] == 4
+        assert result["reference"]["ineligibleReasons"] == {
+            "incomplete_evidence": 1, "not_closed": 1, "no_completed_reply": 2,
+        }
+        groups = {group["value"]: group for group in result["groups"]}
+        assert groups["valid"]["referenceShare"] == 1.0
+        assert groups["invalid"]["referenceShare"] == 0.0
+        assert result["gradeEvidenceCount"] == 0
+
+
 def test_indexed_sqlite_windows_survive_5001_lifetime_rows_and_fail_closed_on_overflow(tmp_path):
     with adapter("sqlite", tmp_path) as store:
         outside = [snapshot(index + 1_000, "2026-08-01T00:00:00Z") for index in range(5_001)]
@@ -275,7 +332,74 @@ def test_live_postgres_window_uses_expression_index(tmp_path):
             ("alpha", "2026-09-01T00:00:00+00:00", "2026-09-03T00:00:00+00:00"),
         )
         assert "conversation_event_window" in " ".join(line for (line,) in plan)
+        actual_query = []
+        fetch = store._fetchall
+
+        def capture_query(sql, parameters):
+            actual_query.append((sql, parameters))
+            return fetch(sql, parameters)
+
+        store._fetchall = capture_query
         result = preview_conversation_comparison(store, tenant_id="alpha",
                                                  payload=request("a" * 64, label_key=""))
+        store._fetchall = fetch
+        assert len(actual_query) == 1
+        full_plan = store._fetchall("EXPLAIN " + actual_query[0][0], actual_query[0][1])
+        assert "conversation_event_window" in " ".join(line for (line,) in full_plan)
         assert result["reference"]["captured"] == 1
         assert result["current"]["captured"] == 1
+
+
+@pytest.mark.parametrize("kind", ["sqlite", "postgres"])
+def test_separate_reader_sees_one_state_during_correction_transaction(kind, tmp_path):
+    with adapter(kind, tmp_path) as writer:
+        original = snapshot(50_000, "2026-09-01T12:00:00Z")
+        changed = validate_conversation({
+            **{key: value for key, value in original.items() if key != "revision"},
+            "messages": [{"role": "user", "content": "Synthetic question."},
+                         {"role": "assistant", "content": "Changed synthetic answer."}],
+        })
+        assessment = grade(original, "pass")
+        writer.save_conversation(original)
+        writer.save_conversation_assessment(assessment)
+        reader = (SQLiteStorage(str(tmp_path / "compare.db")) if kind == "sqlite"
+                  else PostgresStorage(writer._dsn, min_pool=1, max_pool=2))
+        payload = request(assessment["evaluator_fingerprint"], label_key="")
+        try:
+            if kind == "sqlite":
+                with writer._lock:
+                    writer._conn.execute("BEGIN IMMEDIATE")
+                    try:
+                        writer._conn.execute(
+                            "UPDATE conversation_snapshots SET payload=? WHERE tenant_id=? AND conversation_id=?",
+                            (json.dumps(changed), "alpha", original["id"]),
+                        )
+                        during = preview_conversation_comparison(reader, tenant_id="alpha", payload=payload)
+                        assert during["reference"]["pass"] == 1
+                        writer._conn.execute(
+                            "DELETE FROM conversation_assessments WHERE tenant_id=? AND conversation_id=? AND revision<>?",
+                            ("alpha", original["id"], changed["revision"]),
+                        )
+                    except BaseException:
+                        writer._conn.execute("ROLLBACK")
+                        raise
+                    else:
+                        writer._conn.execute("COMMIT")
+            else:
+                with writer._pool.connection() as connection, connection.transaction():
+                    with connection.cursor() as cursor:
+                        cursor.execute(
+                            "UPDATE conversation_snapshots SET payload=%s WHERE tenant_id=%s AND conversation_id=%s",
+                            (json.dumps(changed), "alpha", original["id"]),
+                        )
+                        during = preview_conversation_comparison(reader, tenant_id="alpha", payload=payload)
+                        assert during["reference"]["pass"] == 1
+                        cursor.execute(
+                            "DELETE FROM conversation_assessments WHERE tenant_id=%s AND conversation_id=%s AND revision<>%s",
+                            ("alpha", original["id"], changed["revision"]),
+                        )
+            after = preview_conversation_comparison(reader, tenant_id="alpha", payload=payload)
+            assert after["reference"]["pass"] == 0
+            assert after["reference"]["ungraded"] == 1
+        finally:
+            reader.close()

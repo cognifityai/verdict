@@ -736,13 +736,16 @@ whole-conversation rubric. Enter two non-overlapping date ranges in local time
 such as `group` or `persona`. Voice imports may
 include a top-level `labels` object with up to eight short string values; missing
 values appear as a separate group. The comparison reads stored current grades
-without calling a judge. It shows captured, PASS, FAIL, UNCLEAR, judge-error,
-and ungraded counts; PASS rates use only PASS and FAIL grades. Group shares are
-based on captured conversations, so inspect both mix changes and within-group
+without calling a judge. It shows captured, eligible, not-evaluable, PASS,
+FAIL, UNCLEAR, judge-error, and ungraded-eligible counts; PASS rates use only
+PASS and FAIL grades. A missing evaluator in both windows is called out rather
+than silently treated as a coverage failure. Group shares are based on eligible
+conversations, so inspect both mix changes and within-group
 rates before interpreting an overall change. A corrected transcript or label
 invalidates its old grade and can change a later preview. Choose narrower
 windows if they contain more than 10,000 conversations. Conversations without
-a usable source end time cannot enter a dated window.
+a usable source end time cannot enter a dated window. This exploratory result
+is not saved or used for alerts.
 - Trace Explorer pages through every stored non-judge application trace in
   30-row pages. Search and provider/content-state filters apply to the current
   page; dashboard aggregates continue to use the complete store. Selecting a

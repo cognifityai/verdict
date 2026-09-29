@@ -116,7 +116,8 @@ def test_explicit_voice_labels_are_bounded_and_part_of_snapshot_revision(storage
 
 @pytest.mark.parametrize("labels", [
     {"Bad key": "one"}, {"group": ""}, {"group": "x" * 129},
-    {f"key_{index}": "value" for index in range(9)},
+    {f"key_{chr(97 + index)}": "value" for index in range(9)},
+    {"patient_123456789": "one"},
 ])
 def test_invalid_voice_labels_do_not_create_snapshot(storage, labels):
     source = _source()

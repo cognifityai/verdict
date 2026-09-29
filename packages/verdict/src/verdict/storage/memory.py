@@ -1084,12 +1084,16 @@ class InMemoryStorage:
                 assessment = json.loads(assessment_json) if assessment_json else None
                 if assessment is not None and assessment["revision"] != snapshot["revision"]:
                     assessment = None
+                from verdict.conversation_assessments import evaluation_targets
+
+                _, ineligible_reason = evaluation_targets(snapshot, {"target": "conversation"})
                 definition = next((dimension for dimension in assessment["rubric"]["dimensions"]
                                    if dimension["name"] == value["dimension"]), None) if assessment else None
                 rows.append({
                     "id": conversation_id, "event_at": event_at,
                     "revision": snapshot["revision"],
                     "labels": snapshot.get("labels"),
+                    "ineligible_reason": ineligible_reason,
                     "assessment_status": assessment["status"] if assessment else None,
                     "rubric_target": assessment["rubric"]["target"] if assessment else None,
                     "dimension_type": definition["type"] if definition else None,
