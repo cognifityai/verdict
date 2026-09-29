@@ -1139,6 +1139,11 @@ class InMemoryStorage:
                     "dimension_min": definition.get("min") if definition else None,
                     "dimension_max": definition.get("max") if definition else None,
                     "dimension_state": result.get("state"), "dimension_score": result.get("score"),
+                    "dimension_score_type": (
+                        "boolean" if type(result.get("score")) is bool else
+                        "number" if type(result.get("score")) in (int, float) else
+                        "string" if isinstance(result.get("score"), str) else None
+                    ),
                 })
         return sorted(rows, key=lambda row: (row["event_at"], row["id"]))[:limit]
 

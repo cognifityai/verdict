@@ -774,6 +774,8 @@ call a judge, save a result, generate an alert, verify identical interactive
 turns, or establish a model winner. Source corrections or label edits remove
 old grades and can change a later comparison; earlier reimports under the
 same source ID are overwritten and cannot be detected as duplicates.
+If a valid numeric rubric's bounds exceed finite aggregate arithmetic, the
+paired scores remain inspectable but the aggregate and interval are unavailable.
 - Trace Explorer pages through every stored non-judge application trace in
   30-row pages. Search and provider/content-state filters apply to the current
   page; dashboard aggregates continue to use the complete store. Selecting a

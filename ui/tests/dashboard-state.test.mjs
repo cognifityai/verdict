@@ -1671,6 +1671,17 @@ test("matched conversation comparison uses current paired grades and rejects sta
   await oldRequest;
   tree = render(ui.MatchedConversationCompare, hooks, props);
   assert.doesNotMatch(textOf(tree), /Selected variant rows/);
+  findAll(tree, (node) => node.type === "input" && node.props["aria-label"] === "Second variant value")[0]
+    .props.onChange({ target: { value: "right" } });
+  tree = render(ui.MatchedConversationCompare, hooks, props);
+  const extremeRequest = findAll(tree, (node) => node.type === "form")[0]
+    .props.onSubmit({ preventDefault() {} });
+  await resolveJson(requests[7], { candidateRows: 2, declaredPairs: 1, usablePairs: 1,
+    exclusions: {}, dimensionType: "number", numeric: { unavailableReason: "score_arithmetic_overflow" },
+    binary: null, examples: [] });
+  await extremeRequest;
+  tree = render(ui.MatchedConversationCompare, hooks, props);
+  assert.match(textOf(tree), /numeric range is too large for a finite aggregate/);
 });
 
 function runListRow(runId) {

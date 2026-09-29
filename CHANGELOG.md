@@ -31,6 +31,9 @@ the product is refined.
   and opens both current transcripts together. Numeric paired differences show
   a conservative bounded-score interval. The result is descriptive, unsaved,
   and does not claim a model winner or trigger an alert.
+  Malformed stored scores and noncanonical stored end times fail closed;
+  extremely wide valid numeric ranges retain inspectable pairs without a
+  finite aggregate.
 - Conversation grade detail shows only results for its returned transcript
   revision. Judge findings reject unrecognized fields and bind their dimension
   to the enclosing rubric result. Core and eval release dependencies now

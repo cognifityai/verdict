@@ -347,6 +347,8 @@ bounded-score 95% interval under independent, representative-case sampling. This
 descriptive result, not a causal model winner, replay, or alert. The producer
 must supply truthful pair IDs and variant metadata; a shared ID does not prove
 identical interactive turns. At most 10,000 selected-variant rows enter a query.
+Extremely wide valid numeric ranges retain inspectable pairs but cannot show
+a finite aggregate or interval.
 Conversation snapshots require the `0.1.0a23` core build; grading them also
 requires the matching eval build. The published `0.1.0a22` command above
 imports Voice reply Traces but does not store conversation snapshots or grade

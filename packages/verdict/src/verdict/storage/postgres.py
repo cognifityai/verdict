@@ -2482,7 +2482,8 @@ class PostgresStorage:
                            AS definition(value)
                         WHERE definition.value->>'name'=%s LIMIT 1) AS dimension_max,
                       (grade.payload::jsonb)->'dimensions'->%s->>'state' AS dimension_state,
-                      (grade.payload::jsonb)->'dimensions'->%s->>'score' AS dimension_score
+                      (grade.payload::jsonb)->'dimensions'->%s->>'score' AS dimension_score,
+                      jsonb_typeof((grade.payload::jsonb)->'dimensions'->%s->'score') AS dimension_score_type
                  FROM selected LEFT JOIN conversation_assessments AS grade
                    ON grade.tenant_id=%s AND grade.conversation_id=selected.conversation_id
                   AND grade.evaluator_fingerprint=%s AND grade.target_position=-1
@@ -2491,13 +2492,13 @@ class PostgresStorage:
             (value["tenant_id"], value["window_start"], value["window_end"],
              value["variant_key"], value["left_variant"], value["right_variant"], limit,
              value["dimension"], value["dimension"], value["dimension"], value["dimension"],
-             value["dimension"], value["dimension"],
+             value["dimension"], value["dimension"], value["dimension"],
              value["tenant_id"], value["evaluator_fingerprint"], limit),
         )
         fields = ("id", "event_at", "revision", "labels", "end_status", "issue_count",
                   "first_user", "last_assistant", "assessment_status", "rubric_target",
                   "dimension_type", "dimension_direction", "dimension_min", "dimension_max",
-                  "dimension_state", "dimension_score")
+                  "dimension_state", "dimension_score", "dimension_score_type")
         return [dict(zip(fields, row, strict=True)) for row in rows]
 
     def delete_conversation(self, tenant_id: str, conversation_id: str) -> None:

@@ -2544,7 +2544,8 @@ class SQLiteStorage:
                       FROM json_each(grade.payload, '$.rubric.dimensions') AS definition
                      WHERE json_extract(definition.value, '$.name')=? LIMIT 1) AS dimension_max,
                    json_extract(grade.payload, ?) AS dimension_state,
-                   json_extract(grade.payload, ?) AS dimension_score
+                   json_extract(grade.payload, ?) AS dimension_score,
+                   json_type(grade.payload, ?) AS dimension_score_type
               FROM selected
               LEFT JOIN conversation_assessments AS grade
                 ON grade.tenant_id=? AND grade.conversation_id=selected.conversation_id
@@ -2558,6 +2559,7 @@ class SQLiteStorage:
             value["right_variant"], limit,
             value["dimension"], value["dimension"], value["dimension"], value["dimension"],
             f'$.dimensions."{value["dimension"]}".state',
+            f'$.dimensions."{value["dimension"]}".score',
             f'$.dimensions."{value["dimension"]}".score',
             value["tenant_id"], value["evaluator_fingerprint"], limit,
         )

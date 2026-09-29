@@ -92,6 +92,8 @@ def _grade(row: dict) -> dict:
         raise ValueError("stored conversation grade is invalid")
     score = row.get("dimension_score")
     if score is not None:
+        if row.get("dimension_score_type") not in {"number", "integer", "real"}:
+            raise ValueError("stored numeric score is invalid")
         try:
             score = float(score)
         except (TypeError, ValueError) as exc:
@@ -112,7 +114,7 @@ def _grade(row: dict) -> dict:
         except (TypeError, ValueError) as exc:
             raise ValueError("stored numeric range is invalid") from exc
         if (direction not in {"higher_is_better", "lower_is_better"} or not math.isfinite(low)
-                or not math.isfinite(high) or not math.isfinite(high - low) or low >= high
+                or not math.isfinite(high) or low >= high
                 or (score is not None and not low <= score <= high)):
             raise ValueError("stored numeric grade is invalid")
     return {"id": row["id"], "revision": row["revision"], "status": status,
@@ -133,6 +135,8 @@ def preview_matched_conversations(storage, *, tenant_id: str, payload: dict) -> 
     missing_pair = 0
     kind = direction = low = high = None
     for row in rows:
+        if _boundary(row["event_at"]) != row["event_at"]:
+            raise ValueError("stored matched row has noncanonical event time")
         if not query["window_start"] <= row["event_at"] < query["window_end"]:
             raise ValueError("stored matched row is outside selected window")
         labels = _labels(row["labels"])
@@ -205,16 +209,20 @@ def preview_matched_conversations(storage, *, tenant_id: str, payload: dict) -> 
             examples.append({"pairId": pair_id, "left": a, "right": b})
     numeric = None
     if kind == "number" and usable:
-        left_mean = math.fsum(value / usable for value in left_scores)
-        right_mean = math.fsum(value / usable for value in right_scores)
-        delta = math.fsum((right - left) / usable
-                          for left, right in zip(left_scores, right_scores, strict=True))
-        radius = (high - low) * math.sqrt(2 * math.log(40) / usable)
-        numeric = {"leftMean": left_mean, "rightMean": right_mean,
-                   "meanRightMinusLeft": delta,
-                   "deltaInterval95": [max(-(high - low), delta - radius),
-                                       min(high - low, delta + radius)],
-                   "intervalMethod": "bounded_hoeffding_95"}
+        width = high - low
+        if not math.isfinite(width):
+            numeric = {"unavailableReason": "score_arithmetic_overflow"}
+        else:
+            left_mean = math.fsum(value / usable for value in left_scores)
+            right_mean = math.fsum(value / usable for value in right_scores)
+            delta = math.fsum((right - left) / usable
+                              for left, right in zip(left_scores, right_scores, strict=True))
+            radius = width * math.sqrt(2 * math.log(40) / usable)
+            numeric = {"leftMean": left_mean, "rightMean": right_mean,
+                       "meanRightMinusLeft": delta,
+                       "deltaInterval95": [max(-width, delta - radius),
+                                           min(width, delta + radius)],
+                       "intervalMethod": "bounded_hoeffding_95"}
     return {
         "state": "descriptive", "unit": "matched_conversation",
         "method": "source_declared_current_pairs_v1", "windowStart": query["window_start"],

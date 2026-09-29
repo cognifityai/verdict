@@ -207,6 +207,85 @@ def test_lower_is_better_numeric_and_missing_score_are_separate(kind, tmp_path):
         assert result["exclusions"]["missingScorePairs"] == 1
 
 
+@pytest.mark.parametrize("kind", ["memory", "sqlite", "postgres"])
+def test_valid_extreme_numeric_bounds_keep_pair_inspectable_when_aggregate_is_unrepresentable(kind, tmp_path):
+    with store_for(kind, tmp_path) as store:
+        left = conversation(9500, pair="extreme")
+        right = conversation(9501, pair="extreme", variant="right")
+        rubric = validate_rubric({"name": "extreme", "version": "1", "target": "conversation",
+            "dimensions": [{"name": "quality", "description": "Bounded synthetic score.",
+                            "type": "number", "min": -1e308, "max": 1e308}]})
+        identity = {"provider": "local", "model": "synthetic",
+                    "rubric_fingerprint": rubric["fingerprint"], "prompt_version": "pair_v1",
+                    "max_output_tokens": 2048}
+        for row, score in [(left, 0), (right, 1)]:
+            store.save_conversation(row)
+            stored = validate_assessment({"tenant_id": row["tenant_id"],
+                "conversation_id": row["id"], "revision": row["revision"],
+                "target_position": None, "rubric": rubric, "evaluator": identity,
+                "status": "completed", "dimensions": {"quality": {
+                    "state": "unclear", "score": score, "reason": "Synthetic grade."}},
+                "findings": [], "evaluated_at": "2026-09-03T00:00:00Z"}, row)
+            store.save_conversation_assessment(stored)
+        result = preview_matched_conversations(store, tenant_id="alpha",
+            payload=request(stored["evaluator_fingerprint"]))
+        assert result["usablePairs"] == 1
+        assert result["numeric"]["unavailableReason"] == "score_arithmetic_overflow"
+        assert result["examples"][0]["left"]["score"] == 0
+        assert result["examples"][0]["right"]["score"] == 1
+
+
+def test_corrupt_boolean_score_fails_closed_at_api_boundary(tmp_path):
+    with store_for("sqlite", tmp_path) as store:
+        left = conversation(9600, pair="corrupt")
+        right = conversation(9601, pair="corrupt", variant="right")
+        for row, score in ((left, 2), (right, 4)):
+            store.save_conversation(row)
+            store.save_conversation_assessment(grade(row, score, numeric=True))
+        store._conn.execute(
+            "UPDATE conversation_assessments SET payload=json_set(payload, '$.dimensions.quality.score', json('true')) "
+            "WHERE tenant_id=? AND conversation_id=?", ("alpha", right["id"]),
+        )
+        with pytest.raises(ValueError, match="numeric score"):
+            preview_matched_conversations(store, tenant_id="alpha",
+                payload=request(grade(left, 2, numeric=True)["evaluator_fingerprint"]))
+
+
+def test_postgres_preserves_boolean_score_type_for_fail_closed_comparison(tmp_path):
+    with store_for("postgres", tmp_path) as store:
+        left = conversation(9650, pair="corrupt")
+        right = conversation(9651, pair="corrupt", variant="right")
+        for row, score in ((left, 2), (right, 4)):
+            store.save_conversation(row)
+            store.save_conversation_assessment(grade(row, score, numeric=True))
+        store._exec(
+            "UPDATE conversation_assessments SET payload=jsonb_set(payload::jsonb, "
+            "'{dimensions,quality,score}', 'true'::jsonb)::text "
+            "WHERE tenant_id=%s AND conversation_id=%s", ("alpha", right["id"]),
+        )
+        with pytest.raises(ValueError, match="numeric score"):
+            preview_matched_conversations(store, tenant_id="alpha",
+                payload=request(grade(left, 2, numeric=True)["evaluator_fingerprint"]))
+
+
+def test_corrupt_noncanonical_event_time_cannot_enter_utc_window(tmp_path):
+    with store_for("sqlite", tmp_path) as store:
+        left = conversation(9700, pair="time")
+        right = conversation(9701, pair="time", variant="right")
+        for row in (left, right):
+            store.save_conversation(row)
+            store.save_conversation_assessment(grade(row, "pass"))
+        store._conn.execute(
+            "UPDATE conversation_snapshots SET payload=json_set(payload, '$.event_at', '2026-09-02T23:00:00-03:00') "
+            "WHERE tenant_id=? AND conversation_id=?", ("alpha", right["id"]),
+        )
+        payload = request(grade(left, "pass")["evaluator_fingerprint"])
+        payload["windowStart"] = "2026-09-02T00:00:00Z"
+        payload["windowEnd"] = "2026-09-03T00:00:00Z"
+        with pytest.raises(ValueError, match="noncanonical event time"):
+            preview_matched_conversations(store, tenant_id="alpha", payload=payload)
+
+
 @pytest.mark.parametrize("changed", [
     {"pairKey": "Bad key"}, {"variantKey": "pair_id"},
     {"leftVariant": "right"}, {"windowEnd": "2026-09-01T00:00:00Z"},
