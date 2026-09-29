@@ -35,6 +35,7 @@ _PROVIDER_KEYS = {
     "anthropic": "ANTHROPIC_API_KEY",
     "openai": "OPENAI_API_KEY",
     "google": "GOOGLE_API_KEY",
+    "jev": "TYPESAFE_API_KEY",
 }
 _MAX_EVALUATION_TRACES = 10_000
 _EVALUATION_LOCK = threading.Lock()
@@ -55,6 +56,10 @@ def evaluator_environment() -> dict[str, Any]:
                 "provider": provider,
                 "secretReference": key,
                 "configured": bool(os.environ.get(key)),
+                "sdkAvailable": (
+                    importlib.util.find_spec("typesafe_sdk") is not None
+                    if provider == "jev" else True
+                ),
                 "customEndpointConfigured": (
                     provider == "openai" and bool(os.environ.get("OPENAI_BASE_URL"))
                 ),
@@ -79,8 +84,14 @@ def _validated_config(config: dict[str, Any]):
     model = config.get("model")
     if provider not in _PROVIDER_KEYS:
         raise ValueError("unsupported judge provider")
+    if provider == "jev" and config.get("toolEvidence") is not None:
+        raise ValueError("Jev does not support recorded tool evidence")
     if not isinstance(model, str) or not model or len(model.encode("utf-8")) > 256:
         raise ValueError("invalid judge model")
+    if provider == "jev":
+        from verdict_eval.jev_judge import validate_jev_model
+
+        validate_jev_model(model)
     max_calls_value = config.get("maxCalls", "all")
     max_calls = None if max_calls_value == "all" else max_calls_value
     max_output = config.get("maxOutputTokens", 512)
@@ -178,14 +189,24 @@ class _IdentityOnlyProvider:
             self.supports_temperature = True
 
 
-def _judge(provider, model, rubric, max_output, *, tool_evidence=False):
+def _judge(provider, model, rubric, max_output, *, tool_evidence=False,
+           skip_context_dependent_when_missing=True):
+    if provider.name == "jev":
+        if tool_evidence:
+            raise ValueError("Jev does not support recorded tool evidence")
+        from verdict_eval.jev_judge import JevJudge
+
+        return JevJudge(
+            model=model, rubric=rubric,
+            skip_context_dependent_when_missing=skip_context_dependent_when_missing,
+        )
     from verdict_eval.judge import Judge
 
     return Judge(
         provider=provider,
         model=model,
         rubric=rubric,
-        skip_context_dependent_when_missing=True,
+        skip_context_dependent_when_missing=skip_context_dependent_when_missing,
         max_tokens=max_output,
         tool_evidence_mode=TOOL_EVIDENCE_MODE if tool_evidence else None,
         tool_evidence_template=TurnToolCounts.PROMPT_TEMPLATE if tool_evidence else None,
@@ -334,9 +355,12 @@ def _turn_preview(storage, tenant_id, config, provider, model, max_calls, max_ou
                                                     max_calls, limit, before, planned),
         "alreadyJudged": already, "maximumCalls": "all" if max_calls is None else max_calls,
         "scanLimit": limit, "hasMore": next_cursor is not None, "nextCursor": next_cursor,
-        "estimatedInputTokens": input_estimate, "maximumOutputTokens": max_output * len(selected),
-        "estimatedMaximumCostUsd": compute_cost_usd(model, input_estimate, max_output * len(selected)),
-        "costIsStaticEstimate": True, "externalEgressRequired": True,
+        "estimatedInputTokens": input_estimate,
+        "maximumOutputTokens": None if provider == "jev" else max_output * len(selected),
+        "estimatedMaximumCostUsd": (None if provider == "jev" else
+                                    compute_cost_usd(model, input_estimate, max_output * len(selected))),
+        "costIsStaticEstimate": provider != "jev", "externalEgressRequired": True,
+        "destination": identity["evaluator_config"]["base_url"] if provider == "jev" else None,
     }
 
 
@@ -424,16 +448,22 @@ def preview_evaluation(
         "alreadyJudged": already_judged,
         "maximumCalls": "all" if max_calls is None else max_calls,
         "estimatedInputTokens": input_estimate,
-        "maximumOutputTokens": output_maximum,
-        "estimatedMaximumCostUsd": compute_cost_usd(model, input_estimate, output_maximum),
-        "costIsStaticEstimate": True,
+        "maximumOutputTokens": None if provider == "jev" else output_maximum,
+        "estimatedMaximumCostUsd": (None if provider == "jev" else
+                                    compute_cost_usd(model, input_estimate, output_maximum)),
+        "costIsStaticEstimate": provider != "jev",
         "externalEgressRequired": True,
+        "destination": identity["evaluator_config"]["base_url"] if provider == "jev" else None,
     }
 
 
 def _provider(name: str):
     if not os.environ.get(_PROVIDER_KEYS[name]):
         raise ValueError(f"{_PROVIDER_KEYS[name]} is not configured")
+    if name == "jev":
+        if importlib.util.find_spec("typesafe_sdk") is None:
+            raise ImportError("Install cognifity-verdict-eval[jev] to use Jev")
+        return _IdentityOnlyProvider("jev")
     if name == "anthropic":
         from verdict_eval.providers import AnthropicAdapter
         return AnthropicAdapter()
@@ -643,11 +673,38 @@ def _label_set(path: str | Path, rubric):
     return set_name, examples
 
 
-def preview_calibration(*, path: str | Path, config: dict[str, Any]) -> dict[str, Any]:
-    _provider_name, model, _max_calls, max_output, rubric = _validated_config(config)
+def _calibration_plan(path: str | Path, config: dict[str, Any]):
+    provider_name, model, _max_calls, max_output, rubric = _validated_config(config)
     if config.get("toolEvidence") is not None:
         raise ValueError("calibration examples do not contain Agent Turn tool evidence")
-    set_name, examples = _label_set(path, rubric)
+    set_name, source_examples = _label_set(path, rubric)
+    identity = _judge(
+        _IdentityOnlyProvider(provider_name), model, rubric, max_output,
+    ).evaluator_identity(context=None)
+    production_dimensions = set(identity["expected_dimensions"])
+    for example in source_examples:
+        if set(example.labels) - production_dimensions:
+            raise ValueError("label set contains dimensions absent from the production evaluator")
+    # Dashboard Trace and Turn judging have no retrieved context. Keep the
+    # calibration input and fingerprint on that same effective evidence path.
+    examples = [replace(example, context=None) for example in source_examples]
+    from verdict_eval.judge_health import sentinel_set_fingerprint
+
+    plan = {
+        "evaluator": identity["evaluator_fingerprint"],
+        "setName": set_name,
+        "setFingerprint": sentinel_set_fingerprint(examples),
+    }
+    fingerprint = hashlib.sha256(json.dumps(
+        plan, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")).hexdigest()
+    return provider_name, model, max_output, rubric, set_name, examples, identity, fingerprint
+
+
+def preview_calibration(*, path: str | Path, config: dict[str, Any]) -> dict[str, Any]:
+    provider_name, model, max_output, _rubric, set_name, examples, identity, fingerprint = (
+        _calibration_plan(path, config)
+    )
     label_counts: Counter[str] = Counter()
     estimated_input = 0
     for example in examples:
@@ -661,9 +718,13 @@ def preview_calibration(*, path: str | Path, config: dict[str, Any]) -> dict[str
         "examples": len(examples),
         "labelCounts": dict(sorted(label_counts.items())),
         "plannedCalls": len(examples),
-        "estimatedMaximumCostUsd": compute_cost_usd(model, estimated_input, maximum_output),
+        "estimatedMaximumCostUsd": (None if provider_name == "jev" else
+                                    compute_cost_usd(model, estimated_input, maximum_output)),
         "externalEgressRequired": True,
         "rawLabelsPersisted": False,
+        "planFingerprint": fingerprint,
+        "destination": (identity["evaluator_config"]["base_url"]
+                        if provider_name == "jev" else None),
     }
 
 
@@ -680,19 +741,19 @@ def execute_calibration(
 ) -> dict[str, Any]:
     if confirm_external_egress is not True:
         raise ValueError("external judge egress was not confirmed")
-    provider_name, model, _max_calls, max_output, rubric = _validated_config(config)
-    if config.get("toolEvidence") is not None:
-        raise ValueError("calibration examples do not contain Agent Turn tool evidence")
-    set_name, examples = _label_set(path, rubric)
-    from verdict_eval.judge import Judge
-    from verdict_eval.judge_health import evaluate_judge_health
-    judge = Judge(
-        provider=provider or _provider(provider_name),
-        model=model,
-        rubric=rubric,
-        max_tokens=max_output,
-        skip_context_dependent_when_missing=False,
+    provider_name, model, max_output, rubric, set_name, examples, identity, fingerprint = (
+        _calibration_plan(path, config)
     )
+    if config.get("planFingerprint") is not None and config["planFingerprint"] != fingerprint:
+        raise ValueError("calibration plan does not match the approved preview")
+    from verdict_eval.judge_health import evaluate_judge_health
+    judge = _judge(
+        provider or _provider(provider_name), model, rubric, max_output,
+    )
+    if judge.evaluator_identity(context=None)["evaluator_fingerprint"] != (
+        identity["evaluator_fingerprint"]
+    ):
+        raise ValueError("judge provider behavior changed after preview")
     health = evaluate_judge_health(
         judge,
         examples,
