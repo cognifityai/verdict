@@ -22,6 +22,7 @@ import { ControlCenter } from "./ControlCenter.jsx";
 import { SetupWizard } from "./SetupWizard.jsx";
 import { initialDashboardTab } from "./source-state.mjs";
 import { Monitor, metricLabel } from "./Monitor.jsx";
+import { MatchedConversationCompare } from "./MatchedConversationCompare.jsx";
 import {
   canonicalDashboardHash, parseDashboardRoute, parseDashboardSelection,
   serializeDashboardRoute,
@@ -966,7 +967,7 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
             ...route, tab: "explore", section: "calls", traceJudgeStatus, traceId: null,
           })}
           onSelectTrace={(traceId) => commitRoute({ ...route, tab: "explore", section: "calls", traceId })} />}
-        {tab === "explore" && route.section === "compare" && <Compare data={DATA} source={source} />}
+        {tab === "explore" && route.section === "compare" && <><MatchedConversationCompare configUrl={mountedConfigUrl()} source={source} /><Compare data={DATA} source={source} /></>}
         {tab === "evaluate" && route.section === "results" && <Judge data={DATA} onOpenOperations={operationsUrl ? () => commitRoute({ ...route, tab: "settings", section: "integrations" }) : null} />}
         {tab === "evaluate" && route.section === "lab" && <EvaluatorLab configUrl={mountedConfigUrl()} onOpenEvaluated={(evaluatorId) => { onEvaluatorChange?.(evaluatorId); commitRoute({ ...route, tab: "explore", section: "calls", evaluatorId, traceJudgeStatus: "judged", traceId: null }); }} />}
         {tab === "evaluate" && route.section === "inspect" && <InspectLab configUrl={mountedConfigUrl()} />}

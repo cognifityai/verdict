@@ -496,6 +496,26 @@ Imports normalize source end times to UTC before storage. Preview rejects a
 returned row with a noncanonical end time. A direct database change can make a
 row sort outside the selected window before preview sees it; reimport the
 source record to repair its snapshot.
+For two configurations tested on the same declared input, add an opaque
+`pair_id` and a `variant` to each Voice record's top-level `labels` object.
+Open **Explore → Compare**, enter the UTC campaign dates, the whole-conversation
+evaluator fingerprint and dimension, both label keys, and the two variant
+values. The view requires exactly one current conversation per variant and
+pair ID; it reports duplicate, unmatched, ineligible, ungraded, error, and
+unusable pairs separately. Binary grades show paired PASS/FAIL directions;
+numeric grades show paired score difference and a conservative bounded-score
+95% interval under independent, representative-case sampling. Open a pair to
+inspect both current transcripts and grades.
+The source must guarantee pair IDs denote the same evaluation input and explain
+whether the variant is the assigned or actually used configuration. Verdict
+does not verify identical turns or claim a model winner. A corrected transcript
+or label invalidates its grade; the unsaved comparison must then be rerun.
+Both variants must end within the selected window, which uses source end time.
+Imported end times are normalized to UTC. A returned row with a noncanonical
+stored time is rejected, but a direct database change can make a row sort
+outside the requested window before comparison sees it.
+For extremely wide numeric rubric bounds, individual scores remain visible
+when the aggregate cannot be represented as a finite number.
 This workflow requires synchronized `0.1.0a23` core and eval builds. The
 published `0.1.0a22` install commands above do not include it; use a source
 checkout until `0.1.0a23` is published.

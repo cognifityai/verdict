@@ -28,7 +28,9 @@ The first agent-run analysis pass is deterministic and key-free: it reports
 evidence coverage, source-exposed completion state, source-reported per-turn
 token activity when available, observed tool/command/test failures, retries,
 and possible repeated-tool patterns. Provider-call token, latency, cost, judge,
-and model-comparison views remain limited to genuine LLM `Trace` records.
+and provider-call comparison views remain limited to genuine LLM `Trace`
+records. Source-declared whole-conversation pairs have a separate exploratory
+comparison described below.
 Programmatic policies can additionally require event
 types, prohibit named tools, or require JSON responses. Verdict does not infer
 task success, file state, retries, or cost when the source evidence does not
@@ -715,8 +717,9 @@ source. See [`ADR-013`](docs/adrs/013-stable-dependent-package-read-port.md).
   and the current transcript with its grades. Monitor can compare current
   whole-conversation binary grades across two historical windows, optionally
   by an explicit source label. This is descriptive: it creates no prospective
-  alert, and source labels are not semantic clusters. Matched model comparison
-  is not included yet. `delete_trace` deletes only a Trace;
+  alert, and source labels are not semantic clusters. **Explore → Compare**
+  also supports source-declared matched whole-conversation cases when both
+  variants carry an opaque pair ID and variant label. `delete_trace` deletes only a Trace;
   use `delete_conversation` for its separate snapshot. `prune_before` removes
   snapshots whose source end time, or first import time when absent, is before
   the cutoff while still returning only the number of deleted Traces. Supply
@@ -768,6 +771,34 @@ Imports normalize source end times to UTC before storage. If a returned stored
 row has a noncanonical end time, preview fails closed. Direct database changes
 can make a row sort outside the requested window before preview sees it; repair
 such snapshots by reimporting the source record.
+
+To compare two model or prompt variants on declared matched cases, include
+top-level Voice labels such as `{"pair_id":"opaque_case_1","variant":"model_a"}`
+and `{"pair_id":"opaque_case_1","variant":"model_b"}` on separate imported
+conversations. The producer must use the same pair ID only for the same
+evaluation input, and identify whether the variant denotes assigned or
+actually used configuration. In **Explore → Compare**, enter a single UTC
+campaign window, the evaluator fingerprint from Evaluator Lab, one
+whole-conversation rubric dimension, the pair/variant label keys, and two
+variant values. Both conversations must end inside the window and have one
+current grade from that same evaluator. Verdict excludes ambiguous duplicate
+current conversation IDs, unmatched, ineligible, missing, error, and unusable
+grades, then shows paired binary outcomes or numeric score differences and
+up to 50 inspectable pairs. Numeric differences use the rubric's score range
+for a conservative 95% interval, assuming independent, representative cases.
+Technical-failure closures with completed replies remain grade eligible and are counted
+separately. This view reads at most 10,000 selected-variant rows and does not
+call a judge, save a result, generate an alert, verify identical interactive
+turns, or establish a model winner. Source corrections or label edits remove
+old grades and can change a later comparison; earlier reimports under the
+same source ID are overwritten and cannot be detected as duplicates.
+Imports normalize source end times to UTC before storage. A returned row with
+a noncanonical stored time is rejected. Direct changes to the database can
+make a row sort outside the requested window before comparison sees it.
+If a valid numeric rubric's bounds exceed finite aggregate arithmetic, the
+paired scores remain inspectable but the aggregate and interval are unavailable.
+Invalid comparison requests return a generic error without exposing stored
+error details; an overlarge selection asks you to choose narrower dates.
 - Trace Explorer pages through every stored non-judge application trace in
   30-row pages. Search and provider/content-state filters apply to the current
   page; dashboard aggregates continue to use the complete store. Selecting a

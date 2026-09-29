@@ -2500,6 +2500,79 @@ class SQLiteStorage:
         with self._lock:
             return [dict(row) for row in self._conn.execute(sql, parameters).fetchall()]
 
+    def load_matched_conversation_rows(self, query: dict, *, limit: int) -> list[dict]:
+        from verdict.matched_conversations import validate_storage_query
+
+        value = validate_storage_query(query, limit)
+        sql = """
+            WITH selected AS (
+                SELECT conversation_id,
+                       json_extract(payload, '$.event_at') AS event_at,
+                       json_extract(payload, '$.revision') AS revision,
+                       json_extract(payload, '$.labels') AS labels,
+                       json_extract(payload, '$.end_status') AS end_status,
+                       json_array_length(payload, '$.input_issues') AS issue_count,
+                       (SELECT MIN(CAST(message.key AS INTEGER))
+                          FROM json_each(conversation_snapshots.payload, '$.messages') AS message
+                         WHERE json_extract(message.value, '$.role')='user'
+                           AND json_extract(message.value, '$.status')='completed') AS first_user,
+                       (SELECT MAX(CAST(message.key AS INTEGER))
+                          FROM json_each(conversation_snapshots.payload, '$.messages') AS message
+                         WHERE json_extract(message.value, '$.role')='assistant'
+                           AND json_extract(message.value, '$.status')='completed') AS last_assistant
+                  FROM conversation_snapshots
+                 WHERE tenant_id=? AND json_extract(payload, '$.event_at')>=?
+                   AND json_extract(payload, '$.event_at')<?
+                   AND json_extract(payload, ?) IN (?, ?)
+                 ORDER BY json_extract(payload, '$.event_at'), conversation_id LIMIT ?
+            )
+            SELECT selected.conversation_id AS id, selected.event_at, selected.revision,
+                   selected.labels, selected.end_status, selected.issue_count,
+                   selected.first_user, selected.last_assistant,
+                   json_extract(grade.payload, '$.status') AS assessment_status,
+                   json_extract(grade.payload, '$.rubric.target') AS rubric_target,
+                   (SELECT json_extract(definition.value, '$.type')
+                      FROM json_each(grade.payload, '$.rubric.dimensions') AS definition
+                     WHERE json_extract(definition.value, '$.name')=? LIMIT 1) AS dimension_type,
+                   (SELECT json_extract(definition.value, '$.direction')
+                      FROM json_each(grade.payload, '$.rubric.dimensions') AS definition
+                     WHERE json_extract(definition.value, '$.name')=? LIMIT 1) AS dimension_direction,
+                   (SELECT json_extract(definition.value, '$.min')
+                      FROM json_each(grade.payload, '$.rubric.dimensions') AS definition
+                     WHERE json_extract(definition.value, '$.name')=? LIMIT 1) AS dimension_min,
+                   (SELECT json_type(definition.value, '$.min')
+                      FROM json_each(grade.payload, '$.rubric.dimensions') AS definition
+                     WHERE json_extract(definition.value, '$.name')=? LIMIT 1) AS dimension_min_type,
+                   (SELECT json_extract(definition.value, '$.max')
+                      FROM json_each(grade.payload, '$.rubric.dimensions') AS definition
+                     WHERE json_extract(definition.value, '$.name')=? LIMIT 1) AS dimension_max,
+                   (SELECT json_type(definition.value, '$.max')
+                      FROM json_each(grade.payload, '$.rubric.dimensions') AS definition
+                     WHERE json_extract(definition.value, '$.name')=? LIMIT 1) AS dimension_max_type,
+                   json_extract(grade.payload, ?) AS dimension_state,
+                   json_extract(grade.payload, ?) AS dimension_score,
+                   json_type(grade.payload, ?) AS dimension_score_type
+              FROM selected
+              LEFT JOIN conversation_assessments AS grade
+                ON grade.tenant_id=? AND grade.conversation_id=selected.conversation_id
+               AND grade.evaluator_fingerprint=? AND grade.target_position=-1
+               AND grade.revision=selected.revision
+             ORDER BY selected.event_at, selected.conversation_id LIMIT ?
+        """
+        parameters = (
+            value["tenant_id"], value["window_start"], value["window_end"],
+            f'$.labels."{value["variant_key"]}"', value["left_variant"],
+            value["right_variant"], limit,
+            value["dimension"], value["dimension"], value["dimension"], value["dimension"],
+            value["dimension"], value["dimension"],
+            f'$.dimensions."{value["dimension"]}".state',
+            f'$.dimensions."{value["dimension"]}".score',
+            f'$.dimensions."{value["dimension"]}".score',
+            value["tenant_id"], value["evaluator_fingerprint"], limit,
+        )
+        with self._lock:
+            return [dict(row) for row in self._conn.execute(sql, parameters).fetchall()]
+
     def delete_conversation(self, tenant_id: str, conversation_id: str) -> None:
         from verdict.conversations import validate_conversation_query
 

@@ -36,7 +36,8 @@ source-reported per-turn tokens when available. Text is redacted before the
 preview cutoff, and incomplete token components remain explicitly partial;
 Claude totals appear only after terminal, complete response usage. Those source
 activity totals are not a quality ranking: latency, price, judging, and model
-comparisons still use genuine `Trace` records only.
+provider-call comparisons still use genuine `Trace` records only. A separate
+source-declared paired-conversation comparison is described below.
 
 Codex Turn requests include text from completed `UserMessage` items and the
 older `user_message` format. Rescanning can fill previously missing request
@@ -337,7 +338,17 @@ not-evaluable, PASS/FAIL, UNCLEAR, judge-error, and ungraded-eligible coverage
 separately. The PASS rate uses only
 PASS and FAIL grades; changing a transcript or label invalidates its old grade.
 This comparison does not create a prospective alert or discover semantic
-clusters. Matched model comparison is not included yet.
+clusters. Explore → Compare additionally accepts one source-declared pair-ID
+label and variant label for two versions of the same evaluation input. It
+compares only exact current whole-conversation binary or bounded numeric grades
+from one evaluator inside one UTC end-time window; duplicates and missing
+grades are excluded with counts. Numeric paired differences have a conservative
+bounded-score 95% interval under independent, representative-case sampling. This is an unsaved
+descriptive result, not a causal model winner, replay, or alert. The producer
+must supply truthful pair IDs and variant metadata; a shared ID does not prove
+identical interactive turns. At most 10,000 selected-variant rows enter a query.
+Extremely wide valid numeric ranges retain inspectable pairs but cannot show
+a finite aggregate or interval.
 Conversation snapshots require the `0.1.0a23` core build; grading them also
 requires the matching eval build. The published `0.1.0a22` command above
 imports Voice reply Traces but does not store conversation snapshots or grade

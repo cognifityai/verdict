@@ -728,6 +728,9 @@ class BufferedStorage:
     def load_conversation_comparison_rows(self, query: dict, *, limit: int) -> list[dict]:
         return self._read(self._inner.load_conversation_comparison_rows, query, limit=limit)
 
+    def load_matched_conversation_rows(self, query: dict, *, limit: int) -> list[dict]:
+        return self._read(self._inner.load_matched_conversation_rows, query, limit=limit)
+
     def delete_conversation(self, tenant_id: str, conversation_id: str) -> None:
         self._maintenance(self._inner.delete_conversation, tenant_id, conversation_id)
 
