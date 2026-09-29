@@ -150,6 +150,56 @@ test("conversation upload, approved run, and partial coverage refresh", async ()
   assert.equal(requests.length, 6);
 });
 
+test("conversation approval is cleared after failed navigation and run", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const props = { root: "", token: "setup-token", provider: "openai", model: "synthetic",
+    providerState: { configured: true }, updatePreferences: () => {} };
+  const document = { name: "quality", version: "1", target: "conversation",
+    dimensions: [{ name: "helpful", description: "Addresses the request.", type: "binary" }] };
+  let tree = render(ui.ConversationEvaluation, hooks, props);
+  const upload = findAll(tree, (node) => node.type === "input" && node.props.type === "file")[0]
+    .props.onChange({ target: { files: [{ size: 200, text: async () => JSON.stringify(document) }] } });
+  await new Promise(setImmediate);
+  await resolveJson(requests[0], { ...document, fingerprint: "a".repeat(64) });
+  await upload;
+  tree = render(ui.ConversationEvaluation, hooks, props);
+  const load = findAll(tree, (node) => node.type === "button" &&
+    textOf(node).includes("Preview first page"))[0].props.onClick();
+  const preview = { target: "conversation", scannedConversations: 1,
+    eligibleTargets: 1, alreadyJudged: 0, plannedCalls: 1, retryableErrors: 0,
+    notEvaluableReasons: {}, plannedTargets: [{ conversationId: "a", revision: "one",
+      targetPosition: null }], planFingerprint: "plan", evaluatorFingerprint: "b".repeat(64) };
+  await resolveJson(requests[1], preview);
+  await resolveJson(requests[2], { conversations: [], nextCursor: "next" });
+  await load;
+  tree = render(ui.ConversationEvaluation, hooks, props);
+  findAll(tree, (node) => node.type === "input" && node.props.type === "checkbox")[0]
+    .props.onChange({ target: { checked: true } });
+  tree = render(ui.ConversationEvaluation, hooks, props);
+  assert.equal(findAll(tree, (node) => node.type === "input" && node.props.type === "checkbox")[0]
+    .props.checked, true);
+  const navigating = findAll(tree, (node) => node.type === "button" &&
+    textOf(node) === "Next page by ID")[0].props.onClick();
+  await resolveJson(requests[3], preview);
+  requests[4].resolve({ ok: false, status: 503, json: async () => ({ error: "review unavailable" }) });
+  await navigating;
+  tree = render(ui.ConversationEvaluation, hooks, props);
+  assert.equal(findAll(tree, (node) => node.type === "input" && node.props.type === "checkbox")[0]
+    .props.checked, false);
+  findAll(tree, (node) => node.type === "input" && node.props.type === "checkbox")[0]
+    .props.onChange({ target: { checked: true } });
+  tree = render(ui.ConversationEvaluation, hooks, props);
+  const running = findAll(tree, (node) => node.type === "button" &&
+    /Run\s+1\s+judge calls/.test(textOf(node)))[0].props.onClick();
+  requests[5].resolve({ ok: false, status: 400, json: async () => ({ error: "stale plan" }) });
+  await running;
+  tree = render(ui.ConversationEvaluation, hooks, props);
+  assert.equal(findAll(tree, (node) => node.type === "input" && node.props.type === "checkbox")[0]
+    .props.checked, false);
+});
+
 test("Evaluator Lab previews a native Turn page and sends its approved identities", async () => {
   const ui = await loadUiModule();
   const hooks = createEffectHooks();

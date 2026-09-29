@@ -472,6 +472,9 @@ rubrics are at `examples/telemetry/conversation-rubric.example.json` and
 `examples/telemetry/response-rubric.example.json`; custom
 weighted totals are outside this generic schema. Conversation drift analysis
 is not available yet.
+This workflow requires synchronized `0.1.0a23` core and eval builds. The
+published `0.1.0a22` install commands above do not include it; use a source
+checkout until `0.1.0a23` is published.
 
 ## 5. Instrument your own app (the five-line pattern)
 

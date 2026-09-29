@@ -31,7 +31,7 @@ export function ConversationEvaluation({ root, token, provider, model, providerS
 
   async function loadPage(cursor = null) {
     if (inFlight.current || !rubric || !token) return;
-    inFlight.current = true; setBusy(true); setError(null); setDetail(null); setResult(null);
+    inFlight.current = true; setBusy(true); setError(null); setDetail(null); setResult(null); setConfirmed(false);
     try {
       const selected = config(cursor);
       const body = JSON.stringify(selected);
@@ -46,7 +46,7 @@ export function ConversationEvaluation({ root, token, provider, model, providerS
   async function upload(event) {
     const file = event.target.files?.[0];
     if (!file || !token || inFlight.current) return;
-    inFlight.current = true; setBusy(true); setError(null);
+    inFlight.current = true; setBusy(true); setError(null); setConfirmed(false);
     try {
       if (file.size > 128000) throw new Error("Rubric exceeds 128 KB");
       const document = JSON.parse(await file.text());
@@ -61,7 +61,7 @@ export function ConversationEvaluation({ root, token, provider, model, providerS
 
   async function run() {
     if (inFlight.current || !current || !confirmed || !preview?.plannedCalls) return;
-    inFlight.current = true; setBusy(true); setError(null);
+    inFlight.current = true; setBusy(true); setError(null); setConfirmed(false);
     try {
       const approved = { ...config(), plannedTargets: preview.plannedTargets,
         planFingerprint: preview.planFingerprint, confirmExternalEgress: true };

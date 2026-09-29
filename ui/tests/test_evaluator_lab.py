@@ -59,6 +59,7 @@ def test_evaluator_environment_reports_openai_compatible_endpoint_without_value(
 
     assert openai["configured"] is True
     assert openai["customEndpointConfigured"] is True
+    assert environment["conversationEvalAvailable"] is True
     assert endpoint not in str(environment)
 
 

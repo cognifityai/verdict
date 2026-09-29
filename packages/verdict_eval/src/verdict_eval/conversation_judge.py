@@ -159,7 +159,9 @@ def _result_fields(rubric: dict, output: dict) -> tuple[dict, list[dict]]:
         if not isinstance(entries, list) or len(entries) > 100:
             raise ValueError("invalid judge findings")
         for entry in entries:
-            if not isinstance(entry, dict):
+            if not isinstance(entry, dict) or set(entry) - {
+                "issue", "message_position", "quote", "reason",
+            }:
                 raise ValueError("invalid judge finding")
             findings.append({"dimension": name, **entry})
     return dimensions, findings

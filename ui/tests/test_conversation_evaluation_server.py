@@ -84,6 +84,55 @@ async def test_rubric_and_grade_canaries_absent_from_storage_and_detail(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_detail_never_pairs_old_snapshot_with_corrected_grade(tmp_path, monkeypatch):
+    path = tmp_path / "corrected.db"
+    original = validate_conversation({
+        "id": "d" * 32, "tenant_id": "alpha", "source_scope": "b" * 16,
+        "messages": [{"role": "user", "content": "Question."},
+                     {"role": "assistant", "content": "Old answer."}],
+        "event_at": "2026-09-01T12:00:00Z", "end_status": "complete", "input_issues": [],
+    })
+    corrected_input = {key: value for key, value in original.items() if key != "revision"}
+    corrected = validate_conversation({
+        **corrected_input, "messages": [{"role": "user", "content": "Question."},
+                                         {"role": "assistant", "content": "New answer."}],
+    })
+    rubric = validate_rubric({
+        "name": "quality", "version": "1", "target": "conversation",
+        "dimensions": [{"name": "helpful", "description": "Addresses the request."}],
+    })
+    identity = {"provider": "local", "model": "synthetic", "rubric_fingerprint": rubric["fingerprint"],
+                "prompt_version": "conversation_v1", "max_output_tokens": 2048}
+    grade = validate_assessment({
+        "tenant_id": "alpha", "conversation_id": corrected["id"], "revision": corrected["revision"],
+        "target_position": None, "rubric": rubric, "evaluator": identity,
+        "status": "completed", "dimensions": {"helpful": {"state": "pass", "reason": "New answer."}},
+        "findings": [], "evaluated_at": "2026-09-01T12:01:00Z",
+    }, corrected)
+    writer = SQLiteStorage(str(path))
+    writer.save_conversation(original)
+    writer.close()
+    read_snapshot = SQLiteStorage.get_conversation
+
+    def interleave_correction(storage, tenant_id, conversation_id):
+        old = read_snapshot(storage, tenant_id, conversation_id)
+        writer = SQLiteStorage(str(path))
+        writer.save_conversation(corrected)
+        writer.save_conversation_assessment(grade)
+        writer.close()
+        return old
+
+    monkeypatch.setattr(SQLiteStorage, "get_conversation", interleave_correction)
+    app = create_app(storage=f"sqlite:///{path}", tenant_id="alpha")
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1") as client:
+        detail = await client.get(f"/api/data/conversations/{original['id']}?evaluator={grade['evaluator_fingerprint']}")
+        assert detail.status_code == 200
+        payload = detail.json()
+        assert payload["conversation"]["revision"] == original["revision"]
+        assert all(a["revision"] == payload["conversation"]["revision"] for a in payload["assessments"])
+
+
+@pytest.mark.asyncio
 async def test_review_and_preview_page_after_5000_conversations(tmp_path):
     path = tmp_path / "long_lived.db"
     store = SQLiteStorage(str(path))

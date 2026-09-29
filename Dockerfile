@@ -2,7 +2,7 @@
 # Override VERDICT_VERSION only with another published, tested release.
 FROM python:3.12-slim
 
-ARG VERDICT_VERSION=0.1.0a22
+ARG VERDICT_VERSION=0.1.0a23
 ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     PORT=8080 \
@@ -11,7 +11,7 @@ ENV PYTHONUNBUFFERED=1 \
 WORKDIR /app
 
 RUN pip install --no-cache-dir \
-    "cognifity-verdict[dashboard,postgres]==${VERDICT_VERSION}"
+    "cognifity-verdict[dashboard,postgres,eval]==${VERDICT_VERSION}"
 
 # A maintainer may place verdict.db in docker-db/ before building. A clean
 # checkout creates an empty schema through the real storage adapter instead of

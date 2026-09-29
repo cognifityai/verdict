@@ -142,3 +142,30 @@ def test_invented_finding_quote_is_a_retryable_judge_error():
     [saved] = store.list_conversation_assessments("alpha", row["id"], preview["evaluatorFingerprint"])
     assert saved["status"] == "error"
     assert saved["findings"] == []
+
+
+@pytest.mark.parametrize("extra", [{"dimension": "safety"}, {"unexpected": "value"}])
+def test_judge_cannot_override_or_extend_finding_attribution(extra):
+    store = InMemoryStorage()
+    row = _row()
+    store.save_conversation(row)
+    config = _config()
+    config["rubric"]["dimensions"].append({
+        "name": "safety", "description": "Avoids unsafe advice.",
+    })
+    preview = preview_evaluation(store, tenant_id="alpha", config=config)
+    provider = FakeProvider(json.dumps({"dimensions": {
+        "helpful": {"verdict": "FAIL", "reason": "Missing detail.", "findings": [
+            {"issue": "omission", "reason": "Missing detail.", **extra},
+        ]},
+        "safety": {"verdict": "PASS", "reason": "Safe.", "findings": []},
+    }}))
+    provider.name = "openai"
+    outcome = execute_evaluation(store, tenant_id="alpha", config={
+        **config, "plannedTargets": preview["plannedTargets"],
+        "planFingerprint": preview["planFingerprint"],
+    }, confirm_external_egress=True, provider=provider)
+    assert outcome["errors"] == 1
+    [saved] = store.list_conversation_assessments("alpha", row["id"], preview["evaluatorFingerprint"])
+    assert saved["status"] == "error"
+    assert saved["findings"] == []

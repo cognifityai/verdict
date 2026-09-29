@@ -47,8 +47,14 @@ def evaluator_environment() -> dict[str, Any]:
         available = True
     except ImportError:
         available = False
+    try:
+        from verdict_eval import conversation_judge  # noqa: F401
+        conversation_available = True
+    except ImportError:
+        conversation_available = False
     return {
         "evalPackageAvailable": available,
+        "conversationEvalAvailable": conversation_available,
         "inspectPackageAvailable": importlib.util.find_spec("verdict_inspect") is not None,
         "providers": [
             {

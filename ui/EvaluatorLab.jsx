@@ -114,10 +114,14 @@ export function EvaluatorLab({ configUrl, onOpenEvaluated }) {
   const destinationLabel = providerState?.customEndpointConfigured
     ? "the configured OpenAI-compatible endpoint"
     : provider;
-  if (unit === "conversation") return <ConversationEvaluation
-    root={root} token={token} provider={provider} model={model}
-    providerState={providerState} updatePreferences={updatePreferences}
-  />;
+  if (unit === "conversation") {
+    if (environment && !environment.conversationEvalAvailable) return <section role="alert" className="max-w-5xl border p-5" style={{ borderColor: C.amber, background: C.panel }}>
+      Conversation grading requires matching Verdict core and eval packages. Install the same release of both, then reload.
+      <button className="block underline mt-3" onClick={() => updatePreferences({ unit: "trace" })}>Return to Trace evaluation</button>
+    </section>;
+    return <ConversationEvaluation root={root} token={token} provider={provider} model={model}
+      providerState={providerState} updatePreferences={updatePreferences} />;
+  }
   return <fieldset disabled={busy} className="max-w-5xl space-y-4" style={{ border: 0, margin: 0, padding: 0 }}>
     <section className="border p-5" style={{ borderColor: C.border, background: C.panel }}>
       <div className="text-xs font-mono" style={{ color: C.green }}>EVIDENCE-AWARE EVALUATOR LAB</div>

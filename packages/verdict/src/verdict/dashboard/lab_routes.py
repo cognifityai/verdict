@@ -78,6 +78,12 @@ def register_lab_routes(app, setup: SetupRoutes) -> None:
                 writable.list_conversation_assessments(setup.tenant_id, row["id"], evaluator)
                 if evaluator else []
             )
+            assessments = [assessment for assessment in assessments if (
+                assessment.get("tenant_id") == setup.tenant_id
+                and assessment.get("conversation_id") == row["id"]
+                and assessment.get("revision") == row["revision"]
+                and assessment.get("evaluator_fingerprint") == evaluator
+            )]
             return {"conversation": row, "assessments": assessments}
         except (TypeError, ValueError, UnicodeError):
             return JSONResponse({"error": "invalid conversation request"}, status_code=400)

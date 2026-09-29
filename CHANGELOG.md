@@ -19,6 +19,11 @@ the product is refined.
   and complete coverage against the current transcript revision. Corrections,
   deletion, and retention invalidate or remove grades with the snapshot.
   Conversation monitoring and model comparison are not included yet.
+- Conversation grade detail shows only results for its returned transcript
+  revision. Judge findings reject unrecognized fields and bind their dimension
+  to the enclosing rubric result. Core and eval release dependencies now
+  require a matching `0.1.0a23` candidate; the dashboard reports when its
+  conversation evaluator is unavailable.
 - Telemetry import now rejects `BufferedStorage` at entry because its queued
   Trace writes cannot support a completed-write import count.
 

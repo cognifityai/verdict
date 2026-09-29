@@ -703,6 +703,9 @@ To grade imported conversations, open **Evaluate → Evaluator Lab**, select
 [`examples/telemetry/conversation-rubric.example.json`](examples/telemetry/conversation-rubric.example.json)
 or [`examples/telemetry/response-rubric.example.json`](examples/telemetry/response-rubric.example.json)),
 and preview one bounded page. The default Trace evaluator remains separate.
+This workflow requires a synchronized core and eval build from the
+`0.1.0a23` release candidate; the published `0.1.0a22` installation above
+does not contain it. Until `0.1.0a23` is published, run from this source tree.
 Review the eligible and excluded counts before approving the selected judge
 calls. The judge uses the configured provider key or OpenAI-compatible endpoint;
 preview and file validation make no judge call. Uploaded rubric descriptions
