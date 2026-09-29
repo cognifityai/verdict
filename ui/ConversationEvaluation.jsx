@@ -92,7 +92,9 @@ export function ConversationEvaluation({ root, token, provider, model, providerS
   }
 
   const destination = providerState?.customEndpointConfigured
-    ? "the configured OpenAI-compatible endpoint" : provider;
+    ? provider === "anthropic" ? "the configured Anthropic endpoint"
+      : "the configured OpenAI-compatible endpoint"
+    : provider;
   return <fieldset disabled={busy} className="max-w-5xl space-y-4" style={{ border: 0, margin: 0, padding: 0 }}>
     <section className="border p-5 space-y-4" style={{ borderColor: C.border, background: C.panel }}>
       <div className="text-xs font-mono" style={{ color: C.green }}>EVALUATOR LAB · CONVERSATIONS</div>

@@ -99,8 +99,8 @@ test("conversation upload, approved run, and partial coverage refresh", async ()
   const ui = await loadUiModule();
   const hooks = createEffectHooks();
   const requests = deferredFetches();
-  const props = { root: "", token: "setup-token", provider: "openai", model: "synthetic",
-    providerState: { configured: true }, updatePreferences: () => {} };
+  const props = { root: "", token: "setup-token", provider: "anthropic", model: "synthetic",
+    providerState: { configured: true, customEndpointConfigured: true }, updatePreferences: () => {} };
   const document = { name: "reply_quality", version: "1", target: "response",
     dimensions: [{ name: "relevance", description: "Addresses the request.", type: "binary" }] };
   let tree = render(ui.ConversationEvaluation, hooks, props);
@@ -125,6 +125,7 @@ test("conversation upload, approved run, and partial coverage refresh", async ()
   await loading;
 
   tree = render(ui.ConversationEvaluation, hooks, props);
+  assert.match(textOf(tree), /configured Anthropic endpoint/);
   findAll(tree, (node) => node.type === "input" && node.props.type === "checkbox")[0]
     .props.onChange({ target: { checked: true } });
   tree = render(ui.ConversationEvaluation, hooks, props);

@@ -10,6 +10,44 @@ from verdict.storage.sqlite import SQLiteStorage
 
 
 @pytest.mark.asyncio
+async def test_custom_anthropic_endpoint_is_disclosed_without_its_url(monkeypatch, tmp_path):
+    endpoint = "https://synthetic-judge.invalid/v1"
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "synthetic-key")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", endpoint)
+    app = create_app(storage=f"sqlite:///{tmp_path / 'env.db'}", tenant_id="alpha")
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1") as client:
+        response = await client.get("/api/evaluators")
+    assert response.status_code == 200
+    anthropic = next(row for row in response.json()["providers"] if row["provider"] == "anthropic")
+    assert anthropic["configured"] is True
+    assert anthropic["customEndpointConfigured"] is True
+    assert endpoint not in response.text and "synthetic-key" not in response.text
+
+
+@pytest.mark.asyncio
+async def test_oversized_numeric_rubric_values_return_validation_error(tmp_path):
+    app = create_app(storage=f"sqlite:///{tmp_path / 'rubric.db'}", tenant_id="alpha")
+    huge = int("9" * 400)
+    document = {"name": "quality", "version": "1", "target": "conversation",
+                "dimensions": [{"name": "score", "description": "Synthetic range.",
+                                "type": "number", "min": 0, "max": 5,
+                                "passThreshold": 3}]}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app, raise_app_exceptions=False),
+                                 base_url="http://127.0.0.1") as client:
+        token = (await client.get("/api/setup/token")).json()["setupToken"]
+        headers = {"X-Verdict-Setup": token}
+        for field in ("min", "max", "passThreshold"):
+            candidate = {**document, "dimensions": [{**document["dimensions"][0], field: huge}]}
+            response = await client.post("/api/evaluators/rubric/validate",
+                                         json={"document": candidate}, headers=headers)
+            assert response.status_code == 400, field
+            assert response.json() == {"error": "invalid executable rubric JSON"}
+        valid = await client.post("/api/evaluators/rubric/validate",
+                                  json={"document": document}, headers=headers)
+    assert valid.status_code == 200
+
+
+@pytest.mark.asyncio
 async def test_conversation_preview_and_review_show_partial_coverage(tmp_path):
     path = tmp_path / "conversations.db"
     store = SQLiteStorage(str(path))

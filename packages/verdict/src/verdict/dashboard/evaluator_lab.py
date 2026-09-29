@@ -36,6 +36,7 @@ _PROVIDER_KEYS = {
     "openai": "OPENAI_API_KEY",
     "google": "GOOGLE_API_KEY",
 }
+_PROVIDER_ENDPOINT_ENV = {"openai": "OPENAI_BASE_URL", "anthropic": "ANTHROPIC_BASE_URL"}
 _MAX_EVALUATION_TRACES = 10_000
 _EVALUATION_LOCK = threading.Lock()
 
@@ -61,8 +62,8 @@ def evaluator_environment() -> dict[str, Any]:
                 "provider": provider,
                 "secretReference": key,
                 "configured": bool(os.environ.get(key)),
-                "customEndpointConfigured": (
-                    provider == "openai" and bool(os.environ.get("OPENAI_BASE_URL"))
+                "customEndpointConfigured": bool(
+                    os.environ.get(_PROVIDER_ENDPOINT_ENV.get(provider, ""))
                 ),
             }
             for provider, key in _PROVIDER_KEYS.items()

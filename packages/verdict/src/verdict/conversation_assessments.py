@@ -33,6 +33,15 @@ def _text(value: object, maximum: int, *, empty: bool = False) -> str:
     return safe
 
 
+def _finite_number(value: object) -> bool:
+    if type(value) not in (int, float):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
 def validate_rubric(value: object) -> dict:
     """Accept only the executable binary/numeric rubric schema."""
     if not isinstance(value, dict) or len(_json(value).encode("utf-8")) > MAX_RUBRIC_BYTES:
@@ -67,8 +76,7 @@ def validate_rubric(value: object) -> dict:
         }
         if kind == "number":
             low, high = raw.get("min"), raw.get("max")
-            if (type(low) not in (int, float) or type(high) not in (int, float)
-                    or not math.isfinite(low) or not math.isfinite(high) or low >= high):
+            if not _finite_number(low) or not _finite_number(high) or low >= high:
                 raise ValueError("numeric dimension requires finite min < max")
             direction = raw.get("direction", "higher_is_better")
             if direction not in {"higher_is_better", "lower_is_better"}:
@@ -76,7 +84,7 @@ def validate_rubric(value: object) -> dict:
             dimension.update(min=low, max=high, direction=direction)
             if "passThreshold" in raw:
                 threshold = raw["passThreshold"]
-                if type(threshold) not in (int, float) or not math.isfinite(threshold) or not low <= threshold <= high:
+                if not _finite_number(threshold) or not low <= threshold <= high:
                     raise ValueError("invalid numeric pass threshold")
                 dimension["passThreshold"] = threshold
         elif set(raw) & {"min", "max", "direction", "passThreshold"}:
@@ -194,7 +202,7 @@ def validate_assessment(value: object, conversation: dict) -> dict:
                     raise ValueError("invalid binary dimension result")
             else:
                 if score is not None and (
-                    type(score) not in (int, float) or not math.isfinite(score)
+                    not _finite_number(score)
                     or not definition["min"] <= score <= definition["max"]
                 ):
                     raise ValueError("numeric score outside rubric range")

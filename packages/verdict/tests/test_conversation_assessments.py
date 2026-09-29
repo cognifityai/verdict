@@ -57,6 +57,25 @@ def grade_for(row):
     }, row)
 
 
+@pytest.mark.parametrize("score", [int("9" * 400), True, "4", float("inf")])
+def test_numeric_assessment_rejects_unusable_score_without_overflow(score):
+    row = snapshot([{"role": "user", "content": "Question."},
+                    {"role": "assistant", "content": "Answer."}])
+    rule = validate_rubric({"name": "quality", "version": "1", "target": "conversation",
+                            "dimensions": [{"name": "score", "description": "Synthetic range.",
+                                            "type": "number", "min": 0, "max": 5,
+                                            "passThreshold": 3}]})
+    identity = {"provider": "local", "model": "synthetic",
+                "rubric_fingerprint": rule["fingerprint"], "prompt_version": "conversation_v1",
+                "max_output_tokens": 2048}
+    with pytest.raises(ValueError, match="numeric score outside rubric range"):
+        validate_assessment({"tenant_id": "alpha", "conversation_id": row["id"],
+            "revision": row["revision"], "target_position": None,
+            "rubric": rule, "evaluator": identity, "status": "completed",
+            "dimensions": {"score": {"state": "unclear", "score": score, "reason": "Synthetic."}},
+            "findings": [], "evaluated_at": "2026-09-01T12:01:00Z"}, row)
+
+
 @pytest.mark.parametrize(("messages", "ending", "issues", "expected", "reason"), [
     ([{"role": "user", "content": "Question."}], "complete", [], (), "no_completed_reply"),
     ([{"role": "assistant", "content": "Answer."}], "complete", [], (), "no_completed_reply"),

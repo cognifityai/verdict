@@ -24,6 +24,9 @@ the product is refined.
   to the enclosing rubric result. Core and eval release dependencies now
   require a matching `0.1.0a23` candidate; the dashboard reports when its
   conversation evaluator is unavailable.
+- Conversation judge consent identifies configured custom Anthropic and
+  OpenAI-compatible endpoints. Oversized numeric rubric values return a
+  validation error instead of an internal server error.
 - Telemetry import now rejects `BufferedStorage` at entry because its queued
   Trace writes cannot support a completed-write import count.
 

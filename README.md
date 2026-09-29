@@ -711,7 +711,9 @@ This workflow requires a synchronized core and eval build from the
 `0.1.0a23` release candidate; the published `0.1.0a22` installation above
 does not contain it. Until `0.1.0a23` is published, run from this source tree.
 Review the eligible and excluded counts before approving the selected judge
-calls. The judge uses the configured provider key or OpenAI-compatible endpoint;
+calls. The judge uses the configured provider key. When `OPENAI_BASE_URL` or
+`ANTHROPIC_BASE_URL` selects a custom endpoint, the consent screen names that
+destination before sending transcript content, without exposing its URL;
 preview and file validation make no judge call. Uploaded rubric descriptions
 and transcript text are best-effort redacted. A generic rubric defines only
 binary or bounded numeric dimensions; Verdict does not execute a vendor's

@@ -472,6 +472,10 @@ rubrics are at `examples/telemetry/conversation-rubric.example.json` and
 `examples/telemetry/response-rubric.example.json`; custom
 weighted totals are outside this generic schema. Conversation drift analysis
 is not available yet.
+For this workflow, `OPENAI_BASE_URL` and `ANTHROPIC_BASE_URL` select custom
+judge endpoints. The consent screen identifies the configured destination
+without returning its URL. Numeric rubric bounds and thresholds must be finite
+numbers; invalid values receive a validation error before any judge call.
 This workflow requires synchronized `0.1.0a23` core and eval builds. The
 published `0.1.0a22` install commands above do not include it; use a source
 checkout until `0.1.0a23` is published.
@@ -645,9 +649,9 @@ count, bind score currentness. An unrelated non-tool event below the 64-event
 eligibility cap does not schedule a new judge call. At more than 64 total events
 the Turn is not eligible for counts-only judging. Preview and Agent Run detail
 batch the bounded event-metadata reads for each Turn page.
-When `OPENAI_BASE_URL` is set, the OpenAI provider uses that compatible endpoint;
-the UI reports only that a custom endpoint is configured and never returns the
-URL. Unknown local model names remain unpriced.
+When `OPENAI_BASE_URL` or `ANTHROPIC_BASE_URL` is set, that provider uses its
+configured endpoint; the UI reports only that a custom endpoint is configured
+and never returns the URL. Unknown local model names remain unpriced.
 Without saved tab preferences, the default selection is every evidence-complete,
 not-yet-evaluated Trace in the bounded 10,000-Trace scan; an optional numeric
 cap remains available. In the same browser tab, the evaluation unit, tool-count
