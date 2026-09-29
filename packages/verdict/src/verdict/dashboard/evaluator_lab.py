@@ -88,8 +88,10 @@ def _validated_config(config: dict[str, Any]):
         raise ValueError("Jev does not support recorded tool evidence")
     if not isinstance(model, str) or not model or len(model.encode("utf-8")) > 256:
         raise ValueError("invalid judge model")
-    if provider == "jev" and model != "jev-1.13.0":
-        raise ValueError("unsupported Jev model")
+    if provider == "jev":
+        from verdict_eval.jev_judge import validate_jev_model
+
+        validate_jev_model(model)
     max_calls_value = config.get("maxCalls", "all")
     max_calls = None if max_calls_value == "all" else max_calls_value
     max_output = config.get("maxOutputTokens", 512)

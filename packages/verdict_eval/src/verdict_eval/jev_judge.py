@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
@@ -24,6 +25,15 @@ _CRITERIA = {
     "unclear": "The dimension cannot be assessed from the supplied information.",
 }
 _DEFAULT_BASE_URL = "https://api.typesafe.ai"
+_VERSIONED_MODEL = re.compile(r"jev-[0-9]+(?:\.[0-9]+){2}")
+
+
+def validate_jev_model(model: str) -> str:
+    """Require a fixed release so calibration identity cannot follow a moving alias."""
+    if (not isinstance(model, str) or len(model) > 256
+            or _VERSIONED_MODEL.fullmatch(model) is None):
+        raise ValueError("a versioned Jev model ID is required (e.g. jev-1.13.0)")
+    return model
 
 
 def resolve_jev_base_url(value: str | None = None) -> str:
@@ -59,6 +69,7 @@ class JevJudge:
     base_url: str | None = None
 
     def __post_init__(self) -> None:
+        self.model = validate_jev_model(self.model)
         self.base_url = resolve_jev_base_url(self.base_url)
 
     def _effective_rubric(self, context: str | None) -> Rubric:

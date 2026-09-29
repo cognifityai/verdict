@@ -590,10 +590,12 @@ bucket against the frozen reference.
 Evaluator Lab shows NOT_EVALUABLE reasons before any model call, reads provider
 keys only from environment variables, and requires an explicit egress approval.
 For Jev, install `cognifity-verdict-eval[jev]`, set `TYPESAFE_API_KEY` in the
-dashboard process, select **Jev** and preview before running. The model is fixed
-to the tested `jev-1.13.0` version. Jev returns labels without explanations;
-Verdict does not estimate Jev charges. The existing Monitor statistics remain
-unchanged. Jev supports final Turn text but not the recorded tool-count option.
+dashboard process, select **Jev**, enter a versioned model ID, and preview before
+running. `jev-1.13.0` is prefilled. Moving aliases such as `jev-latest` are
+rejected so calibration stays tied to one model version. Jev returns labels
+without explanations; Verdict does not estimate Jev charges. The existing
+Monitor statistics remain unchanged. Jev supports final Turn text but not the
+recorded tool-count option.
 If `TYPESAFE_BASE_URL` is set, the preview and approval show its effective URL;
 Verdict pins that URL in the Jev evaluator identity and in the SDK call.
 Dashboard label-set calibration sends query/response text and the rubric without

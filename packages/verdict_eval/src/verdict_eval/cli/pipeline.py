@@ -213,8 +213,12 @@ def main(argv: list[str] | None = None) -> int:
         print("ERROR: Jev judge telemetry capture is unavailable")
         return 2
     if args.judge_provider == "jev":
-        if args.judge_model != "jev-1.13.0":
-            print("ERROR: unsupported Jev model")
+        from verdict_eval.jev_judge import validate_jev_model
+
+        try:
+            validate_jev_model(args.judge_model)
+        except ValueError as exc:
+            print(f"ERROR: {exc}")
             return 2
         if not os.environ.get("TYPESAFE_API_KEY"):
             print("ERROR: TYPESAFE_API_KEY is not configured")

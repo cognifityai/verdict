@@ -41,7 +41,7 @@ def _config() -> dict:
     }
 
 
-def _wire_sdk(monkeypatch, *, omit: str | None = None):
+def _wire_sdk(monkeypatch, *, omit: str | None = None, response_model="jev-1.13.0"):
     requests = []
     client_type = typesafe_sdk.TypeSafeClient
 
@@ -54,7 +54,7 @@ def _wire_sdk(monkeypatch, *, omit: str | None = None):
             "probabilities": {"pass": 0.8, "fail": 0.1, "unclear": 0.1},
         } for name in body["questions"] if name != omit}
         return httpx2.Response(200, json={
-            "model": "jev-1.13.0", "answers": answers,
+            "model": response_model, "answers": answers,
             "usage": {"input_tokens": 40, "output_tokens": 10},
         })
 
@@ -100,6 +100,48 @@ def test_jev_preview_and_run_share_identity_and_persist_labels(monkeypatch):
     assert [dimension.verdict for dimension in saved.dimensions] == [Verdict.PASS] * 2
     assert len(requests) == 1
     assert requests[0]["state"]["assistant_response"] == "Returns are allowed."
+
+
+def test_another_versioned_jev_model_has_separate_preview_and_persisted_identity(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.setenv("TYPESAFE_API_KEY", "ts_test_key")
+    requests = _wire_sdk(monkeypatch, response_model="jev-1.14.0")
+    storage = InMemoryStorage()
+    storage.insert_trace(_trace())
+    default_config = _config()
+    selected_config = {**default_config, "model": "jev-1.14.0"}
+    old_preview = preview_evaluation(storage, tenant_id="local", config=default_config)
+    preview = preview_evaluation(storage, tenant_id="local", config=selected_config)
+    assert preview["planFingerprint"] != old_preview["planFingerprint"]
+    with pytest.raises(ValueError, match="approved preview"):
+        execute_evaluation(storage, tenant_id="local", confirm_external_egress=True,
+                           config={**selected_config, "planFingerprint": old_preview["planFingerprint"],
+                                   "plannedTraces": old_preview["plannedTraces"]})
+    assert requests == []
+    result = execute_evaluation(
+        storage, tenant_id="local", confirm_external_egress=True,
+        config={**selected_config, "planFingerprint": preview["planFingerprint"],
+                "plannedTraces": preview["plannedTraces"]},
+    )
+    assert result["completed"] == 1
+    assert requests[0]["model"] == "jev-1.14.0"
+    [saved] = storage.list_judgments_for_trace("trace-1")
+    assert saved.judge_models == ["jev-1.14.0"]
+    assert saved.evaluator_fingerprint == result["evaluatorFingerprint"]
+    labels = tmp_path / "labels.jsonl"
+    labels.write_text(
+        '{"sentinel_id":"one","query":"q","response":"a",'
+        '"labels":{"relevance":"pass","completeness":"pass"}}\n'
+    )
+    calibration_preview = preview_calibration(path=labels, config=selected_config)
+    health = execute_calibration(
+        storage, path=labels,
+        config={**selected_config, "planFingerprint": calibration_preview["planFingerprint"]},
+        confirm_external_egress=True, minimum_examples=1,
+    )
+    assert health["evaluatorFingerprint"] == saved.evaluator_fingerprint
+    assert requests[1]["model"] == "jev-1.14.0"
 
 
 def test_jev_malformed_result_is_recorded_as_error(monkeypatch):

@@ -38,14 +38,17 @@ Install `cognifity-verdict-eval[jev]` and set `TYPESAFE_API_KEY` in the process
 running the judge. In Evaluator Lab, select Jev, preview the planned calls, and
 approve the external transfer. The equivalent CLI choice is
 `verdict-pipeline --judge-provider jev --judge-model jev-1.13.0`; its optional
-judge-telemetry capture flag is unavailable for Jev.
+judge-telemetry capture flag is unavailable for Jev. Other explicit versioned
+Jev model IDs can be selected in Evaluator Lab or passed to the CLI; the API
+must support the chosen version. Moving aliases such as `jev-latest` are
+rejected because evaluator health must refer to one fixed model version.
 
 For production judgments, Jev receives redacted request and response text as a
 structured state and one Choice question per rubric dimension. It returns PASS,
-FAIL, or UNCLEAR without
-explanatory reasoning. The requested model and exact dimension set are checked
-before a result is stored. Evaluator fingerprints separate Jev from other
-judges, endpoint URLs, and prompt/rubric versions. Set `TYPESAFE_BASE_URL` only
+FAIL, or UNCLEAR without explanatory reasoning. The requested model and exact
+dimension set are checked before a result is stored. Evaluator fingerprints
+separate results by judge, model version, endpoint URL, and prompt/rubric
+version. Set `TYPESAFE_BASE_URL` only
 when using a custom Jev endpoint; Evaluator Lab shows the effective URL before
 approval and pins it for the call. Dashboard calibration sends label-set query
 and response text plus the rubric without Verdict redaction. It ignores optional

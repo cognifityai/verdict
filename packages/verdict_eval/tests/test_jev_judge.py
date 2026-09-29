@@ -107,6 +107,35 @@ def test_pipeline_accepts_jev_but_rejects_unavailable_telemetry_capture(capsys):
     assert "unavailable" in capsys.readouterr().out
 
 
+def test_pipeline_accepts_an_explicit_versioned_jev_model(monkeypatch):
+    monkeypatch.setenv("TYPESAFE_API_KEY", "ts_test_key")
+    from verdict_eval.cli import pipeline
+
+    selected = []
+    monkeypatch.setattr(pipeline, "_run", lambda args: selected.append(args.judge_model) or 0)
+    assert main(["--judge-provider", "jev", "--judge-model", "jev-1.14.0"]) == 0
+    assert selected == ["jev-1.14.0"]
+
+
+def test_jev_versioned_model_is_sent_and_identified(monkeypatch):
+    requests = _wire_judge(monkeypatch, response_model="jev-1.14.0")
+    judge = JevJudge(model="jev-1.14.0")
+    result = judge.judge(query="Question", response="Answer")
+    assert requests[0]["model"] == "jev-1.14.0"
+    assert result.judge_models == ["jev-1.14.0"]
+    assert result.evaluator_fingerprint != JevJudge().evaluator_identity()[
+        "evaluator_fingerprint"
+    ]
+
+
+@pytest.mark.parametrize("model", ["jev-latest", "jev", "", "jev-1.14.0?key=x"])
+def test_jev_rejects_alias_or_invalid_model_before_provider_call(monkeypatch, model):
+    requests = _wire_judge(monkeypatch)
+    with pytest.raises(ValueError, match="versioned Jev model"):
+        JevJudge(model=model)
+    assert requests == []
+
+
 def test_pipeline_rejects_missing_jev_key_before_opening_storage(monkeypatch, tmp_path):
     monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
     path = tmp_path / "missing-key.db"

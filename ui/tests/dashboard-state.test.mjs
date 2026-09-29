@@ -114,12 +114,17 @@ test("Evaluator Lab selects Jev and runs only the approved preview", async () =>
   provider.props.onChange({ target: { value: "jev" } });
   tree = render(ui.EvaluatorLab, hooks, props);
   const model = findAll(tree, (node) => node.type === "label" && textOf(node).startsWith("Model"))[0];
-  assert.equal(findAll(model, (node) => node.type === "input")[0].props.value, "jev-1.13.0");
+  const modelInput = findAll(model, (node) => node.type === "input")[0];
+  assert.equal(modelInput.props.value, "jev-1.13.0");
+  assert.notEqual(modelInput.props.disabled, true);
+  modelInput.props.onChange({ target: { value: "jev-1.14.0" } });
+  tree = render(ui.EvaluatorLab, hooks, props);
   assert.match(textOf(tree), /TYPESAFE_API_KEY/);
 
   const preview = findAll(tree, (node) => node.type === "button" &&
     textOf(node).includes("Preview eligible calls"))[0].props.onClick();
   assert.equal(JSON.parse(requests[2].options.body).provider, "jev");
+  assert.equal(JSON.parse(requests[2].options.body).model, "jev-1.14.0");
   await resolveJson(requests[2], {
     unit: "trace", availableTraces: 1, eligible: 1, alreadyJudged: 0,
     notEvaluable: 0, notEvaluableReasons: {}, plannedCalls: 1,
@@ -134,6 +139,18 @@ test("Evaluator Lab selects Jev and runs only the approved preview", async () =>
   assert.match(textOf(tree), /Provider pricing unavailable/);
   assert.match(textOf(tree), /https:\/\/judge-a\.example/);
   assert.doesNotMatch(textOf(tree), /512-token output allowance/);
+  const changedModel = findAll(tree, (node) => node.type === "label"
+    && textOf(node).startsWith("Model"))[0];
+  findAll(changedModel, (node) => node.type === "input")[0].props.onChange({
+    target: { value: "jev-1.15.0" },
+  });
+  tree = render(ui.EvaluatorLab, hooks, props);
+  assert.equal(findAll(tree, (node) => node.type === "button" &&
+    textOf(node).includes("Run 1 judge calls"))[0].props.disabled, true);
+  findAll(changedModel, (node) => node.type === "input")[0].props.onChange({
+    target: { value: "jev-1.14.0" },
+  });
+  tree = render(ui.EvaluatorLab, hooks, props);
   const consent = findAll(tree, (node) => node.type === "input" &&
     node.props.type === "checkbox").at(-1);
   consent.props.onChange({ target: { checked: true } });
@@ -142,6 +159,7 @@ test("Evaluator Lab selects Jev and runs only the approved preview", async () =>
     textOf(node).includes("Run 1 judge calls"))[0].props.onClick();
   const approved = JSON.parse(requests[3].options.body);
   assert.equal(approved.provider, "jev");
+  assert.equal(approved.model, "jev-1.14.0");
   assert.equal(approved.planFingerprint, "jev-plan");
   assert.equal(approved.confirmExternalEgress, true);
   await resolveJson(requests[3], { unit: "trace", availableTraces: 1,
@@ -402,6 +420,10 @@ test("Evaluator Lab bounds saved choices and tolerates unavailable browser stora
         "google", "claude-haiku-4-5", "agent_turn", true, "limit", 10],
       [JSON.stringify({ provider: "openai", model: "local/cheap-model", judgeAll: false, maxCalls: -1 }),
         "openai", "local/cheap-model", "trace", false, "limit", 100],
+      [JSON.stringify({ provider: "jev", model: "jev-1.14.0" }),
+        "jev", "jev-1.14.0", "trace", false, "all", null],
+      [JSON.stringify({ provider: "jev", model: "" }),
+        "jev", "jev-1.13.0", "trace", false, "all", null],
       ["x".repeat(2000), "anthropic", "claude-haiku-4-5", "trace", false, "all", null],
     ]) {
       globalThis.window = { sessionStorage: { getItem: () => stored, setItem() {} } };

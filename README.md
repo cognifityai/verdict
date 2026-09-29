@@ -308,17 +308,20 @@ After installation, capture and structural checks can run without a provider key
 export ANTHROPIC_API_KEY=...     # or OPENAI_API_KEY / GOOGLE_API_KEY / TYPESAFE_API_KEY
 ```
 
-Evaluator Lab can use Jev (`jev-1.13.0`) after installing
+Evaluator Lab can use Jev after installing
 `cognifity-verdict-eval[jev]` and setting `TYPESAFE_API_KEY` in the dashboard
-process. Choose **Jev** in its provider menu, preview the exact eligible calls,
+process. Choose **Jev** in its provider menu, enter a versioned model ID
+(`jev-1.13.0` is the prefilled default), preview the exact eligible calls,
 and approve external egress before running. Jev returns PASS/FAIL/UNCLEAR labels
 without explanatory reasoning. Its pricing is unavailable in Verdict, so the
 preview does not show a cost estimate. Jev supports Trace and final Agent Turn
 text judging and label-set calibration; recorded Turn tool counts are unavailable.
 Monitor continues to use its existing cohort comparison and Fisher test.
 The optional `TYPESAFE_BASE_URL` selects a Jev endpoint. Evaluator Lab shows the
-effective URL before approval and keeps results from different URLs in separate
-evaluator identities. Dashboard calibration sends the label set's query and
+effective URL before approval and keeps results from different URLs and model
+versions in separate evaluator identities. Moving aliases such as `jev-latest`
+are rejected because they do not identify one fixed calibration target.
+Dashboard calibration sends the label set's query and
 response text plus the rubric without applying Verdict redaction; inspect the
 file before approving. Optional context is ignored because dashboard production
 judging has no retrieved context, and human labels stay local.

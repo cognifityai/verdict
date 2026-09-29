@@ -28,10 +28,9 @@ function readPreferences() {
     if (!saved || typeof saved !== "object" || Array.isArray(saved)) return DEFAULT_PREFERENCES;
     return {
       provider: PROVIDERS.includes(saved.provider) ? saved.provider : DEFAULT_PREFERENCES.provider,
-      model: saved.provider === "jev" ? DEFAULT_MODELS.jev
-        : typeof saved.model === "string" && saved.model.length > 0
+      model: typeof saved.model === "string" && saved.model.length > 0
         && new TextEncoder().encode(saved.model).length <= 256
-        ? saved.model : DEFAULT_PREFERENCES.model,
+        ? saved.model : saved.provider === "jev" ? DEFAULT_MODELS.jev : DEFAULT_PREFERENCES.model,
       unit: ["trace", "agent_turn"].includes(saved.unit) ? saved.unit : DEFAULT_PREFERENCES.unit,
       includeToolCounts: saved.provider === "jev" ? false
         : typeof saved.includeToolCounts === "boolean"
@@ -137,13 +136,13 @@ export function EvaluatorLab({ configUrl, onOpenEvaluated }) {
           });
           setPreview(null); setCalibration(null); setConfirmed(false);
         }} className="block w-full border p-2 mt-1 bg-transparent">{PROVIDERS.map((name) => <option key={name} value={name}>{name === "openai" ? "openai / compatible endpoint" : name === "jev" ? "Jev" : name}</option>)}</select></label>
-        <label className="text-sm">Model<input value={model} disabled={provider === "jev"} onChange={(event) => updatePreferences({ model: event.target.value })} className="block w-full border p-2 mt-1 bg-transparent" /></label>
+        <label className="text-sm">Model<input value={model} onChange={(event) => updatePreferences({ model: event.target.value })} className="block w-full border p-2 mt-1 bg-transparent" /></label>
         <label className="text-sm">Rubric name<input value={rubricName} onChange={(event) => setRubricName(event.target.value)} className="block w-full border p-2 mt-1 bg-transparent" /></label>
         <label className="text-sm">Rubric version<input value={rubricVersion} onChange={(event) => setRubricVersion(event.target.value)} className="block w-full border p-2 mt-1 bg-transparent" /></label>
         <label className="text-sm">Evaluation scope<select value={judgeAll ? "all" : "limit"} onChange={(event) => updatePreferences({ judgeAll: event.target.value === "all" })} className="block w-full border p-2 mt-1 bg-transparent"><option value="all">All eligible in this bounded scan</option><option value="limit">Limit judge calls</option></select>{!judgeAll && <input aria-label="Maximum judge calls" type="number" min="1" max="10000" value={maxCalls} onChange={(event) => updatePreferences({ maxCalls: Number(event.target.value) })} className="block w-full border p-2 mt-2 bg-transparent" />}<span className="block text-xs mt-1" style={{ color: C.faint }}>{unit === "agent_turn" ? "Scans at most 100 candidate Turns per page, including ineligible Turns. Continue to older Turns explicitly." : "Scans at most 10,000 Traces."}</span></label>
         <div className="text-sm"><div>Secret reference</div><div className="border p-2 mt-1 font-mono" style={{ color: providerState?.configured && providerState?.sdkAvailable !== false ? C.green : C.amber }}>{providerState?.secretReference || "loading"} · {providerState?.configured ? "configured" : "not configured"}{providerState?.sdkAvailable === false ? " · install Jev SDK" : ""}{providerState?.customEndpointConfigured ? " · custom endpoint configured by OPENAI_BASE_URL" : ""}</div></div>
       </div>
-      {provider === "jev" && <p className="text-xs mt-3" style={{ color: C.faint }}>Jev returns verdict labels without explanatory reasoning. Its model is fixed to the tested version.</p>}
+      {provider === "jev" && <p className="text-xs mt-3" style={{ color: C.faint }}>Enter a versioned Jev model ID (for example, jev-1.13.0). Moving aliases such as jev-latest cannot be calibrated as one fixed evaluator. Jev returns labels without explanatory reasoning.</p>}
       {unit === "agent_turn" && provider === "jev" && <p className="text-xs mt-4" style={{ color: C.faint }}>Jev scores the Turn request and final response; recorded tool counts are unavailable for this judge.</p>}
       {unit === "agent_turn" && provider !== "jev" && <label className="flex gap-2 mt-4 text-sm"><input type="checkbox" checked={includeToolCounts} onChange={(event) => { updatePreferences({ includeToolCounts: event.target.checked }); setConfirmed(false); setCalibration(null); }} />Include bounded counts of recorded tool calls, results, errors, and producer-recorded dispatch origins in judge input. Turns with no recorded tool events or more than 64 total events are not evaluable in this mode. The projection adds no names, arguments, results, IDs, or URLs. Origin labels describe only the outer dispatch boundary, not unobserved downstream services or protocols.</label>}
       <h3 className="font-semibold mt-5">Rubric dimensions</h3>
