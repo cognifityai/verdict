@@ -12,7 +12,9 @@ The JSONL examples use one source record per line. OTLP uses its normal export
 envelope. MLflow and Phoenix keep their trace/span nesting. Voice transcripts
 contain text only; Verdict never imports audio bytes or audio URLs. Voice import
 also keeps one current, bounded conversation snapshot in storage for later
-review. It does not yet judge or monitor whole conversations.
+review. Evaluator Lab can grade clean, closed snapshots with an uploaded JSON
+rubric in synchronized `0.1.0a23` source builds. Conversation monitoring is not yet
+available. The published `0.1.0a22` packages do not store these snapshots.
 For a dated conversation, set top-level `ended_at` (or `end_time`) on each Voice
 record; turn-level timestamps do not set the conversation end time. Verdict
 stores the normalized UTC value as `event_at`. If neither source field is

@@ -332,8 +332,8 @@ The storage API provides `get_conversation`, tenant-scoped
 grade eligible snapshots using a local JSON rubric and review current evidence
 with full or partial coverage. Conversation monitoring and matched model
 comparison are not included yet.
-Conversation snapshots and grading require synchronized core and eval builds
-from the `0.1.0a23` release candidate. The published `0.1.0a22` command above
+Conversation snapshots require the `0.1.0a23` core build; grading them also
+requires the matching eval build. The published `0.1.0a22` command above
 imports Voice reply Traces but does not store conversation snapshots or grade
 them. Use a source checkout until `0.1.0a23` is published.
 
