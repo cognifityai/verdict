@@ -16,6 +16,7 @@ PROVIDER_KEY_NAMES = {
     "GEMINI_API_KEY",
     "GOOGLE_API_KEY",
     "OPENAI_API_KEY",
+    "TYPESAFE_API_KEY",
 }
 FINAL_SECRET_DENIES = [
     "*.[Ee][Nn][Vv]*",

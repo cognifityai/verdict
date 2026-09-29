@@ -2,7 +2,7 @@ import React, { useRef, useState } from "react";
 
 const C = { panel: "#111715", border: "#26332e", sub: "#94a39d", green: "#4ee1aa", amber: "#f2b84b", red: "#ff6b6b" };
 
-export function ConversationEvaluation({ root, token, provider, model, providerState, updatePreferences }) {
+export function ConversationEvaluation({ root, token, provider, model, providerState, updatePreferences, changeProvider }) {
   const [rubric, setRubric] = useState(null);
   const [maxCalls, setMaxCalls] = useState(10);
   const [after, setAfter] = useState(null);
@@ -15,6 +15,7 @@ export function ConversationEvaluation({ root, token, provider, model, providerS
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const inFlight = useRef(false);
+  const providerSupported = ["anthropic", "openai", "google"].includes(provider);
   const config = (cursor = after) => ({ unit: "conversation", provider, model, rubric,
     maxCalls, maxOutputTokens: 4096, scanLimit: 20, ...(cursor ? { after: cursor } : {}) });
   const current = previewKey === JSON.stringify(config());
@@ -30,7 +31,7 @@ export function ConversationEvaluation({ root, token, provider, model, providerS
   }
 
   async function loadPage(cursor = null) {
-    if (inFlight.current || !rubric || !token) return;
+    if (inFlight.current || !rubric || !token || !providerSupported) return;
     inFlight.current = true; setBusy(true); setError(null); setDetail(null); setResult(null); setConfirmed(false);
     try {
       const selected = config(cursor);
@@ -60,7 +61,7 @@ export function ConversationEvaluation({ root, token, provider, model, providerS
   }
 
   async function run() {
-    if (inFlight.current || !current || !confirmed || !preview?.plannedCalls) return;
+    if (inFlight.current || !providerSupported || !current || !confirmed || !preview?.plannedCalls) return;
     inFlight.current = true; setBusy(true); setError(null); setConfirmed(false);
     try {
       const approved = { ...config(), plannedTargets: preview.plannedTargets,
@@ -102,13 +103,14 @@ export function ConversationEvaluation({ root, token, provider, model, providerS
       <p className="text-sm" style={{ color: C.sub }}>Import text transcripts through Setup → Existing telemetry → Voice. Only clean, closed conversations with a completed reply are graded. Preview makes no judge call.</p>
       <div className="grid sm:grid-cols-2 gap-4">
         <label className="text-sm">Evaluation unit<select value="conversation" onChange={e => updatePreferences({ unit: e.target.value })} className="block w-full border p-2 mt-1 bg-transparent"><option value="conversation">Conversation or reply</option><option value="trace">Provider Trace</option><option value="agent_turn">Agent Turn</option></select></label>
-        <label className="text-sm">Provider<select value={provider} onChange={e => updatePreferences({ provider: e.target.value })} className="block w-full border p-2 mt-1 bg-transparent">{["anthropic", "openai", "google"].map(name => <option key={name} value={name}>{name === "openai" ? "openai / compatible endpoint" : name}</option>)}</select></label>
+        <label className="text-sm">Provider<select value={provider} onChange={e => changeProvider(e.target.value)} className="block w-full border p-2 mt-1 bg-transparent">{!providerSupported && <option value={provider} disabled>{provider} (Trace/Turn only)</option>}{["anthropic", "openai", "google"].map(name => <option key={name} value={name}>{name === "openai" ? "openai / compatible endpoint" : name}</option>)}</select></label>
         <label className="text-sm">Judge model<input value={model} onChange={e => updatePreferences({ model: e.target.value })} className="block w-full border p-2 mt-1 bg-transparent" /></label>
         <label className="text-sm">Maximum calls in this page<input type="number" min="1" max="20" value={maxCalls} onChange={e => setMaxCalls(Number(e.target.value))} className="block w-full border p-2 mt-1 bg-transparent" /></label>
       </div>
+      {!providerSupported && <p className="text-sm" style={{ color: C.amber }}>Jev cannot grade conversations. Select Anthropic, OpenAI, or Google before preview.</p>}
       <label className="block text-sm font-semibold">Rubric JSON file<input type="file" accept=".json,application/json" aria-label="Rubric JSON file" onChange={upload} className="block w-full mt-2" /></label>
       {rubric && <div className="border p-3 text-sm" style={{ borderColor: C.border }}><strong>{rubric.name} · v{rubric.version}</strong> · {rubric.target}<div className="mt-1">{rubric.dimensions.map(d => `${d.name} (${d.type === "number" ? `${d.min}–${d.max}` : "PASS / FAIL / UNCLEAR"})`).join(" · ")}</div><div className="font-mono text-xs break-all mt-2" style={{ color: C.sub }}>{rubric.fingerprint}</div></div>}
-      <button disabled={!rubric || !token} onClick={() => loadPage(null)} className="border px-4 py-2 text-sm">Preview first page</button>
+      <button disabled={!rubric || !token || !providerSupported} onClick={() => loadPage(null)} className="border px-4 py-2 text-sm">Preview first page</button>
     </section>
     {preview && <section className="border p-5 space-y-3" style={{ borderColor: C.border, background: C.panel }}>
       <h3 className="font-semibold">Preview · {preview.target} rubric</h3>

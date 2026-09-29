@@ -29,6 +29,9 @@ dependencies = [
 cognifity-verdict = { workspace = true }
 
 [project.optional-dependencies]
+jev = [
+    "typesafe-sdk>=0.7.1,<0.8",
+]
 semantic = [
     "sentence-transformers>=3.0",
 ]

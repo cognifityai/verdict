@@ -305,10 +305,28 @@ Verdict never ships with anyone's API key. It reads **your** provider key from t
 After installation, capture and structural checks can run without a provider key. The built-in hash embedder can report lexical embedding-distribution changes, but it is not a semantic model and may split paraphrases into separate intent clusters. Install the local `sentence-transformers/all-MiniLM-L6-v2` extra shown below for semantic intent clustering and semantic drift. Capture never invokes a judge automatically. A provider-backed judge run requires that provider's key; `verdict-inspect` skips its optional Anthropic judge when no Anthropic key is set.
 
 ```bash
-export ANTHROPIC_API_KEY=...     # or OPENAI_API_KEY / GOOGLE_API_KEY
+export ANTHROPIC_API_KEY=...     # or OPENAI_API_KEY / GOOGLE_API_KEY / TYPESAFE_API_KEY
 ```
 
-The judge is pluggable behind a provider interface, so you can point it at Anthropic, OpenAI, Google, or a local/self-hosted OpenAI-compatible model. The default judge model is configurable; a cheap model (e.g. Haiku) is the recommended default, with a stronger model (e.g. Sonnet) as an accuracy upgrade.
+Evaluator Lab can use Jev after installing
+`cognifity-verdict-eval[jev]` and setting `TYPESAFE_API_KEY` in the dashboard
+process. Choose **Jev** in its provider menu, enter a versioned model ID
+(`jev-1.13.0` is the prefilled default), preview the exact eligible calls,
+and approve external egress before running. Jev returns PASS/FAIL/UNCLEAR labels
+without explanatory reasoning. Its pricing is unavailable in Verdict, so the
+preview does not show a cost estimate. Jev supports Trace and final Agent Turn
+text judging and label-set calibration; recorded Turn tool counts are unavailable.
+Monitor continues to use its existing cohort comparison and Fisher test.
+The optional `TYPESAFE_BASE_URL` selects a Jev endpoint. Evaluator Lab shows the
+effective URL before approval and keeps results from different URLs and model
+versions in separate evaluator identities. Moving aliases such as `jev-latest`
+are rejected because they do not identify one fixed calibration target.
+Dashboard calibration sends the label set's query and
+response text plus the rubric without applying Verdict redaction; inspect the
+file before approving. Optional context is ignored because dashboard production
+judging has no retrieved context, and human labels stay local.
+
+The judge can use Anthropic, OpenAI, Google, Jev, or a local/self-hosted OpenAI-compatible model. Jev uses its structured Choice API; the other built-in judges use provider completions. Validate the chosen judge against held-out labels from the intended workload before relying on quality alerts.
 
 ## Install
 
@@ -669,7 +687,7 @@ You hand-label a sample PASS/FAIL (blind, before the judge runs), then the harne
 
 ## Architecture
 
-Hexagonal / ports-and-adapters, ≥2 adapters per port (one real + in-memory for tests). Storage: `SQLiteStorage`, `PostgresStorage`, `InMemoryStorage`, plus a `BufferedStorage` wrapper for async batched writes. Judge providers: Anthropic, OpenAI, Google, optional LiteLLM, and a `FakeProvider` for tests. SDK capture and existing-telemetry import both produce the same **vendor-neutral `Trace` schema**. Verdict accepts OTLP/OpenInference inputs but does **not** emit OTel/OpenInference spans; an exporter remains a v1 roadmap item. See the ADRs in [`docs/adrs/`](docs/adrs/).
+Hexagonal / ports-and-adapters, ≥2 adapters per port (one real + in-memory for tests). Storage: `SQLiteStorage`, `PostgresStorage`, `InMemoryStorage`, plus a `BufferedStorage` wrapper for async batched writes. Judge choices: Anthropic, OpenAI, Google, Jev, optional LiteLLM, and a `FakeProvider` for tests. SDK capture and existing-telemetry import both produce the same **vendor-neutral `Trace` schema**. Verdict accepts OTLP/OpenInference inputs but does **not** emit OTel/OpenInference spans; an exporter remains a v1 roadmap item. See the ADRs in [`docs/adrs/`](docs/adrs/).
 
 Optional same-process packages should depend on the versioned
 `verdict.read_port` DTO/Protocol boundary, not Verdict tables, the broad storage
