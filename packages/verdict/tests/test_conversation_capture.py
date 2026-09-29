@@ -401,10 +401,17 @@ def test_live_postgres_conversation_lifecycle():
     )
     if not dsn:
         pytest.skip(reason)
+    from psycopg.conninfo import conninfo_to_dict, make_conninfo
+
     tenant = f"conversation-{uuid4().hex}"
     with isolated_test_dsn(dsn) as isolated_dsn:
-        storage = PostgresStorage(isolated_dsn, min_pool=1, max_pool=2)
+        options = conninfo_to_dict(isolated_dsn)["options"]
+        non_utc_dsn = make_conninfo(
+            isolated_dsn, options=f"{options} -cTimeZone=America/Los_Angeles"
+        )
+        storage = PostgresStorage(non_utc_dsn, min_pool=1, max_pool=2)
         try:
+            assert storage._fetchone("SHOW TIME ZONE", ())[0] == "America/Los_Angeles"
             context = _context(tenant)
             for name in ("first", "second", "third"):
                 import_into_storage(map_voice_conversation(_source(name), context), storage)
@@ -416,6 +423,8 @@ def test_live_postgres_conversation_lifecycle():
             assert {row["id"] for row in first_page + second_page} == {
                 context.trace_id(name) for name in ("first", "second", "third")
             }
+            assert all(row["retention_at"] == "2026-09-20T12:00:00+00:00"
+                       for row in first_page + second_page)
             older = conversation_from_voice(_source("parallel"), context)
             changed = _source("parallel")
             changed["turns"][-1]["text"] = "parallel revision"
@@ -432,5 +441,14 @@ def test_live_postgres_conversation_lifecycle():
             assert storage.get_conversation(tenant, context.trace_id("first")) is None
             assert storage.prune_before("2026-09-21T00:00:00+00:00") == 6
             assert storage.list_conversations(tenant) == ([], None)
+            untimed = _source("untimed")
+            untimed.pop("ended_at")
+            before = datetime.now(timezone.utc)
+            import_into_storage(map_voice_conversation(untimed, context), storage)
+            fallback = storage.get_conversation(tenant, context.trace_id("untimed"))
+            assert fallback is not None
+            assert fallback["retention_at"].endswith("+00:00")
+            assert before <= datetime.fromisoformat(fallback["retention_at"]) <= datetime.now(timezone.utc)
+            assert storage.list_conversations(tenant)[0][0]["retention_at"] == fallback["retention_at"]
         finally:
             storage.close()

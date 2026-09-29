@@ -2263,7 +2263,7 @@ class PostgresStorage:
         if row is None:
             return None
         value = json.loads(row[0])
-        value["retention_at"] = row[1].isoformat()
+        value["retention_at"] = row[1].astimezone(timezone.utc).isoformat()
         return value
 
     def list_conversations(
@@ -2280,7 +2280,7 @@ class PostgresStorage:
         page = []
         for payload, retention_at in rows[:limit]:
             value = json.loads(payload)
-            value["retention_at"] = retention_at.isoformat()
+            value["retention_at"] = retention_at.astimezone(timezone.utc).isoformat()
             page.append(value)
         return page, page[-1]["id"] if len(rows) > limit else None
 

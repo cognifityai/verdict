@@ -692,7 +692,9 @@ source. See [`ADR-013`](docs/adrs/013-stable-dependent-package-read-port.md).
   dashboard screen are not included yet. `delete_trace` deletes only a Trace;
   use `delete_conversation` for its separate snapshot. `prune_before` removes
   snapshots whose source end time, or first import time when absent, is before
-  the cutoff while still returning only the number of deleted Traces.
+  the cutoff while still returning only the number of deleted Traces. Supply
+  top-level `ended_at` or `end_time` in Voice records for a source end time;
+  Verdict stores its UTC form as `event_at`.
 - Trace Explorer pages through every stored non-judge application trace in
   30-row pages. Search and provider/content-state filters apply to the current
   page; dashboard aggregates continue to use the complete store. Selecting a
