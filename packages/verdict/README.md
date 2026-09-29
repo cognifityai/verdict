@@ -313,10 +313,23 @@ verdict-import receive-otlp --storage sqlite:///./verdict.db
 Native readers cover Langfuse v2, LangSmith, Datadog LLM Observability,
 Phoenix, Opik, MLflow files, and a text-only voice-conversation schema. The
 importer stores every eligible LLM call; the existing evaluation pipeline later
-samples stored traces for judging. It never stores a second raw vendor envelope
+samples stored traces for judging. Voice import also stores one current,
+bounded, redacted conversation snapshot per source identity. It never stores a second raw vendor envelope
 or imputes missing token, latency, cost, model, session, or content fields. See
 the repository's `examples/telemetry/README.md` for exact source contracts and
 privacy limits; ADR-006 records only the architectural boundary.
+The snapshot keeps an incomplete prefix if its stored content would exceed
+512,000 bytes; reply Trace import continues under the published mapping.
+`import_into_storage` requires a direct synchronous adapter and rejects
+`BufferedStorage` before consuming input. Its stored count refers to completed
+adapter writes.
+
+The storage API provides `get_conversation`, tenant-scoped
+`list_conversations(tenant_id, after=..., limit=...)` (up to 20 per page), and
+`delete_conversation`. The latter does not delete separate Trace rows, and
+`delete_trace` does not delete a conversation snapshot. Retention via
+`prune_before` covers both and still returns a Trace count. Conversation
+judging, monitoring, and dashboard review are not part of this change.
 
 OTLP message objects may provide text in `content`, `text`, or typed text
 `parts`. Verdict joins genuine text parts in order and ignores unsupported

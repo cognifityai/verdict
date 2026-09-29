@@ -158,6 +158,7 @@ def test_file_cli_imports_through_public_entry_point(tmp_path: Path, capsys) -> 
         "skip_reasons": {},
         "skipped": 0,
         "stored": 1,
+        "conversations_stored": 0,
     }
     storage = SQLiteStorage(str(database))
     assert len(storage.list_traces(tenant_id="tenant-cli", limit=10)) == 1

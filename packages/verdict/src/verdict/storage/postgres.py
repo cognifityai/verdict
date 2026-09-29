@@ -20,7 +20,7 @@ import threading
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import asdict
-from datetime import datetime
+from datetime import datetime, timezone
 
 from verdict.agent_judgment import (
     TOOL_EVIDENCE_MODE,
@@ -144,6 +144,12 @@ def _trace_tenant_clause(requested: str, column: str = "tenant_id") -> str:
 
 
 _SCHEMA = """
+CREATE TABLE IF NOT EXISTS conversation_snapshots (
+    tenant_id TEXT NOT NULL, conversation_id TEXT NOT NULL,
+    retention_at TIMESTAMPTZ NOT NULL, payload TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, conversation_id)
+);
+CREATE INDEX IF NOT EXISTS conversation_retention ON conversation_snapshots(retention_at);
 CREATE TABLE IF NOT EXISTS traces (
     trace_id          TEXT PRIMARY KEY,
     parent_span_id    TEXT,
@@ -2232,9 +2238,71 @@ class PostgresStorage:
                     (trace_id,),
                 )
 
+    def save_conversation(self, conversation: dict) -> None:
+        from verdict.conversations import _json, validate_conversation
+
+        value = validate_conversation(conversation)
+        retention_at = value["event_at"] or datetime.now(timezone.utc).isoformat()
+        self._exec(
+            """INSERT INTO conversation_snapshots (tenant_id, conversation_id, retention_at, payload)
+               VALUES (%s, %s, %s::timestamptz, %s)
+               ON CONFLICT (tenant_id, conversation_id) DO UPDATE SET
+                 retention_at=LEAST(conversation_snapshots.retention_at, EXCLUDED.retention_at),
+                 payload=EXCLUDED.payload""",
+            (value["tenant_id"], value["id"], retention_at, _json(value)),
+        )
+
+    def get_conversation(self, tenant_id: str, conversation_id: str) -> dict | None:
+        from verdict.conversations import validate_conversation_query
+
+        validate_conversation_query(tenant_id, 1, conversation_id)
+        row = self._fetchone(
+            "SELECT payload, retention_at FROM conversation_snapshots WHERE tenant_id=%s AND conversation_id=%s",
+            (tenant_id, conversation_id),
+        )
+        if row is None:
+            return None
+        value = json.loads(row[0])
+        value["retention_at"] = row[1].isoformat()
+        return value
+
+    def list_conversations(
+        self, tenant_id: str, *, after: str | None = None, limit: int = 20
+    ) -> tuple[list[dict], str | None]:
+        from verdict.conversations import validate_conversation_query
+
+        validate_conversation_query(tenant_id, limit, after)
+        rows = self._fetchall(
+            """SELECT payload, retention_at FROM conversation_snapshots
+               WHERE tenant_id=%s AND conversation_id>%s ORDER BY conversation_id LIMIT %s""",
+            (tenant_id, after or "", limit + 1),
+        )
+        page = []
+        for payload, retention_at in rows[:limit]:
+            value = json.loads(payload)
+            value["retention_at"] = retention_at.isoformat()
+            page.append(value)
+        return page, page[-1]["id"] if len(rows) > limit else None
+
+    def delete_conversation(self, tenant_id: str, conversation_id: str) -> None:
+        from verdict.conversations import validate_conversation_query
+
+        validate_conversation_query(tenant_id, 1, conversation_id)
+        self._exec(
+            "DELETE FROM conversation_snapshots WHERE tenant_id=%s AND conversation_id=%s",
+            (tenant_id, conversation_id),
+        )
+
     def prune_before(self, cutoff_iso: str) -> int:
+        from verdict.conversations import retention_cutoff
+
+        conversation_cutoff = retention_cutoff(cutoff_iso)
         with self._lock, self._pool.connection() as conn, conn.transaction():
             with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM conversation_snapshots WHERE retention_at < %s::timestamptz",
+                    (conversation_cutoff,),
+                )
                 # See delete_trace(): this makes the multi-table cleanup one
                 # linearizable maintenance operation across storage instances.
                 cur.execute("LOCK TABLE traces IN SHARE ROW EXCLUSIVE MODE")

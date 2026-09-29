@@ -456,6 +456,13 @@ always a provider LLM call; tokens, model, cost, and latency are retained only
 when the exported turn contains them. Start with the contract fixtures and
 generator in `examples/telemetry/`. One source conversation is limited to 1,000
 turns and reports `conversation_turn_limit` when additional turns are omitted.
+The same import also stores one current, redacted text-only conversation
+snapshot. Malformed or truncated snapshots are labeled incomplete. Source end
+time governs retention when present; otherwise the first import time does.
+The snapshot is capped at 512,000 stored bytes; longer transcripts keep an
+incomplete prefix and the reply Trace mapping continues.
+Use the storage API's tenant-scoped `list_conversations` cursor to review these
+records. Conversation evaluation and drift analysis are not available yet.
 
 ## 5. Instrument your own app (the five-line pattern)
 

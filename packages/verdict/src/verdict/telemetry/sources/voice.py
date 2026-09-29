@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
+from verdict.conversations import conversation_from_voice
 from verdict.telemetry.model import ImportContext, MappingResult, safe_routing_id
 from verdict.telemetry.normalize import first, make_trace, parse_datetime
 
@@ -74,4 +77,12 @@ def map_voice_conversation(record: object, context: ImportContext) -> list[Mappi
             history.append(assistant)
     if len(turns) > _MAX_TURNS:
         results.append(MappingResult.skipped("conversation_turn_limit"))
-    return results or [MappingResult.skipped("no_assistant_turn")]
+    results = results or [MappingResult.skipped("no_assistant_turn")]
+    try:
+        conversation = conversation_from_voice(record, context)
+    except (TypeError, ValueError, UnicodeError):
+        results.append(MappingResult.skipped("invalid_conversation_snapshot"))
+    else:
+        if conversation is not None:
+            results[0] = replace(results[0], conversation=conversation)
+    return results

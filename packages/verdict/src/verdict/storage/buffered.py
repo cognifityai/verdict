@@ -703,6 +703,20 @@ class BufferedStorage:
     def delete_trace(self, trace_id: str) -> None:
         self._maintenance(self._inner.delete_trace, trace_id)
 
+    def save_conversation(self, conversation: dict) -> None:
+        self._maintenance(self._inner.save_conversation, conversation)
+
+    def get_conversation(self, tenant_id: str, conversation_id: str) -> dict | None:
+        return self._read(self._inner.get_conversation, tenant_id, conversation_id)
+
+    def list_conversations(
+        self, tenant_id: str, *, after: str | None = None, limit: int = 20
+    ) -> tuple[list[dict], str | None]:
+        return self._read(self._inner.list_conversations, tenant_id, after=after, limit=limit)
+
+    def delete_conversation(self, tenant_id: str, conversation_id: str) -> None:
+        self._maintenance(self._inner.delete_conversation, tenant_id, conversation_id)
+
     def prune_before(self, cutoff_iso: str) -> int:
         return self._maintenance(self._inner.prune_before, cutoff_iso)
 

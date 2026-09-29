@@ -121,6 +121,7 @@ class InMemoryStorage:
 
     def __init__(self) -> None:
         self._traces: dict[str, Trace] = {}
+        self._conversations: dict[tuple[str, str], tuple[str, str]] = {}
         self._import_sources: dict[tuple[str, str], SourceSession] = {}
         self._agent_runs: dict[tuple[str, str], AgentRun] = {}
         self._agent_turns: dict[tuple[str, str, str], AgentTurn] = {}
@@ -1009,8 +1010,66 @@ class InMemoryStorage:
             if s.trace_id != trace_id or sid in retained_parent_span_ids
         }
 
+    def save_conversation(self, conversation: dict) -> None:
+        from datetime import timezone
+
+        from verdict.conversations import _json, validate_conversation
+
+        value = validate_conversation(conversation)
+        identity = (value["tenant_id"], value["id"])
+        retention_at = value["event_at"] or datetime.now(timezone.utc).isoformat()
+        with self._agent_evidence_lock:
+            previous = self._conversations.get(identity)
+            if previous is not None:
+                retention_at = min(retention_at, previous[1])
+            self._conversations[identity] = (_json(value), retention_at)
+
+    def get_conversation(self, tenant_id: str, conversation_id: str) -> dict | None:
+        from verdict.conversations import validate_conversation_query
+
+        validate_conversation_query(tenant_id, 1, conversation_id)
+        with self._agent_evidence_lock:
+            row = self._conversations.get((tenant_id, conversation_id))
+            if row is None:
+                return None
+            value = json.loads(row[0])
+            value["retention_at"] = row[1]
+            return value
+
+    def list_conversations(
+        self, tenant_id: str, *, after: str | None = None, limit: int = 20
+    ) -> tuple[list[dict], str | None]:
+        from verdict.conversations import validate_conversation_query
+
+        validate_conversation_query(tenant_id, limit, after)
+        with self._agent_evidence_lock:
+            keys = sorted(
+                key for key in self._conversations
+                if key[0] == tenant_id and (after is None or key[1] > after)
+            )[: limit + 1]
+            page = []
+            for key in keys[:limit]:
+                payload, retention_at = self._conversations[key]
+                value = json.loads(payload)
+                value["retention_at"] = retention_at
+                page.append(value)
+        return page, page[-1]["id"] if len(keys) > limit else None
+
+    def delete_conversation(self, tenant_id: str, conversation_id: str) -> None:
+        from verdict.conversations import validate_conversation_query
+
+        validate_conversation_query(tenant_id, 1, conversation_id)
+        with self._agent_evidence_lock:
+            self._conversations.pop((tenant_id, conversation_id), None)
+
     def prune_before(self, cutoff_iso: str) -> int:
+        from verdict.conversations import retention_cutoff
+
+        conversation_cutoff = retention_cutoff(cutoff_iso)
         with self._agent_evidence_lock, self._cluster_v2_lock:
+            self._conversations = {
+                key: row for key, row in self._conversations.items() if row[1] >= conversation_cutoff
+            }
             doomed = [
                 tid
                 for tid, trace in self._traces.items()

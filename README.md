@@ -414,8 +414,14 @@ python scripts/smoke_test.py
 
 `verdict-import` converts existing telemetry into Verdict's current `Trace`
 rows and writes them through the same SQLite/PostgreSQL storage port used by SDK
-capture. It does not create a raw-envelope database or replace the clustering,
+capture. Voice file import also keeps one bounded, redacted current conversation
+snapshot per source identity. It does not create a raw-envelope database or replace the clustering,
 sampling, judge, drift, or dashboard paths.
+If a Voice transcript exceeds the snapshot's 512,000-byte stored-content
+limit, Verdict keeps a bounded prefix labeled `incomplete` with a
+`truncated_transcript` issue; its existing reply Trace mapping is unaffected.
+The importer requires direct synchronous storage; it rejects `BufferedStorage`
+so its stored count cannot be an acknowledgement of a queued write.
 
 Install the `telemetry` extra when accepting OTLP protobuf; it is optional for
 JSON files and API readers:
@@ -677,10 +683,16 @@ source. See [`ADR-013`](docs/adrs/013-stable-dependent-package-read-port.md).
   Opik readers follow their documented current contracts; Datadog's LLM
   Observability export API is preview. Synthetic contract servers and fixtures
   do not substitute for a credentialed check against a customer's deployment.
-- The generic voice reader maps completed assistant transcript turns, not raw
-  audio or a provider's agent graph. Tokens, cost, model, and latency exist only
+- The generic voice reader maps completed assistant transcript turns and stores
+  one current text-only conversation snapshot. It does not import raw audio or a
+  provider's agent graph. Tokens, cost, model, and latency exist only
   when the source turn supplies them. Verify a voice vendor's export against the
-  documented generic schema before relying on it.
+  documented generic schema before relying on it. Conversation snapshots are
+  available through the storage API; conversation judging, monitoring, and a
+  dashboard screen are not included yet. `delete_trace` deletes only a Trace;
+  use `delete_conversation` for its separate snapshot. `prune_before` removes
+  snapshots whose source end time, or first import time when absent, is before
+  the cutoff while still returning only the number of deleted Traces.
 - Trace Explorer pages through every stored non-judge application trace in
   30-row pages. Search and provider/content-state filters apply to the current
   page; dashboard aggregates continue to use the complete store. Selecting a

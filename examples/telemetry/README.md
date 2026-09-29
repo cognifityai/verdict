@@ -10,7 +10,9 @@ verdict-import file examples/telemetry/otlp-genai.json \
 
 The JSONL examples use one source record per line. OTLP uses its normal export
 envelope. MLflow and Phoenix keep their trace/span nesting. Voice transcripts
-contain text only; Verdict never imports audio bytes or audio URLs.
+contain text only; Verdict never imports audio bytes or audio URLs. Voice import
+also keeps one current, bounded conversation snapshot in storage for later
+review. It does not yet judge or monitor whole conversations.
 
 Generate balanced baseline/current JSONL for every adapter and run the existing
 pipeline against the resulting database:
