@@ -339,12 +339,12 @@ you use:
 
 ```bash
 python -m pip install \
-  "cognifity-verdict[anthropic,openai,google,dashboard]==0.1.0a22" \
-  "cognifity-verdict-eval[semantic]==0.1.0a22" \
-  "cognifity-verdict-inspect==0.1.0a22"
+  "cognifity-verdict[anthropic,openai,google,dashboard]==0.1.0a23" \
+  "cognifity-verdict-eval[semantic]==0.1.0a23" \
+  "cognifity-verdict-inspect==0.1.0a23"
 ```
 
-For a customer proof of concept on `0.1.0a22`, follow the bounded
+For a customer proof of concept on `0.1.0a23`, follow the bounded
 [`POC release profile`](docs/POC_RELEASE_PROFILE.md). It names the provider
 entry points exercised for this release, keeps persistence synchronous, and
 separates a workflow demonstration from a production-readiness claim.
@@ -363,15 +363,21 @@ PostgreSQL store:
 
 ```bash
 python -m pip install \
-  "cognifity-verdict[dashboard,postgres]==0.1.0a22" \
-  "cognifity-verdict-eval==0.1.0a22" \
-  "cognifity-verdict-inspect==0.1.0a22"
+  "cognifity-verdict[dashboard,postgres]==0.1.0a23" \
+  "cognifity-verdict-eval==0.1.0a23" \
+  "cognifity-verdict-inspect==0.1.0a23"
 ```
 
 The dashboard server is part of the core distribution because the core
 `verdict` command launches it. The `dashboard` extra is retained as an empty
 compatibility selector; `all` adds provider, PostgreSQL, telemetry, and eval
 dependencies on top of that core runtime.
+
+The release workflow also publishes the verified dashboard image as
+`ghcr.io/cognifityai/verdict:0.1.0a23`. It contains Verdict, not PostgreSQL or
+application data, and includes the supported judge provider SDKs. Set
+`VERDICT_STORAGE` to the deployment's database and
+configure dashboard access before binding it outside loopback.
 
 ### Upgrade from an earlier synchronized alpha
 
@@ -381,9 +387,9 @@ do not delete or reclone it:
 
 ```bash
 python -m pip install --upgrade \
-  "cognifity-verdict[anthropic,openai,google,dashboard]==0.1.0a22" \
-  "cognifity-verdict-eval[semantic]==0.1.0a22" \
-  "cognifity-verdict-inspect==0.1.0a22"
+  "cognifity-verdict[anthropic,openai,google,dashboard]==0.1.0a23" \
+  "cognifity-verdict-eval[semantic]==0.1.0a23" \
+  "cognifity-verdict-inspect==0.1.0a23"
 
 python -m pip check
 python -c "import verdict, verdict_eval, verdict_inspect; print(verdict.__version__, verdict_eval.__version__, verdict_inspect.__version__)"
@@ -414,7 +420,7 @@ API remains `import verdict`.
 Minimal install without the local semantic model:
 
 ```bash
-python -m pip install "cognifity-verdict-eval==0.1.0a22"  # lexical hash fallback
+python -m pip install "cognifity-verdict-eval==0.1.0a23"  # lexical hash fallback
 ```
 
 The full test suite also needs pytest and the dashboard's HTTP test dependency:
@@ -442,16 +448,13 @@ limit, Verdict keeps a bounded prefix labeled `incomplete` with a
 `truncated_transcript` issue; its existing reply Trace mapping is unaffected.
 The importer requires direct synchronous storage; it rejects `BufferedStorage`
 so its stored count cannot be an acknowledgement of a queued write.
-Conversation snapshots require the `0.1.0a23` core build; grading them also
-requires the matching eval build. The published `0.1.0a22` install command
-below imports Voice reply Traces but does not store conversation snapshots.
-Use a source checkout until `0.1.0a23` is published.
+Conversation snapshots and grading require synchronized `0.1.0a23` core and eval builds.
 
 Install the `telemetry` extra when accepting OTLP protobuf; it is optional for
 JSON files and API readers:
 
 ```bash
-python -m pip install "cognifity-verdict[telemetry,postgres]==0.1.0a22"
+python -m pip install "cognifity-verdict[telemetry,postgres]==0.1.0a23"
 
 # JSON, JSONL, or NDJSON; use --format auto or name the source explicitly.
 verdict-import file ./langsmith-runs.jsonl --format langsmith \
@@ -642,7 +645,7 @@ unacceptable; provider and manual-span failures then retain an error category
 without exception message content. IPv6 validation preserves trailing text that is not part of the
 validated address; clock values such as `12:34:56` are not treated as IPv6. Use
 non-sensitive tenant/session/cluster IDs. `sample_rate`
-controls what fraction of supported calls is retained. The `0.1.0a22` POC
+controls what fraction of supported calls is retained. The `0.1.0a23` POC
 profile keeps `buffered_writes=False`, so a normal process exit cannot strand
 queued telemetry. `buffered_writes=True` moves writes to a background batched
 writer but requires an explicit `shutdown()` imported from `verdict.client`
@@ -731,9 +734,7 @@ To grade imported conversations, open **Evaluate → Evaluator Lab**, select
 [`examples/telemetry/conversation-rubric.example.json`](examples/telemetry/conversation-rubric.example.json)
 or [`examples/telemetry/response-rubric.example.json`](examples/telemetry/response-rubric.example.json)),
 and preview one bounded page. The default Trace evaluator remains separate.
-This workflow requires a synchronized core and eval build from the
-`0.1.0a23` release candidate; the published `0.1.0a22` installation above
-does not contain it. Until `0.1.0a23` is published, run from this source tree.
+This workflow is included in the synchronized `0.1.0a23` core and eval builds.
 Review the eligible and excluded counts before approving the selected judge
 calls. The judge uses the configured provider key. When `OPENAI_BASE_URL` or
 `ANTHROPIC_BASE_URL` selects a custom endpoint, the consent screen names that
@@ -808,7 +809,7 @@ error details; an overlarge selection asks you to choose narrower dates.
 - Agent Run exploration pages through every stored run in 30-row pages while
   retaining bounded event and turn detail. Finding links continue to show the
   exact affected-run set rather than applying list offsets to it.
-- **Published capture coverage in `0.1.0a22`:** the bounded POC profile names
+- **Published capture coverage in `0.1.0a23`:** the bounded POC profile names
   Anthropic
   `messages.create(...)` (including `stream=True`), OpenAI
   `chat.completions.create(...)` and its stream helper, and Google
@@ -983,7 +984,7 @@ error details; an overlarge selection asks you to choose narrower dates.
   agreement remains a separate diagnostic. Any sentinel execution error
   prevents a `healthy` status: too few usable examples remain
   `insufficient_data`; otherwise the result is `degraded`.
-- The `0.1.0a22` POC drift demonstration assumes independently sampled calls.
+- The `0.1.0a23` POC drift demonstration assumes independently sampled calls.
   Do not treat repeated turns from the same conversation as independent
   evidence or use that profile for a production decision. Use Monitor's
   descriptive logical-session preview to inspect session-level rates and
