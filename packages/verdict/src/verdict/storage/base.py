@@ -106,6 +106,16 @@ class Storage(Protocol):
 
     def insert_trace(self, trace: Trace) -> None: ...
 
+    def save_conversation(self, conversation: dict) -> None: ...
+
+    def get_conversation(self, tenant_id: str, conversation_id: str) -> dict | None: ...
+
+    def list_conversations(
+        self, tenant_id: str, *, after: str | None = None, limit: int = 20
+    ) -> tuple[list[dict], str | None]: ...
+
+    def delete_conversation(self, tenant_id: str, conversation_id: str) -> None: ...
+
     def replace_agent_capture(
         self,
         bundle: AgentRunBundle,

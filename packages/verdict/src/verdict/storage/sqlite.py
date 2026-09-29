@@ -137,6 +137,12 @@ def _trace_tenant_clause(requested: str, column: str = "tenant_id") -> str:
 
 
 _SCHEMA = """
+CREATE TABLE IF NOT EXISTS conversation_snapshots (
+    tenant_id TEXT NOT NULL, conversation_id TEXT NOT NULL,
+    retention_at TEXT NOT NULL, payload TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, conversation_id)
+);
+CREATE INDEX IF NOT EXISTS conversation_retention ON conversation_snapshots(retention_at);
 CREATE TABLE IF NOT EXISTS traces (
     trace_id TEXT PRIMARY KEY,
     parent_span_id TEXT,
@@ -2293,10 +2299,75 @@ class SQLiteStorage:
             else:
                 self._conn.execute("COMMIT")
 
+    def save_conversation(self, conversation: dict) -> None:
+        from verdict.conversations import _json, validate_conversation
+
+        value = validate_conversation(conversation)
+        retention_at = value["event_at"] or datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            self._conn.execute(
+                """INSERT INTO conversation_snapshots (tenant_id, conversation_id, retention_at, payload)
+                   VALUES (?, ?, ?, ?)
+                   ON CONFLICT (tenant_id, conversation_id) DO UPDATE SET
+                     retention_at=MIN(conversation_snapshots.retention_at, excluded.retention_at),
+                     payload=excluded.payload""",
+                (value["tenant_id"], value["id"], retention_at, _json(value)),
+            )
+
+    def get_conversation(self, tenant_id: str, conversation_id: str) -> dict | None:
+        from verdict.conversations import validate_conversation_query
+
+        validate_conversation_query(tenant_id, 1, conversation_id)
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT payload, retention_at FROM conversation_snapshots WHERE tenant_id=? AND conversation_id=?",
+                (tenant_id, conversation_id),
+            ).fetchone()
+        if row is None:
+            return None
+        value = json.loads(row["payload"])
+        value["retention_at"] = row["retention_at"]
+        return value
+
+    def list_conversations(
+        self, tenant_id: str, *, after: str | None = None, limit: int = 20
+    ) -> tuple[list[dict], str | None]:
+        from verdict.conversations import validate_conversation_query
+
+        validate_conversation_query(tenant_id, limit, after)
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT payload, retention_at FROM conversation_snapshots
+                   WHERE tenant_id=? AND conversation_id>? ORDER BY conversation_id LIMIT ?""",
+                (tenant_id, after or "", limit + 1),
+            ).fetchall()
+        page = []
+        for row in rows[:limit]:
+            value = json.loads(row["payload"])
+            value["retention_at"] = row["retention_at"]
+            page.append(value)
+        return page, page[-1]["id"] if len(rows) > limit else None
+
+    def delete_conversation(self, tenant_id: str, conversation_id: str) -> None:
+        from verdict.conversations import validate_conversation_query
+
+        validate_conversation_query(tenant_id, 1, conversation_id)
+        with self._lock:
+            self._conn.execute(
+                "DELETE FROM conversation_snapshots WHERE tenant_id=? AND conversation_id=?",
+                (tenant_id, conversation_id),
+            )
+
     def prune_before(self, cutoff_iso: str) -> int:
+        from verdict.conversations import retention_cutoff
+
+        conversation_cutoff = retention_cutoff(cutoff_iso)
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
             try:
+                self._conn.execute(
+                    "DELETE FROM conversation_snapshots WHERE retention_at < ?", (conversation_cutoff,)
+                )
                 cur = self._conn.execute(
                     "SELECT trace_id FROM traces WHERE started_at < ?",
                     (cutoff_iso,),

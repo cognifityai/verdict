@@ -17,13 +17,21 @@ class ImportRunError(RuntimeError):
         self.cause_type = type(cause).__name__
         super().__init__(
             f"telemetry import {stage} failed after seen={summary.seen}, "
-            f"stored={summary.stored}, skipped={summary.skipped} ({self.cause_type})"
+            f"stored={summary.stored}, conversations_stored={summary.conversations_stored}, "
+            f"skipped={summary.skipped} ({self.cause_type})"
         )
 
 
 def import_into_storage(results: Iterable[MappingResult], storage: Storage) -> ImportSummary:
-    """Synchronously persist every mapped trace and account for every result."""
+    """Synchronously persist mapped records through a direct storage adapter."""
     summary = ImportSummary()
+    from verdict.storage.buffered import BufferedStorage
+
+    if isinstance(storage, BufferedStorage):
+        raise ImportRunError(
+            "requires_direct_storage", summary,
+            RuntimeError("buffered writes cannot confirm import persistence"),
+        )
     iterator = iter(results)
     while True:
         try:
@@ -33,6 +41,12 @@ def import_into_storage(results: Iterable[MappingResult], storage: Storage) -> I
         except Exception as exc:
             raise ImportRunError("source", summary, exc) from exc
         summary.seen += 1
+        if result.conversation is not None:
+            try:
+                storage.save_conversation(result.conversation)
+            except Exception as exc:
+                raise ImportRunError("conversation_storage", summary, exc) from exc
+            summary.conversations_stored += 1
         if result.trace is None:
             summary.add_skip(result.skip_reason or "unknown_skip")
             continue

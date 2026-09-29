@@ -6,6 +6,17 @@ the product is refined.
 
 ## [Unreleased]
 
+### Added
+
+- Voice file import now stores a bounded, redacted current conversation snapshot
+  alongside the existing completed-assistant Trace rows. Conversation reads use
+  tenant-scoped cursor pages; explicit conversation deletion and normal storage
+  retention cover the new transcript data. This does not add conversation
+  judging, monitoring, or dashboard screens. Existing Voice Trace evidence is
+  unchanged. Overlong transcripts retain a bounded prefix marked incomplete.
+- Telemetry import now rejects `BufferedStorage` at entry because its queued
+  Trace writes cannot support a completed-write import count.
+
 ## [0.1.0a22] - 2026-09-28
 
 ### Added
