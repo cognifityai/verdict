@@ -422,6 +422,10 @@ limit, Verdict keeps a bounded prefix labeled `incomplete` with a
 `truncated_transcript` issue; its existing reply Trace mapping is unaffected.
 The importer requires direct synchronous storage; it rejects `BufferedStorage`
 so its stored count cannot be an acknowledgement of a queued write.
+Conversation snapshots and the conversation evaluator require synchronized
+`0.1.0a23` core and eval builds. The published `0.1.0a22` install command below
+imports Voice reply Traces but does not store conversation snapshots. Use a
+source checkout until `0.1.0a23` is published.
 
 Install the `telemetry` extra when accepting OTLP protobuf; it is optional for
 JSON files and API readers:
