@@ -1736,3 +1736,34 @@ def test_customer_label_set_can_be_previewed_and_calibrated(tmp_path):
     [health] = storage.list_evaluator_health(limit=10)
     assert health.sentinel_set_name == "customer-v1"
     assert health.tenant_id == "__verdict_local__"
+
+
+def test_shared_calibration_identity_matches_production_judgment(tmp_path):
+    config = {**_config(), "rubric": {
+        "name": "quality", "version": "1", "dimensions": [
+            {"name": "relevance", "description": "Answers the request."},
+            {"name": "completeness", "description": "Covers the request."},
+        ],
+    }}
+    label_set = tmp_path / "labels.jsonl"
+    label_set.write_text(
+        '{"sentinel_id":"one","query":"q","response":"a",'
+        '"labels":{"relevance":"pass","completeness":"pass"}}\n'
+    )
+    provider = CountingProvider()
+    storage = InMemoryStorage()
+    storage.insert_trace(_trace("trace-calibration"))
+    calibrated = execute_calibration(
+        storage, tenant_id="local", path=label_set, config=config,
+        provider=provider, confirm_external_egress=True, minimum_examples=1,
+    )
+    preview = preview_evaluation(storage, tenant_id="local", config=config)
+    judged = execute_evaluation(
+        storage, tenant_id="local", provider=provider,
+        confirm_external_egress=True,
+        config={**config, "planFingerprint": preview["planFingerprint"],
+                "plannedTraces": preview["plannedTraces"]},
+    )
+    assert calibrated["evaluatorFingerprint"] == judged["evaluatorFingerprint"]
+    [health] = storage.list_evaluator_health(tenant_id="local", limit=10)
+    assert health.evaluator_fingerprint == judged["evaluatorFingerprint"]
