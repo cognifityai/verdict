@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { AlertTriangle, CheckCircle2, FlaskConical, LoaderCircle } from "lucide-react";
+import { ConversationEvaluation } from "./ConversationEvaluation.jsx";
 
 const C = { panel: "#111715", border: "#26332e", sub: "#94a39d", faint: "#68766f", green: "#4ee1aa", amber: "#f2b84b", red: "#ff6b6b" };
 const DEFAULT_DIMENSIONS = [
@@ -31,7 +32,7 @@ function readPreferences() {
       model: typeof saved.model === "string" && saved.model.length > 0
         && new TextEncoder().encode(saved.model).length <= 256
         ? saved.model : saved.provider === "jev" ? DEFAULT_MODELS.jev : DEFAULT_PREFERENCES.model,
-      unit: ["trace", "agent_turn"].includes(saved.unit) ? saved.unit : DEFAULT_PREFERENCES.unit,
+      unit: ["trace", "agent_turn", "conversation"].includes(saved.unit) ? saved.unit : DEFAULT_PREFERENCES.unit,
       includeToolCounts: saved.provider === "jev" ? false
         : typeof saved.includeToolCounts === "boolean"
         ? saved.includeToolCounts : DEFAULT_PREFERENCES.includeToolCounts,
@@ -67,6 +68,13 @@ export function EvaluatorLab({ configUrl, onOpenEvaluated }) {
   const [evaluationElapsedSeconds, setEvaluationElapsedSeconds] = useState(0);
   const [error, setError] = useState(null);
   const requestInFlight = useRef(false);
+  const changeProvider = (next) => {
+    updatePreferences({ provider: next,
+      ...(next === "jev" ? { model: DEFAULT_MODELS.jev, includeToolCounts: false }
+        : provider === "jev" ? { model: DEFAULT_MODELS[next] || "" } : {}),
+    });
+    setPreview(null); setCalibration(null); setConfirmed(false);
+  };
   useEffect(() => {
     if (typeof window === "undefined") return;
     try { window.sessionStorage.setItem(PREFERENCES_KEY, JSON.stringify(preferences)); }
@@ -116,26 +124,27 @@ export function EvaluatorLab({ configUrl, onOpenEvaluated }) {
   const busy = busyAction != null;
   const evaluationRunning = busyAction === "evaluation";
   const destinationLabel = providerState?.customEndpointConfigured
-    ? "the configured OpenAI-compatible endpoint"
+    ? provider === "anthropic" ? "the configured Anthropic endpoint" : "the configured OpenAI-compatible endpoint"
     : provider === "jev" ? "Jev" : provider;
   const calibrationPreviewCurrent = calibration?.previewKey === JSON.stringify({
     config: payload(), labelSetPath,
   });
+  if (unit === "conversation") {
+    if (environment && !environment.conversationEvalAvailable) return <section role="alert" className="max-w-5xl border p-5" style={{ borderColor: C.amber, background: C.panel }}>
+      Conversation grading requires matching Verdict core and eval packages. Install the same release of both, then reload.
+      <button className="block underline mt-3" onClick={() => updatePreferences({ unit: "trace" })}>Return to Trace evaluation</button>
+    </section>;
+    return <ConversationEvaluation root={root} token={token} provider={provider} model={model}
+      providerState={providerState} updatePreferences={updatePreferences} changeProvider={changeProvider} />;
+  }
   return <fieldset disabled={busy} className="max-w-5xl space-y-4" style={{ border: 0, margin: 0, padding: 0 }}>
     <section className="border p-5" style={{ borderColor: C.border, background: C.panel }}>
       <div className="text-xs font-mono" style={{ color: C.green }}>EVIDENCE-AWARE EVALUATOR LAB</div>
       <h2 className="text-lg font-semibold mt-1">Configure and preflight a judge</h2>
       <p className="text-sm mt-2" style={{ color: C.sub }}>Choose provider Trace for individual model calls or Agent Turn for a completed, untruncated request and final output. Optional recorded tool-event counts can accompany a Turn; direct origin labels describe only the observed outer dispatch and cannot verify downstream protocols, citations, or factual claims. Preview does not send data externally.</p>
       <div className="grid sm:grid-cols-2 gap-4 mt-5">
-        <label className="text-sm">Evaluation unit<select value={unit} onChange={(event) => { updatePreferences({ unit: event.target.value }); setTurnCursor(null); setPreview(null); setConfirmed(false); }} className="block w-full border p-2 mt-1 bg-transparent"><option value="trace">Provider Trace</option><option value="agent_turn">Agent Turn (final output)</option></select></label>
-        <label className="text-sm">Provider<select value={provider} onChange={(event) => {
-          const next = event.target.value;
-          updatePreferences({ provider: next,
-            ...(next === "jev" ? { model: DEFAULT_MODELS.jev, includeToolCounts: false }
-              : provider === "jev" ? { model: DEFAULT_MODELS[next] || "" } : {}),
-          });
-          setPreview(null); setCalibration(null); setConfirmed(false);
-        }} className="block w-full border p-2 mt-1 bg-transparent">{PROVIDERS.map((name) => <option key={name} value={name}>{name === "openai" ? "openai / compatible endpoint" : name === "jev" ? "Jev" : name}</option>)}</select></label>
+        <label className="text-sm">Evaluation unit<select value={unit} onChange={(event) => { updatePreferences({ unit: event.target.value }); setTurnCursor(null); setPreview(null); setConfirmed(false); }} className="block w-full border p-2 mt-1 bg-transparent"><option value="trace">Provider Trace</option><option value="agent_turn">Agent Turn (final output)</option><option value="conversation">Conversation or reply</option></select></label>
+        <label className="text-sm">Provider<select value={provider} onChange={(event) => changeProvider(event.target.value)} className="block w-full border p-2 mt-1 bg-transparent">{PROVIDERS.map((name) => <option key={name} value={name}>{name === "openai" ? "openai / compatible endpoint" : name === "jev" ? "Jev" : name}</option>)}</select></label>
         <label className="text-sm">Model<input value={model} onChange={(event) => updatePreferences({ model: event.target.value })} className="block w-full border p-2 mt-1 bg-transparent" /></label>
         <label className="text-sm">Rubric name<input value={rubricName} onChange={(event) => setRubricName(event.target.value)} className="block w-full border p-2 mt-1 bg-transparent" /></label>
         <label className="text-sm">Rubric version<input value={rubricVersion} onChange={(event) => setRubricVersion(event.target.value)} className="block w-full border p-2 mt-1 bg-transparent" /></label>

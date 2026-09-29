@@ -328,8 +328,14 @@ The storage API provides `get_conversation`, tenant-scoped
 `list_conversations(tenant_id, after=..., limit=...)` (up to 20 per page), and
 `delete_conversation`. The latter does not delete separate Trace rows, and
 `delete_trace` does not delete a conversation snapshot. Retention via
-`prune_before` covers both and still returns a Trace count. Conversation
-judging, monitoring, and dashboard review are not part of this change.
+`prune_before` covers both and still returns a Trace count. Evaluator Lab can
+grade eligible snapshots using a local JSON rubric and review current evidence
+with full or partial coverage. Conversation monitoring and matched model
+comparison are not included yet.
+Conversation snapshots require the `0.1.0a23` core build; grading them also
+requires the matching eval build. The published `0.1.0a22` command above
+imports Voice reply Traces but does not store conversation snapshots or grade
+them. Use a source checkout until `0.1.0a23` is published.
 
 OTLP message objects may provide text in `content`, `text`, or typed text
 `parts`. Verdict joins genuine text parts in order and ignores unsupported

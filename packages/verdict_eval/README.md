@@ -32,6 +32,21 @@ Dimensions marked `requires_context=True` can be skipped when a caller enables
 `skip_context_dependent_when_missing`. If every dimension requires unavailable
 context, evaluation fails before a provider call.
 
+Evaluator Lab also has an opt-in conversation unit for imported, redacted text
+snapshots. Its uploaded JSON rubric explicitly selects `conversation` or
+`response` and declares 1–12 binary or bounded numeric dimensions. A numeric
+`passThreshold` derives PASS/FAIL from the score; without one the result is
+UNCLEAR for binary aggregation. The evaluator stores a grade only for the
+current exact transcript revision, target, rubric, provider, model, prompt
+version, and endpoint. Partial coverage and judge errors stay visible.
+Conversation grading supports Anthropic, OpenAI, and Google providers; Jev is
+available for Trace and Turn evaluation only.
+This does not execute a custom scoring formula or establish agreement with
+human labels. See the repository's example rubric and onboarding guide.
+This conversation unit requires synchronized core and eval builds from the
+`0.1.0a23` release candidate; the published `0.1.0a22` packages do not include
+it. Use a source checkout until `0.1.0a23` is published.
+
 ## Jev judge
 
 Install `cognifity-verdict-eval[jev]` and set `TYPESAFE_API_KEY` in the process

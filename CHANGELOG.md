@@ -11,9 +11,22 @@ the product is refined.
 - Voice file import now stores a bounded, redacted current conversation snapshot
   alongside the existing completed-assistant Trace rows. Conversation reads use
   tenant-scoped cursor pages; explicit conversation deletion and normal storage
-  retention cover the new transcript data. This does not add conversation
-  judging, monitoring, or dashboard screens. Existing Voice Trace evidence is
+  retention cover the new transcript data. Existing Voice Trace evidence is
   unchanged. Overlong transcripts retain a bounded prefix marked incomplete.
+- Evaluator Lab can validate a local JSON rubric and, after an explicit preview
+  and egress approval, grade a clean, closed imported conversation or each
+  completed assistant reply. Conversation review shows missing, error, partial,
+  and complete coverage against the current transcript revision. Corrections,
+  deletion, and retention invalidate or remove grades with the snapshot.
+  Conversation monitoring and model comparison are not included yet.
+- Conversation grade detail shows only results for its returned transcript
+  revision. Judge findings reject unrecognized fields and bind their dimension
+  to the enclosing rubric result. Core and eval release dependencies now
+  require a matching `0.1.0a23` candidate; the dashboard reports when its
+  conversation evaluator is unavailable.
+- Conversation judge consent identifies configured custom Anthropic and
+  OpenAI-compatible endpoints. Oversized numeric rubric values return a
+  validation error instead of an internal server error.
 - Telemetry import now rejects `BufferedStorage` at entry because its queued
   Trace writes cannot support a completed-write import count.
 

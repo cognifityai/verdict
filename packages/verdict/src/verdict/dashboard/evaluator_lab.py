@@ -37,6 +37,7 @@ _PROVIDER_KEYS = {
     "google": "GOOGLE_API_KEY",
     "jev": "TYPESAFE_API_KEY",
 }
+_PROVIDER_ENDPOINT_ENV = {"openai": "OPENAI_BASE_URL", "anthropic": "ANTHROPIC_BASE_URL"}
 _MAX_EVALUATION_TRACES = 10_000
 _EVALUATION_LOCK = threading.Lock()
 
@@ -48,8 +49,14 @@ def evaluator_environment() -> dict[str, Any]:
         available = True
     except ImportError:
         available = False
+    try:
+        from verdict_eval import conversation_judge  # noqa: F401
+        conversation_available = True
+    except ImportError:
+        conversation_available = False
     return {
         "evalPackageAvailable": available,
+        "conversationEvalAvailable": conversation_available,
         "inspectPackageAvailable": importlib.util.find_spec("verdict_inspect") is not None,
         "providers": [
             {
@@ -60,8 +67,8 @@ def evaluator_environment() -> dict[str, Any]:
                     importlib.util.find_spec("typesafe_sdk") is not None
                     if provider == "jev" else True
                 ),
-                "customEndpointConfigured": (
-                    provider == "openai" and bool(os.environ.get("OPENAI_BASE_URL"))
+                "customEndpointConfigured": bool(
+                    os.environ.get(_PROVIDER_ENDPOINT_ENV.get(provider, ""))
                 ),
             }
             for provider, key in _PROVIDER_KEYS.items()

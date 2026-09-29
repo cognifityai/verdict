@@ -706,6 +706,17 @@ class BufferedStorage:
     def save_conversation(self, conversation: dict) -> None:
         self._maintenance(self._inner.save_conversation, conversation)
 
+    def save_conversation_assessment(self, assessment: dict) -> bool:
+        return self._maintenance(self._inner.save_conversation_assessment, assessment)
+
+    def list_conversation_assessments(
+        self, tenant_id: str, conversation_id: str, evaluator_fingerprint: str, *, limit: int = 1_000
+    ) -> list[dict]:
+        return self._read(
+            self._inner.list_conversation_assessments,
+            tenant_id, conversation_id, evaluator_fingerprint, limit=limit,
+        )
+
     def get_conversation(self, tenant_id: str, conversation_id: str) -> dict | None:
         return self._read(self._inner.get_conversation, tenant_id, conversation_id)
 

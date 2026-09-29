@@ -440,6 +440,10 @@ limit, Verdict keeps a bounded prefix labeled `incomplete` with a
 `truncated_transcript` issue; its existing reply Trace mapping is unaffected.
 The importer requires direct synchronous storage; it rejects `BufferedStorage`
 so its stored count cannot be an acknowledgement of a queued write.
+Conversation snapshots require the `0.1.0a23` core build; grading them also
+requires the matching eval build. The published `0.1.0a22` install command
+below imports Voice reply Traces but does not store conversation snapshots.
+Use a source checkout until `0.1.0a23` is published.
 
 Install the `telemetry` extra when accepting OTLP protobuf; it is optional for
 JSON files and API readers:
@@ -706,13 +710,38 @@ source. See [`ADR-013`](docs/adrs/013-stable-dependent-package-read-port.md).
   provider's agent graph. Tokens, cost, model, and latency exist only
   when the source turn supplies them. Verify a voice vendor's export against the
   documented generic schema before relying on it. Conversation snapshots are
-  available through the storage API; conversation judging, monitoring, and a
-  dashboard screen are not included yet. `delete_trace` deletes only a Trace;
+  available through the storage API and Evaluator Lab can grade clean, closed
+  snapshots using an uploaded JSON rubric. The review screen shows coverage
+  and the current transcript with its grades. Conversation monitoring and
+  model comparison are not included yet. `delete_trace` deletes only a Trace;
   use `delete_conversation` for its separate snapshot. `prune_before` removes
   snapshots whose source end time, or first import time when absent, is before
   the cutoff while still returning only the number of deleted Traces. Supply
   top-level `ended_at` or `end_time` in Voice records for a source end time;
   Verdict stores its UTC form as `event_at`.
+
+To grade imported conversations, open **Evaluate → Evaluator Lab**, select
+**Conversation or reply**, upload a local JSON rubric (see
+[`examples/telemetry/conversation-rubric.example.json`](examples/telemetry/conversation-rubric.example.json)
+or [`examples/telemetry/response-rubric.example.json`](examples/telemetry/response-rubric.example.json)),
+and preview one bounded page. The default Trace evaluator remains separate.
+This workflow requires a synchronized core and eval build from the
+`0.1.0a23` release candidate; the published `0.1.0a22` installation above
+does not contain it. Until `0.1.0a23` is published, run from this source tree.
+Review the eligible and excluded counts before approving the selected judge
+calls. The judge uses the configured provider key. When `OPENAI_BASE_URL` or
+`ANTHROPIC_BASE_URL` selects a custom endpoint, the consent screen names that
+destination before sending transcript content, without exposing its URL;
+preview and file validation make no judge call. Uploaded rubric descriptions
+and transcript text are best-effort redacted. A generic rubric defines only
+binary or bounded numeric dimensions; Verdict does not execute a vendor's
+custom total-score formula. Grades bind the exact current transcript, rubric,
+provider, model, prompt version, and endpoint. A corrected transcript removes
+its old grades. Each page scans at most 20 conversations and runs at most 20
+judge calls; move through the ID-ordered pages explicitly. Full coverage means
+every eligible reply was completed by that evaluator; UNCLEAR remains visible
+but does not count as PASS or FAIL. Judge agreement with human labels must be
+checked before treating scores as a quality measurement.
 - Trace Explorer pages through every stored non-judge application trace in
   30-row pages. Search and provider/content-state filters apply to the current
   page; dashboard aggregates continue to use the complete store. Selecting a

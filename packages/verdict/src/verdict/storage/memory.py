@@ -122,6 +122,7 @@ class InMemoryStorage:
     def __init__(self) -> None:
         self._traces: dict[str, Trace] = {}
         self._conversations: dict[tuple[str, str], tuple[str, str]] = {}
+        self._conversation_assessments: dict[tuple[str, str, str, int], str] = {}
         self._import_sources: dict[tuple[str, str], SourceSession] = {}
         self._agent_runs: dict[tuple[str, str], AgentRun] = {}
         self._agent_turns: dict[tuple[str, str, str], AgentTurn] = {}
@@ -1022,7 +1023,44 @@ class InMemoryStorage:
             previous = self._conversations.get(identity)
             if previous is not None:
                 retention_at = min(retention_at, previous[1])
+                if json.loads(previous[0])["revision"] != value["revision"]:
+                    self._conversation_assessments = {
+                        key: payload for key, payload in self._conversation_assessments.items()
+                        if key[:2] != identity
+                    }
             self._conversations[identity] = (_json(value), retention_at)
+
+    def save_conversation_assessment(self, assessment: dict) -> bool:
+        from verdict.conversation_assessments import should_store_assessment, validate_assessment
+        from verdict.conversations import _json
+
+        if not isinstance(assessment, dict):
+            raise ValueError("invalid conversation assessment")
+        identity = (assessment.get("tenant_id"), assessment.get("conversation_id"))
+        with self._agent_evidence_lock:
+            row = self._conversations.get(identity)
+            if row is None:
+                raise ValueError("conversation assessment revision unavailable")
+            value = validate_assessment(assessment, json.loads(row[0]))
+            key = (*identity, value["evaluator_fingerprint"], -1 if value["target_position"] is None else value["target_position"])
+            old = self._conversation_assessments.get(key)
+            if not should_store_assessment(json.loads(old) if old else None, value):
+                return False
+            self._conversation_assessments[key] = _json(value)
+            return True
+
+    def list_conversation_assessments(
+        self, tenant_id: str, conversation_id: str, evaluator_fingerprint: str, *, limit: int = 1_000
+    ) -> list[dict]:
+        from verdict.conversation_assessments import validate_assessment_query
+
+        validate_assessment_query(tenant_id, conversation_id, evaluator_fingerprint, limit)
+        with self._agent_evidence_lock:
+            keys = sorted(
+                key for key in self._conversation_assessments
+                if key[:3] == (tenant_id, conversation_id, evaluator_fingerprint)
+            )[:limit]
+            return [json.loads(self._conversation_assessments[key]) for key in keys]
 
     def get_conversation(self, tenant_id: str, conversation_id: str) -> dict | None:
         from verdict.conversations import validate_conversation_query
@@ -1061,6 +1099,10 @@ class InMemoryStorage:
         validate_conversation_query(tenant_id, 1, conversation_id)
         with self._agent_evidence_lock:
             self._conversations.pop((tenant_id, conversation_id), None)
+            self._conversation_assessments = {
+                key: payload for key, payload in self._conversation_assessments.items()
+                if key[:2] != (tenant_id, conversation_id)
+            }
 
     def prune_before(self, cutoff_iso: str) -> int:
         from verdict.conversations import retention_cutoff
@@ -1069,6 +1111,11 @@ class InMemoryStorage:
         with self._agent_evidence_lock, self._cluster_v2_lock:
             self._conversations = {
                 key: row for key, row in self._conversations.items() if row[1] >= conversation_cutoff
+            }
+            retained = set(self._conversations)
+            self._conversation_assessments = {
+                key: payload for key, payload in self._conversation_assessments.items()
+                if key[:2] in retained
             }
             doomed = [
                 tid
