@@ -551,7 +551,10 @@ Bearer padding is removed with the credential. Existing Verdict redaction and ha
 placeholders remain terminal when capture and storage apply the boundary more
 than once. Agent Run names and descriptive service, version, and environment
 fields use the same boundary while routing IDs remain unchanged; flat GitHub,
-Bearer, Basic-auth, and common provider credentials are also recognized.
+Bearer, Basic-auth, and common provider credentials are also recognized, as are
+unlabeled vendor tokens with a distinctive prefix such as Stripe secret keys,
+Hugging Face, GitLab, Slack, npm, and PyPI tokens. Public identifiers such as
+Stripe publishable keys are left readable.
 Unknown top-level provider fields are dropped; malformed, cyclic, non-JSON, and
 excessively deep or large values fail closed. Repeated container references fail
 closed at every occurrence so sanitized output cannot alias caller-owned data;

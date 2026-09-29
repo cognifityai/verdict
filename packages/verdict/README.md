@@ -272,7 +272,8 @@ Traces are written to SQLite by default (or any `Storage` adapter). Content
 capture (prompts/completions) is **on by default** and can be disabled with
 `capture_content=False`; captured content is run through built-in
 pattern and field-aware redaction, including common provider/API credentials,
-GitHub tokens, and authorization headers, recursively across supported
+GitHub tokens, unlabeled vendor tokens with a distinctive prefix (for example
+Stripe, Hugging Face, GitLab, Slack, npm, and PyPI), and authorization headers, recursively across supported
 JSON-compatible message and tool structures before content limits, `Trace`
 assignment, and storage. Opaque values under supported credential field names
 such as `password`, `api_key`, `token`, `secret_key`, `cookie`, and `passcode`,

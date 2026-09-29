@@ -61,7 +61,8 @@ _MESSAGE_FIELDS = (
 
 # Cheap, fast first-pass patterns. This is NOT comprehensive PII detection — it
 # covers the common, high-frequency accidental leaks in LLM traffic:
-# provider/API credentials, email, URL, US SSN, payment-card-shaped digit runs,
+# provider/API credentials (including unlabeled vendor tokens with a
+# distinctive prefix), email, URL, US SSN, payment-card-shaped digit runs,
 # IPv4/IPv6, and US-style phone numbers. Known gaps (NOT handled — regex has no entity model):
 # names, postal addresses, dates of birth, IBAN/passport numbers, separator-less
 # phone numbers, and most non-US formats. Do not treat regex-only redaction as a
@@ -185,10 +186,31 @@ _NON_SENSITIVE_TOKEN_FIELDS = frozenset(
 )
 _JSON_UNICODE_KEY_ESCAPE = re.compile(r"\\u([0-9A-Fa-f]{4})", re.IGNORECASE)
 
+# Vendor credentials whose documented prefix is distinctive enough to redact
+# without a surrounding label. Each body has a minimum length so ordinary
+# identifiers that share a prefix (``hf_hub_download``, ``npm_config_cache``)
+# survive. Public identifiers such as Stripe ``pk_`` publishable keys are
+# deliberately excluded.
+_VENDOR_CREDENTIAL = (
+    r"[rs]k_(?:live|test)_[A-Za-z0-9]{16,}"  # Stripe secret / restricted key
+    r"|whsec_[A-Za-z0-9]{24,}"  # Stripe webhook signing secret
+    r"|hf_[A-Za-z0-9]{30,}"  # Hugging Face
+    r"|gl(?:pat|oas|dt|rt|cbt|ptt|ft|imt|soat|agent)-[A-Za-z0-9_-]{20,}"
+    r"(?:\.[A-Za-z0-9_-]+)*"  # GitLab, including dotted routable tokens
+    r"|(?:xox[abeoprs](?:\.xox[abeoprs])?|xapp)-[A-Za-z0-9-]{20,}"  # Slack
+    r"|npm_[A-Za-z0-9]{36,}"  # npm
+    r"|pypi-AgE[A-Za-z0-9_-]{40,}"  # PyPI / TestPyPI
+    r"|gsk_[A-Za-z0-9]{40,}"  # Groq
+    r"|xai-[A-Za-z0-9]{40,}"  # xAI
+    r"|r8_[A-Za-z0-9]{30,}"  # Replicate
+    r"|pplx-[A-Za-z0-9]{40,}"  # Perplexity
+    r"|lsv2_(?:pt|sk)_[A-Za-z0-9_]{32,}"  # LangSmith
+)
+
 _PATTERNS = {
     "PROVIDER_KEY": re.compile(
         r"\b(?:sk-ant-[A-Za-z0-9_-]{16,}|sk-(?:proj-)?[A-Za-z0-9_-]{20,}|"
-        r"AKIA[A-Z0-9]{16}|AIza[A-Za-z0-9_-]{30,})\b"
+        rf"AKIA[A-Z0-9]{{16}}|AIza[A-Za-z0-9_-]{{30,}}|{_VENDOR_CREDENTIAL})\b"
     ),
     "GITHUB_TOKEN": re.compile(
         r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b"

@@ -6,6 +6,16 @@ the product is refined.
 
 ## [Unreleased]
 
+### Fixed
+
+- Redaction now removes unlabeled vendor credentials that have a distinctive
+  prefix: Stripe secret, restricted, and webhook-signing keys; Hugging Face;
+  GitLab; Slack; npm; PyPI; Groq; xAI; Replicate; Perplexity; and LangSmith.
+  They previously survived when they appeared without a label such as
+  `API_KEY=`. They use the existing `<PROVIDER_KEY>` placeholder. Rows written
+  by earlier releases are not rewritten. Stripe publishable keys and ordinary
+  identifiers that share a prefix are left readable.
+
 ## [0.1.0a23] - 2026-09-29
 
 ### Added
