@@ -692,6 +692,8 @@ existing Verdict redaction/hash placeholders remain unchanged when storage
 reapplies the boundary. Agent Run names and descriptive service, version, and
 environment fields cross the same boundary; routing IDs remain unchanged. The detector is
 best-effort pattern matching with common provider/API, GitHub, Bearer, and Basic-auth patterns,
+unlabeled vendor tokens with a distinctive prefix (Stripe secret and restricted keys,
+Hugging Face, GitLab, Slack, npm, PyPI, Groq, xAI, Replicate, Perplexity, LangSmith),
 Luhn card checks, and standard-library IP
 address validation, not a compliance control; names, addresses, many
 international identifiers, and opaque application metadata are not guaranteed
