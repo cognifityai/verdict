@@ -6,6 +6,18 @@ the product is refined.
 
 ## [Unreleased]
 
+### Added
+
+- Local Claude Code and Codex history shows an estimated list price for agent
+  turns, in Overview → Performance and per source. Each turn's token components
+  are priced at the public rates for the one model the turn named, with cache
+  reads and writes at the provider's cache rates (`estimate_turn_cost_usd`).
+  It is a list price, not a bill; turns with no model, more than one model, an
+  unpriced model, or an unknown token basis are counted as unpriced. Agent
+  insights carry `agentTurnListPriceUsd`, `agentTurnsPriced`, and
+  `agentTurnsUnpriced`, and each source row carries `listPriceUsd` and
+  `pricedTurns`. Provider-call `cost_usd` is unchanged.
+
 ## [0.1.0b1] - 2026-09-29
 
 ### Changed

@@ -43,8 +43,9 @@ verdict.init(storage="sqlite:///./verdict.db", service_name="my-app")
 ## What you get without an API key
 
 - **Agent evidence** from Claude Code and Codex history: runs, turns, tool calls,
-  tool errors, possible tool loops, missing final responses, and the token usage
-  the source reports.
+  tool errors, possible tool loops, missing final responses, the token usage
+  the source reports, and an estimated list price for that usage (an estimate
+  from public per-token rates, not a bill).
 - **LLM call capture** for supported Anthropic, OpenAI, and Google SDK methods:
   tokens, latency, estimated cost, and errors.
 - **Drift alerts that do not cry wolf.** Monitor compares a reference cohort with
@@ -1054,8 +1055,9 @@ error details; an overlarge selection asks you to choose narrower dates.
 - `cost_usd` is a best-effort estimate from a dated static base-price table, not
   a billing source of truth. The table includes GPT-4.1 base text models and
   their published dated snapshots; unknown and unverified fine-tuned/custom
-  models remain unpriced. Caching, special tiers, tools, residency, and
-  negotiated discounts are not modeled.
+  models remain unpriced. Special tiers, tools, residency, and negotiated
+  discounts are not modeled. The agent-turn list price applies the providers'
+  published cache-read and cache-write rates; provider-call `cost_usd` does not.
 - Judge execution is sequential. Judge token/cost usage, evaluation-budget
   enforcement, cache-aware provider-Trace pricing, human-readable cluster naming, and
   automatic fragmented-cluster fusion are not implemented. Their scoped

@@ -176,3 +176,88 @@ def compute_cost_usd(
         return float(cost)
     except Exception:
         return None
+
+
+# Cached-token rates relative to a model's base input rate, from the same
+# provider pricing pages as PRICE_PER_1K on PRICING_LAST_VERIFIED. Anthropic
+# bills cache reads at 10% of input and five-minute cache writes at 125%.
+# OpenAI's cached-input discount depends on the family; the prefixes below are
+# matched in order and an unlisted family uses 0.5, the least generous listed
+# discount, so an unknown family is never under-priced.
+_ANTHROPIC_CACHE_READ = 0.1
+_ANTHROPIC_CACHE_WRITE = 1.25
+_OPENAI_CACHE_READ_BY_FAMILY: tuple[tuple[str, float], ...] = (
+    ("gpt-5", 0.1),
+    ("gpt-6", 0.1),
+    ("gpt-4.1", 0.25),
+    ("o3", 0.25),
+    ("o4", 0.25),
+    ("gpt-4o", 0.5),
+    ("o1", 0.5),
+)
+_OPENAI_CACHE_READ_DEFAULT = 0.5
+
+
+def _provider_of(model: str) -> str | None:
+    name = model.lower().rsplit("/", 1)[-1]
+    if name.startswith("claude"):
+        return "anthropic"
+    if name.startswith(("gpt", "o1", "o3", "o4", "chatgpt")):
+        return "openai"
+    return None
+
+
+def _cache_read_multiplier(provider: str, model: str) -> float:
+    if provider == "anthropic":
+        return _ANTHROPIC_CACHE_READ
+    name = model.lower().rsplit("/", 1)[-1]
+    for family, multiplier in _OPENAI_CACHE_READ_BY_FAMILY:
+        if name == family or name.startswith((family + "-", family + ".")):
+            return multiplier
+    return _OPENAI_CACHE_READ_DEFAULT
+
+
+def estimate_turn_cost_usd(
+    model: str,
+    *,
+    input_tokens: int | None,
+    cached_input_tokens: int | None,
+    cache_write_input_tokens: int | None,
+    output_tokens: int | None,
+    input_includes_cached: bool,
+) -> float | None:
+    """Estimate the list price of one agent turn from its token components.
+
+    ``input_includes_cached`` states the source's convention: OpenAI-style
+    counts include cached tokens in ``input_tokens`` (Codex), Anthropic-style
+    counts exclude them (Claude Code). Output tokens are priced at the output
+    rate, which already covers reasoning tokens for both providers. Returns
+    ``None`` when the model has no static price, the provider's cache rates are
+    unknown, or the counts are inconsistent; never raises.
+    """
+    try:
+        provider = _provider_of(model)
+        if provider is None:
+            return None
+        counts = [
+            0 if value is None else int(value)
+            for value in (input_tokens, cached_input_tokens, cache_write_input_tokens, output_tokens)
+        ]
+        if any(value < 0 for value in counts):
+            return None
+        input_count, cached, cache_write, output = counts
+        uncached = input_count - cached if input_includes_cached else input_count
+        if uncached < 0:
+            return None
+        base = compute_cost_usd(model, uncached, output)
+        if base is None:
+            return None
+        cached_cost = compute_cost_usd(model, cached, 0) or 0.0
+        write_cost = compute_cost_usd(model, cache_write, 0) or 0.0
+        return float(
+            base
+            + cached_cost * _cache_read_multiplier(provider, model)
+            + write_cost * (_ANTHROPIC_CACHE_WRITE if provider == "anthropic" else 1.0)
+        )
+    except Exception:
+        return None
