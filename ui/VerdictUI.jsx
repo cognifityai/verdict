@@ -301,7 +301,16 @@ function useDashboardData() {
         headers: { Accept: "application/json" },
         signal: controller.signal,
       });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      if (!response.ok) {
+        const failure = await response.json().catch(() => null);
+        if (response.status === 503 && failure?.state === "store_not_created") {
+          // Setup has not created the local store yet: first run, not an error.
+          if (requestId !== requestSequence.current) return false;
+          setState((current) => ({ ...current, loading: false, error: null }));
+          return false;
+        }
+        throw new Error(`HTTP ${response.status}`);
+      }
       const snapshot = await response.json();
       if (!snapshot || !snapshot.meta || !Array.isArray(snapshot.providers)) {
         throw new Error("invalid dashboard response");
@@ -313,6 +322,13 @@ function useDashboardData() {
       if (requestId !== requestSequence.current) return false;
       if (error?.name === "AbortError") return false;
       setState((current) => {
+        if (current.source !== "live") {
+          return {
+            ...current,
+            loading: false,
+            error: "Could not load dashboard data. Check the Verdict server log.",
+          };
+        }
         const confirmed = current.snapshot.evaluation?.selectedId;
         const requested = evaluatorId || "the default evaluator";
         const shown = confirmed || "the current snapshot";

@@ -55,6 +55,22 @@ def _finding(
     return Finding(code, severity, message, tuple(event.event_id for event in events[:20]))
 
 
+def outcome_reported(event: AgentEvent) -> bool:
+    """Whether the source reported success or failure for an execution event.
+
+    This mirrors the failure predicates below: a zero failure count only means
+    "no failures" when at least one event of that type reported an outcome.
+    """
+    if event.status in {ExecutionStatus.COMPLETED, ExecutionStatus.FAILED}:
+        return True
+    attributes = event.attributes
+    return (
+        isinstance(attributes.get("is_error"), bool)
+        or isinstance(attributes.get("exit_code"), int)
+        or isinstance(attributes.get("failed"), int)
+    )
+
+
 def analyze_agent_run(
     bundle: AgentRunBundle, policy: AnalysisPolicy | None = None
 ) -> AgentRunAnalysis:

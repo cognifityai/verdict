@@ -7,11 +7,14 @@ import {
 
 const panel = "border p-5";
 const style = { borderColor: "#26332e", background: "#111715" };
+const LONG_CAPTURE = "Capturing local history… Large histories can take several minutes. Keep this page open.";
+const LONG_IMPORT = "Importing… Large files can take several minutes. Keep this page open.";
 
 export function SetupWizard({ configUrl, onComplete, onNavigate, onRefresh, agentSummary = {} }) {
   const [token, setToken] = useState(null);
   const [source, setSource] = useState("local");
   const [busy, setBusy] = useState(false);
+  const [busyLabel, setBusyLabel] = useState(null);
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
   const [claudeRoot, setClaudeRoot] = useState("~/.claude/projects");
@@ -39,8 +42,8 @@ export function SetupWizard({ configUrl, onComplete, onNavigate, onRefresh, agen
     if (hasObservedStore) setEditing(false);
   }, [hasObservedStore]);
 
-  async function post(path, payload) {
-    setBusy(true); setError(null);
+  async function post(path, payload, label) {
+    setBusy(true); setBusyLabel(label); setError(null);
     try {
       const response = await fetch(path, {
         method: "POST", credentials: "same-origin",
@@ -52,7 +55,7 @@ export function SetupWizard({ configUrl, onComplete, onNavigate, onRefresh, agen
       setResult(body); return body;
     } catch (failure) {
       setError(setupFailureMessage(failure, serverOrigin)); return null;
-    } finally { setBusy(false); }
+    } finally { setBusy(false); setBusyLabel(null); }
   }
 
   const sources = [
@@ -106,8 +109,8 @@ export function SetupWizard({ configUrl, onComplete, onNavigate, onRefresh, agen
         <label className="block text-sm mt-3">Codex history directory<input value={codexRoot} onChange={(event) => { setCodexRoot(event.target.value); setPreviewedLocal(null); }} className="block w-full mt-1 border p-2 bg-transparent" /></label>
         <p className="text-sm mt-4" style={{ color: "#94a39d" }}>Verdict retains bounded, recursively redacted request, response, tool, command, and test evidence for local agent analysis. For the standard Codex directory, it also reads completed model-call metadata from the sibling <code>logs_2.sqlite</code> database; diagnostic bodies are never stored. Local setup uses content capture by default so the resulting run is actually evaluable.</p>
         <div className="flex gap-2 mt-4">
-          <button disabled={!token || busy} onClick={async () => { const data = await post(`${root}/api/setup/preview`, { claudeRoot, codexRoot }); if (data) setPreviewedLocal(localKey); }} className="border px-4 py-2 text-sm">Preview sources</button>
-          <button disabled={!token || busy || previewedLocal !== localKey} onClick={async () => { const data = await post(`${root}/api/setup/capture`, { claudeRoot, codexRoot, captureContent: true }); if (data) onComplete("local"); }} className="px-4 py-2 text-sm" style={{ background: "#4ee1aa", color: "#0b0e0d" }}>Approve and capture</button>
+          <button disabled={!token || busy} onClick={async () => { const data = await post(`${root}/api/setup/preview`, { claudeRoot, codexRoot }, "Previewing sources…"); if (data) setPreviewedLocal(localKey); }} className="border px-4 py-2 text-sm">Preview sources</button>
+          <button disabled={!token || busy || previewedLocal !== localKey} onClick={async () => { const data = await post(`${root}/api/setup/capture`, { claudeRoot, codexRoot, captureContent: true }, LONG_CAPTURE); if (data) onComplete("local"); }} className="px-4 py-2 text-sm" style={{ background: "#4ee1aa", color: "#0b0e0d" }}>Approve and capture</button>
         </div>
       </section>}
 
@@ -119,8 +122,8 @@ export function SetupWizard({ configUrl, onComplete, onNavigate, onRefresh, agen
           {["auto", "otlp", "langfuse", "langsmith", "datadog", "phoenix", "opik", "mlflow", "voice"].map((name) => <option key={name}>{name}</option>)}
         </select>
         <div className="flex gap-2 mt-4">
-          <button disabled={!token || !filePath || busy} onClick={async () => { const data = await post(`${root}/api/setup/import/preview`, { path: filePath, format: fileFormat }); if (data) setPreviewedImport(importKey); }} className="border px-4 py-2 text-sm">Preview import</button>
-          <button disabled={!token || !filePath || busy || previewedImport !== importKey} onClick={async () => { const data = await post(`${root}/api/setup/import`, { path: filePath, format: fileFormat }); if (data) onRefresh?.(); }} className="px-4 py-2 text-sm" style={{ background: "#4ee1aa", color: "#0b0e0d" }}>Approve and import</button>
+          <button disabled={!token || !filePath || busy} onClick={async () => { const data = await post(`${root}/api/setup/import/preview`, { path: filePath, format: fileFormat }, "Previewing import…"); if (data) setPreviewedImport(importKey); }} className="border px-4 py-2 text-sm">Preview import</button>
+          <button disabled={!token || !filePath || busy || previewedImport !== importKey} onClick={async () => { const data = await post(`${root}/api/setup/import`, { path: filePath, format: fileFormat }, LONG_IMPORT); if (data) onRefresh?.(); }} className="px-4 py-2 text-sm" style={{ background: "#4ee1aa", color: "#0b0e0d" }}>Approve and import</button>
         </div>
       </section>}
 
@@ -136,6 +139,7 @@ export function SetupWizard({ configUrl, onComplete, onNavigate, onRefresh, agen
         <p className="text-sm mt-3">Restart Verdict with <code>verdict --storage sqlite:///path/to/verdict.db</code> or a PostgreSQL DSN. The dashboard reads that store without copying its records.</p>
       </section>}
 
+      {busy && busyLabel && <div role="status" aria-live="polite" className={panel} style={{ ...style, color: "#94a39d" }}>{busyLabel}</div>}
       {error && <div role="alert" className={panel} style={{ ...style, color: "#ff6b6b" }}>{error}</div>}
       {result && <section className={panel} style={style}>
         <div className="text-xs font-mono" style={{ color: "#4ee1aa" }}>RESULT</div>

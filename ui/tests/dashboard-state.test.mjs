@@ -28,7 +28,7 @@ function componentStub(names) {
 }
 
 async function loadUiModule() {
-  const source = `${await readFile(UI_SOURCE, "utf8")}\nexport { Dashboard, Overview, Traces, TraceDetail, TabHelp, Judge, Compare, ManagementReport, mountedApiUrl, Monitor };\nexport { useOperations } from "./Operations.jsx";\nexport { RegistryView } from "./Registry.jsx";\nexport { EvaluatorLab } from "./EvaluatorLab.jsx";\nexport { ConversationEvaluation } from "./ConversationEvaluation.jsx";\nexport { MatchedConversationCompare } from "./MatchedConversationCompare.jsx";\nexport { Runs } from "./Runs.jsx";\nexport { Insights } from "./Insights.jsx";`;
+  const source = `${await readFile(UI_SOURCE, "utf8")}\nexport { Dashboard, Overview, Traces, TraceDetail, TabHelp, Judge, Compare, ManagementReport, mountedApiUrl, Monitor };\nexport { useOperations } from "./Operations.jsx";\nexport { RegistryView } from "./Registry.jsx";\nexport { EvaluatorLab } from "./EvaluatorLab.jsx";\nexport { ConversationEvaluation } from "./ConversationEvaluation.jsx";\nexport { MatchedConversationCompare } from "./MatchedConversationCompare.jsx";\nexport { Runs } from "./Runs.jsx";\nexport { Insights } from "./Insights.jsx";\nexport { SetupWizard } from "./SetupWizard.jsx";`;
   const result = await build({
     stdin: {
       contents: source,
@@ -2522,4 +2522,64 @@ test("unresolved evaluator selection affects judge results but not monitoring", 
   assert.doesNotMatch(overview, /Evaluation drift signals/);
   assert.match(judge, /Select a Trace evaluator to view judge results/);
   assert.doesNotMatch(judge, /No Trace evaluator results have been stored yet/);
+});
+
+async function resolveStatus(request, status, payload) {
+  request.resolve({ ok: false, status, json: async () => payload });
+  for (let index = 0; index < 6; index += 1) await Promise.resolve();
+}
+
+test("a store that setup has not created yet is first run, not a load failure", async () => {
+  const ui = await loadUiModule();
+  const hooks = createHooks();
+  const requests = deferredFetches();
+  let dashboard = dashboardElement(render(ui.DashboardRoot, hooks));
+  dashboard.props.onReload();
+  await resolveStatus(requests[0], 503, { error: "data unavailable", state: "store_not_created" });
+
+  dashboard = dashboardElement(render(ui.DashboardRoot, hooks));
+  assert.equal(dashboard.props.loadError, null);
+  assert.notEqual(dashboard.props.source, "live");
+});
+
+test("a failed first load does not claim that a snapshot is still displayed", async () => {
+  const ui = await loadUiModule();
+  const hooks = createHooks();
+  const requests = deferredFetches();
+  let dashboard = dashboardElement(render(ui.DashboardRoot, hooks));
+  dashboard.props.onReload();
+  await resolveStatus(requests[0], 503, { error: "data unavailable" });
+
+  dashboard = dashboardElement(render(ui.DashboardRoot, hooks));
+  assert.doesNotMatch(dashboard.props.loadError, /Still showing|evaluator/);
+  assert.match(dashboard.props.loadError, /Could not load dashboard data/);
+});
+
+test("local capture shows that a long import is still running", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const props = { configUrl: "/api/config", onComplete: () => {}, agentSummary: {} };
+  render(ui.SetupWizard, hooks, props);
+  hooks.flushEffects();
+  await resolveJson(requests[0], { setupToken: "setup-token" });
+  const button = (label) => findAll(render(ui.SetupWizard, hooks, props),
+    (node) => node.type === "button" && textOf(node) === label)[0];
+  const status = () => findAll(render(ui.SetupWizard, hooks, props),
+    (node) => node.props?.role === "status").map(textOf).join(" ");
+
+  const previewing = button("Preview sources").props.onClick();
+  assert.match(status(), /Previewing sources/);
+  await resolveJson(requests[1], { claude: { files: 1 }, codex: { files: 0 } });
+  await previewing;
+  assert.equal(status(), "");
+
+  const capturing = button("Approve and capture").props.onClick();
+  assert.match(requests[2].url, /\/api\/setup\/capture$/);
+  assert.match(status(), /Capturing local history/);
+  assert.match(status(), /several minutes/);
+  assert.equal(button("Approve and capture").props.disabled, true);
+  await resolveJson(requests[2], { summary: { stored: 1 } });
+  await capturing;
+  assert.equal(status(), "");
 });

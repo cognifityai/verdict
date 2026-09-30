@@ -8,6 +8,16 @@ export function agentEvidenceValue(dataHealth = {}, value) {
   return Number(dataHealth.counts?.runs) > 0 ? value : NO_AGENT_RUNS;
 }
 
+const OUTCOME_NOT_REPORTED = "Not reported by source";
+
+// A zero failure count only means "no failures" when the source reported at
+// least one outcome for that event type. Snapshots written before outcome
+// counts existed carry no count and keep their stored value.
+export function failureCountValue(failures, reported, notReported = OUTCOME_NOT_REPORTED) {
+  if (reported === undefined || reported === null) return failures ?? 0;
+  return Number(reported) > 0 ? (failures ?? 0) : notReported;
+}
+
 export function sourceTokenValue(activity = {}) {
   if (activity.tokenUsageState === "not_captured") {
     return "Not captured";
