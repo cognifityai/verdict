@@ -6,6 +6,24 @@ the product is refined.
 
 ## [Unreleased]
 
+### Fixed
+
+- Redaction is idempotent: redacting already-redacted text returns it
+  unchanged in both `redact` and `hash` modes. Previously a placeholder edge
+  could satisfy a word-boundary or lookaround assertion that the original
+  neighbour did not, so each further scan matched more text (a grouped digit
+  run lost one "phone number" per scan), and a secret assignment whose token
+  had been replaced by a placeholder was reclassified on the next scan. Storage
+  adapters sanitize every record again before persistence, so these differences
+  altered stored content and made Voice conversation snapshots fail their
+  digest check. `redact` now returns a fixed point of the scan and fails closed
+  to `<REDACTED>` if text is still changing after a bounded number of scans.
+- `verdict-import` no longer aborts a whole run when the storage adapter
+  rejects one record. A conversation snapshot or Trace the adapter rejects is
+  counted under `conversation_rejected` or `trace_rejected` in `skip_reasons`
+  and the import continues; source and storage failures still stop the run
+  with the counts reached so far.
+
 ## [0.1.0b1] - 2026-09-29
 
 ### Changed

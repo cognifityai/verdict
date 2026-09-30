@@ -545,7 +545,10 @@ ID (including the parent source trace ID when present). The existing pipeline
 decides which stored traces to judge. Missing optional
 tokens, cost, end time, model, session, or content remain `None`; Verdict does
 not invent them. Records without a stable source ID or valid start time are
-skipped with an explicit reason. Imported prompt/response text is an explicit
+skipped with an explicit reason, and so is a record the storage adapter
+rejects (`conversation_rejected` or `trace_rejected` in `skip_reasons`); the
+import continues past it. A source or storage failure stops the run and
+reports the counts reached so far. Imported prompt/response text is an explicit
 content transfer: only allowlisted fields are copied and the storage boundary
 applies Verdict's best-effort redaction, but operators must still treat the
 Verdict database as sensitive.
