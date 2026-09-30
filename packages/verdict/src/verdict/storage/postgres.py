@@ -20,7 +20,7 @@ import threading
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import asdict
-from datetime import datetime
+from datetime import datetime, timezone
 
 from verdict.agent_judgment import (
     TOOL_EVIDENCE_MODE,
@@ -144,6 +144,22 @@ def _trace_tenant_clause(requested: str, column: str = "tenant_id") -> str:
 
 
 _SCHEMA = """
+CREATE TABLE IF NOT EXISTS conversation_snapshots (
+    tenant_id TEXT NOT NULL, conversation_id TEXT NOT NULL,
+    retention_at TIMESTAMPTZ NOT NULL, payload TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, conversation_id)
+);
+CREATE INDEX IF NOT EXISTS conversation_retention ON conversation_snapshots(retention_at);
+CREATE INDEX IF NOT EXISTS conversation_event_window ON conversation_snapshots
+    (tenant_id, (((payload::jsonb)->>'event_at') COLLATE "C"), conversation_id);
+CREATE TABLE IF NOT EXISTS conversation_assessments (
+    tenant_id TEXT NOT NULL, conversation_id TEXT NOT NULL,
+    evaluator_fingerprint TEXT NOT NULL, target_position INTEGER NOT NULL,
+    revision TEXT NOT NULL, payload TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, conversation_id, evaluator_fingerprint, target_position),
+    FOREIGN KEY (tenant_id, conversation_id)
+      REFERENCES conversation_snapshots(tenant_id, conversation_id) ON DELETE CASCADE
+);
 CREATE TABLE IF NOT EXISTS traces (
     trace_id          TEXT PRIMARY KEY,
     parent_span_id    TEXT,
@@ -2232,9 +2248,288 @@ class PostgresStorage:
                     (trace_id,),
                 )
 
-    def prune_before(self, cutoff_iso: str) -> int:
+    def save_conversation(self, conversation: dict) -> None:
+        from verdict.conversations import _json, validate_conversation
+
+        value = validate_conversation(conversation)
+        retention_at = value["event_at"] or datetime.now(timezone.utc).isoformat()
         with self._lock, self._pool.connection() as conn, conn.transaction():
             with conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO conversation_snapshots (tenant_id, conversation_id, retention_at, payload)
+                       VALUES (%s, %s, %s::timestamptz, %s)
+                       ON CONFLICT (tenant_id, conversation_id) DO UPDATE SET
+                         retention_at=LEAST(conversation_snapshots.retention_at, EXCLUDED.retention_at),
+                         payload=EXCLUDED.payload""",
+                    (value["tenant_id"], value["id"], retention_at, _json(value)),
+                )
+                cur.execute(
+                    """DELETE FROM conversation_assessments WHERE tenant_id=%s
+                       AND conversation_id=%s AND revision<>%s""",
+                    (value["tenant_id"], value["id"], value["revision"]),
+                )
+
+    def save_conversation_assessment(self, assessment: dict) -> bool:
+        from verdict.conversation_assessments import should_store_assessment, validate_assessment
+        from verdict.conversations import _json, validate_conversation_query
+
+        if not isinstance(assessment, dict):
+            raise ValueError("invalid conversation assessment")
+        tenant_id, conversation_id = assessment.get("tenant_id"), assessment.get("conversation_id")
+        validate_conversation_query(tenant_id, 1, conversation_id)
+        with self._lock, self._pool.connection() as conn, conn.transaction():
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT payload FROM conversation_snapshots
+                       WHERE tenant_id=%s AND conversation_id=%s FOR UPDATE""",
+                    (tenant_id, conversation_id),
+                )
+                current = cur.fetchone()
+                if current is None:
+                    raise ValueError("conversation assessment revision unavailable")
+                value = validate_assessment(assessment, json.loads(current[0]))
+                target = -1 if value["target_position"] is None else value["target_position"]
+                key = (tenant_id, conversation_id, value["evaluator_fingerprint"], target)
+                cur.execute(
+                    """SELECT payload FROM conversation_assessments WHERE tenant_id=%s
+                       AND conversation_id=%s AND evaluator_fingerprint=%s AND target_position=%s""",
+                    key,
+                )
+                previous = cur.fetchone()
+                if not should_store_assessment(json.loads(previous[0]) if previous else None, value):
+                    return False
+                cur.execute(
+                    """INSERT INTO conversation_assessments
+                       (tenant_id, conversation_id, evaluator_fingerprint, target_position, revision, payload)
+                       VALUES (%s, %s, %s, %s, %s, %s)
+                       ON CONFLICT (tenant_id, conversation_id, evaluator_fingerprint, target_position)
+                       DO UPDATE SET revision=EXCLUDED.revision, payload=EXCLUDED.payload""",
+                    (*key, value["revision"], _json(value)),
+                )
+                return True
+
+    def list_conversation_assessments(
+        self, tenant_id: str, conversation_id: str, evaluator_fingerprint: str, *, limit: int = 1_000
+    ) -> list[dict]:
+        from verdict.conversation_assessments import validate_assessment_query
+
+        validate_assessment_query(tenant_id, conversation_id, evaluator_fingerprint, limit)
+        rows = self._fetchall(
+            """SELECT payload FROM conversation_assessments WHERE tenant_id=%s
+               AND conversation_id=%s AND evaluator_fingerprint=%s
+               ORDER BY target_position LIMIT %s""",
+            (tenant_id, conversation_id, evaluator_fingerprint, limit),
+        )
+        return [json.loads(row[0]) for row in rows]
+
+    def get_conversation(self, tenant_id: str, conversation_id: str) -> dict | None:
+        from verdict.conversations import validate_conversation_query
+
+        validate_conversation_query(tenant_id, 1, conversation_id)
+        row = self._fetchone(
+            "SELECT payload, retention_at FROM conversation_snapshots WHERE tenant_id=%s AND conversation_id=%s",
+            (tenant_id, conversation_id),
+        )
+        if row is None:
+            return None
+        value = json.loads(row[0])
+        value["retention_at"] = row[1].astimezone(timezone.utc).isoformat()
+        return value
+
+    def list_conversations(
+        self, tenant_id: str, *, after: str | None = None, limit: int = 20
+    ) -> tuple[list[dict], str | None]:
+        from verdict.conversations import validate_conversation_query
+
+        validate_conversation_query(tenant_id, limit, after)
+        rows = self._fetchall(
+            """SELECT payload, retention_at FROM conversation_snapshots
+               WHERE tenant_id=%s AND conversation_id>%s ORDER BY conversation_id LIMIT %s""",
+            (tenant_id, after or "", limit + 1),
+        )
+        page = []
+        for payload, retention_at in rows[:limit]:
+            value = json.loads(payload)
+            value["retention_at"] = retention_at.astimezone(timezone.utc).isoformat()
+            page.append(value)
+        return page, page[-1]["id"] if len(rows) > limit else None
+
+    def load_conversation_comparison_rows(self, query: dict, *, limit: int) -> list[dict]:
+        from verdict.conversation_monitoring import validate_storage_query
+
+        value = validate_storage_query(query, limit)
+        rows = self._fetchall(
+            """WITH reference AS (
+                   SELECT conversation_id,
+                          (payload::jsonb)->>'event_at' AS event_at,
+                          (payload::jsonb)->>'revision' AS revision,
+                          ((payload::jsonb)->'labels')::text AS labels,
+                          (payload::jsonb)->>'end_status' AS end_status,
+                          jsonb_array_length((payload::jsonb)->'input_issues') AS issue_count,
+                          (SELECT MIN(message.position)
+                             FROM jsonb_array_elements((conversation_snapshots.payload::jsonb)->'messages')
+                               WITH ORDINALITY AS message(value, position)
+                            WHERE message.value->>'role'='user'
+                              AND message.value->>'status'='completed') AS first_user,
+                          (SELECT MAX(message.position)
+                             FROM jsonb_array_elements((conversation_snapshots.payload::jsonb)->'messages')
+                               WITH ORDINALITY AS message(value, position)
+                            WHERE message.value->>'role'='assistant'
+                              AND message.value->>'status'='completed') AS last_assistant
+                     FROM conversation_snapshots
+                    WHERE tenant_id=%s AND ((payload::jsonb)->>'event_at') COLLATE "C">=%s
+                      AND ((payload::jsonb)->>'event_at') COLLATE "C"<%s
+                    ORDER BY ((payload::jsonb)->>'event_at') COLLATE "C", conversation_id LIMIT %s
+               ), current AS (
+                   SELECT conversation_id,
+                          (payload::jsonb)->>'event_at' AS event_at,
+                          (payload::jsonb)->>'revision' AS revision,
+                          ((payload::jsonb)->'labels')::text AS labels,
+                          (payload::jsonb)->>'end_status' AS end_status,
+                          jsonb_array_length((payload::jsonb)->'input_issues') AS issue_count,
+                          (SELECT MIN(message.position)
+                             FROM jsonb_array_elements((conversation_snapshots.payload::jsonb)->'messages')
+                               WITH ORDINALITY AS message(value, position)
+                            WHERE message.value->>'role'='user'
+                              AND message.value->>'status'='completed') AS first_user,
+                          (SELECT MAX(message.position)
+                             FROM jsonb_array_elements((conversation_snapshots.payload::jsonb)->'messages')
+                               WITH ORDINALITY AS message(value, position)
+                            WHERE message.value->>'role'='assistant'
+                              AND message.value->>'status'='completed') AS last_assistant
+                     FROM conversation_snapshots
+                    WHERE tenant_id=%s AND ((payload::jsonb)->>'event_at') COLLATE "C">=%s
+                      AND ((payload::jsonb)->>'event_at') COLLATE "C"<%s
+                    ORDER BY ((payload::jsonb)->>'event_at') COLLATE "C", conversation_id LIMIT %s
+               ), selected AS (
+                   SELECT * FROM reference UNION ALL SELECT * FROM current
+               )
+               SELECT selected.conversation_id, selected.event_at, selected.revision, selected.labels,
+                      selected.end_status, selected.issue_count,
+                      selected.first_user, selected.last_assistant,
+                      (grade.payload::jsonb)->>'status' AS assessment_status,
+                      (grade.payload::jsonb)->'rubric'->>'target' AS rubric_target,
+                      (SELECT definition.value->>'type'
+                         FROM jsonb_array_elements(
+                           (grade.payload::jsonb)->'rubric'->'dimensions'
+                         ) AS definition(value)
+                        WHERE definition.value->>'name'=%s LIMIT 1) AS dimension_type,
+                      (grade.payload::jsonb)->'dimensions'->%s->>'state' AS dimension_state
+                 FROM selected LEFT JOIN conversation_assessments AS grade
+                   ON grade.tenant_id=%s AND grade.conversation_id=selected.conversation_id
+                  AND grade.evaluator_fingerprint=%s AND grade.target_position=-1
+                  AND grade.revision=selected.revision
+                ORDER BY selected.event_at COLLATE "C", selected.conversation_id LIMIT %s""",
+            (
+                value["tenant_id"], value["reference_start"], value["reference_end"], limit,
+                value["tenant_id"], value["current_start"], value["current_end"], limit,
+                value["dimension"], value["dimension"],
+                value["tenant_id"], value["evaluator_fingerprint"], limit,
+            ),
+        )
+        fields = ("id", "event_at", "revision", "labels", "end_status", "issue_count",
+                  "first_user", "last_assistant", "assessment_status", "rubric_target",
+                  "dimension_type", "dimension_state")
+        return [dict(zip(fields, row, strict=True)) for row in rows]
+
+    def load_matched_conversation_rows(self, query: dict, *, limit: int) -> list[dict]:
+        from verdict.matched_conversations import validate_storage_query
+
+        value = validate_storage_query(query, limit)
+        rows = self._fetchall(
+            """WITH selected AS (
+                   SELECT conversation_id,
+                          (payload::jsonb)->>'event_at' AS event_at,
+                          (payload::jsonb)->>'revision' AS revision,
+                          ((payload::jsonb)->'labels')::text AS labels,
+                          (payload::jsonb)->>'end_status' AS end_status,
+                          jsonb_array_length((payload::jsonb)->'input_issues') AS issue_count,
+                          (SELECT MIN(message.position)
+                             FROM jsonb_array_elements((conversation_snapshots.payload::jsonb)->'messages')
+                               WITH ORDINALITY AS message(value, position)
+                            WHERE message.value->>'role'='user'
+                              AND message.value->>'status'='completed') AS first_user,
+                          (SELECT MAX(message.position)
+                             FROM jsonb_array_elements((conversation_snapshots.payload::jsonb)->'messages')
+                               WITH ORDINALITY AS message(value, position)
+                            WHERE message.value->>'role'='assistant'
+                              AND message.value->>'status'='completed') AS last_assistant
+                     FROM conversation_snapshots
+                    WHERE tenant_id=%s AND ((payload::jsonb)->>'event_at') COLLATE "C">=%s
+                      AND ((payload::jsonb)->>'event_at') COLLATE "C"<%s
+                      AND (payload::jsonb)->'labels'->>%s IN (%s, %s)
+                    ORDER BY ((payload::jsonb)->>'event_at') COLLATE "C", conversation_id LIMIT %s
+               )
+               SELECT selected.conversation_id, selected.event_at, selected.revision,
+                      selected.labels, selected.end_status, selected.issue_count,
+                      selected.first_user, selected.last_assistant,
+                      (grade.payload::jsonb)->>'status' AS assessment_status,
+                      (grade.payload::jsonb)->'rubric'->>'target' AS rubric_target,
+                      (SELECT definition.value->>'type'
+                         FROM jsonb_array_elements((grade.payload::jsonb)->'rubric'->'dimensions')
+                           AS definition(value)
+                        WHERE definition.value->>'name'=%s LIMIT 1) AS dimension_type,
+                      (SELECT definition.value->>'direction'
+                         FROM jsonb_array_elements((grade.payload::jsonb)->'rubric'->'dimensions')
+                           AS definition(value)
+                        WHERE definition.value->>'name'=%s LIMIT 1) AS dimension_direction,
+                      (SELECT definition.value->>'min'
+                         FROM jsonb_array_elements((grade.payload::jsonb)->'rubric'->'dimensions')
+                           AS definition(value)
+                        WHERE definition.value->>'name'=%s LIMIT 1) AS dimension_min,
+                      (SELECT jsonb_typeof(definition.value->'min')
+                         FROM jsonb_array_elements((grade.payload::jsonb)->'rubric'->'dimensions')
+                           AS definition(value)
+                        WHERE definition.value->>'name'=%s LIMIT 1) AS dimension_min_type,
+                      (SELECT definition.value->>'max'
+                         FROM jsonb_array_elements((grade.payload::jsonb)->'rubric'->'dimensions')
+                           AS definition(value)
+                        WHERE definition.value->>'name'=%s LIMIT 1) AS dimension_max,
+                      (SELECT jsonb_typeof(definition.value->'max')
+                         FROM jsonb_array_elements((grade.payload::jsonb)->'rubric'->'dimensions')
+                           AS definition(value)
+                        WHERE definition.value->>'name'=%s LIMIT 1) AS dimension_max_type,
+                      (grade.payload::jsonb)->'dimensions'->%s->>'state' AS dimension_state,
+                      (grade.payload::jsonb)->'dimensions'->%s->>'score' AS dimension_score,
+                      jsonb_typeof((grade.payload::jsonb)->'dimensions'->%s->'score') AS dimension_score_type
+                 FROM selected LEFT JOIN conversation_assessments AS grade
+                   ON grade.tenant_id=%s AND grade.conversation_id=selected.conversation_id
+                  AND grade.evaluator_fingerprint=%s AND grade.target_position=-1
+                  AND grade.revision=selected.revision
+                ORDER BY selected.event_at COLLATE "C", selected.conversation_id LIMIT %s""",
+            (value["tenant_id"], value["window_start"], value["window_end"],
+             value["variant_key"], value["left_variant"], value["right_variant"], limit,
+             value["dimension"], value["dimension"], value["dimension"], value["dimension"],
+             value["dimension"], value["dimension"],
+             value["dimension"], value["dimension"], value["dimension"],
+             value["tenant_id"], value["evaluator_fingerprint"], limit),
+        )
+        fields = ("id", "event_at", "revision", "labels", "end_status", "issue_count",
+                  "first_user", "last_assistant", "assessment_status", "rubric_target",
+                  "dimension_type", "dimension_direction", "dimension_min", "dimension_min_type",
+                  "dimension_max", "dimension_max_type",
+                  "dimension_state", "dimension_score", "dimension_score_type")
+        return [dict(zip(fields, row, strict=True)) for row in rows]
+
+    def delete_conversation(self, tenant_id: str, conversation_id: str) -> None:
+        from verdict.conversations import validate_conversation_query
+
+        validate_conversation_query(tenant_id, 1, conversation_id)
+        self._exec(
+            "DELETE FROM conversation_snapshots WHERE tenant_id=%s AND conversation_id=%s",
+            (tenant_id, conversation_id),
+        )
+
+    def prune_before(self, cutoff_iso: str) -> int:
+        from verdict.conversations import retention_cutoff
+
+        conversation_cutoff = retention_cutoff(cutoff_iso)
+        with self._lock, self._pool.connection() as conn, conn.transaction():
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM conversation_snapshots WHERE retention_at < %s::timestamptz",
+                    (conversation_cutoff,),
+                )
                 # See delete_trace(): this makes the multi-table cleanup one
                 # linearizable maintenance operation across storage instances.
                 cur.execute("LOCK TABLE traces IN SHARE ROW EXCLUSIVE MODE")

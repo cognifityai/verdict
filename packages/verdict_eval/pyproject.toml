@@ -1,6 +1,6 @@
 [project]
 name = "cognifity-verdict-eval"
-version = "0.1.0a21"
+version = "0.1.0a23"
 description = "Verdict eval engine: binary judges, structural checks, semantic drift, and clustering"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -19,7 +19,7 @@ classifiers = [
 ]
 
 dependencies = [
-    "cognifity-verdict>=0.1.0a21,<0.2",
+    "cognifity-verdict>=0.1.0a23,<0.1.0a24",
     "scikit-learn>=1.4",
     "scipy>=1.11",
     "numpy>=1.26",
@@ -29,6 +29,9 @@ dependencies = [
 cognifity-verdict = { workspace = true }
 
 [project.optional-dependencies]
+jev = [
+    "typesafe-sdk>=0.7.1,<0.8",
+]
 semantic = [
     "sentence-transformers>=3.0",
 ]

@@ -43,7 +43,7 @@ def _add_api_window(parser: argparse.ArgumentParser) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="verdict-import",
-        description="Import existing LLM telemetry into Verdict's current Trace storage.",
+        description="Import existing LLM telemetry and bounded Voice conversations into Verdict storage.",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -286,6 +286,7 @@ def main(argv: list[str] | None = None) -> int:
                 {
                     "seen": import_summary.seen,
                     "stored": import_summary.stored,
+                    "conversations_stored": import_summary.conversations_stored,
                     "skipped": import_summary.skipped,
                     "skip_reasons": import_summary.skip_reasons,
                 },

@@ -703,6 +703,37 @@ class BufferedStorage:
     def delete_trace(self, trace_id: str) -> None:
         self._maintenance(self._inner.delete_trace, trace_id)
 
+    def save_conversation(self, conversation: dict) -> None:
+        self._maintenance(self._inner.save_conversation, conversation)
+
+    def save_conversation_assessment(self, assessment: dict) -> bool:
+        return self._maintenance(self._inner.save_conversation_assessment, assessment)
+
+    def list_conversation_assessments(
+        self, tenant_id: str, conversation_id: str, evaluator_fingerprint: str, *, limit: int = 1_000
+    ) -> list[dict]:
+        return self._read(
+            self._inner.list_conversation_assessments,
+            tenant_id, conversation_id, evaluator_fingerprint, limit=limit,
+        )
+
+    def get_conversation(self, tenant_id: str, conversation_id: str) -> dict | None:
+        return self._read(self._inner.get_conversation, tenant_id, conversation_id)
+
+    def list_conversations(
+        self, tenant_id: str, *, after: str | None = None, limit: int = 20
+    ) -> tuple[list[dict], str | None]:
+        return self._read(self._inner.list_conversations, tenant_id, after=after, limit=limit)
+
+    def load_conversation_comparison_rows(self, query: dict, *, limit: int) -> list[dict]:
+        return self._read(self._inner.load_conversation_comparison_rows, query, limit=limit)
+
+    def load_matched_conversation_rows(self, query: dict, *, limit: int) -> list[dict]:
+        return self._read(self._inner.load_matched_conversation_rows, query, limit=limit)
+
+    def delete_conversation(self, tenant_id: str, conversation_id: str) -> None:
+        self._maintenance(self._inner.delete_conversation, tenant_id, conversation_id)
+
     def prune_before(self, cutoff_iso: str) -> int:
         return self._maintenance(self._inner.prune_before, cutoff_iso)
 

@@ -1,4 +1,4 @@
-# Run a customer POC with Verdict 0.1.0a21
+# Run a customer POC with Verdict 0.1.0a23
 
 Use this profile to demonstrate Verdict on verified provider calls without
 presenting the public alpha as production-ready. The historical `0.1.0a4`
@@ -11,17 +11,23 @@ provider, dashboard, semantic, and storage extras the POC needs:
 
 ```bash
 python -m pip install \
-  "cognifity-verdict[anthropic,openai,google,dashboard]==0.1.0a21" \
-  "cognifity-verdict-eval[semantic]==0.1.0a21" \
-  "cognifity-verdict-inspect==0.1.0a21"
+  "cognifity-verdict[anthropic,openai,google,dashboard]==0.1.0a23" \
+  "cognifity-verdict-eval[semantic]==0.1.0a23" \
+  "cognifity-verdict-inspect==0.1.0a23"
 python -m pip check
 python -c "import verdict, verdict_eval, verdict_inspect; print(verdict.__version__, verdict_eval.__version__, verdict_inspect.__version__)"
 ```
 
-The final command must print `0.1.0a21 0.1.0a21 0.1.0a21`. Add the `postgres`
+The final command must print `0.1.0a23 0.1.0a23 0.1.0a23`. Add the `postgres`
 extra only when the existing deployment uses PostgreSQL. Back up an existing
 store and dependency lockfile before upgrading; the additive migrations
 preserve existing trace and evaluation tables.
+
+For a container deployment, use the versioned image
+`ghcr.io/cognifityai/verdict:0.1.0a23` after the release workflow succeeds.
+It provides the dashboard and the matching eval package. Run PostgreSQL
+separately, keep its port private, and supply the storage URL and dashboard
+credentials through the deployment's secret mechanism.
 
 ## 2. Use a released provider entry point
 
@@ -111,7 +117,7 @@ semantic quality.
 
 The POC is ready to show only when all of these are true:
 
-1. All three installed packages report `0.1.0a21` and `python -m pip check` passes.
+1. All three installed packages report `0.1.0a23` and `python -m pip check` passes.
 2. The application uses only a provider entry point in the supported column.
 3. `buffered_writes` is `False`; content capture is approved for the named POC
    data or explicitly disabled before collection.

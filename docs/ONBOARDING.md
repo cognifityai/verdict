@@ -8,8 +8,8 @@ provider key (bring your own — Verdict never ships one).
 
 - **Python 3.10+.** On macOS the system `/usr/bin/python3` is often 3.9 and
   will fail — use `brew install python@3.12`, `pyenv`, or `uv`.
-- Optional: a provider key (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or
-  `GOOGLE_API_KEY`) if you want the judge / quality-drift layer. Everything
+- Optional: a provider key (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
+  `GOOGLE_API_KEY`, or `TYPESAFE_API_KEY` for Jev) if you want the judge / quality-drift layer. Everything
   else works without one.
 
 ## 1. Install (one chain covers all three packages)
@@ -24,9 +24,9 @@ uv venv --python 3.12 && source .venv/bin/activate     # or your own 3.10+ venv
 
 # Include the provider extras you want to test live. Google capture needs `google`.
 python -m pip install \
-  "cognifity-verdict[anthropic,openai,google,dashboard]==0.1.0a21" \
-  "cognifity-verdict-eval[semantic]==0.1.0a21" \
-  "cognifity-verdict-inspect==0.1.0a21"
+  "cognifity-verdict[anthropic,openai,google,dashboard]==0.1.0a23" \
+  "cognifity-verdict-eval[semantic]==0.1.0a23" \
+  "cognifity-verdict-inspect==0.1.0a23"
 ```
 
 For a customer POC on the public alpha, use the pinned commands and provider
@@ -38,7 +38,7 @@ lists them as hard dependencies, so the line above brings them in.
 Minimal alternative without the local semantic model:
 
 ```bash
-python -m pip install "cognifity-verdict-eval==0.1.0a21"  # lexical hash fallback
+python -m pip install "cognifity-verdict-eval==0.1.0a23"  # lexical hash fallback
 ```
 
 Already on an earlier synchronized alpha? Use the upgrade command in the repository
@@ -223,7 +223,7 @@ process-local `capture.dropped_records` runtime metric for records rejected by a
 full or failed spool; equivalent failures produce one bounded warning per
 failure class.
 
-For a central PostgreSQL deployment, install `0.1.0a21` with its `postgres`
+For a central PostgreSQL deployment, install `0.1.0a23` with its `postgres`
 extra and start the authenticated collector:
 
 ```bash
@@ -305,7 +305,7 @@ source uses OTLP protobuf. JSON files and hosted API readers do not require that
 extra:
 
 ```bash
-python -m pip install "cognifity-verdict[telemetry]==0.1.0a21"
+python -m pip install "cognifity-verdict[telemetry]==0.1.0a23"
 
 verdict-import file ./traces.ndjson --format auto \
   --storage sqlite:///./verdict.db --tenant-id my-team
@@ -456,6 +456,67 @@ always a provider LLM call; tokens, model, cost, and latency are retained only
 when the exported turn contains them. Start with the contract fixtures and
 generator in `examples/telemetry/`. One source conversation is limited to 1,000
 turns and reports `conversation_turn_limit` when additional turns are omitted.
+The same import also stores one current, redacted text-only conversation
+snapshot. Malformed or truncated snapshots are labeled incomplete. Source end
+time governs retention when present; otherwise the first import time does.
+The snapshot is capped at 512,000 stored bytes; longer transcripts keep an
+incomplete prefix and the reply Trace mapping continues.
+Use the storage API's tenant-scoped `list_conversations` cursor to review these
+records. In **Evaluate → Evaluator Lab**, select **Conversation or reply** to
+upload a JSON rubric and preview a bounded page. The reviewer sees excluded
+conversations and partial reply coverage. A judge call requires explicit
+approval of the previewed provider, endpoint, and call count. Only clean,
+closed snapshots with a completed assistant reply after a user message are
+eligible. Correcting a transcript invalidates its previous grades. The example
+rubrics are at `examples/telemetry/conversation-rubric.example.json` and
+`examples/telemetry/response-rubric.example.json`; custom
+weighted totals are outside this generic schema. To explore quality over time,
+open **Monitor → Compare History**, choose **Conversation grade (descriptive)**,
+copy the evaluator fingerprint from the Lab preview, enter a binary dimension
+from a whole-conversation rubric, and select two non-overlapping windows in
+local time. The result displays their UTC boundaries.
+The optional source label key partitions both windows and shows group mix and
+within-group PASS rates. A Voice record can supply a top-level `labels` object
+with up to eight nonsensitive keys (`[a-z][a-z_]{0,31}`) and redacted string values of
+at most 128 UTF-8 bytes. Missing values have their own group; changing a label
+invalidates the old grade. The comparison makes no judge calls, supports at
+most 10,000 selected conversations, and shows not-evaluable, UNCLEAR, judge
+errors, and ungraded-eligible records separately. PASS rates use only PASS/FAIL
+grades; source-group shares use eligible conversations. If no grade from the
+selected evaluator is present in either window, check the fingerprint and dates.
+This is a
+historical, current-state view: correcting source data can change a later
+preview, and it does not create a prospective drift alert or semantic cluster.
+Records without a usable source end time cannot enter a dated window.
+For this workflow, `OPENAI_BASE_URL` and `ANTHROPIC_BASE_URL` select custom
+judge endpoints. The consent screen identifies the configured destination
+without returning its URL. Numeric rubric bounds and thresholds must be finite
+numbers; invalid values receive a validation error before any judge call.
+Imports normalize source end times to UTC before storage. Preview rejects a
+returned row with a noncanonical end time. A direct database change can make a
+row sort outside the selected window before preview sees it; reimport the
+source record to repair its snapshot.
+For two configurations tested on the same declared input, add an opaque
+`pair_id` and a `variant` to each Voice record's top-level `labels` object.
+Open **Explore → Compare**, enter the UTC campaign dates, the whole-conversation
+evaluator fingerprint and dimension, both label keys, and the two variant
+values. The view requires exactly one current conversation per variant and
+pair ID; it reports duplicate, unmatched, ineligible, ungraded, error, and
+unusable pairs separately. Binary grades show paired PASS/FAIL directions;
+numeric grades show paired score difference and a conservative bounded-score
+95% interval under independent, representative-case sampling. Open a pair to
+inspect both current transcripts and grades.
+The source must guarantee pair IDs denote the same evaluation input and explain
+whether the variant is the assigned or actually used configuration. Verdict
+does not verify identical turns or claim a model winner. A corrected transcript
+or label invalidates its grade; the unsaved comparison must then be rerun.
+Both variants must end within the selected window, which uses source end time.
+Imported end times are normalized to UTC. A returned row with a noncanonical
+stored time is rejected, but a direct database change can make a row sort
+outside the requested window before comparison sees it.
+For extremely wide numeric rubric bounds, individual scores remain visible
+when the aggregate cannot be represented as a finite number.
+This workflow is included in the synchronized `0.1.0a23` core and eval builds.
 
 ## 5. Instrument your own app (the five-line pattern)
 
@@ -504,12 +565,12 @@ a linear `@`-anchored scanner to keep malformed and long inputs bounded. It
 remains best effort, not a compliance control, and opaque metadata such as
 tenant/session/cluster IDs must be non-sensitive. Set `capture_content=False`
 when the approved customer boundary is metadata-only; error categories remain
-available, but provider and manual-span exception messages are omitted. The `0.1.0a21` POC profile also keeps
+available, but provider and manual-span exception messages are omitted. The `0.1.0a23` POC profile also keeps
 `buffered_writes=False`; buffered mode requires an explicit `shutdown()`
 imported from `verdict.client` before process exit.
 
 Use only the provider methods listed in the
-[`POC release profile`](POC_RELEASE_PROFILE.md). Release `0.1.0a21` includes the
+[`POC release profile`](POC_RELEASE_PROFILE.md). Release `0.1.0a23` includes the
 Anthropic `messages.stream(...)` helper plus OpenAI `responses.create(...)`,
 `responses.parse(...)`, and `responses.stream(...)` for new or existing
 responses, in addition to the earlier Chat/Google paths. OpenAI's
@@ -589,6 +650,21 @@ bucket against the frozen reference.
 
 Evaluator Lab shows NOT_EVALUABLE reasons before any model call, reads provider
 keys only from environment variables, and requires an explicit egress approval.
+For Jev, install `cognifity-verdict-eval[jev]`, set `TYPESAFE_API_KEY` in the
+dashboard process, select **Jev**, enter a versioned model ID, and preview before
+running. `jev-1.13.0` is prefilled. Moving aliases such as `jev-latest` are
+rejected so calibration stays tied to one model version. Jev returns labels
+without explanations; Verdict does not estimate Jev charges. The existing
+Monitor statistics remain unchanged. Jev supports final Turn text but not the
+recorded tool-count option.
+If `TYPESAFE_BASE_URL` is set, the preview and approval show its effective URL;
+Verdict pins that URL in the Jev evaluator identity and in the SDK call.
+Dashboard label-set calibration sends query/response text and the rubric without
+automatic redaction. Inspect the file before approving. Optional context is
+ignored to match the dashboard's production judge, and labels remain local.
+Labels for context-required dimensions cannot calibrate that context-free judge.
+The stored label-set fingerprint covers the effective examples, excluding the
+ignored context.
 Select provider Trace (the backward-compatible default) for an individual
 model exchange, or Agent Turn for a completed final output. The Turn path
 requires present, untruncated redacted request/response text and does not
@@ -626,9 +702,9 @@ count, bind score currentness. An unrelated non-tool event below the 64-event
 eligibility cap does not schedule a new judge call. At more than 64 total events
 the Turn is not eligible for counts-only judging. Preview and Agent Run detail
 batch the bounded event-metadata reads for each Turn page.
-When `OPENAI_BASE_URL` is set, the OpenAI provider uses that compatible endpoint;
-the UI reports only that a custom endpoint is configured and never returns the
-URL. Unknown local model names remain unpriced.
+When `OPENAI_BASE_URL` or `ANTHROPIC_BASE_URL` is set, that provider uses its
+configured endpoint; the UI reports only that a custom endpoint is configured
+and never returns the URL. Unknown local model names remain unpriced.
 Without saved tab preferences, the default selection is every evidence-complete,
 not-yet-evaluated Trace in the bounded 10,000-Trace scan; an optional numeric
 cap remains available. In the same browser tab, the evaluation unit, tool-count
@@ -676,8 +752,10 @@ Add `--capture-judge-telemetry` only when you intentionally want judge model
 cost/latency traces written to the same store. Those traces are tagged as the
 `judge` workload and excluded from future drift inputs so the evaluator does not
 become part of the workload it evaluates. The flag is off by default.
+This flag is unavailable for Jev because its Choice API is not captured by the
+supported provider instrumentors.
 
-For PostgreSQL, install `cognifity-verdict[dashboard,postgres]==0.1.0a21` and pass
+For PostgreSQL, install `cognifity-verdict[dashboard,postgres]==0.1.0a23` and pass
 the same protected storage URL used by the SDK. Evidence tables use Verdict's
 normal additive schema initialization. The dashboard control plane lazily
 creates its append-only configuration table on first use.

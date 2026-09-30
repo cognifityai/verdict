@@ -10,7 +10,29 @@ verdict-import file examples/telemetry/otlp-genai.json \
 
 The JSONL examples use one source record per line. OTLP uses its normal export
 envelope. MLflow and Phoenix keep their trace/span nesting. Voice transcripts
-contain text only; Verdict never imports audio bytes or audio URLs.
+contain text only; Verdict never imports audio bytes or audio URLs. Voice import
+also keeps one current, bounded conversation snapshot in storage for later
+review. Evaluator Lab can grade clean, closed snapshots with an uploaded JSON
+rubric in synchronized `0.1.0a23` source builds. Monitor can compare stored
+whole-conversation binary grades in two historical windows. An optional
+top-level `labels` object, for example `{"persona":"example_avatar","group":"example_workflow"}`,
+lets that comparison show source-group mix and within-group rates; keys must
+match `[a-z][a-z_]{0,31}`, with at most eight nonsensitive keys and 128 UTF-8 bytes per
+redacted string value. Changing a label invalidates the old grade. The view
+does not create a prospective alert or semantic cluster. The published
+`0.1.0a22` packages do not store these snapshots.
+For a dated conversation, set top-level `ended_at` (or `end_time`) on each Voice
+record; turn-level timestamps do not set the conversation end time. Verdict
+stores the normalized UTC value as `event_at`. If neither source field is
+present, the snapshot is untimed and retention starts at first import.
+
+For an exploratory paired comparison in **Explore → Compare**, put an opaque
+`pair_id` and `variant` in each source conversation's top-level `labels`; use
+the same pair ID only for two variants of the same evaluation input. Both
+conversations need current whole-conversation grades from one evaluator and
+end times inside the chosen UTC window. Verdict shows paired binary outcomes
+or numeric score differences with coverage, but does not verify the source's
+pairing claim or generate an alert.
 
 Generate balanced baseline/current JSONL for every adapter and run the existing
 pipeline against the resulting database:

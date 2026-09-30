@@ -36,7 +36,8 @@ source-reported per-turn tokens when available. Text is redacted before the
 preview cutoff, and incomplete token components remain explicitly partial;
 Claude totals appear only after terminal, complete response usage. Those source
 activity totals are not a quality ranking: latency, price, judging, and model
-comparisons still use genuine `Trace` records only.
+provider-call comparisons still use genuine `Trace` records only. A separate
+source-declared paired-conversation comparison is described below.
 
 Codex Turn requests include text from completed `UserMessage` items and the
 older `user_message` format. Rescanning can fill previously missing request
@@ -305,7 +306,7 @@ content capture when its documented coverage is insufficient.
 Import existing telemetry without instrumenting the application:
 
 ```bash
-pip install "cognifity-verdict[telemetry]==0.1.0a21"  # extra is for OTLP protobuf
+pip install "cognifity-verdict[telemetry]==0.1.0a23"  # extra is for OTLP protobuf
 verdict-import file traces.jsonl --format auto --storage sqlite:///./verdict.db
 verdict-import receive-otlp --storage sqlite:///./verdict.db
 ```
@@ -313,10 +314,42 @@ verdict-import receive-otlp --storage sqlite:///./verdict.db
 Native readers cover Langfuse v2, LangSmith, Datadog LLM Observability,
 Phoenix, Opik, MLflow files, and a text-only voice-conversation schema. The
 importer stores every eligible LLM call; the existing evaluation pipeline later
-samples stored traces for judging. It never stores a second raw vendor envelope
+samples stored traces for judging. Voice import also stores one current,
+bounded, redacted conversation snapshot per source identity. It never stores a second raw vendor envelope
 or imputes missing token, latency, cost, model, session, or content fields. See
 the repository's `examples/telemetry/README.md` for exact source contracts and
 privacy limits; ADR-006 records only the architectural boundary.
+The snapshot keeps an incomplete prefix if its stored content would exceed
+512,000 bytes; reply Trace import continues under the published mapping.
+`import_into_storage` requires a direct synchronous adapter and rejects
+`BufferedStorage` before consuming input. Its stored count refers to completed
+adapter writes.
+
+The storage API provides `get_conversation`, tenant-scoped
+`list_conversations(tenant_id, after=..., limit=...)` (up to 20 per page), and
+`delete_conversation`. The latter does not delete separate Trace rows, and
+`delete_trace` does not delete a conversation snapshot. Retention via
+`prune_before` covers both and still returns a Trace count. Evaluator Lab can
+grade eligible snapshots using a local JSON rubric and review current evidence
+with full or partial coverage. Monitor provides a descriptive comparison of
+current whole-conversation binary grades in two historical windows, with
+optional grouping by explicit Voice source label. It reports eligible,
+not-evaluable, PASS/FAIL, UNCLEAR, judge-error, and ungraded-eligible coverage
+separately. The PASS rate uses only
+PASS and FAIL grades; changing a transcript or label invalidates its old grade.
+This comparison does not create a prospective alert or discover semantic
+clusters. Explore → Compare additionally accepts one source-declared pair-ID
+label and variant label for two versions of the same evaluation input. It
+compares only exact current whole-conversation binary or bounded numeric grades
+from one evaluator inside one UTC end-time window; duplicates and missing
+grades are excluded with counts. Numeric paired differences have a conservative
+bounded-score 95% interval under independent, representative-case sampling. This is an unsaved
+descriptive result, not a causal model winner, replay, or alert. The producer
+must supply truthful pair IDs and variant metadata; a shared ID does not prove
+identical interactive turns. At most 10,000 selected-variant rows enter a query.
+Extremely wide valid numeric ranges retain inspectable pairs but cannot show
+a finite aggregate or interval.
+Conversation snapshots and grading require synchronized `0.1.0a23` core and eval builds.
 
 OTLP message objects may provide text in `content`, `text`, or typed text
 `parts`. Verdict joins genuine text parts in order and ignores unsupported
@@ -360,7 +393,7 @@ deprecated trace-list endpoint, so Verdict receives one record per actual
 generation or embedding rather than a trace aggregate.
 
 For a customer proof of concept, follow the versioned
-[`0.1.0a21 POC release profile`](https://github.com/cognifityai/verdict/blob/v0.1.0a21/docs/POC_RELEASE_PROFILE.md).
+[`0.1.0a23 POC release profile`](https://github.com/cognifityai/verdict/blob/v0.1.0a23/docs/POC_RELEASE_PROFILE.md).
 It pins the package set, provider entry points, persistence mode, and privacy
 boundary used for release verification.
 
@@ -410,7 +443,7 @@ each ended span is persisted once independently of provider success. `flush()` i
 a FIFO point-in-time barrier and accepts an optional timeout. `close()` rejects
 new reads/writes, drains every accepted FIFO write, stops and joins the worker,
 then closes the inner adapter; post-close `flush()` is an idempotent no-op.
-The `0.1.0a21` POC profile uses `buffered_writes=False`. Buffered mode requires
+The `0.1.0a23` POC profile uses `buffered_writes=False`. Buffered mode requires
 an explicit `shutdown()` imported from `verdict.client` before process exit.
 Fixed-window `DriftRun` snapshots created by older releases remain readable for
 compatibility; the current pipeline does not create or replace them.
@@ -452,7 +485,7 @@ client = Anthropic()
 Install and run the version-matched dashboard without a source checkout:
 
 ```bash
-python -m pip install "cognifity-verdict[dashboard]==0.1.0a21"
+python -m pip install "cognifity-verdict[dashboard]==0.1.0a23"
 verdict-dashboard --storage sqlite:///./verdict.db
 ```
 
@@ -498,7 +531,7 @@ report. Analysis runs on the Verdict dashboard host; semantic analysis and the
 external judge are separate opt-ins. The judge also requires an explicit
 confirmation before any content is sent to its provider.
 
-Upgrade an existing synchronized `0.1.0a5` through `0.1.0a20` environment with
+Upgrade an existing synchronized `0.1.0a5` through `0.1.0a22` environment with
 `python -m pip install --upgrade`
 and the same provider, dashboard, semantic, and storage extras already in use.
 The published wheels replace editable installs without a new clone and reuse the
@@ -555,7 +588,7 @@ and stable labels from the same active registry. Standalone and legacy stores
 without an active registry for the selected tenant continue to use
 `Trace.cluster_id`.
 
-For published release `0.1.0a21`, the bounded POC entry points include Anthropic
+For published release `0.1.0a23`, the bounded POC entry points include Anthropic
 `messages.create(...)` (including `stream=True`), OpenAI
 `chat.completions.create(...)` and its stream helper, and Google
 `models.generate_content(...)` / `generate_content_stream(...)`, plus the

@@ -121,6 +121,8 @@ class InMemoryStorage:
 
     def __init__(self) -> None:
         self._traces: dict[str, Trace] = {}
+        self._conversations: dict[tuple[str, str], tuple[str, str]] = {}
+        self._conversation_assessments: dict[tuple[str, str, str, int], str] = {}
         self._import_sources: dict[tuple[str, str], SourceSession] = {}
         self._agent_runs: dict[tuple[str, str], AgentRun] = {}
         self._agent_turns: dict[tuple[str, str, str], AgentTurn] = {}
@@ -1009,8 +1011,201 @@ class InMemoryStorage:
             if s.trace_id != trace_id or sid in retained_parent_span_ids
         }
 
+    def save_conversation(self, conversation: dict) -> None:
+        from datetime import timezone
+
+        from verdict.conversations import _json, validate_conversation
+
+        value = validate_conversation(conversation)
+        identity = (value["tenant_id"], value["id"])
+        retention_at = value["event_at"] or datetime.now(timezone.utc).isoformat()
+        with self._agent_evidence_lock:
+            previous = self._conversations.get(identity)
+            if previous is not None:
+                retention_at = min(retention_at, previous[1])
+                if json.loads(previous[0])["revision"] != value["revision"]:
+                    self._conversation_assessments = {
+                        key: payload for key, payload in self._conversation_assessments.items()
+                        if key[:2] != identity
+                    }
+            self._conversations[identity] = (_json(value), retention_at)
+
+    def save_conversation_assessment(self, assessment: dict) -> bool:
+        from verdict.conversation_assessments import should_store_assessment, validate_assessment
+        from verdict.conversations import _json
+
+        if not isinstance(assessment, dict):
+            raise ValueError("invalid conversation assessment")
+        identity = (assessment.get("tenant_id"), assessment.get("conversation_id"))
+        with self._agent_evidence_lock:
+            row = self._conversations.get(identity)
+            if row is None:
+                raise ValueError("conversation assessment revision unavailable")
+            value = validate_assessment(assessment, json.loads(row[0]))
+            key = (*identity, value["evaluator_fingerprint"], -1 if value["target_position"] is None else value["target_position"])
+            old = self._conversation_assessments.get(key)
+            if not should_store_assessment(json.loads(old) if old else None, value):
+                return False
+            self._conversation_assessments[key] = _json(value)
+            return True
+
+    def list_conversation_assessments(
+        self, tenant_id: str, conversation_id: str, evaluator_fingerprint: str, *, limit: int = 1_000
+    ) -> list[dict]:
+        from verdict.conversation_assessments import validate_assessment_query
+
+        validate_assessment_query(tenant_id, conversation_id, evaluator_fingerprint, limit)
+        with self._agent_evidence_lock:
+            keys = sorted(
+                key for key in self._conversation_assessments
+                if key[:3] == (tenant_id, conversation_id, evaluator_fingerprint)
+            )[:limit]
+            return [json.loads(self._conversation_assessments[key]) for key in keys]
+
+    def load_conversation_comparison_rows(self, query: dict, *, limit: int) -> list[dict]:
+        from verdict.conversation_monitoring import validate_storage_query
+
+        value = validate_storage_query(query, limit)
+        rows = []
+        with self._agent_evidence_lock:
+            for (tenant_id, conversation_id), (payload, _) in self._conversations.items():
+                if tenant_id != value["tenant_id"]:
+                    continue
+                snapshot = json.loads(payload)
+                event_at = snapshot["event_at"]
+                if event_at is None or not (
+                    value["reference_start"] <= event_at < value["reference_end"]
+                    or value["current_start"] <= event_at < value["current_end"]
+                ):
+                    continue
+                assessment_json = self._conversation_assessments.get((
+                    tenant_id, conversation_id, value["evaluator_fingerprint"], -1,
+                ))
+                assessment = json.loads(assessment_json) if assessment_json else None
+                if assessment is not None and assessment["revision"] != snapshot["revision"]:
+                    assessment = None
+                from verdict.conversation_assessments import evaluation_targets
+
+                _, ineligible_reason = evaluation_targets(snapshot, {"target": "conversation"})
+                definition = next((dimension for dimension in assessment["rubric"]["dimensions"]
+                                   if dimension["name"] == value["dimension"]), None) if assessment else None
+                rows.append({
+                    "id": conversation_id, "event_at": event_at,
+                    "revision": snapshot["revision"],
+                    "labels": snapshot.get("labels"),
+                    "ineligible_reason": ineligible_reason,
+                    "assessment_status": assessment["status"] if assessment else None,
+                    "rubric_target": assessment["rubric"]["target"] if assessment else None,
+                    "dimension_type": definition["type"] if definition else None,
+                    "dimension_state": assessment["dimensions"].get(value["dimension"], {}).get("state")
+                    if assessment else None,
+                })
+        return sorted(rows, key=lambda row: (row["event_at"], row["id"]))[:limit]
+
+    def load_matched_conversation_rows(self, query: dict, *, limit: int) -> list[dict]:
+        from verdict.conversation_assessments import evaluation_targets
+        from verdict.matched_conversations import validate_storage_query
+
+        value = validate_storage_query(query, limit)
+        rows = []
+        with self._agent_evidence_lock:
+            for (tenant_id, conversation_id), (payload, _) in self._conversations.items():
+                if tenant_id != value["tenant_id"]:
+                    continue
+                snapshot = json.loads(payload)
+                event_at = snapshot["event_at"]
+                if event_at is None or not value["window_start"] <= event_at < value["window_end"]:
+                    continue
+                labels = snapshot.get("labels") or {}
+                if labels.get(value["variant_key"]) not in (value["left_variant"], value["right_variant"]):
+                    continue
+                assessment_json = self._conversation_assessments.get((
+                    tenant_id, conversation_id, value["evaluator_fingerprint"], -1,
+                ))
+                assessment = json.loads(assessment_json) if assessment_json else None
+                if assessment is not None and assessment["revision"] != snapshot["revision"]:
+                    assessment = None
+                _, reason = evaluation_targets(snapshot, {"target": "conversation"})
+                definition = next((dimension for dimension in assessment["rubric"]["dimensions"]
+                                   if dimension["name"] == value["dimension"]), None) if assessment else None
+                result = assessment["dimensions"].get(value["dimension"], {}) if assessment else {}
+                lower = definition.get("min") if definition else None
+                upper = definition.get("max") if definition else None
+                rows.append({
+                    "id": conversation_id, "event_at": event_at, "revision": snapshot["revision"],
+                    "labels": labels, "end_status": snapshot["end_status"], "ineligible_reason": reason,
+                    "assessment_status": assessment["status"] if assessment else None,
+                    "rubric_target": assessment["rubric"]["target"] if assessment else None,
+                    "dimension_type": definition["type"] if definition else None,
+                    "dimension_direction": definition.get("direction") if definition else None,
+                    "dimension_min": lower,
+                    "dimension_min_type": "number" if type(lower) in (int, float) else type(lower).__name__,
+                    "dimension_max": upper,
+                    "dimension_max_type": "number" if type(upper) in (int, float) else type(upper).__name__,
+                    "dimension_state": result.get("state"), "dimension_score": result.get("score"),
+                    "dimension_score_type": (
+                        "boolean" if type(result.get("score")) is bool else
+                        "number" if type(result.get("score")) in (int, float) else
+                        "string" if isinstance(result.get("score"), str) else None
+                    ),
+                })
+        return sorted(rows, key=lambda row: (row["event_at"], row["id"]))[:limit]
+
+    def get_conversation(self, tenant_id: str, conversation_id: str) -> dict | None:
+        from verdict.conversations import validate_conversation_query
+
+        validate_conversation_query(tenant_id, 1, conversation_id)
+        with self._agent_evidence_lock:
+            row = self._conversations.get((tenant_id, conversation_id))
+            if row is None:
+                return None
+            value = json.loads(row[0])
+            value["retention_at"] = row[1]
+            return value
+
+    def list_conversations(
+        self, tenant_id: str, *, after: str | None = None, limit: int = 20
+    ) -> tuple[list[dict], str | None]:
+        from verdict.conversations import validate_conversation_query
+
+        validate_conversation_query(tenant_id, limit, after)
+        with self._agent_evidence_lock:
+            keys = sorted(
+                key for key in self._conversations
+                if key[0] == tenant_id and (after is None or key[1] > after)
+            )[: limit + 1]
+            page = []
+            for key in keys[:limit]:
+                payload, retention_at = self._conversations[key]
+                value = json.loads(payload)
+                value["retention_at"] = retention_at
+                page.append(value)
+        return page, page[-1]["id"] if len(keys) > limit else None
+
+    def delete_conversation(self, tenant_id: str, conversation_id: str) -> None:
+        from verdict.conversations import validate_conversation_query
+
+        validate_conversation_query(tenant_id, 1, conversation_id)
+        with self._agent_evidence_lock:
+            self._conversations.pop((tenant_id, conversation_id), None)
+            self._conversation_assessments = {
+                key: payload for key, payload in self._conversation_assessments.items()
+                if key[:2] != (tenant_id, conversation_id)
+            }
+
     def prune_before(self, cutoff_iso: str) -> int:
+        from verdict.conversations import retention_cutoff
+
+        conversation_cutoff = retention_cutoff(cutoff_iso)
         with self._agent_evidence_lock, self._cluster_v2_lock:
+            self._conversations = {
+                key: row for key, row in self._conversations.items() if row[1] >= conversation_cutoff
+            }
+            retained = set(self._conversations)
+            self._conversation_assessments = {
+                key: payload for key, payload in self._conversation_assessments.items()
+                if key[:2] in retained
+            }
             doomed = [
                 tid
                 for tid, trace in self._traces.items()

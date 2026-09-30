@@ -108,6 +108,7 @@ class MappingResult:
 
     trace: Trace | None = None
     skip_reason: str | None = None
+    conversation: dict | None = None
 
     def __post_init__(self) -> None:
         if (self.trace is None) == (self.skip_reason is None):
@@ -132,6 +133,7 @@ class ImportSummary:
     stored: int = 0
     skipped: int = 0
     skip_reasons: dict[str, int] = field(default_factory=dict)
+    conversations_stored: int = 0
 
     def add_skip(self, reason: str) -> None:
         self.skipped += 1

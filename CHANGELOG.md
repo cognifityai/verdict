@@ -6,6 +6,53 @@ the product is refined.
 
 ## [Unreleased]
 
+## [0.1.0a23] - 2026-09-29
+
+### Added
+
+- The release workflow publishes the version-checked dashboard image to
+  `ghcr.io/cognifityai/verdict:0.1.0a23` after the synchronized PyPI packages.
+- Voice file import now stores a bounded, redacted current conversation snapshot
+  alongside the existing completed-assistant Trace rows. Conversation reads use
+  tenant-scoped cursor pages; explicit conversation deletion and normal storage
+  retention cover the new transcript data. Existing Voice Trace evidence is
+  unchanged. Overlong transcripts retain a bounded prefix marked incomplete.
+- Evaluator Lab can validate a local JSON rubric and, after an explicit preview
+  and egress approval, grade a clean, closed imported conversation or each
+  completed assistant reply. Conversation review shows missing, error, partial,
+  and complete coverage against the current transcript revision. Corrections,
+  deletion, and retention invalidate or remove grades with the snapshot.
+  A separate exploratory Compare view can inspect source-declared matched
+  conversations after both variants have current whole-conversation grades.
+- Monitor can compare current whole-conversation binary grades across two
+  historical windows and an optional explicit Voice source label. It shows
+  rate and eligibility/grade coverage, group mix, and within-group changes with links to current
+  evidence. This descriptive view creates no prospective alert or semantic
+  cluster and rejects windows above 10,000 conversations.
+- Explore → Compare can compare two source-declared variants of the same opaque
+  case ID in one UTC end-time window. It excludes duplicate, unmatched, and
+  ungraded pairs, supports binary and bounded numeric conversation dimensions,
+  and opens both current transcripts together. Numeric paired differences show
+  a conservative bounded-score interval. The result is descriptive, unsaved,
+  and does not claim a model winner or trigger an alert.
+  Malformed stored scores or score bounds fail closed, as do returned rows
+  with noncanonical stored end times;
+  extremely wide valid numeric ranges retain inspectable pairs without a
+  finite aggregate. Invalid comparison errors do not return internal error
+  text to the browser; an overlarge selection retains its date-range guidance.
+- Conversation grade detail shows only results for its returned transcript
+  revision. Judge findings reject unrecognized fields and bind their dimension
+  to the enclosing rubric result. Core and eval release dependencies now
+  require a matching `0.1.0a23` candidate; the dashboard reports when its
+  conversation evaluator is unavailable.
+- Conversation judge consent identifies configured custom Anthropic and
+  OpenAI-compatible endpoints. Oversized numeric rubric values return a
+  validation error instead of an internal server error.
+- Telemetry import now rejects `BufferedStorage` at entry because its queued
+  Trace writes cannot support a completed-write import count.
+
+## [0.1.0a22] - 2026-09-28
+
 ### Added
 
 - Monitor comparisons now lead with a drift-analysis result instead of the
@@ -680,7 +727,9 @@ the product is refined.
   retain content must explicitly select metadata-only capture. Redaction remains
   best-effort rather than a compliance control.
 
-[Unreleased]: https://github.com/cognifityai/verdict/compare/v0.1.0a21...HEAD
+[Unreleased]: https://github.com/cognifityai/verdict/compare/v0.1.0a23...HEAD
+[0.1.0a23]: https://github.com/cognifityai/verdict/compare/v0.1.0a22...v0.1.0a23
+[0.1.0a22]: https://github.com/cognifityai/verdict/compare/v0.1.0a21...v0.1.0a22
 [0.1.0a21]: https://github.com/cognifityai/verdict/compare/v0.1.0a20...v0.1.0a21
 [0.1.0a20]: https://github.com/cognifityai/verdict/compare/v0.1.0a19...v0.1.0a20
 [0.1.0a19]: https://github.com/cognifityai/verdict/compare/v0.1.0a18...v0.1.0a19

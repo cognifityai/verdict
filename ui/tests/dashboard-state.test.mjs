@@ -28,7 +28,7 @@ function componentStub(names) {
 }
 
 async function loadUiModule() {
-  const source = `${await readFile(UI_SOURCE, "utf8")}\nexport { Dashboard, Overview, Traces, TraceDetail, TabHelp, Judge, Compare, ManagementReport, mountedApiUrl, Monitor };\nexport { useOperations } from "./Operations.jsx";\nexport { RegistryView } from "./Registry.jsx";\nexport { EvaluatorLab } from "./EvaluatorLab.jsx";\nexport { Runs } from "./Runs.jsx";\nexport { Insights } from "./Insights.jsx";`;
+  const source = `${await readFile(UI_SOURCE, "utf8")}\nexport { Dashboard, Overview, Traces, TraceDetail, TabHelp, Judge, Compare, ManagementReport, mountedApiUrl, Monitor };\nexport { useOperations } from "./Operations.jsx";\nexport { RegistryView } from "./Registry.jsx";\nexport { EvaluatorLab } from "./EvaluatorLab.jsx";\nexport { ConversationEvaluation } from "./ConversationEvaluation.jsx";\nexport { MatchedConversationCompare } from "./MatchedConversationCompare.jsx";\nexport { Runs } from "./Runs.jsx";\nexport { Insights } from "./Insights.jsx";`;
   const result = await build({
     stdin: {
       contents: source,
@@ -95,6 +95,356 @@ test("Evaluator Lab starts with a neutral response-quality rubric name", async (
   assert.equal(openAIOption.props.value, "openai");
 });
 
+test("conversation upload, approved run, and partial coverage refresh", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const props = { root: "", token: "setup-token", provider: "anthropic", model: "synthetic",
+    providerState: { configured: true, customEndpointConfigured: true }, updatePreferences: () => {} };
+  const document = { name: "reply_quality", version: "1", target: "response",
+    dimensions: [{ name: "relevance", description: "Addresses the request.", type: "binary" }] };
+  let tree = render(ui.ConversationEvaluation, hooks, props);
+  const file = findAll(tree, (node) => node.type === "input" && node.props.type === "file")[0];
+  const uploading = file.props.onChange({ target: { files: [{ size: 200,
+    text: async () => JSON.stringify(document) }] } });
+  await new Promise(setImmediate);
+  await resolveJson(requests[0], { ...document, fingerprint: "a".repeat(64) });
+  await uploading;
+
+  tree = render(ui.ConversationEvaluation, hooks, props);
+  const previewButton = findAll(tree, (node) => node.type === "button" &&
+    textOf(node).includes("Preview first page"))[0];
+  const loading = previewButton.props.onClick();
+  await resolveJson(requests[1], { target: "response", scannedConversations: 1,
+    eligibleTargets: 2, alreadyJudged: 0, plannedCalls: 1, retryableErrors: 0,
+    notEvaluableReasons: {}, plannedTargets: [{ conversationId: "a", revision: "one",
+      targetPosition: 1 }], planFingerprint: "plan", evaluatorFingerprint: "b".repeat(64) });
+  await resolveJson(requests[2], { conversations: [{ id: "a".repeat(32),
+    event_at: "2026-09-01T00:00:00Z", end_status: "complete", input_issues: [],
+    coverage: { targets: 2, completed: 0, error: 0, missing: 2, fullyGraded: false } }] });
+  await loading;
+
+  tree = render(ui.ConversationEvaluation, hooks, props);
+  assert.match(textOf(tree), /configured Anthropic endpoint/);
+  findAll(tree, (node) => node.type === "input" && node.props.type === "checkbox")[0]
+    .props.onChange({ target: { checked: true } });
+  tree = render(ui.ConversationEvaluation, hooks, props);
+  const runButton = findAll(tree, (node) => node.type === "button" &&
+    /Run\s+1\s+judge calls/.test(textOf(node)))[0];
+  assert.ok(runButton, textOf(tree));
+  const running = runButton.props.onClick();
+  assert.equal(JSON.parse(requests[3].options.body).planFingerprint, "plan");
+  assert.equal(JSON.parse(requests[3].options.body).confirmExternalEgress, true);
+  await resolveJson(requests[3], { completed: 1, errors: 0, stale: 0 });
+  await resolveJson(requests[4], { target: "response", scannedConversations: 1,
+    eligibleTargets: 2, alreadyJudged: 1, plannedCalls: 1, retryableErrors: 0,
+    notEvaluableReasons: {}, plannedTargets: [{ conversationId: "a", revision: "one",
+      targetPosition: 3 }], planFingerprint: "plan-next", evaluatorFingerprint: "b".repeat(64) });
+  await resolveJson(requests[5], { conversations: [{ id: "a".repeat(32),
+    event_at: "2026-09-01T00:00:00Z", end_status: "complete", input_issues: [],
+    coverage: { targets: 2, completed: 1, error: 0, missing: 1, fullyGraded: false } }] });
+  await running;
+  tree = render(ui.ConversationEvaluation, hooks, props);
+  assert.match(textOf(tree), /1\/2 completed/);
+  assert.match(textOf(tree), /Saved:\s+1/);
+  assert.doesNotMatch(textOf(tree), /Fully graded/);
+  assert.equal(requests.length, 6);
+});
+
+test("conversation approval is cleared after failed navigation and run", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const props = { root: "", token: "setup-token", provider: "openai", model: "synthetic",
+    providerState: { configured: true }, updatePreferences: () => {} };
+  const document = { name: "quality", version: "1", target: "conversation",
+    dimensions: [{ name: "helpful", description: "Addresses the request.", type: "binary" }] };
+  let tree = render(ui.ConversationEvaluation, hooks, props);
+  const upload = findAll(tree, (node) => node.type === "input" && node.props.type === "file")[0]
+    .props.onChange({ target: { files: [{ size: 200, text: async () => JSON.stringify(document) }] } });
+  await new Promise(setImmediate);
+  await resolveJson(requests[0], { ...document, fingerprint: "a".repeat(64) });
+  await upload;
+  tree = render(ui.ConversationEvaluation, hooks, props);
+  const load = findAll(tree, (node) => node.type === "button" &&
+    textOf(node).includes("Preview first page"))[0].props.onClick();
+  const preview = { target: "conversation", scannedConversations: 1,
+    eligibleTargets: 1, alreadyJudged: 0, plannedCalls: 1, retryableErrors: 0,
+    notEvaluableReasons: {}, plannedTargets: [{ conversationId: "a", revision: "one",
+      targetPosition: null }], planFingerprint: "plan", evaluatorFingerprint: "b".repeat(64) };
+  await resolveJson(requests[1], preview);
+  await resolveJson(requests[2], { conversations: [], nextCursor: "next" });
+  await load;
+  tree = render(ui.ConversationEvaluation, hooks, props);
+  findAll(tree, (node) => node.type === "input" && node.props.type === "checkbox")[0]
+    .props.onChange({ target: { checked: true } });
+  tree = render(ui.ConversationEvaluation, hooks, props);
+  assert.equal(findAll(tree, (node) => node.type === "input" && node.props.type === "checkbox")[0]
+    .props.checked, true);
+  const navigating = findAll(tree, (node) => node.type === "button" &&
+    textOf(node) === "Next page by ID")[0].props.onClick();
+  await resolveJson(requests[3], preview);
+  requests[4].resolve({ ok: false, status: 503, json: async () => ({ error: "review unavailable" }) });
+  await navigating;
+  tree = render(ui.ConversationEvaluation, hooks, props);
+  assert.equal(findAll(tree, (node) => node.type === "input" && node.props.type === "checkbox")[0]
+    .props.checked, false);
+  findAll(tree, (node) => node.type === "input" && node.props.type === "checkbox")[0]
+    .props.onChange({ target: { checked: true } });
+  tree = render(ui.ConversationEvaluation, hooks, props);
+  const running = findAll(tree, (node) => node.type === "button" &&
+    /Run\s+1\s+judge calls/.test(textOf(node)))[0].props.onClick();
+  requests[5].resolve({ ok: false, status: 400, json: async () => ({ error: "stale plan" }) });
+  await running;
+  tree = render(ui.ConversationEvaluation, hooks, props);
+  assert.equal(findAll(tree, (node) => node.type === "input" && node.props.type === "checkbox")[0]
+    .props.checked, false);
+});
+
+test("Monitor compares conversation grades and detects changed example evidence", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const props = { configUrl: "/api/config", view: "history" };
+  render(ui.Monitor, hooks, props);
+  hooks.flushEffects();
+  await resolveJson(requests[0], { setupToken: "setup-token" });
+  await resolveJson(requests[1], { state: "not_configured", active: null, candidate: null,
+    agentEvaluators: [] });
+  let tree = render(ui.Monitor, hooks, props);
+  findAll(tree, (node) => node.type === "select" && findAll(node,
+    (child) => child.type === "option" && child.props.value === "conversation").length)[0]
+    .props.onChange({ target: { value: "conversation" } });
+  tree = render(ui.Monitor, hooks, props);
+  const field = (placeholder) => findAll(tree, (node) => node.type === "input" &&
+    node.props.placeholder?.includes(placeholder))[0];
+  field("64-character").props.onChange({ target: { value: "a".repeat(64) } });
+  field("e.g. quality").props.onChange({ target: { value: "quality" } });
+  field("e.g. group").props.onChange({ target: { value: "group" } });
+  const dates = findAll(tree, (node) => node.type === "input" && node.props.type === "datetime-local");
+  ["2026-09-01T00:00", "2026-09-03T00:00", "2026-09-03T00:00", "2026-09-05T00:00"]
+    .forEach((value, index) => dates[index].props.onChange({ target: { value } }));
+  tree = render(ui.Monitor, hooks, props);
+  const pending = findAll(tree, (node) => node.type === "button" &&
+    textOf(node) === "Run historical comparison")[0].props.onClick();
+  const submitted = JSON.parse(requests[2].options.body);
+  assert.deepEqual(Object.keys(submitted).sort(), ["analysisUnit", "currentEnd", "currentStart",
+    "dimension", "evaluatorFingerprint", "labelKey", "referenceEnd", "referenceStart"].sort());
+  assert.equal(submitted.dimension, "quality");
+  assert.equal(submitted.labelKey, "group");
+  const empty = { pass: [], fail: [], unclear: [], error: [], ungraded: [], ineligible: [] };
+  const base = { captured: 2, eligible: 2, ineligible: 0, pass: 1, fail: 0, unclear: 0, error: 1, ungraded: 0,
+    evaluable: 1, passRate: 1, interval: [0.2, 1],
+    examples: { ...empty, pass: [{ id: "b".repeat(32), revision: "old", qualityState: "pass" }],
+      error: [{ id: "d".repeat(32), revision: "same", qualityState: "error" }] } };
+  const current = { ...base, pass: 0, fail: 1, passRate: 0, interval: [0, 0.8],
+    examples: { ...empty, fail: [{ id: "c".repeat(32), revision: "current", qualityState: "fail" }] } };
+  await resolveJson(requests[2], { state: "descriptive", unit: "conversation",
+    method: "current_snapshot_binary_v1", evaluatorFingerprint: "a".repeat(64),
+    dimension: "quality", labelKey: "group",
+    referenceStart: submitted.referenceStart, referenceEnd: submitted.referenceEnd,
+    currentStart: submitted.currentStart, currentEnd: submitted.currentEnd,
+    reference: base, current, effect: -1, gradeEvidenceCount: 3, groups: [] });
+  await pending;
+  tree = render(ui.Monitor, hooks, props);
+  const preview = findAll(tree, (node) => node.type?.name === "ConversationPreview")[0];
+  assert.ok(preview);
+  const rendered = render(preview.type, createHooks(), preview.props);
+  assert.match(textOf(rendered), /does not create an alert/);
+  const noGrades = render(preview.type, createHooks(), { ...preview.props,
+    preview: { ...preview.props.preview, gradeEvidenceCount: 0 } });
+  assert.match(textOf(noGrades), /Check the fingerprint and dates/);
+  const rate = findAll(rendered, (node) => node.type?.name === "ConversationRate")[0];
+  const rateTree = render(rate.type, createHooks(), rate.props);
+  findAll(rateTree, (node) => node.type === "button")[0].props.onClick();
+  await resolveJson(requests[3], { conversation: { revision: "old", messages: [
+    { role: "user", content: "Question." }, { role: "assistant", content: "Answer." },
+  ] }, assessments: [{ status: "completed", dimensions: { quality: { state: "pass" } } }] });
+  tree = render(ui.Monitor, hooks, props);
+  assert.match(textOf(tree), /Answer\./);
+  findAll(rateTree, (node) => node.type === "button")[0].props.onClick();
+  await resolveJson(requests[4], { conversation: { revision: "new", messages: [
+    { role: "user", content: "Question." }, { role: "assistant", content: "Changed answer." },
+  ] }, assessments: [] });
+  tree = render(ui.Monitor, hooks, props);
+  assert.match(textOf(tree), /transcript changed since the comparison/);
+  findAll(rateTree, (node) => node.type === "button")[1].props.onClick();
+  await resolveJson(requests[5], { conversation: { revision: "same", messages: [
+    { role: "user", content: "Question." }, { role: "assistant", content: "Answer." },
+  ] }, assessments: [{ status: "completed", target_position: null,
+    dimensions: { quality: { state: "pass" } } }] });
+  tree = render(ui.Monitor, hooks, props);
+  assert.match(textOf(tree), /grade changed since the comparison/);
+  assert.doesNotMatch(textOf(tree), /Changed answer\./);
+});
+
+test("conversation evaluation requires a supported provider after Jev selection", async () => {
+  const ui = await loadUiModule();
+  const selected = [];
+  const tree = render(ui.ConversationEvaluation, createHooks(), {
+    root: "", token: "setup-token", provider: "jev", model: "jev-1.13.0",
+    providerState: { configured: true }, updatePreferences: () => {},
+    changeProvider: (next) => selected.push(next),
+  });
+  assert.match(textOf(tree), /Jev cannot grade conversations/);
+  const preview = findAll(tree, (node) => node.type === "button" &&
+    textOf(node).includes("Preview first page"))[0];
+  assert.equal(preview.props.disabled, true);
+  const provider = findAll(tree, (node) => node.type === "select" &&
+    findAll(node, (child) => child.type === "option" && child.props.value === "jev").length)[0];
+  provider.props.onChange({ target: { value: "openai" } });
+  assert.deepEqual(selected, ["openai"]);
+});
+
+test("switching from Jev to a conversation provider selects its model explicitly", async () => {
+  const ui = await loadUiModule();
+  const hooks = createHooks();
+  const props = { configUrl: "/api/config" };
+  let tree = render(ui.EvaluatorLab, hooks, props);
+  const provider = findAll(tree, (node) => node.type === "select" &&
+    findAll(node, (child) => child.type === "option" && child.props.value === "jev").length)[0];
+  provider.props.onChange({ target: { value: "jev" } });
+  tree = render(ui.EvaluatorLab, hooks, props);
+  const unit = findAll(tree, (node) => node.type === "select" &&
+    findAll(node, (child) => child.type === "option" && child.props.value === "conversation").length)[0];
+  unit.props.onChange({ target: { value: "conversation" } });
+  tree = render(ui.EvaluatorLab, hooks, props);
+  let conversation = findAll(tree, (node) => node.type === ui.ConversationEvaluation)[0];
+  assert.equal(conversation.props.provider, "jev");
+  conversation.props.changeProvider("openai");
+  tree = render(ui.EvaluatorLab, hooks, props);
+  conversation = findAll(tree, (node) => node.type === ui.ConversationEvaluation)[0];
+  assert.equal(conversation.props.provider, "openai");
+  assert.equal(conversation.props.model, "gpt-4o-mini");
+});
+
+test("Evaluator Lab selects Jev and runs only the approved preview", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const props = { configUrl: "/api/config" };
+  render(ui.EvaluatorLab, hooks, props);
+  hooks.flushEffects();
+  await resolveJson(requests[0], { setupToken: "setup-token" });
+  await resolveJson(requests[1], { evalPackageAvailable: true,
+    providers: [{ provider: "jev", configured: true, sdkAvailable: true,
+      secretReference: "TYPESAFE_API_KEY" }] });
+
+  let tree = render(ui.EvaluatorLab, hooks, props);
+  const provider = findAll(tree, (node) => node.type === "select" &&
+    findAll(node, (child) => child.type === "option" && child.props.value === "jev").length)[0];
+  assert.ok(provider);
+  provider.props.onChange({ target: { value: "jev" } });
+  tree = render(ui.EvaluatorLab, hooks, props);
+  const model = findAll(tree, (node) => node.type === "label" && textOf(node).startsWith("Model"))[0];
+  const modelInput = findAll(model, (node) => node.type === "input")[0];
+  assert.equal(modelInput.props.value, "jev-1.13.0");
+  assert.notEqual(modelInput.props.disabled, true);
+  modelInput.props.onChange({ target: { value: "jev-1.14.0" } });
+  tree = render(ui.EvaluatorLab, hooks, props);
+  assert.match(textOf(tree), /TYPESAFE_API_KEY/);
+
+  const preview = findAll(tree, (node) => node.type === "button" &&
+    textOf(node).includes("Preview eligible calls"))[0].props.onClick();
+  assert.equal(JSON.parse(requests[2].options.body).provider, "jev");
+  assert.equal(JSON.parse(requests[2].options.body).model, "jev-1.14.0");
+  await resolveJson(requests[2], {
+    unit: "trace", availableTraces: 1, eligible: 1, alreadyJudged: 0,
+    notEvaluable: 0, notEvaluableReasons: {}, plannedCalls: 1,
+    destination: "https://judge-a.example",
+    estimatedMaximumCostUsd: null, maximumOutputTokens: null,
+    rubric: { dimensions: ["relevance"], skippedDimensions: [] },
+    planFingerprint: "jev-plan", plannedTraces: [{ traceId: "trace-1",
+      evidenceFingerprint: "a".repeat(64) }],
+  });
+  await preview;
+  tree = render(ui.EvaluatorLab, hooks, props);
+  assert.match(textOf(tree), /Provider pricing unavailable/);
+  assert.match(textOf(tree), /https:\/\/judge-a\.example/);
+  assert.doesNotMatch(textOf(tree), /512-token output allowance/);
+  const changedModel = findAll(tree, (node) => node.type === "label"
+    && textOf(node).startsWith("Model"))[0];
+  findAll(changedModel, (node) => node.type === "input")[0].props.onChange({
+    target: { value: "jev-1.15.0" },
+  });
+  tree = render(ui.EvaluatorLab, hooks, props);
+  assert.equal(findAll(tree, (node) => node.type === "button" &&
+    textOf(node).includes("Run 1 judge calls"))[0].props.disabled, true);
+  findAll(changedModel, (node) => node.type === "input")[0].props.onChange({
+    target: { value: "jev-1.14.0" },
+  });
+  tree = render(ui.EvaluatorLab, hooks, props);
+  const consent = findAll(tree, (node) => node.type === "input" &&
+    node.props.type === "checkbox").at(-1);
+  consent.props.onChange({ target: { checked: true } });
+  tree = render(ui.EvaluatorLab, hooks, props);
+  const run = findAll(tree, (node) => node.type === "button" &&
+    textOf(node).includes("Run 1 judge calls"))[0].props.onClick();
+  const approved = JSON.parse(requests[3].options.body);
+  assert.equal(approved.provider, "jev");
+  assert.equal(approved.model, "jev-1.14.0");
+  assert.equal(approved.planFingerprint, "jev-plan");
+  assert.equal(approved.confirmExternalEgress, true);
+  await resolveJson(requests[3], { unit: "trace", availableTraces: 1,
+    eligible: 1, completed: 1, alreadyJudged: 0, errors: 0,
+    notEvaluable: 0, notEvaluableReasons: {}, evaluatorFingerprint: "a".repeat(64) });
+  await run;
+  assert.match(textOf(render(ui.EvaluatorLab, hooks, props)), /Evaluation completed/);
+});
+
+test("Evaluator Lab calibration discloses unredacted text and binds the approved endpoint", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const props = { configUrl: "/api/config" };
+  render(ui.EvaluatorLab, hooks, props);
+  hooks.flushEffects();
+  await resolveJson(requests[0], { setupToken: "setup-token" });
+  await resolveJson(requests[1], { evalPackageAvailable: true,
+    providers: [{ provider: "jev", configured: true, sdkAvailable: true,
+      secretReference: "TYPESAFE_API_KEY" }] });
+
+  let tree = render(ui.EvaluatorLab, hooks, props);
+  const provider = findAll(tree, (node) => node.type === "select" &&
+    findAll(node, (child) => child.type === "option" && child.props.value === "jev").length)[0];
+  provider.props.onChange({ target: { value: "jev" } });
+  tree = render(ui.EvaluatorLab, hooks, props);
+  const path = findAll(tree, (node) => node.type === "input" &&
+    node.props.placeholder === "/path/to/labels.jsonl")[0];
+  path.props.onChange({ target: { value: "/tmp/labels.jsonl" } });
+  tree = render(ui.EvaluatorLab, hooks, props);
+  const preview = findAll(tree, (node) => node.type === "button" &&
+    textOf(node).includes("Preview label set"))[0].props.onClick();
+  await resolveJson(requests[2], { setName: "labels", examples: 1, plannedCalls: 1,
+    labelCounts: { relevance: 1 }, destination: "https://judge-a.example",
+    planFingerprint: "calibration-plan" });
+  await preview;
+
+  tree = render(ui.EvaluatorLab, hooks, props);
+  assert.match(textOf(tree), /without Verdict redaction/);
+  assert.match(textOf(tree), /https:\/\/judge-a\.example/);
+  const changedPath = findAll(tree, (node) => node.type === "input" &&
+    node.props.placeholder === "/path/to/labels.jsonl")[0];
+  changedPath.props.onChange({ target: { value: "/tmp/other-labels.jsonl" } });
+  tree = render(ui.EvaluatorLab, hooks, props);
+  assert.equal(findAll(tree, (node) => node.type === "button" &&
+    textOf(node).includes("Run calibration"))[0].props.disabled, true);
+  changedPath.props.onChange({ target: { value: "/tmp/labels.jsonl" } });
+  tree = render(ui.EvaluatorLab, hooks, props);
+  const consent = findAll(tree, (node) => node.type === "input" &&
+    node.props.type === "checkbox").at(-1);
+  consent.props.onChange({ target: { checked: true } });
+  tree = render(ui.EvaluatorLab, hooks, props);
+  const run = findAll(tree, (node) => node.type === "button" &&
+    textOf(node).includes("Run calibration"))[0].props.onClick();
+  const approved = JSON.parse(requests[3].options.body);
+  assert.equal(approved.planFingerprint, "calibration-plan");
+  assert.equal(approved.labelSetPath, "/tmp/labels.jsonl");
+  await resolveJson(requests[3], { status: "insufficient_data", exampleAgreement: 1,
+    totalExamples: 1, errors: 0 });
+  await run;
+});
+
 test("Evaluator Lab previews a native Turn page and sends its approved identities", async () => {
   const ui = await loadUiModule();
   const hooks = createEffectHooks();
@@ -113,7 +463,7 @@ test("Evaluator Lab previews a native Turn page and sends its approved identitie
   unit.props.onChange({ target: { value: "agent_turn" } });
   tree = render(ui.EvaluatorLab, hooks, props);
   const preview = findAll(tree, (node) => node.type === "button" &&
-    textOf(node).includes("Preview eligibility"))[0].props.onClick();
+    textOf(node).includes("Preview eligible calls"))[0].props.onClick();
   const sent = JSON.parse(requests[2].options.body);
   assert.equal(sent.unit, "agent_turn");
   assert.equal(sent.scanLimit, 100);
@@ -171,7 +521,7 @@ test("Turn tool-count consent binds the displayed preview and disables stale exe
   toolOption.props.onChange({ target: { checked: true } });
   tree = render(ui.EvaluatorLab, hooks, props);
   const preview = findAll(tree, (node) => node.type === "button" &&
-    textOf(node).includes("Preview eligibility"))[0].props.onClick();
+    textOf(node).includes("Preview eligible calls"))[0].props.onClick();
   assert.equal(JSON.parse(requests[2].options.body).toolEvidence, "counts_v1");
   await resolveJson(requests[2], {
     unit: "agent_turn", toolEvidence: "counts_v1", availableTurns: 1,
@@ -246,7 +596,7 @@ test("Evaluator Lab restores judge choices after reload without restoring approv
     tree = render(ui.EvaluatorLab, first, props);
     first.flushEffects();
     await findAll(tree, (node) => node.type === "button"
-      && textOf(node).includes("Preview eligibility"))[0].props.onClick();
+      && textOf(node).includes("Preview eligible calls"))[0].props.onClick();
     tree = render(ui.EvaluatorLab, first, props);
     findAll(tree, (node) => node.type === "input"
       && node.props.type === "checkbox").at(-1).props.onChange({ target: { checked: true } });
@@ -293,6 +643,10 @@ test("Evaluator Lab bounds saved choices and tolerates unavailable browser stora
         "google", "claude-haiku-4-5", "agent_turn", true, "limit", 10],
       [JSON.stringify({ provider: "openai", model: "local/cheap-model", judgeAll: false, maxCalls: -1 }),
         "openai", "local/cheap-model", "trace", false, "limit", 100],
+      [JSON.stringify({ provider: "jev", model: "jev-1.14.0" }),
+        "jev", "jev-1.14.0", "trace", false, "all", null],
+      [JSON.stringify({ provider: "jev", model: "" }),
+        "jev", "jev-1.13.0", "trace", false, "all", null],
       ["x".repeat(2000), "anthropic", "claude-haiku-4-5", "trace", false, "all", null],
     ]) {
       globalThis.window = { sessionStorage: { getItem: () => stored, setItem() {} } };
@@ -338,7 +692,7 @@ test("Evaluator Lab makes a long judge run visible and prevents duplicate submis
   let tree = render(ui.EvaluatorLab, hooks, props);
   const previewButton = findAll(
     tree,
-    (node) => node.type === "button" && textOf(node).includes("Preview eligibility"),
+    (node) => node.type === "button" && textOf(node).includes("Preview eligible calls"),
   )[0];
   const previewPending = previewButton.props.onClick();
   await resolveJson(requests[2], {
@@ -1421,6 +1775,95 @@ async function resolveJson(request, payload) {
   request.resolve({ ok: true, json: async () => payload });
   for (let index = 0; index < 6; index += 1) await Promise.resolve();
 }
+
+test("matched conversation comparison uses current paired grades and rejects stale drilldown", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const props = { configUrl: "/api/config", source: "live" };
+  let tree = render(ui.MatchedConversationCompare, hooks, props);
+  hooks.flushEffects();
+  await resolveJson(requests[0], { setupToken: "setup-token" });
+  const values = { windowStart: "2026-09-01", windowEnd: "2026-09-04",
+    evaluatorFingerprint: "a".repeat(64), dimension: "quality",
+    leftVariant: "left", rightVariant: "right" };
+  const labels = { windowStart: "Start date (UTC, inclusive)", windowEnd: "End date (UTC, exclusive)",
+    evaluatorFingerprint: "Evaluator fingerprint", dimension: "Rubric dimension",
+    leftVariant: "First variant value", rightVariant: "Second variant value" };
+  for (const [field, value] of Object.entries(values)) {
+    tree = render(ui.MatchedConversationCompare, hooks, props);
+    findAll(tree, (node) => node.type === "input" && node.props["aria-label"] === labels[field])[0]
+      .props.onChange({ target: { value } });
+  }
+  tree = render(ui.MatchedConversationCompare, hooks, props);
+  const comparing = findAll(tree, (node) => node.type === "form")[0]
+    .props.onSubmit({ preventDefault() {} });
+  assert.equal(requests[1].url, "/api/compare/conversations/matched");
+  assert.equal(requests[1].options.headers["X-Verdict-Setup"], "setup-token");
+  assert.equal(JSON.parse(requests[1].options.body).windowEnd, "2026-09-04T00:00:00Z");
+  const left = { id: "1".repeat(32), revision: "b".repeat(64), status: "completed",
+    state: "pass", score: null, type: "binary", direction: null, min: null, max: null };
+  const right = { ...left, id: "2".repeat(32), revision: "c".repeat(64), state: "fail" };
+  await resolveJson(requests[1], { evaluatorFingerprint: "a".repeat(64), dimension: "quality",
+    pairKey: "pair_id", variantKey: "variant", leftVariant: "left", rightVariant: "right",
+    candidateRows: 2, declaredPairs: 1, usablePairs: 1, technicalFailurePairs: 0, dimensionType: "binary",
+    exclusions: {}, binary: { bothPass: 0, bothFail: 0, leftPassRightFail: 1,
+      leftFailRightPass: 0 }, numeric: null, examples: [{ pairId: "case_1", left, right }] });
+  await comparing;
+  tree = render(ui.MatchedConversationCompare, hooks, props);
+  assert.match(textOf(tree), /First passes, second fails:\s+1/);
+  const opening = findAll(tree, (node) => node.type === "button" && textOf(node).includes("case_1"))[0].props.onClick();
+  const detail = (side, variant) => ({ conversation: { id: side.id, revision: side.revision,
+    labels: { pair_id: "case_1", variant }, messages: [{ role: "user", content: "Synthetic question." }] },
+    assessments: [{ evaluator_fingerprint: "a".repeat(64), target_position: null,
+      revision: side.revision, status: "completed",
+      rubric: { target: "conversation", dimensions: [{ name: "quality", type: "binary" }] },
+      dimensions: { quality: { state: side.state, score: null } } }] });
+  await resolveJson(requests[2], detail(left, "left"));
+  await resolveJson(requests[3], detail(right, "right"));
+  await opening;
+  tree = render(ui.MatchedConversationCompare, hooks, props);
+  assert.match(textOf(tree), /Synthetic question/);
+  const reopening = findAll(tree, (node) => node.type === "button" && textOf(node).includes("case_1"))[0].props.onClick();
+  await resolveJson(requests[4], detail(left, "left"));
+  await resolveJson(requests[5], { ...detail(right, "right"), conversation: {
+    ...detail(right, "right").conversation, revision: "d".repeat(64) } });
+  await reopening;
+  tree = render(ui.MatchedConversationCompare, hooks, props);
+  assert.match(textOf(tree), /changed.*Run the comparison again/);
+  assert.doesNotMatch(textOf(tree), /Synthetic question/);
+  const oldRequest = findAll(tree, (node) => node.type === "form")[0]
+    .props.onSubmit({ preventDefault() {} });
+  tree = render(ui.MatchedConversationCompare, hooks, props);
+  findAll(tree, (node) => node.type === "input" && node.props["aria-label"] === "Second variant value")[0]
+    .props.onChange({ target: { value: "new_variant" } });
+  await resolveJson(requests[6], { candidateRows: 2, declaredPairs: 1, usablePairs: 1,
+    exclusions: {}, examples: [], binary: { bothPass: 1 } });
+  await oldRequest;
+  tree = render(ui.MatchedConversationCompare, hooks, props);
+  assert.doesNotMatch(textOf(tree), /Selected variant rows/);
+  findAll(tree, (node) => node.type === "input" && node.props["aria-label"] === "Second variant value")[0]
+    .props.onChange({ target: { value: "right" } });
+  tree = render(ui.MatchedConversationCompare, hooks, props);
+  const extremeRequest = findAll(tree, (node) => node.type === "form")[0]
+    .props.onSubmit({ preventDefault() {} });
+  await resolveJson(requests[7], { candidateRows: 2, declaredPairs: 1, usablePairs: 1,
+    exclusions: {}, dimensionType: "number", numeric: { unavailableReason: "score_arithmetic_overflow" },
+    binary: null, examples: [] });
+  await extremeRequest;
+  tree = render(ui.MatchedConversationCompare, hooks, props);
+  assert.match(textOf(tree), /numeric range is too large for a finite aggregate/);
+  const numericRequest = findAll(tree, (node) => node.type === "form")[0]
+    .props.onSubmit({ preventDefault() {} });
+  await resolveJson(requests[8], { candidateRows: 2, declaredPairs: 1, usablePairs: 1,
+    exclusions: {}, dimensionType: "number", direction: "higher_is_better",
+    numeric: { leftMean: 2, rightMean: 4, meanRightMinusLeft: 2,
+      deltaInterval95: [-5, 5] }, binary: null, examples: [] });
+  await numericRequest;
+  tree = render(ui.MatchedConversationCompare, hooks, props);
+  assert.match(textOf(tree), /Mean score on paired cases: first\s+2\s+, second\s+4/);
+  assert.match(textOf(tree), /second minus first\s+2/);
+});
 
 function runListRow(runId) {
   return {

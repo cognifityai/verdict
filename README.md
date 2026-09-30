@@ -5,7 +5,11 @@
 [![Python](https://img.shields.io/pypi/pyversions/cognifity-verdict.svg)](https://pypi.org/project/cognifity-verdict/)
 [![License](https://img.shields.io/github/license/cognifityai/verdict.svg)](LICENSE)
 
-> Open-source drift detection and quality monitoring for LLM-powered apps. Helps surface behavior, estimated-cost, and response-quality changes in captured production traffic.
+> See what your AI agents and LLM apps actually did, and get told when their behavior changes.
+
+Verdict is open-source, local-first monitoring for Claude Code, Codex, and LLM
+applications. It runs on your machine, redacts captured content by default, and
+produces findings without an API key.
 
 A [Cognifity AI](https://cognifity.ai) project. Apache 2.0.
 
@@ -13,9 +17,61 @@ A [Cognifity AI](https://cognifity.ai) project. Apache 2.0.
 
 *Bundled dashboard shown with clearly labeled synthetic sample data.*
 
+## Try it in two minutes
+
+```bash
+python -m pip install cognifity-verdict
+verdict
+```
+
+`verdict` opens a local dashboard bound to loopback. Choose **Claude Code /
+Codex**, preview the history folders (`~/.claude/projects` and
+`~/.codex/sessions` by default), and approve the import. Large histories take a
+few minutes. Verdict makes no network calls unless you configure one: an LLM
+judge with your own key, an alert webhook, a remote collector, or a hosted
+telemetry import.
+
+To capture a live application instead:
+
+```python
+import verdict
+
+verdict.init(storage="sqlite:///./verdict.db", service_name="my-app")
+# Supported Anthropic, OpenAI, and Google SDK calls are now captured.
+```
+
+## What you get without an API key
+
+- **Agent evidence** from Claude Code and Codex history: runs, turns, tool calls,
+  tool errors, possible tool loops, missing final responses, and the token usage
+  the source reports.
+- **LLM call capture** for supported Anthropic, OpenAI, and Google SDK methods:
+  tokens, latency, estimated cost, and errors.
+- **Drift alerts that do not cry wolf.** Monitor compares a reference cohort with
+  a current cohort using Fisher's exact test, Benjamini–Hochberg correction, and
+  a minimum effect size. Provider errors, empty replies, and refusal-like
+  language are compared without a key.
+- **Privacy by default.** Prompts, responses, and tool payloads are recursively
+  redacted before storage. Set `capture_content=False` for metadata only.
+
+With your own provider key you can also score responses with an LLM judge and
+monitor PASS/FAIL quality drift. Semantic intent clustering is available as an
+experimental option.
+
+## What it does not do
+
+- It is not a better judge than the model you point it at. Validate a judge on
+  your own labeled data before trusting quality alerts.
+- Redaction is best-effort pattern matching, not a compliance control.
+- It does not infer task success that the source history does not record.
+- It imports OpenTelemetry/OpenInference data but does not emit spans yet.
+
+More detail: [honest limits](#honest-limits--not-in-v0),
+[onboarding](docs/ONBOARDING.md), and the [statistics primer](docs/STATS_PRIMER.md).
+
 ---
 
-## What this is
+## How it works
 
 Verdict imports local Claude Code/Codex histories, normalizes existing telemetry,
 and instruments supported Anthropic, OpenAI, and Google SDK methods. It keeps a
@@ -28,7 +84,9 @@ The first agent-run analysis pass is deterministic and key-free: it reports
 evidence coverage, source-exposed completion state, source-reported per-turn
 token activity when available, observed tool/command/test failures, retries,
 and possible repeated-tool patterns. Provider-call token, latency, cost, judge,
-and model-comparison views remain limited to genuine LLM `Trace` records.
+and provider-call comparison views remain limited to genuine LLM `Trace`
+records. Source-declared whole-conversation pairs have a separate exploratory
+comparison described below.
 Programmatic policies can additionally require event
 types, prohibit named tools, or require JSON responses. Verdict does not infer
 task success, file state, retries, or cost when the source evidence does not
@@ -49,7 +107,7 @@ claims such as tool/command status and loop detection. Semantic correctness,
 groundedness, and task success still require the relevant captured context,
 authoritative outcomes, or a separately validated evaluator.
 
-## Fastest local start
+## Local setup details
 
 ```bash
 python -m pip install cognifity-verdict
@@ -305,10 +363,28 @@ Verdict never ships with anyone's API key. It reads **your** provider key from t
 After installation, capture and structural checks can run without a provider key. The built-in hash embedder can report lexical embedding-distribution changes, but it is not a semantic model and may split paraphrases into separate intent clusters. Install the local `sentence-transformers/all-MiniLM-L6-v2` extra shown below for semantic intent clustering and semantic drift. Capture never invokes a judge automatically. A provider-backed judge run requires that provider's key; `verdict-inspect` skips its optional Anthropic judge when no Anthropic key is set.
 
 ```bash
-export ANTHROPIC_API_KEY=...     # or OPENAI_API_KEY / GOOGLE_API_KEY
+export ANTHROPIC_API_KEY=...     # or OPENAI_API_KEY / GOOGLE_API_KEY / TYPESAFE_API_KEY
 ```
 
-The judge is pluggable behind a provider interface, so you can point it at Anthropic, OpenAI, Google, or a local/self-hosted OpenAI-compatible model. The default judge model is configurable; a cheap model (e.g. Haiku) is the recommended default, with a stronger model (e.g. Sonnet) as an accuracy upgrade.
+Evaluator Lab can use Jev after installing
+`cognifity-verdict-eval[jev]` and setting `TYPESAFE_API_KEY` in the dashboard
+process. Choose **Jev** in its provider menu, enter a versioned model ID
+(`jev-1.13.0` is the prefilled default), preview the exact eligible calls,
+and approve external egress before running. Jev returns PASS/FAIL/UNCLEAR labels
+without explanatory reasoning. Its pricing is unavailable in Verdict, so the
+preview does not show a cost estimate. Jev supports Trace and final Agent Turn
+text judging and label-set calibration; recorded Turn tool counts are unavailable.
+Monitor continues to use its existing cohort comparison and Fisher test.
+The optional `TYPESAFE_BASE_URL` selects a Jev endpoint. Evaluator Lab shows the
+effective URL before approval and keeps results from different URLs and model
+versions in separate evaluator identities. Moving aliases such as `jev-latest`
+are rejected because they do not identify one fixed calibration target.
+Dashboard calibration sends the label set's query and
+response text plus the rubric without applying Verdict redaction; inspect the
+file before approving. Optional context is ignored because dashboard production
+judging has no retrieved context, and human labels stay local.
+
+The judge can use Anthropic, OpenAI, Google, Jev, or a local/self-hosted OpenAI-compatible model. Jev uses its structured Choice API; the other built-in judges use provider completions. Validate the chosen judge against held-out labels from the intended workload before relying on quality alerts.
 
 ## Install
 
@@ -319,17 +395,17 @@ you use:
 
 ```bash
 python -m pip install \
-  "cognifity-verdict[anthropic,openai,google,dashboard]==0.1.0a21" \
-  "cognifity-verdict-eval[semantic]==0.1.0a21" \
-  "cognifity-verdict-inspect==0.1.0a21"
+  "cognifity-verdict[anthropic,openai,google,dashboard]==0.1.0a23" \
+  "cognifity-verdict-eval[semantic]==0.1.0a23" \
+  "cognifity-verdict-inspect==0.1.0a23"
 ```
 
-For a customer proof of concept on `0.1.0a21`, follow the bounded
-[`POC release profile`](docs/POC_RELEASE_PROFILE.md). It names the provider
-entry points exercised for this release, keeps persistence synchronous, and
-separates a workflow demonstration from a production-readiness claim.
+For a bounded pilot on `0.1.0a23`, follow the
+[release profile](docs/POC_RELEASE_PROFILE.md). It names the provider entry
+points exercised for this release, keeps persistence synchronous, and separates
+a workflow demonstration from a production-readiness claim.
 
-To let a customer coding agent discover and implement that POC, use the
+To let a coding agent instrument an application, use the
 [`verdict-instrument-app` agent skill](docs/AGENT_POC_SKILL.md). The guide
 includes a cross-agent prompt, approval boundaries, staged acceptance criteria,
 and the current automation limits.
@@ -343,15 +419,21 @@ PostgreSQL store:
 
 ```bash
 python -m pip install \
-  "cognifity-verdict[dashboard,postgres]==0.1.0a21" \
-  "cognifity-verdict-eval==0.1.0a21" \
-  "cognifity-verdict-inspect==0.1.0a21"
+  "cognifity-verdict[dashboard,postgres]==0.1.0a23" \
+  "cognifity-verdict-eval==0.1.0a23" \
+  "cognifity-verdict-inspect==0.1.0a23"
 ```
 
 The dashboard server is part of the core distribution because the core
 `verdict` command launches it. The `dashboard` extra is retained as an empty
 compatibility selector; `all` adds provider, PostgreSQL, telemetry, and eval
 dependencies on top of that core runtime.
+
+The release workflow also publishes the verified dashboard image as
+`ghcr.io/cognifityai/verdict:0.1.0a23`. It contains Verdict, not PostgreSQL or
+application data, and includes the supported judge provider SDKs. Set
+`VERDICT_STORAGE` to the deployment's database and
+configure dashboard access before binding it outside loopback.
 
 ### Upgrade from an earlier synchronized alpha
 
@@ -361,9 +443,9 @@ do not delete or reclone it:
 
 ```bash
 python -m pip install --upgrade \
-  "cognifity-verdict[anthropic,openai,google,dashboard]==0.1.0a21" \
-  "cognifity-verdict-eval[semantic]==0.1.0a21" \
-  "cognifity-verdict-inspect==0.1.0a21"
+  "cognifity-verdict[anthropic,openai,google,dashboard]==0.1.0a23" \
+  "cognifity-verdict-eval[semantic]==0.1.0a23" \
+  "cognifity-verdict-inspect==0.1.0a23"
 
 python -m pip check
 python -c "import verdict, verdict_eval, verdict_inspect; print(verdict.__version__, verdict_eval.__version__, verdict_inspect.__version__)"
@@ -394,7 +476,7 @@ API remains `import verdict`.
 Minimal install without the local semantic model:
 
 ```bash
-python -m pip install "cognifity-verdict-eval==0.1.0a21"  # lexical hash fallback
+python -m pip install "cognifity-verdict-eval==0.1.0a23"  # lexical hash fallback
 ```
 
 The full test suite also needs pytest and the dashboard's HTTP test dependency:
@@ -414,14 +496,21 @@ python scripts/smoke_test.py
 
 `verdict-import` converts existing telemetry into Verdict's current `Trace`
 rows and writes them through the same SQLite/PostgreSQL storage port used by SDK
-capture. It does not create a raw-envelope database or replace the clustering,
+capture. Voice file import also keeps one bounded, redacted current conversation
+snapshot per source identity. It does not create a raw-envelope database or replace the clustering,
 sampling, judge, drift, or dashboard paths.
+If a Voice transcript exceeds the snapshot's 512,000-byte stored-content
+limit, Verdict keeps a bounded prefix labeled `incomplete` with a
+`truncated_transcript` issue; its existing reply Trace mapping is unaffected.
+The importer requires direct synchronous storage; it rejects `BufferedStorage`
+so its stored count cannot be an acknowledgement of a queued write.
+Conversation snapshots and grading require synchronized `0.1.0a23` core and eval builds.
 
 Install the `telemetry` extra when accepting OTLP protobuf; it is optional for
 JSON files and API readers:
 
 ```bash
-python -m pip install "cognifity-verdict[telemetry,postgres]==0.1.0a21"
+python -m pip install "cognifity-verdict[telemetry,postgres]==0.1.0a23"
 
 # JSON, JSONL, or NDJSON; use --format auto or name the source explicitly.
 verdict-import file ./langsmith-runs.jsonl --format langsmith \
@@ -612,7 +701,7 @@ unacceptable; provider and manual-span failures then retain an error category
 without exception message content. IPv6 validation preserves trailing text that is not part of the
 validated address; clock values such as `12:34:56` are not treated as IPv6. Use
 non-sensitive tenant/session/cluster IDs. `sample_rate`
-controls what fraction of supported calls is retained. The `0.1.0a21` POC
+controls what fraction of supported calls is retained. The `0.1.0a23` POC
 profile keeps `buffered_writes=False`, so a normal process exit cannot strand
 queued telemetry. `buffered_writes=True` moves writes to a background batched
 writer but requires an explicit `shutdown()` imported from `verdict.client`
@@ -659,7 +748,7 @@ You hand-label a sample PASS/FAIL (blind, before the judge runs), then the harne
 
 ## Architecture
 
-Hexagonal / ports-and-adapters, ≥2 adapters per port (one real + in-memory for tests). Storage: `SQLiteStorage`, `PostgresStorage`, `InMemoryStorage`, plus a `BufferedStorage` wrapper for async batched writes. Judge providers: Anthropic, OpenAI, Google, optional LiteLLM, and a `FakeProvider` for tests. SDK capture and existing-telemetry import both produce the same **vendor-neutral `Trace` schema**. Verdict accepts OTLP/OpenInference inputs but does **not** emit OTel/OpenInference spans; an exporter remains a v1 roadmap item. See the ADRs in [`docs/adrs/`](docs/adrs/).
+Hexagonal / ports-and-adapters, ≥2 adapters per port (one real + in-memory for tests). Storage: `SQLiteStorage`, `PostgresStorage`, `InMemoryStorage`, plus a `BufferedStorage` wrapper for async batched writes. Judge choices: Anthropic, OpenAI, Google, Jev, optional LiteLLM, and a `FakeProvider` for tests. SDK capture and existing-telemetry import both produce the same **vendor-neutral `Trace` schema**. Verdict accepts OTLP/OpenInference inputs but does **not** emit OTel/OpenInference spans; an exporter remains a v1 roadmap item. See the ADRs in [`docs/adrs/`](docs/adrs/).
 
 Optional same-process packages should depend on the versioned
 `verdict.read_port` DTO/Protocol boundary, not Verdict tables, the broad storage
@@ -677,10 +766,96 @@ source. See [`ADR-013`](docs/adrs/013-stable-dependent-package-read-port.md).
   Opik readers follow their documented current contracts; Datadog's LLM
   Observability export API is preview. Synthetic contract servers and fixtures
   do not substitute for a credentialed check against a customer's deployment.
-- The generic voice reader maps completed assistant transcript turns, not raw
-  audio or a provider's agent graph. Tokens, cost, model, and latency exist only
+- The generic voice reader maps completed assistant transcript turns and stores
+  one current text-only conversation snapshot. It does not import raw audio or a
+  provider's agent graph. Tokens, cost, model, and latency exist only
   when the source turn supplies them. Verify a voice vendor's export against the
-  documented generic schema before relying on it.
+  documented generic schema before relying on it. Conversation snapshots are
+  available through the storage API and Evaluator Lab can grade clean, closed
+  snapshots using an uploaded JSON rubric. The review screen shows coverage
+  and the current transcript with its grades. Monitor can compare current
+  whole-conversation binary grades across two historical windows, optionally
+  by an explicit source label. This is descriptive: it creates no prospective
+  alert, and source labels are not semantic clusters. **Explore → Compare**
+  also supports source-declared matched whole-conversation cases when both
+  variants carry an opaque pair ID and variant label. `delete_trace` deletes only a Trace;
+  use `delete_conversation` for its separate snapshot. `prune_before` removes
+  snapshots whose source end time, or first import time when absent, is before
+  the cutoff while still returning only the number of deleted Traces. Supply
+  top-level `ended_at` or `end_time` in Voice records for a source end time;
+  Verdict stores its UTC form as `event_at`.
+
+To grade imported conversations, open **Evaluate → Evaluator Lab**, select
+**Conversation or reply**, upload a local JSON rubric (see
+[`examples/telemetry/conversation-rubric.example.json`](examples/telemetry/conversation-rubric.example.json)
+or [`examples/telemetry/response-rubric.example.json`](examples/telemetry/response-rubric.example.json)),
+and preview one bounded page. The default Trace evaluator remains separate.
+This workflow is included in the synchronized `0.1.0a23` core and eval builds.
+Review the eligible and excluded counts before approving the selected judge
+calls. The judge uses the configured provider key. When `OPENAI_BASE_URL` or
+`ANTHROPIC_BASE_URL` selects a custom endpoint, the consent screen names that
+destination before sending transcript content, without exposing its URL;
+preview and file validation make no judge call. Uploaded rubric descriptions
+and transcript text are best-effort redacted. A generic rubric defines only
+binary or bounded numeric dimensions; Verdict does not execute a vendor's
+custom total-score formula. Grades bind the exact current transcript, rubric,
+provider, model, prompt version, and endpoint. A corrected transcript removes
+its old grades. Each page scans at most 20 conversations and runs at most 20
+judge calls; move through the ID-ordered pages explicitly. Full coverage means
+every eligible reply was completed by that evaluator; UNCLEAR remains visible
+but does not count as PASS or FAIL. Judge agreement with human labels must be
+checked before treating scores as a quality measurement.
+
+To explore conversation quality, open **Monitor → Compare History**, select
+**Conversation grade (descriptive)**, and enter the evaluator fingerprint shown
+in the Evaluator Lab preview plus the name of one binary dimension from its
+whole-conversation rubric. Enter two non-overlapping date ranges in local time
+(the result displays their UTC boundaries) and, optionally, a source label key
+such as `group` or `persona`. Voice imports may
+include a top-level `labels` object with up to eight short string values; missing
+values appear as a separate group. The comparison reads stored current grades
+without calling a judge. It shows captured, eligible, not-evaluable, PASS,
+FAIL, UNCLEAR, judge-error, and ungraded-eligible counts; PASS rates use only
+PASS and FAIL grades. A missing evaluator in both windows is called out rather
+than silently treated as a coverage failure. Group shares are based on eligible
+conversations, so inspect both mix changes and within-group
+rates before interpreting an overall change. A corrected transcript or label
+invalidates its old grade and can change a later preview. Choose narrower
+windows if they contain more than 10,000 conversations. Conversations without
+a usable source end time cannot enter a dated window. This exploratory result
+is not saved or used for alerts.
+Imports normalize source end times to UTC before storage. If a returned stored
+row has a noncanonical end time, preview fails closed. Direct database changes
+can make a row sort outside the requested window before preview sees it; repair
+such snapshots by reimporting the source record.
+
+To compare two model or prompt variants on declared matched cases, include
+top-level Voice labels such as `{"pair_id":"opaque_case_1","variant":"model_a"}`
+and `{"pair_id":"opaque_case_1","variant":"model_b"}` on separate imported
+conversations. The producer must use the same pair ID only for the same
+evaluation input, and identify whether the variant denotes assigned or
+actually used configuration. In **Explore → Compare**, enter a single UTC
+campaign window, the evaluator fingerprint from Evaluator Lab, one
+whole-conversation rubric dimension, the pair/variant label keys, and two
+variant values. Both conversations must end inside the window and have one
+current grade from that same evaluator. Verdict excludes ambiguous duplicate
+current conversation IDs, unmatched, ineligible, missing, error, and unusable
+grades, then shows paired binary outcomes or numeric score differences and
+up to 50 inspectable pairs. Numeric differences use the rubric's score range
+for a conservative 95% interval, assuming independent, representative cases.
+Technical-failure closures with completed replies remain grade eligible and are counted
+separately. This view reads at most 10,000 selected-variant rows and does not
+call a judge, save a result, generate an alert, verify identical interactive
+turns, or establish a model winner. Source corrections or label edits remove
+old grades and can change a later comparison; earlier reimports under the
+same source ID are overwritten and cannot be detected as duplicates.
+Imports normalize source end times to UTC before storage. A returned row with
+a noncanonical stored time is rejected. Direct changes to the database can
+make a row sort outside the requested window before comparison sees it.
+If a valid numeric rubric's bounds exceed finite aggregate arithmetic, the
+paired scores remain inspectable but the aggregate and interval are unavailable.
+Invalid comparison requests return a generic error without exposing stored
+error details; an overlarge selection asks you to choose narrower dates.
 - Trace Explorer pages through every stored non-judge application trace in
   30-row pages. Search and provider/content-state filters apply to the current
   page; dashboard aggregates continue to use the complete store. Selecting a
@@ -690,7 +865,7 @@ source. See [`ADR-013`](docs/adrs/013-stable-dependent-package-read-port.md).
 - Agent Run exploration pages through every stored run in 30-row pages while
   retaining bounded event and turn detail. Finding links continue to show the
   exact affected-run set rather than applying list offsets to it.
-- **Published capture coverage in `0.1.0a21`:** the bounded POC profile names
+- **Published capture coverage in `0.1.0a23`:** the bounded POC profile names
   Anthropic
   `messages.create(...)` (including `stream=True`), OpenAI
   `chat.completions.create(...)` and its stream helper, and Google
@@ -867,7 +1042,7 @@ source. See [`ADR-013`](docs/adrs/013-stable-dependent-package-read-port.md).
   agreement remains a separate diagnostic. Any sentinel execution error
   prevents a `healthy` status: too few usable examples remain
   `insufficient_data`; otherwise the result is `degraded`.
-- The `0.1.0a21` POC drift demonstration assumes independently sampled calls.
+- The `0.1.0a23` POC drift demonstration assumes independently sampled calls.
   Do not treat repeated turns from the same conversation as independent
   evidence or use that profile for a production decision. Use Monitor's
   descriptive logical-session preview to inspect session-level rates and

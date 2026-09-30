@@ -137,6 +137,22 @@ def _trace_tenant_clause(requested: str, column: str = "tenant_id") -> str:
 
 
 _SCHEMA = """
+CREATE TABLE IF NOT EXISTS conversation_snapshots (
+    tenant_id TEXT NOT NULL, conversation_id TEXT NOT NULL,
+    retention_at TEXT NOT NULL, payload TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, conversation_id)
+);
+CREATE INDEX IF NOT EXISTS conversation_retention ON conversation_snapshots(retention_at);
+CREATE INDEX IF NOT EXISTS conversation_event_window ON conversation_snapshots
+    (tenant_id, json_extract(payload, '$.event_at'), conversation_id);
+CREATE TABLE IF NOT EXISTS conversation_assessments (
+    tenant_id TEXT NOT NULL, conversation_id TEXT NOT NULL,
+    evaluator_fingerprint TEXT NOT NULL, target_position INTEGER NOT NULL,
+    revision TEXT NOT NULL, payload TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, conversation_id, evaluator_fingerprint, target_position),
+    FOREIGN KEY (tenant_id, conversation_id)
+      REFERENCES conversation_snapshots(tenant_id, conversation_id) ON DELETE CASCADE
+);
 CREATE TABLE IF NOT EXISTS traces (
     trace_id TEXT PRIMARY KEY,
     parent_span_id TEXT,
@@ -2293,10 +2309,290 @@ class SQLiteStorage:
             else:
                 self._conn.execute("COMMIT")
 
-    def prune_before(self, cutoff_iso: str) -> int:
+    def save_conversation(self, conversation: dict) -> None:
+        from verdict.conversations import _json, validate_conversation
+
+        value = validate_conversation(conversation)
+        retention_at = value["event_at"] or datetime.now(timezone.utc).isoformat()
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
             try:
+                self._conn.execute(
+                    """INSERT INTO conversation_snapshots (tenant_id, conversation_id, retention_at, payload)
+                       VALUES (?, ?, ?, ?)
+                       ON CONFLICT (tenant_id, conversation_id) DO UPDATE SET
+                         retention_at=MIN(conversation_snapshots.retention_at, excluded.retention_at),
+                         payload=excluded.payload""",
+                    (value["tenant_id"], value["id"], retention_at, _json(value)),
+                )
+                self._conn.execute(
+                    """DELETE FROM conversation_assessments WHERE tenant_id=?
+                       AND conversation_id=? AND revision<>?""",
+                    (value["tenant_id"], value["id"], value["revision"]),
+                )
+            except BaseException:
+                self._conn.execute("ROLLBACK")
+                raise
+            else:
+                self._conn.execute("COMMIT")
+
+    def save_conversation_assessment(self, assessment: dict) -> bool:
+        from verdict.conversation_assessments import should_store_assessment, validate_assessment
+        from verdict.conversations import _json, validate_conversation_query
+
+        if not isinstance(assessment, dict):
+            raise ValueError("invalid conversation assessment")
+        tenant_id, conversation_id = assessment.get("tenant_id"), assessment.get("conversation_id")
+        validate_conversation_query(tenant_id, 1, conversation_id)
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                current = self._conn.execute(
+                    "SELECT payload FROM conversation_snapshots WHERE tenant_id=? AND conversation_id=?",
+                    (tenant_id, conversation_id),
+                ).fetchone()
+                if current is None:
+                    raise ValueError("conversation assessment revision unavailable")
+                value = validate_assessment(assessment, json.loads(current["payload"]))
+                target = -1 if value["target_position"] is None else value["target_position"]
+                key = (tenant_id, conversation_id, value["evaluator_fingerprint"], target)
+                previous = self._conn.execute(
+                    """SELECT payload FROM conversation_assessments WHERE tenant_id=?
+                       AND conversation_id=? AND evaluator_fingerprint=? AND target_position=?""",
+                    key,
+                ).fetchone()
+                if not should_store_assessment(json.loads(previous["payload"]) if previous else None, value):
+                    self._conn.execute("COMMIT")
+                    return False
+                self._conn.execute(
+                    """INSERT INTO conversation_assessments
+                       (tenant_id, conversation_id, evaluator_fingerprint, target_position, revision, payload)
+                       VALUES (?, ?, ?, ?, ?, ?)
+                       ON CONFLICT (tenant_id, conversation_id, evaluator_fingerprint, target_position)
+                       DO UPDATE SET revision=excluded.revision, payload=excluded.payload""",
+                    (*key, value["revision"], _json(value)),
+                )
+            except BaseException:
+                self._conn.execute("ROLLBACK")
+                raise
+            else:
+                self._conn.execute("COMMIT")
+                return True
+
+    def list_conversation_assessments(
+        self, tenant_id: str, conversation_id: str, evaluator_fingerprint: str, *, limit: int = 1_000
+    ) -> list[dict]:
+        from verdict.conversation_assessments import validate_assessment_query
+
+        validate_assessment_query(tenant_id, conversation_id, evaluator_fingerprint, limit)
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT payload FROM conversation_assessments WHERE tenant_id=?
+                   AND conversation_id=? AND evaluator_fingerprint=?
+                   ORDER BY target_position LIMIT ?""",
+                (tenant_id, conversation_id, evaluator_fingerprint, limit),
+            ).fetchall()
+        return [json.loads(row["payload"]) for row in rows]
+
+    def get_conversation(self, tenant_id: str, conversation_id: str) -> dict | None:
+        from verdict.conversations import validate_conversation_query
+
+        validate_conversation_query(tenant_id, 1, conversation_id)
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT payload, retention_at FROM conversation_snapshots WHERE tenant_id=? AND conversation_id=?",
+                (tenant_id, conversation_id),
+            ).fetchone()
+        if row is None:
+            return None
+        value = json.loads(row["payload"])
+        value["retention_at"] = row["retention_at"]
+        return value
+
+    def list_conversations(
+        self, tenant_id: str, *, after: str | None = None, limit: int = 20
+    ) -> tuple[list[dict], str | None]:
+        from verdict.conversations import validate_conversation_query
+
+        validate_conversation_query(tenant_id, limit, after)
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT payload, retention_at FROM conversation_snapshots
+                   WHERE tenant_id=? AND conversation_id>? ORDER BY conversation_id LIMIT ?""",
+                (tenant_id, after or "", limit + 1),
+            ).fetchall()
+        page = []
+        for row in rows[:limit]:
+            value = json.loads(row["payload"])
+            value["retention_at"] = row["retention_at"]
+            page.append(value)
+        return page, page[-1]["id"] if len(rows) > limit else None
+
+    def load_conversation_comparison_rows(self, query: dict, *, limit: int) -> list[dict]:
+        from verdict.conversation_monitoring import validate_storage_query
+
+        value = validate_storage_query(query, limit)
+        sql = """
+            WITH reference AS (
+                SELECT conversation_id,
+                       json_extract(payload, '$.event_at') AS event_at,
+                       json_extract(payload, '$.revision') AS revision,
+                       json_extract(payload, '$.labels') AS labels,
+                       json_extract(payload, '$.end_status') AS end_status,
+                       json_array_length(payload, '$.input_issues') AS issue_count,
+                       (SELECT MIN(CAST(message.key AS INTEGER))
+                          FROM json_each(conversation_snapshots.payload, '$.messages') AS message
+                         WHERE json_extract(message.value, '$.role')='user'
+                           AND json_extract(message.value, '$.status')='completed') AS first_user,
+                       (SELECT MAX(CAST(message.key AS INTEGER))
+                          FROM json_each(conversation_snapshots.payload, '$.messages') AS message
+                         WHERE json_extract(message.value, '$.role')='assistant'
+                           AND json_extract(message.value, '$.status')='completed') AS last_assistant
+                  FROM conversation_snapshots
+                 WHERE tenant_id=? AND json_extract(payload, '$.event_at')>=?
+                   AND json_extract(payload, '$.event_at')<?
+                 ORDER BY json_extract(payload, '$.event_at'), conversation_id LIMIT ?
+            ), current AS (
+                SELECT conversation_id,
+                       json_extract(payload, '$.event_at') AS event_at,
+                       json_extract(payload, '$.revision') AS revision,
+                       json_extract(payload, '$.labels') AS labels,
+                       json_extract(payload, '$.end_status') AS end_status,
+                       json_array_length(payload, '$.input_issues') AS issue_count,
+                       (SELECT MIN(CAST(message.key AS INTEGER))
+                          FROM json_each(conversation_snapshots.payload, '$.messages') AS message
+                         WHERE json_extract(message.value, '$.role')='user'
+                           AND json_extract(message.value, '$.status')='completed') AS first_user,
+                       (SELECT MAX(CAST(message.key AS INTEGER))
+                          FROM json_each(conversation_snapshots.payload, '$.messages') AS message
+                         WHERE json_extract(message.value, '$.role')='assistant'
+                           AND json_extract(message.value, '$.status')='completed') AS last_assistant
+                  FROM conversation_snapshots
+                 WHERE tenant_id=? AND json_extract(payload, '$.event_at')>=?
+                   AND json_extract(payload, '$.event_at')<?
+                 ORDER BY json_extract(payload, '$.event_at'), conversation_id LIMIT ?
+            ), selected AS (
+                SELECT * FROM reference UNION ALL SELECT * FROM current
+            )
+            SELECT selected.conversation_id AS id, selected.event_at, selected.revision,
+                   selected.labels, selected.end_status, selected.issue_count,
+                   selected.first_user, selected.last_assistant,
+                   json_extract(grade.payload, '$.status') AS assessment_status,
+                   json_extract(grade.payload, '$.rubric.target') AS rubric_target,
+                   (SELECT json_extract(definition.value, '$.type')
+                      FROM json_each(grade.payload, '$.rubric.dimensions') AS definition
+                     WHERE json_extract(definition.value, '$.name')=? LIMIT 1)
+                     AS dimension_type,
+                   json_extract(grade.payload, ?) AS dimension_state
+              FROM selected
+              LEFT JOIN conversation_assessments AS grade
+                ON grade.tenant_id=? AND grade.conversation_id=selected.conversation_id
+               AND grade.evaluator_fingerprint=? AND grade.target_position=-1
+               AND grade.revision=selected.revision
+             ORDER BY selected.event_at, selected.conversation_id LIMIT ?
+        """
+        parameters = (
+            value["tenant_id"], value["reference_start"], value["reference_end"], limit,
+            value["tenant_id"], value["current_start"], value["current_end"], limit,
+            value["dimension"], f'$.dimensions."{value["dimension"]}".state',
+            value["tenant_id"], value["evaluator_fingerprint"], limit,
+        )
+        with self._lock:
+            return [dict(row) for row in self._conn.execute(sql, parameters).fetchall()]
+
+    def load_matched_conversation_rows(self, query: dict, *, limit: int) -> list[dict]:
+        from verdict.matched_conversations import validate_storage_query
+
+        value = validate_storage_query(query, limit)
+        sql = """
+            WITH selected AS (
+                SELECT conversation_id,
+                       json_extract(payload, '$.event_at') AS event_at,
+                       json_extract(payload, '$.revision') AS revision,
+                       json_extract(payload, '$.labels') AS labels,
+                       json_extract(payload, '$.end_status') AS end_status,
+                       json_array_length(payload, '$.input_issues') AS issue_count,
+                       (SELECT MIN(CAST(message.key AS INTEGER))
+                          FROM json_each(conversation_snapshots.payload, '$.messages') AS message
+                         WHERE json_extract(message.value, '$.role')='user'
+                           AND json_extract(message.value, '$.status')='completed') AS first_user,
+                       (SELECT MAX(CAST(message.key AS INTEGER))
+                          FROM json_each(conversation_snapshots.payload, '$.messages') AS message
+                         WHERE json_extract(message.value, '$.role')='assistant'
+                           AND json_extract(message.value, '$.status')='completed') AS last_assistant
+                  FROM conversation_snapshots
+                 WHERE tenant_id=? AND json_extract(payload, '$.event_at')>=?
+                   AND json_extract(payload, '$.event_at')<?
+                   AND json_extract(payload, ?) IN (?, ?)
+                 ORDER BY json_extract(payload, '$.event_at'), conversation_id LIMIT ?
+            )
+            SELECT selected.conversation_id AS id, selected.event_at, selected.revision,
+                   selected.labels, selected.end_status, selected.issue_count,
+                   selected.first_user, selected.last_assistant,
+                   json_extract(grade.payload, '$.status') AS assessment_status,
+                   json_extract(grade.payload, '$.rubric.target') AS rubric_target,
+                   (SELECT json_extract(definition.value, '$.type')
+                      FROM json_each(grade.payload, '$.rubric.dimensions') AS definition
+                     WHERE json_extract(definition.value, '$.name')=? LIMIT 1) AS dimension_type,
+                   (SELECT json_extract(definition.value, '$.direction')
+                      FROM json_each(grade.payload, '$.rubric.dimensions') AS definition
+                     WHERE json_extract(definition.value, '$.name')=? LIMIT 1) AS dimension_direction,
+                   (SELECT json_extract(definition.value, '$.min')
+                      FROM json_each(grade.payload, '$.rubric.dimensions') AS definition
+                     WHERE json_extract(definition.value, '$.name')=? LIMIT 1) AS dimension_min,
+                   (SELECT json_type(definition.value, '$.min')
+                      FROM json_each(grade.payload, '$.rubric.dimensions') AS definition
+                     WHERE json_extract(definition.value, '$.name')=? LIMIT 1) AS dimension_min_type,
+                   (SELECT json_extract(definition.value, '$.max')
+                      FROM json_each(grade.payload, '$.rubric.dimensions') AS definition
+                     WHERE json_extract(definition.value, '$.name')=? LIMIT 1) AS dimension_max,
+                   (SELECT json_type(definition.value, '$.max')
+                      FROM json_each(grade.payload, '$.rubric.dimensions') AS definition
+                     WHERE json_extract(definition.value, '$.name')=? LIMIT 1) AS dimension_max_type,
+                   json_extract(grade.payload, ?) AS dimension_state,
+                   json_extract(grade.payload, ?) AS dimension_score,
+                   json_type(grade.payload, ?) AS dimension_score_type
+              FROM selected
+              LEFT JOIN conversation_assessments AS grade
+                ON grade.tenant_id=? AND grade.conversation_id=selected.conversation_id
+               AND grade.evaluator_fingerprint=? AND grade.target_position=-1
+               AND grade.revision=selected.revision
+             ORDER BY selected.event_at, selected.conversation_id LIMIT ?
+        """
+        parameters = (
+            value["tenant_id"], value["window_start"], value["window_end"],
+            f'$.labels."{value["variant_key"]}"', value["left_variant"],
+            value["right_variant"], limit,
+            value["dimension"], value["dimension"], value["dimension"], value["dimension"],
+            value["dimension"], value["dimension"],
+            f'$.dimensions."{value["dimension"]}".state',
+            f'$.dimensions."{value["dimension"]}".score',
+            f'$.dimensions."{value["dimension"]}".score',
+            value["tenant_id"], value["evaluator_fingerprint"], limit,
+        )
+        with self._lock:
+            return [dict(row) for row in self._conn.execute(sql, parameters).fetchall()]
+
+    def delete_conversation(self, tenant_id: str, conversation_id: str) -> None:
+        from verdict.conversations import validate_conversation_query
+
+        validate_conversation_query(tenant_id, 1, conversation_id)
+        with self._lock:
+            self._conn.execute(
+                "DELETE FROM conversation_snapshots WHERE tenant_id=? AND conversation_id=?",
+                (tenant_id, conversation_id),
+            )
+
+    def prune_before(self, cutoff_iso: str) -> int:
+        from verdict.conversations import retention_cutoff
+
+        conversation_cutoff = retention_cutoff(cutoff_iso)
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                self._conn.execute(
+                    "DELETE FROM conversation_snapshots WHERE retention_at < ?", (conversation_cutoff,)
+                )
                 cur = self._conn.execute(
                     "SELECT trace_id FROM traces WHERE started_at < ?",
                     (cutoff_iso,),
