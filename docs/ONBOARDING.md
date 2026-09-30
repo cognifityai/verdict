@@ -834,8 +834,9 @@ includes provider, model list, rubric name/version, behavior-relevant config,
 expected dimensions, and a prompt/rubric fingerprint. Fixed-window drift rows
 created by older releases have no tenant owner, so `/api/data` and the UI
 exclude them. They remain readable through the Python storage API and are
-never treated as a current zero or alert. Old drift bookmarks open Monitor
-History.
+never treated as a current zero or alert. Old drift and Monitor Signals
+bookmarks open Monitor History, except drift-cluster bookmarks, which open
+Monitor Segments.
 Evaluator requests are sequenced and cancelled so an older response cannot
 replace a newer selection. If a load fails, the dashboard explicitly names the
 last confirmed evaluator that remains on screen, and trace detail is

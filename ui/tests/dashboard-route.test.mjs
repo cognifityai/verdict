@@ -44,7 +44,7 @@ test("drift subsection survives refreshable direct links", () => {
   assert.equal(parseDashboardRoute("#tab=drift&drift=clusters").section, "segments");
 });
 
-test("fixed-window signals have a refreshable route and legacy drift links open it", () => {
+test("retired signals and drift links redirect to Monitor History", () => {
   const direct = parseDashboardRoute("#tab=monitor&section=signals&evaluator=evaluator-2");
   assert.equal(direct.tab, "monitor");
   assert.equal(direct.section, "history");

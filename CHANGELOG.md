@@ -69,8 +69,9 @@ the product is refined.
   drift rows remain readable through the Python storage API, but `/api/data`
   no longer returns `driftSignals`, `driftRun`, `driftAnalysis`,
   `evaluation.driftStatus`, `evaluation.unattributedDriftSignals`, or
-  `truncation.resources.driftSignals`. Old drift bookmarks open Monitor History.
-  No database migration or deletion is required.
+  `truncation.resources.driftSignals`. Old drift and Monitor Signals bookmarks
+  open Monitor History, except drift-cluster bookmarks, which open Monitor
+  Segments. No database migration or deletion is required.
 - Monitor snapshots written by this version cannot be read by Verdict
   `0.1.0a21` or earlier. Upgrade the service and dashboard together, and do not
   downgrade after running Monitor unless the newer Monitor policy and snapshot
