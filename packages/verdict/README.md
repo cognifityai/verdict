@@ -88,6 +88,19 @@ metadata-only capture records that content as not captured.
 `MCP`, `PROVIDER_HOSTED`, or `APPLICATION`. Omit it when unknown. Verdict never
 infers origin from a tool name, and the label cannot prove which protocols a
 wrapper uses downstream.
+With content capture enabled, tool arguments and results are recursively
+redacted and bounded before storage. Values that exceed an event's depth, node,
+or byte limits may contain omission markers. If the final event cannot fit,
+Verdict stores the call or result event with its typed metadata and an explicit
+`omission_reason`; it omits the content field. A tool exception or cancellation
+still records a terminal result status and does not suppress the application
+exception. If the storage sink itself fails, capture remains fail open: the
+process-local dropped-record counter and a bounded warning identify the
+failure class, but the rejected event is not durable.
+An explicit `call_id` must be valid UTF-8 text without NUL bytes; invalid
+values are rejected before a tool call starts. Long IDs retain the published
+behavior of a bounded, redacted stored value; IDs beyond the redaction input
+budget can share a redaction marker. An empty ID generates an ID.
 
 ## Stable read port for optional packages
 

@@ -53,6 +53,18 @@ so they cannot block later supported records. Quota and write failures increment
 dropped-record counter and emit a bounded, non-sensitive warning without
 changing application behavior.
 
+Agent event content is recursively redacted, then bounded within the complete
+event envelope. The SDK retains a typed tool-result event when the result
+cannot fit: the result content is absent and `omission_reason` identifies the
+bounded or invalid shape. Tool failure and cancellation also produce terminal
+result events. These guarantees assume a successful sink write; a rejected
+write is observable through the dropped-record counter and a warning that
+contains the failure class but no application content.
+Caller-supplied tool call IDs are bounded and redacted independently of result
+content, so the typed `call_id` field remains present when content exceeds its
+budget. IDs beyond the redaction input budget can share a redaction marker and
+are not individually distinguishable.
+
 An active producer segment has an `.open` suffix and is atomically renamed to a
 sealed JSONL segment on normal rotation or shutdown. Local import reads complete
 records from either lifecycle. Remote authentication and idempotent Agent-record
