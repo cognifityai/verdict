@@ -6,8 +6,11 @@ those ephemeral approvals separate from durable schedule configuration.
 
 from __future__ import annotations
 
+import logging
 import secrets
+import threading
 from collections import Counter
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -25,6 +28,47 @@ from verdict.telemetry.sources.codex import codex_diagnostic_path
 
 _MAX_FILES_PREVIEW = 10_000
 LOCAL_SCOPE = "__verdict_local__"
+_log = logging.getLogger("verdict.dashboard.setup")
+
+
+@dataclass
+class CaptureJob:
+    """One local-history capture running on a background thread.
+
+    States move forward only: ``running`` (files are being imported) ->
+    ``analyzing`` (deterministic analysis of the result) -> ``completed`` or
+    ``failed``. One job exists per dashboard process at a time; a finished job
+    stays readable until the next one starts. The thread owns its own storage
+    handle and closes it before the job leaves ``running``.
+    """
+
+    started_at: str
+    state: str = "running"
+    files_done: int = 0
+    files_total: int | None = None
+    finished_at: str | None = None
+    summary: dict[str, Any] | None = None
+    analysis: dict[str, Any] | None = None
+    error: str | None = None
+    lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+
+    def as_dict(self) -> dict[str, Any]:
+        with self.lock:
+            return {
+                "state": self.state,
+                "startedAt": self.started_at,
+                "finishedAt": self.finished_at,
+                "filesDone": self.files_done,
+                "filesTotal": self.files_total,
+                "summary": self.summary,
+                "analysis": self.analysis,
+                "error": self.error,
+            }
+
+    @property
+    def active(self) -> bool:
+        with self.lock:
+            return self.state in {"running", "analyzing"}
 
 
 def _is_postgres(storage_url: str) -> bool:
@@ -54,6 +98,8 @@ class SetupRoutes:
         self.tenant_id = tenant_id
         self._previewed_local_roots: set[tuple[str | None, str | None]] = set()
         self._previewed_imports: set[tuple[str, str]] = set()
+        self._capture_job: CaptureJob | None = None
+        self._capture_start_lock = threading.Lock()
 
     def authorized(self, request: Request) -> bool:
         if not self.request_matches_tenant(request):
@@ -209,33 +255,44 @@ class SetupRoutes:
                     self._approved_path(claude_root),
                     self._approved_path(codex_root),
                 )
-                if root_key not in self._previewed_local_roots:
-                    return JSONResponse(
-                        {"error": "preview these exact source paths before capture"},
-                        status_code=409,
-                    )
                 capture_content = payload.get("captureContent", True)
                 if not isinstance(capture_content, bool):
                     raise ValueError("captureContent must be boolean")
-                writable = self.writable_storage()
-                try:
-                    summary = capture_local_agents(
-                        writable,
-                        tenant_id=self.tenant_id,
-                        claude_root=claude_root,
-                        codex_root=codex_root,
-                        capture_content=capture_content,
-                    )
-                finally:
-                    writable.close()
-                self._previewed_local_roots.discard(root_key)
-                analysis = self._run_analysis()
-                return {
-                    "summary": summary.as_dict(),
-                    "analysis": analysis["analysisState"],
-                }
+                with self._capture_start_lock:
+                    if self._capture_job is not None and self._capture_job.active:
+                        return JSONResponse(
+                            {"error": "a capture is already running", "job": self._capture_job.as_dict()},
+                            status_code=409,
+                        )
+                    if root_key not in self._previewed_local_roots:
+                        return JSONResponse(
+                            {"error": "preview these exact source paths before capture"},
+                            status_code=409,
+                        )
+                    # The approval is consumed when the job starts, so a second
+                    # click cannot start another capture without a new preview.
+                    self._previewed_local_roots.discard(root_key)
+                    job = CaptureJob(started_at=datetime.now(timezone.utc).isoformat())
+                    self._capture_job = job
+                thread = threading.Thread(
+                    target=self._run_capture_job,
+                    args=(job, claude_root, codex_root, capture_content),
+                    name="verdict-local-capture",
+                    daemon=True,
+                )
+                thread.start()
+                return JSONResponse({"job": job.as_dict()}, status_code=202)
             except (OSError, TypeError, UnicodeError, ValueError):
                 return JSONResponse({"error": "invalid setup request"}, status_code=400)
+
+        def setup_capture_status(request):
+            if not self.request_matches_tenant(request):
+                return JSONResponse({"error": "setup unavailable"}, status_code=403)
+            job = self._capture_job
+            return {"job": None if job is None else job.as_dict()}
+
+        setup_capture_status.__annotations__["request"] = Request
+        app.get("/api/setup/capture/status")(setup_capture_status)
 
         setup_capture.__annotations__["request"] = Request
         app.post("/api/setup/capture")(setup_capture)
@@ -329,6 +386,52 @@ class SetupRoutes:
 
         setup_import.__annotations__["request"] = Request
         app.post("/api/setup/import")(setup_import)
+
+    def _run_capture_job(
+        self,
+        job: CaptureJob,
+        claude_root: Path | None,
+        codex_root: Path | None,
+        capture_content: bool,
+    ) -> None:
+        """Thread body: import, then analyze, then record the terminal state.
+
+        Every exit path sets a terminal state. The error text is a category,
+        never the exception message, because that could carry a path.
+        """
+
+        def progress(done: int, total: int) -> None:
+            with job.lock:
+                job.files_done, job.files_total = done, total
+
+        try:
+            writable = self.writable_storage()
+            try:
+                summary = capture_local_agents(
+                    writable,
+                    tenant_id=self.tenant_id,
+                    claude_root=claude_root,
+                    codex_root=codex_root,
+                    capture_content=capture_content,
+                    progress=progress,
+                )
+            finally:
+                writable.close()
+            with job.lock:
+                job.summary = summary.as_dict()
+                job.state = "analyzing"
+            analysis = self._run_analysis()
+            with job.lock:
+                job.analysis = analysis["analysisState"]
+                job.state = "completed"
+        except Exception:
+            _log.exception("local history capture failed")
+            with job.lock:
+                job.error = "capture_failed" if job.state == "running" else "analysis_failed"
+                job.state = "failed"
+        finally:
+            with job.lock:
+                job.finished_at = datetime.now(timezone.utc).isoformat()
 
     def _run_analysis(self) -> dict[str, Any]:
         # Import at execution time to avoid coupling the route capability back

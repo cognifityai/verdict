@@ -7,7 +7,15 @@ import {
 
 const panel = "border p-5";
 const style = { borderColor: "#26332e", background: "#111715" };
-const LONG_CAPTURE = "Capturing local history… Large histories can take several minutes. Keep this page open.";
+const LONG_CAPTURE = "Starting local history capture…";
+const CAPTURE_POLL_MS = 1500;
+
+function captureProgressLabel(job) {
+  if (!job) return LONG_CAPTURE;
+  if (job.state === "analyzing") return "Files imported. Analyzing captured evidence…";
+  if (job.filesTotal == null) return "Listing history files…";
+  return `Importing ${job.filesDone} of ${job.filesTotal} history files… Large histories can take several minutes. Keep this page open.`;
+}
 const LONG_IMPORT = "Importing… Large files can take several minutes. Keep this page open.";
 
 export function SetupWizard({ configUrl, onComplete, onNavigate, onRefresh, agentSummary = {} }) {
@@ -53,6 +61,34 @@ export function SetupWizard({ configUrl, onComplete, onNavigate, onRefresh, agen
       const body = await response.json();
       if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
       setResult(body); return body;
+    } catch (failure) {
+      setError(setupFailureMessage(failure, serverOrigin)); return null;
+    } finally { setBusy(false); setBusyLabel(null); }
+  }
+
+  // Local capture runs on the server in the background: the POST returns the
+  // job at once and this polls its status until the job ends.
+  async function capture(payload) {
+    setBusy(true); setBusyLabel(LONG_CAPTURE); setError(null);
+    try {
+      const response = await fetch(`${root}/api/setup/capture`, {
+        method: "POST", credentials: "same-origin",
+        headers: { "Content-Type": "application/json", "X-Verdict-Setup": token },
+        body: JSON.stringify(payload),
+      });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
+      let job = body.job;
+      while (job && (job.state === "running" || job.state === "analyzing")) {
+        setBusyLabel(captureProgressLabel(job));
+        await new Promise((resolve) => setTimeout(resolve, CAPTURE_POLL_MS));
+        const status = await fetch(`${root}/api/setup/capture/status`, { credentials: "same-origin", headers: { Accept: "application/json" } });
+        if (!status.ok) throw new Error(`HTTP ${status.status}`);
+        job = (await status.json()).job;
+      }
+      if (!job || job.state !== "completed") throw new Error(job?.error || "capture did not complete");
+      const result = { summary: job.summary, analysis: job.analysis };
+      setResult(result); return result;
     } catch (failure) {
       setError(setupFailureMessage(failure, serverOrigin)); return null;
     } finally { setBusy(false); setBusyLabel(null); }
@@ -110,7 +146,7 @@ export function SetupWizard({ configUrl, onComplete, onNavigate, onRefresh, agen
         <p className="text-sm mt-4" style={{ color: "#94a39d" }}>Verdict retains bounded, recursively redacted request, response, tool, command, and test evidence for local agent analysis. For the standard Codex directory, it also reads completed model-call metadata from the sibling <code>logs_2.sqlite</code> database; diagnostic bodies are never stored. Local setup uses content capture by default so the resulting run is actually evaluable.</p>
         <div className="flex gap-2 mt-4">
           <button disabled={!token || busy} onClick={async () => { const data = await post(`${root}/api/setup/preview`, { claudeRoot, codexRoot }, "Previewing sources…"); if (data) setPreviewedLocal(localKey); }} className="border px-4 py-2 text-sm">Preview sources</button>
-          <button disabled={!token || busy || previewedLocal !== localKey} onClick={async () => { const data = await post(`${root}/api/setup/capture`, { claudeRoot, codexRoot, captureContent: true }, LONG_CAPTURE); if (data) onComplete("local"); }} className="px-4 py-2 text-sm" style={{ background: "#4ee1aa", color: "#0b0e0d" }}>Approve and capture</button>
+          <button disabled={!token || busy || previewedLocal !== localKey} onClick={async () => { const data = await capture({ claudeRoot, codexRoot, captureContent: true }); if (data) onComplete("local"); }} className="px-4 py-2 text-sm" style={{ background: "#4ee1aa", color: "#0b0e0d" }}>Approve and capture</button>
         </div>
       </section>}
 

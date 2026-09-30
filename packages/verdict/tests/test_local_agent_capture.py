@@ -2319,3 +2319,20 @@ def test_failure_counts_state_whether_the_source_reported_any_outcome(tmp_path: 
     assert unreported["toolErrors"] == 0
     assert unreported["toolOutcomesReported"] == 0
     assert unreported_totals["toolOutcomesReported"] == 0
+
+
+def test_capture_reports_progress_once_per_history_file(tmp_path: Path) -> None:
+    claude_root = tmp_path / "claude"
+    _write_jsonl(claude_root / "a.jsonl", _claude_records())
+    _write_jsonl(claude_root / "nested" / "b.jsonl", _claude_records())
+    codex_root = tmp_path / "codex"
+    _write_jsonl(codex_root / "c.jsonl", _codex_records())
+    seen: list[tuple[int, int]] = []
+
+    summary = capture_local_agents(
+        InMemoryStorage(), tenant_id="local", claude_root=claude_root, codex_root=codex_root,
+        progress=lambda done, total: seen.append((done, total)),
+    )
+
+    assert summary.files == 3
+    assert seen == [(0, 3), (1, 3), (2, 3), (3, 3)]

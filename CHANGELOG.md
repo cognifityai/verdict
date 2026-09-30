@@ -6,6 +6,17 @@ the product is refined.
 
 ## [Unreleased]
 
+### Changed
+
+- Local history capture from Settings → Data Sources runs on a background
+  thread. `POST /api/setup/capture` returns 202 with the job at once and
+  `GET /api/setup/capture/status` reports `running`, `analyzing`, `completed`,
+  or `failed` with the files imported so far; the page shows that progress.
+  One capture runs per dashboard process at a time (a second start answers
+  409), the preview approval is consumed when the job starts, and a failed
+  job reports a category (`capture_failed`, `analysis_failed`), never a path.
+  `capture_local_agents` accepts an optional `progress(done, total)` callback.
+
 ## [0.1.0b1] - 2026-09-29
 
 ### Changed
