@@ -5,7 +5,11 @@
 [![Python](https://img.shields.io/pypi/pyversions/cognifity-verdict.svg)](https://pypi.org/project/cognifity-verdict/)
 [![License](https://img.shields.io/github/license/cognifityai/verdict.svg)](LICENSE)
 
-> Open-source drift detection and quality monitoring for LLM-powered apps. Helps surface behavior, estimated-cost, and response-quality changes in captured production traffic.
+> See what your AI agents and LLM apps actually did, and get told when their behavior changes.
+
+Verdict is open-source, local-first monitoring for Claude Code, Codex, and LLM
+applications. It runs on your machine, redacts captured content by default, and
+produces findings without an API key.
 
 A [Cognifity AI](https://cognifity.ai) project. Apache 2.0.
 
@@ -13,9 +17,61 @@ A [Cognifity AI](https://cognifity.ai) project. Apache 2.0.
 
 *Bundled dashboard shown with clearly labeled synthetic sample data.*
 
+## Try it in two minutes
+
+```bash
+python -m pip install cognifity-verdict
+verdict
+```
+
+`verdict` opens a local dashboard bound to loopback. Choose **Claude Code /
+Codex**, preview the history folders (`~/.claude/projects` and
+`~/.codex/sessions` by default), and approve the import. Large histories take a
+few minutes. Verdict makes no network calls unless you configure one: an LLM
+judge with your own key, an alert webhook, a remote collector, or a hosted
+telemetry import.
+
+To capture a live application instead:
+
+```python
+import verdict
+
+verdict.init(storage="sqlite:///./verdict.db", service_name="my-app")
+# Supported Anthropic, OpenAI, and Google SDK calls are now captured.
+```
+
+## What you get without an API key
+
+- **Agent evidence** from Claude Code and Codex history: runs, turns, tool calls,
+  tool errors, possible tool loops, missing final responses, and the token usage
+  the source reports.
+- **LLM call capture** for supported Anthropic, OpenAI, and Google SDK methods:
+  tokens, latency, estimated cost, and errors.
+- **Drift alerts that do not cry wolf.** Monitor compares a reference cohort with
+  a current cohort using Fisher's exact test, Benjamini–Hochberg correction, and
+  a minimum effect size. Provider errors, empty replies, and refusal-like
+  language are compared without a key.
+- **Privacy by default.** Prompts, responses, and tool payloads are recursively
+  redacted before storage. Set `capture_content=False` for metadata only.
+
+With your own provider key you can also score responses with an LLM judge and
+monitor PASS/FAIL quality drift. Semantic intent clustering is available as an
+experimental option.
+
+## What it does not do
+
+- It is not a better judge than the model you point it at. Validate a judge on
+  your own labeled data before trusting quality alerts.
+- Redaction is best-effort pattern matching, not a compliance control.
+- It does not infer task success that the source history does not record.
+- It imports OpenTelemetry/OpenInference data but does not emit spans yet.
+
+More detail: [honest limits](#honest-limits--not-in-v0),
+[onboarding](docs/ONBOARDING.md), and the [statistics primer](docs/STATS_PRIMER.md).
+
 ---
 
-## What this is
+## How it works
 
 Verdict imports local Claude Code/Codex histories, normalizes existing telemetry,
 and instruments supported Anthropic, OpenAI, and Google SDK methods. It keeps a
@@ -51,7 +107,7 @@ claims such as tool/command status and loop detection. Semantic correctness,
 groundedness, and task success still require the relevant captured context,
 authoritative outcomes, or a separately validated evaluator.
 
-## Fastest local start
+## Local setup details
 
 ```bash
 python -m pip install cognifity-verdict
@@ -344,12 +400,12 @@ python -m pip install \
   "cognifity-verdict-inspect==0.1.0a23"
 ```
 
-For a customer proof of concept on `0.1.0a23`, follow the bounded
-[`POC release profile`](docs/POC_RELEASE_PROFILE.md). It names the provider
-entry points exercised for this release, keeps persistence synchronous, and
-separates a workflow demonstration from a production-readiness claim.
+For a bounded pilot on `0.1.0a23`, follow the
+[release profile](docs/POC_RELEASE_PROFILE.md). It names the provider entry
+points exercised for this release, keeps persistence synchronous, and separates
+a workflow demonstration from a production-readiness claim.
 
-To let a customer coding agent discover and implement that POC, use the
+To let a coding agent instrument an application, use the
 [`verdict-instrument-app` agent skill](docs/AGENT_POC_SKILL.md). The guide
 includes a cross-agent prompt, approval boundaries, staged acceptance criteria,
 and the current automation limits.
