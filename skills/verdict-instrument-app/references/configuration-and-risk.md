@@ -36,7 +36,7 @@ An approval to add Verdict is not approval to store prompts and responses.
 | Isolated developer trial | absolute-path SQLite | local file durability and concurrency |
 | Shared/multi-instance capture | Postgres | keep the DSN in `VERDICT_STORAGE` and mount the UI behind application auth |
 | Dashboard demonstration | SQLite plus localhost bind | not an outbound alerting service |
-| Production analytics | design separately | public-alpha release is not a production claim |
+| Production analytics | design separately | public-beta release is not a production claim |
 
 ### Jobs, latency, and cost
 

@@ -1,4 +1,4 @@
-# Publishing a synchronized Verdict alpha
+# Publishing a synchronized Verdict release
 
 Verdict publishes `cognifity-verdict`, `cognifity-verdict-eval`, and
 `cognifity-verdict-inspect` from one immutable release tag. The release workflow
