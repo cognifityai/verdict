@@ -10,6 +10,26 @@ export function agentEvidenceValue(dataHealth = {}, value) {
 
 const OUTCOME_NOT_REPORTED = "Not reported by source";
 
+// Turn-level list-price estimate for local agent history. It is a list price
+// computed from token counts and public per-token rates, not a bill:
+// subscription usage is not charged this way. Snapshots from earlier releases
+// have no estimate at all.
+export function agentTurnListPriceValue(performance = {}) {
+  if (!("agentTurnListPriceUsd" in performance)) return "Not available";
+  const priced = Number(performance.agentTurnsPriced) || 0;
+  const unpriced = Number(performance.agentTurnsUnpriced) || 0;
+  if (performance.agentTurnListPriceUsd == null || priced === 0) {
+    return unpriced > 0 ? "Not priced — model or token basis unknown" : "Not available";
+  }
+  const total = priced + unpriced;
+  return `$${Number(performance.agentTurnListPriceUsd).toFixed(2)} list price · ${priced} of ${total} turns priced`;
+}
+
+export function sourceListPriceValue(activity = {}) {
+  if (activity.listPriceUsd == null) return "—";
+  return `$${Number(activity.listPriceUsd).toFixed(2)} (${activity.pricedTurns}/${activity.turns} turns)`;
+}
+
 // A zero failure count only means "no failures" when the source reported at
 // least one outcome for that event type. Snapshots written before outcome
 // counts existed carry no count and keep their stored value.

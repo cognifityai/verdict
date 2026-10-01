@@ -1339,7 +1339,7 @@ def test_incompatible_persisted_insights_are_not_served_as_current(tmp_path):
     assert insights_response.status_code == 200
     assert data_response.status_code == 200
     assert result["analysisState"]["status"] == "never_run"
-    assert result["analysisState"]["analyzerVersion"] == "agent-insights-v2"
+    assert result["analysisState"]["analyzerVersion"] == "agent-insights-v3"
     assert result["schema"] == "agent-insights-v2"
     assert "comparisons" not in result
     assert data_response.json()["coverage"]["deterministicAnalysis"] == {
@@ -1587,3 +1587,43 @@ def test_agent_runs_api_is_tenant_scoped_and_bounded(tmp_path):
     valid, invalid = asyncio.run(request_runs())
     assert [run["runId"] for run in valid.json()["runs"]] == ["r-a"]
     assert invalid.status_code == 422
+
+
+def test_snapshot_from_the_previous_analyzer_version_is_recomputed_on_unchanged_data(tmp_path):
+    """Adding result fields bumps the analyzer version so "run again" cannot
+    return a snapshot that lacks them, even when the evidence is unchanged."""
+    import verdict.dashboard.analysis_service as analysis_service
+
+    storage_url = f"sqlite:///{tmp_path / 'same-data.db'}"
+    storage = SQLiteStorage(str(tmp_path / "same-data.db"))
+    now = datetime(2026, 9, 1, tzinfo=timezone.utc)
+    tenant = "__verdict_local__"
+    unchanged_fingerprint = "b" * 64
+    storage.save_deterministic_analysis_run(DeterministicAnalysisRun(
+        analysis_id="a" * 64,
+        tenant_id=tenant,
+        scope_key="agent-and-trace",
+        cutoff=now,
+        completed_at=now,
+        status=AnalysisRunStatus.COMPLETED,
+        analyzer_version="agent-insights-v2",
+        input_fingerprint=unchanged_fingerprint,
+        result={"schema": "agent-insights-v2", "performance": {}},
+    ))
+    storage.close()
+    builds = []
+
+    def build():
+        builds.append(1)
+        return {
+            "schema": "agent-insights-v2",
+            "performance": {"agentTurnListPriceUsd": 0.5},
+            "_analysisInputFingerprint": unchanged_fingerprint,
+        }
+
+    result = analysis_service.run_analysis(storage_url, tenant=tenant, build=build)
+
+    assert builds == [1]
+    assert result["analysisState"]["status"] == "completed"
+    assert result["analysisState"]["analyzerVersion"] == "agent-insights-v3"
+    assert result["performance"]["agentTurnListPriceUsd"] == 0.5

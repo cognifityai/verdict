@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { AlertTriangle, CheckCircle2, RefreshCw } from "lucide-react";
-import { agentEvidenceValue, datasetActivitySummary, datasetEvidenceRows, failureCountValue, sourceTokenValue } from "./insights-data.mjs";
+import { agentEvidenceValue, agentTurnListPriceValue, datasetActivitySummary, datasetEvidenceRows, failureCountValue, sourceListPriceValue, sourceTokenValue } from "./insights-data.mjs";
 
 const C = { panel: "#111715", border: "#26332e", sub: "#94a39d", faint: "#68766f", green: "#4ee1aa", amber: "#f2b84b", red: "#ff6b6b" };
 
@@ -58,6 +58,7 @@ export function Insights({ url, onOpenRuns, mode = "findings" }) {
     ["Model calls", data.performance.modelCalls], ["Input tokens", data.performance.inputTokens ?? "Not captured"],
     ["Output tokens", data.performance.outputTokens ?? "Not captured"], ["Average latency", data.performance.averageModelLatencyMs == null ? "Not captured" : `${data.performance.averageModelLatencyMs} ms`],
     ["Known latency calls", data.performance.latencyKnownCalls], ["Cost", data.performance.costUsd == null ? "Not captured" : `$${data.performance.costUsd}`],
+    ["Estimated list price (agent turns)", agentTurnListPriceValue(data.performance)],
   ]} comparisons={data.modelComparisons} />;
   if (mode === "behavior") return <ProductView title="Behavior" intro="Transparent structural response indicators. These are signatures, not semantic quality judgments." rows={[
     ["Captured responses", data.behavior.capturedResponses], ["Average response characters", data.behavior.averageResponseCharacters ?? "Not captured"],
@@ -102,6 +103,7 @@ export function Insights({ url, onOpenRuns, mode = "findings" }) {
         ["Trace input tokens", data.performance.inputTokens ?? "Not captured"], ["Trace output tokens", data.performance.outputTokens ?? "Not captured"],
         ["Average model latency", data.performance.averageModelLatencyMs == null ? "Not captured" : `${data.performance.averageModelLatencyMs} ms`],
         ["Cost", data.performance.costState === "not_captured" ? "Not captured" : data.performance.costUsd],
+        ["Estimated list price (agent turns)", agentEvidenceValue(data.dataHealth, agentTurnListPriceValue(data.performance))],
       ]} />
       <Section title="Evidence health" rows={[
         ...datasetEvidenceRows(data.dataHealth, data.scope),
@@ -112,8 +114,8 @@ export function Insights({ url, onOpenRuns, mode = "findings" }) {
     <section className="border p-5" style={{ borderColor: C.border, background: C.panel }}>
       <h2 className="font-semibold">Source evidence coverage and activity</h2>
       <p className="text-sm mt-2" style={{ color: C.sub }}>Observed activity is not a task-quality ranking. Provider-call latency, price, judging, and model comparisons use genuine LLM Traces above.</p>
-      <div className="overflow-x-auto mt-3"><table className="w-full text-sm"><thead><tr style={{ color: C.faint }}><th className="text-left p-2">Source</th><th className="text-right p-2">Runs / children</th><th className="text-right p-2">Turns / final responses</th><th className="text-right p-2">Tool calls</th><th className="text-right p-2">Tool / command / test failures</th><th className="text-right p-2">Source-reported tokens</th><th className="text-right p-2">Token coverage</th><th className="text-right p-2">Run outcomes</th></tr></thead><tbody>{(data.sourceActivity || []).map((row) => <tr key={row.source} className="border-t" style={{ borderColor: C.border }}><td className="p-2">{row.source}</td><td className="text-right p-2">{row.runs} / {row.childRuns}</td><td className="text-right p-2">{row.turns} / {row.finalResponses}{row.truncatedResponses ? ` (${row.truncatedResponses} previews)` : ""}</td><td className="text-right p-2">{row.toolCalls}</td><td className="text-right p-2">{failureCountValue(row.toolErrors, row.toolOutcomesReported, "—")} / {failureCountValue(row.commandFailures, row.commandOutcomesReported, "—")} / {failureCountValue(row.testFailures, row.testOutcomesReported, "—")}</td><td className="text-right p-2">{sourceTokenValue(row)}</td><td className="text-right p-2">{row.tokenUsageTurns}/{row.turns} turns</td><td className="text-right p-2">{displayCounts(row.runOutcomes)}</td></tr>)}</tbody></table></div>
-      <p className="text-xs mt-2" style={{ color: C.faint }}>— means the source does not report success or failure for that event type, so no failure count is shown.</p>
+      <div className="overflow-x-auto mt-3"><table className="w-full text-sm"><thead><tr style={{ color: C.faint }}><th className="text-left p-2">Source</th><th className="text-right p-2">Runs / children</th><th className="text-right p-2">Turns / final responses</th><th className="text-right p-2">Tool calls</th><th className="text-right p-2">Tool / command / test failures</th><th className="text-right p-2">Source-reported tokens</th><th className="text-right p-2">Est. list price</th><th className="text-right p-2">Token coverage</th><th className="text-right p-2">Run outcomes</th></tr></thead><tbody>{(data.sourceActivity || []).map((row) => <tr key={row.source} className="border-t" style={{ borderColor: C.border }}><td className="p-2">{row.source}</td><td className="text-right p-2">{row.runs} / {row.childRuns}</td><td className="text-right p-2">{row.turns} / {row.finalResponses}{row.truncatedResponses ? ` (${row.truncatedResponses} previews)` : ""}</td><td className="text-right p-2">{row.toolCalls}</td><td className="text-right p-2">{failureCountValue(row.toolErrors, row.toolOutcomesReported, "—")} / {failureCountValue(row.commandFailures, row.commandOutcomesReported, "—")} / {failureCountValue(row.testFailures, row.testOutcomesReported, "—")}</td><td className="text-right p-2">{sourceTokenValue(row)}</td><td className="text-right p-2">{sourceListPriceValue(row)}</td><td className="text-right p-2">{row.tokenUsageTurns}/{row.turns} turns</td><td className="text-right p-2">{displayCounts(row.runOutcomes)}</td></tr>)}</tbody></table></div>
+      <p className="text-xs mt-2" style={{ color: C.faint }}>— means the source does not report success or failure for that event type, so no failure count is shown. The list price is an estimate from token counts and public per-token rates, not a bill.</p>
     </section>
   </div>;
 }

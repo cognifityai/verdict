@@ -3,9 +3,11 @@ import test from "node:test";
 
 import {
   agentEvidenceValue,
+  agentTurnListPriceValue,
   datasetActivitySummary,
   datasetEvidenceRows,
   failureCountValue,
+  sourceListPriceValue,
   sourceTokenValue,
 } from "../insights-data.mjs";
 
@@ -85,4 +87,15 @@ test("a zero failure count needs at least one reported outcome", () => {
   // Snapshots written before outcome counts existed keep their stored value.
   assert.equal(failureCountValue(0, undefined), 0);
   assert.equal(failureCountValue(4, null), 4);
+});
+
+test("the agent-turn list price says what it is and how much it covers", () => {
+  assert.equal(agentTurnListPriceValue({}), "Not available");
+  assert.equal(agentTurnListPriceValue({ agentTurnListPriceUsd: null, agentTurnsPriced: 0, agentTurnsUnpriced: 0 }), "Not available");
+  assert.equal(agentTurnListPriceValue({ agentTurnListPriceUsd: null, agentTurnsPriced: 0, agentTurnsUnpriced: 7 }),
+    "Not priced — model or token basis unknown");
+  assert.equal(agentTurnListPriceValue({ agentTurnListPriceUsd: 12.3456, agentTurnsPriced: 40, agentTurnsUnpriced: 2 }),
+    "$12.35 list price · 40 of 42 turns priced");
+  assert.equal(sourceListPriceValue({ listPriceUsd: null, pricedTurns: 0, turns: 3 }), "—");
+  assert.equal(sourceListPriceValue({ listPriceUsd: 0.5, pricedTurns: 2, turns: 3 }), "$0.50 (2/3 turns)");
 });

@@ -20,8 +20,8 @@ from datetime import date
 
 log = logging.getLogger("verdict.pricing")
 
-# This is deliberately visible to callers and tests. Static pricing without an
-# audit date looks authoritative long after it has become stale.
+# This is the last full-table audit date. Newly added model entries carry their
+# own check date below; do not advance this date after checking only one family.
 PRICING_LAST_VERIFIED = date(2026, 9, 5)
 PRICING_REVIEW_AFTER = date(2026, 11, 15)
 PRICING_SOURCE_URLS = (
@@ -43,6 +43,7 @@ PRICE_PER_1K: dict[str, tuple[float, float]] = {
     # Anthropic (USD per 1K tokens)
     "claude-fable-5": (0.010, 0.050),
     "claude-mythos-5": (0.010, 0.050),
+    "claude-opus-5-5": (0.004, 0.020),
     "claude-opus-5": (0.005, 0.025),
     "claude-sonnet-5": (0.002, 0.010),
     "claude-opus-4-8": (0.005, 0.025),
@@ -60,6 +61,12 @@ PRICE_PER_1K: dict[str, tuple[float, float]] = {
     "claude-3-haiku": (0.00025, 0.00125),
     "claude-3-sonnet": (0.003, 0.015),
     # OpenAI (USD per 1K tokens)
+    # GPT-6 standard short-context text rates checked 2026-10-01 against the
+    # official model pricing pages. Long context and service tiers are excluded.
+    "gpt-6-astra": (0.010, 0.050),
+    "gpt-6.1-sol": (0.002, 0.010),
+    "gpt-6-sol": (0.002, 0.010),
+    "gpt-6-luna": (0.0001, 0.0005),
     "gpt-5.6-sol": (0.004, 0.020),
     "gpt-5.6-terra": (0.002, 0.012),
     "gpt-5.6-luna": (0.0002, 0.0012),
@@ -174,5 +181,103 @@ def compute_cost_usd(
         out_tok = output_tokens or 0
         cost = (in_tok / 1000.0) * in_rate + (out_tok / 1000.0) * out_rate
         return float(cost)
+    except Exception:
+        return None
+
+
+# Cached-token rates relative to a model's base input rate, from provider
+# pricing pages. Newer model entries were checked after the full-table audit.
+# Anthropic bills cache reads at 10% of input and five-minute writes at 125%.
+# OpenAI's cached-input discount depends on the family; the prefixes below are
+# matched in order and an unlisted family uses 0.5, the least generous listed
+# discount, so an unknown family is never under-priced.
+# Anthropic cache reads are 10% of input except on the models listed here;
+# cache writes are the five-minute rate. One-hour cache writes cost 2x input,
+# but the normalized turn fields do not record which duration was used, so the
+# estimate assumes five-minute writes.
+_ANTHROPIC_CACHE_READ = 0.1
+_ANTHROPIC_CACHE_READ_BY_MODEL: tuple[tuple[str, float], ...] = (
+    ("claude-fable-5-1", 0.025),
+    ("claude-mythos-5-1", 0.025),
+    ("claude-opus-5-5", 0.05),
+)
+_ANTHROPIC_CACHE_WRITE = 1.25
+_OPENAI_CACHE_READ_BY_FAMILY: tuple[tuple[str, float], ...] = (
+    ("gpt-6.1-sol", 0.05),
+    ("gpt-5", 0.1),
+    ("gpt-6", 0.1),
+    ("gpt-4.1", 0.25),
+    ("o3", 0.25),
+    ("o4", 0.25),
+    ("gpt-4o", 0.5),
+    ("o1", 0.5),
+)
+_OPENAI_CACHE_READ_DEFAULT = 0.5
+
+
+def _provider_of(model: str) -> str | None:
+    name = model.lower().rsplit("/", 1)[-1]
+    if name.startswith("claude"):
+        return "anthropic"
+    if name.startswith(("gpt", "o1", "o3", "o4", "chatgpt")):
+        return "openai"
+    return None
+
+
+def _cache_read_multiplier(provider: str, model: str) -> float:
+    name = model.lower().rsplit("/", 1)[-1]
+    if provider == "anthropic":
+        for family, multiplier in _ANTHROPIC_CACHE_READ_BY_MODEL:
+            if name == family or name.startswith(family + "-"):
+                return multiplier
+        return _ANTHROPIC_CACHE_READ
+    for family, multiplier in _OPENAI_CACHE_READ_BY_FAMILY:
+        if name == family or name.startswith((family + "-", family + ".")):
+            return multiplier
+    return _OPENAI_CACHE_READ_DEFAULT
+
+
+def estimate_turn_cost_usd(
+    model: str,
+    *,
+    input_tokens: int | None,
+    cached_input_tokens: int | None,
+    cache_write_input_tokens: int | None,
+    output_tokens: int | None,
+    input_includes_cached: bool,
+) -> float | None:
+    """Estimate the list price of one agent turn from its token components.
+
+    ``input_includes_cached`` states the source's convention: OpenAI-style
+    counts include cached tokens in ``input_tokens`` (Codex), Anthropic-style
+    counts exclude them (Claude Code). Output tokens are priced at the output
+    rate, which already covers reasoning tokens for both providers. Returns
+    ``None`` when the model has no static price, the provider's cache rates are
+    unknown, or the counts are inconsistent; never raises.
+    """
+    try:
+        provider = _provider_of(model)
+        if provider is None:
+            return None
+        counts = [
+            0 if value is None else int(value)
+            for value in (input_tokens, cached_input_tokens, cache_write_input_tokens, output_tokens)
+        ]
+        if any(value < 0 for value in counts):
+            return None
+        input_count, cached, cache_write, output = counts
+        uncached = input_count - cached if input_includes_cached else input_count
+        if uncached < 0:
+            return None
+        base = compute_cost_usd(model, uncached, output)
+        if base is None:
+            return None
+        cached_cost = compute_cost_usd(model, cached, 0) or 0.0
+        write_cost = compute_cost_usd(model, cache_write, 0) or 0.0
+        return float(
+            base
+            + cached_cost * _cache_read_multiplier(provider, model)
+            + write_cost * (_ANTHROPIC_CACHE_WRITE if provider == "anthropic" else 1.0)
+        )
     except Exception:
         return None

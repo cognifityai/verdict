@@ -2319,3 +2319,129 @@ def test_failure_counts_state_whether_the_source_reported_any_outcome(tmp_path: 
     assert unreported["toolErrors"] == 0
     assert unreported["toolOutcomesReported"] == 0
     assert unreported_totals["toolOutcomesReported"] == 0
+
+
+@pytest.mark.parametrize(
+    ("codex_model", "cached_rate"),
+    [
+        ("gpt-5.4", 0.1),
+        ("gpt-6-astra", 0.1),
+        ("gpt-6-sol", 0.1),
+        ("gpt-6.1-sol", 0.05),
+        ("gpt-6-luna", 0.1),
+    ],
+)
+def test_agent_turns_carry_an_estimated_list_price_per_source(
+    tmp_path: Path, codex_model: str, cached_rate: float,
+) -> None:
+    from verdict.dashboard.app import build_agent_insights_bundle
+    from verdict.pricing import PRICE_PER_1K
+
+    claude_root = tmp_path / "claude"
+    _write_jsonl(claude_root / "session.jsonl", _claude_records())
+    codex_root = tmp_path / "codex"
+    codex_records = _codex_records()
+    for record in codex_records:
+        if record.get("type") == "turn_context":
+            record["payload"]["model"] = codex_model
+    _write_jsonl(codex_root / "session.jsonl", codex_records)
+    database = tmp_path / "verdict.db"
+    storage = SQLiteStorage(str(database))
+    assert capture_local_agents(
+        storage, tenant_id="local", claude_root=claude_root, codex_root=codex_root,
+    ).skipped == 0
+    bundles = {bundle.session.source_kind: bundle for bundle in storage.list_agent_run_bundles("local")}
+    storage.close()
+
+    # Claude Code: input excludes cache reads/writes, priced at 10% / 125% of input.
+    [claude_turn] = bundles["claude-code"].turns
+    in_rate, out_rate = PRICE_PER_1K["claude-sonnet-4-5"]
+    claude_expected = (
+        claude_turn.input_tokens * in_rate
+        + claude_turn.cached_input_tokens * in_rate * 0.1
+        + claude_turn.cache_write_input_tokens * in_rate * 1.25
+        + claude_turn.output_tokens * out_rate
+    ) / 1000
+    # Codex: input already includes cached tokens; the rate depends on model.
+    codex_turns = bundles["codex"].turns
+    in_rate, out_rate = PRICE_PER_1K[codex_model]
+    codex_expected = sum(
+        ((turn.input_tokens - (turn.cached_input_tokens or 0)) * in_rate
+         + (turn.cached_input_tokens or 0) * in_rate * cached_rate
+         + turn.output_tokens * out_rate) / 1000
+        for turn in codex_turns if turn.input_tokens is not None
+    )
+    assert claude_expected > 0 and codex_expected > 0
+
+    insights = build_agent_insights_bundle(database, tenant="local")
+    by_source = {row["source"]: row for row in insights["sourceActivity"]}
+    assert by_source["claude-code"]["pricedTurns"] == 1
+    assert by_source["claude-code"]["listPriceUsd"] == pytest.approx(claude_expected, abs=1e-6)
+    assert by_source["codex"]["pricedTurns"] == sum(
+        1 for turn in codex_turns if turn.input_tokens is not None
+    )
+    assert by_source["codex"]["listPriceUsd"] == pytest.approx(codex_expected, abs=1e-6)
+    performance = insights["performance"]
+    assert performance["agentTurnListPriceUsd"] == pytest.approx(
+        claude_expected + codex_expected, abs=1e-6
+    )
+    assert performance["agentTurnsPriced"] == 1 + by_source["codex"]["pricedTurns"]
+    assert performance["agentTurnsPriced"] + performance["agentTurnsUnpriced"] == (
+        len(codex_turns) + 1
+    )
+
+
+def test_turns_without_one_named_model_or_a_known_token_basis_are_not_priced(
+    tmp_path: Path,
+) -> None:
+    from verdict.dashboard.app import build_agent_insights_bundle
+
+    root = tmp_path / "claude"
+    records = _claude_records()
+    for record in records:
+        if record.get("type") == "assistant":
+            record["message"]["model"] = "model-with-no-price"
+    _write_jsonl(root / "session.jsonl", records)
+    database = tmp_path / "verdict.db"
+    storage = SQLiteStorage(str(database))
+    capture_local_agents(storage, tenant_id="local", claude_root=root)
+    storage.close()
+
+    insights = build_agent_insights_bundle(database, tenant="local")
+    [row] = insights["sourceActivity"]
+    assert row["listPriceUsd"] is None and row["pricedTurns"] == 0
+    assert insights["performance"]["agentTurnListPriceUsd"] is None
+    assert insights["performance"]["agentTurnsUnpriced"] == 1
+
+
+def test_only_turns_with_exactly_one_real_model_are_priced(tmp_path: Path) -> None:
+    from verdict.dashboard.app import build_agent_insights_bundle
+
+    def insights_for(name: str, mutate) -> dict:
+        root = tmp_path / name
+        records = _claude_records()
+        mutate(records)
+        _write_jsonl(root / "session.jsonl", records)
+        database = tmp_path / f"{name}.db"
+        storage = SQLiteStorage(str(database))
+        capture_local_agents(storage, tenant_id="local", claude_root=root)
+        storage.close()
+        return build_agent_insights_bundle(database, tenant="local")["performance"]
+
+    def second_model(records):
+        records[1]["message"]["model"] = "claude-haiku-4-5"
+
+    def client_notice(records):
+        notice = json.loads(json.dumps(records[1]))
+        notice["uuid"] = "assistant-notice"
+        notice["message"] = {
+            "id": "msg-notice", "model": "<synthetic>", "stop_reason": "stop_sequence",
+            "usage": {"input_tokens": 0, "output_tokens": 0},
+            "content": [{"type": "text", "text": "You've hit your session limit"}],
+        }
+        records.append(notice)
+
+    mixed = insights_for("mixed", second_model)
+    assert mixed["agentTurnsPriced"] == 0 and mixed["agentTurnsUnpriced"] == 1
+    with_notice = insights_for("notice", client_notice)
+    assert with_notice["agentTurnsPriced"] == 1 and with_notice["agentTurnListPriceUsd"] > 0

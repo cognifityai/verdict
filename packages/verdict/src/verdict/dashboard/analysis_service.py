@@ -15,7 +15,7 @@ from verdict.analysis_records import (
 )
 from verdict.dashboard.storage_url import is_postgres_storage
 
-ANALYZER_VERSION = "agent-insights-v2"
+ANALYZER_VERSION = "agent-insights-v3"
 SCOPE_KEY = "agent-and-trace"
 
 
