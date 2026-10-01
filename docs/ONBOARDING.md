@@ -463,7 +463,10 @@ The same import also stores one current, redacted text-only conversation
 snapshot. Malformed or truncated snapshots are labeled incomplete. Source end
 time governs retention when present; otherwise the first import time does.
 The snapshot is capped at 512,000 stored bytes; longer transcripts keep an
-incomplete prefix and the reply Trace mapping continues.
+incomplete prefix and the reply Trace mapping continues. A snapshot or Trace
+that the storage adapter rejects is reported as `conversation_rejected` or
+`trace_rejected` and the import moves on to the next record; only a source or
+storage failure stops the run.
 Use the storage API's tenant-scoped `list_conversations` cursor to review these
 records. In **Evaluate → Evaluator Lab**, select **Conversation or reply** to
 upload a JSON rubric and preview a bounded page. The reviewer sees excluded

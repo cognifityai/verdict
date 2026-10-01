@@ -5,6 +5,18 @@ Redaction uses built-in pattern matching, a linear ``@``-anchored email scanner,
 Luhn card checks, and standard-library IP validation; it needs no extra
 dependencies. A deeper
 Presidio-based pass is a possible future addition but is NOT currently wired in.
+
+Redaction is idempotent: ``redact(redact(x)) == redact(x)`` for every input
+and mode. Storage adapters sanitize every record again before persistence and
+conversation snapshots carry a digest of their redacted content, so a scan
+whose output changes under re-application would either alter stored evidence
+or reject the record. ``redact`` therefore returns a fixed point of the single
+scan. For the variable-length digit patterns (phone, card, IPv6 candidates) a
+placeholder is opaque: text beside it was classified by the scan that produced
+it, so a placeholder edge does not let a greedy digit run re-partition itself
+into one more match per scan. Every other pattern treats a placeholder edge
+as the boundary it replaced, so a credential or address glued to a
+placeholder is still removed.
 """
 
 from __future__ import annotations
@@ -18,6 +30,7 @@ import json
 import math
 import re
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -32,6 +45,18 @@ _MAX_NESTING_DEPTH = 64
 _MAX_STRUCTURE_NODES = 10_000
 _MAX_STRUCTURE_CHARACTERS = 1_000_000
 _MAX_ERROR_BYTES = 10_000
+
+# ``redact`` repeats the single scan until the text stops changing. Text
+# without sensitive content costs one scan; text with a replacement costs one
+# confirming scan more. Known mechanisms converge within three scans (see
+# tests/test_redaction_idempotence.py); a text that is still changing at the
+# cap fails closed instead of persisting a value that a later scan would
+# change again.
+_MAX_REDACTION_PASSES = 8
+# Stands in for the placeholder when a candidate match touches a placeholder
+# edge. Any ASCII word character works: the probe only asks whether the
+# pattern still matches once the placeholder is treated as opaque content.
+_PLACEHOLDER_EDGE_SENTINEL = "x"
 
 # Longest textual IPv6 address:
 # ``ffff:ffff:ffff:ffff:ffff:ffff:255.255.255.255``. Bounding each candidate
@@ -230,7 +255,10 @@ _PATTERNS = {
     # irreversibly clobbered order IDs, tracking numbers, etc.). A candidate is
     # only redacted if it passes the Luhn checksum AND has a valid card length;
     # see _redact_credit_card / _luhn_ok.
-    "CREDIT_CARD": re.compile(r"\b(?:\d[ -]?){13,19}\b"),
+    # The candidate ends on a digit so the placeholder never swallows the
+    # separator after a card; the address or token that follows keeps its
+    # boundary and is scanned normally.
+    "CREDIT_CARD": re.compile(r"\b(?:\d[ -]?){12,18}\d\b"),
     # Candidate matcher only. Colons also occur in clocks and other structured
     # values and namespace separators. Match a whole token (including an IPv4
     # tail or scope ID) and validate it with ipaddress.IPv6Address below. The
@@ -543,15 +571,114 @@ def _redact_secret_assignments(
     return "".join(output)
 
 
-def _sub_outside_placeholders(text: str, pattern: re.Pattern[str], replacement) -> str:
+# Patterns whose candidates are variable-length digit runs. Beside a
+# placeholder their greedy groups can re-partition into one more match per
+# scan (a grouped digit table losing one "phone number" per scan, a hex
+# fingerprint yielding one more "IPv6 address" per scan) until the fail-closed
+# cap destroys the message. For these, and only these, a placeholder edge is
+# opaque. Fixed-prefix credentials and fixed-length addresses cannot creep, so
+# they keep the boundary the placeholder replaced and a value glued to a
+# placeholder is still removed.
+_OPAQUE_EDGE_LABELS = frozenset({"PHONE", "CREDIT_CARD", "IPV6"})
+
+
+def _sub_outside_placeholders(
+    text: str,
+    pattern: re.Pattern[str],
+    replacement: str | Callable[[re.Match[str]], str],
+    *,
+    opaque_edges: bool = False,
+) -> str:
+    """Apply ``pattern`` to the text between placeholders.
+
+    With ``opaque_edges`` a candidate that touches a placeholder edge is kept
+    only if the pattern still matches the same span with a word character
+    standing in for the placeholder; a rejected candidate is skipped whole,
+    exactly as ``re.sub`` skips a candidate its callback declined. Without it,
+    the placeholder edge is an ordinary boundary.
+    """
     output: list[str] = []
     cursor = 0
     for placeholder in _PLACEHOLDER.finditer(text):
-        output.append(pattern.sub(replacement, text[cursor:placeholder.start()]))
+        output.append(
+            _scan_segment(
+                text[cursor : placeholder.start()],
+                pattern,
+                replacement,
+                after_placeholder=opaque_edges and cursor > 0,
+                before_placeholder=opaque_edges,
+            )
+        )
         output.append(placeholder.group(0))
         cursor = placeholder.end()
-    output.append(pattern.sub(replacement, text[cursor:]))
+    output.append(
+        _scan_segment(
+            text[cursor:],
+            pattern,
+            replacement,
+            after_placeholder=opaque_edges and cursor > 0,
+            before_placeholder=False,
+        )
+    )
     return "".join(output)
+
+
+def _scan_segment(
+    segment: str,
+    pattern: re.Pattern[str],
+    replacement: str | Callable[[re.Match[str]], str],
+    *,
+    after_placeholder: bool,
+    before_placeholder: bool,
+) -> str:
+    if not segment:
+        return segment
+    output: list[str] = []
+    output_cursor = 0
+    position = 0
+    while True:
+        match = pattern.search(segment, position)
+        if match is None:
+            break
+        start, end = match.span()
+        if end == start:
+            position = start + 1
+            continue
+        touches_left = after_placeholder and start == 0
+        touches_right = before_placeholder and end == len(segment)
+        if (touches_left or touches_right) and not _survives_placeholder_edge(
+            segment, pattern, match, touches_left, touches_right
+        ):
+            position = end
+            continue
+        output.append(segment[output_cursor:start])
+        output.append(replacement if isinstance(replacement, str) else replacement(match))
+        output_cursor = end
+        position = end
+    if not output:
+        return segment
+    output.append(segment[output_cursor:])
+    return "".join(output)
+
+
+def _survives_placeholder_edge(
+    segment: str,
+    pattern: re.Pattern[str],
+    match: re.Match[str],
+    touches_left: bool,
+    touches_right: bool,
+) -> bool:
+    """Return whether the match still covers its span with the placeholder opaque.
+
+    A probe match that runs past the original end only shows that the pattern
+    has no assertion on that side, so the original span stands. A probe that
+    fails, or backtracks to a shorter span, relied on the placeholder edge.
+    """
+    sentinel = _PLACEHOLDER_EDGE_SENTINEL
+    probe = (sentinel if touches_left else "") + segment + (sentinel if touches_right else "")
+    offset = 1 if touches_left else 0
+    probe_match = pattern.match(probe, match.start() + offset)
+    return probe_match is not None and probe_match.end() - offset >= match.end()
 
 
 def _basic_auth_repl(
@@ -656,7 +783,10 @@ def redact(
         secret: HMAC secret (required for hash mode).
 
     Returns:
-        Redacted string, or None if input was None.
+        Redacted string, or None if input was None. The result is a fixed
+        point: redacting it again returns it unchanged. Text that is still
+        changing after ``_MAX_REDACTION_PASSES`` scans fails closed to
+        ``<REDACTED>``.
     """
     if text is None:
         return None
@@ -667,6 +797,17 @@ def redact(
     if mode == "hash" and not secret:
         raise ValueError("hash mode requires a redaction_secret")
 
+    current = text
+    for _ in range(_MAX_REDACTION_PASSES):
+        following = _redact_once(current, mode, secret)
+        if following == current:
+            return current
+        current = following
+    return _REDACTED
+
+
+def _redact_once(text: str, mode: RedactionMode, secret: str | None) -> str:
+    """Run every scanner once, left to right, in fixed order."""
     # Email discovery is first for classification stability in URL contexts.
     out = _redact_emails(text, mode, secret)
     out = _redact_secret_assignments(out, mode, secret)
@@ -677,6 +818,7 @@ def redact(
                 out,
                 pat,
                 lambda m, lbl=label: _credit_card_repl(m.group(0), lbl, mode, secret),
+                opaque_edges=True,
             )
         elif label == "IPV6":
             # A colon is required by every IPv6 spelling.  Avoid entering the
@@ -695,6 +837,7 @@ def redact(
                     secret,
                     following=m.string[m.end() : m.end() + 1],
                 ),
+                opaque_edges=True,
             )
         elif label == "BASIC_AUTH":
             out = _sub_outside_placeholders(
@@ -707,9 +850,12 @@ def redact(
                 out,
                 pat,
                 lambda m, lbl=label: _hash_match(m.group(0), lbl, secret),
+                opaque_edges=label in _OPAQUE_EDGE_LABELS,
             )
         else:  # redact
-            out = _sub_outside_placeholders(out, pat, f"<{label}>")
+            out = _sub_outside_placeholders(
+                out, pat, f"<{label}>", opaque_edges=label in _OPAQUE_EDGE_LABELS,
+            )
     return out
 
 
@@ -1074,7 +1220,13 @@ def _analyze_structure(
 def _mapping_from_redacted_entries(
     entries: list[tuple[str, str, Any]],
 ) -> dict[str, Any]:
-    """Build a deterministic mapping without dropping colliding redacted keys."""
+    """Build a deterministic mapping without dropping colliding redacted keys.
+
+    Collision suffixes are assigned in ``(sanitized, original)`` order, but the
+    mapping is emitted in final-key order so that sanitizing the result again
+    (where ``<EMAIL>#10`` sorts before ``<EMAIL>#2``) yields the same
+    serialization.
+    """
     counts = Counter(sanitized for sanitized, _original, _value in entries)
     result: dict[str, Any] = {}
     used: set[str] = set()
@@ -1089,7 +1241,7 @@ def _mapping_from_redacted_entries(
                 candidate = f"{sanitized}#{suffix}"
         used.add(candidate)
         result[candidate] = child
-    return result
+    return dict(sorted(result.items()))
 
 
 def sanitize_trace(

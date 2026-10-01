@@ -115,8 +115,12 @@ For Verdict, the matrix must include these cases whenever the subsystem changes:
 
 - **Redaction:** alternate valid representations and token boundaries (including
   mapped/scoped IP forms), key-collision/cardinality behavior, insertion-order
-  determinism, cycles/shared graphs, and serialized/storage size budgets. Run
-  canaries through the final storage, API/export, and browser-visible boundary.
+  determinism, cycles/shared graphs, and serialized/storage size budgets. Every
+  sanitizer must be a fixed point (`redact(redact(x)) == redact(x)`): storage
+  adapters re-apply it and conversation snapshots digest its output, so test
+  re-application over digit runs, glued tokens, and literal placeholders beside
+  every pattern. Run canaries through the final storage, API/export, and
+  browser-visible boundary.
 - **Trace/storage linkage:** explicit context, inherited context, provider
   adoption, nested spans, concurrent tasks/tenants, sampling, synchronous and
   delayed buffered failure, backpressure, late stream completion, and shutdown.
