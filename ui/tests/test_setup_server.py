@@ -42,6 +42,23 @@ def _write_codex_diagnostic(path):
         )
 
 
+async def _capture_and_wait(client, headers, payload, *, timeout_s: float = 30.0):
+    """POST a capture, then poll its status until the job reaches a terminal state."""
+    import time as _time
+
+    started = await client.post("/api/setup/capture", headers=headers, json=payload)
+    if started.status_code != 202:
+        return started, None
+    deadline = _time.monotonic() + timeout_s
+    while _time.monotonic() < deadline:
+        status = await client.get("/api/setup/capture/status")
+        job = status.json()["job"]
+        if job["state"] in {"completed", "failed"}:
+            return started, job
+        await asyncio.sleep(0.02)
+    raise AssertionError("capture job did not finish")
+
+
 def test_setup_preview_then_approved_local_capture(tmp_path):
     codex = tmp_path / "codex" / "sessions"
     claude = tmp_path / "claude"
@@ -60,18 +77,27 @@ def test_setup_preview_then_approved_local_capture(tmp_path):
                 "/api/setup/preview", headers={"X-Verdict-Setup": token},
                 json={"claudeRoot": str(claude), "codexRoot": str(codex)},
             )
-            capture = await client.post(
-                "/api/setup/capture", headers={"X-Verdict-Setup": token},
-                json={"claudeRoot": str(claude), "codexRoot": str(codex)},
+            before = await client.get("/api/setup/capture/status")
+            started, job = await _capture_and_wait(
+                client, {"X-Verdict-Setup": token},
+                {"claudeRoot": str(claude), "codexRoot": str(codex)},
             )
             rejected = await client.post(
                 "/api/setup/capture", headers={"X-Verdict-Setup": "wrong"}, json={},
             )
+            status = await client.get("/api/setup/capture/status")
             dashboard = await client.get("/api/data")
             runs = await client.get("/api/runs?limit=1")
-            return preview, capture, rejected, dashboard, runs
+            return preview, before, started, job, rejected, status, dashboard, runs
 
-    preview, capture, rejected, dashboard, runs = asyncio.run(setup())
+    preview, before, started, job, rejected, status, dashboard, runs = asyncio.run(setup())
+    assert before.json() == {"job": None}
+    assert started.status_code == 202
+    assert started.json()["job"]["state"] in {"running", "analyzing", "completed"}
+    assert job["state"] == "completed" and job["error"] is None
+    assert job["filesDone"] == job["filesTotal"] == 1
+    assert job["finishedAt"] is not None and job["analysis"]["status"] == "completed"
+    capture = status  # the terminal job is readable until the next capture starts
     assert preview.status_code == 200
     assert preview.json()["codex"]["files"] == 1
     assert preview.json()["codex"]["modelCallDiagnostics"] == {
@@ -79,8 +105,8 @@ def test_setup_preview_then_approved_local_capture(tmp_path):
         "exists": True,
     }
     assert capture.status_code == 200
-    assert capture.json()["summary"]["stored"] == 1
-    assert capture.json()["summary"]["codex_model_calls"]["stored"] == 1
+    assert capture.json()["job"]["summary"]["stored"] == 1
+    assert capture.json()["job"]["summary"]["codex_model_calls"]["stored"] == 1
     assert "SECRET_CANARY" not in capture.text
     assert "DIAGNOSTIC_BODY_CANARY" not in capture.text
     assert rejected.status_code == 403
@@ -113,14 +139,14 @@ def test_setup_capture_can_explicitly_disable_content(tmp_path):
                 headers={"X-Verdict-Setup": token},
                 json={"codexRoot": str(codex)},
             )
-            return await client.post(
-                "/api/setup/capture",
-                headers={"X-Verdict-Setup": token},
-                json={"codexRoot": str(codex), "captureContent": False},
+            started, job = await _capture_and_wait(
+                client, {"X-Verdict-Setup": token},
+                {"codexRoot": str(codex), "captureContent": False},
             )
+            return started, job
 
-    response = asyncio.run(setup())
-    assert response.status_code == 200
+    response, job = asyncio.run(setup())
+    assert response.status_code == 202 and job["state"] == "completed"
     [bundle] = SQLiteStorage(str(tmp_path / "verdict.db")).list_agent_run_bundles(
         "__verdict_local__"
     )
@@ -417,3 +443,155 @@ def test_setup_capture_requires_preview_of_the_exact_paths(tmp_path):
     without_preview, changed_path = asyncio.run(request())
     assert without_preview.status_code == 409
     assert changed_path.status_code == 409
+
+
+def test_capture_thread_start_failure_preserves_approval_and_allows_retry(tmp_path, monkeypatch):
+    import threading
+
+    import verdict.dashboard.setup_routes as setup_routes
+
+    codex = tmp_path / "codex"
+    _write_codex(codex / "session.jsonl")
+    real_start = threading.Thread.start
+
+    def cannot_start(self):
+        raise RuntimeError(f"thread failed near {tmp_path}/private")
+
+    async def run():
+        app = create_app(storage=f"sqlite:///{tmp_path / 'verdict.db'}")
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            headers = {"X-Verdict-Setup": token}
+            payload = {"codexRoot": str(codex)}
+            await client.post("/api/setup/preview", headers=headers, json=payload)
+            monkeypatch.setattr(setup_routes.threading.Thread, "start", cannot_start)
+            failed = await client.post("/api/setup/capture", headers=headers, json=payload)
+            status = await client.get("/api/setup/capture/status")
+            monkeypatch.setattr(setup_routes.threading.Thread, "start", real_start)
+            retry, job = await _capture_and_wait(client, headers, payload)
+            return failed, status, retry, job
+
+    failed, status, retry, job = asyncio.run(run())
+    assert failed.status_code == 503
+    assert "private" not in failed.text and str(tmp_path) not in failed.text
+    assert status.json()["job"] is None
+    assert retry.status_code == 202
+    assert job["state"] == "completed"
+
+
+def test_capture_status_reports_progress_failure_and_single_flight(tmp_path, monkeypatch):
+    import threading
+
+    import verdict.dashboard.setup_routes as setup_routes
+
+    codex = tmp_path / "codex" / "sessions"
+    _write_codex(codex / "session.jsonl")
+    database = tmp_path / "verdict.db"
+    release = threading.Event()
+    seen_progress: list[tuple[int, int]] = []
+    real_capture = setup_routes.capture_local_agents
+
+    def slow_capture(storage, **kwargs):
+        progress = kwargs.get("progress")
+
+        def record(done, total):
+            seen_progress.append((done, total))
+            progress(done, total)
+
+        release.wait(timeout=10)
+        return real_capture(storage, **{**kwargs, "progress": record})
+
+    monkeypatch.setattr(setup_routes, "capture_local_agents", slow_capture)
+
+    async def run():
+        app = create_app(storage=f"sqlite:///{database}")
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            headers = {"X-Verdict-Setup": token}
+            await client.post("/api/setup/preview", headers=headers, json={"codexRoot": str(codex)})
+            first = await client.post("/api/setup/capture", headers=headers, json={"codexRoot": str(codex)})
+            running = await client.get("/api/setup/capture/status")
+            # A second start while the job runs is refused, and so is a start
+            # after a fresh preview, because one capture runs at a time.
+            await client.post("/api/setup/preview", headers=headers, json={"codexRoot": str(codex)})
+            second = await client.post("/api/setup/capture", headers=headers, json={"codexRoot": str(codex)})
+            release.set()
+            deadline = 200
+            while deadline:
+                job = (await client.get("/api/setup/capture/status")).json()["job"]
+                if job["state"] in {"completed", "failed"}:
+                    break
+                deadline -= 1
+                await asyncio.sleep(0.02)
+            return first, running, second, job
+
+    first, running, second, job = asyncio.run(run())
+    assert first.status_code == 202
+    assert running.json()["job"]["state"] == "running"
+    assert second.status_code == 409 and "already running" in second.json()["error"]
+    assert job["state"] == "completed"
+    assert seen_progress[0] == (0, 1) and seen_progress[-1] == (1, 1)
+    assert job["filesDone"] == 1 and job["filesTotal"] == 1
+
+    # A capture that raises ends in a failed state with a category, not a message.
+    def broken_capture(storage, **kwargs):
+        raise OSError(f"disk error at {tmp_path}/secret-path")
+
+    monkeypatch.setattr(setup_routes, "capture_local_agents", broken_capture)
+
+    async def fail():
+        app = create_app(storage=f"sqlite:///{database}")
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            headers = {"X-Verdict-Setup": token}
+            await client.post("/api/setup/preview", headers=headers, json={"codexRoot": str(codex)})
+            started = await client.post("/api/setup/capture", headers=headers, json={"codexRoot": str(codex)})
+            for _ in range(200):
+                status = await client.get("/api/setup/capture/status")
+                if status.json()["job"]["state"] in {"completed", "failed"}:
+                    return started, status
+                await asyncio.sleep(0.02)
+            raise AssertionError("job did not finish")
+
+    started, status = asyncio.run(fail())
+    assert started.status_code == 202
+    assert status.json()["job"]["state"] == "failed"
+    assert status.json()["job"]["error"] == "capture_failed"
+    assert "secret-path" not in status.text and str(tmp_path) not in status.text
+
+
+def test_capture_status_identifies_the_job_and_reports_analysis_errors(tmp_path, monkeypatch):
+    import verdict.dashboard.setup_routes as setup_routes
+
+    codex = tmp_path / "codex" / "sessions"
+    _write_codex(codex / "session.jsonl")
+    database = tmp_path / "verdict.db"
+    # The analysis service reports a builder failure as a returned error status.
+    monkeypatch.setattr(
+        setup_routes.SetupRoutes, "_run_analysis",
+        lambda self: {"analysisState": {"status": "error", "error": "io_error"}},
+    )
+
+    async def run():
+        app = create_app(storage=f"sqlite:///{database}")
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            headers = {"X-Verdict-Setup": token}
+            await client.post("/api/setup/preview", headers=headers, json={"codexRoot": str(codex)})
+            started, job = await _capture_and_wait(client, headers, {"codexRoot": str(codex)})
+            by_id = await client.get(f"/api/setup/capture/status?job={job['jobId']}")
+            other = await client.get("/api/setup/capture/status?job=not-this-job")
+            return started, job, by_id, other
+
+    started, job, by_id, other = asyncio.run(run())
+    assert started.status_code == 202 and started.json()["job"]["jobId"] == job["jobId"]
+    assert len(job["jobId"]) == 16
+    # The files were imported and the summary is kept even though analysis failed.
+    assert job["state"] == "failed" and job["error"] == "analysis_failed"
+    assert job["summary"]["stored"] == 1 and job["analysis"]["status"] == "error"
+    assert by_id.status_code == 200 and by_id.json()["job"]["jobId"] == job["jobId"]
+    assert other.status_code == 404 and other.json()["job"]["jobId"] == job["jobId"]

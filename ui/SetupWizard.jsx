@@ -7,7 +7,15 @@ import {
 
 const panel = "border p-5";
 const style = { borderColor: "#26332e", background: "#111715" };
-const LONG_CAPTURE = "Capturing local history… Large histories can take several minutes. Keep this page open.";
+const LONG_CAPTURE = "Starting local history capture…";
+const CAPTURE_POLL_MS = 1500;
+
+function captureProgressLabel(job) {
+  if (!job) return LONG_CAPTURE;
+  if (job.state === "analyzing") return "Files imported. Analyzing captured evidence…";
+  if (job.filesTotal == null) return "Listing history files…";
+  return `Importing ${job.filesDone} of ${job.filesTotal} history files… Large histories can take several minutes. You can leave this page while Verdict keeps running.`;
+}
 const LONG_IMPORT = "Importing… Large files can take several minutes. Keep this page open.";
 
 export function SetupWizard({ configUrl, onComplete, onNavigate, onRefresh, agentSummary = {} }) {
@@ -58,12 +66,64 @@ export function SetupWizard({ configUrl, onComplete, onNavigate, onRefresh, agen
     } finally { setBusy(false); setBusyLabel(null); }
   }
 
+  // Local capture runs on the server in the background: the POST returns the
+  // job at once and this polls its status until the job ends.
+  async function followCaptureJob(job) {
+    while (job && (job.state === "running" || job.state === "analyzing")) {
+      setBusyLabel(captureProgressLabel(job));
+      await new Promise((resolve) => setTimeout(resolve, CAPTURE_POLL_MS));
+      const status = await fetch(`${root}/api/setup/capture/status?job=${encodeURIComponent(job.jobId)}`, { credentials: "same-origin", headers: { Accept: "application/json" } });
+      if (status.status === 404) throw new Error("another capture replaced this one; its result is shown under Data Sources");
+      if (!status.ok) throw new Error(`HTTP ${status.status}`);
+      job = (await status.json()).job;
+    }
+    if (!job || job.state !== "completed") throw new Error(job?.error || "capture did not complete");
+    const result = { summary: job.summary, analysis: job.analysis };
+    setResult(result); return result;
+  }
+
+  async function capture(payload) {
+    setBusy(true); setBusyLabel(LONG_CAPTURE); setError(null);
+    try {
+      const response = await fetch(`${root}/api/setup/capture`, {
+        method: "POST", credentials: "same-origin",
+        headers: { "Content-Type": "application/json", "X-Verdict-Setup": token },
+        body: JSON.stringify(payload),
+      });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
+      return await followCaptureJob(body.job);
+    } catch (failure) {
+      setError(setupFailureMessage(failure, serverOrigin)); return null;
+    } finally { setBusy(false); setBusyLabel(null); }
+  }
+
+  // A capture keeps running on the server if this page is closed or reloaded.
+  // On load, pick up the job that is still running and show its progress.
+  useEffect(() => {
+    let active = true;
+    fetch(`${root}/api/setup/capture/status`, { credentials: "same-origin", headers: { Accept: "application/json" } })
+      .then((response) => response.ok ? response.json() : null)
+      .then(async (body) => {
+        const job = body?.job;
+        if (!active || !job || (job.state !== "running" && job.state !== "analyzing")) return;
+        setBusy(true); setError(null);
+        try { if (await followCaptureJob(job)) onComplete("local"); }
+        catch (failure) { if (active) setError(setupFailureMessage(failure, serverOrigin)); }
+        finally { if (active) { setBusy(false); setBusyLabel(null); } }
+      })
+      .catch(() => {});
+    return () => { active = false; };
+  }, [root]);  // eslint-disable-line react-hooks/exhaustive-deps
+
   const sources = [
     ["local", "Claude Code / Codex"], ["file", "Existing telemetry file"],
     ["sdk", "Live app through SDK"], ["database", "Existing Verdict database"],
   ];
   const localKey = JSON.stringify([claudeRoot, codexRoot]);
   const importKey = JSON.stringify([filePath, fileFormat]);
+  const statusNotice = busy && busyLabel && <div role="status" aria-live="polite" className={panel} style={{ ...style, color: "#94a39d" }}>{busyLabel}</div>;
+  const errorNotice = error && <div role="alert" className={panel} style={{ ...style, color: "#ff6b6b" }}>{error}</div>;
   if (hasObservedStore && !editing) {
     const sourceText = (Array.isArray(agentSummary.agentRunSources) ? agentSummary.agentRunSources : [])
       .filter((item) => typeof item?.sourceKind === "string" && item.sourceKind && Number.isInteger(Number(item.runs)) && Number(item.runs) > 0)
@@ -71,6 +131,8 @@ export function SetupWizard({ configUrl, onComplete, onNavigate, onRefresh, agen
       .join(" · ");
     return (
       <div className="max-w-4xl space-y-4">
+        {statusNotice}
+        {errorNotice}
         <section className={panel} style={style}>
           <div className="text-xs font-mono" style={{ color: "#4ee1aa" }}>{storePresentation.connectedEmpty ? "CONNECTED VERDICT STORE" : "OBSERVED DATA SOURCES"}</div>
           <h2 className="text-lg font-semibold mt-1">{storePresentation.connectedEmpty ? `Connected ${storePresentation.backendLabel} store` : sourcePresentation.heading}</h2>
@@ -110,7 +172,7 @@ export function SetupWizard({ configUrl, onComplete, onNavigate, onRefresh, agen
         <p className="text-sm mt-4" style={{ color: "#94a39d" }}>Verdict retains bounded, recursively redacted request, response, tool, command, and test evidence for local agent analysis. For the standard Codex directory, it also reads completed model-call metadata from the sibling <code>logs_2.sqlite</code> database; diagnostic bodies are never stored. Local setup uses content capture by default so the resulting run is actually evaluable.</p>
         <div className="flex gap-2 mt-4">
           <button disabled={!token || busy} onClick={async () => { const data = await post(`${root}/api/setup/preview`, { claudeRoot, codexRoot }, "Previewing sources…"); if (data) setPreviewedLocal(localKey); }} className="border px-4 py-2 text-sm">Preview sources</button>
-          <button disabled={!token || busy || previewedLocal !== localKey} onClick={async () => { const data = await post(`${root}/api/setup/capture`, { claudeRoot, codexRoot, captureContent: true }, LONG_CAPTURE); if (data) onComplete("local"); }} className="px-4 py-2 text-sm" style={{ background: "#4ee1aa", color: "#0b0e0d" }}>Approve and capture</button>
+          <button disabled={!token || busy || previewedLocal !== localKey} onClick={async () => { const data = await capture({ claudeRoot, codexRoot, captureContent: true }); if (data) onComplete("local"); }} className="px-4 py-2 text-sm" style={{ background: "#4ee1aa", color: "#0b0e0d" }}>Approve and capture</button>
         </div>
       </section>}
 
@@ -139,8 +201,8 @@ export function SetupWizard({ configUrl, onComplete, onNavigate, onRefresh, agen
         <p className="text-sm mt-3">Restart Verdict with <code>verdict --storage sqlite:///path/to/verdict.db</code> or a PostgreSQL DSN. The dashboard reads that store without copying its records.</p>
       </section>}
 
-      {busy && busyLabel && <div role="status" aria-live="polite" className={panel} style={{ ...style, color: "#94a39d" }}>{busyLabel}</div>}
-      {error && <div role="alert" className={panel} style={{ ...style, color: "#ff6b6b" }}>{error}</div>}
+      {statusNotice}
+      {errorNotice}
       {result && <section className={panel} style={style}>
         <div className="text-xs font-mono" style={{ color: "#4ee1aa" }}>RESULT</div>
         <pre className="mt-3 text-xs overflow-x-auto">{JSON.stringify(result, null, 2)}</pre>
