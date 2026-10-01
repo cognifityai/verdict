@@ -333,8 +333,11 @@ def validate_assessment_query(
     tenant_id: str, conversation_id: str, evaluator_fingerprint: str, limit: int
 ) -> None:
     validate_conversation_query(tenant_id, 1, conversation_id)
-    if (not isinstance(evaluator_fingerprint, str)
-            or not re.fullmatch(r"[0-9a-f]{64}", evaluator_fingerprint)):
-        raise ValueError("invalid evaluator fingerprint")
+    validate_evaluator_fingerprint(evaluator_fingerprint)
     if type(limit) is not int or not 1 <= limit <= 1_000:
         raise ValueError("invalid assessment query limit")
+
+
+def validate_evaluator_fingerprint(value: object) -> None:
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value):
+        raise ValueError("invalid evaluator fingerprint")

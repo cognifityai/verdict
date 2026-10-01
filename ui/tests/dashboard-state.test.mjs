@@ -201,6 +201,59 @@ test("conversation approval is cleared after failed navigation and run", async (
     .props.checked, false);
 });
 
+test("stored conversation results can be reviewed without rerunning a judge", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const props = { root: "", token: "setup-token", provider: "openai", model: "synthetic",
+    providerState: { configured: true }, updatePreferences: () => {} };
+  let tree = render(ui.ConversationEvaluation, hooks, props);
+  const fingerprint = "c".repeat(64);
+  const field = findAll(tree, (node) => node.type === "input" &&
+    node.props["aria-label"] === "Stored evaluator fingerprint")[0];
+  assert.ok(field);
+  field.props.onChange({ target: { value: fingerprint } });
+  tree = render(ui.ConversationEvaluation, hooks, props);
+  const button = findAll(tree, (node) => node.type === "button" &&
+    textOf(node) === "Review stored results")[0];
+  const loading = button.props.onClick();
+  assert.match(requests[0].url, /\/api\/data\/conversations\/assessments\?evaluator=/);
+  await resolveJson(requests[0], { evaluatorFingerprint: fingerprint,
+    nextCursor: null, conversations: [{ id: "a".repeat(32), revision: "one",
+      event_at: "2026-09-01T00:00:00Z", end_status: "complete",
+      assessmentCount: 1, completedCount: 1, errorCount: 0,
+      assessmentsTruncated: false }] });
+  await loading;
+  tree = render(ui.ConversationEvaluation, hooks, props);
+  assert.match(textOf(tree), /1 completed/);
+  const opening = findAll(tree, (node) => node.type === "button" &&
+    textOf(node).includes("aaaaaaaaaaaa"))[0].props.onClick();
+  assert.match(requests[1].url, new RegExp(`evaluator=${fingerprint}`));
+  await resolveJson(requests[1], { conversation: { revision: "one", messages: [
+    { role: "user", status: "completed", content: "Synthetic question." },
+    { role: "assistant", status: "completed", content: "Synthetic answer." },
+  ] }, assessments: [{ id: "grade", rubric: { name: "sample", version: "1" },
+    target_position: null, status: "completed", dimensions: {
+      clarity: { state: "pass", score: null, reason: "Clear." },
+    }, findings: [] }] });
+  await opening;
+  tree = render(ui.ConversationEvaluation, hooks, props);
+  assert.match(textOf(tree), /Synthetic answer/);
+  assert.equal(requests.length, 2);
+
+  const staleOpening = findAll(tree, (node) => node.type === "button" &&
+    textOf(node).includes("aaaaaaaaaaaa"))[0].props.onClick();
+  const editedField = findAll(tree, (node) => node.type === "input" &&
+    node.props["aria-label"] === "Stored evaluator fingerprint")[0];
+  editedField.props.onChange({ target: { value: "d".repeat(64) } });
+  await resolveJson(requests[2], { conversation: { revision: "one", messages: [
+    { role: "assistant", status: "completed", content: "Stale answer." },
+  ] }, assessments: [] });
+  await staleOpening;
+  tree = render(ui.ConversationEvaluation, hooks, props);
+  assert.doesNotMatch(textOf(tree), /Stale answer/);
+});
+
 test("Monitor compares conversation grades and detects changed example evidence", async () => {
   const ui = await loadUiModule();
   const hooks = createEffectHooks();

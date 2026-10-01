@@ -253,3 +253,67 @@ async def test_monitor_previews_current_conversation_grades_without_activation(t
         invalid = await client.post("/api/monitor/preview", json=payload,
                                     headers={"X-Verdict-Setup": token})
         assert invalid.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_stored_evaluator_review_lists_only_current_matching_grades(tmp_path):
+    path = tmp_path / "stored_review.db"
+    store = SQLiteStorage(str(path))
+    rubric = validate_rubric({
+        "name": "sample_quality", "version": "1", "target": "conversation",
+        "dimensions": [{"name": "clarity", "description": "Is the answer understandable?"}],
+    })
+    identity = {"provider": "local", "model": "synthetic", "source": "imported",
+                "rubric_fingerprint": rubric["fingerprint"],
+                "prompt_version": "offline_v1", "max_output_tokens": 2048}
+    first = validate_conversation({
+        "id": "a" * 32, "tenant_id": "alpha", "source_scope": "b" * 16,
+        "messages": [{"role": "user", "content": "Question."},
+                     {"role": "assistant", "content": "Answer."}],
+        "event_at": "2026-09-01T12:00:00Z", "end_status": "complete", "input_issues": [],
+    })
+    second = {**first, "id": "c" * 32, "revision": None}
+    other_tenant = {**first, "id": "d" * 32, "tenant_id": "beta", "revision": None}
+    store.save_conversation(first)
+    store.save_conversation(validate_conversation(second))
+    store.save_conversation(validate_conversation(other_tenant))
+    grade = validate_assessment({
+        "tenant_id": "alpha", "conversation_id": first["id"], "revision": first["revision"],
+        "target_position": None, "rubric": rubric, "evaluator": identity,
+        "status": "completed", "dimensions": {"clarity": {"state": "pass", "reason": "Clear."}},
+        "findings": [], "evaluated_at": "2026-09-01T12:01:00Z",
+    }, first)
+    store.save_conversation_assessment(grade)
+    store.close()
+    app = create_app(storage=f"sqlite:///{path}", tenant_id="alpha")
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                 base_url="http://127.0.0.1") as client:
+        invalid = await client.get("/api/data/conversations/assessments?evaluator=wrong")
+        assert invalid.status_code == 400
+        page = await client.get(
+            f"/api/data/conversations/assessments?evaluator={grade['evaluator_fingerprint']}"
+        )
+        assert page.status_code == 200
+        body = page.json()
+        assert body["evaluatorFingerprint"] == grade["evaluator_fingerprint"]
+        assert body["nextCursor"] is None
+        assert [(row["id"], row["assessmentCount"], row["completedCount"])
+                for row in body["conversations"]] == [
+                    ("a" * 32, 1, 1), ("c" * 32, 0, 0),
+                ]
+        assert "messages" not in body["conversations"][0]
+        next_page = await client.get(
+            f"/api/data/conversations/assessments?evaluator={grade['evaluator_fingerprint']}&after={'a' * 32}"
+        )
+        assert [row["id"] for row in next_page.json()["conversations"]] == ["c" * 32]
+        writer = SQLiteStorage(str(path))
+        writer.save_conversation(validate_conversation({
+            **first, "messages": [{"role": "user", "content": "Question."},
+                                  {"role": "assistant", "content": "Corrected answer."}],
+            "revision": None,
+        }))
+        writer.close()
+        changed = await client.get(
+            f"/api/data/conversations/assessments?evaluator={grade['evaluator_fingerprint']}"
+        )
+        assert changed.json()["conversations"][0]["assessmentCount"] == 0

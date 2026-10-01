@@ -82,6 +82,44 @@ def register_lab_routes(app, setup: SetupRoutes) -> None:
             if writable is not None:
                 writable.close()
 
+    @app.get("/api/data/conversations/assessments")
+    def stored_conversation_assessments(request: Request, evaluator: str, after: str | None = None):
+        if not setup.request_matches_tenant(request):
+            return JSONResponse({"error": "conversation review unavailable"}, status_code=403)
+        writable = None
+        try:
+            from verdict.conversation_assessments import validate_evaluator_fingerprint
+
+            validate_evaluator_fingerprint(evaluator)
+            writable = setup.writable_storage()
+            rows, cursor = writable.list_conversations(setup.tenant_id, after=after, limit=20)
+            summaries = []
+            for row in rows:
+                assessments = writable.list_conversation_assessments(
+                    setup.tenant_id, row["id"], evaluator, limit=21
+                )
+                current = [item for item in assessments[:20] if (
+                    item.get("tenant_id") == setup.tenant_id
+                    and item.get("conversation_id") == row["id"]
+                    and item.get("revision") == row["revision"]
+                    and item.get("evaluator_fingerprint") == evaluator
+                )]
+                summaries.append({
+                    "id": row["id"], "revision": row["revision"],
+                    "event_at": row["event_at"], "end_status": row["end_status"],
+                    "assessmentCount": len(current),
+                    "completedCount": sum(item["status"] == "completed" for item in current),
+                    "errorCount": sum(item["status"] == "error" for item in current),
+                    "assessmentsTruncated": len(assessments) > 20,
+                })
+            return {"conversations": summaries, "nextCursor": cursor,
+                    "evaluatorFingerprint": evaluator, "order": "conversation_id"}
+        except (TypeError, ValueError, UnicodeError):
+            return JSONResponse({"error": "invalid stored conversation review"}, status_code=400)
+        finally:
+            if writable is not None:
+                writable.close()
+
     @app.get("/api/data/conversations/{conversation_id}")
     def conversation_detail(request: Request, conversation_id: str, evaluator: str | None = None):
         if not setup.request_matches_tenant(request):
