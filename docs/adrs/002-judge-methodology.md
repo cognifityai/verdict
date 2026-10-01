@@ -21,6 +21,18 @@ PASS rate is `PASS / (PASS + FAIL)`. `UNCLEAR`, missing dimensions, malformed
 output normalized to `UNCLEAR`, and judge errors are coverage states and do not
 enter the denominator. No scored values means unavailable, not zero percent.
 
+Every judge path decodes replies through one shared decoder
+(`verdict_eval.judge_output`). It accepts the reply's JSON inside a Markdown
+fence or prose and the per-dimension results as an object keyed by name or as
+a list of named objects, and it rejects duplicate keys, duplicate dimension
+names, and non-finite numbers. A reply that is complete but malformed is
+normalized to `UNCLEAR` per dimension; a reply that is not a judgment at all,
+because the provider stopped at the output ceiling or it is oversized, is a
+retryable judge error. The decoder's contract version is part of every
+evaluator identity, because a different decoder turns the same provider text
+into a different judgment. Adapters send the judge's output budget plus a
+fixed reasoning allowance so models with built-in thinking can answer.
+
 The measuring instrument is a complete evaluator identity: provider, model
 list, rubric name/version, behavior-relevant configuration, expected dimensions,
 and a SHA-256 fingerprint over the effective rubric and prompt templates.

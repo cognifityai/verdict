@@ -192,6 +192,13 @@ class _IdentityOnlyProvider:
                 self.supports_temperature = adapter.supports_temperature
             finally:
                 adapter._client.close()
+        elif name == "openai":
+            from verdict_eval.providers import openai_temperature_supported
+
+            # Reasoning families take no temperature; the live adapter applies
+            # the same per-model rule, so preview and run share one identity.
+            self.temperature_supported = openai_temperature_supported
+            self.supports_temperature = True
         else:
             self.supports_temperature = True
 
@@ -218,6 +225,19 @@ def _judge(provider, model, rubric, max_output, *, tool_evidence=False,
         tool_evidence_mode=TOOL_EVIDENCE_MODE if tool_evidence else None,
         tool_evidence_template=TurnToolCounts.PROMPT_TEMPLATE if tool_evidence else None,
     )
+
+
+def _output_maximum(provider: str, model: str, max_output: int, calls: int) -> int | None:
+    """The output-token ceiling the adapters will send, summed over the planned calls.
+
+    It includes the reasoning allowance the adapters add for models that think
+    by default, so the consent screen shows the true maximum.
+    """
+    if provider == "jev":
+        return None
+    from verdict_eval.providers import output_token_ceiling
+
+    return output_token_ceiling(max_output, model) * calls
 
 
 def _rubric_summary(rubric, identity):
@@ -363,9 +383,10 @@ def _turn_preview(storage, tenant_id, config, provider, model, max_calls, max_ou
         "alreadyJudged": already, "maximumCalls": "all" if max_calls is None else max_calls,
         "scanLimit": limit, "hasMore": next_cursor is not None, "nextCursor": next_cursor,
         "estimatedInputTokens": input_estimate,
-        "maximumOutputTokens": None if provider == "jev" else max_output * len(selected),
+        "maximumOutputTokens": _output_maximum(provider, model, max_output, len(selected)),
         "estimatedMaximumCostUsd": (None if provider == "jev" else
-                                    compute_cost_usd(model, input_estimate, max_output * len(selected))),
+                                    compute_cost_usd(model, input_estimate,
+                                                     _output_maximum(provider, model, max_output, len(selected)))),
         "costIsStaticEstimate": provider != "jev", "externalEgressRequired": True,
         "destination": identity["evaluator_config"]["base_url"] if provider == "jev" else None,
     }
@@ -438,7 +459,7 @@ def preview_evaluation(
             (len(trace.prompt_redacted or "") + len(trace.response_redacted or "") + rubric_chars)
             / 4
         ) + 400
-    output_maximum = max_output * len(selected)
+    output_maximum = _output_maximum(provider, model, max_output, len(selected))
     return {
         "provider": provider,
         "model": model,
@@ -455,7 +476,7 @@ def preview_evaluation(
         "alreadyJudged": already_judged,
         "maximumCalls": "all" if max_calls is None else max_calls,
         "estimatedInputTokens": input_estimate,
-        "maximumOutputTokens": None if provider == "jev" else output_maximum,
+        "maximumOutputTokens": output_maximum,
         "estimatedMaximumCostUsd": (None if provider == "jev" else
                                     compute_cost_usd(model, input_estimate, output_maximum)),
         "costIsStaticEstimate": provider != "jev",
@@ -719,7 +740,7 @@ def preview_calibration(*, path: str | Path, config: dict[str, Any]) -> dict[str
         estimated_input += math.ceil(
             (len(example.query) + len(example.response) + len(example.context or "")) / 4
         ) + 400
-    maximum_output = max_output * len(examples)
+    maximum_output = _output_maximum(provider_name, model, max_output, len(examples))
     return {
         "setName": set_name,
         "examples": len(examples),
