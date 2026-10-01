@@ -117,10 +117,11 @@ def test_authorization_fstring_value_is_a_fixed_point(mode: str, secret: str | N
 
 
 # --------------------------------------------------------------------------
-# Placeholder edge contract: a placeholder is opaque. Text beside it was
-# classified by the scan that produced it, so a boundary assertion may not be
-# satisfied by the placeholder edge alone. Patterns without an assertion on
-# that side still match.
+# Placeholder edge contract. For the variable-length digit patterns (phone,
+# card, IPv6) a placeholder is opaque: a greedy digit run beside it may not use
+# the placeholder edge to re-partition into one more match per scan. Every
+# other pattern treats the edge as the boundary it replaced, so a credential or
+# fixed-length address glued to a placeholder is still removed.
 # --------------------------------------------------------------------------
 
 
@@ -131,17 +132,24 @@ def test_authorization_fstring_value_is_a_fixed_point(mode: str, secret: str | N
         ("555-123-4567<PHONE>", "555-123-4567<PHONE>"),
         ("<PHONE>555-123-4567", "<PHONE><PHONE>"),
         ("<PHONE>,123-45-6789", "<PHONE>,<SSN>"),
-        ("<REDACTED>123-45-6789", "<REDACTED>123-45-6789"),
-        ("123-45-6789<REDACTED>", "123-45-6789<REDACTED>"),
+        ("<REDACTED>123-45-6789", "<REDACTED><SSN>"),
+        ("123-45-6789<REDACTED>", "<SSN><REDACTED>"),
         ("4111 1111 1111 1111<PHONE>", "4111 1111 1111 1111<PHONE>"),
         ("<EMAIL>4111 1111 1111 1111", "<EMAIL>4111 1111 1111 1111"),
         ("<EMAIL> 4111 1111 1111 1111", "<EMAIL> <CREDIT_CARD>"),
-        ("<IP>10.0.0.1", "<IP>10.0.0.1"),
-        ("10.0.0.1<IP>", "10.0.0.1<IP>"),
+        ("<IP>10.0.0.1", "<IP><IP>"),
+        ("10.0.0.1<IP>", "<IP><IP>"),
+        ("10.0.0.1<SECRET>", "<IP><SECRET>"),
         ("<IPV6>2001:db8::1", "<IPV6>2001:db8::1"),
         ("2001:db8::1<IPV6>", "2001:db8::1<IPV6>"),
         ("2001:db8::1 <IPV6>", "<IPV6> <IPV6>"),
-        ("<SECRET>sk-abcdefghijklmnopqrstuvwxyz", "<SECRET>sk-abcdefghijklmnopqrstuvwxyz"),
+        ("<SECRET>sk-abcdefghijklmnopqrstuvwxyz", "<SECRET><PROVIDER_KEY>"),
+        ("<EMAIL>ghp_abcdefghijklmnopqrstuvwxyz0123456789", "<EMAIL><GITHUB_TOKEN>"),
+        ("<SECRET>AKIAABCDEFGHIJKLMNOP", "<SECRET><PROVIDER_KEY>"),
+        # A card's placeholder never swallows the separator after it, so the
+        # address that follows keeps its boundary.
+        ("card 4111 1111 1111 1111 2001:db8::1 done", "card <CREDIT_CARD> <IPV6> done"),
+        ("card 4111 1111 1111 1111 10.0.0.1 done", "card <CREDIT_CARD> <IP> done"),
         ("<SECRET> sk-abcdefghijklmnopqrstuvwxyz", "<SECRET> <PROVIDER_KEY>"),
         ("https://x.com/a<EMAIL>", "<URL><EMAIL>"),
         ("<EMAIL>https://x.com/a", "<EMAIL><URL>"),
@@ -172,24 +180,15 @@ def test_placeholder_edges_never_satisfy_boundary_assertions(text: str, expected
     [
         "<PHONE>555-123-4567",
         "555-123-4567<PHONE>",
-        "<REDACTED>123-45-6789",
-        "123-45-6789<REDACTED>",
         "<EMAIL>4111 1111 1111 1111",
-        "<IP>10.0.0.1",
-        "10.0.0.1<IP>",
         "2001:db8::1<IPV6>",
-        "<SECRET>sk-abcdefghijklmnopqrstuvwxyz",
-        "<SECRET>AKIAABCDEFGHIJKLMNOP",
-        "AKIAABCDEFGHIJKLMNOP<SECRET>",
-        "<SECRET>ghp_abcdefghijklmnopqrstuvwxyz",
-        "<EMAIL>https://x.com/a",
-        "<URL>Bearer abcdefghijklmnopqrstuvwxyz",
     ],
 )
 def test_placeholder_edge_matches_word_character_neighbour(text: str) -> None:
-    """Executable statement of the edge semantic: where a regex assertion
-    decides the leftmost candidate, a placeholder neighbour and a word-character
-    neighbour classify the text beside them identically. (Greedy tails such as
+    """Executable statement of the edge semantic for the digit-run patterns:
+    where a regex assertion decides the leftmost candidate, a placeholder
+    neighbour and a word-character neighbour classify the text beside them
+    identically. (Greedy tails such as
     ``\\S+`` swallow a literal word character but stop at a placeholder, and a
     rejected candidate is skipped whole rather than re-scanned from inside, so
     those rows live in the expectation table above instead.)"""

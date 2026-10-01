@@ -18,6 +18,11 @@ the product is refined.
   altered stored content and made Voice conversation snapshots fail their
   digest check. `redact` now returns a fixed point of the scan and fails closed
   to `<REDACTED>` if text is still changing after a bounded number of scans.
+  For the variable-length digit patterns (phone, card, IPv6) a placeholder
+  edge is opaque, so a digit run cannot re-partition into one more match per
+  scan; every other pattern treats the edge as the boundary it replaced, so a
+  credential or address glued to a placeholder is still removed. A card
+  placeholder no longer swallows the separator after the card.
 - `verdict-import` no longer aborts a whole run when the storage adapter
   rejects one record. A conversation snapshot or Trace the adapter rejects is
   counted under `conversation_rejected` or `trace_rejected` in `skip_reasons`

@@ -11,9 +11,12 @@ and mode. Storage adapters sanitize every record again before persistence and
 conversation snapshots carry a digest of their redacted content, so a scan
 whose output changes under re-application would either alter stored evidence
 or reject the record. ``redact`` therefore returns a fixed point of the single
-scan, and a placeholder is opaque: text beside it was classified by the scan
-that produced it, so the placeholder edge never satisfies a boundary
-assertion on its own.
+scan. For the variable-length digit patterns (phone, card, IPv6 candidates) a
+placeholder is opaque: text beside it was classified by the scan that produced
+it, so a placeholder edge does not let a greedy digit run re-partition itself
+into one more match per scan. Every other pattern treats a placeholder edge
+as the boundary it replaced, so a credential or address glued to a
+placeholder is still removed.
 """
 
 from __future__ import annotations
@@ -252,7 +255,10 @@ _PATTERNS = {
     # irreversibly clobbered order IDs, tracking numbers, etc.). A candidate is
     # only redacted if it passes the Luhn checksum AND has a valid card length;
     # see _redact_credit_card / _luhn_ok.
-    "CREDIT_CARD": re.compile(r"\b(?:\d[ -]?){13,19}\b"),
+    # The candidate ends on a digit so the placeholder never swallows the
+    # separator after a card; the address or token that follows keeps its
+    # boundary and is scanned normally.
+    "CREDIT_CARD": re.compile(r"\b(?:\d[ -]?){12,18}\d\b"),
     # Candidate matcher only. Colons also occur in clocks and other structured
     # values and namespace separators. Match a whole token (including an IPv4
     # tail or scope ID) and validate it with ipaddress.IPv6Address below. The
@@ -565,25 +571,31 @@ def _redact_secret_assignments(
     return "".join(output)
 
 
+# Patterns whose candidates are variable-length digit runs. Beside a
+# placeholder their greedy groups can re-partition into one more match per
+# scan (a grouped digit table losing one "phone number" per scan, a hex
+# fingerprint yielding one more "IPv6 address" per scan) until the fail-closed
+# cap destroys the message. For these, and only these, a placeholder edge is
+# opaque. Fixed-prefix credentials and fixed-length addresses cannot creep, so
+# they keep the boundary the placeholder replaced and a value glued to a
+# placeholder is still removed.
+_OPAQUE_EDGE_LABELS = frozenset({"PHONE", "CREDIT_CARD", "IPV6"})
+
+
 def _sub_outside_placeholders(
     text: str,
     pattern: re.Pattern[str],
     replacement: str | Callable[[re.Match[str]], str],
+    *,
+    opaque_edges: bool = False,
 ) -> str:
     """Apply ``pattern`` to the text between placeholders.
 
-    A placeholder is opaque: it stands for content that an earlier scan already
-    classified together with its real neighbours. Scanning each gap as an
-    independent string would let the placeholder edge satisfy ``\\b`` and
-    lookaround assertions that the original neighbour did not, so a second scan
-    could match text the first scan deliberately left alone, and the text
-    before that on the scan after. A candidate that touches a placeholder edge
-    is therefore kept only if the pattern still matches the same span with a
-    word character standing in for the placeholder. A rejected candidate is
-    skipped whole, exactly as ``re.sub`` skips a candidate its callback
-    declined, so a re-scan visits the positions the first scan visited and can
-    only replace a subset of what a boundary-blind re-scan would replace. Text
-    whose first scan was already stable is therefore unchanged by this rule.
+    With ``opaque_edges`` a candidate that touches a placeholder edge is kept
+    only if the pattern still matches the same span with a word character
+    standing in for the placeholder; a rejected candidate is skipped whole,
+    exactly as ``re.sub`` skips a candidate its callback declined. Without it,
+    the placeholder edge is an ordinary boundary.
     """
     output: list[str] = []
     cursor = 0
@@ -593,8 +605,8 @@ def _sub_outside_placeholders(
                 text[cursor : placeholder.start()],
                 pattern,
                 replacement,
-                after_placeholder=cursor > 0,
-                before_placeholder=True,
+                after_placeholder=opaque_edges and cursor > 0,
+                before_placeholder=opaque_edges,
             )
         )
         output.append(placeholder.group(0))
@@ -604,7 +616,7 @@ def _sub_outside_placeholders(
             text[cursor:],
             pattern,
             replacement,
-            after_placeholder=cursor > 0,
+            after_placeholder=opaque_edges and cursor > 0,
             before_placeholder=False,
         )
     )
@@ -806,6 +818,7 @@ def _redact_once(text: str, mode: RedactionMode, secret: str | None) -> str:
                 out,
                 pat,
                 lambda m, lbl=label: _credit_card_repl(m.group(0), lbl, mode, secret),
+                opaque_edges=True,
             )
         elif label == "IPV6":
             # A colon is required by every IPv6 spelling.  Avoid entering the
@@ -824,6 +837,7 @@ def _redact_once(text: str, mode: RedactionMode, secret: str | None) -> str:
                     secret,
                     following=m.string[m.end() : m.end() + 1],
                 ),
+                opaque_edges=True,
             )
         elif label == "BASIC_AUTH":
             out = _sub_outside_placeholders(
@@ -836,9 +850,12 @@ def _redact_once(text: str, mode: RedactionMode, secret: str | None) -> str:
                 out,
                 pat,
                 lambda m, lbl=label: _hash_match(m.group(0), lbl, secret),
+                opaque_edges=label in _OPAQUE_EDGE_LABELS,
             )
         else:  # redact
-            out = _sub_outside_placeholders(out, pat, f"<{label}>")
+            out = _sub_outside_placeholders(
+                out, pat, f"<{label}>", opaque_edges=label in _OPAQUE_EDGE_LABELS,
+            )
     return out
 
 
