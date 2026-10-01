@@ -265,3 +265,123 @@ def test_ensemble_rejects_same_named_dimensions_with_different_context_contracts
             Judge(FakeProvider("{}"), "a", rubric=first),
             Judge(FakeProvider("{}"), "b", rubric=second),
         ])
+
+
+# ---------------------------------------------------------------------------
+# Shared decoder behaviour seen through the trace judge
+# ---------------------------------------------------------------------------
+
+
+class _ResponseProvider:
+    """Returns a full CompletionResponse so finish reasons reach the judge."""
+
+    name = "fake"
+
+    def __init__(self, text: str, finish_reason: str | None) -> None:
+        from verdict_eval.providers import CompletionResponse
+
+        self._response = CompletionResponse(text=text, finish_reason=finish_reason)
+
+    def complete(self, request):
+        return self._response
+
+
+def test_judge_accepts_a_wrapped_list_of_named_dimensions():
+    payload = json.dumps({"dimensions": [
+        {"name": d.name, "type": "binary", "verdict": "FAIL" if d.name == "safety" else "PASS",
+         "reason": "r"}
+        for d in DEFAULT_RUBRIC.dimensions
+    ]})
+
+    judgment = Judge(provider=FakeProvider(payload), model="fake-judge").judge(
+        query="hi", response="hello",
+    )
+
+    by_name = {d.name: d for d in judgment.dimensions}
+    assert by_name["safety"].verdict == Verdict.FAIL
+    assert by_name["safety"].reasoning == "r"
+    assert judgment.pass_count == len(DEFAULT_RUBRIC.dimensions) - 1
+
+
+def test_duplicate_keys_no_longer_let_the_last_value_win():
+    payload = (
+        '{"completeness": {"reasoning": "first", "verdict": "PASS"}, '
+        '"completeness": {"reasoning": "second", "verdict": "FAIL"}}'
+    )
+
+    judgment = Judge(provider=FakeProvider(payload), model="fake-judge").judge(
+        query="hi", response="hello",
+    )
+
+    completeness = next(d for d in judgment.dimensions if d.name == "completeness")
+    assert completeness.verdict == Verdict.UNCLEAR
+    assert judgment.fail_count == 0
+
+
+@pytest.mark.parametrize("finish_reason", ["max_tokens", "length", "MAX_TOKENS"])
+def test_reply_cut_off_at_the_output_ceiling_is_a_judge_error_not_unclear(finish_reason):
+    from verdict_eval.judge_output import JudgeOutputUnusable
+
+    complete_json = _fake_json_for({d.name: "PASS" for d in DEFAULT_RUBRIC.dimensions})
+    judge = Judge(provider=_ResponseProvider(complete_json, finish_reason), model="fake-judge")
+
+    with pytest.raises(JudgeOutputUnusable, match="ceiling"):
+        judge.judge(query="hi", response="hello")
+
+
+def test_empty_reply_after_thinking_is_a_judge_error():
+    from verdict_eval.judge_output import JudgeOutputUnusable
+
+    judge = Judge(provider=_ResponseProvider("", "max_tokens"), model="fake-judge")
+
+    with pytest.raises(JudgeOutputUnusable):
+        judge.score(query="hi", response="hello")
+
+
+def test_oversize_reply_is_a_judge_error_not_a_partial_result():
+    from verdict_eval.judge_output import JudgeOutputUnusable
+
+    payload = json.dumps({"relevance": {"reasoning": "x" * 70_000, "verdict": "PASS"}})
+
+    with pytest.raises(JudgeOutputUnusable):
+        Judge(provider=FakeProvider(payload), model="fake-judge").judge(query="q", response="r")
+
+
+def test_complete_but_malformed_reply_stays_unclear_per_dimension():
+    judge = Judge(provider=_ResponseProvider("I cannot evaluate this.", "end_turn"),
+                  model="fake-judge")
+
+    judgment = judge.judge(query="hi", response="hello")
+
+    assert all(d.verdict == Verdict.UNCLEAR for d in judgment.dimensions)
+    assert all("malformed" in d.reasoning for d in judgment.dimensions)
+
+
+def test_evaluator_identity_records_and_follows_the_output_contract(monkeypatch):
+    from verdict_eval import judge_output
+
+    judge = Judge(provider=FakeProvider("{}"), model="judge-a")
+    before = judge.evaluator_identity()
+    assert before["evaluator_config"]["output_contract"] == judge_output.OUTPUT_CONTRACT_VERSION
+
+    monkeypatch.setattr(judge_output, "OUTPUT_CONTRACT_VERSION", "judge_output_test")
+    after = judge.evaluator_identity()
+
+    assert after["evaluator_config"]["output_contract"] == "judge_output_test"
+    assert after["evaluator_fingerprint"] != before["evaluator_fingerprint"]
+
+
+def test_identity_records_per_model_temperature_support():
+    class FamilyProvider(FakeProvider):
+        def temperature_supported(self, model):
+            return model == "sampling-model"
+
+    provider = FamilyProvider("{}")
+    applied = Judge(provider=provider, model="sampling-model").evaluator_identity()
+    omitted = Judge(provider=provider, model="reasoning-model").evaluator_identity()
+
+    assert applied["evaluator_config"]["temperature_applied"] is True
+    assert applied["evaluator_config"]["temperature"] == 0.0
+    assert omitted["evaluator_config"]["temperature_applied"] is False
+    assert omitted["evaluator_config"]["temperature"] is None
+    assert omitted["evaluator_config"]["requested_temperature"] == 0.0

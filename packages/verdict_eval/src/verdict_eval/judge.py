@@ -19,6 +19,14 @@ from verdict.client import workload_context
 from verdict.metrics import verdict_label
 from verdict.schema import DimensionScore, Judgment, Verdict
 
+from verdict_eval import judge_output
+from verdict_eval.judge_output import (
+    JudgeOutputError,
+    JudgeOutputUnusable,
+    decode_judge_dimensions,
+    dimension_fields,
+    is_truncated,
+)
 from verdict_eval.providers import CompletionRequest, LLMProvider
 
 
@@ -155,6 +163,19 @@ def _user_prompt(
     return "\n".join(parts)
 
 
+def _temperature_applied(provider: object, model: str) -> bool:
+    """Whether the provider will send the judge's temperature for this model.
+
+    An adapter states this per model (``temperature_supported``) when the
+    provider decides by model family, or once for the whole SDK
+    (``supports_temperature``). Anything else is assumed to apply it.
+    """
+    rule = getattr(provider, "temperature_supported", None)
+    if callable(rule):
+        return bool(rule(model))
+    return bool(getattr(provider, "supports_temperature", True))
+
+
 def _fingerprint(payload: dict) -> str:
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
@@ -218,7 +239,7 @@ class Judge:
         self._validate_tool_evidence_configuration()
         rubric = self._effective_rubric(context)
         provider = str(getattr(self.provider, "name", type(self.provider).__name__))
-        temperature_applied = getattr(self.provider, "supports_temperature", True)
+        temperature_applied = _temperature_applied(self.provider, self.model)
         config = {
             "temperature": self.temperature if temperature_applied else None,
             "requested_temperature": self.temperature,
@@ -227,6 +248,9 @@ class Judge:
             "skip_context_dependent_when_missing": (
                 self.skip_context_dependent_when_missing
             ),
+            # The reply decoder turns the same provider text into a judgment;
+            # a different decoder is a different evaluator.
+            "output_contract": judge_output.OUTPUT_CONTRACT_VERSION,
         }
         if self.tool_evidence_mode is not None:
             config["tool_evidence_mode"] = self.tool_evidence_mode
@@ -297,7 +321,9 @@ class Judge:
         )
         with workload_context("judge"):
             resp = self.provider.complete(req)
-        parsed = _parse_verdict_json(resp.text, rubric)
+        parsed = _parse_verdict_json(
+            resp.text, rubric, getattr(resp, "finish_reason", None),
+        )
 
         dimensions = [
             DimensionScore(
@@ -414,57 +440,43 @@ class JudgeEnsemble:
 # JSON parsing — tolerant of the typical wrappers models add
 # ---------------------------------------------------------------------------
 
-_MAX_JSON_OBJECT_STARTS = 64
+_MALFORMED_REASONING = "judge output malformed; dimension defaulted to UNCLEAR"
 
 
-def _decode_verdict_object(text: str, rubric: Rubric) -> dict[str, object] | None:
-    """Decode the first bounded JSON object containing a rubric dimension.
-
-    ``JSONDecoder.raw_decode`` identifies the structural end of the object, so
-    Markdown fences, braces, and escapes inside JSON strings remain ordinary
-    string content. Limiting candidate starts keeps malformed model output from
-    causing unbounded repeated decode attempts.
-    """
-    expected_dimensions = {dimension.name for dimension in rubric.dimensions}
-    decoder = json.JSONDecoder()
-    starts_checked = 0
-
-    for start, character in enumerate(text):
-        if character != "{":
-            continue
-        starts_checked += 1
-        if starts_checked > _MAX_JSON_OBJECT_STARTS:
-            break
-        try:
-            candidate, _ = decoder.raw_decode(text, start)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(candidate, dict) and (
-            not expected_dimensions or expected_dimensions.intersection(candidate)
-        ):
-            return candidate
-    return None
-
-
-def _parse_verdict_json(text: str, rubric: Rubric) -> dict[str, dict[str, object]]:
+def _parse_verdict_json(
+    text: str, rubric: Rubric, finish_reason: object = None,
+) -> dict[str, dict[str, object]]:
     """Best-effort parse of the judge's JSON output.
 
     Returns a dict mapping every rubric dimension to {"reasoning": str, "verdict": Verdict}.
-    Missing or malformed dimensions are recorded as UNCLEAR with a flagged reason.
+    Missing or malformed dimensions are recorded as UNCLEAR with a flagged
+    reason (ADR-002). A reply that is not a judgment at all, because the
+    provider cut it off at the output ceiling or it is oversized, raises
+    ``JudgeOutputUnusable`` so the caller records a retryable judge error
+    instead of a completed all-UNCLEAR judgment. Decoding is shared with the
+    conversation judge in ``judge_output``.
     """
-    parsed = _decode_verdict_object(text.strip(), rubric)
+    names = [dimension.name for dimension in rubric.dimensions]
+    if is_truncated(finish_reason):
+        raise JudgeOutputUnusable("judge output truncated at the output token ceiling")
+    try:
+        parsed = decode_judge_dimensions(text if isinstance(text, str) else "", names)
+    except JudgeOutputUnusable:
+        raise
+    except JudgeOutputError:
+        parsed = {}
 
     out: dict[str, dict[str, object]] = {}
-    for d in rubric.dimensions:
-        block = (parsed or {}).get(d.name) if isinstance(parsed, dict) else None
-        if isinstance(block, dict):
-            v_raw = str(block.get("verdict", "UNCLEAR")).upper().strip()
-            verdict = _to_verdict(v_raw)
-            reasoning = str(block.get("reasoning", "")).strip()
-        else:
-            verdict = Verdict.UNCLEAR
-            reasoning = "judge output malformed; dimension defaulted to UNCLEAR"
-        out[d.name] = {"verdict": verdict, "reasoning": reasoning}
+    for name in names:
+        try:
+            fields = dimension_fields(parsed[name])
+        except (KeyError, JudgeOutputError):
+            out[name] = {"verdict": Verdict.UNCLEAR, "reasoning": _MALFORMED_REASONING}
+            continue
+        out[name] = {
+            "verdict": _to_verdict(fields.verdict or "UNCLEAR"),
+            "reasoning": fields.reason,
+        }
     return out
 
 
