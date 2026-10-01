@@ -824,12 +824,15 @@ every eligible reply was completed by that evaluator; UNCLEAR remains visible
 but does not count as PASS or FAIL. Judge agreement with human labels must be
 checked before treating scores as a quality measurement.
 
-The same screen has **Review stored evaluator results** for assessments written
-through Verdict's storage API by another evaluator. Enter that evaluator's
-64-character fingerprint to page through current conversation results and open
-their evidence. This read-only view does not need the evaluator's rubric file or
-make judge calls. The list shows up to 20 assessments per conversation and does
-not claim full reply coverage; open a conversation for its stored detail.
+Open **Evaluate → Results → Conversation results** to review current grades
+written by any conversation evaluator through Verdict's storage API. The
+evaluator selector shows its rubric name and version, provider, model, target,
+and fingerprint prefix; the full evaluator ID appears below it for Monitor.
+Results pages only conversations with a stored grade
+from that exact evaluator; open one to inspect the grades and messages. The
+list reports stored completed and error counts, not full reply coverage. This
+read-only view does not need the evaluator's rubric file or make judge calls.
+**Trace results** remain available on the same Results screen.
 
 To explore conversation quality, open **Monitor → Compare History**, select
 **Conversation grade (descriptive)**, and enter the evaluator fingerprint from

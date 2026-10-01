@@ -82,6 +82,36 @@ def register_lab_routes(app, setup: SetupRoutes) -> None:
             if writable is not None:
                 writable.close()
 
+    @app.get("/api/data/conversations/assessment-evaluators")
+    def stored_conversation_evaluators(request: Request, after: str | None = None):
+        if not setup.request_matches_tenant(request):
+            return JSONResponse({"error": "conversation results unavailable"}, status_code=403)
+        writable = None
+        try:
+            writable = setup.writable_storage()
+            assessments, cursor = writable.list_conversation_evaluators(
+                setup.tenant_id, after=after, limit=20
+            )
+            evaluators = []
+            for item in assessments:
+                if item["tenant_id"] != setup.tenant_id:
+                    raise ValueError("stored evaluator scope mismatch")
+                rubric, identity = item["rubric"], item["evaluator"]
+                if identity["rubric_fingerprint"] != rubric["fingerprint"]:
+                    raise ValueError("stored evaluator rubric mismatch")
+                evaluators.append({
+                    "fingerprint": item["evaluator_fingerprint"],
+                    "rubricName": rubric["name"], "rubricVersion": rubric["version"],
+                    "target": rubric["target"], "provider": identity["provider"],
+                    "model": identity["model"],
+                })
+            return {"evaluators": evaluators, "nextCursor": cursor}
+        except (TypeError, ValueError, KeyError, UnicodeError):
+            return JSONResponse({"error": "invalid stored conversation results"}, status_code=400)
+        finally:
+            if writable is not None:
+                writable.close()
+
     @app.get("/api/data/conversations/assessments")
     def stored_conversation_assessments(request: Request, evaluator: str, after: str | None = None):
         if not setup.request_matches_tenant(request):
@@ -92,26 +122,9 @@ def register_lab_routes(app, setup: SetupRoutes) -> None:
 
             validate_evaluator_fingerprint(evaluator)
             writable = setup.writable_storage()
-            rows, cursor = writable.list_conversations(setup.tenant_id, after=after, limit=20)
-            summaries = []
-            for row in rows:
-                assessments = writable.list_conversation_assessments(
-                    setup.tenant_id, row["id"], evaluator, limit=21
-                )
-                current = [item for item in assessments[:20] if (
-                    item.get("tenant_id") == setup.tenant_id
-                    and item.get("conversation_id") == row["id"]
-                    and item.get("revision") == row["revision"]
-                    and item.get("evaluator_fingerprint") == evaluator
-                )]
-                summaries.append({
-                    "id": row["id"], "revision": row["revision"],
-                    "event_at": row["event_at"], "end_status": row["end_status"],
-                    "assessmentCount": len(current),
-                    "completedCount": sum(item["status"] == "completed" for item in current),
-                    "errorCount": sum(item["status"] == "error" for item in current),
-                    "assessmentsTruncated": len(assessments) > 20,
-                })
+            summaries, cursor = writable.list_graded_conversations(
+                setup.tenant_id, evaluator, after=after, limit=20
+            )
             return {"conversations": summaries, "nextCursor": cursor,
                     "evaluatorFingerprint": evaluator, "order": "conversation_id"}
         except (TypeError, ValueError, UnicodeError):

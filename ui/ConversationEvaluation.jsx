@@ -10,14 +10,11 @@ export function ConversationEvaluation({ root, token, provider, model, providerS
   const [previewKey, setPreviewKey] = useState(null);
   const [review, setReview] = useState(null);
   const [detail, setDetail] = useState(null);
-  const [storedFingerprint, setStoredFingerprint] = useState("");
-  const [storedReview, setStoredReview] = useState(null);
   const [result, setResult] = useState(null);
   const [confirmed, setConfirmed] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const inFlight = useRef(false);
-  const storedGeneration = useRef(0);
   const providerSupported = ["anthropic", "openai", "google"].includes(provider);
   const config = (cursor = after) => ({ unit: "conversation", provider, model, rubric,
     maxCalls, maxOutputTokens: 4096, scanLimit: 20, ...(cursor ? { after: cursor } : {}) });
@@ -85,27 +82,14 @@ export function ConversationEvaluation({ root, token, provider, model, providerS
     finally { inFlight.current = false; setBusy(false); }
   }
 
-  async function loadStored(cursor = null) {
-    if (inFlight.current || !/^[0-9a-f]{64}$/.test(storedFingerprint)) return;
-    const generation = storedGeneration.current;
-    inFlight.current = true; setBusy(true); setError(null); setDetail(null);
-    try {
-      const query = new URLSearchParams({ evaluator: storedFingerprint });
-      if (cursor) query.set("after", cursor);
-      const value = await request(`/api/data/conversations/assessments?${query}`);
-      if (generation === storedGeneration.current) setStoredReview(value);
-    } catch (failure) { if (generation === storedGeneration.current) setError(String(failure)); }
-    finally { inFlight.current = false; setBusy(false); }
-  }
-
-  async function open(id, fingerprint = preview?.evaluatorFingerprint) {
+  async function open(id) {
+    const fingerprint = preview?.evaluatorFingerprint;
     if (inFlight.current || !fingerprint) return;
-    const generation = storedGeneration.current;
     inFlight.current = true; setBusy(true); setError(null); setDetail(null);
     try {
       const value = await request(`/api/data/conversations/${encodeURIComponent(id)}?evaluator=${encodeURIComponent(fingerprint)}`);
-      if (generation === storedGeneration.current) setDetail(value);
-    } catch (failure) { if (generation === storedGeneration.current) setError(String(failure)); }
+      setDetail(value);
+    } catch (failure) { setError(String(failure)); }
     finally { inFlight.current = false; setBusy(false); }
   }
 
@@ -128,19 +112,6 @@ export function ConversationEvaluation({ root, token, provider, model, providerS
       <label className="block text-sm font-semibold">Rubric JSON file<input type="file" accept=".json,application/json" aria-label="Rubric JSON file" onChange={upload} className="block w-full mt-2" /></label>
       {rubric && <div className="border p-3 text-sm" style={{ borderColor: C.border }}><strong>{rubric.name} · v{rubric.version}</strong> · {rubric.target}<div className="mt-1">{rubric.dimensions.map(d => `${d.name} (${d.type === "number" ? `${d.min}–${d.max}` : "PASS / FAIL / UNCLEAR"})`).join(" · ")}</div><div className="font-mono text-xs break-all mt-2" style={{ color: C.sub }}>{rubric.fingerprint}</div></div>}
       <button disabled={!rubric || !token || !providerSupported} onClick={() => loadPage(null)} className="border px-4 py-2 text-sm">Preview first page</button>
-    </section>
-    <section className="border p-5 space-y-3" style={{ borderColor: C.border, background: C.panel }}>
-      <h3 className="font-semibold">Review stored evaluator results</h3>
-      <p className="text-sm" style={{ color: C.sub }}>Enter an evaluator fingerprint to inspect existing conversation grades. This view makes no judge calls and does not change stored results.</p>
-      <label className="block text-sm">Evaluator fingerprint<input aria-label="Stored evaluator fingerprint" value={storedFingerprint} onChange={e => {
-        storedGeneration.current += 1; setStoredFingerprint(e.target.value.trim());
-        setStoredReview(null); setDetail(null);
-      }} className="block w-full border p-2 mt-1 bg-transparent font-mono" placeholder="64-character evaluator fingerprint" /></label>
-      <button disabled={!/^[0-9a-f]{64}$/.test(storedFingerprint)} onClick={() => loadStored()} className="border px-4 py-2 text-sm">Review stored results</button>
-      {storedReview && <div className="space-y-2"><p className="text-xs" style={{ color: C.sub }}>ID ordered · up to 20 stored assessments shown per conversation. Empty rows have no result from this evaluator.</p>
-        <div className="overflow-auto max-h-96"><table className="w-full text-sm text-left"><thead><tr><th className="p-2">Conversation</th><th className="p-2">Stored results</th></tr></thead><tbody>{storedReview.conversations.map(row => <tr key={row.id} className="border-t" style={{ borderColor: C.border }}><td className="p-2"><button className="underline" onClick={() => open(row.id, storedReview.evaluatorFingerprint)}>{row.id.slice(0, 12)}</button><div className="text-xs" style={{ color: C.sub }}>{row.event_at || "No source time"}</div></td><td className="p-2">{row.assessmentCount ? `${row.completedCount} completed · ${row.errorCount} errors` : "No stored result"}{row.assessmentsTruncated && " · more results exist"}</td></tr>)}</tbody></table></div>
-        {storedReview.nextCursor && <button className="border px-3 py-2 text-sm" onClick={() => loadStored(storedReview.nextCursor)}>Next stored page</button>}
-      </div>}
     </section>
     {preview && <section className="border p-5 space-y-3" style={{ borderColor: C.border, background: C.panel }}>
       <h3 className="font-semibold">Preview · {preview.target} rubric</h3>

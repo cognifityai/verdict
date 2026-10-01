@@ -1062,6 +1062,63 @@ class InMemoryStorage:
             )[:limit]
             return [json.loads(self._conversation_assessments[key]) for key in keys]
 
+    def list_conversation_evaluators(
+        self, tenant_id: str, *, after: str | None = None, limit: int = 20
+    ) -> tuple[list[dict], str | None]:
+        from verdict.conversation_assessments import validate_evaluator_fingerprint
+        from verdict.conversations import validate_conversation_query
+
+        validate_conversation_query(tenant_id, limit)
+        if after is not None:
+            validate_evaluator_fingerprint(after)
+        with self._agent_evidence_lock:
+            selected = {}
+            for (tenant, conversation_id, fingerprint, _), payload in self._conversation_assessments.items():
+                if tenant != tenant_id or fingerprint <= (after or ""):
+                    continue
+                snapshot = self._conversations.get((tenant, conversation_id))
+                if snapshot is None:
+                    continue
+                assessment = json.loads(payload)
+                if assessment["revision"] == json.loads(snapshot[0])["revision"]:
+                    selected.setdefault(fingerprint, assessment)
+            fingerprints = sorted(selected)[:limit + 1]
+            page = [selected[fingerprint] for fingerprint in fingerprints[:limit]]
+            return page, fingerprints[limit - 1] if len(fingerprints) > limit else None
+
+    def list_graded_conversations(
+        self, tenant_id: str, evaluator_fingerprint: str, *, after: str | None = None,
+        limit: int = 20,
+    ) -> tuple[list[dict], str | None]:
+        from verdict.conversation_assessments import validate_evaluator_fingerprint
+        from verdict.conversations import validate_conversation_query
+
+        validate_conversation_query(tenant_id, limit, after)
+        validate_evaluator_fingerprint(evaluator_fingerprint)
+        with self._agent_evidence_lock:
+            grouped = {}
+            for (tenant, conversation_id, fingerprint, _), payload in self._conversation_assessments.items():
+                if (tenant, fingerprint) != (tenant_id, evaluator_fingerprint) or conversation_id <= (after or ""):
+                    continue
+                snapshot = self._conversations.get((tenant, conversation_id))
+                if snapshot is None:
+                    continue
+                conversation = json.loads(snapshot[0])
+                assessment = json.loads(payload)
+                if assessment["revision"] != conversation["revision"]:
+                    continue
+                if assessment["status"] not in {"completed", "error"}:
+                    raise ValueError("invalid stored assessment status")
+                row = grouped.setdefault(conversation_id, {
+                    "id": conversation_id, "revision": conversation["revision"],
+                    "event_at": conversation["event_at"], "end_status": conversation["end_status"],
+                    "assessmentCount": 0, "completedCount": 0, "errorCount": 0,
+                })
+                row["assessmentCount"] += 1
+                row["completedCount" if assessment["status"] == "completed" else "errorCount"] += 1
+            ids = sorted(grouped)[:limit + 1]
+            return [grouped[id_] for id_ in ids[:limit]], ids[limit - 1] if len(ids) > limit else None
+
     def load_conversation_comparison_rows(self, query: dict, *, limit: int) -> list[dict]:
         from verdict.conversation_monitoring import validate_storage_query
 

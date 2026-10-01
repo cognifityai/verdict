@@ -16,6 +16,7 @@ import { Registry } from "./Registry.jsx";
 import { Runs } from "./Runs.jsx";
 import { Insights } from "./Insights.jsx";
 import { EvaluatorLab } from "./EvaluatorLab.jsx";
+import { ConversationResults } from "./ConversationResults.jsx";
 import { InspectLab } from "./InspectLab.jsx";
 import { ManagementReport } from "./ManagementReport.jsx";
 import { ControlCenter } from "./ControlCenter.jsx";
@@ -984,7 +985,10 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
           })}
           onSelectTrace={(traceId) => commitRoute({ ...route, tab: "explore", section: "calls", traceId })} />}
         {tab === "explore" && route.section === "compare" && <><MatchedConversationCompare configUrl={mountedConfigUrl()} source={source} /><Compare data={DATA} source={source} /></>}
-        {tab === "evaluate" && route.section === "results" && <Judge data={DATA} onOpenOperations={operationsUrl ? () => commitRoute({ ...route, tab: "settings", section: "integrations" }) : null} />}
+        {tab === "evaluate" && route.section === "results" && <ConversationResults
+          root={mountedConfigUrl().replace(/\/api\/config$/, "")} source={source}
+          traceResults={<Judge data={DATA} onOpenOperations={operationsUrl ? () => commitRoute({ ...route, tab: "settings", section: "integrations" }) : null} />}
+        />}
         {tab === "evaluate" && route.section === "lab" && <EvaluatorLab configUrl={mountedConfigUrl()} onOpenEvaluated={(evaluatorId) => { onEvaluatorChange?.(evaluatorId); commitRoute({ ...route, tab: "explore", section: "calls", evaluatorId, traceJudgeStatus: "judged", traceId: null }); }} />}
         {tab === "evaluate" && route.section === "inspect" && <InspectLab configUrl={mountedConfigUrl()} />}
         {tab === "evaluate" && route.section === "review" && <ControlCenter section="review" configUrl={mountedConfigUrl()} onNavigate={(target) => navigateWorkflow(commitRoute, route, target)} />}

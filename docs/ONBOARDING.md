@@ -487,12 +487,14 @@ closed snapshots with a completed assistant reply after a user message are
 eligible. Correcting a transcript invalidates its previous grades. The example
 rubrics are at `examples/telemetry/conversation-rubric.example.json` and
 `examples/telemetry/response-rubric.example.json`; custom
-weighted totals are outside this generic schema. **Review stored evaluator
-results** on the same screen can show grades written through Verdict's storage
-API by another evaluator. Enter its evaluator fingerprint to page through
-current grades and open their evidence. It makes no judge calls and shows at
-most 20 assessments per conversation in the list; its counts are not a full
-reply-coverage claim. To explore quality over time,
+weighted totals are outside this generic schema. Open **Evaluate → Results →
+Conversation results** to select a stored conversation evaluator by rubric,
+provider, and model. Copy its full evaluator ID for Monitor. The list pages only
+current conversations with grades from that exact evaluator. Open a row to
+inspect its grades and evidence. The list
+counts stored completed and error results, not full reply coverage, and makes
+no judge calls. **Trace results** are a separate view on the same screen.
+To explore quality over time,
 open **Monitor → Compare History**, choose **Conversation grade (descriptive)**,
 enter the fingerprint from the Lab preview or another stored evaluator, then a
 binary dimension

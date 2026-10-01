@@ -299,13 +299,13 @@ async def test_stored_evaluator_review_lists_only_current_matching_grades(tmp_pa
         assert body["nextCursor"] is None
         assert [(row["id"], row["assessmentCount"], row["completedCount"])
                 for row in body["conversations"]] == [
-                    ("a" * 32, 1, 1), ("c" * 32, 0, 0),
+                    ("a" * 32, 1, 1),
                 ]
         assert "messages" not in body["conversations"][0]
         next_page = await client.get(
             f"/api/data/conversations/assessments?evaluator={grade['evaluator_fingerprint']}&after={'a' * 32}"
         )
-        assert [row["id"] for row in next_page.json()["conversations"]] == ["c" * 32]
+        assert next_page.json()["conversations"] == []
         writer = SQLiteStorage(str(path))
         writer.save_conversation(validate_conversation({
             **first, "messages": [{"role": "user", "content": "Question."},
@@ -316,4 +316,4 @@ async def test_stored_evaluator_review_lists_only_current_matching_grades(tmp_pa
         changed = await client.get(
             f"/api/data/conversations/assessments?evaluator={grade['evaluator_fingerprint']}"
         )
-        assert changed.json()["conversations"][0]["assessmentCount"] == 0
+        assert changed.json()["conversations"] == []

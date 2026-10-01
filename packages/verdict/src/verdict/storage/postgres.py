@@ -160,6 +160,8 @@ CREATE TABLE IF NOT EXISTS conversation_assessments (
     FOREIGN KEY (tenant_id, conversation_id)
       REFERENCES conversation_snapshots(tenant_id, conversation_id) ON DELETE CASCADE
 );
+CREATE INDEX IF NOT EXISTS conversation_assessment_evaluator_page ON conversation_assessments
+    (tenant_id, evaluator_fingerprint, conversation_id);
 CREATE TABLE IF NOT EXISTS traces (
     trace_id          TEXT PRIMARY KEY,
     parent_span_id    TEXT,
@@ -2321,6 +2323,57 @@ class PostgresStorage:
             (tenant_id, conversation_id, evaluator_fingerprint, limit),
         )
         return [json.loads(row[0]) for row in rows]
+
+    def list_conversation_evaluators(
+        self, tenant_id: str, *, after: str | None = None, limit: int = 20
+    ) -> tuple[list[dict], str | None]:
+        from verdict.conversation_assessments import validate_evaluator_fingerprint
+        from verdict.conversations import validate_conversation_query
+
+        validate_conversation_query(tenant_id, limit)
+        if after is not None:
+            validate_evaluator_fingerprint(after)
+        rows = self._fetchall(
+            """SELECT a.evaluator_fingerprint, MIN(a.payload) AS payload
+               FROM conversation_assessments a JOIN conversation_snapshots c
+               ON c.tenant_id=a.tenant_id AND c.conversation_id=a.conversation_id
+               WHERE a.tenant_id=%s AND a.evaluator_fingerprint>%s
+               AND a.revision=(c.payload::jsonb->>'revision')
+               GROUP BY a.evaluator_fingerprint ORDER BY a.evaluator_fingerprint LIMIT %s""",
+            (tenant_id, after or "", limit + 1),
+        )
+        return [json.loads(row[1]) for row in rows[:limit]], rows[limit - 1][0] if len(rows) > limit else None
+
+    def list_graded_conversations(
+        self, tenant_id: str, evaluator_fingerprint: str, *, after: str | None = None,
+        limit: int = 20,
+    ) -> tuple[list[dict], str | None]:
+        from verdict.conversation_assessments import validate_evaluator_fingerprint
+        from verdict.conversations import validate_conversation_query
+
+        validate_conversation_query(tenant_id, limit, after)
+        validate_evaluator_fingerprint(evaluator_fingerprint)
+        rows = self._fetchall(
+            """SELECT a.conversation_id, c.payload, COUNT(*),
+               COUNT(*) FILTER (WHERE a.payload::jsonb->>'status'='completed'),
+               COUNT(*) FILTER (WHERE a.payload::jsonb->>'status'='error')
+               FROM conversation_assessments a JOIN conversation_snapshots c
+               ON c.tenant_id=a.tenant_id AND c.conversation_id=a.conversation_id
+               WHERE a.tenant_id=%s AND a.evaluator_fingerprint=%s AND a.conversation_id>%s
+               AND a.revision=(c.payload::jsonb->>'revision')
+               GROUP BY a.conversation_id, c.payload ORDER BY a.conversation_id LIMIT %s""",
+            (tenant_id, evaluator_fingerprint, after or "", limit + 1),
+        )
+        page = []
+        for conversation_id, payload, total, completed, errors in rows[:limit]:
+            if total != completed + errors:
+                raise ValueError("invalid stored assessment status")
+            snapshot = json.loads(payload)
+            page.append({"id": conversation_id, "revision": snapshot["revision"],
+                         "event_at": snapshot["event_at"], "end_status": snapshot["end_status"],
+                         "assessmentCount": total, "completedCount": completed,
+                         "errorCount": errors})
+        return page, rows[limit - 1][0] if len(rows) > limit else None
 
     def get_conversation(self, tenant_id: str, conversation_id: str) -> dict | None:
         from verdict.conversations import validate_conversation_query
