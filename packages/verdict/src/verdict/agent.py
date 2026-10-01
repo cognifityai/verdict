@@ -106,7 +106,10 @@ def _content(client: Any, value: object) -> str | None:
         return "<OMITTED:invalid>"
 
 
-def _bounded_value(client: Any, value: object) -> Any:
+def _bounded_value(
+    client: Any, value: object, *, max_depth: int = _MAX_VALUE_DEPTH,
+    max_nodes: int = _MAX_VALUE_NODES,
+) -> Any:
     try:
         sanitized = redact_structure(
             value,
@@ -117,7 +120,7 @@ def _bounded_value(client: Any, value: object) -> Any:
 
         def visit(item: Any, depth: int) -> Any:
             nodes[0] += 1
-            if nodes[0] > _MAX_VALUE_NODES or depth > _MAX_VALUE_DEPTH:
+            if nodes[0] > max_nodes or depth > max_depth:
                 return "<OMITTED:bounded>"
             if item is None or isinstance(item, (bool, int)):
                 return item
@@ -239,40 +242,97 @@ class _TurnState:
         trace_id: str | None = None,
     ) -> AgentEvent:
         has_content = bool(EVENT_CONTENT_FIELDS & attributes.keys())
+        kind = {
+            AgentEventType.TOOL_CALL: "tool_call_arguments",
+            AgentEventType.TOOL_RESULT: "tool_result",
+        }.get(event_type, "event_content")
+        omission_reason = None
         safe_attributes = {
             key: value
             for key, value in attributes.items()
             if self.owner.client.capture_content or key not in EVENT_CONTENT_FIELDS
         }
-        # Hash semantic credentials before bounding; the second pass below
-        # closes the same rule after malformed children become omission markers.
-        try:
-            attributes_for_bounding = sanitize_agent_event_attributes(
+        tool_content_field = {
+            AgentEventType.TOOL_CALL: "arguments",
+            AgentEventType.TOOL_RESULT: "result",
+        }.get(event_type)
+        if tool_content_field is not None:
+            bounded_attributes = {
+                key: _bounded_value(self.owner.client, value, max_depth=3, max_nodes=112)
+                for key, value in safe_attributes.items()
+                if key != tool_content_field
+            }
+            if tool_content_field in safe_attributes:
+                try:
+                    sanitized_content = sanitize_agent_event_attributes(
+                        event_type,
+                        {tool_content_field: safe_attributes[tool_content_field]},
+                        mode=self.owner.client.redaction_mode,
+                        secret=self.owner.client.redaction_secret,
+                    )
+                except Exception:
+                    sanitized_content = {}
+                if tool_content_field in sanitized_content:
+                    bounded_attributes[tool_content_field] = _bounded_value(
+                        self.owner.client,
+                        sanitized_content[tool_content_field],
+                        max_depth=3,
+                        max_nodes=112,
+                    )
+                else:
+                    omission_reason = f"{kind}_exceeds_redaction_limit"
+            safe_attributes = bounded_attributes
+        else:
+            # Other events can pair a semantic name with content. Sanitize the
+            # full mapping before bounding so sensitive names keep their value.
+            try:
+                attributes_for_bounding = sanitize_agent_event_attributes(
+                    event_type,
+                    safe_attributes,
+                    mode=self.owner.client.redaction_mode,
+                    secret=self.owner.client.redaction_secret,
+                )
+            except Exception:
+                attributes_for_bounding = safe_attributes
+            if (
+                has_content
+                and self.owner.client.capture_content
+                and not EVENT_CONTENT_FIELDS.intersection(attributes_for_bounding)
+            ):
+                attributes_for_bounding = sanitize_agent_event_attributes(
+                    event_type,
+                    {key: value for key, value in safe_attributes.items() if key not in EVENT_CONTENT_FIELDS},
+                    mode=self.owner.client.redaction_mode,
+                    secret=self.owner.client.redaction_secret,
+                )
+                omission_reason = f"{kind}_exceeds_redaction_limit"
+            safe_attributes = {
+                key: _bounded_value(self.owner.client, value, max_depth=3, max_nodes=112)
+                for key, value in attributes_for_bounding.items()
+            }
+            safe_attributes = sanitize_agent_event_attributes(
                 event_type,
                 safe_attributes,
                 mode=self.owner.client.redaction_mode,
                 secret=self.owner.client.redaction_secret,
             )
-        except Exception:
-            attributes_for_bounding = safe_attributes
-        safe_attributes = {
-            key: _bounded_value(self.owner.client, value)
-            for key, value in attributes_for_bounding.items()
-        }
-        safe_attributes = sanitize_agent_event_attributes(
-            event_type,
-            safe_attributes,
-            mode=self.owner.client.redaction_mode,
-            secret=self.owner.client.redaction_secret,
-        )
+            if (
+                has_content
+                and self.owner.client.capture_content
+                and not EVENT_CONTENT_FIELDS.intersection(safe_attributes)
+                and omission_reason is None
+            ):
+                omission_reason = f"{kind}_exceeds_redaction_limit"
         privacy = (
-            PrivacyClassification.REDACTED
+            PrivacyClassification.OMITTED
+            if omission_reason is not None
+            else PrivacyClassification.REDACTED
             if has_content and self.owner.client.capture_content
             else PrivacyClassification.OMITTED
             if has_content
             else PrivacyClassification.METADATA
         )
-        event = AgentEvent(
+        event_fields = dict(
             event_id=f"event_{uuid4().hex}",
             turn_id=self.turn.turn_id,
             sequence=0,
@@ -285,12 +345,33 @@ class _TurnState:
             omission_reason=(
                 "content_capture_disabled"
                 if has_content and not self.owner.client.capture_content
-                else None
+                else omission_reason
             ),
             trace_id=trace_id,
             producer_id=self.owner.producer_id,
             producer_sequence=0,
         )
+        warning_reason = omission_reason
+        try:
+            event = AgentEvent(**event_fields)
+        except ValueError as error:
+            if not EVENT_CONTENT_FIELDS.intersection(safe_attributes):
+                raise
+            # An unexpected shape or aggregate budget can still defeat the
+            # per-value bound. Keep typed metadata and the event identity.
+            reason = f"{kind}_{'exceeds_event_limit' if 'bounded' in str(error) else 'invalid_shape'}"
+            event_fields["attributes"] = {
+                key: value for key, value in safe_attributes.items() if key not in EVENT_CONTENT_FIELDS
+            }
+            event_fields["privacy_classification"] = PrivacyClassification.OMITTED
+            event_fields["omission_reason"] = reason
+            event = AgentEvent(**event_fields)
+            warning_reason = reason
+        if warning_reason is not None:
+            try:
+                log.warning("Verdict omitted agent event content: %s", warning_reason)
+            except BaseException:
+                pass
         with self._lock:
             sequence = self._next_event_sequence
             producer_sequence = self.owner._next_producer_sequence()
@@ -341,6 +422,13 @@ class ToolContext:
     ) -> None:
         if not isinstance(name, str) or not name:
             raise ValueError("tool name must be non-empty text")
+        if call_id is not None:
+            if not isinstance(call_id, str) or "\x00" in call_id:
+                raise ValueError("tool call_id must be valid text")
+            try:
+                call_id.encode("utf-8")
+            except UnicodeError as error:
+                raise ValueError("tool call_id must be valid text") from error
         self._turn = turn
         self._name = _truncate_utf8(name, 256)
         self._arguments = arguments
