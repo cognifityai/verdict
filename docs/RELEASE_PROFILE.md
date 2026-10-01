@@ -1,4 +1,4 @@
-# Run a customer POC with Verdict 0.1.0b1
+# Run a pilot with Verdict 0.1.0b1
 
 Use this profile to demonstrate Verdict on verified provider calls without
 presenting the public beta as production-ready. The historical `0.1.0a4`
@@ -7,7 +7,7 @@ profile remains available from its release tag.
 ## 1. Install the exact synchronized release
 
 Use Python 3.10, 3.11, or 3.12 in a clean environment. Install only the
-provider, dashboard, semantic, and storage extras the POC needs:
+provider, dashboard, semantic, and storage extras the pilot needs:
 
 ```bash
 python -m pip install \
@@ -31,7 +31,7 @@ credentials through the deployment's secret mechanism.
 
 ## 2. Use a released provider entry point
 
-| Provider | Supported in this POC | Outside this POC |
+| Provider | Supported in this pilot | Outside this pilot |
 |---|---|---|
 | Anthropic | `messages.create(...)`; `messages.create(stream=True)`; `messages.stream(...)` sync/async helpers | Entry points not listed here |
 | OpenAI | `chat.completions.create(...)`; Chat stream helper; Responses `create(...)`, `parse(...)`, and new/existing-response stream helpers | `responses.with_streaming_response` raw-response manager; experimental `client.beta.responses` multi-agent resource |
@@ -39,19 +39,19 @@ credentials through the deployment's secret mechanism.
 
 Consume supported streams completely or close them explicitly. Dropping an
 unconsumed, unclosed stream does not guarantee trace persistence. Before a
-customer demonstration, run the repository's live capture check with only the
+live demonstration, run the repository's live capture check with only the
 providers actually configured and retain its named entry-point results.
 
-## 3. Configure the POC safely
+## 3. Configure the pilot safely
 
 Keep writes synchronous. Content capture is on by default for a useful local
-POC; disable it explicitly when approval is metadata-only:
+pilot; disable it explicitly when approval is metadata-only:
 
 ```python
 import verdict
 
 verdict.init(
-    service_name="customer-poc",
+    service_name="pilot",
     storage="sqlite:///./verdict-poc.db",
     buffered_writes=False,
     capture_content=True,
@@ -59,12 +59,12 @@ verdict.init(
 ```
 
 `buffered_writes=True` requires an explicit `shutdown()` imported from
-`verdict.client` before process exit. Do not enable it for this POC.
+`verdict.client` before process exit. Do not enable it for this pilot.
 
 Content capture uses best-effort pattern redaction, not a compliance boundary.
 Use only specifically approved data, or set `capture_content=False`. For
 content-dependent evaluation, approved non-sensitive fixtures in an isolated
-store remain the safest POC path.
+store remain the safest pilot path.
 
 Provider credentials remain in the customer's environment. Never put API keys
 in the skill file, repository, SQLite database, screenshots, or support bundle.
@@ -96,7 +96,7 @@ fragmentation gate (`30.1047%` largest nonoutlier cluster versus a `30%`
 maximum). Do not silently enable those strategies or claim generally validated
 semantic quality.
 
-## 5. Interpret the POC correctly
+## 5. Interpret the pilot correctly
 
 - Verify that the stored trace count equals the number of sampled supported
   calls before showing downstream results.
@@ -113,13 +113,13 @@ semantic quality.
 - Registry readiness estimates and fragmentation warnings are diagnostics, not
   activation or drift decisions.
 
-## 6. POC acceptance check
+## 6. Pilot acceptance check
 
-The POC is ready to show only when all of these are true:
+The pilot is ready to show only when all of these are true:
 
 1. All three installed packages report `0.1.0b1` and `python -m pip check` passes.
 2. The application uses only a provider entry point in the supported column.
-3. `buffered_writes` is `False`; content capture is approved for the named POC
+3. `buffered_writes` is `False`; content capture is approved for the named pilot
    data or explicitly disabled before collection.
 4. Exactly one trace is stored for each sampled supported call.
 5. Tokens, latency, model, provider, finish reason, and errors are populated
