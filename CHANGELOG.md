@@ -22,6 +22,19 @@ the product is refined.
 
 ### Changed
 
+- Local history capture from Settings → Data Sources runs on a background
+  thread. `POST /api/setup/capture` returns 202 with the job at once and
+  `GET /api/setup/capture/status` reports `running`, `analyzing`, `completed`,
+  or `failed` with the files imported so far; the page shows that progress.
+  One capture runs per dashboard process at a time (a second start answers
+  409), the preview approval is consumed when the job starts, and a failed
+  job reports a category (`capture_failed`, `analysis_failed`), never a path;
+  an analysis that reports an error also ends the job as failed while keeping
+  the import summary. Each job carries a `jobId`; `?job=<id>` on the status
+  endpoint answers 404 when that job is no longer current, and a reloaded
+  setup page picks up a job that is still running, even after some files have
+  already produced Agent Runs.
+  `capture_local_agents` accepts an optional `progress(done, total)` callback.
 - The pilot guides are `docs/RELEASE_PROFILE.md` and `docs/AGENT_SKILL.md`
   (previously `POC_RELEASE_PROFILE.md` and `AGENT_POC_SKILL.md`). Public docs
   describe a pilot rather than a customer proof of concept; links to the

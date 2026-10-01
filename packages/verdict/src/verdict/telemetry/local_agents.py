@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1399,12 +1400,26 @@ def capture_local_agents(
     codex_root: Path | None = None,
     capture_content: bool = True,
     home: Path | None = None,
+    progress: Callable[[int, int], None] | None = None,
 ) -> LocalCaptureSummary:
-    """Rescan selected local roots into the canonical agent capture boundary."""
+    """Rescan selected local roots into the canonical agent capture boundary.
+
+    ``progress(done, total)`` is called once before the first file with
+    ``done == 0`` and once after each file. ``total`` counts the history files
+    found under the selected roots; Codex model-call diagnostics are imported
+    after the last file and are not part of the count.
+    """
     if not tenant_id:
         raise ValueError("tenant_id is required")
     sources = (("claude-code", claude_root, _parse_claude), ("codex", codex_root, _parse_codex))
     summary = LocalCaptureSummary()
+    listed: dict[str, list[Path]] = {}
+    for source_kind, root, _parser in sources:
+        if root is not None:
+            listed[source_kind] = list(_iter_paths(root) or ())
+    total = sum(len(paths) for paths in listed.values())
+    if progress is not None:
+        progress(0, total)
     capture_service = AgentCaptureService(storage)
     codex_usage_by_thread: dict[str, list[tuple[float, int, int, int | None]]] = {}
     for source_kind, root, parser in sources:
@@ -1412,8 +1427,7 @@ def capture_local_agents(
             continue
         source_scope = hashlib.sha256(str(root.resolve()).encode()).hexdigest()
         try:
-            paths = _iter_paths(root)
-            for path in paths or ():
+            for path in listed[source_kind]:
                 summary.files += 1
                 try:
                     parsed = parser(path, home=home)
@@ -1453,6 +1467,9 @@ def capture_local_agents(
                 except (OSError, ValueError) as exc:
                     summary.add_skip(str(exc) or type(exc).__name__)
                     continue
+                finally:
+                    if progress is not None:
+                        progress(summary.files, total)
                 summary.stored += 1
         except ValueError as exc:
             summary.add_skip(str(exc))

@@ -2555,31 +2555,148 @@ test("a failed first load does not claim that a snapshot is still displayed", as
   assert.match(dashboard.props.loadError, /Could not load dashboard data/);
 });
 
-test("local capture shows that a long import is still running", async () => {
+async function untilRequests(requests, count, timer) {
+  for (let index = 0; index < 500 && requests.length < count; index += 1) {
+    await new Promise((resolve) => timer(resolve, 1));
+  }
+  assert.ok(requests.length >= count, `expected ${count} requests, saw ${requests.length}`);
+}
+
+test("local capture starts a server job and shows its progress until it completes", async () => {
   const ui = await loadUiModule();
   const hooks = createEffectHooks();
   const requests = deferredFetches();
-  const props = { configUrl: "/api/config", onComplete: () => {}, agentSummary: {} };
-  render(ui.SetupWizard, hooks, props);
-  hooks.flushEffects();
-  await resolveJson(requests[0], { setupToken: "setup-token" });
-  const button = (label) => findAll(render(ui.SetupWizard, hooks, props),
-    (node) => node.type === "button" && textOf(node) === label)[0];
-  const status = () => findAll(render(ui.SetupWizard, hooks, props),
-    (node) => node.props?.role === "status").map(textOf).join(" ");
+  const completed = [];
+  const props = { configUrl: "/api/config", onComplete: (source) => completed.push(source), agentSummary: {} };
+  const realSetTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = (callback) => realSetTimeout(callback, 0);
+  try {
+    render(ui.SetupWizard, hooks, props);
+    hooks.flushEffects();
+    await resolveJson(requests[0], { setupToken: "setup-token" });
+    assert.match(requests[1].url, /\/api\/setup\/capture\/status$/);
+    await resolveJson(requests[1], { job: null });
+    const button = (label) => findAll(render(ui.SetupWizard, hooks, props),
+      (node) => node.type === "button" && textOf(node) === label)[0];
+    const status = () => findAll(render(ui.SetupWizard, hooks, props),
+      (node) => node.props?.role === "status").map(textOf).join(" ");
 
-  const previewing = button("Preview sources").props.onClick();
-  assert.match(status(), /Previewing sources/);
-  await resolveJson(requests[1], { claude: { files: 1 }, codex: { files: 0 } });
-  await previewing;
-  assert.equal(status(), "");
+    const previewing = button("Preview sources").props.onClick();
+    assert.match(status(), /Previewing sources/);
+    await resolveJson(requests[2], { claude: { files: 1 }, codex: { files: 0 } });
+    await previewing;
 
-  const capturing = button("Approve and capture").props.onClick();
-  assert.match(requests[2].url, /\/api\/setup\/capture$/);
-  assert.match(status(), /Capturing local history/);
-  assert.match(status(), /several minutes/);
-  assert.equal(button("Approve and capture").props.disabled, true);
-  await resolveJson(requests[2], { summary: { stored: 1 } });
-  await capturing;
-  assert.equal(status(), "");
+    const capturing = button("Approve and capture").props.onClick();
+    assert.match(requests[3].url, /\/api\/setup\/capture$/);
+    assert.equal(requests[3].options.method, "POST");
+    await resolveJson(requests[3], { job: { jobId: "job-1", state: "running", filesDone: 0, filesTotal: null } });
+    assert.match(status(), /Listing history files/);
+    assert.equal(button("Approve and capture").props.disabled, true);
+    await untilRequests(requests, 5, realSetTimeout);
+    assert.match(requests[4].url, /\/api\/setup\/capture\/status\?job=job-1$/);
+    await resolveJson(requests[4], { job: { jobId: "job-1", state: "running", filesDone: 12, filesTotal: 120 } });
+    assert.match(status(), /Importing 12 of 120 history files/);
+    await untilRequests(requests, 6, realSetTimeout);
+    await resolveJson(requests[5], { job: { jobId: "job-1", state: "analyzing", filesDone: 120, filesTotal: 120 } });
+    assert.match(status(), /Analyzing captured evidence/);
+    await untilRequests(requests, 7, realSetTimeout);
+    await resolveJson(requests[6], { job: { jobId: "job-1", state: "completed", filesDone: 120, filesTotal: 120,
+      summary: { stored: 120 }, analysis: { status: "completed" } } });
+    await capturing;
+    assert.equal(status(), "");
+    assert.deepEqual(completed, ["local"]);
+  } finally {
+    globalThis.setTimeout = realSetTimeout;
+  }
+});
+
+test("a capture job that fails is reported instead of completing the setup", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const completed = [];
+  const props = { configUrl: "/api/config", onComplete: (source) => completed.push(source), agentSummary: {} };
+  const realSetTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = (callback) => realSetTimeout(callback, 0);
+  try {
+    render(ui.SetupWizard, hooks, props);
+    hooks.flushEffects();
+    await resolveJson(requests[0], { setupToken: "setup-token" });
+    await resolveJson(requests[1], { job: null });
+    const button = (label) => findAll(render(ui.SetupWizard, hooks, props),
+      (node) => node.type === "button" && textOf(node) === label)[0];
+    const previewing = button("Preview sources").props.onClick();
+    await resolveJson(requests[2], { claude: { files: 1 }, codex: { files: 0 } });
+    await previewing;
+    const capturing = button("Approve and capture").props.onClick();
+    await resolveJson(requests[3], { job: { jobId: "job-2", state: "running", filesDone: 0, filesTotal: 1 } });
+    await untilRequests(requests, 5, realSetTimeout);
+    await resolveJson(requests[4], { job: { jobId: "job-2", state: "failed", filesDone: 0, filesTotal: 1, error: "capture_failed" } });
+    await capturing;
+    const alerts = findAll(render(ui.SetupWizard, hooks, props), (node) => node.props?.role === "alert").map(textOf).join(" ");
+    assert.match(alerts, /capture_failed/);
+    assert.deepEqual(completed, []);
+  } finally {
+    globalThis.setTimeout = realSetTimeout;
+  }
+});
+
+test("a reloaded setup page picks up the capture that is still running", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const completed = [];
+  const props = { configUrl: "/api/config", onComplete: (source) => completed.push(source), agentSummary: {} };
+  const realSetTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = (callback) => realSetTimeout(callback, 0);
+  try {
+    render(ui.SetupWizard, hooks, props);
+    hooks.flushEffects();
+    await resolveJson(requests[0], { setupToken: "setup-token" });
+    await resolveJson(requests[1], { job: { jobId: "job-9", state: "running", filesDone: 40, filesTotal: 90 } });
+    const status = () => findAll(render(ui.SetupWizard, hooks, props),
+      (node) => node.props?.role === "status").map(textOf).join(" ");
+    assert.match(status(), /Importing 40 of 90 history files/);
+    await untilRequests(requests, 3, realSetTimeout);
+    assert.match(requests[2].url, /\/api\/setup\/capture\/status\?job=job-9$/);
+    await resolveJson(requests[2], { job: { jobId: "job-9", state: "completed", filesDone: 90, filesTotal: 90,
+      summary: { stored: 90 }, analysis: { status: "completed" } } });
+    for (let index = 0; index < 20 && completed.length === 0; index += 1) await new Promise((resolve) => realSetTimeout(resolve, 1));
+    assert.deepEqual(completed, ["local"]);
+    assert.equal(status(), "");
+  } finally {
+    globalThis.setTimeout = realSetTimeout;
+  }
+});
+
+test("reloaded capture progress and failure stay visible with an observed store", async () => {
+  const ui = await loadUiModule();
+  const realSetTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = (callback) => realSetTimeout(callback, 0);
+  try {
+    for (const agentSummary of [
+      { totalAgentRuns: 40, totalTraces: 0 },
+      { totalAgentRuns: 0, totalTraces: 5 },
+      { storageBackend: "sqlite", totalAgentRuns: 0, totalTraces: 0 },
+    ]) {
+      const hooks = createEffectHooks();
+      const requests = deferredFetches();
+      const props = { configUrl: "/api/config", onComplete: () => {}, agentSummary };
+      render(ui.SetupWizard, hooks, props);
+      hooks.flushEffects();
+      await resolveJson(requests[0], { setupToken: "setup-token" });
+      await resolveJson(requests[1], { job: { jobId: "job-10", state: "running", filesDone: 40, filesTotal: 90 } });
+      const notices = (role) => findAll(render(ui.SetupWizard, hooks, props),
+        (node) => node.props?.role === role).map(textOf).join(" ");
+      assert.match(notices("status"), /Importing 40 of 90 history files/);
+      await untilRequests(requests, 3, realSetTimeout);
+      await resolveJson(requests[2], { job: { jobId: "job-10", state: "failed", error: "capture_failed" } });
+      for (let attempt = 0; attempt < 20 && !notices("alert"); attempt += 1) {
+        await new Promise((resolve) => realSetTimeout(resolve, 1));
+      }
+      assert.match(notices("alert"), /capture_failed/);
+    }
+  } finally {
+    globalThis.setTimeout = realSetTimeout;
+  }
 });
