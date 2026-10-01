@@ -271,21 +271,25 @@ class SetupRoutes:
                             {"error": "preview these exact source paths before capture"},
                             status_code=409,
                         )
-                    # The approval is consumed when the job starts, so a second
-                    # click cannot start another capture without a new preview.
-                    self._previewed_local_roots.discard(root_key)
                     job = CaptureJob(
                         job_id=secrets.token_hex(8),
                         started_at=datetime.now(timezone.utc).isoformat(),
                     )
+                    thread = threading.Thread(
+                        target=self._run_capture_job,
+                        args=(job, claude_root, codex_root, capture_content),
+                        name="verdict-local-capture",
+                        daemon=True,
+                    )
+                    try:
+                        thread.start()
+                    except (OSError, RuntimeError):
+                        return JSONResponse(
+                            {"error": "capture could not start"}, status_code=503
+                        )
+                    # Register only a started job and consume approval only then.
                     self._capture_job = job
-                thread = threading.Thread(
-                    target=self._run_capture_job,
-                    args=(job, claude_root, codex_root, capture_content),
-                    name="verdict-local-capture",
-                    daemon=True,
-                )
-                thread.start()
+                    self._previewed_local_roots.discard(root_key)
                 return JSONResponse({"job": job.as_dict()}, status_code=202)
             except (OSError, TypeError, UnicodeError, ValueError):
                 return JSONResponse({"error": "invalid setup request"}, status_code=400)

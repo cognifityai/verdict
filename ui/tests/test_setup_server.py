@@ -445,6 +445,41 @@ def test_setup_capture_requires_preview_of_the_exact_paths(tmp_path):
     assert changed_path.status_code == 409
 
 
+def test_capture_thread_start_failure_preserves_approval_and_allows_retry(tmp_path, monkeypatch):
+    import threading
+
+    import verdict.dashboard.setup_routes as setup_routes
+
+    codex = tmp_path / "codex"
+    _write_codex(codex / "session.jsonl")
+    real_start = threading.Thread.start
+
+    def cannot_start(self):
+        raise RuntimeError(f"thread failed near {tmp_path}/private")
+
+    async def run():
+        app = create_app(storage=f"sqlite:///{tmp_path / 'verdict.db'}")
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            headers = {"X-Verdict-Setup": token}
+            payload = {"codexRoot": str(codex)}
+            await client.post("/api/setup/preview", headers=headers, json=payload)
+            monkeypatch.setattr(setup_routes.threading.Thread, "start", cannot_start)
+            failed = await client.post("/api/setup/capture", headers=headers, json=payload)
+            status = await client.get("/api/setup/capture/status")
+            monkeypatch.setattr(setup_routes.threading.Thread, "start", real_start)
+            retry, job = await _capture_and_wait(client, headers, payload)
+            return failed, status, retry, job
+
+    failed, status, retry, job = asyncio.run(run())
+    assert failed.status_code == 503
+    assert "private" not in failed.text and str(tmp_path) not in failed.text
+    assert status.json()["job"] is None
+    assert retry.status_code == 202
+    assert job["state"] == "completed"
+
+
 def test_capture_status_reports_progress_failure_and_single_flight(tmp_path, monkeypatch):
     import threading
 
