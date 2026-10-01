@@ -41,9 +41,28 @@ current exact transcript revision, target, rubric, provider, model, prompt
 version, and endpoint. Partial coverage and judge errors stay visible.
 Conversation grading supports Anthropic, OpenAI, and Google providers; Jev is
 available for Trace and Turn evaluation only.
-This does not execute a custom scoring formula or establish agreement with
-human labels. See the repository's example rubric and onboarding guide.
+Simple dimension rubrics do not execute a custom scoring formula or establish
+agreement with human labels. See the repository's example rubric and onboarding guide.
 This conversation unit is included in the synchronized `0.1.0b1` core and eval builds.
+
+A build containing `element_scoring_v1` also accepts the
+[`element rubric example`](../../examples/telemetry/element-rubric.example.json)
+through that same upload control. The declared `kind` chooses whole-conversation
+element grading automatically. The judge supplies applicable elements,
+adequacy, evidence, and confidence; Verdict validates them and calculates
+category scores, indices, labels, and the gate. It stores both source findings
+and computed values for review. The alternate route is scored separately.
+Its result includes the route rationale, context label, and a reason for each
+sub-score.
+Catalogs with named phases require source-supplied `enabled_phases` for standard
+scoring. Records without them are counted as alternate-only in preview; a
+standard response cannot be saved. Verdict rejects a judge response that
+changes supplied phases or claims no applicable elements in a standard
+category. Only rubric-allowlisted conditional exclusions are accepted and
+shown in review.
+Historical conversation Monitor can compare the binary gate, while numeric
+historical monitoring and domain judge calibration require separate work.
+This format is absent from the published `0.1.0b1` packages.
 
 ## Jev judge
 

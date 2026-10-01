@@ -151,6 +151,30 @@ test("conversation upload, approved run, and partial coverage refresh", async ()
   assert.equal(requests.length, 6);
 });
 
+test("element rubric upload selects scoring mode and output budget from the file", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const props = { root: "", token: "setup-token", provider: "openai", model: "synthetic",
+    providerState: { configured: true }, updatePreferences: () => {} };
+  const document = { name: "fictional", version: "1", target: "conversation",
+    kind: "element_scoring_v1", catalog: { coverage: [{ phase: "general", element: "question" }] },
+    scoring: { weights: { coverage: 1 } }, fingerprint: "a".repeat(64) };
+  let tree = render(ui.ConversationEvaluation, hooks, props);
+  const upload = findAll(tree, (node) => node.type === "input" && node.props.type === "file")[0]
+    .props.onChange({ target: { files: [{ size: 200, text: async () => JSON.stringify(document) }] } });
+  await new Promise(setImmediate);
+  await resolveJson(requests[0], document);
+  await upload;
+  tree = render(ui.ConversationEvaluation, hooks, props);
+  assert.match(textOf(tree), /Element scoring/);
+  assert.match(textOf(tree), /1\s+declared elements/);
+  const budget = findAll(tree, (node) => node.type === "input" && node.props.type === "number" &&
+    node.props.max === "32768")[0];
+  assert.equal(budget.props.value, 16384);
+  assert.equal(JSON.parse(requests[0].options.body).document.kind, "element_scoring_v1");
+});
+
 test("conversation approval is cleared after failed navigation and run", async () => {
   const ui = await loadUiModule();
   const hooks = createEffectHooks();

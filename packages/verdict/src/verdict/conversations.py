@@ -24,6 +24,7 @@ _ISSUES = {
     "invalid_end_time",
 }
 _LABEL_KEY = re.compile(r"[a-z][a-z_]{0,31}\Z")
+_PHASE_KEY = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.:/-]{0,127}\Z")
 
 
 def _json(value: object) -> str:
@@ -118,6 +119,14 @@ def validate_conversation(value: dict) -> dict:
     }
     if labels:
         result["labels"] = {key: labels[key] for key in sorted(labels)}
+    if "enabled_phases" in value:
+        phases = value["enabled_phases"]
+        if (not isinstance(phases, list) or len(phases) > 16
+                or any(not isinstance(phase, str) or _PHASE_KEY.fullmatch(phase) is None
+                       or redact(phase) != phase for phase in phases)
+                or len(phases) != len(set(phases))):
+            raise ValueError("invalid enabled phases")
+        result["enabled_phases"] = sorted(phases)
     payload = _json(result)
     if len(payload.encode("utf-8")) > MAX_CONVERSATION_BYTES:
         raise ValueError("conversation exceeds limit")
@@ -207,6 +216,8 @@ def conversation_from_voice(record: dict, context: ImportContext) -> dict | None
             "end_status": end_status,
             "input_issues": sorted(set(issues)),
             **({"labels": record["labels"]} if "labels" in record else {}),
+            **({"enabled_phases": record["enabled_phases"]}
+               if "enabled_phases" in record else {}),
         }
     )
 

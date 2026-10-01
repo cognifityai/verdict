@@ -1,0 +1,36 @@
+{
+  "name": "fictional_review",
+  "version": "1",
+  "target": "conversation",
+  "kind": "element_scoring_v1",
+  "instructions": "Judge this fictional service conversation. Use the alternate route only when the special escalation condition in the conversation applies.",
+  "catalog": {
+    "coverage": [
+      {"phase": "general", "element": "question"},
+      {"phase": "general", "element": "followup"}
+    ],
+    "errors": [{"phase": "general", "element": "accuracy"}],
+    "timeline": [{"phase": "general", "element": "sequence"}]
+  },
+  "scoring": {
+    "modes": {"coverage": "coverage", "errors": "violation", "timeline": "coverage"},
+    "weights": {"coverage": 0.4, "errors": 0.4, "timeline": 0.2},
+    "deduplicate": ["errors", "coverage"],
+    "optional_elements": [{"category": "coverage", "phase": "general", "element": "followup"}],
+    "bonus": {"category": "timeline", "requires_category": "errors", "min_confidence": 0.6, "points": 5},
+    "indices": {"risk": ["coverage", "errors"]},
+    "gate": {"minimums": {"coverage": 50, "errors": 60}, "index": "risk", "index_minimum": 65, "label": "Unsafe"},
+    "labels": [
+      {"min": 90, "label": "Excellent"},
+      {"min": 75, "label": "Strong"},
+      {"min": 60, "label": "Adequate"},
+      {"min": 40, "label": "Weak"},
+      {"min": 0, "label": "Unsafe"}
+    ],
+    "alternate": {
+      "weights": {"recognition": 0.5, "response": 0.5},
+      "labels": [{"min": 75, "label": "Strong"}, {"min": 0, "label": "Weak"}]
+    },
+    "review_below": 0.7
+  }
+}

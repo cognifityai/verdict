@@ -1,5 +1,7 @@
 """Dashboard entry points for rubric preview and current conversation review."""
 
+import json
+from pathlib import Path
 
 import httpx
 import pytest
@@ -7,6 +9,29 @@ from verdict.conversation_assessments import validate_assessment, validate_rubri
 from verdict.conversations import validate_conversation
 from verdict.dashboard.app import create_app
 from verdict.storage.sqlite import SQLiteStorage
+
+ELEMENT_RUBRIC = json.loads((Path(__file__).resolve().parents[2] /
+                             "examples/telemetry/element-rubric.example.json").read_text())
+
+
+@pytest.mark.asyncio
+async def test_structured_rubric_upload_validates_and_bad_nested_value_returns_400(tmp_path):
+    document = json.loads(json.dumps(ELEMENT_RUBRIC))
+    app = create_app(storage=f"sqlite:///{tmp_path / 'rubric.db'}", tenant_id="alpha")
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app, raise_app_exceptions=False),
+                                 base_url="http://127.0.0.1") as client:
+        token = (await client.get("/api/setup/token")).json()["setupToken"]
+        headers = {"X-Verdict-Setup": token}
+        accepted = await client.post("/api/evaluators/rubric/validate",
+                                     json={"document": document}, headers=headers)
+        assert accepted.status_code == 200
+        assert accepted.json()["kind"] == "element_scoring_v1"
+        assert accepted.json()["dimensions"][-1]["name"] == "safety_gate"
+        document["scoring"]["deduplicate"] = [{}]
+        rejected = await client.post("/api/evaluators/rubric/validate",
+                                     json={"document": document}, headers=headers)
+        assert rejected.status_code == 400
+        assert rejected.json() == {"error": "invalid executable rubric JSON"}
 
 
 @pytest.mark.asyncio

@@ -43,9 +43,18 @@ def _finite_number(value: object) -> bool:
 
 
 def validate_rubric(value: object) -> dict:
-    """Accept only the executable binary/numeric rubric schema."""
+    """Accept simple dimensions or a bounded deterministic scoring profile."""
     if not isinstance(value, dict) or len(_json(value).encode("utf-8")) > MAX_RUBRIC_BYTES:
         raise ValueError("invalid rubric JSON")
+    from verdict.structured_rubrics import KIND, validate_profile
+    if value.get("kind") == KIND:
+        result = validate_profile(value)
+        result["fingerprint"] = _digest(result)
+        if value.get("fingerprint") not in (None, result["fingerprint"]):
+            raise ValueError("rubric fingerprint mismatch")
+        if len(_json(result).encode("utf-8")) > MAX_RUBRIC_BYTES:
+            raise ValueError("rubric exceeds stored byte limit")
+        return result
     if set(value) - {"name", "version", "target", "instructions", "dimensions", "fingerprint"}:
         raise ValueError("unsupported rubric field or scoring profile")
     target = value.get("target")
@@ -133,6 +142,12 @@ def evaluation_targets(conversation: dict, rubric: dict) -> tuple[tuple[int | No
     )
     if reason is not None:
         return (), reason
+    if rubric.get("kind") == "element_scoring_v1":
+        declared = {e["phase"] for items in rubric["catalog"].values()
+                    for e in items if e["phase"] != "general"}
+        phases = conversation.get("enabled_phases")
+        if phases and set(phases) - declared:
+            return (), "unknown_enabled_phases"
     if rubric["target"] == "response":
         return tuple(replies), None
     return (None,), None
@@ -171,7 +186,7 @@ def validate_assessment(value: object, conversation: dict) -> dict:
     if not isinstance(value, dict) or set(value) - {
         "id", "tenant_id", "conversation_id", "revision", "target_position", "rubric",
         "evaluator", "evaluator_fingerprint", "status", "dimensions", "findings",
-        "evaluated_at", "error",
+        "evaluated_at", "error", "structured",
     }:
         raise ValueError("invalid conversation assessment")
     if (value.get("tenant_id") != conversation["tenant_id"]
@@ -198,17 +213,33 @@ def validate_assessment(value: object, conversation: dict) -> dict:
     if not isinstance(raw_dimensions, dict) or not isinstance(raw_findings, list) or len(raw_findings) > 100:
         raise ValueError("invalid assessment results")
     definitions = {d["name"]: d for d in rubric["dimensions"]}
+    structured = None
     if status == "error":
-        if raw_dimensions or raw_findings:
+        if raw_dimensions or raw_findings or value.get("structured") is not None:
             raise ValueError("failed assessment cannot contain results")
         error = value.get("error", "judge_unavailable")
         if error not in {"judge_unavailable", "invalid_judge_output", "target_unavailable"}:
             raise ValueError("invalid assessment error code")
         dimensions, findings = {}, []
     else:
-        if set(raw_dimensions) != set(definitions) or value.get("error") not in (None, ""):
+        if value.get("error") not in (None, ""):
             raise ValueError("completed assessment must cover every rubric dimension")
         error = None
+        if rubric.get("kind") == "element_scoring_v1":
+            from verdict.structured_rubrics import score_output
+            if raw_findings or value.get("structured") is None:
+                raise ValueError("structured assessment requires element findings")
+            structured, derived = score_output(
+                rubric, value["structured"], conversation["messages"],
+                conversation.get("enabled_phases"),
+            )
+            if raw_dimensions not in ({}, derived):
+                raise ValueError("structured scores contradict element findings")
+            raw_dimensions = derived
+        elif value.get("structured") is not None:
+            raise ValueError("simple assessment cannot contain structured findings")
+        if set(raw_dimensions) != set(definitions):
+            raise ValueError("completed assessment must cover every rubric dimension")
         dimensions = {}
         for name, definition in definitions.items():
             item = raw_dimensions[name]
@@ -271,6 +302,8 @@ def validate_assessment(value: object, conversation: dict) -> dict:
         "evaluated_at": evaluated_at,
         "error": error,
     }
+    if rubric.get("kind") == "element_scoring_v1" and structured is not None:
+        result["structured"] = structured
     if value.get("id") not in (None, result["id"]):
         raise ValueError("assessment id mismatch")
     if len(_json(result).encode("utf-8")) > MAX_ASSESSMENT_BYTES:

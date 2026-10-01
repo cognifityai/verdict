@@ -473,7 +473,15 @@ closed snapshots with a completed assistant reply after a user message are
 eligible. Correcting a transcript invalidates its previous grades. The example
 rubrics are at `examples/telemetry/conversation-rubric.example.json` and
 `examples/telemetry/response-rubric.example.json`; custom
-weighted totals are outside this generic schema. To explore quality over time,
+weighted totals are outside this simple schema. An additional
+`element_scoring_v1` format is shown in
+`examples/telemetry/element-rubric.example.json`; the file declares weights,
+an alternate route, and which elements may be marked inapplicable. The same
+upload control detects its `kind`. For a phased catalog, supply top-level
+`enabled_phases` in each Voice record. Records lacking phases can receive only
+the alternate result, and preview counts them separately. Verdict calculates
+scores from validated element findings. This format requires a build containing
+the change; published `0.1.0b1` supports simple rubrics only. To explore quality over time,
 open **Monitor → Compare History**, choose **Conversation grade (descriptive)**,
 copy the evaluator fingerprint from the Lab preview, enter a binary dimension
 from a whole-conversation rubric, and select two non-overlapping windows in

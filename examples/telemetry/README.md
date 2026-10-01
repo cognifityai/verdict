@@ -26,6 +26,33 @@ record; turn-level timestamps do not set the conversation end time. Verdict
 stores the normalized UTC value as `event_at`. If neither source field is
 present, the snapshot is untimed and retention starts at first import.
 
+In **Evaluate → Evaluator Lab → Conversation or reply**, upload
+[`conversation-rubric.example.json`](conversation-rubric.example.json) for a
+simple whole-conversation dimension rubric, or
+[`element-rubric.example.json`](element-rubric.example.json) for declared
+element findings and deterministic scoring. The upload detects `kind` in the
+file; `element_scoring_v1` always grades a whole conversation. Its judge must
+return one finding per declared element in each enabled phase, or the separate alternate
+route scores. Verdict computes the final scores and gate and stores them with
+the exact transcript revision. Upload validation and preview do not call the
+judge. This example is fictional and does not validate any domain-specific
+rubric. The published `0.1.0b1` packages do not include element scoring.
+If the catalog contains named phases, each Voice record must supply a
+top-level `enabled_phases` array of phase keys from that catalog, for example
+`"enabled_phases":["intake"]`. Missing or empty phases restrict the record
+to the alternate route. Preview counts these alternate-only targets; a
+standard judge output for one is rejected. Unknown phase keys are excluded.
+Changing the list changes the snapshot revision and invalidates old grades.
+The judge must repeat the supplied phases exactly. For a conditional element
+that does not apply, the rubric must declare its category/phase/element in
+`scoring.optional_elements`. The judge can then return `applicable:false`, an
+explanation, and null adequacy/evidence. Verdict excludes it from scoring but keeps the
+decision visible. If any standard category has no applicable elements, the
+result is rejected rather than publishing a potentially misleading score.
+Deduplication also rejects conflicting severity for identical evidence when
+the lower-priority finding is more severe, or when it would erase an entire
+assessed category. Such results appear as judge errors for review and retry.
+
 For an exploratory paired comparison in **Explore → Compare**, put an opaque
 `pair_id` and `variant` in each source conversation's top-level `labels`; use
 the same pair ID only for two variants of the same evaluation input. Both

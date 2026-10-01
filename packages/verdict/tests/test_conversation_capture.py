@@ -114,6 +114,19 @@ def test_explicit_voice_labels_are_bounded_and_part_of_snapshot_revision(storage
     assert changed["revision"] != original["revision"]
 
 
+def test_source_enabled_phases_are_stored_and_bound_to_snapshot_revision(storage):
+    source = _source()
+    source["enabled_phases"] = ["history", "intake"]
+    import_into_storage(map_voice_conversation(source, _context()), storage)
+    [original], _ = storage.list_conversations("tenant-a")
+    assert original["enabled_phases"] == ["history", "intake"]
+    source["enabled_phases"] = ["intake"]
+    import_into_storage(map_voice_conversation(source, _context()), storage)
+    [changed], _ = storage.list_conversations("tenant-a")
+    assert changed["enabled_phases"] == ["intake"]
+    assert changed["revision"] != original["revision"]
+
+
 @pytest.mark.parametrize("labels", [
     {"Bad key": "one"}, {"group": ""}, {"group": "x" * 129},
     {f"key_{chr(97 + index)}": "value" for index in range(9)},

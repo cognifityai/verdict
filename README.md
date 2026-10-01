@@ -792,21 +792,40 @@ To grade imported conversations, open **Evaluate → Evaluator Lab**, select
 [`examples/telemetry/conversation-rubric.example.json`](examples/telemetry/conversation-rubric.example.json)
 or [`examples/telemetry/response-rubric.example.json`](examples/telemetry/response-rubric.example.json)),
 and preview one bounded page. The default Trace evaluator remains separate.
-This workflow is included in the synchronized `0.1.0b1` core and eval builds.
+The same upload control accepts an optional whole-conversation
+[`element_scoring_v1` rubric](examples/telemetry/element-rubric.example.json).
+The file's `kind` selects element scoring; no second upload flow is needed.
+For this format, the judge reports element findings and Verdict calculates
+the declared category weights, score bands, and gate. Review the parsed
+catalog and weights before judging. The synchronized `0.1.0b1` builds support
+simple dimension rubrics only; element scoring requires a build containing
+this change. For catalogs with named phases, the Voice record must supply
+top-level `enabled_phases` as phase keys; missing phases exclude the record
+from standard scoring and leave only the alternate route available. Preview
+shows that count. Verdict binds supplied phase keys to the snapshot and
+rejects a judge response that changes them. Only elements explicitly listed
+in `scoring.optional_elements` can be marked inapplicable with a reason; those
+decisions remain visible in review.
 Review the eligible and excluded counts before approving the selected judge
 calls. The judge uses the configured provider key. When `OPENAI_BASE_URL` or
 `ANTHROPIC_BASE_URL` selects a custom endpoint, the consent screen names that
 destination before sending transcript content, without exposing its URL;
 preview and file validation make no judge call. Uploaded rubric descriptions
-and transcript text are best-effort redacted. A generic rubric defines only
-binary or bounded numeric dimensions; Verdict does not execute a vendor's
-custom total-score formula. Grades bind the exact current transcript, rubric,
+and transcript text are best-effort redacted. A simple rubric defines only
+binary or bounded numeric dimensions. The element format executes its declared
+scoring rules, not arbitrary formulas in an uploaded document. Grades bind the exact current transcript, rubric,
 provider, model, prompt version, and endpoint. A corrected transcript removes
 its old grades. Each page scans at most 20 conversations and runs at most 20
 judge calls; move through the ID-ordered pages explicitly. Full coverage means
 every eligible reply was completed by that evaluator; UNCLEAR remains visible
 but does not count as PASS or FAIL. Judge agreement with human labels must be
 checked before treating scores as a quality measurement.
+The element rubric's binary `safety_gate` can be compared in historical
+Monitor. Category and overall scores appear in conversation review and can be
+used in paired comparison; historical conversation Monitor currently accepts
+binary dimensions only. The alternate route leaves standard scores and the
+gate ungraded. Review judge route and element findings against human labels
+before relying on domain-specific scores.
 
 To explore conversation quality, open **Monitor → Compare History**, select
 **Conversation grade (descriptive)**, and enter the evaluator fingerprint shown
