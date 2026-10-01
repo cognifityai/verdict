@@ -131,6 +131,9 @@ It is a list price, not a bill: desktop and
 subscription activity is not charged this way. A turn is left unpriced when it
 names no model or more than one, when its model has no static price, or when
 its token basis is unknown; the figure states how many turns it covers.
+The static table recognizes GPT-6 Astra, Sol, 6.1 Sol, and Luna at their
+standard short-context text rates; it does not infer a price for other GPT-6
+variants or service tiers.
 Codex diagnostic traces include input/output tokens only when one valid usage
 event from the same session matches the completion timestamp. Prompt,
 response, latency, and cost remain unavailable, and the traces are not

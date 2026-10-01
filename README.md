@@ -1055,7 +1055,8 @@ error details; an overlarge selection asks you to choose narrower dates.
   analysis.
 - `cost_usd` is a best-effort estimate from a dated static base-price table, not
   a billing source of truth. The table includes GPT-4.1 base text models and
-  their published dated snapshots; unknown and unverified fine-tuned/custom
+  their published dated snapshots, plus GPT-6 Astra, Sol, 6.1 Sol, and Luna
+  standard short-context text rates. Unknown and unverified fine-tuned/custom
   models remain unpriced. Special tiers, tools, residency, and negotiated
   discounts are not modeled. The agent-turn list price applies the providers'
   published cache-read and cache-write rates; provider-call `cost_usd` does not.

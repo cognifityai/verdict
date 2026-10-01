@@ -40,6 +40,26 @@ def test_openai_family_cache_rates() -> None:
     assert cached_only("gpt-4.1") == pytest.approx(in_rate("gpt-4.1") * 0.25)
 
 
+@pytest.mark.parametrize(
+    ("model", "input_usd", "cached_usd", "output_usd"),
+    [
+        ("gpt-6-astra", 10.0, 1.0, 50.0),
+        ("gpt-6-sol", 2.0, 0.2, 10.0),
+        ("gpt-6.1-sol", 2.0, 0.1, 10.0),
+        ("gpt-6-luna", 0.1, 0.01, 0.5),
+    ],
+)
+def test_current_gpt6_turns_use_published_base_and_cache_rates(
+    model: str, input_usd: float, cached_usd: float, output_usd: float,
+) -> None:
+    # Codex input counts include cached tokens; each component below is 1M.
+    assert estimate_turn_cost_usd(
+        model, input_tokens=2_000_000, cached_input_tokens=1_000_000,
+        cache_write_input_tokens=None, output_tokens=1_000_000,
+        input_includes_cached=True,
+    ) == pytest.approx(input_usd + cached_usd + output_usd)
+
+
 def test_inconsistent_or_unknown_inputs_return_none() -> None:
     common = dict(cache_write_input_tokens=None, output_tokens=10)
     # Cached tokens exceeding the input that supposedly includes them.

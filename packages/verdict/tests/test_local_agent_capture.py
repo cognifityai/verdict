@@ -2321,7 +2321,19 @@ def test_failure_counts_state_whether_the_source_reported_any_outcome(tmp_path: 
     assert unreported_totals["toolOutcomesReported"] == 0
 
 
-def test_agent_turns_carry_an_estimated_list_price_per_source(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("codex_model", "cached_rate"),
+    [
+        ("gpt-5.4", 0.1),
+        ("gpt-6-astra", 0.1),
+        ("gpt-6-sol", 0.1),
+        ("gpt-6.1-sol", 0.05),
+        ("gpt-6-luna", 0.1),
+    ],
+)
+def test_agent_turns_carry_an_estimated_list_price_per_source(
+    tmp_path: Path, codex_model: str, cached_rate: float,
+) -> None:
     from verdict.dashboard.app import build_agent_insights_bundle
     from verdict.pricing import PRICE_PER_1K
 
@@ -2331,7 +2343,7 @@ def test_agent_turns_carry_an_estimated_list_price_per_source(tmp_path: Path) ->
     codex_records = _codex_records()
     for record in codex_records:
         if record.get("type") == "turn_context":
-            record["payload"]["model"] = "gpt-5.4"  # a priced release, unlike the bare alias
+            record["payload"]["model"] = codex_model
     _write_jsonl(codex_root / "session.jsonl", codex_records)
     database = tmp_path / "verdict.db"
     storage = SQLiteStorage(str(database))
@@ -2350,12 +2362,12 @@ def test_agent_turns_carry_an_estimated_list_price_per_source(tmp_path: Path) ->
         + claude_turn.cache_write_input_tokens * in_rate * 1.25
         + claude_turn.output_tokens * out_rate
     ) / 1000
-    # Codex: input already includes cached tokens; gpt-5.x cached input is 10%.
+    # Codex: input already includes cached tokens; the rate depends on model.
     codex_turns = bundles["codex"].turns
-    in_rate, out_rate = PRICE_PER_1K["gpt-5.4"]
+    in_rate, out_rate = PRICE_PER_1K[codex_model]
     codex_expected = sum(
         ((turn.input_tokens - (turn.cached_input_tokens or 0)) * in_rate
-         + (turn.cached_input_tokens or 0) * in_rate * 0.1
+         + (turn.cached_input_tokens or 0) * in_rate * cached_rate
          + turn.output_tokens * out_rate) / 1000
         for turn in codex_turns if turn.input_tokens is not None
     )

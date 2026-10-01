@@ -17,6 +17,8 @@ the product is refined.
   insights carry `agentTurnListPriceUsd`, `agentTurnsPriced`, and
   `agentTurnsUnpriced`, and each source row carries `listPriceUsd` and
   `pricedTurns`. Provider-call `cost_usd` is unchanged.
+  Published GPT-6 Astra, Sol, 6.1 Sol, and Luna short-context text rates are
+  recognized for local Codex turns; other unrecognized models remain unpriced.
 
 ## [0.1.0b1] - 2026-09-29
 

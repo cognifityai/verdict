@@ -20,8 +20,8 @@ from datetime import date
 
 log = logging.getLogger("verdict.pricing")
 
-# This is deliberately visible to callers and tests. Static pricing without an
-# audit date looks authoritative long after it has become stale.
+# This is the last full-table audit date. Newly added model entries carry their
+# own check date below; do not advance this date after checking only one family.
 PRICING_LAST_VERIFIED = date(2026, 9, 5)
 PRICING_REVIEW_AFTER = date(2026, 11, 15)
 PRICING_SOURCE_URLS = (
@@ -61,6 +61,12 @@ PRICE_PER_1K: dict[str, tuple[float, float]] = {
     "claude-3-haiku": (0.00025, 0.00125),
     "claude-3-sonnet": (0.003, 0.015),
     # OpenAI (USD per 1K tokens)
+    # GPT-6 standard short-context text rates checked 2026-10-01 against the
+    # official model pricing pages. Long context and service tiers are excluded.
+    "gpt-6-astra": (0.010, 0.050),
+    "gpt-6.1-sol": (0.002, 0.010),
+    "gpt-6-sol": (0.002, 0.010),
+    "gpt-6-luna": (0.0001, 0.0005),
     "gpt-5.6-sol": (0.004, 0.020),
     "gpt-5.6-terra": (0.002, 0.012),
     "gpt-5.6-luna": (0.0002, 0.0012),
@@ -179,9 +185,9 @@ def compute_cost_usd(
         return None
 
 
-# Cached-token rates relative to a model's base input rate, from the same
-# provider pricing pages as PRICE_PER_1K on PRICING_LAST_VERIFIED. Anthropic
-# bills cache reads at 10% of input and five-minute cache writes at 125%.
+# Cached-token rates relative to a model's base input rate, from provider
+# pricing pages. Newer model entries were checked after the full-table audit.
+# Anthropic bills cache reads at 10% of input and five-minute writes at 125%.
 # OpenAI's cached-input discount depends on the family; the prefixes below are
 # matched in order and an unlisted family uses 0.5, the least generous listed
 # discount, so an unknown family is never under-priced.
@@ -197,6 +203,7 @@ _ANTHROPIC_CACHE_READ_BY_MODEL: tuple[tuple[str, float], ...] = (
 )
 _ANTHROPIC_CACHE_WRITE = 1.25
 _OPENAI_CACHE_READ_BY_FAMILY: tuple[tuple[str, float], ...] = (
+    ("gpt-6.1-sol", 0.05),
     ("gpt-5", 0.1),
     ("gpt-6", 0.1),
     ("gpt-4.1", 0.25),
