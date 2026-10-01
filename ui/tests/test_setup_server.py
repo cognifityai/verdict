@@ -526,3 +526,37 @@ def test_capture_status_reports_progress_failure_and_single_flight(tmp_path, mon
     assert status.json()["job"]["state"] == "failed"
     assert status.json()["job"]["error"] == "capture_failed"
     assert "secret-path" not in status.text and str(tmp_path) not in status.text
+
+
+def test_capture_status_identifies_the_job_and_reports_analysis_errors(tmp_path, monkeypatch):
+    import verdict.dashboard.setup_routes as setup_routes
+
+    codex = tmp_path / "codex" / "sessions"
+    _write_codex(codex / "session.jsonl")
+    database = tmp_path / "verdict.db"
+    # The analysis service reports a builder failure as a returned error status.
+    monkeypatch.setattr(
+        setup_routes.SetupRoutes, "_run_analysis",
+        lambda self: {"analysisState": {"status": "error", "error": "io_error"}},
+    )
+
+    async def run():
+        app = create_app(storage=f"sqlite:///{database}")
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            headers = {"X-Verdict-Setup": token}
+            await client.post("/api/setup/preview", headers=headers, json={"codexRoot": str(codex)})
+            started, job = await _capture_and_wait(client, headers, {"codexRoot": str(codex)})
+            by_id = await client.get(f"/api/setup/capture/status?job={job['jobId']}")
+            other = await client.get("/api/setup/capture/status?job=not-this-job")
+            return started, job, by_id, other
+
+    started, job, by_id, other = asyncio.run(run())
+    assert started.status_code == 202 and started.json()["job"]["jobId"] == job["jobId"]
+    assert len(job["jobId"]) == 16
+    # The files were imported and the summary is kept even though analysis failed.
+    assert job["state"] == "failed" and job["error"] == "analysis_failed"
+    assert job["summary"]["stored"] == 1 and job["analysis"]["status"] == "error"
+    assert by_id.status_code == 200 and by_id.json()["job"]["jobId"] == job["jobId"]
+    assert other.status_code == 404 and other.json()["job"]["jobId"] == job["jobId"]

@@ -42,6 +42,7 @@ class CaptureJob:
     handle and closes it before the job leaves ``running``.
     """
 
+    job_id: str
     started_at: str
     state: str = "running"
     files_done: int = 0
@@ -55,6 +56,7 @@ class CaptureJob:
     def as_dict(self) -> dict[str, Any]:
         with self.lock:
             return {
+                "jobId": self.job_id,
                 "state": self.state,
                 "startedAt": self.started_at,
                 "finishedAt": self.finished_at,
@@ -272,7 +274,10 @@ class SetupRoutes:
                     # The approval is consumed when the job starts, so a second
                     # click cannot start another capture without a new preview.
                     self._previewed_local_roots.discard(root_key)
-                    job = CaptureJob(started_at=datetime.now(timezone.utc).isoformat())
+                    job = CaptureJob(
+                        job_id=secrets.token_hex(8),
+                        started_at=datetime.now(timezone.utc).isoformat(),
+                    )
                     self._capture_job = job
                 thread = threading.Thread(
                     target=self._run_capture_job,
@@ -285,11 +290,17 @@ class SetupRoutes:
             except (OSError, TypeError, UnicodeError, ValueError):
                 return JSONResponse({"error": "invalid setup request"}, status_code=400)
 
-        def setup_capture_status(request):
+        def setup_capture_status(request, job: str | None = None):
+            """The current job, or 404 when the caller asks for a job that is no longer current."""
             if not self.request_matches_tenant(request):
                 return JSONResponse({"error": "setup unavailable"}, status_code=403)
-            job = self._capture_job
-            return {"job": None if job is None else job.as_dict()}
+            current = self._capture_job
+            if job is not None and (current is None or current.job_id != job):
+                return JSONResponse(
+                    {"error": "capture job is no longer current", "job": None if current is None else current.as_dict()},
+                    status_code=404,
+                )
+            return {"job": None if current is None else current.as_dict()}
 
         setup_capture_status.__annotations__["request"] = Request
         app.get("/api/setup/capture/status")(setup_capture_status)
@@ -420,10 +431,16 @@ class SetupRoutes:
             with job.lock:
                 job.summary = summary.as_dict()
                 job.state = "analyzing"
-            analysis = self._run_analysis()
+            analysis = self._run_analysis()["analysisState"]
             with job.lock:
-                job.analysis = analysis["analysisState"]
-                job.state = "completed"
+                job.analysis = analysis
+                # The analysis service reports a builder failure as a returned
+                # error status rather than by raising; that is still a failed job.
+                if analysis.get("status") == "error":
+                    job.error = "analysis_failed"
+                    job.state = "failed"
+                else:
+                    job.state = "completed"
         except Exception:
             _log.exception("local history capture failed")
             with job.lock:

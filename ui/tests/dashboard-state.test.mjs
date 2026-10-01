@@ -2574,6 +2574,8 @@ test("local capture starts a server job and shows its progress until it complete
     render(ui.SetupWizard, hooks, props);
     hooks.flushEffects();
     await resolveJson(requests[0], { setupToken: "setup-token" });
+    assert.match(requests[1].url, /\/api\/setup\/capture\/status$/);
+    await resolveJson(requests[1], { job: null });
     const button = (label) => findAll(render(ui.SetupWizard, hooks, props),
       (node) => node.type === "button" && textOf(node) === label)[0];
     const status = () => findAll(render(ui.SetupWizard, hooks, props),
@@ -2581,24 +2583,24 @@ test("local capture starts a server job and shows its progress until it complete
 
     const previewing = button("Preview sources").props.onClick();
     assert.match(status(), /Previewing sources/);
-    await resolveJson(requests[1], { claude: { files: 1 }, codex: { files: 0 } });
+    await resolveJson(requests[2], { claude: { files: 1 }, codex: { files: 0 } });
     await previewing;
 
     const capturing = button("Approve and capture").props.onClick();
-    assert.match(requests[2].url, /\/api\/setup\/capture$/);
-    assert.equal(requests[2].options.method, "POST");
-    await resolveJson(requests[2], { job: { state: "running", filesDone: 0, filesTotal: null } });
+    assert.match(requests[3].url, /\/api\/setup\/capture$/);
+    assert.equal(requests[3].options.method, "POST");
+    await resolveJson(requests[3], { job: { jobId: "job-1", state: "running", filesDone: 0, filesTotal: null } });
     assert.match(status(), /Listing history files/);
     assert.equal(button("Approve and capture").props.disabled, true);
-    await untilRequests(requests, 4, realSetTimeout);
-    assert.match(requests[3].url, /\/api\/setup\/capture\/status$/);
-    await resolveJson(requests[3], { job: { state: "running", filesDone: 12, filesTotal: 120 } });
-    assert.match(status(), /Importing 12 of 120 history files/);
     await untilRequests(requests, 5, realSetTimeout);
-    await resolveJson(requests[4], { job: { state: "analyzing", filesDone: 120, filesTotal: 120 } });
-    assert.match(status(), /Analyzing captured evidence/);
+    assert.match(requests[4].url, /\/api\/setup\/capture\/status\?job=job-1$/);
+    await resolveJson(requests[4], { job: { jobId: "job-1", state: "running", filesDone: 12, filesTotal: 120 } });
+    assert.match(status(), /Importing 12 of 120 history files/);
     await untilRequests(requests, 6, realSetTimeout);
-    await resolveJson(requests[5], { job: { state: "completed", filesDone: 120, filesTotal: 120,
+    await resolveJson(requests[5], { job: { jobId: "job-1", state: "analyzing", filesDone: 120, filesTotal: 120 } });
+    assert.match(status(), /Analyzing captured evidence/);
+    await untilRequests(requests, 7, realSetTimeout);
+    await resolveJson(requests[6], { job: { jobId: "job-1", state: "completed", filesDone: 120, filesTotal: 120,
       summary: { stored: 120 }, analysis: { status: "completed" } } });
     await capturing;
     assert.equal(status(), "");
@@ -2620,19 +2622,48 @@ test("a capture job that fails is reported instead of completing the setup", asy
     render(ui.SetupWizard, hooks, props);
     hooks.flushEffects();
     await resolveJson(requests[0], { setupToken: "setup-token" });
+    await resolveJson(requests[1], { job: null });
     const button = (label) => findAll(render(ui.SetupWizard, hooks, props),
       (node) => node.type === "button" && textOf(node) === label)[0];
     const previewing = button("Preview sources").props.onClick();
-    await resolveJson(requests[1], { claude: { files: 1 }, codex: { files: 0 } });
+    await resolveJson(requests[2], { claude: { files: 1 }, codex: { files: 0 } });
     await previewing;
     const capturing = button("Approve and capture").props.onClick();
-    await resolveJson(requests[2], { job: { state: "running", filesDone: 0, filesTotal: 1 } });
-    await untilRequests(requests, 4, realSetTimeout);
-    await resolveJson(requests[3], { job: { state: "failed", filesDone: 0, filesTotal: 1, error: "capture_failed" } });
+    await resolveJson(requests[3], { job: { jobId: "job-2", state: "running", filesDone: 0, filesTotal: 1 } });
+    await untilRequests(requests, 5, realSetTimeout);
+    await resolveJson(requests[4], { job: { jobId: "job-2", state: "failed", filesDone: 0, filesTotal: 1, error: "capture_failed" } });
     await capturing;
     const alerts = findAll(render(ui.SetupWizard, hooks, props), (node) => node.props?.role === "alert").map(textOf).join(" ");
     assert.match(alerts, /capture_failed/);
     assert.deepEqual(completed, []);
+  } finally {
+    globalThis.setTimeout = realSetTimeout;
+  }
+});
+
+test("a reloaded setup page picks up the capture that is still running", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const completed = [];
+  const props = { configUrl: "/api/config", onComplete: (source) => completed.push(source), agentSummary: {} };
+  const realSetTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = (callback) => realSetTimeout(callback, 0);
+  try {
+    render(ui.SetupWizard, hooks, props);
+    hooks.flushEffects();
+    await resolveJson(requests[0], { setupToken: "setup-token" });
+    await resolveJson(requests[1], { job: { jobId: "job-9", state: "running", filesDone: 40, filesTotal: 90 } });
+    const status = () => findAll(render(ui.SetupWizard, hooks, props),
+      (node) => node.props?.role === "status").map(textOf).join(" ");
+    assert.match(status(), /Importing 40 of 90 history files/);
+    await untilRequests(requests, 3, realSetTimeout);
+    assert.match(requests[2].url, /\/api\/setup\/capture\/status\?job=job-9$/);
+    await resolveJson(requests[2], { job: { jobId: "job-9", state: "completed", filesDone: 90, filesTotal: 90,
+      summary: { stored: 90 }, analysis: { status: "completed" } } });
+    for (let index = 0; index < 20 && completed.length === 0; index += 1) await new Promise((resolve) => realSetTimeout(resolve, 1));
+    assert.deepEqual(completed, ["local"]);
+    assert.equal(status(), "");
   } finally {
     globalThis.setTimeout = realSetTimeout;
   }

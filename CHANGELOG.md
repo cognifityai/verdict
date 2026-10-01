@@ -14,7 +14,11 @@ the product is refined.
   or `failed` with the files imported so far; the page shows that progress.
   One capture runs per dashboard process at a time (a second start answers
   409), the preview approval is consumed when the job starts, and a failed
-  job reports a category (`capture_failed`, `analysis_failed`), never a path.
+  job reports a category (`capture_failed`, `analysis_failed`), never a path;
+  an analysis that reports an error also ends the job as failed while keeping
+  the import summary. Each job carries a `jobId`; `?job=<id>` on the status
+  endpoint answers 404 when that job is no longer current, and a reloaded
+  setup page picks up a job that is still running.
   `capture_local_agents` accepts an optional `progress(done, total)` callback.
 
 ## [0.1.0b1] - 2026-09-29

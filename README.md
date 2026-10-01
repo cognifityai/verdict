@@ -120,7 +120,8 @@ connect an existing store. A local capture runs on the server in the
 background; the setup page shows how many history files have been imported,
 then runs the first analysis. One capture runs at a time per dashboard process
 (`POST /api/setup/capture` answers 202 with the job, `GET
-/api/setup/capture/status` reports it), and a closed page does not stop it. Local history capture retains bounded redacted
+/api/setup/capture/status` reports it), a closed page does not stop it, and a
+reloaded setup page picks the running job up again. Local history capture retains bounded redacted
 content by default so the first analysis is useful. The local setup wizard does
 not offer a metadata-only shortcut; SDK and programmatic capture can still set
 `capture_content=False` when that privacy tradeoff is intentional. Capture and

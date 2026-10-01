@@ -68,6 +68,20 @@ export function SetupWizard({ configUrl, onComplete, onNavigate, onRefresh, agen
 
   // Local capture runs on the server in the background: the POST returns the
   // job at once and this polls its status until the job ends.
+  async function followCaptureJob(job) {
+    while (job && (job.state === "running" || job.state === "analyzing")) {
+      setBusyLabel(captureProgressLabel(job));
+      await new Promise((resolve) => setTimeout(resolve, CAPTURE_POLL_MS));
+      const status = await fetch(`${root}/api/setup/capture/status?job=${encodeURIComponent(job.jobId)}`, { credentials: "same-origin", headers: { Accept: "application/json" } });
+      if (status.status === 404) throw new Error("another capture replaced this one; its result is shown under Data Sources");
+      if (!status.ok) throw new Error(`HTTP ${status.status}`);
+      job = (await status.json()).job;
+    }
+    if (!job || job.state !== "completed") throw new Error(job?.error || "capture did not complete");
+    const result = { summary: job.summary, analysis: job.analysis };
+    setResult(result); return result;
+  }
+
   async function capture(payload) {
     setBusy(true); setBusyLabel(LONG_CAPTURE); setError(null);
     try {
@@ -78,21 +92,29 @@ export function SetupWizard({ configUrl, onComplete, onNavigate, onRefresh, agen
       });
       const body = await response.json();
       if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
-      let job = body.job;
-      while (job && (job.state === "running" || job.state === "analyzing")) {
-        setBusyLabel(captureProgressLabel(job));
-        await new Promise((resolve) => setTimeout(resolve, CAPTURE_POLL_MS));
-        const status = await fetch(`${root}/api/setup/capture/status`, { credentials: "same-origin", headers: { Accept: "application/json" } });
-        if (!status.ok) throw new Error(`HTTP ${status.status}`);
-        job = (await status.json()).job;
-      }
-      if (!job || job.state !== "completed") throw new Error(job?.error || "capture did not complete");
-      const result = { summary: job.summary, analysis: job.analysis };
-      setResult(result); return result;
+      return await followCaptureJob(body.job);
     } catch (failure) {
       setError(setupFailureMessage(failure, serverOrigin)); return null;
     } finally { setBusy(false); setBusyLabel(null); }
   }
+
+  // A capture keeps running on the server if this page is closed or reloaded.
+  // On load, pick up the job that is still running and show its progress.
+  useEffect(() => {
+    let active = true;
+    fetch(`${root}/api/setup/capture/status`, { credentials: "same-origin", headers: { Accept: "application/json" } })
+      .then((response) => response.ok ? response.json() : null)
+      .then(async (body) => {
+        const job = body?.job;
+        if (!active || !job || (job.state !== "running" && job.state !== "analyzing")) return;
+        setBusy(true); setError(null);
+        try { if (await followCaptureJob(job)) onComplete("local"); }
+        catch (failure) { if (active) setError(setupFailureMessage(failure, serverOrigin)); }
+        finally { if (active) { setBusy(false); setBusyLabel(null); } }
+      })
+      .catch(() => {});
+    return () => { active = false; };
+  }, [root]);  // eslint-disable-line react-hooks/exhaustive-deps
 
   const sources = [
     ["local", "Claude Code / Codex"], ["file", "Existing telemetry file"],
