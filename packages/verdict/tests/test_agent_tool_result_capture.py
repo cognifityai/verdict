@@ -146,7 +146,11 @@ def test_invalid_call_id_is_rejected_before_tool_starts(tmp_path, call_id):
     storage.close()
 
 
-@pytest.mark.parametrize("call_id", ["", "c" * 256, "c" * 257, "c" * 1024, "c" * 1_000_000])
+@pytest.mark.parametrize(
+    "call_id",
+    ["", "c" * 256, "c" * 257, "c" * 1024, "c" * 1_000_000],
+    ids=["empty", "256", "257", "1024", "one-million"],
+)
 def test_published_call_id_boundary_still_correlates_events(tmp_path, call_id):
     storage = SQLiteStorage(str(tmp_path / "events.db"))
     verdict.init(storage=storage, tenant_id="tenant-a", instrumentors=[])
