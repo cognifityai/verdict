@@ -13,9 +13,20 @@ produces findings without an API key.
 
 A [Cognifity AI](https://cognifity.ai) project. Apache 2.0.
 
-![Verdict dashboard showing synthetic sample drift evidence](docs/assets/verdict-dashboard-evidence-view.png)
+## From signal to evidence
 
-*Bundled dashboard shown with clearly labeled synthetic sample data.*
+**Detect a behavior change.** Verdict compares like-for-like workload segments
+and shows the size, statistical strength, coverage, and examples behind each
+signal.
+
+![Verdict detecting a completeness regression in the incident-response segment](docs/assets/verdict-dashboard-evidence-view.png)
+
+**Inspect the exact calls.** Open any example to review its prompt, response,
+deterministic facts, and verdicts from one pinned evaluator identity.
+
+![Verdict trace explorer showing captured prompts, responses, deterministic facts, and evaluator verdicts](docs/assets/verdict-trace-evidence-view.png)
+
+*Both screens use synthetic showcase data.*
 
 ## Try it in two minutes
 
