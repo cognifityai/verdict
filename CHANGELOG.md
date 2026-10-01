@@ -20,6 +20,36 @@ the product is refined.
   Published GPT-6 Astra, Sol, 6.1 Sol, and Luna short-context text rates are
   recognized for local Codex turns; other unrecognized models remain unpriced.
 
+### Changed
+
+- The pilot guides are `docs/RELEASE_PROFILE.md` and `docs/AGENT_SKILL.md`
+  (previously `POC_RELEASE_PROFILE.md` and `AGENT_POC_SKILL.md`). Public docs
+  describe a pilot rather than a customer proof of concept; links to the
+  `v0.1.0b1` tag keep the old file names because that tag is immutable.
+
+### Fixed
+
+- Redaction is idempotent: redacting already-redacted text returns it
+  unchanged in both `redact` and `hash` modes. Previously a placeholder edge
+  could satisfy a word-boundary or lookaround assertion that the original
+  neighbour did not, so each further scan matched more text (a grouped digit
+  run lost one "phone number" per scan), and a secret assignment whose token
+  had been replaced by a placeholder was reclassified on the next scan. Storage
+  adapters sanitize every record again before persistence, so these differences
+  altered stored content and made Voice conversation snapshots fail their
+  digest check. `redact` now returns a fixed point of the scan and fails closed
+  to `<REDACTED>` if text is still changing after a bounded number of scans.
+  For the variable-length digit patterns (phone, card, IPv6) a placeholder
+  edge is opaque, so a digit run cannot re-partition into one more match per
+  scan; every other pattern treats the edge as the boundary it replaced, so a
+  credential or address glued to a placeholder is still removed. A card
+  placeholder no longer swallows the separator after the card.
+- `verdict-import` no longer aborts a whole run when the storage adapter
+  rejects one record. A conversation snapshot or Trace the adapter rejects is
+  counted under `conversation_rejected` or `trace_rejected` in `skip_reasons`
+  and the import continues; source and storage failures still stop the run
+  with the counts reached so far.
+
 ## [0.1.0b1] - 2026-09-29
 
 ### Changed

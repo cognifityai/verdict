@@ -402,12 +402,12 @@ python -m pip install \
 ```
 
 For a bounded pilot on `0.1.0b1`, follow the
-[release profile](docs/POC_RELEASE_PROFILE.md). It names the provider entry
+[release profile](docs/RELEASE_PROFILE.md). It names the provider entry
 points exercised for this release, keeps persistence synchronous, and separates
 a workflow demonstration from a production-readiness claim.
 
 To let a coding agent instrument an application, use the
-[`verdict-instrument-app` agent skill](docs/AGENT_POC_SKILL.md). The guide
+[`verdict-instrument-app` agent skill](docs/AGENT_SKILL.md). The guide
 includes a cross-agent prompt, approval boundaries, staged acceptance criteria,
 and the current automation limits.
 
@@ -546,7 +546,10 @@ ID (including the parent source trace ID when present). The existing pipeline
 decides which stored traces to judge. Missing optional
 tokens, cost, end time, model, session, or content remain `None`; Verdict does
 not invent them. Records without a stable source ID or valid start time are
-skipped with an explicit reason. Imported prompt/response text is an explicit
+skipped with an explicit reason, and so is a record the storage adapter
+rejects (`conversation_rejected` or `trace_rejected` in `skip_reasons`); the
+import continues past it. A source or storage failure stops the run and
+reports the counts reached so far. Imported prompt/response text is an explicit
 content transfer: only allowlisted fields are copied and the storage boundary
 applies Verdict's best-effort redaction, but operators must still treat the
 Verdict database as sensitive.
@@ -704,7 +707,7 @@ unacceptable; provider and manual-span failures then retain an error category
 without exception message content. IPv6 validation preserves trailing text that is not part of the
 validated address; clock values such as `12:34:56` are not treated as IPv6. Use
 non-sensitive tenant/session/cluster IDs. `sample_rate`
-controls what fraction of supported calls is retained. The `0.1.0b1` POC
+controls what fraction of supported calls is retained. The `0.1.0b1` release
 profile keeps `buffered_writes=False`, so a normal process exit cannot strand
 queued telemetry. `buffered_writes=True` moves writes to a background batched
 writer but requires an explicit `shutdown()` imported from `verdict.client`
@@ -868,7 +871,7 @@ error details; an overlarge selection asks you to choose narrower dates.
 - Agent Run exploration pages through every stored run in 30-row pages while
   retaining bounded event and turn detail. Finding links continue to show the
   exact affected-run set rather than applying list offsets to it.
-- **Published capture coverage in `0.1.0b1`:** the bounded POC profile names
+- **Published capture coverage in `0.1.0b1`:** the bounded release profile names
   Anthropic
   `messages.create(...)` (including `stream=True`), OpenAI
   `chat.completions.create(...)` and its stream helper, and Google
@@ -879,7 +882,7 @@ error details; an overlarge selection asks you to choose narrower dates.
   points. OpenAI's `responses.with_streaming_response` raw-response manager and
   the separate experimental `client.beta.responses` multi-agent resource remain
   outside this bounded support surface. See the
-  [`POC release profile`](docs/POC_RELEASE_PROFILE.md) before instrumenting an
+  [`release profile`](docs/RELEASE_PROFILE.md) before instrumenting an
   existing application.
 - Stream traces finalize deterministically on full iteration, an iteration
   error, explicit `close()` / `aclose()`, or context-manager exit. Async
@@ -1046,7 +1049,7 @@ error details; an overlarge selection asks you to choose narrower dates.
   agreement remains a separate diagnostic. Any sentinel execution error
   prevents a `healthy` status: too few usable examples remain
   `insufficient_data`; otherwise the result is `degraded`.
-- The `0.1.0b1` POC drift demonstration assumes independently sampled calls.
+- The `0.1.0b1` pilot drift demonstration assumes independently sampled calls.
   Do not treat repeated turns from the same conversation as independent
   evidence or use that profile for a production decision. Use Monitor's
   descriptive logical-session preview to inspect session-level rates and
@@ -1088,8 +1091,8 @@ Apache 2.0 — see [LICENSE](LICENSE).
 - [`CHANGELOG.md`](CHANGELOG.md) — curated release changes and version history.
 - [`docs/RELEASING.md`](docs/RELEASING.md) — synchronized publication,
   partial-release recovery, and the immutable rollback boundary.
-- [`docs/POC_RELEASE_PROFILE.md`](docs/POC_RELEASE_PROFILE.md) — the exact
-  provider, persistence, privacy, and evidence boundaries for customer POCs.
+- [`docs/RELEASE_PROFILE.md`](docs/RELEASE_PROFILE.md) — the exact
+  provider, persistence, privacy, and evidence boundaries for pilots.
 - [`docs/STATS_PRIMER.md`](docs/STATS_PRIMER.md) — plain-language explanation of the statistical methods Verdict uses for monitoring, semantic drift, and calibration.
 - [`docs/EXPLAINER.md`](docs/EXPLAINER.md) — how the pipeline works end to end.
 - [`docs/adrs/`](docs/adrs/) — architecture decision records.

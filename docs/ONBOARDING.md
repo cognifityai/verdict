@@ -29,8 +29,8 @@ python -m pip install \
   "cognifity-verdict-inspect==0.1.0b1"
 ```
 
-For a customer POC on the public beta, use the pinned commands and provider
-coverage matrix in [`POC_RELEASE_PROFILE.md`](POC_RELEASE_PROFILE.md).
+For a pilot on the public beta, use the pinned commands and provider
+coverage matrix in [`RELEASE_PROFILE.md`](RELEASE_PROFILE.md).
 
 You do **not** need a separate `pip install scipy scikit-learn` — `verdict_eval`
 lists them as hard dependencies, so the line above brings them in.
@@ -474,7 +474,10 @@ The same import also stores one current, redacted text-only conversation
 snapshot. Malformed or truncated snapshots are labeled incomplete. Source end
 time governs retention when present; otherwise the first import time does.
 The snapshot is capped at 512,000 stored bytes; longer transcripts keep an
-incomplete prefix and the reply Trace mapping continues.
+incomplete prefix and the reply Trace mapping continues. A snapshot or Trace
+that the storage adapter rejects is reported as `conversation_rejected` or
+`trace_rejected` and the import moves on to the next record; only a source or
+storage failure stops the run.
 Use the storage API's tenant-scoped `list_conversations` cursor to review these
 records. In **Evaluate → Evaluator Lab**, select **Conversation or reply** to
 upload a JSON rubric and preview a bounded page. The reviewer sees excluded
@@ -582,12 +585,12 @@ a linear `@`-anchored scanner to keep malformed and long inputs bounded. It
 remains best effort, not a compliance control, and opaque metadata such as
 tenant/session/cluster IDs must be non-sensitive. Set `capture_content=False`
 when the approved customer boundary is metadata-only; error categories remain
-available, but provider and manual-span exception messages are omitted. The `0.1.0b1` POC profile also keeps
+available, but provider and manual-span exception messages are omitted. The `0.1.0b1` release profile also keeps
 `buffered_writes=False`; buffered mode requires an explicit `shutdown()`
 imported from `verdict.client` before process exit.
 
 Use only the provider methods listed in the
-[`POC release profile`](POC_RELEASE_PROFILE.md). Release `0.1.0b1` includes the
+[`release profile`](RELEASE_PROFILE.md). Release `0.1.0b1` includes the
 Anthropic `messages.stream(...)` helper plus OpenAI `responses.create(...)`,
 `responses.parse(...)`, and `responses.stream(...)` for new or existing
 responses, in addition to the earlier Chat/Google paths. OpenAI's
@@ -609,7 +612,7 @@ A pass confirms the entry points exercised by the script land exactly one new
 trace apiece with
 tokens, estimated cost for recognized models, finish reason, and errors on the
 SDK versions you actually have. It does not expand the supported-entry-point
-matrix in the POC release profile. Every requested provider must complete or the
+matrix in the release profile. Every requested provider must complete or the
 command exits nonzero; use `--providers` and `--no-streaming` only to narrow the
 gate explicitly. The final summary names every provider and entry point that
 actually passed, so saved output records the exact live surface exercised.
@@ -1007,7 +1010,7 @@ the other captured workloads.
   iteration error, `close()` / `aclose()`, context exit, and async cancellation
   finalize traces. A never-iterated unclosed stream that is only garbage-
   collected has no persistence guarantee. These guarantees apply only to the
-  provider entry points listed in the POC release profile.
+  provider entry points listed in the release profile.
 - **Manual/provider linkage is automatic on the supported capture path.** A
   supported instrumented provider call inside a manual span persists the
   innermost span ID on `Trace.parent_span_id`. That is the sole automatic

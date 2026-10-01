@@ -75,13 +75,13 @@ def test_documented_pipeline_flags_match_the_released_parser() -> None:
 
 
 def test_customer_entry_document_points_to_the_committed_skill() -> None:
-    if not (REPO_ROOT / "docs" / "AGENT_POC_SKILL.md").is_file():
+    if not (REPO_ROOT / "docs" / "AGENT_SKILL.md").is_file():
         pytest.skip("repository-only documentation integration")
-    guide = (REPO_ROOT / "docs" / "AGENT_POC_SKILL.md").read_text(encoding="utf-8")
+    guide = (REPO_ROOT / "docs" / "AGENT_SKILL.md").read_text(encoding="utf-8")
     readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
 
     assert "skills/verdict-instrument-app/SKILL.md" in guide
-    assert "docs/AGENT_POC_SKILL.md" in readme
+    assert "docs/AGENT_SKILL.md" in readme
     assert "does not automatically install a skill in every coding agent" in guide
     assert "do not need a Verdict source\ncheckout" in guide
     assert "No `git clone`" in guide
