@@ -121,8 +121,19 @@ sum each unique provider response once and retain cache-read and cache-creation
 components. Its total appears only after the turn is terminal and every
 response has complete input/output usage. Missing or malformed counters display
 as unavailable, not zero.
-Verdict therefore leaves cost unavailable for Claude Code and Codex history
-instead of applying API list prices to desktop or subscription activity.
+Verdict does not put a cost on these traces. It shows a separate **estimated
+list price** for agent turns in Overview → Performance and in the per-source
+table: the turn's token components priced at the public per-token rates for
+the one model the turn named, with cache reads and cache writes at the
+provider's cache rates (Claude Code counts exclude cached tokens from input;
+Codex counts include them; cache writes are assumed to be five-minute writes).
+It is a list price, not a bill: desktop and
+subscription activity is not charged this way. A turn is left unpriced when it
+names no model or more than one, when its model has no static price, or when
+its token basis is unknown; the figure states how many turns it covers.
+The static table recognizes GPT-6 Astra, Sol, 6.1 Sol, and Luna at their
+standard short-context text rates; it does not infer a price for other GPT-6
+variants or service tiers.
 Codex diagnostic traces include input/output tokens only when one valid usage
 event from the same session matches the completion timestamp. Prompt,
 response, latency, and cost remain unavailable, and the traces are not

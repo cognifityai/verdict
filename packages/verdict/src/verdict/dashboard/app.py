@@ -55,6 +55,7 @@ from verdict.evidence import EvidenceState, ToolOrigin, _load_json_without_dupli
 from verdict.metrics import ScoreCounts, verdict_label
 from verdict.monitor_inputs import LOCAL_TENANT
 from verdict.normalized_evidence import agent_turn_from_row, normalized_bundle_digest
+from verdict.pricing import estimate_turn_cost_usd
 from verdict.redaction import redact, redact_structure, sanitize_agent_event_attributes
 from verdict.telemetry.model import safe_tenant_id
 from verdict.trace_facts import deterministic_trace_facts
@@ -1056,6 +1057,7 @@ def build_agent_insights_bundle(
         finding_run_ids: dict[tuple[str, str], list[str]] = defaultdict(list)
         source_metrics: dict[str, Counter[str]] = defaultdict(Counter)
         source_outcomes: dict[str, Counter[str]] = defaultdict(Counter)
+        list_price_by_source: dict[str, float] = defaultdict(float)
         totals: Counter[str] = Counter()
         trace_scope = {"available": 0, "analyzed": 0, "complete": True}
         trace_metrics: dict[tuple[str, str], Counter[str]] = defaultdict(Counter)
@@ -1157,8 +1159,15 @@ def build_agent_insights_bundle(
             source_outcomes[source][bundle.run.status.value] += 1
             source_metrics[source]["runs"] += 1
             source_metrics[source]["child_runs"] += int(bundle.run.parent_run_id is not None)
+            turn_models = _models_by_turn(bundle.events)
             for turn in bundle.turns:
                 turn_outcomes[turn.status.value] += 1
+                list_price = _turn_list_price_usd(turn, turn_models.get(turn.turn_id, frozenset()))
+                if list_price is None:
+                    source_metrics[source]["unpriced_turns"] += 1
+                else:
+                    source_metrics[source]["priced_turns"] += 1
+                    list_price_by_source[source] += list_price
                 prompt_states[turn.request_state.value] += 1
                 response_states[turn.response_state.value] += 1
                 source_metrics[source]["turns"] += 1
@@ -1247,6 +1256,10 @@ def build_agent_insights_bundle(
                 "toolOutcomesReported": metrics["tool_outcomes_reported"],
                 "commandOutcomesReported": metrics["command_outcomes_reported"],
                 "testOutcomesReported": metrics["test_outcomes_reported"],
+                "listPriceUsd": (
+                    round(list_price_by_source[source], 6) if metrics["priced_turns"] else None
+                ),
+                "pricedTurns": metrics["priced_turns"],
                 "inputTokens": (
                     metrics["input_tokens"] if metrics["input_tokens_known"] else None
                 ),
@@ -1361,6 +1374,15 @@ def build_agent_insights_bundle(
                 ),
                 "latencyKnownCalls": len(trace_latency_values),
                 "costUsd": round(sum(trace_cost_values), 8) if trace_cost_values else None,
+                "agentTurnListPriceUsd": (
+                    round(sum(list_price_by_source.values()), 6)
+                    if any(metrics["priced_turns"] for metrics in source_metrics.values())
+                    else None
+                ),
+                "agentTurnsPriced": sum(metrics["priced_turns"] for metrics in source_metrics.values()),
+                "agentTurnsUnpriced": sum(
+                    metrics["unpriced_turns"] for metrics in source_metrics.values()
+                ),
                 "costState": "complete" if trace_scope["analyzed"] and len(trace_cost_values) == trace_scope["analyzed"] else "partial" if trace_cost_values else "not_captured",
             },
             "behavior": {
@@ -1410,6 +1432,59 @@ def build_agent_insights_bundle(
     return redacted
 
 
+# Whether a source's turn ``input_tokens`` already includes its cached tokens.
+# OpenAI-style counts (Codex) include them; Anthropic-style counts (Claude
+# Code) report cache reads and writes separately. Any other basis is not
+# priced rather than guessed.
+_TURN_INPUT_INCLUDES_CACHED = {
+    "codex_turn_delta": True,
+    "claude_provider_response_sum": False,
+}
+
+
+def _models_by_turn(events) -> dict[str, frozenset[str]]:
+    """The provider model names each turn used, from its typed events.
+
+    Claude Code turns name the model on every model-call event; Codex turns
+    name it once in a ``model_configuration`` context event. Client notices
+    such as ``<synthetic>`` are not models.
+    """
+    models: dict[str, set[str]] = defaultdict(set)
+    for event in events:
+        kind = event.event_type.value
+        if kind == "model_call":
+            model = event.attributes.get("request_model")
+        elif kind == "context" and event.attributes.get("name") == "model_configuration":
+            model = event.attributes.get("source")
+        else:
+            continue
+        if isinstance(model, str) and model and model != "unknown" and not model.startswith("<"):
+            models[event.turn_id].add(model)
+    return {turn_id: frozenset(names) for turn_id, names in models.items()}
+
+
+def _turn_list_price_usd(turn, models: frozenset[str]) -> float | None:
+    """Estimated list price of one turn, or None when it cannot be priced honestly.
+
+    A turn is priced only when its token basis is understood, exactly one
+    model is named, and both the input and output counts are present.
+    """
+    includes_cached = _TURN_INPUT_INCLUDES_CACHED.get(turn.token_usage_basis)
+    if includes_cached is None or len(models) != 1:
+        return None
+    # A turn missing either count would be priced as if that side were free.
+    if turn.input_tokens is None or turn.output_tokens is None:
+        return None
+    return estimate_turn_cost_usd(
+        next(iter(models)),
+        input_tokens=turn.input_tokens,
+        cached_input_tokens=turn.cached_input_tokens,
+        cache_write_input_tokens=turn.cache_write_input_tokens,
+        output_tokens=turn.output_tokens,
+        input_includes_cached=includes_cached,
+    )
+
+
 # Failure counts are only meaningful when the source reported outcomes.
 _OUTCOME_REPORTED_METRICS = {
     "tool_result": "tool_outcomes_reported",
@@ -1444,6 +1519,7 @@ def _empty_agent_insights() -> dict:
             "modelCalls": 0, "toolCalls": 0, "inputTokens": None, "outputTokens": None,
             "averageModelLatencyMs": None, "latencyKnownCalls": 0,
             "costUsd": None, "costState": "not_captured",
+            "agentTurnListPriceUsd": None, "agentTurnsPriced": 0, "agentTurnsUnpriced": 0,
         },
         "behavior": {
             "findingRuns": 0, "findingTypes": 0, "capturedResponses": 0,
