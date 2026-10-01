@@ -1269,18 +1269,26 @@ def test_anthropic_preview_runs_with_the_installed_sdk_without_network_egress(mo
 
     def respond(request):
         requests.append(json.loads(request.content))
-        return sdk_httpx.Response(200, json={
-            "id": "msg_local_test",
-            "type": "message",
-            "role": "assistant",
-            "model": "claude-haiku-4-5",
-            "content": [{"type": "text", "text": (
-                '{"relevance":{"reasoning":"direct","verdict":"PASS"},'
-                '"completeness":{"reasoning":"complete","verdict":"PASS"}}'
-            )}],
-            "stop_reason": "end_turn",
-            "usage": {"input_tokens": 10, "output_tokens": 8},
-        })
+        # The adapter streams; answer in the Messages API's event-stream format.
+        text = ('{"relevance":{"reasoning":"direct","verdict":"PASS"},'
+                '"completeness":{"reasoning":"complete","verdict":"PASS"}}')
+        events = [
+            {"type": "message_start", "message": {
+                "id": "msg_local_test", "type": "message", "role": "assistant",
+                "model": "claude-haiku-4-5", "content": [], "stop_reason": None,
+                "stop_sequence": None, "usage": {"input_tokens": 10, "output_tokens": 1}}},
+            {"type": "content_block_start", "index": 0,
+             "content_block": {"type": "text", "text": ""}},
+            {"type": "content_block_delta", "index": 0,
+             "delta": {"type": "text_delta", "text": text}},
+            {"type": "content_block_stop", "index": 0},
+            {"type": "message_delta", "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+             "usage": {"output_tokens": 8}},
+            {"type": "message_stop"},
+        ]
+        body = "".join(f"event: {e['type']}\ndata: {json.dumps(e)}\n\n" for e in events)
+        return sdk_httpx.Response(200, headers={"content-type": "text/event-stream"},
+                                  content=body.encode("utf-8"))
 
     storage = InMemoryStorage()
     storage.insert_trace(_trace("eligible"))
@@ -1314,8 +1322,26 @@ def test_anthropic_preview_runs_with_the_installed_sdk_without_network_egress(mo
     assert len(requests) == 1
     assert ("temperature" in requests[0]) is provider.supports_temperature
     assert requests[0].get("temperature") in (None, 0.0)
+    assert requests[0]["stream"] is True
+    from verdict_eval.providers import output_token_ceiling
+    assert requests[0]["max_tokens"] == output_token_ceiling(config["maxOutputTokens"], config["model"])
     [judgment] = storage.list_judgments_for_cluster("all", limit=10)
     assert judgment.evaluator_fingerprint == result["evaluatorFingerprint"]
+
+
+def test_preview_output_maximum_is_the_ceiling_the_adapters_send():
+    from verdict_eval.providers import output_token_ceiling
+
+    storage = InMemoryStorage()
+    storage.insert_trace(_trace("eligible"))
+    storage.insert_trace(_trace("second"))
+
+    config = _config()
+    preview = preview_evaluation(storage, tenant_id="local", config=config)
+
+    assert preview["plannedCalls"] == 2
+    assert preview["maximumOutputTokens"] == output_token_ceiling(config["maxOutputTokens"], config["model"]) * 2
+    assert preview["estimatedMaximumCostUsd"] > 0
 
 
 def test_anthropic_preview_matches_an_adapter_without_temperature(monkeypatch):
@@ -1768,3 +1794,49 @@ def test_shared_calibration_identity_matches_production_judgment(tmp_path):
     assert calibrated["evaluatorFingerprint"] == judged["evaluatorFingerprint"]
     [health] = storage.list_evaluator_health(tenant_id="local", limit=10)
     assert health.evaluator_fingerprint == judged["evaluatorFingerprint"]
+
+
+def test_openai_reasoning_model_preview_and_run_share_one_identity_without_temperature():
+    openai = pytest.importorskip("openai")
+    from verdict_eval.providers import OpenAIAdapter
+
+    sdk_httpx = getattr(openai._base_client, "httpx2", None) or openai._base_client.httpx
+    requests = []
+
+    def respond(request):
+        requests.append(json.loads(request.content))
+        return sdk_httpx.Response(200, json={
+            "id": "chatcmpl-local", "object": "chat.completion", "created": 0,
+            "model": "gpt-5-mini",
+            "choices": [{"index": 0, "finish_reason": "stop", "message": {
+                "role": "assistant",
+                "content": '{"relevance":{"reasoning":"direct","verdict":"PASS"},'
+                           '"completeness":{"reasoning":"complete","verdict":"PASS"}}',
+            }}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 8, "total_tokens": 18},
+        })
+
+    storage = InMemoryStorage()
+    storage.insert_trace(_trace("eligible"))
+    config = {**_config(), "provider": "openai", "model": "gpt-5-mini"}
+    preview = preview_evaluation(storage, tenant_id="local", config=config)
+    assert requests == []
+
+    with sdk_httpx.Client(transport=sdk_httpx.MockTransport(respond)) as client:
+        provider = OpenAIAdapter(api_key="local-test", max_retries=1)
+        provider._client.close()
+        provider._client = openai.OpenAI(api_key="local-test", http_client=client)
+        result = execute_evaluation(
+            storage, tenant_id="local", provider=provider, confirm_external_egress=True,
+            config={**config, "planFingerprint": preview["planFingerprint"],
+                    "plannedTraces": preview["plannedTraces"]},
+        )
+
+    assert result["completed"] == 1 and result["errors"] == 0
+    [body] = requests
+    assert "temperature" not in body
+    assert "max_tokens" not in body
+    assert body["max_completion_tokens"] > 0
+    [judgment] = storage.list_judgments_for_cluster("all", limit=10)
+    assert judgment.evaluator_config["temperature_applied"] is False
+    assert judgment.evaluator_config["temperature"] is None
