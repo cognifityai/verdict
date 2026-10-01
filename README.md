@@ -801,8 +801,14 @@ preview and file validation make no judge call. Uploaded rubric descriptions
 and transcript text are best-effort redacted. A generic rubric defines only
 binary or bounded numeric dimensions; Verdict does not execute a vendor's
 custom total-score formula. Grades bind the exact current transcript, rubric,
-provider, model, prompt version, and endpoint. A corrected transcript removes
-its old grades. Each page scans at most 20 conversations and runs at most 20
+provider, model, prompt version, and endpoint. The prompt shows the judge the
+exact JSON reply shape for the uploaded rubric, and the reply is decoded by the
+same decoder as Trace judging: JSON inside a Markdown fence or prose, and
+dimensions given as an object or a list of named results, are all accepted;
+duplicate keys, duplicate dimension names, non-finite numbers, oversized
+replies, and replies cut off at the output ceiling are judge errors that can be
+retried. The prompt version and the decoder contract are part of the evaluator
+fingerprint. A corrected transcript removes its old grades. Each page scans at most 20 conversations and runs at most 20
 judge calls; move through the ID-ordered pages explicitly. Full coverage means
 every eligible reply was completed by that evaluator; UNCLEAR remains visible
 but does not count as PASS or FAIL. Judge agreement with human labels must be

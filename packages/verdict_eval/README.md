@@ -32,6 +32,39 @@ Dimensions marked `requires_context=True` can be skipped when a caller enables
 `skip_context_dependent_when_missing`. If every dimension requires unavailable
 context, evaluation fails before a provider call.
 
+Every judge reply is decoded by `verdict_eval.judge_output`, which both the
+Trace/Turn judge and conversation grading share. It finds the JSON inside a
+Markdown fence or surrounding prose and accepts the per-dimension results as
+an object keyed by dimension name, inside an outer `dimensions` object, or as
+a list of objects that carry `name`. It rejects duplicate keys, duplicate
+dimension names, non-finite numbers and replies over 64 KB. A complete but
+malformed reply is normalized to `UNCLEAR` per dimension; a reply the provider
+cut off at the output ceiling, or an oversized one, raises
+`JudgeOutputUnusable` so callers record a retryable judge error. Conversation
+grading stores a finding's `issue` label in identifier form (words joined with
+underscores, lower-cased) and still requires each quoted finding to match the
+exact message at the stated 0-based position. The decoder's
+contract version is part of the evaluator identity (`evaluator_config`
+`output_contract`, and the conversation prompt version's suffix), so a decoder
+change never pools with earlier judgments.
+
+`Judge.max_tokens` (default 1024) is the answer budget. For models that think
+by default (Claude Fable, Mythos, Opus 5 and Sonnet 5 families; OpenAI `gpt-5`,
+`gpt-6`, `o1`, `o3`, `o4`; Gemini 2.5 and later) each provider adapter sends
+that budget plus `REASONING_TOKEN_ALLOWANCE` (16,384 tokens) as the output
+ceiling, because such models spend output tokens on reasoning before the
+answer; every one of those families accepts at least 64k output tokens. Any
+other model is sent the budget as is, so a model with a small output limit is
+never asked for more than it supports. The Anthropic adapter streams its
+request; the OpenAI adapter sends `max_completion_tokens`, which reasoning
+models require (an OpenAI-compatible server behind `OPENAI_BASE_URL` must honor
+it; Ollama 0.34 ignores it and runs without a ceiling); the Google adapter
+sends `max_output_tokens`. The allowance is a ceiling, not spend. OpenAI reasoning families
+(`gpt-5*`, `o1*`, `o3*`, `o4*`) accept only their default temperature, so the
+OpenAI adapter omits it for them and the evaluator identity records
+`temperature_applied: false`; the Anthropic adapter sends a temperature only
+when the installed SDK still accepts one (SDK 1.x does not).
+
 Evaluator Lab also has an opt-in conversation unit for imported, redacted text
 snapshots. Its uploaded JSON rubric explicitly selects `conversation` or
 `response` and declares 1–12 binary or bounded numeric dimensions. A numeric

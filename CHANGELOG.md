@@ -6,17 +6,50 @@ the product is refined.
 
 ## [Unreleased]
 
-## [0.1.0b1] - 2026-09-29
-
-### Changed
-
-- The three synchronized packages declare `Development Status :: 4 - Beta` and
-  version `0.1.0b1`. Install pins, the container tag, and the agent skill target
-  the new version; the skill treats synchronized `0.1.0a5` through `0.1.0a23`
-  installs as in-place upgrades.
-
 ### Fixed
 
+- Judge replies are decoded by one shared decoder for Trace, Agent Turn and
+  conversation grading. It accepts the JSON anywhere in the reply (inside a
+  Markdown fence or after a sentence of prose), as a flat object keyed by
+  dimension name, inside an outer `dimensions` object, or as a list of named
+  results, and it rejects duplicate keys, duplicate dimension names,
+  non-finite numbers and oversized replies in every path. Conversation grading
+  previously required bare JSON with `dimensions` as an object and rejected
+  valid replies that fence the JSON or return the dimensions as a named list;
+  the Trace judge previously let a duplicated key's last value win.
+- The conversation grading prompt now shows the exact JSON reply shape with
+  the rubric's own dimension names, the finding fields, and the 0-based
+  message index. A finding's `issue` label is stored in identifier form
+  (`payment_processed` for "Payment processed"); a prose label previously
+  rejected the whole assessment even when the verdict and quotes were exact.
+  Its stored prompt version is now
+  `conversation_rubric_v2/judge_output_v2/<template digest>`, so a prompt
+  edit or a decoder change always makes a new evaluator; the Trace judge's
+  `evaluator_config` records `output_contract`. Both fingerprints change, so
+  grades from earlier releases stay under their own evaluator and are not
+  mixed with new ones. A Monitor policy pinned to an earlier evaluator
+  fingerprint does not advance on new traffic; re-run Evaluator Lab and
+  activate a replacement policy after upgrading.
+- For models that think by default (Claude Fable, Mythos, Opus 5 and Sonnet 5
+  families; OpenAI `gpt-5`, `gpt-6`, `o1`, `o3`, `o4`; Gemini 2.5 and later)
+  provider adapters add a fixed reasoning allowance of 16,384 tokens to the
+  judge's output budget, so those models no longer spend the whole budget
+  thinking and return an empty or cut-off answer. Other models are sent the
+  budget as is, so a model with a small output limit is never asked for more
+  than it supports. The Anthropic adapter
+  streams its request. A reply that still ends at the ceiling is recorded as a
+  retryable judge error instead of a completed all-UNCLEAR judgment. The
+  Evaluator Lab preview's maximum output tokens and cost estimate include the
+  allowance.
+- The OpenAI adapter sends `max_completion_tokens` instead of `max_tokens`,
+  which reasoning models such as `gpt-5-mini` rejected with HTTP 400. An
+  OpenAI-compatible server behind `OPENAI_BASE_URL` must honor that
+  parameter; Ollama 0.34 ignores it, so a local judge there runs without an
+  output ceiling. The adapter also omits the temperature for OpenAI reasoning
+  families (`gpt-5*`, `o1*`, `o3*`, `o4*`), which accept only their default
+  and rejected the judge's `temperature: 0.0` with HTTP 400; the evaluator
+  identity records `temperature_applied: false` for them, so those judgments
+  are never pooled with sampled ones.
 - Redaction now removes unlabeled vendor credentials that have a distinctive
   prefix: Stripe secret, restricted, and webhook-signing keys; Hugging Face;
   GitLab; Slack; npm; PyPI; Groq; xAI; Replicate; Perplexity; and LangSmith.
@@ -37,6 +70,16 @@ the product is refined.
   `commandOutcomesReported`, and `testOutcomesReported`. Analysis snapshots saved
   by earlier releases lack these counts and keep their stored values until the
   analysis is run again.
+
+## [0.1.0b1] - 2026-09-29
+
+### Changed
+
+- The three synchronized packages declare `Development Status :: 4 - Beta` and
+  version `0.1.0b1`. Install pins, the container tag, and the agent skill target
+  the new version; the skill treats synchronized `0.1.0a5` through `0.1.0a23`
+  installs as in-place upgrades.
+
 
 ## [0.1.0a23] - 2026-09-29
 

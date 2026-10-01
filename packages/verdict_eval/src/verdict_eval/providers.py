@@ -18,7 +18,63 @@ class CompletionRequest:
     model: str
     messages: list[dict[str, str]]    # [{role, content}]
     temperature: float = 0.0
+    # The answer budget. Adapters send ``output_token_ceiling(max_tokens)`` to
+    # the provider so a model's built-in reasoning cannot consume the answer.
     max_tokens: int = 1024
+
+
+# Models with built-in reasoning spend output tokens on thinking before the
+# answer, and every provider counts that thinking against the one output
+# ceiling. The judge's ``max_tokens`` is its answer budget; for the families
+# below the adapters add this fixed allowance on top. Every one of these
+# families accepts at least 64k output tokens, so budget plus allowance never
+# exceeds the model's capacity. Any other model, including one that cannot
+# accept a large ceiling (gpt-4o-mini stops at 16,384), gets the budget as is;
+# a reply that still hits the ceiling is reported through
+# ``CompletionResponse.finish_reason`` as a retryable judge error.
+REASONING_TOKEN_ALLOWANCE = 16_384
+# Name prefixes, matched on the model leaf after any ``provider/`` prefix.
+_REASONING_FAMILIES: tuple[str, ...] = (
+    "gpt-5", "gpt-6", "o1", "o3", "o4",  # OpenAI reasoning models
+    "claude-fable-5", "claude-mythos-5", "claude-opus-5", "claude-sonnet-5",  # adaptive thinking
+    "gemini-2.5", "gemini-3",  # thinking on by default
+)
+
+
+def reasons_by_default(model: object) -> bool:
+    """Whether this model spends output tokens on built-in reasoning."""
+    name = str(model or "").strip().lower().rsplit("/", 1)[-1]
+    return any(
+        name == family or name.startswith((family + "-", family + "."))
+        for family in _REASONING_FAMILIES
+    )
+
+
+def output_token_ceiling(max_tokens: int, model: object = None) -> int:
+    """The output ceiling an adapter sends for a judge answer budget on ``model``."""
+    if isinstance(max_tokens, bool) or not isinstance(max_tokens, int) or max_tokens < 1:
+        raise ValueError("max_tokens must be a positive integer")
+    if reasons_by_default(model):
+        return max_tokens + REASONING_TOKEN_ALLOWANCE
+    return max_tokens
+
+
+# OpenAI's reasoning families accept only the default sampling temperature and
+# reject any other value with HTTP 400 (param "temperature"). OpenAI names the
+# families consistently and its Models API exposes no capability flag, so the
+# rule is a family prefix table. A judge on one of these models runs at the
+# provider default, and the evaluator identity records that no temperature
+# was applied.
+_OPENAI_FIXED_TEMPERATURE_FAMILIES = ("gpt-5", "o1", "o3", "o4")
+
+
+def openai_temperature_supported(model: str) -> bool:
+    """Whether OpenAI Chat Completions accepts a temperature for this model."""
+    name = str(model).strip().lower()
+    return not any(
+        name == family or name.startswith((family + "-", family + "."))
+        for family in _OPENAI_FIXED_TEMPERATURE_FAMILIES
+    )
 
 
 @dataclass
@@ -59,7 +115,10 @@ class FakeProvider:
 class AnthropicAdapter:
     """Live Anthropic adapter. Lazy-imports the SDK.
 
-    Includes automatic exponential-backoff retry on transient errors.
+    Requests stream and are assembled with the SDK's final-message helper:
+    the output ceiling includes a reasoning allowance for models that think by
+    default, and the SDK refuses large non-streaming ceilings. Thinking blocks are not part of the reply
+    text. Includes automatic exponential-backoff retry on transient errors.
     """
 
     name = "anthropic"
@@ -74,8 +133,10 @@ class AnthropicAdapter:
             ) from e
         self._client = Anthropic(api_key=api_key) if api_key else Anthropic()
         self._max_retries = max_retries
+        # Requests go through ``messages.stream``; the installed SDK decides
+        # whether that call accepts a temperature at all.
         self.supports_temperature = (
-            "temperature" in inspect.signature(self._client.messages.create).parameters
+            "temperature" in inspect.signature(self._client.messages.stream).parameters
         )
 
     def complete(self, req: CompletionRequest) -> CompletionResponse:
@@ -88,13 +149,14 @@ class AnthropicAdapter:
         kwargs: dict = {
             "model": req.model,
             "messages": chat,
-            "max_tokens": req.max_tokens,
+            "max_tokens": output_token_ceiling(req.max_tokens, req.model),
         }
         if getattr(self, "supports_temperature", True):
             kwargs["temperature"] = req.temperature
         if system_parts:
             kwargs["system"] = "\n\n".join(system_parts)
-        resp = self._client.messages.create(**kwargs)
+        with self._client.messages.stream(**kwargs) as stream:
+            resp = stream.get_final_message()
         text = ""
         for block in resp.content or []:
             t = getattr(block, "text", None)
@@ -112,7 +174,12 @@ class AnthropicAdapter:
 class OpenAIAdapter:
     """Live OpenAI adapter. Lazy-imports the SDK.
 
-    Includes automatic exponential-backoff retry on transient errors.
+    Sends ``max_completion_tokens``, the current Chat Completions ceiling that
+    reasoning models such as gpt-5 require (they reject ``max_tokens``). An
+    OpenAI-compatible server behind ``OPENAI_BASE_URL`` must honor it; Ollama
+    0.34 ignores it, so a local judge there runs without an output ceiling.
+    Omits the temperature for reasoning families, which accept only their
+    default. Includes automatic exponential-backoff retry on transient errors.
     """
 
     name = "openai"
@@ -128,13 +195,19 @@ class OpenAIAdapter:
     def complete(self, req: CompletionRequest) -> CompletionResponse:
         return _with_retry(self._complete_once, req, max_attempts=self._max_retries)
 
+    def temperature_supported(self, model: str) -> bool:
+        """Per-model temperature support; judges record it in the evaluator identity."""
+        return openai_temperature_supported(model)
+
     def _complete_once(self, req: CompletionRequest) -> CompletionResponse:
-        resp = self._client.chat.completions.create(
-            model=req.model,
-            messages=req.messages,
-            temperature=req.temperature,
-            max_tokens=req.max_tokens,
-        )
+        kwargs: dict = {
+            "model": req.model,
+            "messages": req.messages,
+            "max_completion_tokens": output_token_ceiling(req.max_tokens, req.model),
+        }
+        if self.temperature_supported(req.model):
+            kwargs["temperature"] = req.temperature
+        resp = self._client.chat.completions.create(**kwargs)
         choice = resp.choices[0]
         usage = getattr(resp, "usage", None)
         return CompletionResponse(
@@ -185,7 +258,7 @@ class LiteLLMAdapter:
             model=req.model,
             messages=req.messages,
             temperature=req.temperature,
-            max_tokens=req.max_tokens,
+            max_tokens=output_token_ceiling(req.max_tokens, req.model),
         )
         choice = resp["choices"][0]
         usage = resp.get("usage")
@@ -332,7 +405,7 @@ class GoogleAdapter:
 
         config = types.GenerateContentConfig(
             temperature=req.temperature,
-            max_output_tokens=req.max_tokens,
+            max_output_tokens=output_token_ceiling(req.max_tokens, req.model),
             system_instruction="\n\n".join(system_parts) if system_parts else None,
         )
 
