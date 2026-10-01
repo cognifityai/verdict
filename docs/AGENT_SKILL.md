@@ -1,4 +1,4 @@
-# Run a customer POC with the Verdict agent skill
+# Run a pilot with the Verdict agent skill
 
 Use `verdict-instrument-app` to have a coding agent inspect an existing Python
 LLM application, propose a bounded integration, instrument approved paths, and
@@ -57,7 +57,7 @@ support matrix, proposed instrumentation points, data flow, risks, rollback,
 test plan, and one batched set of unresolved questions. Do not edit files,
 install dependencies, enable content capture, make paid calls, create storage,
 start services, or schedule jobs until I approve that exact plan. After
-approval, implement the smallest supported POC and verify every claim through
+approval, implement the smallest supported pilot and verify every claim through
 its final sink. Label live, synthetic, mocked, and unverified evidence
 separately.
 ```
@@ -104,14 +104,14 @@ After discovery, the agent asks one batch covering:
 - environment, process, provider, and call sites in scope;
 - metadata-only or separately approved prompt/response content;
 - prohibited data classes, synthetic redaction canaries, and retention period;
-- absolute SQLite path for a local POC or Postgres owner for shared capture;
+- absolute SQLite path for a local pilot or Postgres owner for shared capture;
 - stable route/task taxonomy or independently labelled intent examples;
 - evaluator provider/model/rubric, credentials, call ceiling, and spend owner;
 - baseline/current window, acceptable detection delay, and available volume;
 - existing scheduler and dashboard network boundary; and
 - permission to edit, install, launch, test, and schedule.
 
-SQLite is the recommended local POC store. The bundled dashboard reads SQLite
+SQLite is the recommended local pilot store. The bundled dashboard reads SQLite
 or PostgreSQL without creating or migrating schemas. Keep a credential-bearing
 Postgres URL in the customer's protected `VERDICT_STORAGE` environment; the
 installed commands report only the backend name.
@@ -140,6 +140,6 @@ does not ship.
 ## Release-specific boundary
 
 The skill targets public Verdict `0.1.0b1`; its capture-method evidence is the
-bounded `0.1.0b1` [POC release profile](POC_RELEASE_PROFILE.md). Re-inspect
+bounded `0.1.0b1` [release profile](RELEASE_PROFILE.md). Re-inspect
 all commands and provider entry points before using the skill with a later
 release.

@@ -224,6 +224,20 @@ search. The completion report must list exact commands, real paths exercised,
 adversarial cases, untested areas, documentation changes, and residual risks.
 Do not call Verdict or a feature production-ready from unit tests alone.
 
+## Public Artifact Boundary
+
+Every artifact in this repository is public: source comments, test fixtures,
+commit messages, pull request text, review comments, and the changelog.
+
+- Do not include data from private sources or statistics about it (file
+  counts, token totals, match counts, result tallies, run dates). State which
+  synthetic, mocked, or live-SDK checks ran; keep private-data evidence out.
+- Do not state the provenance of private data. Fixtures are wholly synthetic
+  and describe the input contract they exercise; replacing identifiers in real
+  content does not make it synthetic.
+- No customer, engagement, trial, or proof-of-concept context, personal names
+  or paths, or tool signatures in pull request descriptions.
+
 ## Documentation Definition Of Done
 
 Documentation updates are required in the same change whenever code modifies
