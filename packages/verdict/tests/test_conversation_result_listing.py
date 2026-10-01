@@ -21,6 +21,7 @@ def _conversation(number: int, tenant: str = "alpha", answer: str = "Synthetic a
         "messages": [{"role": "user", "content": "Synthetic question."},
                      {"role": "assistant", "content": answer}],
         "event_at": "2026-09-01T12:00:00Z", "end_status": "complete", "input_issues": [],
+        "labels": {"display": f"Synthetic conversation {number}"},
     })
 
 
@@ -85,6 +86,8 @@ def test_result_listing_filters_before_paging_and_keeps_identities_separate(adap
                 "alpha", first_grade["evaluator_fingerprint"], limit=1)
             assert [item["id"] for item in pages] == [first["id"]]
             assert pages[0]["completedCount"] == 1 and pages[0]["errorCount"] == 0
+            assert pages[0]["displayLabel"] == "Synthetic conversation 22"
+            assert "labels" not in pages[0]
             assert cursor == first["id"]
             next_page, cursor = store.list_graded_conversations(
                 "alpha", first_grade["evaluator_fingerprint"], after=cursor, limit=1)

@@ -491,7 +491,9 @@ weighted totals are outside this generic schema. Open **Evaluate → Results →
 Conversation results** to select a stored conversation evaluator by rubric,
 provider, and model. Copy its full evaluator ID for Monitor. The list pages only
 current conversations with grades from that exact evaluator. Open a row to
-inspect its grades and evidence. The list
+inspect its grades and evidence. A source-provided `labels.display` appears as
+the row name when available; otherwise the row says “Unnamed conversation,”
+with its opaque ID shown underneath. The list
 counts stored completed and error results, not full reply coverage, and makes
 no judge calls. **Trace results** are a separate view on the same screen.
 To explore quality over time,

@@ -2446,6 +2446,7 @@ class SQLiteStorage:
             snapshot = json.loads(row["snapshot"])
             page.append({"id": row["conversation_id"], "revision": snapshot["revision"],
                          "event_at": snapshot["event_at"], "end_status": snapshot["end_status"],
+                         "displayLabel": snapshot.get("labels", {}).get("display"),
                          "assessmentCount": row["total"], "completedCount": row["completed"],
                          "errorCount": row["errors"]})
         return page, rows[limit - 1]["conversation_id"] if len(rows) > limit else None

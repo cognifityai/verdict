@@ -131,7 +131,8 @@ export function ConversationResults({ root, source, traceResults }) {
           <div className="overflow-auto max-h-96"><table className="w-full text-sm text-left">
             <thead><tr><th className="p-2">Conversation</th><th className="p-2">Stored grades</th></tr></thead>
             <tbody>{page.conversations.map((row) => <tr key={row.id} className="border-t" style={{ borderColor: border }}>
-              <td className="p-2"><button className="underline" onClick={() => { detailGeneration.current += 1; setDetail(null); setDetailId(row.id); }}>{row.id.slice(0, 12)}</button>
+              <td className="p-2"><button className="underline" onClick={() => { detailGeneration.current += 1; setDetail(null); setDetailId(row.id); }}>{row.displayLabel || "Unnamed conversation"}</button>
+                <div className="text-xs" style={{ color: muted }}>ID {row.id.slice(0, 12)}</div>
                 <div className="text-xs" style={{ color: muted }}>{row.event_at
                   ? <>{row.event_at.slice(0, 10)}<br />{row.event_at.slice(11, 16)} UTC</>
                   : "No source time"}</div></td>

@@ -1112,6 +1112,7 @@ class InMemoryStorage:
                 row = grouped.setdefault(conversation_id, {
                     "id": conversation_id, "revision": conversation["revision"],
                     "event_at": conversation["event_at"], "end_status": conversation["end_status"],
+                    "displayLabel": conversation.get("labels", {}).get("display"),
                     "assessmentCount": 0, "completedCount": 0, "errorCount": 0,
                 })
                 row["assessmentCount"] += 1

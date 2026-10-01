@@ -2371,6 +2371,7 @@ class PostgresStorage:
             snapshot = json.loads(payload)
             page.append({"id": conversation_id, "revision": snapshot["revision"],
                          "event_at": snapshot["event_at"], "end_status": snapshot["end_status"],
+                         "displayLabel": snapshot.get("labels", {}).get("display"),
                          "assessmentCount": total, "completedCount": completed,
                          "errorCount": errors})
         return page, rows[limit - 1][0] if len(rows) > limit else None

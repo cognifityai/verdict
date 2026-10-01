@@ -830,7 +830,9 @@ evaluator selector shows its rubric name and version, provider, model, target,
 and fingerprint prefix; the full evaluator ID appears below it for Monitor.
 Results pages only conversations with a stored grade
 from that exact evaluator; open one to inspect the grades and messages. The
-list reports stored completed and error counts, not full reply coverage. This
+list shows a source-provided `labels.display` when available, with the opaque
+conversation ID underneath; unlabeled records show “Unnamed conversation.”
+The list reports stored completed and error counts, not full reply coverage. This
 read-only view does not need the evaluator's rubric file or make judge calls.
 **Trace results** remain available on the same Results screen.
 

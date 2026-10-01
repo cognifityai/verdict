@@ -223,11 +223,13 @@ test("Results ignores late pages from a previously selected evaluator", async ()
   hooks.flushEffects();
   await resolveJson(requests[2], { evaluatorFingerprint: second, nextCursor: null,
     conversations: [{ id: "2".repeat(32), revision: "current", event_at: null,
+      displayLabel: "Synthetic second conversation",
       assessmentCount: 1, completedCount: 1, errorCount: 0 }] });
   await resolveJson(requests[1], { evaluatorFingerprint: first, nextCursor: null,
     conversations: [{ id: "1".repeat(32), revision: "old", event_at: null,
       assessmentCount: 1, completedCount: 1, errorCount: 0 }] });
   tree = render(ui.ConversationResults, hooks, props);
+  assert.match(textOf(tree), /Synthetic second conversation/);
   assert.match(textOf(tree), /222222222222/);
   assert.doesNotMatch(textOf(tree), /111111111111/);
 });
@@ -251,7 +253,7 @@ test("Results clears old detail when its evaluator changes", async () => {
       assessmentCount: 1, completedCount: 1, errorCount: 0 }] });
   tree = render(ui.ConversationResults, hooks, props);
   findAll(tree, (node) => node.type === "button"
-    && textOf(node).includes("111111111111"))[0].props.onClick();
+    && textOf(node) === "Unnamed conversation")[0].props.onClick();
   tree = render(ui.ConversationResults, hooks, props);
   hooks.flushEffects();
   findAll(tree, (node) => node.type === "select"
@@ -311,7 +313,7 @@ test("Results discovers stored conversation evaluators and opens their evidence"
   assert.match(textOf(tree), new RegExp(`Evaluator ID for Monitor:\\s*${fingerprint}`));
   assert.match(textOf(tree), /1\s+completed/);
   const open = findAll(tree, (node) => node.type === "button"
-    && textOf(node).includes("bbbbbbbbbbbb"))[0].props.onClick;
+    && textOf(node) === "Unnamed conversation")[0].props.onClick;
   open();
   tree = render(ui.ConversationResults, hooks, props);
   hooks.flushEffects();
