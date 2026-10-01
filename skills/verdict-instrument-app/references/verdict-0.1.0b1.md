@@ -1,7 +1,7 @@
 # Verdict 0.1.0b1 target
 
 This Python public beta uses the bounded
-[`0.1.0b1` POC release profile](https://github.com/cognifityai/verdict/blob/v0.1.0b1/docs/POC_RELEASE_PROFILE.md).
+[`0.1.0b1` release profile](https://github.com/cognifityai/verdict/blob/v0.1.0b1/docs/POC_RELEASE_PROFILE.md).
 It is not a production-readiness claim.
 
 ## Install one synchronized set

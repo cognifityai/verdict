@@ -393,8 +393,8 @@ The Langfuse reader targets the supported v4 Observations API v2, not the
 deprecated trace-list endpoint, so Verdict receives one record per actual
 generation or embedding rather than a trace aggregate.
 
-For a customer proof of concept, follow the versioned
-[`0.1.0b1 POC release profile`](https://github.com/cognifityai/verdict/blob/v0.1.0b1/docs/POC_RELEASE_PROFILE.md).
+For a pilot, follow the versioned
+[`0.1.0b1 release profile`](https://github.com/cognifityai/verdict/blob/v0.1.0b1/docs/POC_RELEASE_PROFILE.md).
 It pins the package set, provider entry points, persistence mode, and privacy
 boundary used for release verification.
 
@@ -444,7 +444,7 @@ each ended span is persisted once independently of provider success. `flush()` i
 a FIFO point-in-time barrier and accepts an optional timeout. `close()` rejects
 new reads/writes, drains every accepted FIFO write, stops and joins the worker,
 then closes the inner adapter; post-close `flush()` is an idempotent no-op.
-The `0.1.0b1` POC profile uses `buffered_writes=False`. Buffered mode requires
+The `0.1.0b1` release profile uses `buffered_writes=False`. Buffered mode requires
 an explicit `shutdown()` imported from `verdict.client` before process exit.
 Fixed-window `DriftRun` snapshots created by older releases remain readable for
 compatibility; the current pipeline does not create or replace them.
@@ -589,7 +589,7 @@ and stable labels from the same active registry. Standalone and legacy stores
 without an active registry for the selected tenant continue to use
 `Trace.cluster_id`.
 
-For published release `0.1.0b1`, the bounded POC entry points include Anthropic
+For published release `0.1.0b1`, the bounded pilot entry points include Anthropic
 `messages.create(...)` (including `stream=True`), OpenAI
 `chat.completions.create(...)` and its stream helper, and Google
 `models.generate_content(...)` / `generate_content_stream(...)`, plus the

@@ -6,6 +6,13 @@ the product is refined.
 
 ## [Unreleased]
 
+### Changed
+
+- The pilot guides are `docs/RELEASE_PROFILE.md` and `docs/AGENT_SKILL.md`
+  (previously `POC_RELEASE_PROFILE.md` and `AGENT_POC_SKILL.md`). Public docs
+  describe a pilot rather than a customer proof of concept; links to the
+  `v0.1.0b1` tag keep the old file names because that tag is immutable.
+
 ## [0.1.0b1] - 2026-09-29
 
 ### Changed

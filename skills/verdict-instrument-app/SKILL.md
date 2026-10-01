@@ -64,7 +64,7 @@ Read repository instructions and existing observability, privacy, deployment, an
 scheduler conventions. Identify the released Verdict version to use. For the
 compatibility target and its concrete limitations, read
 [`references/verdict-0.1.0b1.md`](references/verdict-0.1.0b1.md). Its capture
-coverage is pinned in the version-matched POC profile linked there.
+coverage is pinned in the version-matched release profile linked there.
 
 Do not treat an unpublished local Verdict worktree as released functionality.
 
@@ -145,7 +145,7 @@ The plan must name:
 6. expected provider/judge volume and cost boundary; and
 7. verification through the final stored trace and final regression sink.
 
-The plan must also name which of these POC outcomes is in scope:
+The plan must also name which of these pilot outcomes is in scope:
 
 - `capture`: metadata reaches the approved store;
 - `quality`: approved content and a calibrated judge exist; reviewed grouping is
@@ -153,7 +153,7 @@ The plan must also name which of these POC outcomes is in scope:
 - `regression`: frozen reference/current cohorts reach the required sample floor
   and produce a persisted latest Monitor comparison.
 
-Do not describe a capture-only POC as a regression POC.
+Do not describe a capture-only pilot as a regression pilot.
 
 Do not implement until the user approves this plan.
 
