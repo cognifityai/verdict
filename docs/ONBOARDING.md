@@ -126,7 +126,8 @@ list price** for agent turns in Overview → Performance and in the per-source
 table: the turn's token components priced at the public per-token rates for
 the one model the turn named, with cache reads and cache writes at the
 provider's cache rates (Claude Code counts exclude cached tokens from input;
-Codex counts include them). It is a list price, not a bill: desktop and
+Codex counts include them; cache writes are assumed to be five-minute writes).
+It is a list price, not a bill: desktop and
 subscription activity is not charged this way. A turn is left unpriced when it
 names no model or more than one, when its model has no static price, or when
 its token basis is unknown; the figure states how many turns it covers.

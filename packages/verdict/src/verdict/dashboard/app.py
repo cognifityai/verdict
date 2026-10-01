@@ -1467,12 +1467,13 @@ def _turn_list_price_usd(turn, models: frozenset[str]) -> float | None:
     """Estimated list price of one turn, or None when it cannot be priced honestly.
 
     A turn is priced only when its token basis is understood, exactly one
-    model is named, and at least one token count is present.
+    model is named, and both the input and output counts are present.
     """
     includes_cached = _TURN_INPUT_INCLUDES_CACHED.get(turn.token_usage_basis)
     if includes_cached is None or len(models) != 1:
         return None
-    if turn.input_tokens is None and turn.output_tokens is None:
+    # A turn missing either count would be priced as if that side were free.
+    if turn.input_tokens is None or turn.output_tokens is None:
         return None
     return estimate_turn_cost_usd(
         next(iter(models)),

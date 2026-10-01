@@ -117,7 +117,7 @@ def test_latest_analysis_can_be_scoped_to_analyzer_version(storage) -> None:
     newer_version = replace(
         older_version,
         analysis_id="f" * 64,
-        analyzer_version="agent-insights-v2",
+        analyzer_version="agent-insights-v3",
         input_fingerprint="c" * 64,
         completed_at=older_version.completed_at + timedelta(minutes=1),
     )

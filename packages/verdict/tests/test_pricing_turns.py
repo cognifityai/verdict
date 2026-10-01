@@ -60,3 +60,20 @@ def test_missing_components_count_as_zero() -> None:
         "claude-sonnet-4-5", input_tokens=1_000, cached_input_tokens=None,
         cache_write_input_tokens=None, output_tokens=None, input_includes_cached=False,
     ) == pytest.approx(0.003)
+
+
+def test_anthropic_models_with_reduced_cache_read_rates() -> None:
+    def cached_million(model: str) -> float:
+        return estimate_turn_cost_usd(
+            model, input_tokens=0, cached_input_tokens=1_000_000,
+            cache_write_input_tokens=None, output_tokens=0, input_includes_cached=False,
+        )
+
+    # Published cache-read prices per million tokens.
+    assert cached_million("claude-fable-5-1") == pytest.approx(0.25)
+    assert cached_million("claude-mythos-5-1") == pytest.approx(0.25)
+    assert cached_million("claude-opus-5-5") == pytest.approx(0.20)
+    assert cached_million("claude-sonnet-5-5") == pytest.approx(0.20)
+    assert cached_million("claude-haiku-4-5") == pytest.approx(0.10)
+    assert cached_million("claude-fable-5") == pytest.approx(1.00)
+    assert cached_million("claude-opus-5") == pytest.approx(0.50)

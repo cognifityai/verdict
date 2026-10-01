@@ -43,6 +43,7 @@ PRICE_PER_1K: dict[str, tuple[float, float]] = {
     # Anthropic (USD per 1K tokens)
     "claude-fable-5": (0.010, 0.050),
     "claude-mythos-5": (0.010, 0.050),
+    "claude-opus-5-5": (0.004, 0.020),
     "claude-opus-5": (0.005, 0.025),
     "claude-sonnet-5": (0.002, 0.010),
     "claude-opus-4-8": (0.005, 0.025),
@@ -184,7 +185,16 @@ def compute_cost_usd(
 # OpenAI's cached-input discount depends on the family; the prefixes below are
 # matched in order and an unlisted family uses 0.5, the least generous listed
 # discount, so an unknown family is never under-priced.
+# Anthropic cache reads are 10% of input except on the models listed here;
+# cache writes are the five-minute rate. One-hour cache writes cost 2x input,
+# but the normalized turn fields do not record which duration was used, so the
+# estimate assumes five-minute writes.
 _ANTHROPIC_CACHE_READ = 0.1
+_ANTHROPIC_CACHE_READ_BY_MODEL: tuple[tuple[str, float], ...] = (
+    ("claude-fable-5-1", 0.025),
+    ("claude-mythos-5-1", 0.025),
+    ("claude-opus-5-5", 0.05),
+)
 _ANTHROPIC_CACHE_WRITE = 1.25
 _OPENAI_CACHE_READ_BY_FAMILY: tuple[tuple[str, float], ...] = (
     ("gpt-5", 0.1),
@@ -208,9 +218,12 @@ def _provider_of(model: str) -> str | None:
 
 
 def _cache_read_multiplier(provider: str, model: str) -> float:
-    if provider == "anthropic":
-        return _ANTHROPIC_CACHE_READ
     name = model.lower().rsplit("/", 1)[-1]
+    if provider == "anthropic":
+        for family, multiplier in _ANTHROPIC_CACHE_READ_BY_MODEL:
+            if name == family or name.startswith(family + "-"):
+                return multiplier
+        return _ANTHROPIC_CACHE_READ
     for family, multiplier in _OPENAI_CACHE_READ_BY_FAMILY:
         if name == family or name.startswith((family + "-", family + ".")):
             return multiplier

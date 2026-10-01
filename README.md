@@ -917,7 +917,8 @@ error details; an overlarge selection asks you to choose narrower dates.
   complete input/output usage.
   Malformed or unavailable counters remain unavailable rather than becoming
   zero. These local-history token counts remain observable, but
-  Verdict does not convert them into API-list-price spend because desktop or
+  Verdict shows a separate, labeled list-price estimate for agent turns (see
+  Overview → Performance) but does not put a cost on these traces, because desktop or
   subscription billing is not established by those files. For the standard
   `~/.codex/sessions` source, local capture also reads completed-call metadata
   directly from the sibling `~/.codex/logs_2.sqlite`; no export is required.
