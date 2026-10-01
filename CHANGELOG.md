@@ -18,7 +18,8 @@ the product is refined.
   an analysis that reports an error also ends the job as failed while keeping
   the import summary. Each job carries a `jobId`; `?job=<id>` on the status
   endpoint answers 404 when that job is no longer current, and a reloaded
-  setup page picks up a job that is still running.
+  setup page picks up a job that is still running, even after some files have
+  already produced Agent Runs.
   `capture_local_agents` accepts an optional `progress(done, total)` callback.
 
 ## [0.1.0b1] - 2026-09-29

@@ -14,7 +14,7 @@ function captureProgressLabel(job) {
   if (!job) return LONG_CAPTURE;
   if (job.state === "analyzing") return "Files imported. Analyzing captured evidence…";
   if (job.filesTotal == null) return "Listing history files…";
-  return `Importing ${job.filesDone} of ${job.filesTotal} history files… Large histories can take several minutes. Keep this page open.`;
+  return `Importing ${job.filesDone} of ${job.filesTotal} history files… Large histories can take several minutes. You can leave this page while Verdict keeps running.`;
 }
 const LONG_IMPORT = "Importing… Large files can take several minutes. Keep this page open.";
 
@@ -122,6 +122,8 @@ export function SetupWizard({ configUrl, onComplete, onNavigate, onRefresh, agen
   ];
   const localKey = JSON.stringify([claudeRoot, codexRoot]);
   const importKey = JSON.stringify([filePath, fileFormat]);
+  const statusNotice = busy && busyLabel && <div role="status" aria-live="polite" className={panel} style={{ ...style, color: "#94a39d" }}>{busyLabel}</div>;
+  const errorNotice = error && <div role="alert" className={panel} style={{ ...style, color: "#ff6b6b" }}>{error}</div>;
   if (hasObservedStore && !editing) {
     const sourceText = (Array.isArray(agentSummary.agentRunSources) ? agentSummary.agentRunSources : [])
       .filter((item) => typeof item?.sourceKind === "string" && item.sourceKind && Number.isInteger(Number(item.runs)) && Number(item.runs) > 0)
@@ -129,6 +131,8 @@ export function SetupWizard({ configUrl, onComplete, onNavigate, onRefresh, agen
       .join(" · ");
     return (
       <div className="max-w-4xl space-y-4">
+        {statusNotice}
+        {errorNotice}
         <section className={panel} style={style}>
           <div className="text-xs font-mono" style={{ color: "#4ee1aa" }}>{storePresentation.connectedEmpty ? "CONNECTED VERDICT STORE" : "OBSERVED DATA SOURCES"}</div>
           <h2 className="text-lg font-semibold mt-1">{storePresentation.connectedEmpty ? `Connected ${storePresentation.backendLabel} store` : sourcePresentation.heading}</h2>
@@ -197,8 +201,8 @@ export function SetupWizard({ configUrl, onComplete, onNavigate, onRefresh, agen
         <p className="text-sm mt-3">Restart Verdict with <code>verdict --storage sqlite:///path/to/verdict.db</code> or a PostgreSQL DSN. The dashboard reads that store without copying its records.</p>
       </section>}
 
-      {busy && busyLabel && <div role="status" aria-live="polite" className={panel} style={{ ...style, color: "#94a39d" }}>{busyLabel}</div>}
-      {error && <div role="alert" className={panel} style={{ ...style, color: "#ff6b6b" }}>{error}</div>}
+      {statusNotice}
+      {errorNotice}
       {result && <section className={panel} style={style}>
         <div className="text-xs font-mono" style={{ color: "#4ee1aa" }}>RESULT</div>
         <pre className="mt-3 text-xs overflow-x-auto">{JSON.stringify(result, null, 2)}</pre>

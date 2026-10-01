@@ -121,8 +121,9 @@ background; the setup page shows how many history files have been imported,
 then runs the first analysis. One capture runs at a time per dashboard process
 (`POST /api/setup/capture` answers 202 with the job, `GET
 /api/setup/capture/status` reports it), a closed page does not stop it, and a
-reloaded setup page picks the running job up again. Local history capture retains bounded redacted
-content by default so the first analysis is useful. The local setup wizard does
+reloaded setup page shows its progress even when earlier files have already
+produced Agent Runs. Local history capture retains bounded redacted content
+by default so the first analysis is useful. The local setup wizard does
 not offer a metadata-only shortcut; SDK and programmatic capture can still set
 `capture_content=False` when that privacy tradeoff is intentional. Capture and
 historical import remain disabled until the exact paths have been previewed in

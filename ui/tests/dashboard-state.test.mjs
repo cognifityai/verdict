@@ -2668,3 +2668,35 @@ test("a reloaded setup page picks up the capture that is still running", async (
     globalThis.setTimeout = realSetTimeout;
   }
 });
+
+test("reloaded capture progress and failure stay visible with an observed store", async () => {
+  const ui = await loadUiModule();
+  const realSetTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = (callback) => realSetTimeout(callback, 0);
+  try {
+    for (const agentSummary of [
+      { totalAgentRuns: 40, totalTraces: 0 },
+      { totalAgentRuns: 0, totalTraces: 5 },
+      { storageBackend: "sqlite", totalAgentRuns: 0, totalTraces: 0 },
+    ]) {
+      const hooks = createEffectHooks();
+      const requests = deferredFetches();
+      const props = { configUrl: "/api/config", onComplete: () => {}, agentSummary };
+      render(ui.SetupWizard, hooks, props);
+      hooks.flushEffects();
+      await resolveJson(requests[0], { setupToken: "setup-token" });
+      await resolveJson(requests[1], { job: { jobId: "job-10", state: "running", filesDone: 40, filesTotal: 90 } });
+      const notices = (role) => findAll(render(ui.SetupWizard, hooks, props),
+        (node) => node.props?.role === role).map(textOf).join(" ");
+      assert.match(notices("status"), /Importing 40 of 90 history files/);
+      await untilRequests(requests, 3, realSetTimeout);
+      await resolveJson(requests[2], { job: { jobId: "job-10", state: "failed", error: "capture_failed" } });
+      for (let attempt = 0; attempt < 20 && !notices("alert"); attempt += 1) {
+        await new Promise((resolve) => realSetTimeout(resolve, 1));
+      }
+      assert.match(notices("alert"), /capture_failed/);
+    }
+  } finally {
+    globalThis.setTimeout = realSetTimeout;
+  }
+});
