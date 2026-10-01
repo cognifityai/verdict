@@ -28,7 +28,7 @@ function componentStub(names) {
 }
 
 async function loadUiModule() {
-  const source = `${await readFile(UI_SOURCE, "utf8")}\nexport { Dashboard, Overview, Traces, TraceDetail, TabHelp, Judge, Compare, ManagementReport, mountedApiUrl, Monitor };\nexport { useOperations } from "./Operations.jsx";\nexport { RegistryView } from "./Registry.jsx";\nexport { EvaluatorLab } from "./EvaluatorLab.jsx";\nexport { ConversationEvaluation } from "./ConversationEvaluation.jsx";\nexport { MatchedConversationCompare } from "./MatchedConversationCompare.jsx";\nexport { Runs } from "./Runs.jsx";\nexport { Insights } from "./Insights.jsx";\nexport { SetupWizard } from "./SetupWizard.jsx";`;
+  const source = `${await readFile(UI_SOURCE, "utf8")}\nexport { Dashboard, Overview, Traces, TraceDetail, TabHelp, Judge, Compare, ManagementReport, mountedApiUrl, Monitor };\nexport { useOperations } from "./Operations.jsx";\nexport { RegistryView } from "./Registry.jsx";\nexport { EvaluatorLab } from "./EvaluatorLab.jsx";\nexport { ConversationEvaluation } from "./ConversationEvaluation.jsx";\nexport { ConversationResults } from "./ConversationResults.jsx";\nexport { MatchedConversationCompare } from "./MatchedConversationCompare.jsx";\nexport { Runs } from "./Runs.jsx";\nexport { Insights } from "./Insights.jsx";\nexport { SetupWizard } from "./SetupWizard.jsx";`;
   const result = await build({
     stdin: {
       contents: source,
@@ -199,6 +199,138 @@ test("conversation approval is cleared after failed navigation and run", async (
   tree = render(ui.ConversationEvaluation, hooks, props);
   assert.equal(findAll(tree, (node) => node.type === "input" && node.props.type === "checkbox")[0]
     .props.checked, false);
+});
+
+test("Results ignores late pages from a previously selected evaluator", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const first = "a".repeat(64);
+  const second = "b".repeat(64);
+  const props = { root: "", source: "live", traceResults: "Trace results" };
+  render(ui.ConversationResults, hooks, props);
+  hooks.flushEffects();
+  await resolveJson(requests[0], { evaluators: [
+    { fingerprint: first, rubricName: "first", rubricVersion: "1", target: "conversation", provider: "local", model: "one" },
+    { fingerprint: second, rubricName: "second", rubricVersion: "1", target: "conversation", provider: "local", model: "two" },
+  ], nextCursor: null });
+  let tree = render(ui.ConversationResults, hooks, props);
+  hooks.flushEffects();
+  const selector = findAll(tree, (node) => node.type === "select"
+    && node.props["aria-label"] === "Conversation evaluator")[0];
+  selector.props.onChange({ target: { value: second } });
+  tree = render(ui.ConversationResults, hooks, props);
+  hooks.flushEffects();
+  await resolveJson(requests[2], { evaluatorFingerprint: second, nextCursor: null,
+    conversations: [{ id: "2".repeat(32), revision: "current", event_at: null,
+      displayLabel: "Synthetic second conversation",
+      assessmentCount: 1, completedCount: 1, errorCount: 0 }] });
+  await resolveJson(requests[1], { evaluatorFingerprint: first, nextCursor: null,
+    conversations: [{ id: "1".repeat(32), revision: "old", event_at: null,
+      assessmentCount: 1, completedCount: 1, errorCount: 0 }] });
+  tree = render(ui.ConversationResults, hooks, props);
+  assert.match(textOf(tree), /Synthetic second conversation/);
+  assert.match(textOf(tree), /222222222222/);
+  assert.doesNotMatch(textOf(tree), /111111111111/);
+});
+
+test("Results clears old detail when its evaluator changes", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const first = "a".repeat(64), second = "b".repeat(64);
+  const props = { root: "", source: "live", traceResults: "Trace results" };
+  render(ui.ConversationResults, hooks, props);
+  hooks.flushEffects();
+  await resolveJson(requests[0], { evaluators: [
+    { fingerprint: first, rubricName: "first", rubricVersion: "1", target: "conversation", provider: "local", model: "one" },
+    { fingerprint: second, rubricName: "second", rubricVersion: "1", target: "conversation", provider: "local", model: "two" },
+  ], nextCursor: null });
+  let tree = render(ui.ConversationResults, hooks, props);
+  hooks.flushEffects();
+  await resolveJson(requests[1], { evaluatorFingerprint: first, nextCursor: null,
+    conversations: [{ id: "1".repeat(32), revision: "one", event_at: null,
+      assessmentCount: 1, completedCount: 1, errorCount: 0 }] });
+  tree = render(ui.ConversationResults, hooks, props);
+  findAll(tree, (node) => node.type === "button"
+    && textOf(node) === "Unnamed conversation")[0].props.onClick();
+  tree = render(ui.ConversationResults, hooks, props);
+  hooks.flushEffects();
+  findAll(tree, (node) => node.type === "select"
+    && node.props["aria-label"] === "Conversation evaluator")[0]
+    .props.onChange({ target: { value: second } });
+  tree = render(ui.ConversationResults, hooks, props);
+  hooks.flushEffects();
+  await resolveJson(requests[2], { conversation: { revision: "one", messages: [
+    { role: "assistant", status: "completed", content: "Stale synthetic answer." },
+  ] }, assessments: [] });
+  tree = render(ui.ConversationResults, hooks, props);
+  assert.doesNotMatch(textOf(tree), /Stale synthetic answer/);
+});
+
+test("Results shows discovery failure and an empty conversation state distinctly", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const props = { root: "", source: "live", traceResults: "Trace results" };
+  render(ui.ConversationResults, hooks, props);
+  hooks.flushEffects();
+  requests[0].resolve({ ok: false, status: 503, json: async () => ({}) });
+  for (let index = 0; index < 6; index += 1) await Promise.resolve();
+  let tree = render(ui.ConversationResults, hooks, props);
+  assert.match(textOf(tree), /Could not load conversation evaluators/);
+  findAll(tree, (node) => node.type === "button"
+    && textOf(node) === "Refresh results")[0].props.onClick();
+  tree = render(ui.ConversationResults, hooks, props);
+  hooks.flushEffects();
+  await resolveJson(requests[1], { evaluators: [], nextCursor: null });
+  tree = render(ui.ConversationResults, hooks, props);
+  findAll(tree, (node) => node.type === "button"
+    && textOf(node) === "Conversation results")[0].props.onClick();
+  tree = render(ui.ConversationResults, hooks, props);
+  assert.match(textOf(tree), /No conversation grades are stored yet/);
+});
+
+test("Results discovers stored conversation evaluators and opens their evidence", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const fingerprint = "a".repeat(64);
+  const props = { root: "", source: "live", traceResults: "Trace results" };
+  render(ui.ConversationResults, hooks, props);
+  hooks.flushEffects();
+  assert.match(requests[0].url, /assessment-evaluators/);
+  await resolveJson(requests[0], { evaluators: [{ fingerprint, rubricName: "synthetic_quality",
+    rubricVersion: "1", target: "conversation", provider: "local", model: "synthetic-model" }], nextCursor: null });
+  let tree = render(ui.ConversationResults, hooks, props);
+  hooks.flushEffects();
+  assert.match(requests[1].url, new RegExp(`assessments\\?evaluator=${fingerprint}`));
+  await resolveJson(requests[1], { evaluatorFingerprint: fingerprint, nextCursor: null,
+    conversations: [{ id: "b".repeat(32), revision: "one", event_at: "2026-09-01T12:00:00Z",
+      end_status: "complete", assessmentCount: 1, completedCount: 1, errorCount: 0 }] });
+  tree = render(ui.ConversationResults, hooks, props);
+  assert.match(textOf(tree), /synthetic_quality/);
+  assert.match(textOf(tree), new RegExp(`Evaluator ID for Monitor:\\s*${fingerprint}`));
+  assert.match(textOf(tree), /1\s+completed/);
+  const open = findAll(tree, (node) => node.type === "button"
+    && textOf(node) === "Unnamed conversation")[0].props.onClick;
+  open();
+  tree = render(ui.ConversationResults, hooks, props);
+  hooks.flushEffects();
+  assert.match(requests[2].url, new RegExp(`evaluator=${fingerprint}`));
+  await resolveJson(requests[2], { conversation: { revision: "one", messages: [
+    { role: "user", status: "completed", content: "Synthetic question." },
+    { role: "assistant", status: "completed", content: "Synthetic answer." },
+  ] }, assessments: [{ id: "grade", revision: "one", evaluator_fingerprint: fingerprint,
+    rubric: { name: "synthetic_quality", version: "1" }, target_position: null,
+    status: "completed", dimensions: { helpful: { state: "pass", reason: "Synthetic." },
+      score: { state: "unclear", score: 80, reason: "No binary threshold." } },
+    findings: [] }] });
+  tree = render(ui.ConversationResults, hooks, props);
+  assert.match(textOf(tree), /Synthetic answer/);
+  assert.match(textOf(tree), /score\s*:\s+80\s+·/);
+  assert.doesNotMatch(textOf(tree), /80 \(unclear\)/);
+  assert.equal(requests.length, 3);
 });
 
 test("Monitor compares conversation grades and detects changed example evidence", async () => {

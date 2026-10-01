@@ -23,6 +23,59 @@ from verdict.schema import (
 from verdict.storage import SQLiteStorage
 
 
+def test_conversation_results_discover_current_evaluators_and_graded_rows(tmp_path):
+    import httpx
+    from verdict.conversation_assessments import validate_assessment, validate_rubric
+    from verdict.conversations import validate_conversation
+
+    path = tmp_path / "conversation-results.db"
+    store = SQLiteStorage(str(path))
+    rubric = validate_rubric({
+        "name": "synthetic_quality", "version": "1", "target": "conversation",
+        "instructions": "Private instruction text remains out of the identity list.",
+        "dimensions": [{"name": "helpful", "description": "Synthetic dimension."}],
+    })
+    identity = {"provider": "local", "model": "synthetic-model",
+                "rubric_fingerprint": rubric["fingerprint"],
+                "prompt_version": "synthetic_v1", "max_output_tokens": 2048}
+    def conversation(number, tenant="alpha", answer="Synthetic answer."):
+        return validate_conversation({
+            "id": f"{number:032x}", "tenant_id": tenant, "source_scope": "a" * 16,
+            "messages": [{"role": "user", "content": "Synthetic question."},
+                         {"role": "assistant", "content": answer}],
+            "event_at": "2026-09-01T12:00:00Z", "end_status": "complete", "input_issues": [],
+        })
+    for number in range(1, 24):
+        store.save_conversation(conversation(number))
+    store.save_conversation(conversation(23, "beta"))
+    for row in (conversation(22), conversation(23), conversation(23, "beta")):
+        store.save_conversation_assessment(validate_assessment({
+            "tenant_id": row["tenant_id"], "conversation_id": row["id"],
+            "revision": row["revision"], "target_position": None, "rubric": rubric,
+            "evaluator": identity, "status": "completed",
+            "dimensions": {"helpful": {"state": "pass", "reason": "Synthetic."}},
+            "findings": [], "evaluated_at": "2026-09-01T12:01:00Z",
+        }, row))
+    store.close()
+
+    async def request():
+        transport = httpx.ASGITransport(app=create_app(storage=f"sqlite:///{path}", tenant_id="alpha"))
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            evaluators = await client.get("/api/data/conversations/assessment-evaluators")
+            fingerprint = evaluators.json()["evaluators"][0]["fingerprint"] if evaluators.status_code == 200 else "a" * 64
+            graded = await client.get("/api/data/conversations/assessments", params={"evaluator": fingerprint})
+            return evaluators, graded
+
+    evaluators, graded = asyncio.run(request())
+    assert evaluators.status_code == 200
+    assert len(evaluators.json()["evaluators"]) == 1
+    assert evaluators.json()["evaluators"][0]["rubricName"] == "synthetic_quality"
+    assert "Private instruction text" not in evaluators.text
+    assert graded.status_code == 200
+    assert [row["id"] for row in graded.json()["conversations"]] == [f"{n:032x}" for n in (22, 23)]
+    assert all(row["completedCount"] == 1 for row in graded.json()["conversations"])
+
+
 def _persist_drift_snapshot(storage, *signals, run_id=None, analysis_time=None):
     assert signals
     fingerprints = {signal.evaluator_fingerprint for signal in signals}

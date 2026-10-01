@@ -824,9 +824,22 @@ every eligible reply was completed by that evaluator; UNCLEAR remains visible
 but does not count as PASS or FAIL. Judge agreement with human labels must be
 checked before treating scores as a quality measurement.
 
+Open **Evaluate → Results → Conversation results** to review current grades
+written by any conversation evaluator through Verdict's storage API. The
+evaluator selector shows its rubric name and version, provider, model, target,
+and fingerprint prefix; the full evaluator ID appears below it for Monitor.
+Results pages only conversations with a stored grade
+from that exact evaluator; open one to inspect the grades and messages. The
+list shows a source-provided `labels.display` when available, with the opaque
+conversation ID underneath; unlabeled records show “Unnamed conversation.”
+The list reports stored completed and error counts, not full reply coverage. This
+read-only view does not need the evaluator's rubric file or make judge calls.
+**Trace results** remain available on the same Results screen.
+
 To explore conversation quality, open **Monitor → Compare History**, select
-**Conversation grade (descriptive)**, and enter the evaluator fingerprint shown
-in the Evaluator Lab preview plus the name of one binary dimension from its
+**Conversation grade (descriptive)**, and enter the evaluator fingerprint from
+the Evaluator Lab preview or another stored evaluator, plus one binary dimension
+from its
 whole-conversation rubric. Enter two non-overlapping date ranges in local time
 (the result displays their UTC boundaries) and, optionally, a source label key
 such as `group` or `persona`. Voice imports may

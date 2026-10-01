@@ -114,6 +114,15 @@ class Storage(Protocol):
         self, tenant_id: str, conversation_id: str, evaluator_fingerprint: str, *, limit: int = 1_000
     ) -> list[dict]: ...
 
+    def list_conversation_evaluators(
+        self, tenant_id: str, *, after: str | None = None, limit: int = 20
+    ) -> tuple[list[dict], str | None]: ...
+
+    def list_graded_conversations(
+        self, tenant_id: str, evaluator_fingerprint: str, *, after: str | None = None,
+        limit: int = 20,
+    ) -> tuple[list[dict], str | None]: ...
+
     def get_conversation(self, tenant_id: str, conversation_id: str) -> dict | None: ...
 
     def list_conversations(

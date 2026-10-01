@@ -717,6 +717,20 @@ class BufferedStorage:
             tenant_id, conversation_id, evaluator_fingerprint, limit=limit,
         )
 
+    def list_conversation_evaluators(
+        self, tenant_id: str, *, after: str | None = None, limit: int = 20
+    ) -> tuple[list[dict], str | None]:
+        return self._read(self._inner.list_conversation_evaluators, tenant_id, after=after, limit=limit)
+
+    def list_graded_conversations(
+        self, tenant_id: str, evaluator_fingerprint: str, *, after: str | None = None,
+        limit: int = 20,
+    ) -> tuple[list[dict], str | None]:
+        return self._read(
+            self._inner.list_graded_conversations,
+            tenant_id, evaluator_fingerprint, after=after, limit=limit,
+        )
+
     def get_conversation(self, tenant_id: str, conversation_id: str) -> dict | None:
         return self._read(self._inner.get_conversation, tenant_id, conversation_id)
 

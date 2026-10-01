@@ -83,10 +83,11 @@ export function ConversationEvaluation({ root, token, provider, model, providerS
   }
 
   async function open(id) {
-    if (inFlight.current || !preview) return;
+    const fingerprint = preview?.evaluatorFingerprint;
+    if (inFlight.current || !fingerprint) return;
     inFlight.current = true; setBusy(true); setError(null); setDetail(null);
     try {
-      const value = await request(`/api/data/conversations/${encodeURIComponent(id)}?evaluator=${encodeURIComponent(preview.evaluatorFingerprint)}`);
+      const value = await request(`/api/data/conversations/${encodeURIComponent(id)}?evaluator=${encodeURIComponent(fingerprint)}`);
       setDetail(value);
     } catch (failure) { setError(String(failure)); }
     finally { inFlight.current = false; setBusy(false); }
