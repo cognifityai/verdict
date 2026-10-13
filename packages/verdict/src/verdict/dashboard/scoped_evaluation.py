@@ -7,6 +7,7 @@ import json
 import math
 import os
 import re
+import secrets
 import threading
 from typing import Any
 
@@ -434,7 +435,7 @@ def schedule_scoped_once(storage, *, storage_url: str, tenant: str,
         if key in config:
             stored_config[key] = config[key]
     stored_config["maxOutput"] = config.get("maxOutputTokens", 512)
-    document_id = hashlib.sha256(_canonical([tenant, preview["planFingerprint"], "once"])).hexdigest()
+    document_id = secrets.token_hex(16)
     payload = {
         "config": stored_config,
         "planFingerprint": preview["planFingerprint"],
@@ -477,6 +478,22 @@ def run_scheduled_once(storage_url: str, *, tenant: str, provider=None) -> dict[
     job_id = str(pending["documentId"])
     payload = dict(pending["payload"])
     config = _scheduled_config(payload)
+
+    def cancel_before_egress(outcome: str, error: str | None = None) -> dict[str, Any]:
+        cancelled_payload = {**payload, "outcome": outcome}
+        if error is not None:
+            cancelled_payload["error"] = error
+        try:
+            cancelled = store.append(
+                tenant, kind="scheduled_evaluation", document_id=job_id,
+                state="cancelled", payload=cancelled_payload,
+                expected_revision=pending["revision"],
+            )
+        except ValueError:
+            return {"jobId": job_id, "status": "approval_changed"}
+        return {"jobId": job_id, "status": cancelled["state"],
+                "reason": outcome, "revision": cancelled["revision"]}
+
     storage = None
     try:
         from verdict.client import _resolve_storage
@@ -496,12 +513,9 @@ def run_scheduled_once(storage_url: str, *, tenant: str, provider=None) -> dict[
         if not valid:
             raise ValueError("scheduled evidence or authorization is stale")
     except (KeyError, TypeError, ValueError, UnicodeError):
-        cancelled = store.append(
-            tenant, kind="scheduled_evaluation", document_id=job_id,
-            state="cancelled", payload={**payload, "outcome": "stale_or_invalid"},
-            expected_revision=pending["revision"],
-        )
-        return {"jobId": job_id, "status": cancelled["state"], "reason": "stale_or_invalid"}
+        return cancel_before_egress("stale_or_invalid")
+    except ImportError as exc:
+        return cancel_before_egress("preflight_failed", type(exc).__name__)
     finally:
         if storage is not None:
             storage.close()
@@ -509,13 +523,7 @@ def run_scheduled_once(storage_url: str, *, tenant: str, provider=None) -> dict[
         key_name = "ANTHROPIC_API_KEY" if preview["provider"] == "anthropic" else "OPENAI_API_KEY"
         if not os.environ.get(key_name):
             return {"jobId": job_id, "status": "waiting_provider"}
-    spent = store.append(
-        tenant, kind="scheduled_evaluation", document_id=job_id,
-        state="spent", payload={**payload, "outcome": "attempt_reserved"},
-        expected_revision=pending["revision"],
-    )
     adapter = provider
-    storage = None
     try:
         if adapter is None:
             from verdict_eval.providers import AnthropicAdapter, OpenAIAdapter
@@ -523,6 +531,29 @@ def run_scheduled_once(storage_url: str, *, tenant: str, provider=None) -> dict[
             adapter = (AnthropicAdapter(max_retries=1, sdk_max_retries=0)
                        if preview["provider"] == "anthropic"
                        else OpenAIAdapter(max_retries=1, sdk_max_retries=0))
+        actual = _judge(adapter, preview["model"], rubric, config["maxOutputTokens"])
+        expected = _judge(_IdentityOnlyProvider(preview["provider"]),
+                          preview["model"], rubric, config["maxOutputTokens"])
+        if actual.evaluator_identity(None)["evaluator_fingerprint"] != expected.evaluator_identity(None)["evaluator_fingerprint"]:
+            raise ValueError("judge provider behavior changed after preview")
+    except Exception as exc:
+        client = getattr(adapter, "_client", None)
+        if client is not None and hasattr(client, "close"):
+            client.close()
+        return cancel_before_egress("preflight_failed", type(exc).__name__)
+    try:
+        spent = store.append(
+            tenant, kind="scheduled_evaluation", document_id=job_id,
+            state="spent", payload={**payload, "outcome": "attempt_reserved"},
+            expected_revision=pending["revision"],
+        )
+    except ValueError:
+        client = getattr(adapter, "_client", None)
+        if client is not None and hasattr(client, "close"):
+            client.close()
+        return {"jobId": job_id, "status": "approval_changed"}
+    storage = None
+    try:
         from verdict.client import _resolve_storage
 
         storage = _resolve_storage(storage_url)
@@ -580,8 +611,11 @@ def register_scoped_routes(app, setup: SetupRoutes) -> None:
              "outcome": item["payload"].get("outcome"),
              "resultId": item["payload"].get("resultId"),
              "error": item["payload"].get("error")}
-            for item in ControlStore(setup.storage_url).list_current(setup.tenant_id)
-            if item["kind"] == "scheduled_evaluation"
+            for item in sorted(
+                (row for row in ControlStore(setup.storage_url).list_current(setup.tenant_id)
+                 if row["kind"] == "scheduled_evaluation"),
+                key=lambda row: (str(row["createdAt"]), str(row["documentId"])), reverse=True,
+            )
         ][:50]}
 
     @app.post("/api/scoped/schedule")

@@ -1,7 +1,9 @@
 import asyncio
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
+from threading import Barrier
 
 import httpx
 import pytest
@@ -82,6 +84,58 @@ def test_result_documents_cannot_be_rolled_back_through_control_api(tmp_path, ki
     response = asyncio.run(scenario())
     assert response.status_code == 400
     assert store.history("__verdict_local__", kind, "synthetic-result") == before
+
+
+def test_two_concurrent_approvals_for_one_plan_leave_one_pending(tmp_path):
+    url = f"sqlite:///{tmp_path / 'concurrent-approval.db'}"
+    store = ControlStore(url)
+    store.list_current("local")
+    barrier = Barrier(2)
+    payload = {"planFingerprint": "a" * 64, "config": {"scope": "run"}}
+
+    def queue(index):
+        barrier.wait()
+        try:
+            return store.append(
+                "local", kind="scheduled_evaluation", document_id=f"approval-{index}",
+                state="pending", payload=payload, expected_revision=None,
+            )["state"]
+        except ValueError:
+            return "rejected"
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(pool.map(queue, range(2)))
+    assert sorted(outcomes) == ["pending", "rejected"]
+    pending = [item for item in store.list_current("local")
+               if item["kind"] == "scheduled_evaluation" and item["state"] == "pending"]
+    assert len(pending) == 1
+
+
+def test_cancel_and_spend_race_has_one_terminal_winner(tmp_path):
+    url = f"sqlite:///{tmp_path / 'approval-race.db'}"
+    store = ControlStore(url)
+    payload = {"planFingerprint": "a" * 64, "config": {"scope": "run"}}
+    pending = store.append(
+        "local", kind="scheduled_evaluation", document_id="approval-race",
+        state="pending", payload=payload, expected_revision=None,
+    )
+    barrier = Barrier(2)
+
+    def transition(state):
+        barrier.wait()
+        try:
+            store.append(
+                "local", kind="scheduled_evaluation", document_id="approval-race",
+                state=state, payload=payload, expected_revision=pending["revision"],
+            )
+            return state
+        except ValueError:
+            return "rejected"
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(pool.map(transition, ("cancelled", "spent")))
+    assert "rejected" in outcomes
+    assert len(store.history("local", "scheduled_evaluation", "approval-race")) == 2
 
 
 def test_control_documents_reject_secret_values_and_invalid_schedules(tmp_path):

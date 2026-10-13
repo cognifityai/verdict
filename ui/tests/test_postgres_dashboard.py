@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
+from threading import Barrier
 from uuid import uuid4
 
 import httpx
@@ -64,6 +66,41 @@ if not (
 POSTGRES_SKIP_REASON = "no explicitly disposable live PostgreSQL database"
 
 pytestmark = pytest.mark.skipif(DSN is None, reason=POSTGRES_SKIP_REASON)
+
+
+def test_live_postgres_only_one_pending_approval_per_plan() -> None:
+    import psycopg
+    from psycopg import sql
+    from psycopg.conninfo import make_conninfo
+
+    schema = f"verdict_approval_{uuid4().hex}"
+    with psycopg.connect(DSN, autocommit=True) as admin:
+        admin.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+    try:
+        scoped_dsn = make_conninfo(DSN, options=f"-csearch_path={schema}")
+        store = ControlStore(scoped_dsn)
+        store.list_current("local")
+        barrier = Barrier(2)
+        payload = {"planFingerprint": "a" * 64, "config": {"scope": "run"}}
+
+        def queue(index: int) -> str:
+            barrier.wait()
+            try:
+                return store.append(
+                    "local", kind="scheduled_evaluation", document_id=f"approval-{index}",
+                    state="pending", payload=payload, expected_revision=None,
+                )["state"]
+            except ValueError:
+                return "rejected"
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            assert sorted(pool.map(queue, range(2))) == ["pending", "rejected"]
+        pending = [row for row in store.list_current("local")
+                   if row["kind"] == "scheduled_evaluation" and row["state"] == "pending"]
+        assert len(pending) == 1
+    finally:
+        with psycopg.connect(DSN, autocommit=True) as admin:
+            admin.execute(sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(schema)))
 
 
 def test_live_postgres_turn_analysis_reads_one_tenant_and_links_evidence() -> None:

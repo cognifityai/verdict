@@ -28,8 +28,15 @@ from verdict.dashboard.app import (
     build_agent_session_bundle,
     create_app,
 )
+from verdict.dashboard.control_plane import ControlStore
 from verdict.dashboard.evaluator_lab import _IdentityOnlyProvider
-from verdict.dashboard.scoped_evaluation import execute_scoped, preview_scoped
+from verdict.dashboard.scoped_evaluation import (
+    cancel_scheduled_once,
+    execute_scoped,
+    preview_scoped,
+    run_scheduled_once,
+    schedule_scoped_once,
+)
 from verdict.evidence import (
     AgentEvent,
     AgentEventType,
@@ -179,6 +186,64 @@ def test_identical_scoped_execution_replays_stored_result_without_provider_call(
     assert failing.calls == 1
     assert first_error == second_error
     assert first_error["status"] == "error"
+    storage.close()
+
+
+def test_cancelled_and_preflight_failed_approval_can_be_queued_again(tmp_path, monkeypatch):
+    path = tmp_path / "approval-requeue.db"
+    url = f"sqlite:///{path}"
+    storage = SQLiteStorage(str(path))
+    storage.replace_agent_run_bundle(_bundle(
+        "local", datetime(2026, 10, 11, tzinfo=timezone.utc), with_turn=True,
+    ))
+    config = {"scope": "run", "runId": "r-local", "provider": "anthropic",
+              "model": "claude-haiku-4-5", "maxOutputTokens": 256,
+              "rubric": {"name": "task_review", "version": "1", "dimensions": [{
+                  "name": "completion", "description": "Did the recorded work meet the stated task?",
+              }]}}
+    preview = preview_scoped(storage, tenant="local", config=config)
+    approved = {**config, "planFingerprint": preview["planFingerprint"]}
+
+    def queue():
+        return schedule_scoped_once(
+            storage, storage_url=url, tenant="local", config=approved,
+            max_estimated_usd=1, confirm_persistent_egress=True,
+        )
+
+    first = queue()
+    cancel_scheduled_once(url, tenant="local", job_id=first["jobId"],
+                          expected_revision=first["revision"])
+    second = queue()
+    assert second["jobId"] != first["jobId"]
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "synthetic-test-key")
+    from verdict_eval.providers import AnthropicAdapter as installed_adapter
+
+    def missing_sdk(*args, **kwargs):
+        if kwargs.get("api_key") == "unused-preview-key":
+            return installed_adapter(*args, **kwargs)
+        raise ImportError("synthetic missing provider extra")
+
+    monkeypatch.setattr("verdict_eval.providers.AnthropicAdapter", missing_sdk)
+    preflight = run_scheduled_once(url, tenant="local")
+    assert preflight["status"] == "cancelled"
+    assert preflight["reason"] == "preflight_failed"
+    assert ControlStore(url).history("local", "scheduled_evaluation", second["jobId"])[0]["state"] == "cancelled"
+    third = queue()
+    assert third["jobId"] not in {first["jobId"], second["jobId"]}
+    monkeypatch.setattr(
+        "verdict.dashboard.scoped_evaluation.execute_scoped",
+        lambda *args, **kwargs: pytest.fail("provider execution must not start before preflight"),
+    )
+    monkeypatch.setattr(
+        "verdict_eval.providers.AnthropicAdapter",
+        lambda *args, **kwargs: (_ for _ in ()).throw(ImportError("synthetic missing SDK")),
+    )
+    missing_during_plan = run_scheduled_once(url, tenant="local")
+    assert missing_during_plan["reason"] == "preflight_failed"
+    assert missing_during_plan["status"] == "cancelled"
+    monkeypatch.setattr("verdict_eval.providers.AnthropicAdapter", installed_adapter)
+    fourth = queue()
+    assert fourth["jobId"] not in {first["jobId"], second["jobId"], third["jobId"]}
     storage.close()
 
 

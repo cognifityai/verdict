@@ -2254,6 +2254,16 @@ test("one-time scheduled evaluation requires a visible budget and persistent con
   await cancelling;
   tree = render(ui.ScopedEvaluate, hooks, props);
   assert.match(textOf(tree), /Scheduled approval:\s+cancelled/);
+  assert.equal(queue().props.disabled, true, "requeue requires fresh consent");
+  findAll(tree, (node) => node.type === "input" && node.props.type === "checkbox")[1]
+    .props.onChange({ target: { checked: true } });
+  tree = render(ui.ScopedEvaluate, hooks, props);
+  const requeuing = queue().props.onClick();
+  assert.equal(requests[6].url, "/api/scoped/schedule");
+  await resolveJson(requests[6], { jobId: "second-job", state: "pending", revision: 1 });
+  await requeuing;
+  tree = render(ui.ScopedEvaluate, hooks, props);
+  assert.match(textOf(tree), /Scheduled approval:\s+pending/);
 });
 
 test("spent scheduled approval opens its saved result without another judge request", async () => {

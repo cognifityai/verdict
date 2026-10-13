@@ -246,6 +246,8 @@ class ControlStore:
             connection.execute(self._schema(self.postgres))
             if self.postgres:
                 connection.execute("LOCK TABLE product_control_documents IN SHARE ROW EXCLUSIVE MODE")
+            elif kind == "scheduled_evaluation":
+                connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 "SELECT revision,state,payload_json FROM product_control_documents "
                 "WHERE tenant_id=" + placeholder + " AND kind=" + placeholder +
@@ -256,6 +258,27 @@ class ControlStore:
             if current != expected_revision:
                 connection.rollback()
                 raise ValueError("control revision conflict")
+            if kind == "scheduled_evaluation" and state == "pending":
+                plan_fingerprint = payload.get("planFingerprint")
+                if not isinstance(plan_fingerprint, str) or not plan_fingerprint:
+                    connection.rollback()
+                    raise ValueError("scheduled approval requires a plan fingerprint")
+                active = connection.execute(
+                    "SELECT d.payload_json FROM product_control_documents d JOIN ("
+                    "SELECT document_id,MAX(revision) AS revision FROM product_control_documents "
+                    "WHERE tenant_id=" + placeholder + " AND kind='scheduled_evaluation' "
+                    "GROUP BY document_id) latest ON latest.document_id=d.document_id "
+                    "AND latest.revision=d.revision WHERE d.tenant_id=" + placeholder + " "
+                    "AND d.kind='scheduled_evaluation' AND d.state='pending'",
+                    (tenant, tenant),
+                )
+                for pending in active:
+                    saved = pending["payload_json"]
+                    if isinstance(saved, str):
+                        saved = json.loads(saved)
+                    if saved.get("planFingerprint") == plan_fingerprint:
+                        connection.rollback()
+                        raise ValueError("scheduled evaluation approval already pending")
             current_payload = row["payload_json"] if row else None
             if isinstance(current_payload, str):
                 current_payload = json.loads(current_payload)
