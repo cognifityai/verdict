@@ -187,23 +187,26 @@ def test_experiment_accepts_exact_600_second_configured_runner_bound(tmp_path, m
     assert len(ran.json()["cases"]) == 1
 
 
-def test_case_input_is_redacted_before_trusted_runner_receives_it(tmp_path, monkeypatch):
+def test_reviewed_case_fields_round_trip_and_runner_receives_saved_input(tmp_path, monkeypatch):
     (tmp_path / "trusted_echo.py").write_text(
         "def run(task_input, context, configuration):\n"
-        "    return task_input\n"
+        "    expected = 'Fetch https://example.com/docs/page and email support@acme.example a summary'\n"
+        "    return 'matched https://example.com/docs/page' if task_input == expected and context == 'contact support@acme.example' else 'mismatch'\n"
     )
     monkeypatch.setenv("PYTHONPATH", str(tmp_path))
     monkeypatch.setenv("VERDICT_EXPERIMENT_RUNNER", "trusted_echo:run")
     monkeypatch.setenv("VERDICT_EXPERIMENT_CONFIGS", json.dumps({
         "baseline": {"version": "baseline-v1"}, "candidate": {"version": "candidate-v1"},
     }))
-    path = tmp_path / "redacted-case.db"
+    path = tmp_path / "reviewed-case.db"
     url = f"sqlite:///{path}"
     SQLiteStorage(str(path)).close()
-    secret_input = "Synthetic contact alice@example.com"
-    payload = {"title": "Redacted input", "reviewed": True, "cases": [{
-        "id": "contact", "input": secret_input, "expectedBehavior": "Echo safe input",
-        "checks": [{"kind": "contains", "value": "Synthetic contact"}],
+    submitted_input = "Fetch https://example.com/docs/page and email support@acme.example a summary"
+    payload = {"title": "Reviewed input", "reviewed": True, "cases": [{
+        "id": "contact", "input": submitted_input,
+        "context": "contact support@acme.example",
+        "expectedBehavior": "Send to https://example.com/docs/page",
+        "checks": [{"kind": "contains", "value": "https://example.com/docs/page"}],
     }]}
 
     async def request():
@@ -211,21 +214,30 @@ def test_case_input_is_redacted_before_trusted_runner_receives_it(tmp_path, monk
         async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
             token = (await client.get("/api/setup/token")).json()["setupToken"]
             headers = {"X-Verdict-Setup": token}
-            saved = await client.post("/api/experiments/case-sets/redacted",
+            saved = await client.post("/api/experiments/case-sets/reviewed",
                                       json=payload, headers=headers)
+            rejected_secret_key = await client.post(
+                "/api/experiments/case-sets/rejected",
+                json={**payload, "api_key": "synthetic"},
+                headers=headers,
+            )
+            listed = await client.get("/api/experiments")
             ran = await client.post("/api/experiments/run", json={
-                "caseSetId": "redacted", "baseline": "baseline", "candidate": "candidate",
+                "caseSetId": "reviewed", "baseline": "baseline", "candidate": "candidate",
                 "trials": 1,
             }, headers=headers)
-            return saved, ran
+            return saved, rejected_secret_key, listed, ran
 
-    saved, ran = asyncio.run(request())
+    saved, rejected_secret_key, listed, ran = asyncio.run(request())
     assert saved.status_code == 200
+    assert rejected_secret_key.status_code == 400
+    assert listed.status_code == 200
     assert ran.status_code == 200
-    stored_input = ControlStore(url).history("local", "case_set", "redacted")[0]["payload"]["cases"][0]["input"]
-    assert "alice@example.com" not in stored_input
-    assert stored_input == ran.json()["cases"][0]["baseline"]["trials"][0]["output"]
-    assert "alice@example.com" not in str(ran.json())
+    stored = ControlStore(url).history("local", "case_set", "reviewed")[0]["payload"]
+    assert stored == payload
+    assert listed.json()["caseSets"][0]["payload"] == payload
+    assert ran.json()["cases"][0]["baseline"]["status"] == "pass"
+    assert ran.json()["cases"][0]["candidate"]["status"] == "pass"
 
 
 def test_experiment_runs_fixed_cases_and_reports_collateral_regression(tmp_path, monkeypatch):

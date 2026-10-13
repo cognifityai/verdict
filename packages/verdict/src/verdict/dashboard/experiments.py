@@ -250,14 +250,11 @@ def register_experiment_routes(app, setup: SetupRoutes) -> None:
         if _ID.fullmatch(case_set_id) is None:
             return JSONResponse({"error": "invalid case set id"}, status_code=400)
         try:
-            safe = redact_structure(payload)
-            if not isinstance(safe, dict):
-                raise ValueError("invalid case set")
             current = next((row for row in store.list_current(setup.tenant_id)
                             if row["kind"] == "case_set" and row["documentId"] == case_set_id), None)
             return store.append(
                 setup.tenant_id, kind="case_set", document_id=case_set_id,
-                state="active", payload=safe,
+                state="active", payload=payload,
                 expected_revision=current["revision"] if current else None,
             )
         except (TypeError, ValueError, OSError):

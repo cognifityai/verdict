@@ -25,7 +25,8 @@ the product is refined.
   with `VERDICT_EXPERIMENT_TRIAL_TIMEOUT_SECONDS` (1–300 seconds; default 120).
   A synchronous comparison is rejected before execution when its cases × two
   sides × trials × timeout exceeds 600 configured runner seconds. Case inputs
-  are redacted before storage and runner execution.
+  are stored and passed to the configured local runner as reviewed;
+  captured-run drafts begin with already-redacted input.
 - Local Claude Code and Codex history shows an estimated list price for agent
   turns, in Overview → Performance and per source. Each turn's token components
   are priced at the public rates for the one model the turn named, with cache
