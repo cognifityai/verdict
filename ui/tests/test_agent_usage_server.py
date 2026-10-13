@@ -229,6 +229,34 @@ def test_usage_missing_and_mixed_model_turns_are_not_priced_as_zero(tmp_path):
     assert day["unattributedTokens"] == 20
 
 
+def test_priced_components_without_reported_total_keep_model_tokens_unknown(tmp_path):
+    path = tmp_path / "missing-total.db"
+    storage = SQLiteStorage(str(path))
+    turn = replace(_turn("run-a", "turn-a", 0, _dt(8, 1), 100,
+                         input_tokens=80, output_tokens=20), total_tokens=None)
+    storage.replace_agent_run_bundle(_bundle(
+        "local", "run-a", (turn,),
+        (_model_event("turn-a", "model-a", "gpt-6-luna"),),
+        session_id="session-a",
+    ))
+    storage.close()
+    report = build_agent_usage_bundle(
+        path, tenant="local", now=_dt(8, 12), day="2026-10-08",
+        session_id="session-a", source_kind="codex",
+    )
+    day = next(item for item in report["days"] if item["day"] == "2026-10-08")
+    source = report["daySources"][0]
+    model = report["dayModels"][0]
+    session = report["selectedSession"]
+    assert day["totalTokens"] is None
+    assert source["totalTokens"] is None
+    assert model["totalTokens"] is None
+    assert session["totalTokens"] is None
+    assert session["models"][0]["totalTokens"] is None
+    assert day["listPriceUsd"] == source["listPriceUsd"] == model["listPriceUsd"] == session["listPriceUsd"]
+    assert day["pricedTurns"] == source["pricedTurns"] == model["pricedTurns"] == 1
+
+
 def test_usage_does_not_merge_equal_session_ids_from_different_sources(tmp_path):
     path = tmp_path / "source-session.db"
     storage = SQLiteStorage(str(path))

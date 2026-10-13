@@ -52,7 +52,7 @@ For an existing Python app, the [integration assistant guide](docs/AGENT_SKILL.m
 ## What the numbers mean
 
 - Token counts follow the source's reported semantics. Cache and reasoning components may already be included in input or output totals; Verdict does not add them again. Missing usage is **unknown**, not zero.
-- Price is a static API list-price estimate only where one supported model and valid usage are attributable. It is not a Claude/Codex subscription bill. Unknown or mixed models remain unpriced.
+- Price is a static API list-price estimate only where one supported model and valid input/output usage are attributable; a missing reported total stays unknown. It is not a Claude/Codex subscription bill. Unknown or mixed models remain unpriced.
 - A session's elapsed span includes tools and idle time. It is not model latency. Genuine provider calls have their own latency when captured.
 - Suggestions link to recorded evidence and are hypotheses until tested. A failed command can be followed by a successful recovery; an expensive turn is not automatically waste.
 - An optional LLM judgment is an evaluator's opinion about the bounded evidence shown before consent. Missing, truncated, and uncertain evidence remain visible; a judge cannot reconstruct hidden reasoning or absent files.

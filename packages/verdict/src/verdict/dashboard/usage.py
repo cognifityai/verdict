@@ -76,7 +76,7 @@ def models_by_turn(events) -> dict[str, frozenset[str]]:
 
 
 def turn_list_price_usd(turn, models: frozenset[str]) -> float | None:
-    """Return a list-price estimate only for one known model and complete basis."""
+    """Price known input/output components with one model, even if total is absent."""
     includes_cached = _TURN_INPUT_INCLUDES_CACHED.get(turn.token_usage_basis)
     if includes_cached is None or len(models) != 1:
         return None
@@ -176,7 +176,8 @@ def _present(summary: dict[str, Any], *, include_models: bool = False) -> dict[s
         ranked = sorted(summary["models"].items(), key=lambda item: (-item[1]["totalTokens"], item[0]))
         result["models"] = [
             {"model": name, **{key: value for key, value in values.items()
-                                if key != "listPriceUsd"},
+                                if key not in {"listPriceUsd", "totalTokens"}},
+             "totalTokens": values["totalTokens"] if values["tokenKnownTurns"] else None,
              "listPriceUsd": round(values["listPriceUsd"], 8)
              if values["pricedTurns"] else None}
             for name, values in ranked[:MAX_DAY_MODELS]
