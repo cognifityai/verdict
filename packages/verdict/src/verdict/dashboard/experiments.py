@@ -28,6 +28,7 @@ _RUNNER = re.compile(r"[A-Za-z_][A-Za-z0-9_.]*:[A-Za-z_][A-Za-z0-9_]*\Z")
 _RUN_LOCK = threading.Lock()
 _CHECK_IDENTITY = "deterministic-output-checks-v1"
 _MAX_WORKER_OUTPUT = 8_192
+_MAX_WORKER_INPUT = 16_384  # Match the worker's bounded stdin read.
 _MAX_RUN_SECONDS = 600
 
 
@@ -141,9 +142,11 @@ def _check(output: str, checks: list[dict[str, str]]) -> bool:
 
 def _trial(case: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
     request = {"input": case["input"], "context": case.get("context"), "configuration": config}
+    encoded = json.dumps(request, ensure_ascii=False).encode()
+    if len(encoded) > _MAX_WORKER_INPUT:
+        return {"status": "error", "error": "input_too_large"}
     try:
-        code, output = _run_worker(json.dumps(request, ensure_ascii=False).encode(),
-                                   _trial_timeout_seconds())
+        code, output = _run_worker(encoded, _trial_timeout_seconds())
     except subprocess.TimeoutExpired:
         return {"status": "error", "error": "timeout"}
     except (OSError, ValueError):

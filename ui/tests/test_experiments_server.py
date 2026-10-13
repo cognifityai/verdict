@@ -88,6 +88,17 @@ def test_inherited_worker_output_is_bounded_and_next_trial_runs(tmp_path, monkey
     assert not marker.exists()
 
 
+def test_oversized_worker_request_reports_input_too_large_before_execution(monkeypatch):
+    def forbidden_worker(*_args, **_kwargs):
+        raise AssertionError("oversized request started a worker")
+
+    monkeypatch.setattr("verdict.dashboard.experiments._run_worker", forbidden_worker)
+    case = {"input": "x" * 4_096, "context": "y" * 4_096,
+            "checks": [{"kind": "exact", "value": "ok"}]}
+    config = {"version": "synthetic", "padding": "z" * 8_140}
+    assert _trial(case, config) == {"status": "error", "error": "input_too_large"}
+
+
 def test_experiment_trial_timeout_is_host_bounded_and_reported(tmp_path, monkeypatch):
     from verdict.dashboard.experiments import _trial_timeout_seconds
 

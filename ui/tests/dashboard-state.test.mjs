@@ -2360,13 +2360,18 @@ test("saved experiment comparison reopens after reload without executing the run
         cases: [{ id: "case-a", expectedBehavior: "fix the synthetic task",
           baseline: { status: "fail", trials: [{ status: "fail", output: "before" }] },
           candidate: { status: "pass", trials: [{ status: "pass", output: "after" }] },
-          comparableMetrics: { taskElapsedMs: null, reportedCostUsd: null } }],
+          comparableMetrics: { taskElapsedMs: null, reportedCostUsd: null } },
+          { id: "case-large", expectedBehavior: "bounded runner input",
+            baseline: { status: "unverified", trials: [{ status: "error", error: "input_too_large" }] },
+            candidate: { status: "unverified", trials: [{ status: "error", error: "input_too_large" }] },
+            comparableMetrics: { taskElapsedMs: null, reportedCostUsd: null } }],
         claim: "Fixed-case comparison only." },
     }] });
   const tree = render(ui.Experiments, hooks, props);
   assert.match(textOf(tree), /Fixed-case comparison/);
   assert.match(textOf(tree), /case-a/);
   assert.match(textOf(tree), /deterministic-output-checks-v1/);
+  assert.match(textOf(tree), /Input too large for local runner/);
   assert.equal(requests.length, 1);
 });
 

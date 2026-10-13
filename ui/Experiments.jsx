@@ -141,7 +141,7 @@ export function Experiments({ root, token, draft = null }) {
           {[["Baseline", item.baseline], ["Candidate", item.candidate]].map(([label, side]) =>
             <div key={label} className="mt-2"><strong>{label}: {side.status}</strong>
               {side.trials.map((trial, index) => <div key={index} className="border p-2 mt-1" style={{ borderColor: C.border }}>
-                Trial {index + 1}: {trial.status}{trial.error ? ` · ${trial.error}` : ""}
+                Trial {index + 1}: {trial.status}{trial.error ? ` · ${trial.error === "input_too_large" ? "Input too large for local runner" : trial.error}` : ""}
                 {trial.output != null && <pre className="whitespace-pre-wrap break-all mt-1">{trial.output}</pre>}
                 {trial.taskElapsedMs != null && <p>Runner elapsed: {trial.taskElapsedMs} ms</p>}
                 {trial.costUsd != null && <p>Application-reported cost ({trial.costBasis}): ${trial.costUsd}</p>}
