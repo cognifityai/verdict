@@ -41,6 +41,11 @@ def _canonical(value: object) -> bytes:
     return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()
 
 
+def _finish_evidence(evidence: dict[str, Any]) -> dict[str, Any]:
+    evidence["evidenceFingerprint"] = hashlib.sha256(_canonical(evidence)).hexdigest()
+    return evidence
+
+
 def _usable_tool_content(value: object) -> bool:
     if value is None or (isinstance(value, str) and not value.strip()):
         return False
@@ -77,6 +82,13 @@ def _session_projection(storage_url: str, tenant: str, config: dict[str, Any]) -
                       if event["runId"] == run_id and event["producerId"]}) > 1
                  for run_id in report["runIds"]):
             reason = "event_order_uncertain"
+    if reason is not None:
+        return _finish_evidence({
+            "scope": "session", "sessionId": session_id, "sourceKind": source_kind,
+            "runIds": report["runIds"], "runId": None, "eventId": None,
+            "query": "", "response": "", "evidenceReferences": [],
+            "coverage": "partial", "unavailableReason": reason,
+        })
     requests = [{"reference": f"[turn:{turn['runId']}/{turn['turnId']}]",
                  "request": turn["request"]} for turn in turns]
     timeline = [
@@ -111,8 +123,7 @@ def _session_projection(storage_url: str, tenant: str, config: dict[str, Any]) -
         "coverage": "complete" if reason is None else "partial",
         "unavailableReason": reason,
     }
-    evidence["evidenceFingerprint"] = hashlib.sha256(_canonical(evidence)).hexdigest()
-    return evidence
+    return _finish_evidence(evidence)
 
 
 def _projection(storage, tenant: str, config: dict[str, Any],
@@ -155,6 +166,12 @@ def _projection(storage, tenant: str, config: dict[str, Any],
                  turn.request_truncated or turn.response_truncated or turn.ended_at is None
                  for turn in turns):
             reason = "turn_content_partial"
+        if reason is not None:
+            return _finish_evidence({
+                "scope": scope, "runId": run_id, "eventId": None,
+                "query": "", "response": "", "evidenceReferences": [],
+                "coverage": "partial", "unavailableReason": reason,
+            })
         requests = [{"reference": f"[turn:{turn.turn_id}]", "request": turn.user_request_redacted}
                     for turn in turns]
         timed = [
@@ -225,6 +242,12 @@ def _projection(storage, tenant: str, config: dict[str, Any],
         refs = [f"turn:{turn.turn_id}", f"event:{call.event_id}"] + [
             f"event:{item.event_id}" for item in (*contracts, *results)
         ]
+    if reason is not None:
+        return _finish_evidence({
+            "scope": scope, "runId": run_id, "eventId": event_id,
+            "query": "", "response": "", "evidenceReferences": refs[:_MAX_EVENTS + _MAX_TURNS],
+            "coverage": "partial", "unavailableReason": reason,
+        })
     safe = redact_structure({"query": query, "response": response})
     if not isinstance(safe, dict) or not all(isinstance(safe.get(k), str) for k in ("query", "response")):
         reason = "redaction_unavailable"
@@ -236,8 +259,7 @@ def _projection(storage, tenant: str, config: dict[str, Any],
                 "query": safe["query"], "response": safe["response"],
                 "evidenceReferences": refs, "coverage": "complete" if reason is None else "partial",
                 "unavailableReason": reason}
-    evidence["evidenceFingerprint"] = hashlib.sha256(_canonical(evidence)).hexdigest()
-    return evidence
+    return _finish_evidence(evidence)
 
 
 def _plan(storage, tenant: str, config: dict[str, Any],

@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 
 import httpx
 import pytest
+import verdict.dashboard.scoped_evaluation as scoped_evaluation
 from verdict.dashboard.app import create_app
 from verdict.dashboard.control_plane import ControlStore
 from verdict.dashboard.evaluator_lab import _IdentityOnlyProvider
@@ -218,6 +219,37 @@ def test_large_and_partial_runs_are_not_sent_to_judge(tmp_path):
     assert preview["plannedCalls"] == 0
     assert preview["unavailableReason"] == "turn_limit"
     session_storage.close()
+
+
+@pytest.mark.parametrize("scope", ["run", "session"])
+def test_oversized_scope_returns_original_limit_before_redaction(tmp_path, monkeypatch, scope):
+    path = tmp_path / f"oversized-{scope}.db"
+    storage = SQLiteStorage(str(path))
+    bundle = _bundle()
+    turns = tuple(replace(bundle.turns[0], turn_id=f"turn-{index}", sequence=index)
+                  for index in range(21))
+    events = tuple(replace(bundle.events[0], event_id=f"event-{index}",
+                           turn_id="turn-0", sequence=index)
+                   for index in range(81))
+    storage.replace_agent_run_bundle(replace(bundle, turns=turns, events=events))
+
+    def forbidden_redaction(*_args, **_kwargs):
+        raise AssertionError("oversized evidence reached scoped redaction")
+
+    monkeypatch.setattr(scoped_evaluation, "redact_structure", forbidden_redaction)
+    config = _config()
+    if scope == "session":
+        config = {**config, "scope": "session", "sessionId": "source-local",
+                  "sourceKind": "synthetic-agent"}
+        config.pop("runId")
+    preview = preview_scoped(storage, tenant="local", config=config,
+                             storage_url=f"sqlite:///{path}")
+    assert preview["plannedCalls"] == 0
+    assert preview["unavailableReason"] == ("evidence_limit" if scope == "run" else "turn_limit")
+    assert preview["evidencePreview"]["query"] == ""
+    assert preview["evidencePreview"]["response"] == ""
+    assert len(preview["evidencePreview"]["evidenceReferences"]) <= 100
+    storage.close()
 
 
 def test_scoped_run_and_tool_previews_bind_ordered_evidence_and_store_results(tmp_path):
