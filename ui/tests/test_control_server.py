@@ -134,6 +134,34 @@ def test_scheduled_analysis_can_run_on_existing_instrumented_agent_activity(tmp_
     assert insights.json()["analysisState"]["status"] == "completed"
 
 
+def test_default_schedule_with_blank_roots_saves_and_runs(tmp_path):
+    database = tmp_path / "blank-roots.db"
+    payload = {
+        "intervalHours": 24, "claudeRoot": "  ", "codexRoot": "",
+        "analyzeOnly": True, "runMonitor": False,
+    }
+
+    async def scenario():
+        app = create_app(storage=f"sqlite:///{database}")
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            headers = {"X-Verdict-Setup": token}
+            saved = await client.post(
+                "/api/control/schedule/daily", headers=headers,
+                json={"state": "active", "payload": payload, "expectedRevision": None},
+            )
+            run = await client.post(
+                "/api/control/actions/run-schedule", headers=headers, json=payload,
+            )
+            return saved, run
+
+    saved, run = asyncio.run(scenario())
+    assert saved.status_code == 200
+    assert run.status_code == 200
+    assert run.json()["analysis"]["status"] == "completed"
+
+
 def test_control_documents_use_the_configured_dashboard_tenant(tmp_path):
     database = tmp_path / "configured-control.db"
 

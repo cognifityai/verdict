@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { AlertTriangle, ArrowRight, CheckCircle2, RefreshCw, Shield, Signal } from "lucide-react";
+import { normalizeSchedulePayload } from "./schedule-payload.js";
 
 const color = { panel: "#111715", border: "#26332e", sub: "#94a39d", green: "#4ee1aa", amber: "#f2b84b", red: "#ff6b6b" };
 const panel = { background: color.panel, borderColor: color.border };
@@ -74,7 +75,7 @@ export function ControlCenter({ configUrl, onNavigate = null, section = "all" })
         </div>
         <label className="flex gap-2 text-sm mt-3"><input type="checkbox" checked={schedule.analyzeOnly === true} onChange={(event) => setSchedule({ ...schedule, analyzeOnly: event.target.checked })} />Analyze already captured agent activity (no history path required)</label>
         <label className="flex gap-2 text-sm mt-3"><input type="checkbox" checked={schedule.runMonitor === true} onChange={(event) => setSchedule({ ...schedule, runMonitor: event.target.checked })} />Run the active genuine model-call monitor</label>
-        <div className="flex flex-wrap gap-2 mt-4"><Button busy={busy === "schedule:daily"} onClick={() => save("schedule", "daily", "active", schedule)}>Save schedule</Button><Button busy={busy === "run"} onClick={() => post("/api/control/actions/run-schedule", schedule, "run")}><ArrowRight size={13} />Run cycle now</Button></div>
+        <div className="flex flex-wrap gap-2 mt-4"><Button busy={busy === "schedule:daily"} onClick={() => save("schedule", "daily", "active", normalizeSchedulePayload(schedule))}>Save schedule</Button><Button busy={busy === "run"} onClick={() => post("/api/control/actions/run-schedule", normalizeSchedulePayload(schedule), "run")}><ArrowRight size={13} />Run cycle now</Button></div>
         <p className="text-xs mt-3" style={{ color: color.sub }}>The saved daily schedule retains these local source paths as durable configuration. Use <code>verdict-service</code> for a continuously running worker; this button executes the same capture → persisted analysis → optional monitor cycle once. A separately approved one-time judge evaluation may also run during a cycle.</p>
       </>}
     </section>}

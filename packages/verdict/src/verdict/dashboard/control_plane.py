@@ -27,6 +27,15 @@ _IDENTITY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
 _ENV_NAME = re.compile(r"[A-Z][A-Z0-9_]{0,127}")
 
 
+def normalize_source_root(value: object) -> str | None:
+    """Treat an unfilled source field as absent, preserving real path spelling."""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    if not isinstance(value, str) or len(value.encode("utf-8")) > 4096:
+        raise ValueError("invalid schedule source path")
+    return value
+
+
 def _safe_json(payload: object) -> str:
     if not isinstance(payload, dict):
         raise ValueError("control payload must be an object")
@@ -72,9 +81,7 @@ def _validate(kind: str, document_id: str, state: str, payload: dict[str, Any]) 
         if isinstance(interval, bool) or not isinstance(interval, int) or not 1 <= interval <= 168:
             raise ValueError("schedule interval must be 1-168 hours")
         for name in ("claudeRoot", "codexRoot"):
-            value = payload.get(name)
-            if value is not None and (not isinstance(value, str) or not value):
-                raise ValueError("invalid schedule source path")
+            normalize_source_root(payload.get(name))
         if payload.get("analyzeOnly") not in (None, True, False):
             raise ValueError("analyzeOnly must be a boolean")
     elif kind == "settings":

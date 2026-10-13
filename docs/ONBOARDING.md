@@ -805,6 +805,8 @@ production scheduling. The continuous `verdict-service` loop is also available.
 Manual capture path approval exists only in the current dashboard process. An
 explicitly saved daily schedule intentionally retains the approved source paths
 as local configuration so this worker can rescan them.
+Blank Claude Code and Codex source fields are treated as absent, so an
+analysis-only schedule can be saved and run without local history paths.
 Daily Operations shows Claude Code and Codex path controls only after local
 agent history has been captured or a local schedule has been saved. A
 telemetry-only store continues through Data sources or SDK ingestion instead.
