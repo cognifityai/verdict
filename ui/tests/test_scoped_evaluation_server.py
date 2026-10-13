@@ -9,6 +9,7 @@ import httpx
 import pytest
 from verdict.dashboard.app import create_app
 from verdict.dashboard.control_plane import ControlStore
+from verdict.dashboard.evaluator_lab import _IdentityOnlyProvider
 from verdict.dashboard.scoped_evaluation import (
     cancel_scheduled_once,
     execute_scoped,
@@ -66,9 +67,9 @@ def _bundle(tenant="local"):
 
 class MockProvider:
     name = "anthropic"
-    supports_temperature = True
 
     def __init__(self, citation="[event:call]"):
+        self.supports_temperature = _IdentityOnlyProvider("anthropic").supports_temperature
         self.calls = 0
         self.citation = citation
 
