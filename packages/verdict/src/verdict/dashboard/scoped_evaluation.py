@@ -316,6 +316,14 @@ def execute_scoped(storage, *, storage_url: str, tenant: str, config: dict[str, 
         preview, rubric = _plan(storage, tenant, config, storage_url)
         if preview["plannedCalls"] != 1 or config.get("planFingerprint") != preview["planFingerprint"]:
             raise ValueError("scoped preview is no longer current")
+        store = ControlStore(storage_url)
+        for prior_status in ("completed", "error"):
+            prior_id = hashlib.sha256(_canonical([
+                tenant, preview["planFingerprint"], prior_status,
+            ])).hexdigest()
+            existing = store.history(tenant, "scoped_evaluation", prior_id)
+            if existing:
+                return {"resultId": prior_id, **existing[0]["payload"]}
         provider_name = preview["provider"]
         judge = _judge(provider or _provider(provider_name), preview["model"], rubric,
                        config.get("maxOutputTokens", 512))
@@ -374,11 +382,11 @@ def execute_scoped(storage, *, storage_url: str, tenant: str, config: dict[str, 
         document_id = hashlib.sha256(_canonical([
             tenant, preview["planFingerprint"], status,
         ])).hexdigest()
-        store = ControlStore(storage_url)
         existing = store.history(tenant, "scoped_evaluation", document_id)
-        if not existing:
-            store.append(tenant, kind="scoped_evaluation", document_id=document_id,
-                         state=status, payload=safe, expected_revision=None)
+        if existing:
+            return {"resultId": document_id, **existing[0]["payload"]}
+        store.append(tenant, kind="scoped_evaluation", document_id=document_id,
+                     state=status, payload=safe, expected_revision=None)
         return {"resultId": document_id, **safe}
 
 

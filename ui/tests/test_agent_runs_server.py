@@ -28,7 +28,8 @@ from verdict.dashboard.app import (
     build_agent_session_bundle,
     create_app,
 )
-from verdict.dashboard.scoped_evaluation import preview_scoped
+from verdict.dashboard.evaluator_lab import _IdentityOnlyProvider
+from verdict.dashboard.scoped_evaluation import execute_scoped, preview_scoped
 from verdict.evidence import (
     AgentEvent,
     AgentEventType,
@@ -42,6 +43,7 @@ from verdict.evidence import (
 )
 from verdict.schema import DimensionScore, Operation, Trace, Verdict
 from verdict.storage import SQLiteStorage
+from verdict_eval.providers import CompletionResponse
 
 
 def _bundle(
@@ -120,6 +122,63 @@ def test_run_and_session_list_eligibility_matches_their_preview(tmp_path):
     assert report["scopedEvaluationEligible"] is True
     assert run_preview["plannedCalls"] == session_preview["plannedCalls"] == 1
     eligible_storage.close()
+    storage.close()
+
+
+def test_identical_scoped_execution_replays_stored_result_without_provider_call(tmp_path):
+    path = tmp_path / "stored-replay.db"
+    url = f"sqlite:///{path}"
+    storage = SQLiteStorage(str(path))
+    storage.replace_agent_run_bundle(_bundle(
+        "local", datetime(2026, 10, 11, tzinfo=timezone.utc), with_turn=True,
+    ))
+    config = {"scope": "run", "runId": "r-local", "provider": "anthropic",
+              "model": "claude-haiku-4-5", "maxOutputTokens": 256,
+              "rubric": {"name": "task_review", "version": "1", "dimensions": [{
+                  "name": "completion", "description": "Did the recorded work meet the stated task?",
+              }]}}
+    preview = preview_scoped(storage, tenant="local", config=config)
+
+    class CountingProvider:
+        name = "anthropic"
+        supports_temperature = _IdentityOnlyProvider("anthropic").supports_temperature
+
+        def __init__(self):
+            self.calls = 0
+
+        def complete(self, request):
+            self.calls += 1
+            return CompletionResponse(text=(
+                '{"completion":{"reasoning":"[event:event-1] records the action",'
+                '"verdict":"PASS"}}'
+            ), input_tokens=10, output_tokens=10)
+
+    provider = CountingProvider()
+    approved = {**config, "planFingerprint": preview["planFingerprint"]}
+    first = execute_scoped(storage, storage_url=url, tenant="local", config=approved,
+                           confirm_external_egress=True, provider=provider)
+    second = execute_scoped(storage, storage_url=url, tenant="local", config=approved,
+                            confirm_external_egress=True, provider=provider)
+    assert provider.calls == 1
+    assert second == first
+    assert second["status"] == "completed"
+    error_config = {**config, "rubric": {**config["rubric"], "version": "2"}}
+    error_preview = preview_scoped(storage, tenant="local", config=error_config)
+
+    class ErrorProvider(CountingProvider):
+        def complete(self, request):
+            self.calls += 1
+            raise RuntimeError("synthetic provider error")
+
+    failing = ErrorProvider()
+    error_approved = {**error_config, "planFingerprint": error_preview["planFingerprint"]}
+    first_error = execute_scoped(storage, storage_url=url, tenant="local", config=error_approved,
+                                 confirm_external_egress=True, provider=failing)
+    second_error = execute_scoped(storage, storage_url=url, tenant="local", config=error_approved,
+                                  confirm_external_egress=True, provider=failing)
+    assert failing.calls == 1
+    assert first_error == second_error
+    assert first_error["status"] == "error"
     storage.close()
 
 
