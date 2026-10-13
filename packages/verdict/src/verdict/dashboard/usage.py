@@ -217,26 +217,32 @@ def build_usage_view(
            JOIN import_sources s
              ON s.tenant_id=r.tenant_id AND s.source_session_id=r.source_session_id
            WHERE t.tenant_id=? AND t.started_at>=? AND t.started_at<?
-           ORDER BY t.started_at DESC,t.run_id DESC,t.sequence DESC
+           ORDER BY t.started_at DESC,t.run_id DESC,t.sequence DESC,t.turn_id DESC
            LIMIT ?""",
         (tenant, first, last, MAX_USAGE_TURNS + 1),
     ))
     complete = len(rows) <= MAX_USAGE_TURNS
     rows = rows[:MAX_USAGE_TURNS]
+    turn_rank = {(row["run_id"], row["turn_id"]): index for index, row in enumerate(rows)}
     models: dict[tuple[str, str], set[str | None]] = defaultdict(set)
     event_count = 0
+    incomplete_from_rank = len(rows)
     for event in session.execute(
         """SELECT e.run_id,e.turn_id,e.event_type,e.attributes_json
            FROM agent_events e JOIN agent_turns t
              ON t.tenant_id=e.tenant_id AND t.run_id=e.run_id AND t.turn_id=e.turn_id
            WHERE t.tenant_id=? AND t.started_at>=? AND t.started_at<?
              AND e.event_type IN ('model_call','context')
-           ORDER BY t.started_at DESC,e.run_id,e.turn_id,e.sequence
+           ORDER BY t.started_at DESC,t.run_id DESC,t.sequence DESC,t.turn_id DESC,
+                    e.sequence,e.event_id
            LIMIT ?""",
         (tenant, first, last, MAX_MODEL_EVENTS + 1),
     ):
         event_count += 1
         if event_count > MAX_MODEL_EVENTS:
+            incomplete_from_rank = turn_rank.get(
+                (event["run_id"], event["turn_id"]), len(rows),
+            )
             break
         raw_attributes = event["attributes_json"]
         if isinstance(raw_attributes, dict):
@@ -255,13 +261,17 @@ def build_usage_view(
 
     daily = {value: _summary() for value in dates}
     turns = []
-    for row in rows:
+    for index, row in enumerate(rows):
         started = _utc(row["started_at"])
         turn_day = started.date().isoformat()
-        turn_models = _complete_models(models[(row["run_id"], row["turn_id"])]) if model_complete else frozenset()
-        price = turn_list_price_usd(SimpleNamespace(**row), turn_models) if model_complete else None
+        model_evidence_complete = model_complete or index < incomplete_from_rank
+        turn_models = (_complete_models(models[(row["run_id"], row["turn_id"])])
+                       if model_evidence_complete else frozenset())
+        price = (turn_list_price_usd(SimpleNamespace(**row), turn_models)
+                 if model_evidence_complete else None)
         item = {**row, "day": turn_day, "sessionKey": row["session_id"] or row["source_session_id"],
-                "models": turn_models, "price": price}
+                "models": turn_models, "price": price,
+                "model_evidence_complete": model_evidence_complete}
         turns.append(item)
         _add(daily[turn_day], item)
 
@@ -321,6 +331,7 @@ def build_usage_view(
                 "outputTokens": turn["output_tokens"],
                 "reasoningOutputTokens": turn["reasoning_output_tokens"],
                 "models": sorted(turn["models"]),
+                "modelEvidenceComplete": turn["model_evidence_complete"],
                 "listPriceUsd": round(turn["price"], 8) if turn["price"] is not None else None,
             }
         ends = [_utc(turn["ended_at"]) for turn in matching if turn["ended_at"] is not None]

@@ -136,7 +136,7 @@ export function Usage({ url, onOpenRun, compact = false }) {
     {state.loading && <div role="status" className="mt-4 text-sm" style={{ color: C.sub }}>Loading usage…</div>}
     {state.error && <div role="alert" className="mt-4 text-sm" style={{ color: C.red }}>Usage unavailable: {state.error}</div>}
     {data && <>
-      {!data.window.complete && <div role="status" className="mt-4 text-sm" style={{ color: C.amber }}>This 30-day view is bounded and partial. {data.window.turnsComplete ? "Model attribution is incomplete; list prices are unavailable." : "Older turns may be omitted."}</div>}
+      {!data.window.complete && <div role="status" className="mt-4 text-sm" style={{ color: C.amber }}>This 30-day view is bounded and partial. {data.window.turnsComplete ? "Model attribution is incomplete for older turns; fully scanned newer turns retain list-price estimates." : "Older turns may be omitted."}</div>}
       {!hasActivity && <p className="mt-5 text-sm" style={{ color: C.sub }}>No agent turns were captured in this 30-day window.</p>}
       {hasActivity && !hasTokenTotals && <p className="mt-5 text-sm" style={{ color: C.amber }}>Agent turns were captured, but none reported a usable token total. A token trend is unavailable.</p>}
       {compact && hasActivity && !hasTokenTotals && day == null && <button type="button" className="text-sm underline mt-3" style={{ color: C.green }} onClick={() => setDay(data.selectedDay)}>Inspect sessions with missing totals</button>}

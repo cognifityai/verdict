@@ -257,6 +257,48 @@ def test_priced_components_without_reported_total_keep_model_tokens_unknown(tmp_
     assert day["pricedTurns"] == source["pricedTurns"] == model["pricedTurns"] == 1
 
 
+def test_model_event_scan_overflow_prices_only_fully_scanned_newer_turns(tmp_path, monkeypatch):
+    path = tmp_path / "event-boundary.db"
+    storage = SQLiteStorage(str(path))
+    turns = tuple(_turn("run-a", f"turn-{index}", index, _dt(8, index + 1), 100,
+                        input_tokens=80, output_tokens=20) for index in range(3))
+    events = tuple(_model_event(turn.turn_id, f"model-{index}", "gpt-6-luna")
+                   for index, turn in enumerate(turns))
+    storage.replace_agent_run_bundle(_bundle(
+        "local", "run-a", turns, events, session_id="session-a",
+    ))
+    storage.close()
+    monkeypatch.setattr(usage_module, "MAX_MODEL_EVENTS", 2)
+    report = build_agent_usage_bundle(
+        path, tenant="local", now=_dt(8, 12), day="2026-10-08",
+        session_id="session-a", source_kind="codex",
+    )
+    assert report["window"]["modelEvidenceComplete"] is False
+    viewed = {item["turnId"]: item for item in report["selectedSession"]["turns"]}
+    assert viewed["turn-2"]["listPriceUsd"] is not None
+    assert viewed["turn-1"]["listPriceUsd"] is not None
+    assert viewed["turn-0"]["listPriceUsd"] is None
+    assert viewed["turn-2"]["modelEvidenceComplete"] is True
+    assert viewed["turn-0"]["modelEvidenceComplete"] is False
+    assert report["dayModels"][0]["pricedTurns"] == 2
+
+    storage = SQLiteStorage(str(path))
+    storage.replace_agent_run_bundle(_bundle(
+        "local", "run-a", turns,
+        (*events, _model_event("turn-1", "model-extra", "gpt-6-luna", sequence=1)),
+        session_id="session-a",
+    ))
+    storage.close()
+    boundary = build_agent_usage_bundle(
+        path, tenant="local", now=_dt(8, 12), day="2026-10-08",
+        session_id="session-a", source_kind="codex",
+    )
+    viewed = {item["turnId"]: item for item in boundary["selectedSession"]["turns"]}
+    assert viewed["turn-2"]["listPriceUsd"] is not None
+    assert viewed["turn-1"]["listPriceUsd"] is None
+    assert viewed["turn-1"]["modelEvidenceComplete"] is False
+
+
 def test_usage_does_not_merge_equal_session_ids_from_different_sources(tmp_path):
     path = tmp_path / "source-session.db"
     storage = SQLiteStorage(str(path))
@@ -518,7 +560,7 @@ def test_model_evidence_attribution_cases_share_sql_and_bundle_rules(tmp_path):
     assert response.json()["runs"][0]["sourceTokenUsage"]["pricedTurns"] == 3
 
 
-def test_usage_scan_limits_mark_partial_and_do_not_invent_prices(tmp_path, monkeypatch):
+def test_usage_scan_limits_mark_partial_and_price_only_complete_newer_turns(tmp_path, monkeypatch):
     path = tmp_path / "bounded.db"
     storage = SQLiteStorage(str(path))
     turns = tuple(_turn("run-a", f"turn-{index}", index, _dt(8, index + 1), 10,
@@ -537,8 +579,8 @@ def test_usage_scan_limits_mark_partial_and_do_not_invent_prices(tmp_path, monke
     day = next(row for row in report["days"] if row["day"] == "2026-10-08")
     assert report["window"]["modelEvidenceComplete"] is False
     assert day["totalTokens"] == 30
-    assert day["pricedTurns"] == 0
-    assert day["listPriceUsd"] is None
+    assert day["pricedTurns"] == 1
+    assert day["listPriceUsd"] is not None
 
 
 def test_usage_invalid_day_and_missing_session_do_not_expose_other_data(tmp_path):
