@@ -67,6 +67,13 @@ def _session_projection(storage_url: str, tenant: str, config: dict[str, Any]) -
     report = build_agent_session_bundle(
         storage_url, tenant=tenant, source_kind=source_kind, session_id=session_id,
     )
+    return session_projection_from_report(report, session_id=session_id, source_kind=source_kind)
+
+
+def session_projection_from_report(
+    report: dict[str, Any], *, session_id: str, source_kind: str,
+) -> dict[str, Any]:
+    """Use the same evidence and size checks for the session view and preview."""
     reason = report["unavailableReason"]
     turns, events = report["turns"], report["events"]
     if reason is None:
@@ -127,7 +134,7 @@ def _session_projection(storage_url: str, tenant: str, config: dict[str, Any]) -
 
 
 def _projection(storage, tenant: str, config: dict[str, Any],
-                storage_url: str | None = None) -> dict[str, Any]:
+                storage_url: str | None = None, *, bundle=None) -> dict[str, Any]:
     scope = config.get("scope")
     if scope == "session":
         if storage_url is None:
@@ -141,7 +148,7 @@ def _projection(storage, tenant: str, config: dict[str, Any],
              or len(event_id.encode()) > 256)) or
             (scope == "run" and event_id is not None)):
         raise ValueError("invalid scoped evaluation selection")
-    bundle = storage.get_agent_run_bundle(tenant, run_id)
+    bundle = bundle if bundle is not None else storage.get_agent_run_bundle(tenant, run_id)
     if bundle is None:
         raise KeyError(run_id)
     turns = sorted(bundle.turns, key=lambda turn: (turn.sequence, turn.turn_id))

@@ -25,8 +25,10 @@ from verdict.dashboard.app import (
     build_agent_insights_bundle,
     build_agent_run_detail,
     build_agent_runs_bundle,
+    build_agent_session_bundle,
     create_app,
 )
+from verdict.dashboard.scoped_evaluation import preview_scoped
 from verdict.evidence import (
     AgentEvent,
     AgentEventType,
@@ -72,6 +74,53 @@ def _bundle(
         turns,
         events,
     )
+
+
+def test_run_and_session_list_eligibility_matches_their_preview(tmp_path):
+    path = tmp_path / "eligibility.db"
+    url = f"sqlite:///{path}"
+    storage = SQLiteStorage(str(path))
+    now = datetime(2026, 10, 11, tzinfo=timezone.utc)
+    bundle = _bundle("local", now, with_turn=True)
+    storage.replace_agent_run_bundle(replace(bundle, turns=(replace(
+        bundle.turns[0], final_response_redacted="synthetic " * 900,
+    ),)))
+    config = {"scope": "run", "runId": "r-local", "provider": "anthropic",
+              "model": "claude-haiku-4-5", "maxOutputTokens": 256,
+              "rubric": {"name": "task_review", "version": "1", "dimensions": [{
+                  "name": "completion", "description": "Did the recorded work meet the stated task?",
+              }]}}
+    run_preview = preview_scoped(storage, tenant="local", config=config)
+    run = build_agent_runs_bundle(url, tenant="local")["runs"][0]
+    assert run["scopedEvaluationEligible"] is (run_preview["plannedCalls"] == 1)
+    assert run["scopedEvaluationUnavailableReason"] == run_preview["unavailableReason"]
+    session_config = {**config, "scope": "session", "sessionId": "s-local",
+                      "sourceKind": "codex"}
+    session_config.pop("runId")
+    session_preview = preview_scoped(storage, tenant="local", config=session_config,
+                                     storage_url=url)
+    report = build_agent_session_bundle(
+        url, tenant="local", source_kind="codex", session_id="s-local",
+    )
+    assert report["scopedEvaluationEligible"] is (session_preview["plannedCalls"] == 1)
+    assert report["scopedEvaluationUnavailableReason"] == session_preview["unavailableReason"]
+    assert run_preview["unavailableReason"] == session_preview["unavailableReason"] == "evidence_limit"
+    eligible_path = tmp_path / "eligible.db"
+    eligible_url = f"sqlite:///{eligible_path}"
+    eligible_storage = SQLiteStorage(str(eligible_path))
+    eligible_storage.replace_agent_run_bundle(bundle)
+    run_preview = preview_scoped(eligible_storage, tenant="local", config=config)
+    run = build_agent_runs_bundle(eligible_url, tenant="local")["runs"][0]
+    report = build_agent_session_bundle(
+        eligible_url, tenant="local", source_kind="codex", session_id="s-local",
+    )
+    session_preview = preview_scoped(eligible_storage, tenant="local", config=session_config,
+                                     storage_url=eligible_url)
+    assert run["scopedEvaluationEligible"] is True
+    assert report["scopedEvaluationEligible"] is True
+    assert run_preview["plannedCalls"] == session_preview["plannedCalls"] == 1
+    eligible_storage.close()
+    storage.close()
 
 
 def test_run_detail_shows_current_native_turn_scores_without_cross_tenant_leak(tmp_path):

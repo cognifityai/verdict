@@ -796,6 +796,13 @@ def build_agent_session_bundle(
     )
     if not isinstance(redacted, dict):
         raise DashboardBundleLimitError("bounded session report exceeded redaction budget")
+    from verdict.dashboard.scoped_evaluation import session_projection_from_report
+
+    scoped_evidence = session_projection_from_report(
+        redacted, session_id=session_id, source_kind=source_kind,
+    )
+    redacted["scopedEvaluationEligible"] = scoped_evidence["coverage"] == "complete"
+    redacted["scopedEvaluationUnavailableReason"] = scoped_evidence["unavailableReason"]
     return redacted
 
 
@@ -869,7 +876,12 @@ def build_agent_runs_bundle(
         )
         runs = []
         linked_trace_ids: dict[str, set[str]] = defaultdict(set)
+        from verdict.dashboard.scoped_evaluation import _projection
+
         for bundle in bundles:
+            scoped_evidence = _projection(
+                None, tenant, {"scope": "run", "runId": bundle.run.run_id}, bundle=bundle,
+            )
             analysis = analyze_agent_run(bundle)
             turn_models = _models_by_turn(bundle.events)
             turn_prices = [
@@ -945,6 +957,8 @@ def build_agent_runs_bundle(
                     "judgeUsed": finding.judge_used,
                 } for finding in analysis.findings],
                 "recommendations": run_recommendations(bundle),
+                "scopedEvaluationEligible": scoped_evidence["coverage"] == "complete",
+                "scopedEvaluationUnavailableReason": scoped_evidence["unavailableReason"],
             })
             linked_trace_ids[bundle.run.run_id].update(
                 event.trace_id for event in bundle.events if event.trace_id is not None
