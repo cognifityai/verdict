@@ -2314,7 +2314,7 @@ test("saved case comparison requires reviewed inputs and an explicitly configure
   assert.equal(requests.length, 1);
 });
 
-test("saved cases disclose redaction and block a combination beyond the runner limit", async () => {
+test("saved cases disclose verbatim storage and block a combination beyond the runner limit", async () => {
   const ui = await loadUiModule();
   const hooks = createEffectHooks();
   const requests = deferredFetches();
@@ -2331,7 +2331,7 @@ test("saved cases disclose redaction and block a combination beyond the runner l
   const run = () => findAll(tree, (node) => node.type === "button" &&
     textOf(node).includes("Run baseline and candidate"))[0];
   assert.equal(run().props.disabled, false);
-  assert.match(textOf(tree), /redacts recognized sensitive patterns/);
+  assert.match(textOf(tree), /stored and passed to the configured local runner exactly as entered/);
   assert.match(textOf(tree), /480\s+of\s+600\s+seconds/);
   findAll(tree, (node) => node.type === "select")[4]
     .props.onChange({ target: { value: "3" } });
