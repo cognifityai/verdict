@@ -1037,6 +1037,33 @@ test("usage chart drills from day to session and explains only captured numbers"
   assert.equal(requests.length, 3);
 });
 
+test("usage labels identify source once and turns across runs", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const props = { url: "/api/usage" };
+  render(ui.Usage, hooks, props);
+  hooks.flushEffects();
+  await resolveJson(requests[0], {
+    window: { complete: true, turnsComplete: true },
+    days: [{ day: "2026-10-08", turns: 2, tokenKnownTurns: 2, totalTokens: 200,
+      pricedTurns: 0, listPriceUsd: null }],
+    selectedDay: "2026-10-08", dayModels: [], daySources: [],
+    sessions: [{ sessionId: "session-a", agentName: "codex", sourceKind: "codex",
+      runIds: ["run-a", "run-b"], turns: 2, tokenKnownTurns: 2,
+      totalTokens: 200, pricedTurns: 0, listPriceUsd: null }],
+    selectedSession: { sessionId: "session-a", sourceKind: "codex", turnCount: 2,
+      totalTokens: 200, pricedTurns: 0, listPriceUsd: null,
+      turns: ["run-a", "run-b"].map((runId) => ({ runId, turnId: `${runId}-turn`,
+        sequence: 19, totalTokens: 100, models: [], listPriceUsd: null })) },
+  });
+  const tree = render(ui.Usage, hooks, props);
+  const labels = textOf(tree);
+  assert.doesNotMatch(labels, /codex\s*·\s*codex/);
+  assert.match(labels, /run-a.*Turn\s+20/);
+  assert.match(labels, /run-b.*Turn\s+20/);
+});
+
 test("usage explains an ambiguous source-qualified session selection", async () => {
   const ui = await loadUiModule();
   const hooks = createEffectHooks();

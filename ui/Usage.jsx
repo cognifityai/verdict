@@ -167,7 +167,7 @@ export function Usage({ url, onOpenRun, compact = false }) {
       {data.sessions.length ? <div className="mt-3 grid gap-2">{data.sessions.map((item) => <button key={`${item.sourceKind}:${item.sessionId}`} type="button" onClick={() => { setDay(data.selectedDay); setSessionId(item.sessionId); setSourceKind(item.sourceKind); setAnalyzing(false); setReportOpen(false); }}
         className="w-full border p-3 text-left flex flex-wrap justify-between gap-2 text-sm"
         style={{ borderColor: item.sessionId === session?.sessionId && item.sourceKind === session?.sourceKind ? C.green : C.border }}>
-        <span><strong>{item.agentName}</strong> · {item.sourceKind} · {item.runIds.length} run{item.runIds.length === 1 ? "" : "s"}</span>
+        <span><strong>{item.agentName}</strong>{item.agentName === item.sourceKind ? "" : ` · ${item.sourceKind}`} · {item.runIds.length} run{item.runIds.length === 1 ? "" : "s"}</span>
         <span>{count(item.totalTokens)} tokens · {price(item.listPriceUsd)} · {coverage(item.tokenKnownTurns, item.turns)} with totals</span>
       </button>)}</div> : <div className="text-sm mt-3" style={{ color: C.sub }}>No captured turns started on this day.</div>}
       {data.sessionsTruncated && <div className="text-xs mt-2" style={{ color: C.amber }}>Showing the 100 sessions with the most reported tokens on this day.</div>}
@@ -179,12 +179,12 @@ export function Usage({ url, onOpenRun, compact = false }) {
         {analyzing && <SessionExplanation session={session} selectedDay={data.selectedDay} dayTotal={chosenDay?.totalTokens} />}
         <div className="font-semibold text-sm mt-5">Largest turns</div>
         <div className="mt-2 space-y-2">{session.turns.slice(0, compact ? 5 : undefined).map((turn) => <div key={`${turn.runId}:${turn.turnId}`} className="border p-3 flex flex-wrap justify-between gap-2 text-xs" style={{ borderColor: C.border }}>
-          <span>Turn {turn.sequence + 1} · {turn.models.join(", ") || "model unavailable"} · {count(turn.totalTokens)} tokens · {price(turn.listPriceUsd)}</span>
+          <span>Run {turn.runId} · Turn {turn.sequence + 1} · {turn.models.join(", ") || "model unavailable"} · {count(turn.totalTokens)} tokens · {price(turn.listPriceUsd)}</span>
           <button type="button" className="underline" style={{ color: C.green }} onClick={() => onOpenRun?.(turn.runId)}>Open run</button>
         </div>)}</div>
         {compact && session.turns.length > 5 && <details className="mt-3 text-sm"><summary className="cursor-pointer">Show {session.turns.length - 5} more displayed turns</summary>
           <div className="mt-2 space-y-2">{session.turns.slice(5).map((turn) => <div key={`${turn.runId}:${turn.turnId}`} className="border p-3 flex flex-wrap justify-between gap-2 text-xs" style={{ borderColor: C.border }}>
-            <span>Turn {turn.sequence + 1} · {turn.models.join(", ") || "model unavailable"} · {count(turn.totalTokens)} tokens · {price(turn.listPriceUsd)}</span>
+            <span>Run {turn.runId} · Turn {turn.sequence + 1} · {turn.models.join(", ") || "model unavailable"} · {count(turn.totalTokens)} tokens · {price(turn.listPriceUsd)}</span>
             <button type="button" className="underline" style={{ color: C.green }} onClick={() => onOpenRun?.(turn.runId)}>Open run</button>
           </div>)}</div></details>}
         {session.turnsTruncated && <div className="text-xs mt-2" style={{ color: C.amber }}>Showing the 50 largest turns; session totals include the remaining turns in this window.</div>}
