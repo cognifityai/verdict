@@ -60,6 +60,30 @@ def test_control_documents_are_versioned_conflict_checked_and_rollbackable(tmp_p
     assert len(store.history("tenant", "settings", "default")) == 3
 
 
+@pytest.mark.parametrize("kind", ["experiment", "scoped_evaluation"])
+def test_result_documents_cannot_be_rolled_back_through_control_api(tmp_path, kind):
+    url = f"sqlite:///{tmp_path / 'results.db'}"
+    store = ControlStore(url)
+    store.append("__verdict_local__", kind=kind, document_id="synthetic-result",
+                 state="completed", payload={"status": "completed"},
+                 expected_revision=None)
+    before = store.history("__verdict_local__", kind, "synthetic-result")
+
+    async def scenario():
+        transport = httpx.ASGITransport(app=create_app(storage=url))
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            return await client.post(
+                f"/api/control/{kind}/synthetic-result/rollback",
+                headers={"X-Verdict-Setup": token},
+                json={"targetRevision": 1, "expectedRevision": 1},
+            )
+
+    response = asyncio.run(scenario())
+    assert response.status_code == 400
+    assert store.history("__verdict_local__", kind, "synthetic-result") == before
+
+
 def test_control_documents_reject_secret_values_and_invalid_schedules(tmp_path):
     store = ControlStore(f"sqlite:///{tmp_path / 'verdict.db'}")
     with pytest.raises(ValueError, match="environment-variable reference"):

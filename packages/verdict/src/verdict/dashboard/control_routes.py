@@ -127,8 +127,9 @@ class ControlRoutes:
                 return JSONResponse(
                     {"error": "control authorization required"}, status_code=403
                 )
-            if kind == "scheduled_evaluation":
-                return JSONResponse({"error": "scheduled egress cannot be rolled back"}, status_code=400)
+            if kind in {"scheduled_evaluation", "experiment", "scoped_evaluation"}:
+                return JSONResponse({"error": "result or egress record cannot be rolled back"},
+                                    status_code=400)
             try:
                 return ControlStore(self.storage_url).rollback(
                     self.tenant_id,
