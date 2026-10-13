@@ -56,7 +56,12 @@ from verdict.dashboard.turn_analysis import MAX_TURN_ANALYSIS_EVENTS, analyze_tu
 from verdict.dashboard.usage import build_usage_view
 from verdict.dashboard.usage import models_by_turn as _models_by_turn
 from verdict.dashboard.usage import turn_list_price_usd as _turn_list_price_usd
-from verdict.evidence import EvidenceState, ToolOrigin, _load_json_without_duplicate_tool_origin
+from verdict.evidence import (
+    EvidenceState,
+    ToolOrigin,
+    _load_json_without_duplicate_tool_origin,
+    event_order_key,
+)
 from verdict.metrics import ScoreCounts, verdict_label
 from verdict.monitor_inputs import LOCAL_TENANT
 from verdict.normalized_evidence import agent_turn_from_row, normalized_bundle_digest
@@ -619,7 +624,8 @@ def build_agent_session_bundle(
                 "SELECT run_id,turn_id,event_id,sequence,occurred_at,event_type,status,"
                 "producer_id,producer_sequence,provenance FROM agent_events "
                 "WHERE tenant_id=? AND run_id IN (" + placeholders + ") "
-                "ORDER BY occurred_at,run_id,turn_id,sequence,event_id LIMIT 80",  # nosec B608
+                "ORDER BY occurred_at,run_id,producer_id,"  # nosec B608 -- generated placeholders
+                "COALESCE(producer_sequence,sequence),event_id LIMIT 80",
                 (tenant, *run_ids),
             )
             usage_row = session.execute(
@@ -719,9 +725,7 @@ def build_agent_session_bundle(
                                "producerSequence": event.producer_sequence,
                                "provenance": event.provenance, "attributes": event.attributes})
         turns.sort(key=lambda item: (item["startedAt"], item["runId"], item["sequence"], item["turnId"]))
-        events.sort(key=lambda item: (item["occurredAt"], item["runId"], item["producerId"],
-                                      item["producerSequence"] if item["producerSequence"] is not None else item["sequence"],
-                                      item["eventId"]))
+        events.sort(key=event_order_key)
         evaluations = []
         if session.table_exists("product_control_documents"):
             for row in session.execute(
@@ -1336,6 +1340,7 @@ def build_agent_turn_analysis(
             "WHERE tenant_id=? AND run_id=? AND turn_id=?",
             (tenant, run_id, turn_id),
         ).fetchone()
+        # SQL equivalent of event_order_key; run_id is fixed by the WHERE clause.
         rows = list(session.execute(
             "SELECT event_id,event_type,status,provenance,attributes_json FROM agent_events "
             "WHERE tenant_id=? AND run_id=? AND turn_id=? "

@@ -8,9 +8,10 @@ from datetime import datetime, timezone
 import httpx
 import pytest
 import verdict.dashboard.scoped_evaluation as scoped_evaluation
-from verdict.dashboard.app import create_app
+from verdict.dashboard.app import build_agent_session_bundle, build_agent_turn_analysis, create_app
 from verdict.dashboard.control_plane import ControlStore
 from verdict.dashboard.evaluator_lab import _IdentityOnlyProvider
+from verdict.dashboard.recommendations import run_recommendations
 from verdict.dashboard.scoped_evaluation import (
     cancel_scheduled_once,
     execute_scoped,
@@ -28,6 +29,7 @@ from verdict.evidence import (
     ExecutionStatus,
     PrivacyClassification,
     SourceSession,
+    event_order_key,
 )
 from verdict.storage import SQLiteStorage
 from verdict_eval.providers import CompletionResponse
@@ -80,6 +82,41 @@ class MockProvider:
             '{"completion":{"reasoning":"' + self.citation +
             ' shows the selected action","verdict":"PASS"}}'
         ), input_tokens=10, output_tokens=10)
+
+
+def test_event_order_key_matches_typed_and_session_projection_with_ties(tmp_path):
+    bundle = _bundle()
+    first = replace(bundle.events[0], event_id="first", producer_id="one",
+                    producer_sequence=1, event_type=AgentEventType.TEST_RESULT,
+                    status=ExecutionStatus.FAILED, attributes={"failed": 1})
+    second = replace(bundle.events[1], event_id="second", producer_id="one",
+                     producer_sequence=0, event_type=AgentEventType.TEST_RESULT,
+                     status=ExecutionStatus.FAILED, attributes={"failed": 1})
+    ordered = [item.event_id for item in sorted((first, second), key=event_order_key)]
+    assert ordered == ["second", "first"]
+    projected = [
+        {"eventId": item.event_id, "occurredAt": item.occurred_at.isoformat(),
+         "runId": item.turn_id, "producerId": item.producer_id,
+         "producerSequence": item.producer_sequence, "sequence": item.sequence}
+        for item in (first, second)
+    ]
+    assert [item["eventId"] for item in sorted(projected, key=event_order_key)] == ordered
+    ordered_bundle = replace(bundle, events=(first, second))
+    assert run_recommendations(ordered_bundle)[0]["evidenceEventIds"] == ["first"]
+    path = tmp_path / "ordered.db"
+    storage = SQLiteStorage(str(path))
+    storage.replace_agent_run_bundle(ordered_bundle)
+    url = f"sqlite:///{path}"
+    preview = preview_scoped(storage, tenant="local", config=_config())
+    transcript = preview["evidencePreview"]["response"]
+    assert transcript.index("[event:second]") < transcript.index("[event:first]")
+    session = build_agent_session_bundle(
+        url, tenant="local", source_kind="synthetic-agent", session_id="source-local",
+    )
+    assert [item["eventId"] for item in session["events"]] == ordered
+    turn = build_agent_turn_analysis(url, tenant="local", run_id="run-a", turn_id="turn-a")
+    assert [item["eventId"] for item in turn["reviewSignals"]] == ordered
+    storage.close()
 
 
 @pytest.mark.parametrize("variant", ["missing_arguments", "blank_contract", "duplicate_call", "redacted_arguments"])

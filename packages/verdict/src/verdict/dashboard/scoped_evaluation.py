@@ -24,7 +24,7 @@ from verdict.dashboard.evaluator_lab import (
     _validated_config,
 )
 from verdict.dashboard.setup_routes import SetupRoutes
-from verdict.evidence import AgentEventType, EvidenceState
+from verdict.evidence import AgentEventType, EvidenceState, event_order_key
 from verdict.pricing import compute_cost_usd
 from verdict.redaction import _PLACEHOLDER, redact, redact_structure
 
@@ -145,11 +145,7 @@ def _projection(storage, tenant: str, config: dict[str, Any],
     if bundle is None:
         raise KeyError(run_id)
     turns = sorted(bundle.turns, key=lambda turn: (turn.sequence, turn.turn_id))
-    events = sorted(bundle.events, key=lambda event: (
-        event.occurred_at, event.producer_id,
-        event.producer_sequence if event.producer_sequence is not None else event.sequence,
-        event.event_id,
-    ))
+    events = sorted(bundle.events, key=event_order_key)
     producers = {event.producer_id for event in events if event.producer_id}
     if scope == "run":
         reason = None
@@ -179,7 +175,7 @@ def _projection(storage, tenant: str, config: dict[str, Any],
              {"reference": f"[turn:{turn.turn_id}]", "response": turn.final_response_redacted})
             for turn in turns
         ] + [
-            (event.occurred_at, 0, event.sequence,
+            (event.occurred_at, 0, event_order_key(event),
              {"reference": f"[event:{event.event_id}]", "type": event.event_type.value,
               "status": event.status.value, "attributes": event.attributes})
             for event in events

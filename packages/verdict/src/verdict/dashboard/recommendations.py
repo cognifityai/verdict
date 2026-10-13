@@ -5,16 +5,13 @@ from __future__ import annotations
 import hashlib
 from itertools import pairwise
 
-from verdict.evidence import AgentEventType, AgentRunBundle, ExecutionStatus
+from verdict.evidence import AgentEventType, AgentRunBundle, ExecutionStatus, event_order_key
 from verdict.redaction import _PLACEHOLDER
 
 
 def run_recommendations(bundle: AgentRunBundle) -> list[dict[str, object]]:
     """Suggest a review action only when ordered evidence supports the pattern."""
-    events = sorted(bundle.events, key=lambda event: (
-        event.occurred_at, event.producer_id, event.producer_sequence
-        if event.producer_sequence is not None else event.sequence, event.event_id,
-    ))
+    events = sorted(bundle.events, key=event_order_key)
     # Ordering across independent producers is only a display convention.
     producers = {event.producer_id for event in events if event.producer_id}
     recommendations: list[dict[str, object]] = []
