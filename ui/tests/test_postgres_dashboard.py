@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import multiprocessing
 import os
@@ -15,6 +16,7 @@ from uuid import uuid4
 
 import httpx
 import pytest
+import verdict.dashboard.scoped_evaluation as scoped_evaluation
 from verdict.dashboard import build_bundle
 from verdict.dashboard.app import (
     build_agent_turn_analysis,
@@ -24,7 +26,13 @@ from verdict.dashboard.app import (
 )
 from verdict.dashboard.control_plane import ControlStore
 from verdict.dashboard.evaluator_lab import _IdentityOnlyProvider
-from verdict.dashboard.scoped_evaluation import execute_scoped, preview_scoped
+from verdict.dashboard.scoped_evaluation import (
+    cancel_scheduled_once,
+    execute_scoped,
+    preview_scoped,
+    run_scheduled_once,
+    schedule_scoped_once,
+)
 from verdict.evidence import (
     AgentEvent,
     AgentEventType,
@@ -100,6 +108,102 @@ def _postgres_scoped_worker(scoped_dsn, approved, start, calls, outcomes):
         outcomes.put(("error", type(exc).__name__))
     finally:
         child_storage.close()
+
+
+def _postgres_waiting_scheduled_worker(scoped_dsn, signal, calls, outcomes):
+    original_guard = scoped_evaluation._cross_process_scoped_guard
+
+    @contextlib.contextmanager
+    def signalled_guard(storage_url):
+        signal.put("waiting")
+        with original_guard(storage_url):
+            yield
+
+    class CountingProvider:
+        name = "anthropic"
+        supports_temperature = _IdentityOnlyProvider("anthropic").supports_temperature
+
+        def complete(self, request):
+            calls.put("called")
+            return CompletionResponse(text=(
+                '{"completion":{"reasoning":"[turn:turn] records completion",'
+                '"verdict":"PASS"}}'
+            ), input_tokens=10, output_tokens=10)
+
+    scoped_evaluation._cross_process_scoped_guard = signalled_guard
+    try:
+        outcomes.put(run_scheduled_once(scoped_dsn, tenant="local", provider=CountingProvider()))
+    except Exception as exc:
+        outcomes.put({"status": "error", "error": type(exc).__name__})
+
+
+@pytest.mark.skipif(os.name != "posix", reason="cross-process fixture requires POSIX")
+def test_live_postgres_scheduled_approval_stays_pending_during_scoped_lock() -> None:
+    import psycopg
+    from psycopg import sql
+    from psycopg.conninfo import make_conninfo
+
+    schema = f"verdict_scheduled_lock_{uuid4().hex}"
+    with psycopg.connect(DSN, autocommit=True) as admin:
+        admin.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+    try:
+        scoped_dsn = make_conninfo(DSN, options=f"-csearch_path={schema}")
+        now = datetime.now(timezone.utc)
+        storage = PostgresStorage(scoped_dsn, min_pool=1, max_pool=1)
+        storage.replace_agent_run_bundle(AgentRunBundle(
+            SourceSession("source", "local", "synthetic", "a" * 64, now, now),
+            AgentRun("run", "source", "local", now, ExecutionStatus.COMPLETED, now),
+            (AgentTurn("turn", "run", 0, now, ExecutionStatus.COMPLETED, now,
+                       "Do the task", "Task complete",
+                       EvidenceState.PRESENT, EvidenceState.PRESENT),), (),
+        ))
+        config = {"scope": "run", "runId": "run", "provider": "anthropic",
+                  "model": "claude-haiku-4-5", "maxOutputTokens": 256,
+                  "rubric": {"name": "task_review", "version": "1", "dimensions": [
+                      {"name": "completion", "description": "Did the task complete?"},
+                  ]}}
+        preview = preview_scoped(storage, tenant="local", config=config)
+        queued = schedule_scoped_once(
+            storage, storage_url=scoped_dsn, tenant="local",
+            config={**config, "planFingerprint": preview["planFingerprint"]},
+            max_estimated_usd=1, confirm_persistent_egress=True,
+        )
+        storage.close()
+        reopened = scoped_evaluation._scheduled_storage(scoped_dsn)
+        try:
+            assert preview_scoped(reopened, tenant="local", config=config,
+                                  storage_url=scoped_dsn)["planFingerprint"] == preview["planFingerprint"]
+        finally:
+            reopened.close()
+        context = multiprocessing.get_context("spawn")
+        signal = context.Queue()
+        calls = context.Queue()
+        outcomes = context.Queue()
+        process = context.Process(target=_postgres_waiting_scheduled_worker,
+                                  args=(scoped_dsn, signal, calls, outcomes))
+        with scoped_evaluation._cross_process_scoped_guard(scoped_dsn):
+            process.start()
+            try:
+                assert signal.get(timeout=10) == "waiting"
+            except queue.Empty:
+                pytest.fail(f"worker did not reach lock: {outcomes.get_nowait()}")
+            current = ControlStore(scoped_dsn).history(
+                "local", "scheduled_evaluation", queued["jobId"],
+            )[0]
+            assert current["state"] == "pending"
+            cancel_scheduled_once(scoped_dsn, tenant="local", job_id=queued["jobId"],
+                                  expected_revision=queued["revision"])
+        process.join(timeout=10)
+        assert process.exitcode == 0
+        assert outcomes.get(timeout=1)["status"] == "approval_changed"
+        assert ControlStore(scoped_dsn).history(
+            "local", "scheduled_evaluation", queued["jobId"],
+        )[0]["state"] == "cancelled"
+        with pytest.raises(queue.Empty):
+            calls.get_nowait()
+    finally:
+        with psycopg.connect(DSN, autocommit=True) as admin:
+            admin.execute(sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(schema)))
 
 
 @pytest.mark.skipif(os.name != "posix", reason="cross-process fixture requires POSIX")

@@ -1,6 +1,7 @@
 """Scoped run and tool evaluation via real SQLite/API with a mocked provider."""
 
 import asyncio
+import contextlib
 import hashlib
 import multiprocessing
 import os
@@ -110,6 +111,80 @@ def _sqlite_scoped_worker(path, approved, start, calls, outcomes):
         child_storage.close()
 
 
+def _waiting_scheduled_worker(url, signal, calls, outcomes):
+    original_guard = scoped_evaluation._cross_process_scoped_guard
+
+    @contextlib.contextmanager
+    def signalled_guard(storage_url):
+        signal.put("waiting")
+        with original_guard(storage_url):
+            yield
+
+    class CountingProvider(MockProvider):
+        def complete(self, request):
+            calls.put("called")
+            return super().complete(request)
+
+    scoped_evaluation._cross_process_scoped_guard = signalled_guard
+    try:
+        outcomes.put(run_scheduled_once(url, tenant="local", provider=CountingProvider()))
+    except Exception as exc:
+        outcomes.put({"status": "error", "error": type(exc).__name__})
+
+
+@pytest.mark.skipif(os.name != "posix", reason="SQLite cross-process lock requires POSIX")
+@pytest.mark.parametrize("while_waiting", ["cancel", "change_evidence", "terminate"])
+def test_scheduled_approval_stays_pending_while_scoped_lock_is_held(
+    tmp_path, while_waiting,
+):
+    path = tmp_path / "scheduled-wait.db"
+    url = f"sqlite:///{path}"
+    storage = SQLiteStorage(str(path))
+    storage.replace_agent_run_bundle(_bundle())
+    config = _config()
+    preview = preview_scoped(storage, tenant="local", config=config)
+    queued = schedule_scoped_once(
+        storage, storage_url=url, tenant="local",
+        config={**config, "planFingerprint": preview["planFingerprint"]},
+        max_estimated_usd=1, confirm_persistent_egress=True,
+    )
+    storage.close()
+    context = multiprocessing.get_context("spawn")
+    signal = context.Queue()
+    calls = context.Queue()
+    outcomes = context.Queue()
+    process = context.Process(target=_waiting_scheduled_worker,
+                              args=(url, signal, calls, outcomes))
+    with scoped_evaluation._cross_process_scoped_guard(url):
+        process.start()
+        assert signal.get(timeout=10) == "waiting"
+        current = ControlStore(url).history("local", "scheduled_evaluation", queued["jobId"])[0]
+        assert current["state"] == "pending"
+        if while_waiting == "cancel":
+            cancel_scheduled_once(url, tenant="local", job_id=queued["jobId"],
+                                  expected_revision=queued["revision"])
+        elif while_waiting == "change_evidence":
+            changed = _bundle()
+            changed_turn = replace(changed.turns[0],
+                                   final_response_redacted="I read the file. Additional detail.")
+            writable = SQLiteStorage(str(path))
+            writable.replace_agent_run_bundle(replace(changed, turns=(changed_turn,)))
+            writable.close()
+        else:
+            process.terminate()
+            process.join(timeout=10)
+            assert process.exitcode is not None
+    if while_waiting != "terminate":
+        process.join(timeout=10)
+        assert process.exitcode == 0
+        outcome = outcomes.get(timeout=1)
+        assert outcome["status"] == ("approval_changed" if while_waiting == "cancel" else "cancelled")
+    final = ControlStore(url).history("local", "scheduled_evaluation", queued["jobId"])[0]
+    assert final["state"] == ("pending" if while_waiting == "terminate" else "cancelled")
+    with pytest.raises(queue.Empty):
+        calls.get_nowait()
+
+
 @pytest.mark.skipif(os.name != "posix", reason="SQLite cross-process lock requires POSIX")
 def test_identical_scoped_evaluations_across_processes_make_one_provider_call(tmp_path):
     path = tmp_path / "concurrent-scoped.db"
@@ -186,6 +261,38 @@ def test_ready_scheduled_approval_is_not_blocked_by_missing_key(tmp_path, monkey
     assert waiting["jobId"] == "0" * 32
     assert waiting["status"] == "waiting_provider"
     storage.close()
+
+
+def test_scoped_run_reports_unsupported_sqlite_lock_platform(tmp_path, monkeypatch):
+    path = tmp_path / "platform.db"
+    url = f"sqlite:///{path}"
+    storage = SQLiteStorage(str(path))
+    storage.replace_agent_run_bundle(_bundle("__verdict_local__"))
+    preview = preview_scoped(storage, tenant="__verdict_local__", config=_config())
+    storage.close()
+
+    @contextlib.contextmanager
+    def unsupported(_storage_url):
+        raise scoped_evaluation.UnsupportedScopedPlatform(
+            "SQLite scoped evaluation locking requires POSIX; use PostgreSQL"
+        )
+        yield
+
+    monkeypatch.setattr(scoped_evaluation, "_cross_process_scoped_guard", unsupported)
+
+    async def request():
+        transport = httpx.ASGITransport(app=create_app(storage=url))
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            return await client.post(
+                "/api/scoped/run", headers={"X-Verdict-Setup": token},
+                json={**_config(), "planFingerprint": preview["planFingerprint"],
+                      "confirmExternalEgress": True},
+            )
+
+    response = asyncio.run(request())
+    assert response.status_code == 501
+    assert "requires POSIX" in response.json()["error"]
 
 
 def test_event_order_key_matches_typed_and_session_projection_with_ties(tmp_path):

@@ -43,6 +43,10 @@ _CITATION_REQUEST = ("For each scored dimension, cite at least one exact [turn:.
 _LOCK = threading.Lock()
 
 
+class UnsupportedScopedPlatform(OSError):
+    """Cross-process SQLite scoped evaluation locking is unavailable."""
+
+
 @contextlib.contextmanager
 def _cross_process_scoped_guard(storage_url: str):
     """Serialize scoped calls for one store until the saved-result replay check completes."""
@@ -57,7 +61,9 @@ def _cross_process_scoped_guard(storage_url: str):
                 connection.execute("SELECT pg_advisory_unlock(%s)", (0x5645524449435402,))
         return
     if os.name != "posix":
-        raise OSError("SQLite scoped evaluation locking requires POSIX; use PostgreSQL")
+        raise UnsupportedScopedPlatform(
+            "SQLite scoped evaluation locking requires POSIX; use PostgreSQL"
+        )
     import fcntl
 
     path = sqlite_path(storage_url)
@@ -346,81 +352,89 @@ def execute_scoped(storage, *, storage_url: str, tenant: str, config: dict[str, 
     if confirm_external_egress is not True:
         raise ValueError("external judge egress was not confirmed")
     with _LOCK, _cross_process_scoped_guard(storage_url):
-        preview, rubric = _plan(storage, tenant, config, storage_url)
-        if preview["plannedCalls"] != 1 or config.get("planFingerprint") != preview["planFingerprint"]:
-            raise ValueError("scoped preview is no longer current")
-        store = ControlStore(storage_url)
-        for prior_status in ("completed", "error"):
-            prior_id = hashlib.sha256(_canonical([
-                tenant, preview["planFingerprint"], prior_status,
-            ])).hexdigest()
-            existing = store.history(tenant, "scoped_evaluation", prior_id)
-            if existing:
-                return {"resultId": prior_id, **existing[0]["payload"]}
-        provider_name = preview["provider"]
-        judge = _judge(provider or _provider(provider_name), preview["model"], rubric,
-                       config.get("maxOutputTokens", 512))
-        base_identity = judge.evaluator_identity(None)
-        expected = _judge(_IdentityOnlyProvider(provider_name), preview["model"], rubric,
-                          config.get("maxOutputTokens", 512)).evaluator_identity(None)
-        if base_identity["evaluator_fingerprint"] != expected["evaluator_fingerprint"]:
-            raise ValueError("judge provider behavior changed after preview")
-        evidence = preview["evidencePreview"]
-        try:
-            scores = judge.score(query=evidence["query"], response=evidence["response"])
-            allowed_refs = set(evidence["evidenceReferences"])
-            dimensions = []
-            for score in scores:
-                references = [
-                    (kind, identifier) for kind, identifier in _REF.findall(score.reasoning)
-                    if kind in {"turn", "event"}
-                ]
-                cited = [f"{kind}:{identifier}" for kind, identifier in references]
-                if any(f"{kind}:{identifier}" not in allowed_refs
-                       for kind, identifier in references):
-                    raise ValueError("judge cited evidence outside the selected scope")
-                dimensions.append({
-                    "name": score.name, "verdict": score.verdict.value,
-                    "explanation": (redact(score.reasoning) or "")[:2_000],
-                    "evidenceReferences": cited,
-                    "citationStatus": "linked" if cited else "uncited_opinion",
-                })
-            status, error = "completed", None
-        except Exception as exc:
-            status, error, dimensions = "error", type(exc).__name__, []
-        # An append or corrected import during the provider call invalidates the
-        # judgment even when the user approved the pre-call projection.
-        try:
-            still_current = _plan(storage, tenant, config, storage_url)[0]["planFingerprint"] == preview["planFingerprint"]
-        except (KeyError, TypeError, ValueError, UnicodeError):
-            still_current = False
-        if not still_current:
-            status, error, dimensions = "error", "evidence_changed_during_evaluation", []
-        result = {
-            "scope": evidence["scope"], "runId": evidence["runId"],
-            "sessionId": evidence.get("sessionId"),
-            "sourceKind": evidence.get("sourceKind"),
-            "runIds": evidence.get("runIds"),
-            "eventId": evidence["eventId"], "coverage": evidence["coverage"],
-            "evidenceFingerprint": evidence["evidenceFingerprint"],
-            "evidenceReferences": evidence["evidenceReferences"],
-            "evaluatorFingerprint": preview["evaluatorFingerprint"],
-            "provider": provider_name, "model": preview["model"],
-            "rubric": preview["rubric"], "promptVersion": _PROMPT_VERSION,
-            "status": status, "error": error, "dimensions": dimensions,
-        }
-        safe = redact_structure(result)
-        if not isinstance(safe, dict):
-            raise ValueError("scoped result redaction failed")
-        document_id = hashlib.sha256(_canonical([
-            tenant, preview["planFingerprint"], status,
+        return _execute_scoped_locked(storage, storage_url=storage_url, tenant=tenant,
+                                      config=config, provider=provider)
+
+
+def _execute_scoped_locked(storage, *, storage_url: str, tenant: str,
+                           config: dict[str, Any], provider=None,
+                           planned: tuple[dict[str, Any], Any] | None = None) -> dict[str, Any]:
+    """Execute only while the caller holds both scoped locks."""
+    preview, rubric = planned if planned is not None else _plan(storage, tenant, config, storage_url)
+    if preview["plannedCalls"] != 1 or config.get("planFingerprint") != preview["planFingerprint"]:
+        raise ValueError("scoped preview is no longer current")
+    store = ControlStore(storage_url)
+    for prior_status in ("completed", "error"):
+        prior_id = hashlib.sha256(_canonical([
+            tenant, preview["planFingerprint"], prior_status,
         ])).hexdigest()
-        existing = store.history(tenant, "scoped_evaluation", document_id)
+        existing = store.history(tenant, "scoped_evaluation", prior_id)
         if existing:
-            return {"resultId": document_id, **existing[0]["payload"]}
-        store.append(tenant, kind="scoped_evaluation", document_id=document_id,
-                     state=status, payload=safe, expected_revision=None)
-        return {"resultId": document_id, **safe}
+            return {"resultId": prior_id, **existing[0]["payload"]}
+    provider_name = preview["provider"]
+    judge = _judge(provider or _provider(provider_name), preview["model"], rubric,
+                   config.get("maxOutputTokens", 512))
+    base_identity = judge.evaluator_identity(None)
+    expected = _judge(_IdentityOnlyProvider(provider_name), preview["model"], rubric,
+                      config.get("maxOutputTokens", 512)).evaluator_identity(None)
+    if base_identity["evaluator_fingerprint"] != expected["evaluator_fingerprint"]:
+        raise ValueError("judge provider behavior changed after preview")
+    evidence = preview["evidencePreview"]
+    try:
+        scores = judge.score(query=evidence["query"], response=evidence["response"])
+        allowed_refs = set(evidence["evidenceReferences"])
+        dimensions = []
+        for score in scores:
+            references = [
+                (kind, identifier) for kind, identifier in _REF.findall(score.reasoning)
+                if kind in {"turn", "event"}
+            ]
+            cited = [f"{kind}:{identifier}" for kind, identifier in references]
+            if any(f"{kind}:{identifier}" not in allowed_refs
+                   for kind, identifier in references):
+                raise ValueError("judge cited evidence outside the selected scope")
+            dimensions.append({
+                "name": score.name, "verdict": score.verdict.value,
+                "explanation": (redact(score.reasoning) or "")[:2_000],
+                "evidenceReferences": cited,
+                "citationStatus": "linked" if cited else "uncited_opinion",
+            })
+        status, error = "completed", None
+    except Exception as exc:
+        status, error, dimensions = "error", type(exc).__name__, []
+    # An append or corrected import during the provider call invalidates the
+    # judgment even when the user approved the pre-call projection.
+    try:
+        still_current = _plan(storage, tenant, config, storage_url)[0]["planFingerprint"] == preview["planFingerprint"]
+    except (KeyError, TypeError, ValueError, UnicodeError):
+        still_current = False
+    if not still_current:
+        status, error, dimensions = "error", "evidence_changed_during_evaluation", []
+    result = {
+        "scope": evidence["scope"], "runId": evidence["runId"],
+        "sessionId": evidence.get("sessionId"),
+        "sourceKind": evidence.get("sourceKind"),
+        "runIds": evidence.get("runIds"),
+        "eventId": evidence["eventId"], "coverage": evidence["coverage"],
+        "evidenceFingerprint": evidence["evidenceFingerprint"],
+        "evidenceReferences": evidence["evidenceReferences"],
+        "evaluatorFingerprint": preview["evaluatorFingerprint"],
+        "provider": provider_name, "model": preview["model"],
+        "rubric": preview["rubric"], "promptVersion": _PROMPT_VERSION,
+        "status": status, "error": error, "dimensions": dimensions,
+    }
+    safe = redact_structure(result)
+    if not isinstance(safe, dict):
+        raise ValueError("scoped result redaction failed")
+    document_id = hashlib.sha256(_canonical([
+        tenant, preview["planFingerprint"], status,
+    ])).hexdigest()
+    existing = store.history(tenant, "scoped_evaluation", document_id)
+    if existing:
+        return {"resultId": document_id, **existing[0]["payload"]}
+    store.append(tenant, kind="scoped_evaluation", document_id=document_id,
+                 state=status, payload=safe, expected_revision=None)
+    return {"resultId": document_id, **safe}
 
 
 def _scheduled_upper_cost(preview: dict[str, Any], rubric) -> float | None:
@@ -500,6 +514,33 @@ def cancel_scheduled_once(storage_url: str, *, tenant: str, job_id: str,
     return {"jobId": job_id, "state": entry["state"], "revision": entry["revision"]}
 
 
+def _validated_scheduled_plan(storage, storage_url: str, tenant: str,
+                             config: dict[str, Any], payload: dict[str, Any]):
+    preview, rubric = _plan(storage, tenant, config, storage_url)
+    upper_cost = _scheduled_upper_cost(preview, rubric)
+    if not (
+        preview["plannedCalls"] == 1
+        and preview["planFingerprint"] == payload.get("planFingerprint")
+        and preview["destination"] == payload.get("destination")
+        and preview["provider"] in {"anthropic", "openai"}
+        and payload.get("maxCalls") == 1
+        and upper_cost is not None
+        and upper_cost <= payload.get("maxEstimatedUsd", -1)
+    ):
+        raise ValueError("scheduled evidence or authorization is stale")
+    return preview, rubric
+
+
+def _scheduled_storage(storage_url: str):
+    if is_postgres_storage(storage_url):
+        from verdict.storage.postgres import PostgresStorage
+
+        return PostgresStorage(storage_url)
+    from verdict.client import _resolve_storage
+
+    return _resolve_storage(storage_url)
+
+
 def run_scheduled_once(storage_url: str, *, tenant: str, provider=None) -> dict[str, Any]:
     """Consume at most one pending approval before any network call."""
     store = ControlStore(storage_url)
@@ -537,22 +578,10 @@ def run_scheduled_once(storage_url: str, *, tenant: str, provider=None) -> dict[
 
     storage = None
     try:
-        from verdict.client import _resolve_storage
-
-        storage = _resolve_storage(storage_url)
-        preview, rubric = _plan(storage, tenant, config, storage_url)
-        upper_cost = _scheduled_upper_cost(preview, rubric)
-        valid = (
-            preview["plannedCalls"] == 1
-            and preview["planFingerprint"] == payload.get("planFingerprint")
-            and preview["destination"] == payload.get("destination")
-            and preview["provider"] in {"anthropic", "openai"}
-            and payload.get("maxCalls") == 1
-            and upper_cost is not None
-            and upper_cost <= payload.get("maxEstimatedUsd", -1)
+        storage = _scheduled_storage(storage_url)
+        preview, rubric = _validated_scheduled_plan(
+            storage, storage_url, tenant, config, payload,
         )
-        if not valid:
-            raise ValueError("scheduled evidence or authorization is stale")
     except (KeyError, TypeError, ValueError, UnicodeError):
         return cancel_before_egress("stale_or_invalid")
     except ImportError as exc:
@@ -572,49 +601,61 @@ def run_scheduled_once(storage_url: str, *, tenant: str, provider=None) -> dict[
             adapter = (AnthropicAdapter(max_retries=1, sdk_max_retries=0)
                        if preview["provider"] == "anthropic"
                        else OpenAIAdapter(max_retries=1, sdk_max_retries=0))
-        actual = _judge(adapter, preview["model"], rubric, config["maxOutputTokens"])
-        expected = _judge(_IdentityOnlyProvider(preview["provider"]),
-                          preview["model"], rubric, config["maxOutputTokens"])
-        if actual.evaluator_identity(None)["evaluator_fingerprint"] != expected.evaluator_identity(None)["evaluator_fingerprint"]:
-            raise ValueError("judge provider behavior changed after preview")
     except Exception as exc:
         client = getattr(adapter, "_client", None)
         if client is not None and hasattr(client, "close"):
             client.close()
         return cancel_before_egress("preflight_failed", type(exc).__name__)
-    try:
-        spent = store.append(
-            tenant, kind="scheduled_evaluation", document_id=job_id,
-            state="spent", payload={**payload, "outcome": "attempt_reserved"},
-            expected_revision=pending["revision"],
-        )
-    except ValueError:
-        client = getattr(adapter, "_client", None)
-        if client is not None and hasattr(client, "close"):
-            client.close()
-        return {"jobId": job_id, "status": "approval_changed"}
     storage = None
     try:
-        from verdict.client import _resolve_storage
-
-        storage = _resolve_storage(storage_url)
-        result = execute_scoped(
-            storage, storage_url=storage_url, tenant=tenant,
-            config={**config, "planFingerprint": payload["planFingerprint"]},
-            confirm_external_egress=True, provider=adapter,
-        )
-        recorded = store.append(
-            tenant, kind="scheduled_evaluation", document_id=job_id,
-            state="spent", payload={**payload, "outcome": result["status"],
-                                    "resultId": result["resultId"],
-                                    "error": result.get("error")},
-            expected_revision=spent["revision"],
-        )
-        return {"jobId": job_id, "status": result["status"],
-                "resultId": result["resultId"], "revision": recorded["revision"]}
-    except Exception as exc:
-        return {"jobId": job_id, "status": "spent_outcome_unknown",
-                "error": type(exc).__name__, "revision": spent["revision"]}
+        with _LOCK, _cross_process_scoped_guard(storage_url):
+            storage = _scheduled_storage(storage_url)
+            try:
+                preview, rubric = _validated_scheduled_plan(
+                    storage, storage_url, tenant, config, payload,
+                )
+            except (KeyError, TypeError, ValueError, UnicodeError):
+                return cancel_before_egress("stale_or_invalid")
+            except ImportError as exc:
+                return cancel_before_egress("preflight_failed", type(exc).__name__)
+            if provider is None and not os.environ.get(key_name):
+                return {"jobId": job_id, "status": "waiting_provider"}
+            try:
+                actual = _judge(adapter, preview["model"], rubric, config["maxOutputTokens"])
+                expected = _judge(_IdentityOnlyProvider(preview["provider"]),
+                                  preview["model"], rubric, config["maxOutputTokens"])
+                if actual.evaluator_identity(None)["evaluator_fingerprint"] != expected.evaluator_identity(None)["evaluator_fingerprint"]:
+                    raise ValueError("judge provider behavior changed after preview")
+            except Exception as exc:
+                return cancel_before_egress("preflight_failed", type(exc).__name__)
+            try:
+                spent = store.append(
+                    tenant, kind="scheduled_evaluation", document_id=job_id,
+                    state="spent", payload={**payload, "outcome": "attempt_reserved"},
+                    expected_revision=pending["revision"],
+                )
+            except ValueError:
+                return {"jobId": job_id, "status": "approval_changed"}
+            try:
+                result = _execute_scoped_locked(
+                    storage, storage_url=storage_url, tenant=tenant,
+                    config={**config, "planFingerprint": payload["planFingerprint"]},
+                    provider=adapter, planned=(preview, rubric),
+                )
+                recorded = store.append(
+                    tenant, kind="scheduled_evaluation", document_id=job_id,
+                    state="spent", payload={**payload, "outcome": result["status"],
+                                            "resultId": result["resultId"],
+                                            "error": result.get("error")},
+                    expected_revision=spent["revision"],
+                )
+                return {"jobId": job_id, "status": result["status"],
+                        "resultId": result["resultId"], "revision": recorded["revision"]}
+            except Exception as exc:
+                return {"jobId": job_id, "status": "spent_outcome_unknown",
+                        "error": type(exc).__name__, "revision": spent["revision"]}
+    except UnsupportedScopedPlatform as exc:
+        return {"jobId": job_id, "status": "unsupported_platform", "error": str(exc)}
     finally:
         if storage is not None:
             storage.close()
@@ -709,6 +750,8 @@ def register_scoped_routes(app, setup: SetupRoutes) -> None:
             return execute_scoped(storage, storage_url=setup.storage_url,
                                   tenant=setup.tenant_id, config=payload,
                                   confirm_external_egress=payload.get("confirmExternalEgress") is True)
+        except UnsupportedScopedPlatform as exc:
+            return JSONResponse({"error": str(exc)}, status_code=501)
         except (KeyError, TypeError, ValueError, UnicodeError):
             return JSONResponse({"error": "invalid or stale scoped evaluation"}, status_code=400)
         finally:
