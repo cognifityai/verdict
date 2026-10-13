@@ -6,10 +6,10 @@ import json
 import re
 import sqlite3
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
 from verdict.dashboard.storage_url import is_postgres_storage
+from verdict.storage.sqlite import sqlite_path
 
 KINDS = {"settings", "schedule", "alert", "proposal", "review", "case_set", "experiment", "scoped_evaluation", "scheduled_evaluation"}
 STATES = {
@@ -157,8 +157,7 @@ class ControlStore:
             except ImportError as exc:
                 raise ImportError("control plane requires the postgres extra") from exc
             return psycopg.connect(self.storage, autocommit=False, row_factory=dict_row)
-        path = self.storage[len("sqlite:///"):] if self.storage.startswith("sqlite:///") else self.storage
-        connection = sqlite3.connect(Path(path))
+        connection = sqlite3.connect(sqlite_path(self.storage))
         connection.row_factory = sqlite3.Row
         return connection
 

@@ -21,6 +21,7 @@ from fastapi.responses import JSONResponse
 from verdict.dashboard.analysis_service import run_analysis
 from verdict.dashboard.control_plane import normalize_source_root
 from verdict.dashboard.storage_url import is_postgres_storage
+from verdict.storage.sqlite import sqlite_path
 from verdict.telemetry.files import SUPPORTED_FORMATS, iter_telemetry_file
 from verdict.telemetry.local_agents import capture_local_agents
 from verdict.telemetry.model import ImportContext
@@ -79,11 +80,7 @@ def _is_postgres(storage_url: str) -> bool:
 
 
 def _sqlite_path(storage_url: str) -> Path:
-    return Path(
-        storage_url[len("sqlite:///") :]
-        if storage_url.startswith("sqlite:///")
-        else storage_url
-    )
+    return sqlite_path(storage_url)
 
 
 class SetupRoutes:

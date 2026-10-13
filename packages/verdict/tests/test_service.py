@@ -9,6 +9,7 @@ import urllib.error
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from verdict.client import _resolve_storage
 from verdict.dashboard.control_plane import ControlStore
 from verdict.monitoring import (
     MonitorPolicy,
@@ -102,6 +103,23 @@ def test_cycle_guard_rejects_overlap_and_recovers_after_release(tmp_path) -> Non
             run_cycle(storage_url, {"analyzeOnly": True})
     result = run_cycle(storage_url, {"analyzeOnly": True})
     assert result["analysis"]["status"] == "completed"
+
+
+def test_cycle_guard_uses_the_storage_file_for_tilde_and_relative_urls(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+    for url, expected in (
+        ("sqlite:///~/tilde.db", tmp_path / "tilde.db"),
+        ("sqlite:///./relative.db", tmp_path / "relative.db"),
+    ):
+        storage = _resolve_storage(url)
+        storage.close()
+        assert expected.exists()
+        with cycle_guard(url):
+            assert expected.with_name(expected.name + ".service.lock").exists()
+            with pytest.raises(CycleBusy):
+                with cycle_guard(f"sqlite:///{expected}"):
+                    pass
 
 
 def test_continuous_cli_survives_busy_cycle_and_runs_after_release(tmp_path) -> None:

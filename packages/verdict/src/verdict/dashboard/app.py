@@ -61,6 +61,7 @@ from verdict.metrics import ScoreCounts, verdict_label
 from verdict.monitor_inputs import LOCAL_TENANT
 from verdict.normalized_evidence import agent_turn_from_row, normalized_bundle_digest
 from verdict.redaction import redact, redact_structure, sanitize_agent_event_attributes
+from verdict.storage.sqlite import sqlite_path
 from verdict.telemetry.model import safe_tenant_id
 from verdict.trace_facts import deterministic_trace_facts
 
@@ -361,11 +362,7 @@ def resolve_storage(storage: str | os.PathLike[str] | None = None) -> str:
 
 
 def _sqlite_path(storage: str) -> Path:
-    if storage.startswith("sqlite:///"):
-        storage = storage.removeprefix("sqlite:///")
-    elif "://" in storage:
-        raise ValueError("dashboard storage must use sqlite or postgresql")
-    return Path(storage).expanduser().resolve()
+    return sqlite_path(storage)
 
 
 def _is_postgres(storage: str) -> bool:

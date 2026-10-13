@@ -31,6 +31,7 @@ from verdict.monitor_inputs import (
     advance_monitor,
 )
 from verdict.monitoring import MonitorRebootstrapRequired, MonitorStateConflict
+from verdict.storage.sqlite import sqlite_path
 from verdict.telemetry.local_agents import capture_local_agents
 
 _log = logging.getLogger("verdict.service")
@@ -67,7 +68,7 @@ def cycle_guard(storage_url: str):
         raise UnsupportedCyclePlatform("SQLite cycle locking requires POSIX; use PostgreSQL on this platform")
     import fcntl
 
-    path = Path(storage_url[len("sqlite:///"):] if storage_url.startswith("sqlite:///") else storage_url)
+    path = sqlite_path(storage_url)
     lock_path = path.with_name(path.name + ".service.lock")
     with lock_path.open("a+b") as handle:
         try:
