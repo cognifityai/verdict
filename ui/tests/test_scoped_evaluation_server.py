@@ -2,6 +2,10 @@
 
 import asyncio
 import hashlib
+import multiprocessing
+import os
+import queue
+import time
 from dataclasses import replace
 from datetime import datetime, timezone
 
@@ -82,6 +86,106 @@ class MockProvider:
             '{"completion":{"reasoning":"' + self.citation +
             ' shows the selected action","verdict":"PASS"}}'
         ), input_tokens=10, output_tokens=10)
+
+
+def _sqlite_scoped_worker(path, approved, start, calls, outcomes):
+    child_storage = SQLiteStorage(str(path))
+
+    class SlowProvider(MockProvider):
+        def complete(self, request):
+            calls.put("called")
+            time.sleep(0.4)
+            return super().complete(request)
+
+    start.wait()
+    try:
+        result = execute_scoped(
+            child_storage, storage_url=f"sqlite:///{path}", tenant="local", config=approved,
+            confirm_external_egress=True, provider=SlowProvider(),
+        )
+        outcomes.put(("ok", result["resultId"]))
+    except Exception as exc:
+        outcomes.put(("error", type(exc).__name__))
+    finally:
+        child_storage.close()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="SQLite cross-process lock requires POSIX")
+def test_identical_scoped_evaluations_across_processes_make_one_provider_call(tmp_path):
+    path = tmp_path / "concurrent-scoped.db"
+    storage = SQLiteStorage(str(path))
+    storage.replace_agent_run_bundle(_bundle())
+    config = _config()
+    preview = preview_scoped(storage, tenant="local", config=config)
+    approved = {**config, "planFingerprint": preview["planFingerprint"]}
+    storage.close()
+    context = multiprocessing.get_context("spawn")
+    start = context.Event()
+    calls = context.Queue()
+    outcomes = context.Queue()
+
+    processes = [context.Process(target=_sqlite_scoped_worker,
+                                 args=(path, approved, start, calls, outcomes))
+                 for _ in range(2)]
+    for process in processes:
+        process.start()
+    start.set()
+    for process in processes:
+        process.join(timeout=10)
+        assert process.exitcode == 0
+    results = [outcomes.get(timeout=1) for _ in processes]
+    assert results[0][0] == results[1][0] == "ok"
+    assert results[0][1] == results[1][1]
+    assert calls.get(timeout=1) == "called"
+    with pytest.raises(queue.Empty):
+        calls.get_nowait()
+
+
+def test_ready_scheduled_approval_is_not_blocked_by_missing_key(tmp_path, monkeypatch):
+    path = tmp_path / "mixed-provider-approvals.db"
+    url = f"sqlite:///{path}"
+    storage = SQLiteStorage(str(path))
+    storage.replace_agent_run_bundle(_bundle())
+    rubric = _config()["rubric"]
+    configs = [
+        {**_config(), "provider": "anthropic"},
+        {**_config(), "provider": "openai", "model": "gpt-4o-mini"},
+    ]
+    ids = iter(("0" * 32, "f" * 32))
+    monkeypatch.setattr(scoped_evaluation.secrets, "token_hex", lambda size: next(ids))
+    for config in configs:
+        preview = preview_scoped(storage, tenant="local", config=config)
+        schedule_scoped_once(
+            storage, storage_url=url, tenant="local",
+            config={**config, "rubric": rubric, "planFingerprint": preview["planFingerprint"]},
+            max_estimated_usd=1, confirm_persistent_egress=True,
+        )
+
+    class OpenAIProvider:
+        name = "openai"
+        supports_temperature = _IdentityOnlyProvider("openai").supports_temperature
+        calls = 0
+
+        def __init__(self, **kwargs):
+            pass
+
+        def complete(self, request):
+            self.calls += 1
+            return CompletionResponse(text=(
+                '{"completion":{"reasoning":"[turn:turn-a] shows completion",'
+                '"verdict":"PASS"}}'
+            ), input_tokens=10, output_tokens=10)
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "synthetic-test-key")
+    monkeypatch.setattr("verdict_eval.providers.OpenAIAdapter", OpenAIProvider)
+    ready = run_scheduled_once(url, tenant="local")
+    assert ready["jobId"] == "f" * 32
+    assert ready["status"] == "completed"
+    waiting = run_scheduled_once(url, tenant="local")
+    assert waiting["jobId"] == "0" * 32
+    assert waiting["status"] == "waiting_provider"
+    storage.close()
 
 
 def test_event_order_key_matches_typed_and_session_projection_with_ties(tmp_path):

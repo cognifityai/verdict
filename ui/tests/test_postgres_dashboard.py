@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import multiprocessing
 import os
+import queue
+import time
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
@@ -20,6 +23,8 @@ from verdict.dashboard.app import (
     create_app,
 )
 from verdict.dashboard.control_plane import ControlStore
+from verdict.dashboard.evaluator_lab import _IdentityOnlyProvider
+from verdict.dashboard.scoped_evaluation import execute_scoped, preview_scoped
 from verdict.evidence import (
     AgentEvent,
     AgentEventType,
@@ -47,6 +52,7 @@ from verdict.schema import (
 )
 from verdict.storage import SQLiteStorage
 from verdict.storage.postgres import PostgresStorage
+from verdict_eval.providers import CompletionResponse
 
 DSN = os.environ.get("VERDICT_TEST_POSTGRES_DSN")
 try:
@@ -66,6 +72,87 @@ if not (
 POSTGRES_SKIP_REASON = "no explicitly disposable live PostgreSQL database"
 
 pytestmark = pytest.mark.skipif(DSN is None, reason=POSTGRES_SKIP_REASON)
+
+
+def _postgres_scoped_worker(scoped_dsn, approved, start, calls, outcomes):
+    child_storage = PostgresStorage(scoped_dsn, min_pool=1, max_pool=1)
+
+    class SlowProvider:
+        name = "anthropic"
+        supports_temperature = _IdentityOnlyProvider("anthropic").supports_temperature
+
+        def complete(self, request):
+            calls.put("called")
+            time.sleep(0.4)
+            return CompletionResponse(text=(
+                '{"completion":{"reasoning":"[turn:turn] records completion",'
+                '"verdict":"PASS"}}'
+            ), input_tokens=10, output_tokens=10)
+
+    start.wait()
+    try:
+        result = execute_scoped(
+            child_storage, storage_url=scoped_dsn, tenant="local", config=approved,
+            confirm_external_egress=True, provider=SlowProvider(),
+        )
+        outcomes.put(("ok", result["resultId"]))
+    except Exception as exc:
+        outcomes.put(("error", type(exc).__name__))
+    finally:
+        child_storage.close()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="cross-process fixture requires POSIX")
+def test_live_postgres_identical_scoped_evaluations_call_provider_once() -> None:
+    import psycopg
+    from psycopg import sql
+    from psycopg.conninfo import make_conninfo
+
+    schema = f"verdict_scoped_lock_{uuid4().hex}"
+    with psycopg.connect(DSN, autocommit=True) as admin:
+        admin.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+    try:
+        scoped_dsn = make_conninfo(DSN, options=f"-csearch_path={schema}")
+        now = datetime.now(timezone.utc)
+        storage = PostgresStorage(scoped_dsn, min_pool=1, max_pool=1)
+        storage.replace_agent_run_bundle(AgentRunBundle(
+            SourceSession("source", "local", "synthetic", "a" * 64, now, now),
+            AgentRun("run", "source", "local", now, ExecutionStatus.COMPLETED, now),
+            (AgentTurn("turn", "run", 0, now, ExecutionStatus.COMPLETED, now,
+                       "Do the task", "Task complete",
+                       EvidenceState.PRESENT, EvidenceState.PRESENT),), (),
+        ))
+        config = {"scope": "run", "runId": "run", "provider": "anthropic",
+                  "model": "claude-haiku-4-5", "maxOutputTokens": 256,
+                  "rubric": {"name": "task_review", "version": "1", "dimensions": [
+                      {"name": "completion", "description": "Did the task complete?"},
+                  ]}}
+        preview = preview_scoped(storage, tenant="local", config=config)
+        approved = {**config, "planFingerprint": preview["planFingerprint"]}
+        storage.close()
+        context = multiprocessing.get_context("spawn")
+        start = context.Event()
+        calls = context.Queue()
+        outcomes = context.Queue()
+
+        processes = [context.Process(target=_postgres_scoped_worker,
+                                     args=(scoped_dsn, approved, start, calls, outcomes))
+                     for _ in range(2)]
+        for process in processes:
+            process.start()
+        start.set()
+        for process in processes:
+            process.join(timeout=10)
+            assert process.exitcode == 0
+        results = [outcomes.get(timeout=1) for _ in processes]
+        assert results[0][0] == results[1][0] == "ok"
+        assert results[0][1] == results[1][1]
+        assert calls.get(timeout=1) == "called"
+        with pytest.raises(queue.Empty):
+            calls.get_nowait()
+    finally:
+        with psycopg.connect(DSN, autocommit=True) as admin:
+            admin.execute(sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(schema)))
 
 
 def test_live_postgres_only_one_pending_approval_per_plan() -> None:

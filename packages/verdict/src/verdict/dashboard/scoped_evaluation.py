@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import math
@@ -25,9 +26,11 @@ from verdict.dashboard.evaluator_lab import (
     _validated_config,
 )
 from verdict.dashboard.setup_routes import SetupRoutes
+from verdict.dashboard.storage_url import is_postgres_storage
 from verdict.evidence import AgentEventType, EvidenceState, event_order_key
 from verdict.pricing import compute_cost_usd
 from verdict.redaction import _PLACEHOLDER, redact, redact_structure
+from verdict.storage.sqlite import sqlite_path
 
 _MAX_TURNS = 20
 _MAX_EVENTS = 80
@@ -38,6 +41,35 @@ _CITATION_REQUEST = ("For each scored dimension, cite at least one exact [turn:.
                      "[event:...] reference from the recorded evidence in the reasoning. "
                      "If the evidence does not support a judgment, return UNCLEAR.\n")
 _LOCK = threading.Lock()
+
+
+@contextlib.contextmanager
+def _cross_process_scoped_guard(storage_url: str):
+    """Serialize scoped calls for one store until the saved-result replay check completes."""
+    if is_postgres_storage(storage_url):
+        import psycopg
+
+        with psycopg.connect(storage_url, autocommit=True) as connection:
+            connection.execute("SELECT pg_advisory_lock(%s)", (0x5645524449435402,))
+            try:
+                yield
+            finally:
+                connection.execute("SELECT pg_advisory_unlock(%s)", (0x5645524449435402,))
+        return
+    if os.name != "posix":
+        raise OSError("SQLite scoped evaluation locking requires POSIX; use PostgreSQL")
+    import fcntl
+
+    path = sqlite_path(storage_url)
+    lock_path = path.with_name(path.name + ".scoped.lock")
+    with lock_path.open("a+b") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
 def _canonical(value: object) -> bytes:
     return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()
 
@@ -313,7 +345,7 @@ def execute_scoped(storage, *, storage_url: str, tenant: str, config: dict[str, 
                    confirm_external_egress: bool, provider=None) -> dict[str, Any]:
     if confirm_external_egress is not True:
         raise ValueError("external judge egress was not confirmed")
-    with _LOCK:
+    with _LOCK, _cross_process_scoped_guard(storage_url):
         preview, rubric = _plan(storage, tenant, config, storage_url)
         if preview["plannedCalls"] != 1 or config.get("planFingerprint") != preview["planFingerprint"]:
             raise ValueError("scoped preview is no longer current")
@@ -471,10 +503,19 @@ def cancel_scheduled_once(storage_url: str, *, tenant: str, job_id: str,
 def run_scheduled_once(storage_url: str, *, tenant: str, provider=None) -> dict[str, Any]:
     """Consume at most one pending approval before any network call."""
     store = ControlStore(storage_url)
-    pending = next((item for item in store.list_current(tenant)
-                    if item["kind"] == "scheduled_evaluation" and item["state"] == "pending"), None)
-    if pending is None:
+    pending_jobs = [item for item in store.list_current(tenant)
+                    if item["kind"] == "scheduled_evaluation" and item["state"] == "pending"]
+    if not pending_jobs:
         return {"status": "idle"}
+    pending = pending_jobs[0]
+    if provider is None:
+        for candidate in pending_jobs:
+            stored = candidate["payload"].get("config")
+            requested = stored.get("provider") if isinstance(stored, dict) else None
+            key_name = {"anthropic": "ANTHROPIC_API_KEY", "openai": "OPENAI_API_KEY"}.get(requested)
+            if key_name and os.environ.get(key_name):
+                pending = candidate
+                break
     job_id = str(pending["documentId"])
     payload = dict(pending["payload"])
     config = _scheduled_config(payload)
