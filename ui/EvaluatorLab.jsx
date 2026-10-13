@@ -46,11 +46,13 @@ function readPreferences() {
   }
 }
 
-export function EvaluatorLab({ configUrl, onOpenEvaluated }) {
+export function EvaluatorLab({ configUrl, onOpenEvaluated, onClearSelection, selection = null }) {
   const root = configUrl.replace(/\/api\/config$/, "");
   const [token, setToken] = useState(null);
   const [environment, setEnvironment] = useState(null);
-  const [preferences, setPreferences] = useState(readPreferences);
+  const [preferences, setPreferences] = useState(() => ({
+    ...readPreferences(), ...(selection?.unit ? { unit: selection.unit } : {}),
+  }));
   const { provider, model, unit, includeToolCounts, judgeAll, maxCalls } = preferences;
   const updatePreferences = (changes) => setPreferences((current) => ({ ...current, ...changes }));
   const [rubricName, setRubricName] = useState("response_quality");
@@ -97,9 +99,13 @@ export function EvaluatorLab({ configUrl, onOpenEvaluated }) {
   }, [busyAction, evaluationStartedAt]);
   const payload = (cursor = turnCursor) => ({
     provider, model, maxCalls: judgeAll ? "all" : maxCalls, maxOutputTokens: 512,
-    unit, ...(unit === "agent_turn" ? { scanLimit: 100,
+    unit, ...(unit === "trace" && selection?.unit === "trace" && selection.traceId
+      ? { traceId: selection.traceId } : {}),
+    ...(unit === "agent_turn" && selection?.unit === "agent_turn"
+      ? { runId: selection.runId, turnId: selection.turnId } : {}),
+    ...(unit === "agent_turn" ? { ...(!selection?.runId ? { scanLimit: 100 } : {}),
       ...(includeToolCounts ? { toolEvidence: "counts_v1" } : {}),
-      ...(cursor ? { before: cursor } : {}) } : {}),
+      ...(cursor && !selection?.runId ? { before: cursor } : {}) } : {}),
     rubric: { name: rubricName, version: rubricVersion, dimensions: dimensions.map(([name, description]) => ({ name, description })) },
   });
   const previewCurrent = previewConfigKey === JSON.stringify(payload());
@@ -142,8 +148,9 @@ export function EvaluatorLab({ configUrl, onOpenEvaluated }) {
       <div className="text-xs font-mono" style={{ color: C.green }}>EVIDENCE-AWARE EVALUATOR LAB</div>
       <h2 className="text-lg font-semibold mt-1">Configure and preflight a judge</h2>
       <p className="text-sm mt-2" style={{ color: C.sub }}>Choose provider Trace for individual model calls or Agent Turn for a completed, untruncated request and final output. Optional recorded tool-event counts can accompany a Turn; direct origin labels describe only the observed outer dispatch and cannot verify downstream protocols, citations, or factual claims. Preview does not send data externally.</p>
+      {selection && selection.unit === unit && <div className="text-xs mt-3" style={{ color: C.green }}>Selected {selection.unit === "agent_turn" ? `turn ${selection.turnId} in run ${selection.runId}` : `Trace ${selection.traceId}`}. Preview is bound to this exact scope.</div>}
       <div className="grid sm:grid-cols-2 gap-4 mt-5">
-        <label className="text-sm">Evaluation unit<select value={unit} onChange={(event) => { updatePreferences({ unit: event.target.value }); setTurnCursor(null); setPreview(null); setConfirmed(false); }} className="block w-full border p-2 mt-1 bg-transparent"><option value="trace">Provider Trace</option><option value="agent_turn">Agent Turn (final output)</option><option value="conversation">Conversation or reply</option></select></label>
+        <label className="text-sm">Evaluation unit<select value={unit} onChange={(event) => { updatePreferences({ unit: event.target.value }); onClearSelection?.(); setTurnCursor(null); setPreview(null); setConfirmed(false); }} className="block w-full border p-2 mt-1 bg-transparent"><option value="trace">Provider Trace</option><option value="agent_turn">Agent Turn (final output)</option><option value="conversation">Conversation or reply</option></select></label>
         <label className="text-sm">Provider<select value={provider} onChange={(event) => changeProvider(event.target.value)} className="block w-full border p-2 mt-1 bg-transparent">{PROVIDERS.map((name) => <option key={name} value={name}>{name === "openai" ? "openai / compatible endpoint" : name === "jev" ? "Jev" : name}</option>)}</select></label>
         <label className="text-sm">Model<input value={model} onChange={(event) => updatePreferences({ model: event.target.value })} className="block w-full border p-2 mt-1 bg-transparent" /></label>
         <label className="text-sm">Rubric name<input value={rubricName} onChange={(event) => setRubricName(event.target.value)} className="block w-full border p-2 mt-1 bg-transparent" /></label>
@@ -163,6 +170,7 @@ export function EvaluatorLab({ configUrl, onOpenEvaluated }) {
       <div className="grid sm:grid-cols-5 gap-3"><Metric label="Eligible" value={preview.eligible} /><Metric label="Already evaluated by this evaluator" value={preview.alreadyJudged} /><Metric label="Not evaluable" value={preview.notEvaluable} /><Metric label="Planned calls" value={preview.plannedCalls} /><Metric label={preview.estimatedMaximumCostUsd == null ? "Provider cost" : "Cost estimate (not a cap)"} value={preview.estimatedMaximumCostUsd == null ? "Unavailable" : `$${preview.estimatedMaximumCostUsd.toFixed(4)}`} /></div>
       <div className="text-xs mt-3" style={{ color: C.faint }}>{preview.maximumOutputTokens == null ? "Provider pricing unavailable in Verdict; check Jev usage with the provider." : `Rough static-price estimate from text length and a ${preview.maximumOutputTokens.toLocaleString()}-token output allowance. Actual tokenization and provider billing can exceed it.`}</div>
       {preview.rubric && <div className="text-sm mt-3" style={{ color: C.sub }}>Evaluated dimensions: {preview.rubric.dimensions.join(" · ")}</div>}
+      {preview.evidencePreview?.length > 0 && <details className="mt-3 border p-3 text-xs" style={{ borderColor: C.border }}><summary>Review exact bounded evidence before egress</summary><pre className="whitespace-pre-wrap break-words mt-2 max-h-72 overflow-auto">{JSON.stringify(preview.evidencePreview, null, 2)}</pre></details>}
       {preview.rubric?.skippedDimensions?.length > 0 && <div className="text-sm mt-2" style={{ color: C.amber }}>Skipped without retrieved context: {preview.rubric.skippedDimensions.join(" · ")}</div>}
       {preview.unit === "agent_turn" && <div className="text-xs mt-2" style={{ color: C.sub }}>Tool evidence: {preview.toolEvidence === "counts_v1" ? "recorded counts and direct dispatch origins only; no downstream or source verification" : "not included"}.</div>}
       <div className="text-xs mt-2" style={{ color: C.faint }}>Coverage applies to this exact provider, model, rubric, version, dimensions, and evaluator configuration. Results from other evaluators remain separate.</div>

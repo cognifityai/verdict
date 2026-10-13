@@ -123,7 +123,8 @@ class AnthropicAdapter:
 
     name = "anthropic"
 
-    def __init__(self, api_key: str | None = None, *, max_retries: int = 4) -> None:
+    def __init__(self, api_key: str | None = None, *, max_retries: int = 4,
+                 sdk_max_retries: int | None = None) -> None:
         import inspect
         try:
             from anthropic import Anthropic
@@ -131,7 +132,8 @@ class AnthropicAdapter:
             raise ImportError(
                 "AnthropicAdapter requires `pip install anthropic`"
             ) from e
-        self._client = Anthropic(api_key=api_key) if api_key else Anthropic()
+        sdk_options = {"max_retries": sdk_max_retries} if sdk_max_retries is not None else {}
+        self._client = Anthropic(api_key=api_key, **sdk_options) if api_key else Anthropic(**sdk_options)
         self._max_retries = max_retries
         # Requests go through ``messages.stream``; the installed SDK decides
         # whether that call accepts a temperature at all.
@@ -184,12 +186,14 @@ class OpenAIAdapter:
 
     name = "openai"
 
-    def __init__(self, api_key: str | None = None, *, max_retries: int = 4) -> None:
+    def __init__(self, api_key: str | None = None, *, max_retries: int = 4,
+                 sdk_max_retries: int | None = None) -> None:
         try:
             from openai import OpenAI
         except ImportError as e:
             raise ImportError("OpenAIAdapter requires `pip install openai`") from e
-        self._client = OpenAI(api_key=api_key) if api_key else OpenAI()
+        sdk_options = {"max_retries": sdk_max_retries} if sdk_max_retries is not None else {}
+        self._client = OpenAI(api_key=api_key, **sdk_options) if api_key else OpenAI(**sdk_options)
         self._max_retries = max_retries
 
     def complete(self, req: CompletionRequest) -> CompletionResponse:

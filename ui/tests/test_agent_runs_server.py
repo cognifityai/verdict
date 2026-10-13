@@ -1170,6 +1170,8 @@ def test_component_only_source_usage_is_partial_not_unavailable(tmp_path):
         "reasoningOutputTokens": None,
         "turns": 1,
         "state": "partial",
+        "pricedTurns": 0,
+        "listPriceUsd": None,
     }
     [activity] = insights["sourceActivity"]
     assert activity["inputTokens"] == 9
@@ -1352,6 +1354,31 @@ def test_incompatible_persisted_insights_are_not_served_as_current(tmp_path):
         "analyzedTraces": 0,
         "complete": False,
     }
+
+
+def test_agent_only_store_reports_persisted_analysis_coverage(tmp_path):
+    path = tmp_path / "agent-only-coverage.db"
+    url = f"sqlite:///{path}"
+    tenant = "__verdict_local__"
+    storage = SQLiteStorage(str(path))
+    storage.replace_agent_run_bundle(_bundle(tenant, datetime(2026, 10, 11, tzinfo=timezone.utc),
+                                            with_turn=True))
+    storage.close()
+    run_analysis(url, tenant=tenant, build=lambda: build_agent_insights_bundle(
+        url, tenant=tenant, _include_input_fingerprint=True,
+    ))
+
+    async def request():
+        transport = httpx.ASGITransport(app=create_app(storage=url))
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            return await client.get("/api/data")
+
+    response = asyncio.run(request())
+    assert response.status_code == 200
+    coverage = response.json()["coverage"]["deterministicAnalysis"]
+    assert coverage["status"] == "completed"
+    assert coverage["availableRuns"] == coverage["analyzedRuns"] == 1
+    assert coverage["complete"] is True
 
 
 def test_current_analysis_is_reused_after_a_newer_rollback_version(tmp_path):

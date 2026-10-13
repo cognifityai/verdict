@@ -5,12 +5,33 @@ from hashlib import sha256
 
 import httpx
 import pytest
+import verdict.service as verdict_service
 from verdict.dashboard.app import create_app
 from verdict.dashboard.control_plane import ControlStore
 from verdict.evidence import AgentRun, AgentRunBundle, ExecutionStatus, SourceSession
 from verdict.monitoring import MonitorPolicy, monitor_policy_to_json
 from verdict.schema import DriftSignal, Trace
 from verdict.storage import SQLiteStorage
+
+
+def test_run_schedule_reports_non_posix_sqlite_lock_limit(tmp_path, monkeypatch):
+    database = tmp_path / "non-posix.db"
+
+    async def request():
+        transport = httpx.ASGITransport(app=create_app(storage=f"sqlite:///{database}"))
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            with monkeypatch.context() as patch:
+                patch.setattr(verdict_service.os, "name", "nt")
+                return await client.post(
+                    "/api/control/actions/run-schedule", json={"analyzeOnly": True},
+                    headers={"X-Verdict-Setup": token},
+                )
+
+    response = asyncio.run(request())
+    assert response.status_code == 501
+    assert "SQLite" in response.json()["error"]
+    assert "POSIX" in response.json()["error"]
 
 
 def test_control_documents_are_versioned_conflict_checked_and_rollbackable(tmp_path):
@@ -84,6 +105,33 @@ def test_control_api_requires_capability_and_exposes_no_secret_values(tmp_path):
         "captureContent": True, "providerKeyEnvVars": ["ANTHROPIC_API_KEY"],
     }
     assert "secret-value" not in snapshot.text
+
+
+def test_scheduled_analysis_can_run_on_existing_instrumented_agent_activity(tmp_path):
+    database = tmp_path / "analysis-only.db"
+    now = datetime.now(timezone.utc)
+    storage = SQLiteStorage(str(database))
+    storage.replace_agent_run_bundle(AgentRunBundle(
+        SourceSession("sdk-session", "__verdict_local__", "verdict_sdk", "a" * 64, now, now),
+        AgentRun("sdk-run", "sdk-session", "__verdict_local__", now,
+                 ExecutionStatus.COMPLETED, now),
+    ))
+    storage.close()
+
+    async def scenario():
+        transport = httpx.ASGITransport(app=create_app(storage=f"sqlite:///{database}"))
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            response = await client.post(
+                "/api/control/actions/run-schedule", headers={"X-Verdict-Setup": token},
+                json={"analyzeOnly": True, "runMonitor": False},
+            )
+            return response, await client.get("/api/insights")
+
+    response, insights = asyncio.run(scenario())
+    assert response.status_code == 200
+    assert response.json()["analysis"]["status"] == "completed"
+    assert insights.json()["analysisState"]["status"] == "completed"
 
 
 def test_control_documents_use_the_configured_dashboard_tenant(tmp_path):

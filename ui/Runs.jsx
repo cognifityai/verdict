@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { AlertTriangle, CheckCircle2, ChevronRight, RefreshCw } from "lucide-react";
+import { ScopedEvaluate } from "./ScopedEvaluate.jsx";
 
 const color = {
   panel: "#111715", border: "#26332e", text: "#e7f0ec", sub: "#94a39d",
@@ -7,11 +8,16 @@ const color = {
 };
 
 const RUN_PAGE_SIZE = 30;
+const findingLabel = (code) => {
+  const words = code.replaceAll("_", " ");
+  return words.charAt(0).toUpperCase() + words.slice(1);
+};
 
 export function Runs({
   url, focusRunIds = [], selectedRunId: routedRunId = null,
   findingCode = null, runIdsTruncated = false, onSelectRun = null, onShowAll = null,
   evaluatorFingerprint = null, routedEventId = null, onOpenTrace = null,
+  onEvaluateTurn = null, onDraftCase = null,
 }) {
   const [state, setState] = useState({ loading: true, error: null, data: null });
   const [selected, setSelected] = useState(null);
@@ -82,7 +88,10 @@ export function Runs({
     if (!selectedRunId) return;
     const controller = new AbortController();
     const requestId = ++detailRequest.current;
-    setDetail({ loading: true, error: null, data: null });
+    setDetail((current) => ({
+      loading: true, error: null,
+      data: current.data?.runId === selectedRunId ? current.data : null,
+    }));
     const eventFocus = focusEventId ? `&event_id=${encodeURIComponent(focusEventId)}` : "";
     const turnEvaluator = turnEvaluatorFilter ? `&turn_evaluator_fingerprint=${turnEvaluatorFilter}` : "";
     fetch(`${url}/${encodeURIComponent(selectedRunId)}?event_limit=100&event_offset=${eventOffset}&turn_limit=20&turn_offset=${turnOffset}${eventFocus}${turnEvaluator}`, {
@@ -115,7 +124,7 @@ export function Runs({
     <div className="grid lg:grid-cols-[360px_minmax(0,1fr)] gap-4">
       <section className="border" style={{ borderColor: color.border, background: color.panel }}>
         {focusRunIds.length > 0 && <div className="p-3 border-b text-xs flex items-center justify-between gap-3" style={{ borderColor: color.amber, color: color.amber }}>
-          <span>Finding {findingCode || "evidence"}: showing {runs.length} of {focusRunIds.length}{runIdsTruncated ? "+" : ""} affected runs{state.data?.filter?.complete === false ? " (some are unavailable in this tenant)" : ""}.</span>
+          <span>{findingCode ? `${findingLabel(findingCode)}: showing` : "Selected run: showing"} {runs.length} of {focusRunIds.length}{runIdsTruncated ? "+" : ""} {findingCode ? "affected runs" : "runs"}{state.data?.filter?.complete === false ? " (some are unavailable in this tenant)" : ""}.</span>
           <button className="underline shrink-0" onClick={() => { setRunOffset(0); onShowAll?.(); }}>Show all runs</button>
         </div>}
         <div className="p-4 border-b flex items-center justify-between" style={{ borderColor: color.border }}>
@@ -153,7 +162,7 @@ export function Runs({
           <button disabled={state.loading || !page.truncated} onClick={() => changeRunPage(page.offset + page.limit)} className="border px-3 py-1">Next</button>
         </div>}
       </section>
-      <RunDetail run={runs.find((run) => run.runId === selectedRunId)} detail={detail} onEventPage={(offset) => { setFocusEventId(null); setEventOffset(offset); }} onTurnPage={setTurnOffset} onFocusEvent={(eventId) => { setFocusEventId(eventId); setEventOffset(0); }} focusEventId={focusEventId} onOpenTrace={onOpenTrace} turnEvaluatorInput={turnEvaluatorInput} onTurnEvaluatorInput={setTurnEvaluatorInput} turnEvaluatorFilter={turnEvaluatorFilter} onTurnEvaluatorFilter={setTurnEvaluatorFilter} />
+      <RunDetail url={url} run={runs.find((run) => run.runId === selectedRunId)} detail={detail} onEventPage={(offset) => { setFocusEventId(null); setEventOffset(offset); }} onTurnPage={setTurnOffset} onFocusEvent={(eventId) => { setFocusEventId(eventId); setEventOffset(0); }} focusEventId={focusEventId} onOpenTrace={onOpenTrace} onEvaluateTurn={onEvaluateTurn} onDraftCase={onDraftCase} turnEvaluatorInput={turnEvaluatorInput} onTurnEvaluatorInput={setTurnEvaluatorInput} turnEvaluatorFilter={turnEvaluatorFilter} onTurnEvaluatorFilter={setTurnEvaluatorFilter} />
     </div>
   );
 }
@@ -198,7 +207,7 @@ function turnTokenSummary(usage) {
   return "not captured";
 }
 
-function RunDetail({ run, detail, onEventPage, onTurnPage, onFocusEvent, focusEventId, onOpenTrace, turnEvaluatorInput, onTurnEvaluatorInput, turnEvaluatorFilter, onTurnEvaluatorFilter }) {
+function RunDetail({ url, run, detail, onEventPage, onTurnPage, onFocusEvent, focusEventId, onOpenTrace, onEvaluateTurn, onDraftCase, turnEvaluatorInput, onTurnEvaluatorInput, turnEvaluatorFilter, onTurnEvaluatorFilter }) {
   if (!run) return null;
   const metrics = run.metrics || {};
   const sourceUsage = run.sourceTokenUsage || { totalTokens: null, state: "not_captured" };
@@ -231,15 +240,34 @@ function RunDetail({ run, detail, onEventPage, onTurnPage, onFocusEvent, focusEv
         <StatusFact label="Finding severity" value={displayCounts(run.findingSeverity)} />
         <StatusFact label="Selected Trace evaluator" value={run.evaluationCoverage?.state === "selected" ? `${run.evaluationCoverage.judged} judged · ${run.evaluationCoverage.notJudged} not judged · ${run.evaluationCoverage.judgeErrors} errors` : "Not selected"} />
       </div>
+      <div className="mt-4 text-xs" style={{ color: color.sub }}>
+        Estimated API list price: {sourceUsage.listPriceUsd == null ? "Not priced" : `$${Number(sourceUsage.listPriceUsd).toFixed(4)}`} ({sourceUsage.pricedTurns || 0}/{run.turnCount} turns priced). This is not a subscription bill; missing and mixed-model turns remain unpriced.
+      </div>
+      <ScopedEvaluate root={url.replace(/\/api\/runs$/, "")} scope="run" runId={run.runId} />
+      {onDraftCase && <button type="button" className="border px-3 py-2 mt-3 text-xs" disabled={detail.loading || !detail.data?.turns?.length}
+        onClick={() => {
+          const turn = detail.data.turns.find((item) => typeof item.request === "string" && item.request.trim() && !item.requestTruncated);
+          onDraftCase({ runId: run.runId, turnId: turn?.turnId || null, request: turn?.request || "", complete: Boolean(turn) });
+        }}>Draft a reviewed case from this run…</button>}
       <h2 className="font-semibold mt-6">Deterministic findings</h2>
       <div className="mt-2 space-y-2">
         {run.findings.length ? run.findings.map((finding, index) => (
           <button key={`${finding.code}-${index}`} disabled={!finding.evidenceEventIds?.length} onClick={() => onFocusEvent(finding.evidenceEventIds[0])} className="border p-3 text-sm text-left w-full" style={{ borderColor: color.border }}>
-            <span className="font-mono text-xs" style={{ color: finding.severity === "error" ? color.red : finding.severity === "warning" ? color.amber : color.sub }}>{finding.code}</span>
+            <span className="text-xs" style={{ color: finding.severity === "error" ? color.red : finding.severity === "warning" ? color.amber : color.sub }}>{findingLabel(finding.code)}</span>
             <div className="mt-1">{finding.message}</div>
             <div className="text-xs mt-1" style={{ color: color.faint }}>{finding.evidenceEventIds?.length ? `Open ${finding.evidenceEventIds.length} linked evidence event(s)` : "No event-level evidence is available for this finding."}</div>
           </button>
         )) : <div className="text-sm" style={{ color: color.sub }}>No deterministic findings.</div>}
+      </div>
+      <h2 className="font-semibold mt-6">Suggested actions</h2>
+      <div className="mt-2 space-y-2">
+        {(run.recommendations || []).length ? run.recommendations.map((item) => <div key={item.code} className="border p-3 text-sm" style={{ borderColor: color.border }}>
+          <div className="text-xs uppercase" style={{ color: color.amber }}>{item.status}</div>
+          <div className="mt-1">{item.observation}</div>
+          <div className="mt-1 font-semibold">{item.action}</div>
+          <div className="text-xs mt-1" style={{ color: color.sub }}>{item.rationale} Tradeoff: {item.tradeoff}</div>
+          {item.evidenceEventIds?.length > 0 && <button type="button" className="underline text-xs mt-2" onClick={() => onFocusEvent(item.evidenceEventIds[0])}>Open recorded evidence</button>}
+        </div>) : <div className="text-sm" style={{ color: color.sub }}>No evidence-backed action suggested for this run.</div>}
       </div>
       <h2 className="font-semibold mt-6">Turns</h2>
       <div className="text-xs mt-1" style={{ color: color.sub }}>{turnEvaluatorFilter ? "Showing only this exact Turn evaluator." : `Showing the latest valid current Turn result among the ${detail.data?.turnEvaluationScope?.maxEvaluatorsPerTurn || 8} newest evaluator slots per Turn, if any. Older results require an exact evaluator fingerprint. Trace evaluator coverage above is separate.`}</div>
@@ -255,6 +283,8 @@ function RunDetail({ run, detail, onEventPage, onTurnPage, onFocusEvent, focusEv
               <div className="mt-2">{turnEvaluatorFilter ? "Exact Turn evaluation" : "Latest valid current Turn evaluation (bounded)"}: {turn.evaluation ? `${turn.evaluation.status} · ${turn.evaluation.rubricName}/${turn.evaluation.rubricVersion} · ${turn.evaluation.judgeModels?.join(", ")} · ${turn.evaluation.toolEvidence === "counts_v1" ? "recorded tool counts included" : "tool counts not included in this judgment"} · evaluator ${turn.evaluation.evaluatorFingerprint} · ${turn.evaluation.dimensions.map((d) => `${d.name}: ${d.verdict}`).join(" · ") || "no scores"}` : "No current native Turn result for this scope"}</div>
               {turn.evaluation?.toolEvidence === "counts_v1" && turn.evaluation.toolCounts && <div className="text-xs mt-1" style={{ color: color.sub }}>Recorded tool events: {turn.evaluation.toolCounts.calls} calls · {turn.evaluation.toolCounts.results} results · {turn.evaluation.toolCounts.errorResults} reported errors · {turn.evaluation.toolCounts.unknownResults} unknown outcomes. Direct dispatch origins: {turn.evaluation.toolCounts.mcpCalls} MCP · {turn.evaluation.toolCounts.applicationCalls} application · {turn.evaluation.toolCounts.providerHostedCalls} provider-hosted · {turn.evaluation.toolCounts.originNotCapturedCalls} not captured · {turn.evaluation.toolCounts.originUnusableCalls} unusable. Origin labels describe only the producer-recorded outer dispatch boundary; they do not verify unobserved downstream services, protocols, sources, or claims.</div>}
             </div>
+            <TurnAnalysis key={`${run.runId}:${turn.turnId}`} url={url} runId={run.runId} turnId={turn.turnId} onFocusEvent={onFocusEvent} />
+            {onEvaluateTurn && <button type="button" className="border px-3 py-2 mt-2 text-xs" onClick={() => onEvaluateTurn(run.runId, turn.turnId)}>Evaluate this turn…</button>}
           </details>
         ))}
         {detail.data?.turnPage && <div className="flex items-center justify-between gap-2 text-xs" style={{ color: color.sub }}><span>Showing {detail.data.turnPage.shown ? detail.data.turnPage.offset + 1 : 0}-{detail.data.turnPage.offset + detail.data.turnPage.shown} of {detail.data.turnPage.available} turns.</span><span className="flex gap-2"><button disabled={detail.data.turnPage.offset === 0} onClick={() => onTurnPage(Math.max(0, detail.data.turnPage.offset - detail.data.turnPage.limit))} className="border px-3 py-1">Previous</button><button disabled={!detail.data.turnPage.truncated} onClick={() => onTurnPage(detail.data.turnPage.offset + detail.data.turnPage.limit)} className="border px-3 py-1">Next</button></span></div>}
@@ -266,12 +296,70 @@ function RunDetail({ run, detail, onEventPage, onTurnPage, onFocusEvent, focusEv
       {detail.data && focusEventId && !detail.data.events.some((event) => event.eventId === focusEventId)
         && <div role="status" className="text-sm mt-2" style={{ color: color.amber }}>The requested agent event is unavailable in this run.</div>}
       {detail.data && <div className="mt-2 space-y-2">
-        {detail.data.events.map((event) => <EventRow key={event.eventId} event={event} focused={event.eventId === (detail.data.focusEventId || focusEventId)} onOpenTrace={onOpenTrace} />)}
+        {detail.data.events.map((event) => <EventRow key={event.eventId} root={url.replace(/\/api\/runs$/, "")} runId={run.runId} event={event} focused={event.eventId === (detail.data.focusEventId || focusEventId)} onOpenTrace={onOpenTrace} />)}
         {!detail.data.events.length && <div className="text-sm" style={{ color: color.sub }}>No normalized events were captured for this run.</div>}
         <div className="flex items-center justify-between gap-2 text-xs" style={{ color: color.sub }}><span>Showing {detail.data.page.shown ? detail.data.page.offset + 1 : 0}-{detail.data.page.offset + detail.data.page.shown} of {detail.data.page.available} events.</span><span className="flex gap-2"><button disabled={detail.data.page.offset === 0} onClick={() => onEventPage(Math.max(0, detail.data.page.offset - detail.data.page.limit))} className="border px-3 py-1">Previous</button><button disabled={!detail.data.page.truncated} onClick={() => onEventPage(detail.data.page.offset + detail.data.page.limit)} className="border px-3 py-1">Next</button></span></div>
       </div>}
     </section>
   );
+}
+
+export function TurnAnalysis({ url, runId, turnId, onFocusEvent }) {
+  const [view, setView] = useState({ open: false, loading: false, error: null, data: null });
+  const request = React.useRef(null);
+  useEffect(() => () => request.current?.abort(), [runId, turnId]);
+  const load = () => {
+    request.current?.abort();
+    const controller = new AbortController();
+    request.current = controller;
+    setView((current) => ({ ...current, open: true, loading: true, error: null }));
+    fetch(`${url}/${encodeURIComponent(runId)}/turns/${encodeURIComponent(turnId)}/analysis`, {
+      credentials: "same-origin", headers: { Accept: "application/json" }, signal: controller.signal,
+    })
+      .then((response) => response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`)))
+      .then((data) => {
+        if (!controller.signal.aborted) setView((current) => ({ ...current, loading: false, error: null, data }));
+      })
+      .catch((error) => {
+        if (!controller.signal.aborted) setView((current) => ({ ...current, loading: false, error: String(error), data: null }));
+      });
+  };
+  const data = view.data;
+  return <div className="mt-3 border-t pt-3 text-xs" style={{ borderColor: color.border }}>
+    <div className="flex flex-wrap gap-2 items-center">
+      <button className="border px-3 py-2" onClick={() => {
+        if (!view.data && !view.loading) load();
+        else setView((current) => ({ ...current, open: !current.open }));
+      }}>{view.open ? "Hide analysis" : "Analyze turn"}</button>
+      {view.open && data && <button className="underline" onClick={load}>Refresh analysis</button>}
+      <span style={{ color: color.faint }}>On demand · local evidence review</span>
+    </div>
+    {view.open && <div className="mt-3 space-y-3">
+      {view.loading && <div role="status" style={{ color: color.sub }}>Analyzing captured events…</div>}
+      {view.error && <div role="alert" style={{ color: color.red }}>Turn analysis unavailable: {view.error}</div>}
+      {data && <>
+        <p style={{ color: color.sub }}>This shows what was recorded around the turn, with links to the source events. It cannot establish the agent’s private intent or whether the final answer was correct.</p>
+        {!data.eventCoverage.complete && <p style={{ color: color.amber }}>{data.eventCoverage.sourcePartial ? "Source capture reported missing events." : `Partial event view: ${data.eventCoverage.shown} of ${data.eventCoverage.available} events.`} Later actions or outcomes may be missing.</p>}
+        {data.eventCoverage.multipleProducers && <p style={{ color: color.amber }}>Several producers contributed events. Their timestamps do not establish one authoritative action order.</p>}
+        <div>
+          <div className="font-semibold" style={{ color: color.text }}>Observed actions</div>
+          {data.actions.length ? <ol className="mt-1 space-y-1">{data.actions.map((action) => <li key={action.eventId}>
+            <button className="underline text-left" onClick={() => onFocusEvent(action.eventId)}>{action.label}</button>
+            {action.resultEventId && <> · <button className="underline" onClick={() => onFocusEvent(action.resultEventId)}>open matched result</button></>}
+          </li>)}</ol> : <p style={{ color: color.sub }}>No tool, command, delegation, or retry action was captured.</p>}
+          {data.actionsTruncated && <p style={{ color: color.amber }}>More actions are recorded than shown here.</p>}
+        </div>
+        <div>
+          <div className="font-semibold" style={{ color: color.text }}>What to review</div>
+          {data.decisionReview?.map((item) => <p key={item.eventId} className="mt-1" style={{ color: color.amber }}><button className="underline text-left" onClick={() => onFocusEvent(item.eventId)}>{item.label}</button></p>)}
+          {data.reviewSignals.length ? <ul className="mt-1 space-y-1">{data.reviewSignals.map((signal) => <li key={signal.eventId}>
+            <button className="underline text-left" onClick={() => onFocusEvent(signal.eventId)}>{signal.label}</button>
+          </li>)}</ul> : <p style={{ color: color.sub }}>No failure signal in the events shown. This does not establish task success.</p>}
+          {data.signalsTruncated && <p style={{ color: color.amber }}>More failure signals are recorded than shown here.</p>}
+        </div>
+      </>}
+    </div>}
+  </div>;
 }
 
 function displayCounts(values) {
@@ -282,7 +370,7 @@ function StatusFact({ label, value }) {
   return <div className="border p-3" style={{ borderColor: color.border }}><div className="text-xs" style={{ color: color.faint }}>{label}</div><div className="text-sm mt-1">{value}</div></div>;
 }
 
-function EventRow({ event, focused = false, onOpenTrace = null }) {
+function EventRow({ event, root, runId, focused = false, onOpenTrace = null }) {
   const attributes = Object.entries(event.attributes || {});
   const failed = event.status === "failed";
   return (
@@ -303,6 +391,7 @@ function EventRow({ event, focused = false, onOpenTrace = null }) {
           <span className="font-mono" style={{ color: color.sub }}>{name}</span>
           <pre className="whitespace-pre-wrap break-words" style={{ color: color.text }}>{typeof value === "string" ? value : JSON.stringify(value)}</pre>
         </div>)}
+        {event.type === "tool_call" && <ScopedEvaluate root={root} scope="tool_action" runId={runId} eventId={event.eventId} />}
       </div>
     </details>
   );

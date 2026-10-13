@@ -28,7 +28,7 @@ function componentStub(names) {
 }
 
 async function loadUiModule() {
-  const source = `${await readFile(UI_SOURCE, "utf8")}\nexport { Dashboard, Overview, Traces, TraceDetail, TabHelp, Judge, Compare, ManagementReport, mountedApiUrl, Monitor };\nexport { useOperations } from "./Operations.jsx";\nexport { RegistryView } from "./Registry.jsx";\nexport { EvaluatorLab } from "./EvaluatorLab.jsx";\nexport { ConversationEvaluation } from "./ConversationEvaluation.jsx";\nexport { MatchedConversationCompare } from "./MatchedConversationCompare.jsx";\nexport { Runs } from "./Runs.jsx";\nexport { Insights } from "./Insights.jsx";\nexport { SetupWizard } from "./SetupWizard.jsx";`;
+  const source = `${await readFile(UI_SOURCE, "utf8")}\nexport { Dashboard, Overview, Traces, TraceDetail, TabHelp, Judge, Compare, ManagementReport, mountedApiUrl, Monitor };\nexport { useOperations } from "./Operations.jsx";\nexport { RegistryView } from "./Registry.jsx";\nexport { EvaluatorLab } from "./EvaluatorLab.jsx";\nexport { ConversationEvaluation } from "./ConversationEvaluation.jsx";\nexport { MatchedConversationCompare } from "./MatchedConversationCompare.jsx";\nexport { Runs, TurnAnalysis } from "./Runs.jsx";\nexport { Usage } from "./Usage.jsx";\nexport { Experiments } from "./Experiments.jsx";\nexport { ScopedEvaluate } from "./ScopedEvaluate.jsx";\nexport { Insights } from "./Insights.jsx";\nexport { SetupWizard } from "./SetupWizard.jsx";`;
   const result = await build({
     stdin: {
       contents: source,
@@ -981,11 +981,296 @@ function deferredFetches() {
   return requests;
 }
 
+test("usage chart drills from day to session and explains only captured numbers", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const props = { url: "/api/usage", onOpenRun: () => {} };
+  const base = {
+    window: { complete: true, turnsComplete: true },
+    days: [
+      { day: "2026-10-07", turns: 1, tokenKnownTurns: 1, totalTokens: 100, pricedTurns: 1, listPriceUsd: 0.01 },
+      { day: "2026-10-08", turns: 2, tokenKnownTurns: 1, totalTokens: 300, pricedTurns: 1, listPriceUsd: 0.02 },
+    ],
+    selectedDay: "2026-10-08", dayModels: [], sessions: [],
+    sessionsTruncated: false, selectedSession: null,
+  };
+  render(ui.Usage, hooks, props);
+  hooks.flushEffects();
+  assert.equal(requests[0].url, "/api/usage");
+  await resolveJson(requests[0], base);
+  let tree = render(ui.Usage, hooks, props);
+  const chart = findAll(tree, (node) => node.type?.name === "UsageChart")[0];
+  const chartTree = render(chart.type, createHooks(), chart.props);
+  findAll(chartTree, (node) => node.type === "button" && node.props["aria-label"]?.includes("2026-10-07"))[0].props.onClick();
+  render(ui.Usage, hooks, props);
+  hooks.flushEffects();
+  assert.equal(requests[1].url, "/api/usage?day=2026-10-07");
+  await resolveJson(requests[1], { ...base, selectedDay: "2026-10-07", sessions: [{
+    sessionId: "session-a", agentName: "codex", sourceKind: "codex", runIds: ["run-a"],
+    turns: 1, tokenKnownTurns: 1, totalTokens: 100, pricedTurns: 1, listPriceUsd: 0.01,
+  }] });
+  tree = render(ui.Usage, hooks, props);
+  findAll(tree, (node) => node.type === "button" && textOf(node).includes("run"))[0].props.onClick();
+  render(ui.Usage, hooks, props);
+  hooks.flushEffects();
+  assert.equal(requests[2].url, "/api/usage?day=2026-10-07&session_id=session-a&source_kind=codex");
+  await resolveJson(requests[2], { ...base, selectedDay: "2026-10-07", sessions: [{
+    sessionId: "session-a", agentName: "codex", sourceKind: "codex", runIds: ["run-a"],
+    turns: 1, tokenKnownTurns: 1, totalTokens: 100, pricedTurns: 1, listPriceUsd: 0.01,
+  }], selectedSession: {
+    sessionId: "session-a", runIds: ["run-a"], turnCount: 1,
+    totalTokens: 100, tokenKnownTurns: 1, pricedTurns: 1, listPriceUsd: 0.01,
+    inputTokens: 80, outputTokens: 20, cachedInputTokens: 0, cacheWriteInputTokens: 0,
+    componentCoverage: { inputTokens: 1, outputTokens: 1, cachedInputTokens: 1, cacheWriteInputTokens: 1 },
+    elapsedSpanSeconds: 20, selectedDayTokens: 100,
+    topTurns: [{ turnId: "turn-a", runId: "run-a", sequence: 0, totalTokens: 100 }],
+    turns: [{ turnId: "turn-a", runId: "run-a", sequence: 0, totalTokens: 100, models: ["gpt-6-luna"], listPriceUsd: 0.01 }],
+  } });
+  tree = render(ui.Usage, hooks, props);
+  findAll(tree, (node) => node.type === "button" && textOf(node) === "Analyze session")[0].props.onClick();
+  tree = render(ui.Usage, hooks, props);
+  const explanation = findAll(tree, (node) => node.type?.name === "SessionExplanation")[0];
+  const explanationTree = render(explanation.type, createHooks(), explanation.props);
+  assert.match(textOf(explanationTree), /Turn\s+1\s+used\s+100\s+reported tokens/);
+  assert.match(textOf(explanationTree), /not model latency/);
+  assert.equal(requests.length, 3);
+});
+
+test("usage explains an ambiguous source-qualified session selection", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const props = { url: "/api/usage" };
+  render(ui.Usage, hooks, props);
+  hooks.flushEffects();
+  await resolveJson(requests[0], {
+    window: { complete: true }, selectedDay: "2026-10-08",
+    days: [{ day: "2026-10-08", turns: 2, tokenKnownTurns: 2,
+      totalTokens: 300, pricedTurns: 0, listPriceUsd: null }],
+    dayModels: [], daySources: [], sessionsTruncated: false,
+    sessions: ["codex", "claude-code"].map((sourceKind) => ({
+      sourceKind, sessionId: "shared-session", agentName: sourceKind,
+      runIds: [sourceKind], totalTokens: 150, tokenKnownTurns: 1, turns: 1,
+      pricedTurns: 0, listPriceUsd: null,
+    })),
+    selectedSession: null, selectionReason: "ambiguous_source",
+  });
+  const tree = render(ui.Usage, hooks, props);
+  assert.match(textOf(tree), /session ID appears in more than one agent source/);
+  assert.equal(requests.length, 1);
+});
+
+test("usage ignores an older day response after a newer selection", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const props = { url: "/api/usage" };
+  const days = [
+    { day: "2026-10-07", turns: 1, tokenKnownTurns: 1, totalTokens: 100, pricedTurns: 0, listPriceUsd: null },
+    { day: "2026-10-08", turns: 1, tokenKnownTurns: 1, totalTokens: 200, pricedTurns: 0, listPriceUsd: null },
+  ];
+  const snapshot = (selectedDay) => ({
+    window: { complete: true }, days, selectedDay, dayModels: [], sessions: [],
+    sessionsTruncated: false, selectedSession: null,
+  });
+  render(ui.Usage, hooks, props);
+  hooks.flushEffects();
+  await resolveJson(requests[0], snapshot("2026-10-08"));
+  const selectDay = (value) => {
+    const tree = render(ui.Usage, hooks, props);
+    const chart = findAll(tree, (node) => node.type?.name === "UsageChart")[0];
+    const chartTree = render(chart.type, createHooks(), chart.props);
+    findAll(chartTree, (node) => node.type === "button" && node.props["aria-label"]?.includes(value))[0].props.onClick();
+    render(ui.Usage, hooks, props);
+    hooks.flushEffects();
+  };
+  selectDay("2026-10-07");
+  selectDay("2026-10-08");
+  await resolveJson(requests[2], snapshot("2026-10-08"));
+  await resolveJson(requests[1], snapshot("2026-10-07"));
+  const current = render(ui.Usage, hooks, props);
+  assert.match(textOf(current), /2026-10-08\s+UTC/);
+  assert.doesNotMatch(textOf(current), /Usage unavailable/);
+});
+
+test("session usage is shown only for a live store", async () => {
+  const ui = await loadUiModule();
+  globalThis.window = {
+    location: { hash: "#tab=overview&section=performance", pathname: "/dashboard", search: "" },
+    history: { pushState() {}, replaceState() {} },
+    addEventListener() {}, removeEventListener() {},
+  };
+  try {
+    const sample = render(ui.Dashboard, createHooks(), { data: bundle("judge-a"), source: "sample" });
+    const live = render(ui.Dashboard, createHooks(), { data: bundle("judge-a"), source: "live" });
+    assert.equal(findAll(sample, (node) => node.type?.name === "Usage").length, 0);
+    assert.equal(findAll(live, (node) => node.type?.name === "Usage").length, 1);
+    assert.equal(findAll(live, (node) => node.type === "details"
+      && textOf(node).includes("Model-call diagnostics")).length, 1);
+  } finally { delete globalThis.window; }
+});
+
+test("agent Overview starts with token and issue charts before technical detail", async () => {
+  const ui = await loadUiModule();
+  const data = bundle("judge-a");
+  data.meta.totalAgentRuns = 2;
+  data.monitor = { state: "not_configured", active: null, candidate: null };
+  globalThis.window = { location: { hash: "#tab=overview&section=summary", pathname: "/dashboard", search: "" },
+    history: { pushState() {}, replaceState() {} }, addEventListener() {}, removeEventListener() {} };
+  try {
+    const tree = render(ui.Dashboard, createHooks(), { data, source: "live" });
+    const usage = findAll(tree, (node) => node.type?.name === "Usage");
+    const insights = findAll(tree, (node) => node.type?.name === "Insights");
+    assert.equal(usage.length, 1);
+    assert.equal(usage[0].props.compact, true);
+    assert.equal(insights.length, 1);
+    assert.match(textOf(tree), /Technical coverage and charts/);
+  } finally { delete globalThis.window; }
+});
+
+test("Overview keeps monitoring status visible before recorded issue bars", async () => {
+  const ui = await loadUiModule();
+  const data = bundle("judge-a");
+  data.meta.totalAgentRuns = 2;
+  data.monitor = { state: "not_configured", active: null, candidate: null };
+  globalThis.window = { location: { hash: "#tab=overview&section=summary", pathname: "/dashboard", search: "" },
+    history: { pushState() {}, replaceState() {} }, addEventListener() {}, removeEventListener() {} };
+  try {
+    const assertStatusBeforeIssues = (tree, label) => {
+      const nodes = findAll(tree, () => true);
+      const statusIndex = nodes.findIndex((node) => node.type?.name?.startsWith("Panel") && textOf(node).includes(label));
+      const issuesIndex = nodes.findIndex((node) => node.type?.name === "Insights");
+      assert.ok(statusIndex >= 0 && issuesIndex >= 0 && statusIndex < issuesIndex);
+    };
+    let tree = render(ui.Dashboard, createHooks(), { data, source: "live" });
+    assertStatusBeforeIssues(tree, "Monitoring not configured");
+
+    data.monitor = { active: null, candidate: { state: "candidate",
+      snapshot: { comparison: { status: "no_alert", metrics: [] } } } };
+    tree = render(ui.Dashboard, createHooks(), { data, source: "live" });
+    assertStatusBeforeIssues(tree, "Historical comparison found no alert");
+
+    data.monitor = { active: { state: "active",
+      snapshot: { comparison: { status: "alert", metrics: [{ alert: true }] } } }, candidate: null };
+    tree = render(ui.Dashboard, createHooks(), { data, source: "live" });
+    assertStatusBeforeIssues(tree, "Active monitor found 1 alert");
+  } finally { delete globalThis.window; }
+});
+
+test("daily token bars use a readable color and horizontal month-day ticks", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const days = Array.from({ length: 30 }, (_, index) => ({
+    day: new Date(Date.UTC(2026, 8, 14 + index)).toISOString().slice(0, 10),
+    turns: 1, tokenKnownTurns: 1, totalTokens: 100 + index,
+    pricedTurns: 0, listPriceUsd: null,
+  }));
+  render(ui.Usage, hooks, { url: "/api/usage", compact: true });
+  hooks.flushEffects();
+  await resolveJson(requests[0], { window: { complete: true, turnsComplete: true }, days,
+    selectedDay: days.at(-1).day, dayModels: [], daySources: [], sessions: [],
+    sessionsTruncated: false, selectedSession: null });
+  const usage = render(ui.Usage, hooks, { url: "/api/usage", compact: true });
+  const chart = findAll(usage, (node) => node.type?.name === "UsageChart")[0];
+  const chartTree = render(chart.type, createHooks(), chart.props);
+  assert.match(textOf(chartTree), /Sep 14/);
+  assert.match(textOf(chartTree), /Oct 13/);
+  const ticks = findAll(chartTree, (node) => node.props?.style?.transform?.includes("rotate"));
+  assert.equal(ticks.length, 0);
+  const bars = findAll(chartTree, (node) => node.type === "button" && node.props["aria-label"]?.includes("reported tokens"));
+  assert.equal(bars.length, 30);
+  const fill = findAll(bars[0], (node) => node.type === "span" && node.props.style?.background)[0];
+  assert.notEqual(fill.props.style.background, "#94a39d");
+});
+
+test("compact token chart reveals sessions only after selecting a day", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const props = { url: "/api/usage", compact: true };
+  const snapshot = (selectedDay) => ({
+    window: { complete: true, turnsComplete: true },
+    days: [
+      { day: "2026-10-06", turns: 1, tokenKnownTurns: 1, totalTokens: 100, pricedTurns: 0, listPriceUsd: null },
+      { day: "2026-10-07", turns: 1, tokenKnownTurns: 1, totalTokens: 200, pricedTurns: 0, listPriceUsd: null },
+    ],
+    selectedDay, dayModels: [], daySources: [], selectedSession: null,
+    sessions: [{ sessionId: "session-a", sourceKind: "codex", agentName: "codex", runIds: ["run-a"],
+      turns: 1, tokenKnownTurns: 1, totalTokens: 100, pricedTurns: 0, listPriceUsd: null }],
+    sessionsTruncated: false,
+  });
+  render(ui.Usage, hooks, props);
+  hooks.flushEffects();
+  await resolveJson(requests[0], snapshot("2026-10-07"));
+  let tree = render(ui.Usage, hooks, props);
+  assert.ok(findAll(tree, (node) => node.type?.name === "UsageChart").length);
+  assert.doesNotMatch(textOf(tree), /Sessions active on/);
+  const chart = findAll(tree, (node) => node.type?.name === "UsageChart")[0];
+  const chartTree = render(chart.type, createHooks(), chart.props);
+  findAll(chartTree, (node) => node.type === "button" && node.props["aria-label"]?.includes("2026-10-06"))[0].props.onClick();
+  render(ui.Usage, hooks, props);
+  hooks.flushEffects();
+  await resolveJson(requests[1], snapshot("2026-10-06"));
+  tree = render(ui.Usage, hooks, props);
+  assert.match(textOf(tree), /Sessions active on\s+2026-10-06\s+UTC/);
+  assert.match(textOf(tree), /session-a|codex/);
+  findAll(tree, (node) => node.type === "button" && textOf(node).includes("run"))[0].props.onClick();
+  render(ui.Usage, hooks, props);
+  hooks.flushEffects();
+  await resolveJson(requests[2], { ...snapshot("2026-10-06"), selectedSession: {
+    sessionId: "session-a", sourceKind: "codex", turnCount: 6, totalTokens: 600,
+    pricedTurns: 0, listPriceUsd: null, turns: Array.from({ length: 6 }, (_, sequence) => ({
+      sequence, runId: "run-a", turnId: `turn-${sequence}`, totalTokens: 100,
+      models: [], listPriceUsd: null,
+    })),
+  } });
+  tree = render(ui.Usage, hooks, props);
+  assert.equal(findAll(tree, (node) => node.type === "button" && textOf(node) === "Open run").length, 6);
+  assert.match(textOf(tree), /Show\s+1\s+more displayed turns/);
+  assert.equal(findAll(tree, (node) => node.type?.name === "SessionReport").length, 0);
+  findAll(tree, (node) => node.type === "button" && textOf(node) === "Open session report")[0].props.onClick();
+  tree = render(ui.Usage, hooks, props);
+  assert.equal(findAll(tree, (node) => node.type?.name === "SessionReport").length, 1);
+});
+
+test("missing token totals do not draw zero bars and still allow session inspection", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const props = { url: "/api/usage", compact: true };
+  const snapshot = { window: { complete: false, turnsComplete: true },
+    days: [{ day: "2026-10-07", turns: 2, tokenKnownTurns: 0, totalTokens: null,
+      pricedTurns: 0, listPriceUsd: null }], selectedDay: "2026-10-07",
+    dayModels: [], daySources: [], sessions: [{ sessionId: "session-unknown", sourceKind: "new-agent",
+      agentName: "new-agent", runIds: ["run-a"], turns: 2, tokenKnownTurns: 0,
+      totalTokens: null, pricedTurns: 0, listPriceUsd: null }], sessionsTruncated: false,
+    selectedSession: null };
+  render(ui.Usage, hooks, props);
+  hooks.flushEffects();
+  await resolveJson(requests[0], snapshot);
+  let tree = render(ui.Usage, hooks, props);
+  assert.match(textOf(tree), /token trend is unavailable/i);
+  assert.match(textOf(tree), /bounded and partial/i);
+  assert.equal(findAll(tree, (node) => node.type?.name === "UsageChart").length, 0);
+  assert.equal(findAll(tree, (node) => node.type === "button" && textOf(node).includes("Est. list price"))[0].props.disabled, true);
+  const inspect = findAll(tree, (node) => node.type === "button" && textOf(node).includes("Inspect sessions with missing totals"))[0];
+  inspect.props.onClick();
+  render(ui.Usage, hooks, props);
+  hooks.flushEffects();
+  await resolveJson(requests[1], snapshot);
+  tree = render(ui.Usage, hooks, props);
+  assert.match(textOf(tree), /Sessions active on\s+2026-10-07\s+UTC/);
+  assert.match(textOf(tree), /new-agent/);
+});
+
 test("Insights reloads the normalized snapshot after an error retry", async () => {
   const ui = await loadUiModule();
   const hooks = createEffectHooks();
   const requests = deferredFetches();
-  const props = { url: "/api/insights?tenant=local" };
+  let dashboardRefreshes = 0;
+  const props = { url: "/api/insights?tenant=local", onAnalysisComplete: () => { dashboardRefreshes += 1; } };
 
   render(ui.Insights, hooks, props);
   hooks.flushEffects();
@@ -1011,6 +1296,7 @@ test("Insights reloads the normalized snapshot after an error retry", async () =
   assert.equal(requests[3].options.method, undefined);
   await resolveJson(requests[3], insightsSnapshot("error"));
   await pending;
+  assert.equal(dashboardRefreshes, 1, "the dashboard coverage must refresh with the insights snapshot");
 
   tree = render(ui.Insights, hooks, props);
   assert.match(textOf(tree), /The latest analysis failed/);
@@ -1019,6 +1305,40 @@ test("Insights reloads the normalized snapshot after an error retry", async () =
     (node) => node.type?.name === "Metric" && node.props?.label === "Agent runs",
   )[0];
   assert.equal(agentRuns.props.value, 0);
+});
+
+test("Overview leads with actionable issues and keeps evidence limits and technical detail available", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const opened = [];
+  const props = { url: "/api/insights", onOpenRuns: (finding) => opened.push(finding.code) };
+  const snapshot = insightsSnapshot("completed");
+  snapshot.scope = { ...snapshot.scope, availableRuns: 10, analyzedRuns: 8, complete: false };
+  snapshot.dataHealth.counts.runs = 10;
+  snapshot.findings = [
+    { code: "run_status_unknown", severity: "info", runs: 7, message: "Status unavailable." },
+    { code: "possible_tool_loop", severity: "warning", runs: 3, message: "Repeated identical calls." },
+    { code: "tool_error", severity: "error", runs: 2, message: "Tool result reported failure." },
+  ];
+  render(ui.Insights, hooks, props);
+  hooks.flushEffects();
+  await resolveJson(requests[0], snapshot);
+  const tree = render(ui.Insights, hooks, props);
+  const chart = findAll(tree, (node) => node.props?.role === "group"
+    && node.props?.["aria-label"] === "Recorded issues by affected runs")[0];
+  assert.ok(chart, "the first-screen issue counts should be a clickable chart");
+  const issueButtons = findAll(chart, (node) => node.type === "button" && node.props.onClick);
+  assert.equal(issueButtons.length, 2);
+  assert.match(textOf(issueButtons[0]), /Tool failures recorded.*2\s+run/s);
+  assert.match(textOf(issueButtons[1]), /Repeated identical tool calls.*3\s+run/s);
+  assert.match(textOf(tree), /analyzed 8 of 10 captured runs/i);
+  assert.match(textOf(tree), /This view is partial/i);
+  assert.equal(findAll(tree, (node) => node.type === "details").length, 2);
+  issueButtons[0].props.onClick();
+  const gapButton = findAll(tree, (node) => node.type === "button" && textOf(node).includes("Run outcome unavailable"))[0];
+  gapButton.props.onClick();
+  assert.deepEqual(opened, ["tool_error", "run_status_unknown"]);
 });
 
 test("a mounted dashboard derives its API path from the host prefix", async () => {
@@ -1320,13 +1640,53 @@ test("overview and navigation use only the active monitor as current drift", asy
   assert.equal(textOf(monitorButton).trim(), "Monitor 1");
 });
 
+test("overview summarizes an unchanged historical check without raw metric rows", async () => {
+  const ui = await loadUiModule();
+  const data = bundle("judge-a");
+  data.monitor = { active: null, candidate: {
+    state: "candidate",
+    snapshot: {
+      manifest: { reference_unit_ids: Array(80).fill("r"), current_unit_ids: Array(20).fill("c"), prospective_open: false },
+      comparison: { status: "no_alert", metrics: [
+        { group_id: "provider_model:opaque", metric: "provider_error", alert: false,
+          reference_value: 0, current_value: 0 },
+      ], groups: [{ group_id: "provider_model:opaque", label: "a provider / model" }] },
+    },
+  } };
+
+  const text = textOf(render(ui.Overview, createHooks(), { data }));
+  assert.match(text, /historical comparison found no alert/i);
+  assert.match(text, /not active monitoring/i);
+  assert.doesNotMatch(text, /Provider error rate|0\.0% → 0\.0%/);
+});
+
+test("overview historical check opens Monitor history without treating it as active", async () => {
+  const ui = await loadUiModule();
+  const data = bundle("judge-a");
+  data.monitor = { active: null, candidate: { state: "candidate",
+    snapshot: { comparison: { status: "no_alert", metrics: [] } } } };
+  let pushed = null;
+  globalThis.window = { location: { hash: "#tab=overview&section=summary", pathname: "/dashboard" },
+    history: { pushState: (_state, _title, url) => { pushed = url; }, replaceState() {} },
+    addEventListener() {}, removeEventListener() {} };
+  try {
+    const tree = render(ui.Dashboard, createHooks(), { data });
+    const details = findAll(tree, (node) => node.type === "button"
+      && textOf(node).includes("Open Monitor details"))[0];
+    assert.ok(details);
+    details.props.onClick();
+    assert.equal(pushed, "#tab=monitor&section=history");
+    assert.doesNotMatch(textOf(tree), /0\.0% → 0\.0%/);
+  } finally { delete globalThis.window; }
+});
+
 test("bundled sample demonstrates the current Monitor instead of only legacy signals", async () => {
   const ui = await loadUiModule();
   const dashboard = render(ui.Dashboard, createHooks(), {});
   const monitorButton = findAll(dashboard,
     (node) => node.type === "button" && textOf(node).includes("Monitor"))[0];
   assert.equal(textOf(monitorButton).trim(), "Monitor 1");
-  assert.match(textOf(dashboard), /Latest completed prospective comparison/i);
+  assert.match(textOf(dashboard), /Active monitor found|No alert in the latest active comparison/i);
 });
 
 test("an inconsistent legacy run does not advertise its stale signal count", async () => {
@@ -1389,9 +1749,9 @@ test("overview prioritizes a stored historical monitor alert over absent legacy 
   };
 
   const text = textOf(render(ui.Overview, createHooks(), { data }));
-  assert.match(text, /exploratory historical comparison/i);
-  assert.match(text, /safety pass rate/i);
-  assert.match(text, /openai \/ gpt-4\.1/i);
+  assert.match(text, /historical comparison found 1 alert/i);
+  assert.doesNotMatch(text, /safety pass rate/i);
+  assert.doesNotMatch(text, /openai \/ gpt-4\.1/i);
   assert.doesNotMatch(text, /provider_model:opaque/i);
   assert.doesNotMatch(text, /No completed run/i);
 });
@@ -1537,9 +1897,10 @@ test("overview shows the authoritative active monitor beside a newer preview", a
 
   const text = textOf(render(ui.Overview, createHooks(), { data }));
   assert.match(text, /ACTIVE MONITOR/);
-  assert.match(text, /active quality pass rate/i);
-  assert.match(text, /EXPLORATORY HISTORICAL COMPARISON/);
-  assert.match(text, /candidate quality pass rate/i);
+  assert.match(text, /Active monitor found 1 alert/i);
+  assert.match(text, /HISTORICAL CHECK/);
+  assert.match(text, /Historical comparison found no alert/i);
+  assert.doesNotMatch(text, /active quality pass rate|candidate quality pass rate/i);
 });
 
 test("overview distinguishes evaluator waiting from traffic collection", async () => {
@@ -1771,10 +2132,267 @@ test("the live dashboard does not display synthetic metrics before confirmation"
   assert.equal(dashboard.props.data.samples.length, 0);
 });
 
+test("a synthetic local store is labeled as demo data throughout the dashboard", async () => {
+  const ui = await loadUiModule();
+  globalThis.window = {
+    location: { hash: "#tab=explore&section=runs", pathname: "/dashboard", search: "" },
+    history: { pushState() {}, replaceState() {} },
+    addEventListener() {}, removeEventListener() {},
+  };
+  try {
+    const data = bundle("judge-a");
+    data.meta.agentRunSources = [{ sourceKind: "synthetic-codex", runs: 1 }];
+    const tree = render(ui.Dashboard, createHooks(), { data, source: "live" });
+    assert.match(textOf(tree), /Synthetic local demo/);
+    assert.match(textOf(tree), /Wholly synthetic demo data/);
+  } finally { delete globalThis.window; }
+});
+
 async function resolveJson(request, payload) {
   request.resolve({ ok: true, json: async () => payload });
   for (let index = 0; index < 6; index += 1) await Promise.resolve();
 }
+
+test("scoped evaluation requires an exact preview and new approval after criterion changes", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const props = { root: "", scope: "run", runId: "synthetic-run" };
+  let tree = render(ui.ScopedEvaluate, hooks, props);
+  findAll(tree, (node) => node.type === "button" && textOf(node).includes("Evaluate this run"))[0]
+    .props.onClick();
+  render(ui.ScopedEvaluate, hooks, props);
+  hooks.flushEffects();
+  await resolveJson(requests[0], { setupToken: "local-token" });
+  await resolveJson(requests[1], { providers: [{ provider: "anthropic", configured: true }] });
+  tree = render(ui.ScopedEvaluate, hooks, props);
+  assert.equal(requests.length, 2, "opening the panel must not judge");
+  const start = findAll(tree, (node) => node.type === "button" && textOf(node).includes("Preview bounded evidence"))[0].props.onClick();
+  assert.equal(JSON.parse(requests[2].options.body).runId, "synthetic-run");
+  await resolveJson(requests[2], { coverage: "complete", plannedCalls: 1, provider: "anthropic",
+    model: "claude-haiku-4-5", destination: "https://api.anthropic.com",
+    estimatedMaximumCostUsd: 0.01, planFingerprint: "approved-plan", evidencePreview: { query: "synthetic task" } });
+  await start;
+  assert.equal(requests[3].url, "/api/scoped/scheduled");
+  await resolveJson(requests[3], { jobs: [] });
+  tree = render(ui.ScopedEvaluate, hooks, props);
+  const runButton = () => findAll(tree, (node) => node.type === "button" && textOf(node).includes("Run evaluation"))[0];
+  assert.equal(runButton().props.disabled, true);
+  findAll(tree, (node) => node.type === "input" && node.props.type === "checkbox")[0]
+    .props.onChange({ target: { checked: true } });
+  tree = render(ui.ScopedEvaluate, hooks, props);
+  assert.equal(runButton().props.disabled, false);
+  findAll(tree, (node) => node.type === "textarea")[0].props.onChange({ target: { value: "Different criterion" } });
+  tree = render(ui.ScopedEvaluate, hooks, props);
+  assert.equal(runButton().props.disabled, true);
+  assert.equal(requests.length, 4);
+});
+
+test("one-time scheduled evaluation requires a visible budget and persistent consent", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const props = { root: "", scope: "session", sessionId: "synthetic-session", sourceKind: "synthetic-codex" };
+  let tree = render(ui.ScopedEvaluate, hooks, props);
+  findAll(tree, (node) => node.type === "button" && textOf(node).includes("Evaluate this session"))[0].props.onClick();
+  render(ui.ScopedEvaluate, hooks, props);
+  hooks.flushEffects();
+  await resolveJson(requests[0], { setupToken: "local-token" });
+  await resolveJson(requests[1], { providers: [{ provider: "anthropic", configured: false }] });
+  tree = render(ui.ScopedEvaluate, hooks, props);
+  const previewing = findAll(tree, (node) => node.type === "button" && textOf(node).includes("Preview bounded evidence"))[0].props.onClick();
+  assert.equal(JSON.parse(requests[2].options.body).sessionId, "synthetic-session");
+  await resolveJson(requests[2], { coverage: "complete", plannedCalls: 1, provider: "anthropic",
+    model: "claude-haiku-4-5", destination: "https://api.anthropic.com",
+    estimatedMaximumCostUsd: 0.002, scheduledUpperStaticListPriceUsd: 0.01,
+    planFingerprint: "approved-session", evidencePreview: { query: "synthetic task" } });
+  await previewing;
+  await resolveJson(requests[3], { jobs: [] });
+  tree = render(ui.ScopedEvaluate, hooks, props);
+  const queue = () => findAll(tree, (node) => node.type === "button" && textOf(node).includes("Queue one evaluation"))[0];
+  assert.equal(queue().props.disabled, true);
+  findAll(tree, (node) => node.type === "input" && node.props.type === "checkbox")[1]
+    .props.onChange({ target: { checked: true } });
+  tree = render(ui.ScopedEvaluate, hooks, props);
+  assert.equal(queue().props.disabled, false);
+  const queuing = queue().props.onClick();
+  assert.equal(requests[4].url, "/api/scoped/schedule");
+  assert.equal(JSON.parse(requests[4].options.body).confirmPersistentExternalEgress, true);
+  await resolveJson(requests[4], { jobId: "synthetic-job", state: "pending", revision: 1 });
+  await queuing;
+  tree = render(ui.ScopedEvaluate, hooks, props);
+  const cancelling = findAll(tree, (node) => node.type === "button" && textOf(node).includes("Cancel approval"))[0].props.onClick();
+  assert.equal(requests[5].url, "/api/scoped/scheduled/synthetic-job/cancel");
+  await resolveJson(requests[5], { jobId: "synthetic-job", state: "cancelled", revision: 2 });
+  await cancelling;
+  tree = render(ui.ScopedEvaluate, hooks, props);
+  assert.match(textOf(tree), /Scheduled approval:\s+cancelled/);
+});
+
+test("spent scheduled approval opens its saved result without another judge request", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const props = { root: "", scope: "run", runId: "synthetic-run" };
+  let tree = render(ui.ScopedEvaluate, hooks, props);
+  findAll(tree, (node) => node.type === "button" && textOf(node).includes("Evaluate this run"))[0].props.onClick();
+  render(ui.ScopedEvaluate, hooks, props);
+  hooks.flushEffects();
+  await resolveJson(requests[0], { setupToken: "local-token" });
+  await resolveJson(requests[1], { providers: [{ provider: "anthropic", configured: false }] });
+  tree = render(ui.ScopedEvaluate, hooks, props);
+  const previewing = findAll(tree, (node) => node.type === "button" &&
+    textOf(node).includes("Preview bounded evidence"))[0].props.onClick();
+  await resolveJson(requests[2], { coverage: "complete", plannedCalls: 1, provider: "anthropic",
+    model: "claude-haiku-4-5", destination: "https://api.anthropic.com",
+    scheduledUpperStaticListPriceUsd: 0.01, planFingerprint: "saved-plan",
+    evidencePreview: { query: "synthetic task" } });
+  await previewing;
+  await resolveJson(requests[3], { jobs: [{ jobId: "saved-job", state: "spent",
+    planFingerprint: "saved-plan", outcome: "completed", resultId: "saved-result" }] });
+  tree = render(ui.ScopedEvaluate, hooks, props);
+  assert.match(textOf(tree), /Scheduled approval:\s+spent/);
+  const opening = findAll(tree, (node) => node.type === "button" &&
+    textOf(node).includes("Open saved result"))[0].props.onClick();
+  assert.equal(requests[4].url, "/api/scoped/result/saved-result");
+  assert.equal(requests[4].options?.method, undefined);
+  await resolveJson(requests[4], { status: "completed", coverage: "complete",
+    evaluatorFingerprint: "synthetic-fingerprint", dimensions: [{ name: "completion",
+      verdict: "pass", citationStatus: "linked", explanation: "[turn:turn-a] supports it",
+      evidenceReferences: ["turn:turn-a"] }] });
+  await opening;
+  tree = render(ui.ScopedEvaluate, hooks, props);
+  assert.match(textOf(tree), /completion\s*:\s+pass/);
+  assert.equal(requests.length, 5);
+});
+
+test("saved case comparison requires reviewed inputs and an explicitly configured runner", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const props = { root: "", token: "local-token" };
+  render(ui.Experiments, hooks, props);
+  hooks.flushEffects();
+  await resolveJson(requests[0], { caseSets: [], configuredVariants: [], runnerConfigured: false });
+  let tree = render(ui.Experiments, hooks, props);
+  const save = () => findAll(tree, (node) => node.type === "button" && textOf(node).includes("Save reviewed case set"))[0];
+  const run = () => findAll(tree, (node) => node.type === "button" && textOf(node).includes("Run baseline and candidate"))[0];
+  assert.equal(save().props.disabled, true);
+  assert.equal(run().props.disabled, true);
+  findAll(tree, (node) => node.type === "input" && node.props.type === "checkbox")[0]
+    .props.onChange({ target: { checked: true } });
+  tree = render(ui.Experiments, hooks, props);
+  assert.equal(save().props.disabled, false);
+  assert.equal(run().props.disabled, true);
+  assert.equal(requests.length, 1);
+});
+
+test("saved cases disclose redaction and block a combination beyond the runner limit", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const props = { root: "", token: "local-token" };
+  render(ui.Experiments, hooks, props);
+  hooks.flushEffects();
+  await resolveJson(requests[0], {
+    caseSets: [{ documentId: "synthetic", state: "active", revision: 1,
+      payload: { cases: [{ id: "one" }, { id: "two" }] } }],
+    configuredVariants: ["baseline", "candidate"], runnerConfigured: true,
+    trialTimeoutSeconds: 120, maxRunSeconds: 600, experiments: [],
+  });
+  let tree = render(ui.Experiments, hooks, props);
+  const run = () => findAll(tree, (node) => node.type === "button" &&
+    textOf(node).includes("Run baseline and candidate"))[0];
+  assert.equal(run().props.disabled, false);
+  assert.match(textOf(tree), /redacts recognized sensitive patterns/);
+  assert.match(textOf(tree), /480\s+of\s+600\s+seconds/);
+  findAll(tree, (node) => node.type === "select")[4]
+    .props.onChange({ target: { value: "3" } });
+  tree = render(ui.Experiments, hooks, props);
+  assert.equal(run().props.disabled, true);
+  assert.match(textOf(tree), /Use fewer cases or trials/);
+  assert.equal(requests.length, 1);
+});
+
+test("saved experiment comparison reopens after reload without executing the runner", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const props = { root: "", token: "local-token" };
+  render(ui.Experiments, hooks, props);
+  hooks.flushEffects();
+  await resolveJson(requests[0], { caseSets: [], configuredVariants: ["baseline", "candidate"],
+    runnerConfigured: true, trialTimeoutSeconds: 45, experiments: [{
+      documentId: "saved-1", createdAt: "2026-10-13T12:00:00Z", state: "completed",
+      payload: { caseSetId: "synthetic", caseSetRevision: 2,
+        baseline: "baseline", candidate: "candidate", baselineVersion: "v1",
+        candidateVersion: "v2", evaluatorIdentity: "deterministic-output-checks-v1",
+        configurationFingerprint: "a".repeat(64), trialsPerSide: 1,
+        comparison: { fixed: ["case-a"], newRegressions: [], unchangedPasses: [],
+          unchangedFailures: [], unverified: [] },
+        cases: [{ id: "case-a", expectedBehavior: "fix the synthetic task",
+          baseline: { status: "fail", trials: [{ status: "fail", output: "before" }] },
+          candidate: { status: "pass", trials: [{ status: "pass", output: "after" }] },
+          comparableMetrics: { taskElapsedMs: null, reportedCostUsd: null } }],
+        claim: "Fixed-case comparison only." },
+    }] });
+  const tree = render(ui.Experiments, hooks, props);
+  assert.match(textOf(tree), /Fixed-case comparison/);
+  assert.match(textOf(tree), /case-a/);
+  assert.match(textOf(tree), /deterministic-output-checks-v1/);
+  assert.equal(requests.length, 1);
+});
+
+test("captured run drafts only prefill complete redacted input and require review", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const draft = { runId: "run-a", turnId: "turn-1", request: "redacted task", complete: true };
+  render(ui.Experiments, hooks, { root: "", token: "local-token", draft });
+  hooks.flushEffects();
+  await resolveJson(requests[0], { caseSets: [], configuredVariants: [], runnerConfigured: false });
+  let tree = render(ui.Experiments, hooks, { root: "", token: "local-token", draft });
+  assert.match(textOf(tree), /Draft from captured run\s+run-a\s*, turn turn-1/);
+  assert.equal(findAll(tree, (node) => node.type === "textarea")[0].props.value, "redacted task");
+  assert.equal(findAll(tree, (node) => node.type === "button" &&
+    textOf(node).includes("Save reviewed case set"))[0].props.disabled, true);
+  assert.equal(findAll(tree, (node) => node.type === "input" &&
+    node.props.type === "checkbox")[0].props.checked, false);
+
+  const missing = { runId: "run-b", turnId: null, request: "truncated", complete: false };
+  render(ui.Experiments, hooks, { root: "", token: "local-token", draft: missing });
+  hooks.flushEffects();
+  tree = render(ui.Experiments, hooks, { root: "", token: "local-token", draft: missing });
+  assert.equal(findAll(tree, (node) => node.type === "textarea")[0].props.value, "");
+  assert.match(textOf(tree), /No complete captured request was available/);
+});
+
+test("Saved Cases has its own Evaluate route and obtains local authorization", async () => {
+  const ui = await loadUiModule();
+  globalThis.window = {
+    location: { hash: "#tab=evaluate&section=cases", pathname: "/dashboard", search: "" },
+    history: { pushState() {}, replaceState() {} },
+    addEventListener() {}, removeEventListener() {},
+  };
+  try {
+    const dashboard = render(ui.Dashboard, createHooks(), { data: bundle("judge-a"), source: "live" });
+    assert.equal(findAll(dashboard, (node) => node.type?.name === "Experiments").length, 1);
+  } finally { delete globalThis.window; }
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const props = { root: "" };
+  render(ui.Experiments, hooks, props);
+  hooks.flushEffects();
+  assert.equal(requests.length, 2);
+  await resolveJson(requests[0], { caseSets: [], configuredVariants: [], runnerConfigured: false });
+  await resolveJson(requests[1], { setupToken: "local-token" });
+  let tree = render(ui.Experiments, hooks, props);
+  findAll(tree, (node) => node.type === "input" && node.props.type === "checkbox")[0]
+    .props.onChange({ target: { checked: true } });
+  tree = render(ui.Experiments, hooks, props);
+  assert.equal(findAll(tree, (node) => node.type === "button" &&
+    textOf(node).includes("Save reviewed case set"))[0].props.disabled, false);
+});
 
 test("matched conversation comparison uses current paired grades and rejects stale drilldown", async () => {
   const ui = await loadUiModule();
@@ -2008,6 +2626,28 @@ test("Agent Runs can fetch one exact Turn evaluator without reusing Trace covera
   assert.doesNotMatch(defaultText, /no tool evidence/);
 });
 
+test("captured run case drafting skips incomplete requests", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const drafts = [];
+  const props = { url: "/api/runs", onDraftCase: (draft) => drafts.push(draft) };
+  render(ui.Runs, hooks, props);
+  hooks.flushEffects();
+  await resolveJson(requests[0], runListPage(0, ["run-a"]));
+  render(ui.Runs, hooks, props);
+  hooks.flushEffects();
+  await resolveJson(requests[1], { runId: "run-a", turns: [
+    { turnId: "partial", request: "partial text", requestTruncated: true },
+    { turnId: "complete", request: "redacted complete task", requestTruncated: false },
+  ], events: [], page: { available: 0, shown: 0 }, turnPage: { available: 2, shown: 2 } });
+  const tree = render(ui.Runs, hooks, props);
+  const detail = findAll(tree, (node) => typeof node.type === "function" && node.type.name === "RunDetail")[0];
+  const rendered = render(detail.type, createHooks(), detail.props);
+  findAll(rendered, (node) => node.type === "button" && textOf(node).includes("Draft a reviewed case"))[0].props.onClick();
+  assert.deepEqual(drafts, [{ runId: "run-a", turnId: "complete", request: "redacted complete task", complete: true }]);
+});
+
 test("Agent Runs presents component-only token evidence as partial", async () => {
   const ui = await loadUiModule();
   const hooks = createEffectHooks();
@@ -2195,6 +2835,57 @@ test("trace detail is derived from the current snapshot instead of retaining an 
   assert.equal(findAll(tree, (node) => node.type?.name === "TraceDetail").length, 0);
 });
 
+test("selected model call offers an exact evaluation action", async () => {
+  const ui = await loadUiModule();
+  const data = bundle("evaluator-a", [{
+    trace_id: "selected-call", provider: "openai", request_model: "model",
+    prompt_redacted: "synthetic prompt", response_redacted: "synthetic response", hour: 1,
+  }]);
+  const selected = [];
+  const tree = render(ui.Traces, createHooks(), {
+    data, selectedTraceId: "selected-call", onEvaluateTrace: (id) => selected.push(id),
+  });
+  const detail = findAll(tree, (node) => node.type?.name === "TraceDetail")[0];
+  assert.equal(detail.props.s.trace_id, "selected-call");
+  const action = findAll(render(ui.TraceDetail, createHooks(), detail.props),
+    (node) => node.type === "button" && textOf(node) === "Evaluate this model call")[0];
+  action.props.onClick();
+  assert.deepEqual(selected, ["selected-call"]);
+});
+
+test("Evaluator Lab sends the selected Trace and clears it when the unit changes", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const cleared = [];
+  const props = { configUrl: "/api/config", selection: { unit: "trace", traceId: "selected-call" },
+    onClearSelection: () => cleared.push(true) };
+  render(ui.EvaluatorLab, hooks, props);
+  hooks.flushEffects();
+  await resolveJson(requests[0], { setupToken: "setup-token" });
+  await resolveJson(requests[1], { providers: [{ provider: "anthropic", configured: true }] });
+  let tree = render(ui.EvaluatorLab, hooks, props);
+  assert.match(textOf(tree), /Selected\s+Trace selected-call/);
+  const preview = findAll(tree, (node) => node.type === "button" &&
+    textOf(node).includes("Preview eligible calls"))[0].props.onClick();
+  assert.equal(JSON.parse(requests[2].options.body).traceId, "selected-call");
+  await resolveJson(requests[2], { unit: "trace", availableTraces: 1, eligible: 1,
+    alreadyJudged: 0, notEvaluable: 0, notEvaluableReasons: {}, plannedCalls: 1,
+    estimatedMaximumCostUsd: 0.01, maximumOutputTokens: 512,
+    rubric: { dimensions: ["relevance"], skippedDimensions: [] },
+    planFingerprint: "selected-plan", plannedTraces: [{ traceId: "selected-call" }] });
+  await preview;
+  tree = render(ui.EvaluatorLab, hooks, props);
+  const unit = findAll(tree, (node) => node.type === "select" &&
+    findAll(node, (child) => child.type === "option" && child.props.value === "agent_turn").length)[0];
+  unit.props.onChange({ target: { value: "agent_turn" } });
+  assert.deepEqual(cleared, [true]);
+  tree = render(ui.EvaluatorLab, hooks, { ...props, selection: null });
+  assert.doesNotMatch(textOf(tree), /Selected\s+Trace selected-call/);
+  assert.equal(findAll(tree, (node) => node.type === "button" &&
+    textOf(node).includes("Run 1 judge calls")).length, 0);
+});
+
 test("judge view renders the server's executable coverage snapshot", async () => {
   const ui = await loadUiModule();
   const hooks = createHooks();
@@ -2233,7 +2924,7 @@ test("dashboard visibly reports every bounded response resource", async () => {
   });
   const rendered = textOf(tree).replace(/\s+/g, " ");
 
-  assert.match(rendered, /Showing a bounded dashboard view/);
+  assert.match(rendered, /Some dashboard views are bounded/);
   assert.match(rendered, /latency points: 100 of 1,000/);
   assert.match(rendered, /clusters: 20 of 75/);
 });
@@ -2490,8 +3181,7 @@ test("overview does not confuse legacy readiness with cohort monitor status", as
 
   const rendered = textOf(render(ui.Overview, createHooks(), { data }));
 
-  assert.match(rendered, /monitoring/i);
-  assert.match(rendered, /Not configured/);
+  assert.doesNotMatch(rendered, /Not configured/);
   assert.doesNotMatch(rendered, /No dimensions currently clear/);
 });
 
@@ -2608,6 +3298,100 @@ test("local capture starts a server job and shows its progress until it complete
   } finally {
     globalThis.setTimeout = realSetTimeout;
   }
+});
+
+test("Turn analysis loads only on click, links evidence, and ignores stale responses", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const focused = [];
+  const props = { url: "/api/runs", runId: "run-a", turnId: "turn-a",
+    onFocusEvent(id) { focused.push(id); } };
+  let tree = render(ui.TurnAnalysis, hooks, props);
+  hooks.flushEffects();
+  assert.equal(requests.length, 0);
+  findAll(tree, (node) => node.type === "button" && textOf(node) === "Analyze turn")[0].props.onClick();
+  tree = render(ui.TurnAnalysis, hooks, props);
+  assert.equal(requests[0].url, "/api/runs/run-a/turns/turn-a/analysis");
+  assert.match(textOf(tree), /Analyzing captured events/);
+  await resolveJson(requests[0], { runId: "run-a", turnId: "turn-a",
+    eventCoverage: { shown: 2, available: 2, complete: true },
+    actions: [{ eventId: "action", label: "Called read_file", resultEventId: "result" }],
+    actionsTruncated: false,
+    reviewSignals: [{ eventId: "failure", label: "Test execution reported failure" }],
+    signalsTruncated: false });
+  tree = render(ui.TurnAnalysis, hooks, props);
+  assert.match(textOf(tree), /cannot establish the agent’s private intent/);
+  findAll(tree, (node) => node.type === "button" && textOf(node) === "Called read_file")[0].props.onClick();
+  findAll(tree, (node) => node.type === "button" && textOf(node) === "open matched result")[0].props.onClick();
+  findAll(tree, (node) => node.type === "button" && textOf(node) === "Test execution reported failure")[0].props.onClick();
+  assert.deepEqual(focused, ["action", "result", "failure"]);
+
+  findAll(tree, (node) => node.type === "button" && textOf(node) === "Refresh analysis")[0].props.onClick();
+  tree = render(ui.TurnAnalysis, hooks, props);
+  findAll(tree, (node) => node.type === "button" && textOf(node) === "Refresh analysis")[0].props.onClick();
+  await resolveJson(requests[2], { runId: "run-a", turnId: "turn-a",
+    eventCoverage: { shown: 0, available: 0, complete: true },
+    actions: [], actionsTruncated: false, reviewSignals: [], signalsTruncated: false });
+  await resolveJson(requests[1], { runId: "run-a", turnId: "turn-a",
+    eventCoverage: { shown: 1, available: 1, complete: true },
+    actions: [{ eventId: "stale", label: "Stale action" }], actionsTruncated: false,
+    reviewSignals: [], signalsTruncated: false });
+  tree = render(ui.TurnAnalysis, hooks, props);
+  assert.match(textOf(tree), /No tool, command, delegation, or retry action/);
+  assert.doesNotMatch(textOf(tree), /Stale action/);
+});
+
+test("Turn analysis keeps a hidden panel hidden after a late response and shows errors", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const props = { url: "/api/runs", runId: "run", turnId: "turn" };
+  let tree = render(ui.TurnAnalysis, hooks, props);
+  hooks.flushEffects();
+  findAll(tree, (node) => node.type === "button" && textOf(node) === "Analyze turn")[0].props.onClick();
+  tree = render(ui.TurnAnalysis, hooks, props);
+  findAll(tree, (node) => node.type === "button" && textOf(node) === "Hide analysis")[0].props.onClick();
+  await resolveJson(requests[0], { eventCoverage: { shown: 0, available: 0, complete: true },
+    actions: [], reviewSignals: [], actionsTruncated: false, signalsTruncated: false });
+  tree = render(ui.TurnAnalysis, hooks, props);
+  assert.doesNotMatch(textOf(tree), /No failure signal/);
+  findAll(tree, (node) => node.type === "button" && textOf(node) === "Analyze turn")[0].props.onClick();
+  tree = render(ui.TurnAnalysis, hooks, props);
+  findAll(tree, (node) => node.type === "button" && textOf(node) === "Refresh analysis")[0].props.onClick();
+  requests[1].resolve({ ok: false, status: 503 });
+  await new Promise(setImmediate);
+  tree = render(ui.TurnAnalysis, hooks, props);
+  assert.match(textOf(tree), /Turn analysis unavailable:\s+Error: HTTP 503/);
+});
+
+test("Agent Runs keeps same-run Turn detail while focusing evidence and clears it on run switch", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const props = { url: "/api/runs" };
+  render(ui.Runs, hooks, props);
+  hooks.flushEffects();
+  await resolveJson(requests[0], runListPage(0, ["run-a", "run-b"], 2));
+  render(ui.Runs, hooks, props);
+  hooks.flushEffects();
+  await resolveJson(requests[1], { runId: "run-a", turns: [{ turnId: "turn-a" }],
+    events: [], page: { available: 0, shown: 0, offset: 0, limit: 100, truncated: false } });
+  let tree = render(ui.Runs, hooks, props);
+  let detail = findAll(tree, (node) => node.type?.name === "RunDetail")[0];
+  detail.props.onFocusEvent("event-a");
+  render(ui.Runs, hooks, props);
+  hooks.flushEffects();
+  tree = render(ui.Runs, hooks, props);
+  detail = findAll(tree, (node) => node.type?.name === "RunDetail")[0];
+  assert.equal(detail.props.detail.data.runId, "run-a");
+  assert.equal(detail.props.detail.loading, true);
+  findAll(tree, (node) => node.type === "button" && textOf(node).includes("run-b"))[0].props.onClick();
+  render(ui.Runs, hooks, props);
+  hooks.flushEffects();
+  tree = render(ui.Runs, hooks, props);
+  detail = findAll(tree, (node) => node.type?.name === "RunDetail")[0];
+  assert.equal(detail.props.detail.data, null);
 });
 
 test("a capture job that fails is reported instead of completing the setup", async () => {

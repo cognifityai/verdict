@@ -42,6 +42,7 @@ from verdict.dashboard.analysis_service import (
 from verdict.dashboard.query import PostgresSession as _PostgresSession
 from verdict.dashboard.query import QuerySession as _QuerySession
 from verdict.dashboard.query import SQLiteSession as _SQLiteSession
+from verdict.dashboard.recommendations import run_recommendations
 from verdict.dashboard.registry import (
     RegistryNotFoundError,
     RegistryStateError,
@@ -51,11 +52,14 @@ from verdict.dashboard.registry import (
     build_registry_bundle as _build_registry_bundle,
 )
 from verdict.dashboard.storage_url import is_postgres_storage
+from verdict.dashboard.turn_analysis import MAX_TURN_ANALYSIS_EVENTS, analyze_turn_events
+from verdict.dashboard.usage import build_usage_view
+from verdict.dashboard.usage import models_by_turn as _models_by_turn
+from verdict.dashboard.usage import turn_list_price_usd as _turn_list_price_usd
 from verdict.evidence import EvidenceState, ToolOrigin, _load_json_without_duplicate_tool_origin
 from verdict.metrics import ScoreCounts, verdict_label
 from verdict.monitor_inputs import LOCAL_TENANT
 from verdict.normalized_evidence import agent_turn_from_row, normalized_bundle_digest
-from verdict.pricing import estimate_turn_cost_usd
 from verdict.redaction import redact, redact_structure, sanitize_agent_event_attributes
 from verdict.telemetry.model import safe_tenant_id
 from verdict.trace_facts import deterministic_trace_facts
@@ -515,6 +519,285 @@ def build_registry_bundle(
     return redacted
 
 
+def build_agent_usage_bundle(
+    storage: str | os.PathLike[str], *, tenant: str,
+    now: datetime | None = None, day: str | None = None,
+    session_id: str | None = None, source_kind: str | None = None,
+) -> dict:
+    """Read a bounded, tenant-scoped UTC usage report without store mutation."""
+    if not isinstance(tenant, str) or not tenant or len(tenant.encode("utf-8")) > 256:
+        raise ValueError("invalid tenant")
+    if session_id is not None and (
+        not isinstance(session_id, str) or not session_id
+        or len(session_id.encode("utf-8")) > 256
+    ):
+        raise ValueError("invalid session_id")
+    if source_kind is not None and (
+        session_id is None or not isinstance(source_kind, str) or not source_kind
+        or len(source_kind.encode("utf-8")) > 256
+    ):
+        raise ValueError("invalid source_kind")
+    if day is not None and (not isinstance(day, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day)):
+        raise ValueError("invalid day")
+    if now is not None and (not isinstance(now, datetime) or now.tzinfo is None):
+        raise ValueError("invalid now")
+    configured = str(storage)
+
+    def builder(session: _QuerySession) -> dict:
+        return build_usage_view(
+            session, tenant=tenant, now=now or _now_utc(), day=day,
+            session_id=session_id, source_kind=source_kind,
+        )
+
+    if _is_postgres(configured):
+        try:
+            import psycopg
+            from psycopg.rows import dict_row
+        except ImportError as exc:
+            raise ImportError("PostgreSQL dashboard support requires the postgres extra") from exc
+        with psycopg.connect(configured, autocommit=False, row_factory=dict_row) as connection:
+            with connection.transaction():
+                connection.execute("SET TRANSACTION READ ONLY")
+                result = builder(_PostgresSession(connection))
+    else:
+        path = _sqlite_path(configured)
+        connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        connection.row_factory = sqlite3.Row
+        try:
+            connection.execute("BEGIN")
+            result = builder(_SQLiteSession(connection))
+            connection.commit()
+        finally:
+            connection.close()
+    redacted = redact_structure(result)
+    if not isinstance(redacted, dict):
+        raise DashboardBundleLimitError("bounded agent usage bundle exceeded redaction budget")
+    return redacted
+
+
+def build_agent_session_bundle(
+    storage: str | os.PathLike[str], *, tenant: str, source_kind: str, session_id: str,
+) -> dict:
+    """Read one exact source-qualified session in a bounded storage snapshot."""
+    for name, value in (("tenant", tenant), ("source_kind", source_kind),
+                        ("session_id", session_id)):
+        if not isinstance(value, str) or not value or len(value.encode("utf-8")) > 256:
+            raise ValueError(f"invalid {name}")
+    configured = str(storage)
+
+    def builder(session: _QuerySession) -> dict:
+        run_ids, available = agent_evidence_queries.session_run_ids(
+            session, tenant, source_kind, session_id, limit=20,
+        )
+        if not run_ids:
+            raise KeyError(session_id)
+        counts = session.execute(
+            "SELECT (SELECT COUNT(*) FROM agent_turns WHERE tenant_id=? AND run_id IN (" +
+            ",".join("?" for _ in run_ids) + ")) AS turns," +
+            "(SELECT COUNT(*) FROM agent_events WHERE tenant_id=? AND run_id IN (" +
+            ",".join("?" for _ in run_ids) + ")) AS events",  # nosec B608 -- generated placeholders
+            (tenant, *run_ids, tenant, *run_ids),
+        ).fetchone()
+        turn_count, event_count = int(counts["turns"]), int(counts["events"])
+        reason = ("run_limit" if available > 20 else
+                  "turn_limit" if turn_count > 20 else
+                  "event_limit" if event_count > 80 else None)
+        if reason is not None:
+            placeholders = ",".join("?" for _ in run_ids)
+            run_rows = session.execute(
+                "SELECT run_id,status,started_at,agent_name FROM agent_runs "
+                "WHERE tenant_id=? AND run_id IN (" + placeholders + ") "
+                "ORDER BY started_at,run_id LIMIT 20",  # nosec B608 -- generated placeholders
+                (tenant, *run_ids),
+            )
+            turn_rows = session.execute(
+                "SELECT run_id,turn_id,sequence,started_at,ended_at,status,"
+                "user_request_redacted,final_response_redacted,request_state,response_state,"
+                "request_truncated,response_truncated,total_tokens "
+                "FROM agent_turns WHERE tenant_id=? AND run_id IN (" + placeholders + ") "
+                "ORDER BY started_at,run_id,sequence LIMIT 20",  # nosec B608 -- generated placeholders
+                (tenant, *run_ids),
+            )
+            event_rows = session.execute(
+                "SELECT run_id,turn_id,event_id,sequence,occurred_at,event_type,status,"
+                "producer_id,producer_sequence,provenance FROM agent_events "
+                "WHERE tenant_id=? AND run_id IN (" + placeholders + ") "
+                "ORDER BY occurred_at,run_id,turn_id,sequence,event_id LIMIT 80",  # nosec B608
+                (tenant, *run_ids),
+            )
+            usage_row = session.execute(
+                "SELECT COUNT(total_tokens) AS known_turns,SUM(total_tokens) AS total_tokens "
+                "FROM agent_turns WHERE tenant_id=? AND run_id IN (" + placeholders + ")",  # nosec B608
+                (tenant, *run_ids),
+            ).fetchone()
+            def excerpt(value):
+                if value is None:
+                    return None
+                return value if len(value) <= 512 else value[:512] + "… [excerpt; open run for full captured text]"
+
+            return {
+                "sessionId": session_id, "sourceKind": source_kind,
+                "runIds": list(run_ids), "runCountAtLeast": available,
+                "turnCount": turn_count, "eventCount": event_count,
+                "coverage": "partial", "unavailableReason": reason,
+                "runs": [{"runId": row["run_id"], "status": row["status"],
+                          "startedAt": str(row["started_at"]), "agentName": row["agent_name"]}
+                         for row in run_rows],
+                "turns": [{"runId": row["run_id"], "turnId": row["turn_id"],
+                           "sequence": row["sequence"], "startedAt": str(row["started_at"]),
+                           "endedAt": str(row["ended_at"]) if row["ended_at"] else None,
+                           "status": row["status"], "request": excerpt(row["user_request_redacted"]),
+                           "response": excerpt(row["final_response_redacted"]),
+                           "requestState": row["request_state"], "responseState": row["response_state"],
+                           "requestTruncated": bool(row["request_truncated"]),
+                           "responseTruncated": bool(row["response_truncated"]),
+                           "totalTokens": row["total_tokens"], "listPriceUsd": None}
+                          for row in turn_rows],
+                "events": [{"runId": row["run_id"], "turnId": row["turn_id"],
+                            "eventId": row["event_id"], "sequence": row["sequence"],
+                            "occurredAt": str(row["occurred_at"]), "type": row["event_type"],
+                            "status": row["status"], "producerId": row["producer_id"],
+                            "producerSequence": row["producer_sequence"],
+                            "provenance": row["provenance"], "attributes": {}}
+                           for row in event_rows],
+                "recommendations": [], "findings": [],
+                "usage": {"totalTokens": usage_row["total_tokens"],
+                          "tokenKnownTurns": usage_row["known_turns"],
+                          "turnCount": turn_count, "listPriceUsd": None,
+                          "pricedTurns": 0, "coverage": "partial"},
+                "evaluations": [],
+            }
+        bundles = agent_evidence_queries.load_bundles(
+            session, tenant, limit=len(run_ids), run_ids=run_ids, oldest_first=True,
+        )
+        turns = []
+        events = []
+        runs = []
+        findings = []
+        recommendations = []
+        total_tokens = 0
+        known_tokens = 0
+        list_price = 0.0
+        priced_turns = 0
+        for bundle in bundles:
+            run_id = bundle.run.run_id
+            analysis = analyze_agent_run(bundle)
+            runs.append({"runId": run_id, "status": bundle.run.status.value,
+                         "startedAt": bundle.run.started_at.isoformat(),
+                         "agentName": bundle.run.agent_name or None})
+            for finding in analysis.findings:
+                findings.append({"runId": run_id, "code": finding.code,
+                                 "severity": finding.severity, "message": finding.message,
+                                 "evidenceEventIds": list(finding.evidence_event_ids)})
+            for recommendation in run_recommendations(bundle):
+                recommendations.append({"runId": run_id, **recommendation})
+            models = _models_by_turn(bundle.events)
+            for turn in bundle.turns:
+                if turn.total_tokens is not None:
+                    known_tokens += 1
+                    total_tokens += turn.total_tokens
+                price = _turn_list_price_usd(turn, models.get(turn.turn_id, frozenset()))
+                if price is not None:
+                    priced_turns += 1
+                    list_price += price
+                turns.append({"runId": run_id, "turnId": turn.turn_id,
+                              "sequence": turn.sequence,
+                              "startedAt": turn.started_at.isoformat(),
+                              "endedAt": turn.ended_at.isoformat() if turn.ended_at else None,
+                              "status": turn.status.value,
+                              "request": turn.user_request_redacted,
+                              "response": turn.final_response_redacted,
+                              "requestState": turn.request_state.value,
+                              "responseState": turn.response_state.value,
+                              "requestTruncated": turn.request_truncated,
+                              "responseTruncated": turn.response_truncated,
+                              "totalTokens": turn.total_tokens,
+                              "listPriceUsd": round(price, 8) if price is not None else None})
+            for event in bundle.events:
+                events.append({"runId": run_id, "turnId": event.turn_id,
+                               "eventId": event.event_id, "sequence": event.sequence,
+                               "occurredAt": event.occurred_at.isoformat(),
+                               "type": event.event_type.value, "status": event.status.value,
+                               "producerId": event.producer_id,
+                               "producerSequence": event.producer_sequence,
+                               "provenance": event.provenance, "attributes": event.attributes})
+        turns.sort(key=lambda item: (item["startedAt"], item["runId"], item["sequence"], item["turnId"]))
+        events.sort(key=lambda item: (item["occurredAt"], item["runId"], item["producerId"],
+                                      item["producerSequence"] if item["producerSequence"] is not None else item["sequence"],
+                                      item["eventId"]))
+        evaluations = []
+        if session.table_exists("product_control_documents"):
+            for row in session.execute(
+                """SELECT document_id,state,payload_json,created_at FROM product_control_documents
+                   WHERE tenant_id=? AND kind='scoped_evaluation'
+                   ORDER BY created_at DESC,document_id DESC LIMIT 200""",
+                (tenant,),
+            ):
+                payload = row["payload_json"]
+                if isinstance(payload, str):
+                    try:
+                        payload = json.loads(payload)
+                    except ValueError:
+                        continue
+                if not isinstance(payload, dict):
+                    continue
+                if payload.get("runId") not in run_ids and not (
+                    payload.get("scope") == "session" and
+                    payload.get("sessionId") == session_id and
+                    payload.get("sourceKind") == source_kind
+                ):
+                    continue
+                evaluations.append({"resultId": row["document_id"],
+                                    "scope": payload.get("scope"), "runId": payload.get("runId"),
+                                    "status": row["state"],
+                                    "evidenceFingerprint": payload.get("evidenceFingerprint"),
+                                    "evaluatorFingerprint": payload.get("evaluatorFingerprint"),
+                                    "dimensions": payload.get("dimensions", [])})
+                if len(evaluations) >= 20:
+                    break
+        return {
+            "sessionId": session_id, "sourceKind": source_kind,
+            "runIds": list(run_ids), "runCountAtLeast": available,
+            "turnCount": turn_count, "eventCount": event_count,
+            "coverage": "complete", "unavailableReason": None,
+            "runs": runs, "turns": turns, "events": events,
+            "findings": findings, "recommendations": recommendations,
+            "usage": {"totalTokens": total_tokens if known_tokens else None,
+                      "tokenKnownTurns": known_tokens, "turnCount": turn_count,
+                      "listPriceUsd": round(list_price, 8) if priced_turns else None,
+                      "pricedTurns": priced_turns},
+            "evaluations": evaluations,
+        }
+
+    if _is_postgres(configured):
+        try:
+            import psycopg
+            from psycopg.rows import dict_row
+        except ImportError as exc:
+            raise ImportError("PostgreSQL dashboard support requires the postgres extra") from exc
+        with psycopg.connect(configured, autocommit=False, row_factory=dict_row) as connection:
+            with connection.transaction():
+                connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+                connection.execute("SET TRANSACTION READ ONLY")
+                result = builder(_PostgresSession(connection))
+    else:
+        connection = sqlite3.connect(f"file:{_sqlite_path(configured)}?mode=ro", uri=True)
+        connection.row_factory = sqlite3.Row
+        try:
+            connection.execute("BEGIN")
+            result = builder(_SQLiteSession(connection))
+            connection.commit()
+        finally:
+            connection.close()
+    redacted = redact_structure(
+        result, _max_nodes=MAX_AGENT_DETAIL_REDACTION_NODES,
+        _max_characters=MAX_AGENT_DETAIL_REDACTION_CHARACTERS,
+    )
+    if not isinstance(redacted, dict):
+        raise DashboardBundleLimitError("bounded session report exceeded redaction budget")
+    return redacted
+
+
 def build_agent_runs_bundle(
     storage: str | os.PathLike[str], *, tenant: str, limit: int = 30,
     offset: int = 0,
@@ -587,6 +870,13 @@ def build_agent_runs_bundle(
         linked_trace_ids: dict[str, set[str]] = defaultdict(set)
         for bundle in bundles:
             analysis = analyze_agent_run(bundle)
+            turn_models = _models_by_turn(bundle.events)
+            turn_prices = [
+                price for turn in bundle.turns
+                if (price := _turn_list_price_usd(
+                    turn, turn_models.get(turn.turn_id, frozenset()),
+                )) is not None
+            ]
             usage_turns = [
                 turn for turn in bundle.turns if turn.token_usage_basis is not None
             ]
@@ -635,6 +925,8 @@ def build_agent_runs_bundle(
                     "outputTokens": source_components["output_tokens"],
                     "reasoningOutputTokens": source_components["reasoning_output_tokens"],
                     "turns": len(usage_turns),
+                    "pricedTurns": len(turn_prices),
+                    "listPriceUsd": round(sum(turn_prices), 8) if turn_prices else None,
                     "state": (
                         "complete"
                         if bundle.turns and len(total_usage_turns) == len(bundle.turns)
@@ -651,6 +943,7 @@ def build_agent_runs_bundle(
                     "evidenceEventIds": list(finding.evidence_event_ids),
                     "judgeUsed": finding.judge_used,
                 } for finding in analysis.findings],
+                "recommendations": run_recommendations(bundle),
             })
             linked_trace_ids[bundle.run.run_id].update(
                 event.trace_id for event in bundle.events if event.trace_id is not None
@@ -1018,6 +1311,75 @@ def build_agent_run_detail(
     )
     if not isinstance(redacted, dict):
         raise DashboardBundleLimitError("bounded agent-run detail exceeded redaction budget")
+    return redacted
+
+
+def build_agent_turn_analysis(
+    storage: str | os.PathLike[str], *, tenant: str, run_id: str, turn_id: str,
+) -> dict:
+    """Review one tenant-scoped turn without sending content to a judge."""
+    for name, value in (("tenant", tenant), ("run_id", run_id), ("turn_id", turn_id)):
+        if not isinstance(value, str) or not value or len(value.encode("utf-8")) > 256:
+            raise ValueError(f"invalid {name}")
+    configured = str(storage)
+
+    def read(session: _QuerySession) -> dict:
+        if not agent_evidence_queries.available(session):
+            raise KeyError(turn_id)
+        turn = session.execute(
+            "SELECT t.request_state,t.response_state FROM agent_turns t "
+            "JOIN agent_runs r ON r.tenant_id=t.tenant_id AND r.run_id=t.run_id "
+            "WHERE t.tenant_id=? AND t.run_id=? AND t.turn_id=?",
+            (tenant, run_id, turn_id),
+        ).fetchone()
+        if turn is None:
+            raise KeyError(turn_id)
+        count = session.execute(
+            "SELECT COUNT(*) AS count,COUNT(DISTINCT producer_id) AS producers FROM agent_events "
+            "WHERE tenant_id=? AND run_id=? AND turn_id=?",
+            (tenant, run_id, turn_id),
+        ).fetchone()
+        rows = list(session.execute(
+            "SELECT event_id,event_type,status,provenance,attributes_json FROM agent_events "
+            "WHERE tenant_id=? AND run_id=? AND turn_id=? "
+            "ORDER BY occurred_at,producer_id,COALESCE(producer_sequence,sequence),event_id "
+            "LIMIT ?",
+            (tenant, run_id, turn_id, MAX_TURN_ANALYSIS_EVENTS),
+        ))
+        events = [{**row, "attributes": _dashboard_agent_event_attributes(
+            row["event_type"], row["attributes_json"]
+        )} for row in rows]
+        return analyze_turn_events(
+            run_id=run_id, turn_id=turn_id, rows=events,
+            available=int(count["count"]), request_state=turn["request_state"],
+            response_state=turn["response_state"],
+            producer_count=int(count["producers"]),
+        )
+
+    if _is_postgres(configured):
+        try:
+            import psycopg
+            from psycopg.rows import dict_row
+        except ImportError as exc:
+            raise ImportError("PostgreSQL dashboard support requires the postgres extra") from exc
+        with psycopg.connect(configured, autocommit=False, row_factory=dict_row) as connection:
+            with connection.transaction():
+                connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+                connection.execute("SET TRANSACTION READ ONLY")
+                result = read(_PostgresSession(connection))
+    else:
+        path = _sqlite_path(configured)
+        connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        connection.row_factory = sqlite3.Row
+        try:
+            connection.execute("BEGIN")
+            result = read(_SQLiteSession(connection))
+            connection.commit()
+        finally:
+            connection.close()
+    redacted = redact_structure(result)
+    if not isinstance(redacted, dict):
+        raise DashboardBundleLimitError("bounded turn analysis exceeded redaction budget")
     return redacted
 
 
@@ -1432,59 +1794,6 @@ def build_agent_insights_bundle(
     return redacted
 
 
-# Whether a source's turn ``input_tokens`` already includes its cached tokens.
-# OpenAI-style counts (Codex) include them; Anthropic-style counts (Claude
-# Code) report cache reads and writes separately. Any other basis is not
-# priced rather than guessed.
-_TURN_INPUT_INCLUDES_CACHED = {
-    "codex_turn_delta": True,
-    "claude_provider_response_sum": False,
-}
-
-
-def _models_by_turn(events) -> dict[str, frozenset[str]]:
-    """The provider model names each turn used, from its typed events.
-
-    Claude Code turns name the model on every model-call event; Codex turns
-    name it once in a ``model_configuration`` context event. Client notices
-    such as ``<synthetic>`` are not models.
-    """
-    models: dict[str, set[str]] = defaultdict(set)
-    for event in events:
-        kind = event.event_type.value
-        if kind == "model_call":
-            model = event.attributes.get("request_model")
-        elif kind == "context" and event.attributes.get("name") == "model_configuration":
-            model = event.attributes.get("source")
-        else:
-            continue
-        if isinstance(model, str) and model and model != "unknown" and not model.startswith("<"):
-            models[event.turn_id].add(model)
-    return {turn_id: frozenset(names) for turn_id, names in models.items()}
-
-
-def _turn_list_price_usd(turn, models: frozenset[str]) -> float | None:
-    """Estimated list price of one turn, or None when it cannot be priced honestly.
-
-    A turn is priced only when its token basis is understood, exactly one
-    model is named, and both the input and output counts are present.
-    """
-    includes_cached = _TURN_INPUT_INCLUDES_CACHED.get(turn.token_usage_basis)
-    if includes_cached is None or len(models) != 1:
-        return None
-    # A turn missing either count would be priced as if that side were free.
-    if turn.input_tokens is None or turn.output_tokens is None:
-        return None
-    return estimate_turn_cost_usd(
-        next(iter(models)),
-        input_tokens=turn.input_tokens,
-        cached_input_tokens=turn.cached_input_tokens,
-        cache_write_input_tokens=turn.cache_write_input_tokens,
-        output_tokens=turn.output_tokens,
-        input_includes_cached=includes_cached,
-    )
-
-
 # Failure counts are only meaningful when the source reported outcomes.
 _OUTCOME_REPORTED_METRICS = {
     "tool_result": "tool_outcomes_reported",
@@ -1660,6 +1969,7 @@ def _agent_run_metadata(cur: _QuerySession, tenant: str) -> dict[str, Any]:
 def _empty_bundle(
     *, agent_runs: dict[str, Any] | None = None, report_days: int = 0,
     analysis_time: datetime | None = None,
+    coverage: dict[str, Any] | None = None,
 ) -> dict:
     run_metadata = agent_runs or {
         "available": 0, "sources": [], "sourcesTruncated": False,
@@ -1715,6 +2025,7 @@ def _empty_bundle(
             "error": 0,
             "evaluable": 0,
         },
+        **({"coverage": coverage} if coverage is not None else {}),
         "dimensionOverall": [],
         "tsRows": [],
         "passrate": [],
@@ -2161,8 +2472,12 @@ def _build(
     analysis_time = _now_utc()
     report_start, report_end, report_period = _report_period(report_days, analysis_time)
     if not _table_exists(cur, "traces"):
+        coverage = _analysis_coverage(cur, tenant=registry_tenant or "__verdict_local__",
+                                      agent_runs=agent_runs, explorer_trace_ids=[],
+                                      judgment_status_by_trace={}, selected_evaluator_id=None)
         return _empty_bundle(
-            agent_runs=agent_runs, report_days=report_days, analysis_time=analysis_time
+            agent_runs=agent_runs, report_days=report_days, analysis_time=analysis_time,
+            coverage=coverage,
         )
     trace_columns = cur.columns("traces")
     trace_scope, trace_scope_params = _trace_tenant_scope(
@@ -2174,8 +2489,12 @@ def _build(
         trace_scope_params,
     ).fetchone()
     if not t0row or not t0row["m"]:
+        coverage = _analysis_coverage(cur, tenant=registry_tenant or "__verdict_local__",
+                                      agent_runs=agent_runs, explorer_trace_ids=[],
+                                      judgment_status_by_trace={}, selected_evaluator_id=None)
         return _empty_bundle(
-            agent_runs=agent_runs, report_days=report_days, analysis_time=analysis_time
+            agent_runs=agent_runs, report_days=report_days, analysis_time=analysis_time,
+            coverage=coverage,
         )
     t0, tmax = _dt(t0row["m"]), _dt(t0row["x"])
     cluster_select = (
@@ -2939,6 +3258,7 @@ def create_app(
                 "/api/data",
                 "/api/registry",
                 "/api/runs",
+                "/api/usage",
                 "/api/insights",
                 "/api/evaluators",
                 "/api/setup",
@@ -3022,10 +3342,14 @@ def create_app(
     _setup_authorized = setup_routes.authorized
 
     from verdict.dashboard.control_routes import ControlRoutes
+    from verdict.dashboard.experiments import register_experiment_routes
     from verdict.dashboard.lab_routes import register_lab_routes
     from verdict.dashboard.monitor_routes import MonitorRoutes
+    from verdict.dashboard.scoped_evaluation import register_scoped_routes
 
     register_lab_routes(app, setup_routes)
+    register_experiment_routes(app, setup_routes)
+    register_scoped_routes(app, setup_routes)
     monitor_routes = MonitorRoutes(setup_routes)
     monitor_routes.register(app)
     ControlRoutes(configured_storage, setup_routes, monitor_routes).register(app)
@@ -3150,6 +3474,39 @@ def create_app(
     agent_runs.__annotations__["request"] = Request
     app.get("/api/runs")(agent_runs)
 
+    def agent_usage(request, day: str | None = None, session_id: str | None = None,
+                    source_kind: str | None = None):
+        try:
+            return build_agent_usage_bundle(
+                configured_storage, tenant=_authorized_tenant(request),
+                day=day, session_id=session_id, source_kind=source_kind,
+            )
+        except ValueError:
+            return JSONResponse({"error": "invalid usage request"}, status_code=400)
+        except (DashboardBundleLimitError, OSError, sqlite3.DatabaseError):
+            _log.exception("failed to build %s agent usage bundle", backend)
+            return JSONResponse({"error": "agent usage unavailable"}, status_code=503)
+
+    agent_usage.__annotations__["request"] = Request
+    app.get("/api/usage")(agent_usage)
+
+    def agent_session(request, session_id: str, source_kind: str):
+        try:
+            return build_agent_session_bundle(
+                configured_storage, tenant=_authorized_tenant(request),
+                source_kind=source_kind, session_id=session_id,
+            )
+        except KeyError:
+            return JSONResponse({"error": "agent session not found"}, status_code=404)
+        except ValueError:
+            return JSONResponse({"error": "invalid agent session request"}, status_code=400)
+        except (DashboardBundleLimitError, OSError, sqlite3.DatabaseError):
+            _log.exception("failed to build %s agent session bundle", backend)
+            return JSONResponse({"error": "agent session unavailable"}, status_code=503)
+
+    agent_session.__annotations__["request"] = Request
+    app.get("/api/session")(agent_session)
+
     def agent_run_detail(
         run_id: str,
         request,
@@ -3183,6 +3540,23 @@ def create_app(
 
     agent_run_detail.__annotations__["request"] = Request
     app.get("/api/runs/{run_id}")(agent_run_detail)
+
+    def agent_turn_analysis(run_id: str, turn_id: str, request):
+        try:
+            return build_agent_turn_analysis(
+                configured_storage, tenant=_authorized_tenant(request),
+                run_id=run_id, turn_id=turn_id,
+            )
+        except KeyError:
+            return JSONResponse({"error": "agent turn not found"}, status_code=404)
+        except ValueError:
+            return JSONResponse({"error": "invalid turn analysis request"}, status_code=400)
+        except (DashboardBundleLimitError, OSError, sqlite3.DatabaseError):
+            _log.exception("failed to build %s agent turn analysis", backend)
+            return JSONResponse({"error": "agent turn analysis unavailable"}, status_code=503)
+
+    agent_turn_analysis.__annotations__["request"] = Request
+    app.get("/api/runs/{run_id}/turns/{turn_id}/analysis")(agent_turn_analysis)
 
     def agent_insights(request):
         try:

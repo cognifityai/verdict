@@ -8,6 +8,24 @@ the product is refined.
 
 ### Added
 
+- Agent usage endpoints (`/api/usage`, `/api/session`) report source-qualified
+  UTC token activity, supported static list-price estimates, bounded session
+  and turn evidence, and deterministic review suggestions. Ambiguous session
+  IDs now return `selectionReason: "ambiguous_source"` until a source is chosen.
+- Scoped session, run, and tool-action evaluation endpoints (`/api/scoped/*`)
+  preview bounded evidence and destination before one approved judge call.
+  The append-only control store now records `scoped_evaluation` results and
+  one-shot `scheduled_evaluation` approvals and outcomes. Unknown bracket labels
+  in judge prose are not evidence citations; only captured `[turn:...]` and
+  `[event:...]` references are validated and linked.
+- Reviewed case sets and fixed-case comparisons use `/api/experiments/*` and
+  append-only `case_set` and `experiment` documents. The dashboard host must
+  configure `VERDICT_EXPERIMENT_RUNNER` as a trusted Python module/function and
+  `VERDICT_EXPERIMENT_CONFIGS` as versioned variants. Trial timeout is host-set
+  with `VERDICT_EXPERIMENT_TRIAL_TIMEOUT_SECONDS` (1–300 seconds; default 120).
+  A synchronous comparison is rejected before execution when its cases × two
+  sides × trials × timeout exceeds 600 configured runner seconds. Case inputs
+  are redacted before storage and runner execution.
 - Local Claude Code and Codex history shows an estimated list price for agent
   turns, in Overview → Performance and per source. Each turn's token components
   are priced at the public rates for the one model the turn named, with cache
@@ -22,6 +40,12 @@ the product is refined.
 
 ### Changed
 
+- Manual `POST /api/control/actions/run-schedule` can consume an already
+  approved, pending one-shot scoped evaluation and make one external judge call
+  during the cycle. The approval is spent before egress; running the cycle
+  without a pending approval makes no such call. On non-POSIX platforms, the
+  SQLite run-now path returns a specific unsupported-platform error; PostgreSQL
+  remains supported.
 - Local history capture from Settings → Data Sources runs on a background
   thread. `POST /api/setup/capture` returns 202 with the job at once and
   `GET /api/setup/capture/status` reports `running`, `analyzing`, `completed`,

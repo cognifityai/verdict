@@ -26,8 +26,8 @@ DASHBOARD = (
 )
 
 PAGES = {
-    "landing.html": ("Verdict - LLM Observability", "landing.js"),
-    "VerdictUI.html": ("Verdict - LLM Observability", "all-in-one.js"),
+    "landing.html": ("Verdict - Agent Profiler and Reliability", "landing.js"),
+    "VerdictUI.html": ("Verdict - Agent Profiler and Reliability", "all-in-one.js"),
 }
 
 

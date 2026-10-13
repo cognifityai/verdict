@@ -14,6 +14,7 @@ from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from verdict.agent_judgment import (
     MAX_TURN_SCAN,
@@ -38,8 +39,26 @@ _PROVIDER_KEYS = {
     "jev": "TYPESAFE_API_KEY",
 }
 _PROVIDER_ENDPOINT_ENV = {"openai": "OPENAI_BASE_URL", "anthropic": "ANTHROPIC_BASE_URL"}
+_DEFAULT_ENDPOINT = {
+    "anthropic": "https://api.anthropic.com",
+    "openai": "https://api.openai.com/v1",
+    "google": "https://generativelanguage.googleapis.com",
+}
 _MAX_EVALUATION_TRACES = 10_000
 _EVALUATION_LOCK = threading.Lock()
+
+
+def _destination(provider: str, identity: dict[str, Any]) -> tuple[str, str]:
+    raw = (identity["evaluator_config"]["base_url"] if provider == "jev" else
+           os.environ.get(_PROVIDER_ENDPOINT_ENV.get(provider, ""), "")
+           or _DEFAULT_ENDPOINT[provider])
+    parsed = urlsplit(raw)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("invalid judge destination")
+    display = (f"{parsed.scheme}://{parsed.hostname}"
+               f"{':' + str(parsed.port) if parsed.port else ''}{parsed.path.rstrip('/')}")
+    # Bind credentials and query changes without displaying their values.
+    return display, hashlib.sha256(raw.encode()).hexdigest()
 
 
 def evaluator_environment() -> dict[str, Any]:
@@ -83,6 +102,12 @@ def _validated_config(config: dict[str, Any]):
         raise ValueError("evaluator config must be an object")
     if config.get("unit", "trace") not in ("trace", "agent_turn"):
         raise ValueError("unsupported evaluation unit")
+    trace_id = config.get("traceId")
+    if trace_id is not None and (
+        config.get("unit", "trace") != "trace" or not isinstance(trace_id, str)
+        or not trace_id or len(trace_id.encode("utf-8")) > 256
+    ):
+        raise ValueError("invalid selected Trace")
     if config.get("toolEvidence") not in (None, TOOL_EVIDENCE_MODE):
         raise ValueError("unsupported tool evidence mode")
     if config.get("toolEvidence") is not None and config.get("unit") != "agent_turn":
@@ -161,12 +186,21 @@ def _eligibility(trace: Trace) -> str | None:
     )
 
 
-def _selected(storage: Storage, tenant_id: str):
-    traces = storage.list_traces(tenant_id=tenant_id, limit=_MAX_EVALUATION_TRACES)
+def _selected(storage: Storage, tenant_id: str, trace_id: str | None = None):
+    if trace_id is None:
+        traces = storage.list_traces(tenant_id=tenant_id, limit=_MAX_EVALUATION_TRACES)
+    else:
+        selected = storage.get_trace(trace_id)
+        traces = [selected] if selected is not None and selected.tenant_id == tenant_id else []
     reasons: Counter[str] = Counter()
     eligible = []
     for trace in traces:
         reason = _eligibility(trace)
+        if trace_id is not None and reason is None and (
+            len(trace.prompt_redacted or "") > 8_000
+            or len(trace.response_redacted or "") > 8_000
+        ):
+            reason = "selected_evidence_too_large"
         if reason:
             reasons[reason] += 1
         else:
@@ -285,10 +319,11 @@ def _planned_trace(trace: Trace) -> dict[str, str]:
     }
 
 
-def _plan_fingerprint(evaluator_fingerprint, max_calls, planned_traces):
+def _plan_fingerprint(evaluator_fingerprint, destination_binding, max_calls, planned_traces):
     encoded = json.dumps(
         [
             evaluator_fingerprint,
+            destination_binding,
             "all" if max_calls is None else max_calls,
             planned_traces,
         ],
@@ -299,10 +334,21 @@ def _plan_fingerprint(evaluator_fingerprint, max_calls, planned_traces):
 
 
 def _turn_scan_options(config):
+    run_id = config.get("runId")
+    turn_id = config.get("turnId")
+    if (run_id is None) != (turn_id is None):
+        raise ValueError("selected Turn requires both runId and turnId")
+    if run_id is not None and any(
+        not isinstance(value, str) or not value or len(value.encode("utf-8")) > 256
+        for value in (run_id, turn_id)
+    ):
+        raise ValueError("invalid selected Turn")
     limit = config.get("scanLimit", MAX_TURN_SCAN)
     if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= MAX_TURN_SCAN:
         raise ValueError("turn scan limit must be 1-100")
     raw = config.get("before")
+    if run_id is not None and (raw is not None or "scanLimit" in config):
+        raise ValueError("selected Turn cannot use a scan cursor")
     if raw is None:
         return limit, None
     if not isinstance(raw, dict) or set(raw) != {"startedAt", "runId", "turnId"}:
@@ -317,9 +363,10 @@ def _turn_scan_options(config):
     return limit, before
 
 
-def _turn_plan_fingerprint(tenant_id, evaluator_fingerprint, max_calls, limit, before, planned):
+def _turn_plan_fingerprint(tenant_id, evaluator_fingerprint, destination_binding,
+                           max_calls, limit, before, planned):
     return hashlib.sha256(json.dumps(
-        ["agent_turn", tenant_id, evaluator_fingerprint, max_calls, limit,
+        ["agent_turn", tenant_id, evaluator_fingerprint, destination_binding, max_calls, limit,
          [before[0].isoformat(), *before[1:]] if before else None, planned],
         sort_keys=True, separators=(",", ":"),
     ).encode("utf-8")).hexdigest()
@@ -328,10 +375,18 @@ def _turn_plan_fingerprint(tenant_id, evaluator_fingerprint, max_calls, limit, b
 def _turn_candidates(storage, tenant_id, identity, config, max_calls):
     limit, before = _turn_scan_options(config)
     tool_mode = config.get("toolEvidence") == TOOL_EVIDENCE_MODE
-    rows, has_more = storage.list_agent_turn_evaluation_candidates(
-        tenant_id, identity["evaluator_fingerprint"], limit=limit, before=before,
-        tool_evidence=tool_mode,
-    )
+    if config.get("runId") is not None:
+        candidate = storage.get_agent_turn_evaluation_candidate(
+            tenant_id, config["runId"], config["turnId"],
+            identity["evaluator_fingerprint"], tool_evidence=tool_mode,
+        )
+        rows, has_more = ([candidate] if candidate is not None else []), False
+        limit = 1
+    else:
+        rows, has_more = storage.list_agent_turn_evaluation_candidates(
+            tenant_id, identity["evaluator_fingerprint"], limit=limit, before=before,
+            tool_evidence=tool_mode,
+        )
     reasons: Counter[str] = Counter()
     selected = []
     eligible = 0
@@ -362,6 +417,7 @@ def _turn_preview(storage, tenant_id, config, provider, model, max_calls, max_ou
     tool_mode = config.get("toolEvidence") == TOOL_EVIDENCE_MODE
     identity = _judge(_IdentityOnlyProvider(provider), model, rubric, max_output,
                       tool_evidence=tool_mode).evaluator_identity(context=None)
+    destination, destination_binding = _destination(provider, identity)
     rows, selected, reasons, eligible, already, planned, next_cursor, limit, before = (
         _turn_candidates(storage, tenant_id, identity, config, max_calls)
     )
@@ -378,8 +434,14 @@ def _turn_preview(storage, tenant_id, config, provider, model, max_calls, max_ou
         "availableTurns": len(rows), "eligible": eligible,
         "notEvaluable": sum(reasons.values()), "notEvaluableReasons": dict(sorted(reasons.items())),
         "plannedCalls": len(selected), "plannedTurns": planned,
+        "evidencePreview": [{
+            "runId": turn.run_id, "turnId": turn.turn_id,
+            "request": turn.user_request_redacted,
+            "response": turn.final_response_redacted,
+            "recordedToolEvidence": counts.prompt_block() if counts else None,
+        } for turn, counts in selected] if config.get("runId") is not None else [],
         "planFingerprint": _turn_plan_fingerprint(tenant_id, identity["evaluator_fingerprint"],
-                                                    max_calls, limit, before, planned),
+                                                    destination_binding, max_calls, limit, before, planned),
         "alreadyJudged": already, "maximumCalls": "all" if max_calls is None else max_calls,
         "scanLimit": limit, "hasMore": next_cursor is not None, "nextCursor": next_cursor,
         "estimatedInputTokens": input_estimate,
@@ -388,11 +450,11 @@ def _turn_preview(storage, tenant_id, config, provider, model, max_calls, max_ou
                                     compute_cost_usd(model, input_estimate,
                                                      _output_maximum(provider, model, max_output, len(selected)))),
         "costIsStaticEstimate": provider != "jev", "externalEgressRequired": True,
-        "destination": identity["evaluator_config"]["base_url"] if provider == "jev" else None,
+        "destination": destination,
     }
 
 
-def _approved_trace_ids(config, evaluator_fingerprint, max_calls, eligible):
+def _approved_trace_ids(config, evaluator_fingerprint, destination_binding, max_calls, eligible):
     fingerprint = config.get("planFingerprint")
     planned_traces = config.get("plannedTraces")
     if (
@@ -419,7 +481,7 @@ def _approved_trace_ids(config, evaluator_fingerprint, max_calls, eligible):
         trace_ids.append(item["traceId"])
     if len(set(trace_ids)) != len(trace_ids):
         raise ValueError("invalid evaluator preview plan")
-    expected = _plan_fingerprint(evaluator_fingerprint, max_calls, planned_traces)
+    expected = _plan_fingerprint(evaluator_fingerprint, destination_binding, max_calls, planned_traces)
     if fingerprint != expected:
         raise ValueError("evaluator plan does not match the approved preview")
     eligible_by_id = {trace.trace_id: trace for trace in eligible}
@@ -438,10 +500,11 @@ def preview_evaluation(
     provider, model, max_calls, max_output, rubric = _validated_config(config)
     if config.get("unit") == "agent_turn":
         return _turn_preview(storage, tenant_id, config, provider, model, max_calls, max_output, rubric)
-    traces, eligible, reasons = _selected(storage, tenant_id)
+    traces, eligible, reasons = _selected(storage, tenant_id, config.get("traceId"))
     identity = _judge(
         _IdentityOnlyProvider(provider), model, rubric, max_output
     ).evaluator_identity(context=None)
+    destination, destination_binding = _destination(provider, identity)
     rubric_summary = _rubric_summary(rubric, identity)
     selected, already_judged = _pending(
         storage, eligible, identity, max_calls
@@ -470,8 +533,13 @@ def preview_evaluation(
         "notEvaluableReasons": dict(sorted(reasons.items())),
         "plannedCalls": len(selected),
         "plannedTraces": planned_traces,
+        "evidencePreview": [{
+            "traceId": trace.trace_id,
+            "prompt": trace.prompt_redacted,
+            "response": trace.response_redacted,
+        } for trace in selected] if config.get("traceId") is not None else [],
         "planFingerprint": _plan_fingerprint(
-            identity["evaluator_fingerprint"], max_calls, planned_traces
+            identity["evaluator_fingerprint"], destination_binding, max_calls, planned_traces
         ),
         "alreadyJudged": already_judged,
         "maximumCalls": "all" if max_calls is None else max_calls,
@@ -481,7 +549,7 @@ def preview_evaluation(
                                     compute_cost_usd(model, input_estimate, output_maximum)),
         "costIsStaticEstimate": provider != "jev",
         "externalEgressRequired": True,
-        "destination": identity["evaluator_config"]["base_url"] if provider == "jev" else None,
+        "destination": destination,
     }
 
 
@@ -534,12 +602,13 @@ def _execute_evaluation(
     if config.get("unit") == "agent_turn":
         return _execute_turn_evaluation(storage, tenant_id, config, provider_name,
                                         model, max_calls, _max_output, rubric, provider)
-    traces, eligible, reasons = _selected(storage, tenant_id)
+    traces, eligible, reasons = _selected(storage, tenant_id, config.get("traceId"))
     preview_identity = _judge(
         _IdentityOnlyProvider(provider_name), model, rubric, _max_output
     ).evaluator_identity(context=None)
+    _, destination_binding = _destination(provider_name, preview_identity)
     approved_trace_ids = _approved_trace_ids(
-        config, preview_identity["evaluator_fingerprint"], max_calls, eligible
+        config, preview_identity["evaluator_fingerprint"], destination_binding, max_calls, eligible
     )
     judge = _judge(provider or _provider(provider_name), model, rubric, _max_output)
     identity = judge.evaluator_identity(context=None)
@@ -601,11 +670,12 @@ def _execute_turn_evaluation(storage, tenant_id, config, provider_name, model,
     tool_mode = config.get("toolEvidence") == TOOL_EVIDENCE_MODE
     preview_identity = _judge(_IdentityOnlyProvider(provider_name), model, rubric,
                               max_output, tool_evidence=tool_mode).evaluator_identity(context=None)
+    _, destination_binding = _destination(provider_name, preview_identity)
     rows, selected, reasons, eligible, already, planned, next_cursor, limit, before = (
         _turn_candidates(storage, tenant_id, preview_identity, config, max_calls)
     )
     fingerprint = _turn_plan_fingerprint(tenant_id, preview_identity["evaluator_fingerprint"],
-                                         max_calls, limit, before, planned)
+                                         destination_binding, max_calls, limit, before, planned)
     if (config.get("planFingerprint") != fingerprint or
         config.get("plannedTurns") != planned):
         raise ValueError("evaluator preview plan is no longer current")

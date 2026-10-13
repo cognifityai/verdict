@@ -11,9 +11,24 @@ from uuid import uuid4
 import httpx
 import pytest
 from verdict.dashboard import build_bundle
-from verdict.dashboard.app import build_registry_bundle, create_app
+from verdict.dashboard.app import (
+    build_agent_turn_analysis,
+    build_agent_usage_bundle,
+    build_registry_bundle,
+    create_app,
+)
 from verdict.dashboard.control_plane import ControlStore
-from verdict.evidence import AgentRun, AgentRunBundle, ExecutionStatus, SourceSession
+from verdict.evidence import (
+    AgentEvent,
+    AgentEventType,
+    AgentRun,
+    AgentRunBundle,
+    AgentTurn,
+    EvidenceState,
+    ExecutionStatus,
+    PrivacyClassification,
+    SourceSession,
+)
 from verdict.schema import (
     ClusterIdentity,
     ClusterRegistryCluster,
@@ -49,6 +64,146 @@ if not (
 POSTGRES_SKIP_REASON = "no explicitly disposable live PostgreSQL database"
 
 pytestmark = pytest.mark.skipif(DSN is None, reason=POSTGRES_SKIP_REASON)
+
+
+def test_live_postgres_turn_analysis_reads_one_tenant_and_links_evidence() -> None:
+    import psycopg
+    from psycopg import sql
+    from psycopg.conninfo import make_conninfo
+
+    schema = f"verdict_turn_analysis_{uuid4().hex}"
+    with psycopg.connect(DSN, autocommit=True) as admin:
+        admin.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+    try:
+        scoped_dsn = make_conninfo(DSN, options=f"-csearch_path={schema}")
+        now = datetime(2026, 10, 8, tzinfo=timezone.utc)
+        storage = PostgresStorage(scoped_dsn, min_pool=1, max_pool=1)
+        storage.replace_agent_run_bundle(AgentRunBundle(
+            SourceSession("source", "local", "codex", "a" * 64, now, now),
+            AgentRun("run", "source", "local", now, ExecutionStatus.UNKNOWN),
+            (AgentTurn("turn", "run", 0, now, ExecutionStatus.UNKNOWN),),
+            (AgentEvent("test", "turn", 0, now, AgentEventType.TEST_RESULT,
+                        ExecutionStatus.FAILED, "synthetic", {"failed": 1},
+                        PrivacyClassification.METADATA),),
+        ))
+        storage.close()
+        analysis = build_agent_turn_analysis(scoped_dsn, tenant="local", run_id="run", turn_id="turn")
+        assert analysis["reviewSignals"] == [
+            {"eventId": "test", "code": "test_failed", "label": "Test execution reported failure"},
+        ]
+        with pytest.raises(KeyError):
+            build_agent_turn_analysis(scoped_dsn, tenant="other", run_id="run", turn_id="turn")
+    finally:
+        with psycopg.connect(DSN, autocommit=True) as admin:
+            admin.execute(sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(schema)))
+
+
+def test_live_postgres_session_usage_matches_jsonb_model_evidence() -> None:
+    import psycopg
+    from psycopg import sql
+    from psycopg.conninfo import make_conninfo
+
+    schema = f"verdict_usage_{uuid4().hex}"
+    with psycopg.connect(DSN, autocommit=True) as admin:
+        admin.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+    try:
+        scoped_dsn = make_conninfo(DSN, options=f"-csearch_path={schema}")
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        turn = AgentTurn(
+            "turn", "run", 0, now, ExecutionStatus.COMPLETED, now,
+            input_tokens=80, output_tokens=20, total_tokens=100,
+            token_usage_basis="codex_turn_delta",
+        )
+        event = AgentEvent(
+            "model", "turn", 0, now, AgentEventType.CONTEXT,
+            ExecutionStatus.COMPLETED, "test",
+            {"name": "model_configuration", "source": "gpt-6-luna"},
+            PrivacyClassification.METADATA,
+        )
+        storage = PostgresStorage(scoped_dsn, min_pool=1, max_pool=1)
+        storage.replace_agent_run_bundle(AgentRunBundle(
+            SourceSession("source", "local", "codex", "a" * 64, now, now),
+            AgentRun("run", "source", "local", now, ExecutionStatus.UNKNOWN,
+                     session_id="session"),
+            (turn,), (event,),
+        ))
+        storage.close()
+        report = build_agent_usage_bundle(scoped_dsn, tenant="local", now=now,
+                                          day=now.date().isoformat(), session_id="session")
+        day = next(row for row in report["days"] if row["day"] == now.date().isoformat())
+        assert day["totalTokens"] == 100
+        assert day["pricedTurns"] == 1
+        assert report["dayModels"][0]["model"] == "gpt-6-luna"
+        assert report["selectedSession"]["turnCount"] == 1
+    finally:
+        with psycopg.connect(DSN, autocommit=True) as admin:
+            admin.execute(sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(schema)))
+
+
+def test_live_postgres_scoped_preview_and_saved_case_experiment(monkeypatch) -> None:
+    import asyncio
+
+    import psycopg
+    from psycopg import sql
+    from psycopg.conninfo import make_conninfo
+
+    schema = f"verdict_profiler_{uuid4().hex}"
+    with psycopg.connect(DSN, autocommit=True) as admin:
+        admin.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+    try:
+        scoped_dsn = make_conninfo(DSN, options=f"-csearch_path={schema}")
+        now = datetime.now(timezone.utc)
+        storage = PostgresStorage(scoped_dsn, min_pool=1, max_pool=1)
+        storage.replace_agent_run_bundle(AgentRunBundle(
+            SourceSession("source", "local", "synthetic", "a" * 64, now, now),
+            AgentRun("run", "source", "local", now, ExecutionStatus.COMPLETED, now),
+            (AgentTurn("turn", "run", 0, now, ExecutionStatus.COMPLETED, now,
+                       "Do the task", "Task complete",
+                       EvidenceState.PRESENT, EvidenceState.PRESENT),), (),
+        ))
+        storage.close()
+        from verdict.service import CycleBusy, cycle_guard
+
+        with cycle_guard(scoped_dsn), pytest.raises(CycleBusy):
+            with cycle_guard(scoped_dsn):
+                pass
+        monkeypatch.setenv("VERDICT_EXPERIMENT_RUNNER", "verdict.dashboard.demo_task:run")
+        monkeypatch.setenv("VERDICT_EXPERIMENT_CONFIGS", json.dumps({
+            "baseline": {"version": "baseline-v1"}, "candidate": {"version": "candidate-v1"},
+        }))
+
+        async def request():
+            transport = httpx.ASGITransport(app=create_app(storage=scoped_dsn, tenant_id="local"))
+            async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+                token = (await client.get("/api/setup/token")).json()["setupToken"]
+                headers = {"X-Verdict-Setup": token}
+                preview = await client.post("/api/scoped/preview", json={
+                    "scope": "run", "runId": "run", "provider": "anthropic",
+                    "model": "claude-haiku-4-5", "rubric": {"name": "task_review", "version": "1",
+                        "dimensions": [{"name": "completion", "description": "Did it do the task?"}]},
+                }, headers=headers)
+                saved = await client.post("/api/experiments/case-sets/cases", json={
+                    "title": "Synthetic", "reviewed": True, "cases": [
+                        {"id": "critical_outage",
+                         "input": "Synthetic incident: checkout unavailable for all users; severity P1",
+                         "expectedBehavior": "Page on-call",
+                         "checks": [{"kind": "exact", "value": "page_on_call"}]},
+                    ],
+                }, headers=headers)
+                ran = await client.post("/api/experiments/run", json={
+                    "caseSetId": "cases", "baseline": "baseline", "candidate": "candidate",
+                }, headers=headers)
+                return preview, saved, ran
+
+        preview, saved, ran = asyncio.run(request())
+        assert preview.status_code == 200, preview.text
+        assert preview.json()["plannedCalls"] == 1
+        assert saved.status_code == 200, saved.text
+        assert ran.status_code == 200, ran.text
+        assert ran.json()["comparison"]["fixed"] == ["critical_outage"]
+    finally:
+        with psycopg.connect(DSN, autocommit=True) as admin:
+            admin.execute(sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(schema)))
 
 
 @pytest.mark.parametrize("foreign_trace", [False, True])

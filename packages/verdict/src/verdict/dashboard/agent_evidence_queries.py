@@ -11,6 +11,24 @@ from verdict.normalized_evidence import bundle_from_normalized_rows
 _TABLES = ("import_sources", "agent_runs", "agent_turns", "agent_events")
 
 
+def session_run_ids(
+    session: QuerySession, tenant_id: str, source_kind: str, session_id: str,
+    *, limit: int,
+) -> tuple[tuple[str, ...], int]:
+    """Resolve the exact source-qualified session, including runs with no turns."""
+    if not available(session):
+        return (), 0
+    rows = list(session.execute(
+        """SELECT r.run_id FROM agent_runs r JOIN import_sources s
+           ON s.tenant_id=r.tenant_id AND s.source_session_id=r.source_session_id
+           WHERE r.tenant_id=? AND s.source_kind=?
+             AND COALESCE(NULLIF(r.session_id,''),r.source_session_id)=?
+           ORDER BY r.started_at,r.run_id LIMIT ?""",
+        (tenant_id, source_kind, session_id, limit + 1),
+    ))
+    return tuple(str(row["run_id"]) for row in rows[:limit]), len(rows)
+
+
 def available(session: QuerySession) -> bool:
     return all(session.table_exists(table) for table in _TABLES)
 

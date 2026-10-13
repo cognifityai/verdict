@@ -1,12 +1,22 @@
-# Verdict Python SDK
+# Verdict Python SDK and Agent Profiler
 
 PyPI distribution: `cognifity-verdict`. Python import: `verdict`.
 
-Install and start the loopback-only product UI:
+For the published `0.1.0b1` release, install and start its loopback-only UI:
 
 ```bash
 python -m pip install cognifity-verdict
 verdict
+```
+
+The Agent Profiler workflow described below is under development in this
+checkout and is not included in the published wheel. To run it locally from
+the repository root, use an isolated environment:
+
+```bash
+python -m venv .venv
+.venv/bin/python -m pip install -e 'packages/verdict[dashboard]' -e packages/verdict_eval
+.venv/bin/verdict-dashboard --storage sqlite:///./verdict.db --host 127.0.0.1
 ```
 
 The initial setup page can approve and rescan local Claude Code/Codex histories,
@@ -35,9 +45,21 @@ separate child runs. Agent Run views show bounded final-response previews and
 source-reported per-turn tokens when available. Text is redacted before the
 preview cutoff, and incomplete token components remain explicitly partial;
 Claude totals appear only after terminal, complete response usage. Those source
-activity totals are not a quality ranking: latency, price, judging, and model
-provider-call comparisons still use genuine `Trace` records only. A separate
+activity totals are not a quality ranking: provider-call latency and statistical
+model-call monitoring still use genuine `Trace` records only. Agent Turn usage
+can receive a static API list-price estimate when one supported model and valid
+counts are attributable; it is not a Claude/Codex subscription bill. A separate
 source-declared paired-conversation comparison is described below.
+
+The dashboard's Agent Profiler flow charts reported token use by UTC day,
+source, model, session, and turn, then opens a combined session report and links its runs to deeper timelines.
+Selected Turn analysis and evidence-linked suggested actions are key-free.
+Optional selected-scope session/run/tool evaluation previews exact bounded redacted
+evidence and requires approval before external judging. Reviewed cases can be
+run against two explicit local application versions with fixed checks; an
+opt-in service or manual run-cycle can analyze already captured activity and consume a separately approved, one-attempt external evaluation. The
+[Agent Profiler guide](../../docs/AGENT_PROFILER.md) gives the runnable demo,
+configuration, evidence boundaries, and limitations.
 
 Codex Turn requests include text from completed `UserMessage` items and the
 older `user_message` format. Rescanning can fill previously missing request
@@ -549,9 +571,9 @@ Upgrade an existing synchronized `0.1.0a5` through `0.1.0b1` environment with
 `python -m pip install --upgrade`
 and the same provider, dashboard, semantic, and storage extras already in use.
 The published wheels replace editable installs without a new clone and reuse the
-selected SQLite file or PostgreSQL tables in place. See the repository
-[upgrade instructions](https://github.com/cognifityai/verdict#upgrade-from-an-earlier-synchronized-alpha)
-for the synchronized three-package command and verification steps.
+selected SQLite file or PostgreSQL tables in place. Use the synchronized
+[beta release profile](../../docs/RELEASE_PROFILE.md) for the exact
+three-package install command and verification steps.
 All writers sharing a store must be stopped and upgraded together when the store
 first moves to normalized agent evidence; migrated stores reject legacy bundle
 writes.

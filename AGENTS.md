@@ -5,10 +5,12 @@ without re-learning the architecture each session.
 
 ## What Verdict Is
 
-Verdict is an open-source LLM observability and drift-detection toolkit. It
-captures supported provider calls, stores traces, evaluates responses with a
-rubric, and helps inspect quality, cost, latency, and drift across similar
-workloads.
+Verdict is a local-first agent profiler and reliability toolkit. It helps
+inspect source-reported token use, agent actions and failures, and bounded
+evidence for optional evaluation. Reviewed cases compare an explicitly
+configured application baseline and candidate. Supported provider-call
+capture, rubric evaluation, and prospective statistical monitoring remain
+available for genuine model traces.
 
 Current scope includes individual LLM calls plus normalized session, run, turn,
 model-call, tool, command, and test evidence from local Claude Code/Codex

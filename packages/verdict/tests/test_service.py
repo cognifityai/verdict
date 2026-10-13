@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
+import selectors
+import subprocess
+import sys
 import urllib.error
 from datetime import datetime, timedelta, timezone
 
@@ -14,7 +18,15 @@ from verdict.monitoring import (
     trace_monitor_units,
 )
 from verdict.schema import DimensionScore, Judgment, Trace, Verdict
-from verdict.service import TENANT, _finding_source_id, _notify, _schedule, run_cycle
+from verdict.service import (
+    TENANT,
+    CycleBusy,
+    _finding_source_id,
+    _notify,
+    _schedule,
+    cycle_guard,
+    run_cycle,
+)
 from verdict.storage import SQLiteStorage
 
 
@@ -81,6 +93,51 @@ def test_saved_schedule_runs_content_on_rescan_idempotently(tmp_path) -> None:
         assert len(storage.list_agent_run_bundles(TENANT)) == 1
     finally:
         storage.close()
+
+
+def test_cycle_guard_rejects_overlap_and_recovers_after_release(tmp_path) -> None:
+    storage_url = f"sqlite:///{tmp_path / 'verdict.db'}"
+    with cycle_guard(storage_url):
+        with pytest.raises(CycleBusy):
+            run_cycle(storage_url, {"analyzeOnly": True})
+    result = run_cycle(storage_url, {"analyzeOnly": True})
+    assert result["analysis"]["status"] == "completed"
+
+
+def test_continuous_cli_survives_busy_cycle_and_runs_after_release(tmp_path) -> None:
+    storage_url = f"sqlite:///{tmp_path / 'busy-cli.db'}"
+    ControlStore(storage_url).append(
+        TENANT, kind="schedule", document_id="daily", state="active",
+        payload={"intervalHours": 1, "analyzeOnly": True}, expected_revision=None,
+    )
+    command = [sys.executable, "-u", "-c",
+               "import sys; from verdict.service import main; sys.exit(main())",
+               "--storage", storage_url]
+    with cycle_guard(storage_url):
+        once = subprocess.run([*command, "--once"], capture_output=True, text=True,
+                              timeout=5)
+        assert once.returncode == 2
+        assert json.loads(once.stdout)["cycleRan"] is False
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                   text=True, env=os.environ.copy())
+        try:
+            with pytest.raises(subprocess.TimeoutExpired):
+                process.wait(timeout=0.3)
+        except BaseException:
+            process.terminate()
+            process.wait(timeout=5)
+            raise
+    try:
+        assert process.stdout is not None
+        with selectors.DefaultSelector() as selector:
+            selector.register(process.stdout, selectors.EVENT_READ)
+            assert selector.select(timeout=5), "service did not resume after the lease released"
+        result = json.loads(process.stdout.readline())
+        assert result["analysis"]["status"] == "completed"
+    finally:
+        process.terminate()
+        process.wait(timeout=5)
+    assert run_cycle(storage_url, {"analyzeOnly": True})["analysis"]["status"] == "completed"
 
 
 def test_service_rejects_missing_or_disabled_schedule(tmp_path) -> None:

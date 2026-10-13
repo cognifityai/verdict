@@ -14,14 +14,16 @@ import { providerPresentation } from "./provider-presentation.js";
 import { Operations } from "./Operations.jsx";
 import { Registry } from "./Registry.jsx";
 import { Runs } from "./Runs.jsx";
+import { Usage } from "./Usage.jsx";
 import { Insights } from "./Insights.jsx";
 import { EvaluatorLab } from "./EvaluatorLab.jsx";
 import { InspectLab } from "./InspectLab.jsx";
 import { ManagementReport } from "./ManagementReport.jsx";
 import { ControlCenter } from "./ControlCenter.jsx";
+import { Experiments } from "./Experiments.jsx";
 import { SetupWizard } from "./SetupWizard.jsx";
 import { initialDashboardTab } from "./source-state.mjs";
-import { Monitor, metricLabel } from "./Monitor.jsx";
+import { Monitor } from "./Monitor.jsx";
 import { MatchedConversationCompare } from "./MatchedConversationCompare.jsx";
 import {
   canonicalDashboardHash, parseDashboardRoute, parseDashboardSelection,
@@ -235,6 +237,10 @@ function mountedRegistryUrl() {
 
 function mountedRunsUrl() {
   return mountedApiUrl().replace(/\/api\/data(?:\?.*)?$/, "/api/runs");
+}
+
+function mountedUsageUrl() {
+  return mountedApiUrl().replace(/\/api\/data(?:\?.*)?$/, "/api/usage");
 }
 
 function mountedInsightsUrl() {
@@ -454,16 +460,17 @@ function Logo({ size = 26 }) {
 /* ================================================================ LANDING */
 function Landing({ onEnter }) {
   const problems = [
-    { icon: TrendingDown, title: "Model behavior changes", body: "Provider, model, or prompt changes can shift response quality. Verdict helps surface those changes by workload." },
-    { icon: DollarSign, title: "Cost changes need context", body: "Prompt and model changes can alter token usage across captured calls. Verdict tracks cost and latency alongside quality." },
-    { icon: Network, title: "Model comparisons take work", body: "Comparing providers on your own traffic usually requires custom logging, labeling, and analysis." },
+    { icon: DollarSign, title: "Token use lacks a trail", body: "Daily totals rarely explain which session, turn, or model contributed. Verdict links reported usage back to recorded work." },
+    { icon: Activity, title: "Failures need context", body: "A failed tool call or test needs surrounding actions and outcomes before anyone can decide what to change." },
+    { icon: Network, title: "Changes need a repeatable check", body: "Reviewed cases let you run the same fixed checks against two explicitly configured application versions." },
   ];
   const steps = [
-    { icon: Activity, t: "Capture", d: "One line of init instruments supported provider SDK calls into Verdict's vendor-neutral Trace schema." },
-    { icon: Database, t: "Store", d: "The SDK stores traces through one protocol: SQLite locally, Postgres for shared environments, or memory for tests. The bundled dashboard reads SQLite and Postgres." },
-    { icon: Layers, t: "Explore", d: "Start without grouping, compare factual provider/model facets, or review optional semantic cluster exemplars before activation." },
-    { icon: Scale, t: "Evaluate", d: "Run a configured evidence-aware rubric only after previewing eligibility, egress, call count, and estimated maximum cost." },
-    { icon: Signal, t: "Monitor", d: "Freeze an exact older reference and newer current cohort, then test eligible metrics with multiplicity and effect-size gates." },
+    { icon: Activity, t: "Capture", d: "Import approved local Claude Code or Codex histories, or record application-agent runs through the Python SDK." },
+    { icon: Database, t: "Profile", d: "Follow reported tokens by day into sessions, turns, model evidence, and recorded failures. The first report needs no judge key." },
+    { icon: Layers, t: "Investigate", d: "Review a bounded session report, analyze a turn, and open the actual events behind a suggested action." },
+    { icon: Scale, t: "Evaluate", d: "Preview exact redacted evidence before approving an optional provider judge for a selected scope." },
+    { icon: FlaskConical, t: "Compare", d: "Run reviewed cases against baseline and candidate configurations with the same deterministic checks." },
+    { icon: Signal, t: "Monitor", d: "Schedule key-free analysis; use prospective statistical monitoring for genuine provider model calls when configured." },
   ];
   const validation = [
     { k: "Capture", l: "Provider call tracing", d: "Instrument supported SDK calls and verify live capture with the release-check script.", icon: FlaskConical, color: C.green },
@@ -501,14 +508,13 @@ function Landing({ onEnter }) {
       {/* hero */}
       <div className="max-w-6xl mx-auto px-6 pt-16 pb-14">
         <div className="max-w-3xl">
-          <Pill color={C.cyan} bg={C.blueBg}><Sparkles size={12} /> LLM-call observability · drift detection</Pill>
+          <Pill color={C.cyan} bg={C.blueBg}><Sparkles size={12} /> Agent profiling · reliability</Pill>
           <h1 className="mt-5 font-semibold" style={{ fontSize: 46, lineHeight: 1.07, letterSpacing: 0 }}>
-            Monitor LLM-call quality on your <span style={{ color: C.accent2 }}>own workloads.</span>
+            See where agent tokens went. <span style={{ color: C.accent2 }}>Inspect what happened next.</span>
           </h1>
           <p className="mt-5 text-lg" style={{ color: C.sub, lineHeight: 1.6 }}>
-            Verdict instruments supported model calls with one line, evaluates sampled outputs against your configured rubric,
-            and helps you inspect quality, cost, and behavior changes on
-            <span style={{ color: C.text }}> your own traffic</span> instead of relying on generic benchmarks.
+            Verdict connects reported usage to sessions, turns, and recorded actions. Analyze failures locally,
+            review optional judge evidence before egress, and test application changes against fixed cases.
           </p>
           <div className="mt-7 flex flex-wrap items-center gap-3">
             <button onClick={onEnter} className="inline-flex items-center gap-2 text-sm font-semibold px-5 py-2.5 rounded-md"
@@ -522,14 +528,14 @@ function Landing({ onEnter }) {
           </div>
           <div className="mt-7 flex flex-wrap gap-x-6 gap-y-2 text-sm" style={{ color: C.faint }}>
             <span className="flex items-center gap-1.5"><CheckCircle2 size={14} style={{ color: C.green }} /> Synthetic sample data included</span>
-            <span className="flex items-center gap-1.5"><CheckCircle2 size={14} style={{ color: C.green }} /> 3 providers, 4 intent clusters</span>
+            <span className="flex items-center gap-1.5"><CheckCircle2 size={14} style={{ color: C.green }} /> Key-free local analysis</span>
             <span className="flex items-center gap-1.5"><CheckCircle2 size={14} style={{ color: C.green }} /> Live API replaces the sample when connected</span>
           </div>
         </div>
       </div>
 
       {/* problems */}
-      <Section title="Three recurring problems in production LLM systems">
+      <Section title="Three questions to answer about agent work">
         <div className="grid md:grid-cols-3 gap-4">
           {problems.map((p) => (
             <Panel key={p.title} className="p-5">
@@ -544,7 +550,7 @@ function Landing({ onEnter }) {
       </Section>
 
       {/* how it works */}
-      <Section title="How it works" subtitle="Capture → explore → evaluate → monitor. Grouping is optional.">
+      <Section title="How it works" subtitle="Capture → profile → investigate → evaluate → compare → monitor.">
         <div className="grid md:grid-cols-3 gap-4">
           {steps.map((s, i) => (
             <Panel key={s.t} className="p-5">
@@ -576,7 +582,7 @@ function Landing({ onEnter }) {
       </Section>
 
       {/* install */}
-      <Section title="The five-line install">
+      <Section title="Instrument an application agent">
         <Panel className="overflow-hidden">
           <div className="flex items-center gap-2 px-4 py-2.5 border-b" style={{ borderColor: C.border, background: C.panel2 }}>
             <Terminal size={14} style={{ color: C.sub }} />
@@ -584,16 +590,16 @@ function Landing({ onEnter }) {
           </div>
           <pre className="p-5 text-sm overflow-x-auto" style={{ color: C.text, lineHeight: 1.7 }}>
 <span style={{ color: C.accent2 }}>import</span> verdict{"\n"}
-<span style={{ color: C.accent2 }}>from</span> anthropic <span style={{ color: C.accent2 }}>import</span> Anthropic{"\n\n"}
-verdict.<span style={{ color: C.blue }}>init</span>(service_name=<span style={{ color: C.green }}>"my-app"</span>, storage=<span style={{ color: C.green }}>"sqlite:///./verdict.db"</span>){"\n"}
-client = <span style={{ color: C.blue }}>Anthropic</span>(){"\n"}
-<span style={{ color: C.faint }}>{"# Use Anthropic normally; supported calls are captured."}</span>
+verdict.<span style={{ color: C.blue }}>init</span>(service_name=<span style={{ color: C.green }}>"my-agent"</span>, storage=<span style={{ color: C.green }}>"sqlite:///./verdict.db"</span>){"\n"}
+<span style={{ color: C.accent2 }}>with</span> verdict.agent_run(name=<span style={{ color: C.green }}>"support-agent"</span>) <span style={{ color: C.accent2 }}>as</span> run:{"\n"}
+{"    "}<span style={{ color: C.accent2 }}>with</span> run.turn(user_input=<span style={{ color: C.green }}>"Look up the order"</span>) <span style={{ color: C.accent2 }}>as</span> turn:{"\n"}
+{"        "}turn.set_output(<span style={{ color: C.green }}>"The order was found."</span>)
           </pre>
         </Panel>
       </Section>
 
       {/* honest limits */}
-      <Section title="Honest limits" subtitle="What Verdict v0 does not yet claim.">
+      <Section title="Evidence boundaries" subtitle="What each report can establish.">
         <div className="flex flex-wrap gap-2">
           {limits.map((l) => (
             <span key={l} className="text-sm px-3 py-1.5 border" style={{ borderColor: C.border, color: C.sub, background: C.panel, borderRadius: 3 }}>{l}</span>
@@ -655,7 +661,7 @@ const TAB_HELP = {
 const WORKSPACE_SECTIONS = {
   overview: [["summary", "Summary"], ["reliability", "Reliability"], ["performance", "Performance"], ["behavior", "Behavior"]],
   explore: [["runs", "Agent Runs & Tools"], ["calls", "LLM Calls"], ["compare", "Compare"]],
-  evaluate: [["results", "Results"], ["lab", "Evaluator Lab"], ["inspect", "Inspect JSON"], ["review", "Review Queue"]],
+  evaluate: [["results", "Results"], ["lab", "Evaluator Lab"], ["cases", "Saved Cases"], ["inspect", "Inspect JSON"], ["review", "Review Queue"]],
   monitor: [["status", "Status"], ["history", "Compare History"], ["segments", "Segments"], ["schedule", "Schedule"]],
   report: [["management", "Management Report"]],
   settings: [["sources", "Data Sources"], ["alerts", "Alerts"], ["integrations", "Integrations"], ["privacy", "Privacy"]],
@@ -747,6 +753,8 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
     initialSelection.current.state === "valid"
       ? initialSelection.current.route : initialRoute.current,
   );
+  const [evaluationSelection, setEvaluationSelection] = useState(null);
+  const [caseDraft, setCaseDraft] = useState(null);
   const [selectionError, setSelectionError] = useState(
     initialSelection.current.state === "invalid",
   );
@@ -834,9 +842,20 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
   const evaluatorSelectionNeeded = ["selection_required", "invalid_selection"].includes(evaluation.status);
   const boundedResources = Object.entries(DATA.truncation?.resources || {})
     .filter(([name, resource]) => (source !== "live" || name !== "traceSamples") && resource.shown < resource.available);
-  const sourceLabel = source === "live" ? "Live store" : source === "sample" ? "Synthetic sample" : "Waiting for live store";
-  const sourceColor = source === "live" ? C.green : C.amber;
-  const workloadLabel = source === "sample"
+  const summaryOpen = tab === "overview" && route.section === "summary";
+  const truncationNotice = DATA.truncation?.applied && boundedResources.length > 0 && (
+    <div role="status" className="px-3 py-3 border flex items-start gap-2 text-sm"
+      style={{ borderColor: "#6b5529", background: C.amberBg, color: C.text, borderRadius: 3 }}>
+      <AlertTriangle size={16} style={{ color: C.amber, marginTop: 1, flexShrink: 0 }} />
+      <span>Some dashboard views are bounded. Store totals remain complete; shown versus available: {boundedResources.map(([name, resource]) => (
+        `${TRUNCATION_LABELS[name] || name}: ${resource.shown.toLocaleString()} of ${resource.available.toLocaleString()}`
+      )).join("; ")}.</span>
+    </div>
+  );
+  const syntheticStore = source === "live" && DATA.meta.agentRunSources?.some((item) => item.sourceKind === "synthetic-codex");
+  const sourceLabel = syntheticStore ? "Synthetic demo" : source === "live" ? "Live store" : source === "sample" ? "Synthetic sample" : "Waiting for live store";
+  const sourceColor = source === "live" && !syntheticStore ? C.green : C.amber;
+  const workloadLabel = syntheticStore ? "Synthetic local demo" : source === "sample"
     ? "Sample workload"
     : DATA.meta.workload
       ? `Workload: ${DATA.meta.workload}`
@@ -857,7 +876,7 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
             <Logo size={24} />
             <span className="font-semibold">Verdict</span>
           </button>
-          <span className="hidden lg:inline text-xs font-mono" style={{ color: C.faint }}>{source === "sample" ? "Sample service" : "Live Verdict store"}</span>
+          <span className="hidden lg:inline text-xs font-mono" style={{ color: C.faint }}>{syntheticStore ? "Synthetic local demo" : source === "sample" ? "Sample service" : "Live Verdict store"}</span>
           <nav className="order-3 w-full sm:order-none sm:w-auto sm:self-stretch flex overflow-x-auto border-t sm:border-t-0" style={{ borderColor: C.border }}>
             {nav.map((n) => {
               const on = tab === n.id;
@@ -901,9 +920,9 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
             <div className="text-xs font-mono" style={{ color: C.accent }}>{workloadLabel}</div>
             <div className="flex items-center gap-2 mt-1"><h1 className="font-semibold" style={{ fontSize: 22, letterSpacing: 0 }}>{nav.find((n) => n.id === tab).label}</h1>{TAB_HELP[tab] && <TabHelp tab={tab} label={nav.find((n) => n.id === tab).label} text={TAB_HELP[tab]} />}</div>
           </div>
-          {source === "sample" && (
+          {(source === "sample" || syntheticStore) && (
             <div className="max-w-full flex items-start gap-2 text-xs px-3 py-2 border" style={{ borderColor: "#6b5529", background: C.amberBg, color: C.amber, borderRadius: 3 }}>
-              <FlaskConical size={14} style={{ flexShrink: 0 }} /> <span>Sample data, not a provider benchmark</span>
+              <FlaskConical size={14} style={{ flexShrink: 0 }} /> <span>Wholly synthetic demo data; not a provider benchmark or measured savings</span>
             </div>
           )}
         </div>
@@ -945,25 +964,36 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
             <span>The requested Verdict link is invalid. No trace or agent activity was selected.</span>
           </div>
         )}
-        {DATA.truncation?.applied && boundedResources.length > 0 && (
-          <div role="status" className="mb-5 px-3 py-3 border flex items-start gap-2 text-sm"
-            style={{ borderColor: "#6b5529", background: C.amberBg, color: C.text, borderRadius: 3 }}>
-            <AlertTriangle size={16} style={{ color: C.amber, marginTop: 1, flexShrink: 0 }} />
-            <span>
-              Showing a bounded dashboard view. Store totals remain complete; presentation data is limited: {boundedResources.map(([name, resource]) => (
-                `${TRUNCATION_LABELS[name] || name}: ${resource.shown.toLocaleString()} of ${resource.available.toLocaleString()}`
-              )).join("; ")}.
-            </span>
-          </div>
-        )}
+        {!summaryOpen && truncationNotice && <div className="mb-5">{truncationNotice}</div>}
         {tab === "overview" && route.section === "summary" && <div className="space-y-5">
-          {MonitorOverview({ monitor: DATA.monitor })}
-          <Insights url={mountedInsightsUrl()} onOpenRuns={openFindingRun} />
-          <Overview data={DATA} includeMonitor={false} />
+          {MonitorOverview({ monitor: DATA.monitor,
+            onOpen: (section) => commitRoute({ ...route, tab: "monitor", section }),
+            compact: true, showEmpty: source !== "loading" })}
+          <div className="grid lg:grid-cols-2 gap-5 items-start">
+            {source === "live" && (DATA.meta.totalAgentRuns || 0) > 0
+              ? <Usage compact url={mountedUsageUrl()} onOpenRun={(runId) => commitRoute({ ...route, tab: "explore", section: "runs", findingCode: null, runIds: [runId], selectedRunId: runId, runIdsTruncated: false })} />
+              : <Panel className="p-5"><h2 className="font-semibold">Token trend needs agent turns</h2>
+                <p className="text-sm mt-2" style={{ color: C.sub }}>Capture or import agent sessions to see reported tokens by day and drill into sessions here.</p>
+                <button type="button" className="text-sm underline mt-3" style={{ color: C.green }}
+                  onClick={() => commitRoute({ ...route, tab: "settings", section: "sources" })}>Set up agent capture</button>
+              </Panel>}
+            <Insights url={mountedInsightsUrl()} onOpenRuns={openFindingRun} onAnalysisComplete={onReload} />
+          </div>
+          {truncationNotice}
+          <details className="border p-5" style={{ borderColor: C.border, background: C.panel }}>
+            <summary className="cursor-pointer font-semibold">Technical coverage and charts</summary>
+            <div className="mt-5"><Overview data={DATA} includeMonitor={false} /></div>
+          </details>
         </div>}
-        {tab === "overview" && route.section === "reliability" && <Insights url={mountedInsightsUrl()} onOpenRuns={openFindingRun} mode="reliability" />}
-        {tab === "overview" && route.section === "performance" && <Insights url={mountedInsightsUrl()} onOpenRuns={openFindingRun} mode="performance" />}
-        {tab === "overview" && route.section === "behavior" && <Insights url={mountedInsightsUrl()} onOpenRuns={openFindingRun} mode="behavior" />}
+        {tab === "overview" && route.section === "reliability" && <Insights url={mountedInsightsUrl()} onOpenRuns={openFindingRun} onAnalysisComplete={onReload} mode="reliability" />}
+        {tab === "overview" && route.section === "performance" && <div className="space-y-5">
+          {source === "live" && <Usage url={mountedUsageUrl()} onOpenRun={(runId) => commitRoute({ ...route, tab: "explore", section: "runs", findingCode: null, runIds: [runId], selectedRunId: runId, runIdsTruncated: false })} />}
+          {source === "live" ? <details className="border p-5" style={{ borderColor: C.border, background: C.panel }}>
+            <summary className="cursor-pointer font-semibold">Model-call diagnostics</summary>
+            <div className="mt-5"><Insights url={mountedInsightsUrl()} onOpenRuns={openFindingRun} onAnalysisComplete={onReload} mode="performance" /></div>
+          </details> : <Insights url={mountedInsightsUrl()} onOpenRuns={openFindingRun} onAnalysisComplete={onReload} mode="performance" />}
+        </div>}
+        {tab === "overview" && route.section === "behavior" && <Insights url={mountedInsightsUrl()} onOpenRuns={openFindingRun} onAnalysisComplete={onReload} mode="behavior" />}
         {tab === "explore" && route.section === "runs" && <Runs
           url={mountedRunsUrl()}
           focusRunIds={route.runIds}
@@ -975,6 +1005,8 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
           onSelectRun={(runId) => commitRoute({ ...route, selectedRunId: runId })}
           onShowAll={() => commitRoute({ ...route, tab: "explore", section: "runs", findingCode: null, runIds: [], selectedRunId: null })}
           onOpenTrace={(traceId) => commitRoute({ ...route, tab: "explore", section: "calls", traceJudgeStatus: "all", traceId })}
+          onEvaluateTurn={(runId, turnId) => { setEvaluationSelection({ unit: "agent_turn", runId, turnId }); commitRoute({ ...route, tab: "evaluate", section: "lab" }); }}
+          onDraftCase={(draft) => { setCaseDraft(draft); commitRoute({ ...route, tab: "evaluate", section: "cases" }); }}
         />}
         {tab === "explore" && route.section === "calls" && <Traces key={evaluation.selectedId || "none"} data={DATA} source={source}
           traceOffset={traceOffset} reloading={reloading} onTracePageChange={onTracePageChange}
@@ -982,10 +1014,15 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
           onJudgeStatus={(traceJudgeStatus) => commitRoute({
             ...route, tab: "explore", section: "calls", traceJudgeStatus, traceId: null,
           })}
-          onSelectTrace={(traceId) => commitRoute({ ...route, tab: "explore", section: "calls", traceId })} />}
+          onSelectTrace={(traceId) => commitRoute({ ...route, tab: "explore", section: "calls", traceId })}
+          onEvaluateTrace={(traceId) => {
+            setEvaluationSelection({ unit: "trace", traceId });
+            commitRoute({ ...route, tab: "evaluate", section: "lab" });
+          }} />}
         {tab === "explore" && route.section === "compare" && <><MatchedConversationCompare configUrl={mountedConfigUrl()} source={source} /><Compare data={DATA} source={source} /></>}
         {tab === "evaluate" && route.section === "results" && <Judge data={DATA} onOpenOperations={operationsUrl ? () => commitRoute({ ...route, tab: "settings", section: "integrations" }) : null} />}
-        {tab === "evaluate" && route.section === "lab" && <EvaluatorLab configUrl={mountedConfigUrl()} onOpenEvaluated={(evaluatorId) => { onEvaluatorChange?.(evaluatorId); commitRoute({ ...route, tab: "explore", section: "calls", evaluatorId, traceJudgeStatus: "judged", traceId: null }); }} />}
+        {tab === "evaluate" && route.section === "lab" && <EvaluatorLab configUrl={mountedConfigUrl()} selection={evaluationSelection} onClearSelection={() => setEvaluationSelection(null)} onOpenEvaluated={(evaluatorId) => { onEvaluatorChange?.(evaluatorId); commitRoute({ ...route, tab: "explore", section: "calls", evaluatorId, traceJudgeStatus: "judged", traceId: null }); }} />}
+        {tab === "evaluate" && route.section === "cases" && <Experiments root={mountedConfigUrl().replace(/\/api\/config$/, "")} draft={caseDraft} />}
         {tab === "evaluate" && route.section === "inspect" && <InspectLab configUrl={mountedConfigUrl()} />}
         {tab === "evaluate" && route.section === "review" && <ControlCenter section="review" configUrl={mountedConfigUrl()} onNavigate={(target) => navigateWorkflow(commitRoute, route, target)} />}
         {tab === "monitor" && route.section === "status" && <Monitor view="status" initialState={DATA.monitor} configUrl={mountedConfigUrl()} evaluation={data.evaluation} onChanged={onReload} onOpenTrace={(traceId, evaluatorId) => commitRoute({ ...route, tab: "explore", section: "calls", traceId, evaluatorId })} />}
@@ -1015,55 +1052,63 @@ function MetricCell({ label, value, sub, icon: Icon, accent }) {
   );
 }
 
-function MonitorResult({ current }) {
+function MonitorResult({ current, onOpen, compact = false }) {
   const candidate = current.policyState === "candidate" || current.state === "candidate";
   const snapshot = current.snapshot;
   const manifest = snapshot?.manifest;
   const comparison = snapshot?.comparison;
   const collecting = manifest?.prospective_open === true;
   const pendingEvaluations = manifest?.pending_evaluator_units?.length || 0;
-  const groupLabels = new Map(
-    (comparison?.groups || []).map((group) => [group.group_id, group.label]),
-  );
   const target = current.policy?.prospective_target || 0;
   const awaitingEvaluator = collecting
-    && manifest.current_unit_ids.length >= target && pendingEvaluations > 0;
+    && (manifest?.current_unit_ids?.length || 0) >= target && pendingEvaluations > 0;
   const alerts = (comparison?.metrics || []).filter((metric) => metric.alert).length;
   const title = current.state === "requires_rebootstrap" ? "Re-bootstrap required"
     : awaitingEvaluator ? `Awaiting ${pendingEvaluations} evaluator results`
-      : collecting ? `Collecting ${manifest.current_unit_ids.length}/${target} new traces`
-      : comparison?.status === "alert" ? `${alerts || 1} alert${alerts === 1 ? "" : "s"} detected`
-        : comparison?.status === "no_alert" ? "No alert in this comparison"
-          : "Insufficient evidence for a decision";
-  const color = comparison?.status === "alert" ? C.red : collecting || comparison?.status === "insufficient" ? C.amber : C.green;
-  return <Panel className="p-5" style={{ borderColor: color }}>
+      : collecting ? `Collecting ${manifest?.current_unit_ids?.length || 0}/${target} new traces`
+      : comparison?.status === "alert" ? `${candidate ? "Historical comparison" : "Active monitor"} found ${alerts || 1} alert${alerts === 1 ? "" : "s"}`
+        : comparison?.status === "no_alert" ? candidate ? "Historical comparison found no alert" : "No alert in the latest active comparison"
+          : "Comparison needs more evidence";
+  const color = current.state === "requires_rebootstrap" ? C.amber
+    : comparison?.status === "alert" && !collecting ? C.red
+      : collecting || comparison?.status !== "no_alert" ? C.amber : C.green;
+  const description = current.state === "requires_rebootstrap"
+    ? "The active reference needs to be rebuilt before this monitor can decide."
+    : awaitingEvaluator ? "Membership is fixed. Run the selected evaluator, then run the monitor again."
+      : collecting ? "The frozen reference is waiting for a complete prospective cohort."
+        : candidate ? "Stored historical check; not active monitoring. Review the comparison in Monitor."
+          : comparison?.status === "no_alert" ? "The selected metrics did not meet the alert threshold. This does not establish task quality."
+            : comparison?.status === "alert" ? "A selected metric crossed its alert threshold. Inspect the comparison and evidence in Monitor."
+              : "The selected metrics cannot support a decision yet. Inspect coverage in Monitor.";
+  return <Panel className={compact ? "px-5 py-3" : "p-5"} style={{ borderColor: color }}>
     <div className="flex flex-wrap items-start justify-between gap-3">
       <div>
-        <div className="text-xs font-mono" style={{ color }}>{candidate ? "EXPLORATORY HISTORICAL COMPARISON" : "ACTIVE MONITOR"}</div>
+        <div className="text-xs font-mono" style={{ color }}>{candidate ? "HISTORICAL CHECK" : "ACTIVE MONITOR"}</div>
         <div className="font-semibold mt-1">{title}</div>
-        <div className="text-sm mt-1" style={{ color: C.sub }}>
-          {candidate ? "Stored preview; not active." : awaitingEvaluator ? "Membership is fixed. Run the selected evaluator, then run the monitor again." : collecting ? "The frozen reference is waiting for a complete prospective cohort." : "Latest completed prospective comparison."}
-        </div>
+        <div className="text-sm mt-1" style={{ color: C.sub }}>{description}</div>
       </div>
-      {manifest && <div className="text-sm" style={{ color: C.sub }}>{manifest.reference_unit_ids.length} reference → {manifest.current_unit_ids.length} current</div>}
+      {onOpen && <button type="button" className="text-sm underline" style={{ color: C.green }}
+        onClick={() => onOpen(candidate ? "history" : "status")}>Open Monitor details</button>}
     </div>
-    {comparison && !collecting && <div className="mt-3 space-y-1">
-      {(comparison.metrics || []).map((metric) => <div key={`${metric.group_id || "all"}:${metric.metric}`} className="text-sm" style={{ color: metric.alert ? C.red : C.sub }}>
-        {metric.group_id ? `${groupLabels.get(metric.group_id) || metric.group_id} · ` : ""}{metricLabel(metric.metric)} · {(100 * metric.reference_value).toFixed(1)}% → {(100 * metric.current_value).toFixed(1)}%
-      </div>)}
-    </div>}
   </Panel>;
 }
 
-function MonitorOverview({ monitor }) {
-  if (!monitor?.active && !monitor?.candidate) return <Panel className="p-5">
-    <div className="text-xs font-mono" style={{ color: C.amber }}>MONITORING</div>
-    <div className="font-semibold mt-1">Not configured</div>
-    <div className="text-sm mt-2" style={{ color: C.sub }}>Compare historical cohorts in Monitor, then activate a policy if new traffic will continue arriving.</div>
-  </Panel>;
+function MonitorOverview({ monitor, onOpen, compact = false, showEmpty = false }) {
+  if (!monitor?.active && !monitor?.candidate) {
+    if (!showEmpty) return null;
+    const unconfigured = monitor?.state === "not_configured";
+    return <Panel className="px-5 py-3" style={{ borderColor: C.border }}>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div><div className="text-xs font-mono" style={{ color: C.amber }}>MONITORING STATUS</div>
+          <div className="font-semibold mt-1">{unconfigured ? "Monitoring not configured" : "Monitoring status unavailable"}</div>
+          <p className="text-xs mt-1" style={{ color: C.sub }}>Recorded issues below are findings, not active monitoring alerts.</p></div>
+        {onOpen && <button type="button" className="text-sm underline" style={{ color: C.green }} onClick={() => onOpen("status")}>Open Monitor</button>}
+      </div>
+    </Panel>;
+  }
   return <div className="space-y-3">
-    {monitor.active && MonitorResult({ current: monitor.active })}
-    {monitor.candidate && MonitorResult({ current: monitor.candidate })}
+    {monitor.active && MonitorResult({ current: monitor.active, onOpen, compact })}
+    {monitor.candidate && MonitorResult({ current: monitor.candidate, onOpen, compact })}
   </div>;
 }
 
@@ -1244,7 +1289,7 @@ function SeriesLegend({ series }) {
 }
 
 /* ---------------------------------------------------------------- TRACES */
-function Traces({ data = SEED, source = "sample", traceOffset = 0, reloading = false, onTracePageChange = null, judgeStatus = "all", selectedTraceId: routedTraceId = null, onJudgeStatus = null, onSelectTrace = null }) {
+function Traces({ data = SEED, source = "sample", traceOffset = 0, reloading = false, onTracePageChange = null, judgeStatus = "all", selectedTraceId: routedTraceId = null, onJudgeStatus = null, onSelectTrace = null, onEvaluateTrace = null }) {
   const DATA = data;
   const [prov, setProv] = useState("all");
   const [capture, setCapture] = useState("all");
@@ -1364,7 +1409,7 @@ function Traces({ data = SEED, source = "sample", traceOffset = 0, reloading = f
 
       {/* detail */}
       <div className="shrink-0" style={{ width: "min(100%, 360px)" }}>
-        {sel ? <TraceDetail s={sel} onClose={() => {
+        {sel ? <TraceDetail s={sel} onEvaluate={onEvaluateTrace ? () => onEvaluateTrace(sel.trace_id) : null} onClose={() => {
           setSelectedTraceId(null);
           onSelectTrace?.(null);
         }} /> : (
@@ -1380,7 +1425,7 @@ function Traces({ data = SEED, source = "sample", traceOffset = 0, reloading = f
   );
 }
 
-function TraceDetail({ s, onClose }) {
+function TraceDetail({ s, onClose, onEvaluate = null }) {
   const provider = providerPresentation(s.provider, s.request_model);
   const recorded = traceTime(s);
   const hasContent = capturedContent(s);
@@ -1495,6 +1540,7 @@ function TraceDetail({ s, onClose }) {
           </div>
         )}
         <div className="text-xs font-mono pt-1" style={{ color: C.faint }}>trace {s.trace_id.slice(0, 12)}</div>
+        {onEvaluate && <button type="button" onClick={onEvaluate} className="border px-3 py-2 text-sm w-full" style={{ borderColor: C.green, color: C.green }}>Evaluate this model call</button>}
       </div>
     </Panel>
   );
