@@ -5,7 +5,7 @@ PyPI distribution: `cognifity-verdict`. Python import: `verdict`.
 For the published `0.1.0b1` release, install and start its loopback-only UI:
 
 ```bash
-python -m pip install cognifity-verdict
+python -m pip install "cognifity-verdict[dashboard]==0.1.0b1"
 verdict
 ```
 
@@ -281,8 +281,12 @@ evaluation status, finding severity, and drift comparison independently.
 `not evaluated` and `judge error` are explicit Trace states. A prospective
 monitor distinguishes traffic collection from a full cohort awaiting selected
 evaluator results.
-The dashboard has six top-level workspaces: Overview, Explore, Evaluate,
-Monitor, Report, and Settings. Report summarizes application calls excluding
+The dashboard shows four primary tasks: Overview, Investigate, Evaluate, and
+Monitor. Select a UTC day in Overview and use **Explain this day** for its
+measured token contributors and a bounded recent-day comparison. **Ask AI why**
+previews aggregate-only context and the destination before one approved call;
+the answer does not establish waste or verified savings. Report and Settings
+are available from the header. Report summarizes application calls excluding
 Verdict-owned judge and paired-replay work over the last 30 UTC calendar days
 by default, with 7-day, 90-day, and all-time
 choices. Its chart shows up to 31 active dates in the selected period, plus the
@@ -374,7 +378,7 @@ not-evaluable, PASS/FAIL, UNCLEAR, judge-error, and ungraded-eligible coverage
 separately. The PASS rate uses only
 PASS and FAIL grades; changing a transcript or label invalidates its old grade.
 This comparison does not create a prospective alert or discover semantic
-clusters. Explore → Compare additionally accepts one source-declared pair-ID
+clusters. Investigate → Compare additionally accepts one source-declared pair-ID
 label and variant label for two versions of the same evaluation input. It
 compares only exact current whole-conversation binary or bounded numeric grades
 from one evaluator inside one UTC end-time window; duplicates and missing

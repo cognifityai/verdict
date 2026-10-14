@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from statistics import median
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -17,6 +18,7 @@ MAX_DAY_SESSIONS = 100
 MAX_SESSION_TURNS = 50
 MAX_DAY_MODELS = 20
 MAX_DAY_SOURCES = 20
+MAX_DAY_EXPLANATION_ITEMS = 5
 
 # Codex input includes cached input; Claude's provider response usage does not.
 _TURN_INPUT_INCLUDES_CACHED = {
@@ -186,6 +188,60 @@ def _present(summary: dict[str, Any], *, include_models: bool = False) -> dict[s
     return result
 
 
+def _day_explanation(
+    day: str, dates: list[str], daily: dict[str, dict[str, Any]],
+    turns: list[dict[str, Any]], ranked_sessions: list[dict[str, Any]],
+    *, complete: bool, model_complete: bool,
+) -> dict[str, Any]:
+    """Describe measured contributors without inferring waste or task quality."""
+    selected = daily[day]
+    total = selected["totalTokens"] if selected["tokenKnownTurns"] else None
+    previous = [value for value in dates[:dates.index(day)]
+                if daily[value]["tokenKnownTurns"]][-7:]
+    references = [daily[value]["totalTokens"] for value in previous]
+    comparison = None
+    if complete and len(references) >= 3 and total is not None:
+        reference = median(references)
+        comparison = {
+            "referenceDays": len(references), "medianTokens": reference,
+            "differenceTokens": total - reference,
+            "differencePercent": round((total - reference) / reference * 100)
+            if reference else None,
+        }
+    def share(value: int | None) -> int | None:
+        return round(value / total * 100) if value is not None and total else None
+
+    top_sessions = []
+    for item in ranked_sessions[:MAX_DAY_EXPLANATION_ITEMS]:
+        summary = item["summary"]
+        day_tokens = summary["totalTokens"] if summary["tokenKnownTurns"] else None
+        top_sessions.append({
+            "sessionId": item["sessionId"], "sourceKind": item["sourceKind"],
+            "agentName": item["agentName"], "dayTokens": day_tokens,
+            "sharePercent": share(day_tokens), "turns": summary["turns"],
+            "tokenKnownTurns": summary["tokenKnownTurns"],
+        })
+    ranked_turns = sorted(
+        (turn for turn in turns if turn["day"] == day and turn["total_tokens"] is not None),
+        key=lambda turn: (-turn["total_tokens"], turn["run_id"], turn["turn_id"]),
+    )
+    top_turns = [{
+        "turnId": turn["turn_id"], "runId": turn["run_id"],
+        "sessionId": turn["sessionKey"], "sourceKind": turn["source_kind"],
+        "sequence": turn["sequence"], "totalTokens": turn["total_tokens"],
+        "sharePercent": share(turn["total_tokens"]),
+        "models": sorted(turn["models"]),
+    } for turn in ranked_turns[:MAX_DAY_EXPLANATION_ITEMS]]
+    return {
+        "day": day, "totalTokens": total, "turns": selected["turns"],
+        "tokenKnownTurns": selected["tokenKnownTurns"],
+        "pricedTurns": selected["pricedTurns"],
+        "windowComplete": complete, "modelEvidenceComplete": model_complete,
+        "comparison": comparison, "topSessions": top_sessions,
+        "topTurns": top_turns,
+    }
+
+
 def build_usage_view(
     session: QuerySession, *, tenant: str, now: datetime, day: str | None,
     session_id: str | None, source_kind: str | None = None,
@@ -199,13 +255,18 @@ def build_usage_view(
     if day is not None and day not in dates:
         raise ValueError("day outside usage window")
     if not all(session.table_exists(table) for table in ("agent_turns", "agent_runs", "import_sources", "agent_events")):
+        empty_daily = {value: _summary() for value in dates}
+        selected_day = day or dates[-1]
         return {
             "window": {"startDay": dates[0], "endDay": dates[-1], "timezone": "UTC",
                        "complete": True, "scannedTurns": 0},
-            "days": [{"day": value, **_present(_summary())} for value in dates],
-            "selectedDay": day or dates[-1], "dayModels": [], "daySources": [], "sessions": [],
+            "days": [{"day": value, **_present(empty_daily[value])} for value in dates],
+            "selectedDay": selected_day, "dayModels": [], "daySources": [], "sessions": [],
             "sessionsTruncated": False, "selectedSession": None,
             "selectionReason": None,
+            "dayExplanation": _day_explanation(
+                selected_day, dates, empty_daily, [], [], complete=True, model_complete=True,
+            ),
         }
     rows = list(session.execute(
         """SELECT t.run_id,t.turn_id,t.sequence,t.started_at,t.ended_at,
@@ -367,4 +428,8 @@ def build_usage_view(
         "sessionsTruncated": len(ranked_sessions) > MAX_DAY_SESSIONS,
         "selectedSession": selected,
         "selectionReason": selection_reason,
+        "dayExplanation": _day_explanation(
+            selected_day, dates, daily, turns, ranked_sessions,
+            complete=complete, model_complete=model_complete,
+        ),
     }

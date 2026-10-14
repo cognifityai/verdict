@@ -64,8 +64,8 @@ present those states without treating missing evidence as success or failure.
   not evaluated, judge error, pass, fail, and unclear.
 - Agent Runs show source outcome, evidence coverage, deterministic findings,
   and selected-evaluator coverage separately.
-- Six top-level workspaces separate concerns: Overview, Explore, Evaluate,
-  Monitor, Report, and Settings. Report summarizes application calls separately
+- Four primary tasks separate concerns: Overview, Investigate, Evaluate, and
+  Monitor. Report and Settings are header utilities. Report summarizes application calls separately
   from evaluator traffic and emits aggregate-only management exports. Monitor
   contains current cohort status, historical comparisons, optional segments,
   schedules.

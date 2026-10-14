@@ -11,7 +11,7 @@ from typing import Any
 from verdict.dashboard.storage_url import is_postgres_storage
 from verdict.storage.sqlite import sqlite_path
 
-KINDS = {"settings", "schedule", "alert", "proposal", "review", "case_set", "experiment", "scoped_evaluation", "scheduled_evaluation"}
+KINDS = {"settings", "schedule", "alert", "proposal", "review", "case_set", "experiment", "scoped_evaluation", "scheduled_evaluation", "usage_explanation"}
 STATES = {
     "settings": {"active"},
     "schedule": {"active", "disabled"},
@@ -22,6 +22,7 @@ STATES = {
     "experiment": {"completed"},
     "scoped_evaluation": {"completed", "error"},
     "scheduled_evaluation": {"pending", "spent", "cancelled"},
+    "usage_explanation": {"reserved", "completed", "error"},
 }
 _IDENTITY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
 _ENV_NAME = re.compile(r"[A-Z][A-Z0-9_]{0,127}")

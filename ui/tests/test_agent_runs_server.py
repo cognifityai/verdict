@@ -1610,6 +1610,68 @@ def test_agent_runs_can_select_an_exact_tenant_scoped_run(tmp_path):
     )["runs"] == []
 
 
+def test_agent_runs_list_view_loads_only_the_selected_run(tmp_path, monkeypatch):
+    path = tmp_path / "runs-list.db"
+    storage = SQLiteStorage(str(path))
+    now = datetime(2026, 8, 31, tzinfo=timezone.utc)
+    for index, tenant in enumerate(("local-a", "local-b", "foreign")):
+        bundle = _bundle(tenant, now)
+        if tenant != "foreign":
+            bundle = AgentRunBundle(
+                replace(bundle.session, tenant_id="local", source_locator_hash=f"{index:064x}"),
+                replace(bundle.run, tenant_id="local"),
+                bundle.turns, bundle.events,
+            )
+        storage.replace_agent_run_bundle(bundle)
+    storage.close()
+
+    from verdict.dashboard import agent_evidence_queries
+    original = agent_evidence_queries.load_bundles
+    loaded = []
+
+    def record_load(*args, **kwargs):
+        loaded.append(kwargs.get("run_ids"))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(agent_evidence_queries, "load_bundles", record_load)
+    result = build_agent_runs_bundle(path, tenant="local", view="list", limit=1)
+    assert len(result["runs"]) == 1
+    assert set(result["runs"][0]) == {
+        "runId", "sourceKind", "startedAt", "status", "agentName",
+        "turnCount", "eventCount",
+    }
+    assert result["selectedRun"]["runId"] == result["runs"][0]["runId"]
+    assert "findings" in result["selectedRun"]
+    assert loaded == [(result["selectedRun"]["runId"],)]
+    assert build_agent_runs_bundle(
+        path, tenant="local", view="list", limit=1,
+        selected_run_id="r-foreign",
+    )["selectedRun"] is None
+    assert build_agent_runs_bundle(
+        path, tenant="local", view="list", limit=1, offset=1,
+        selected_run_id=result["selectedRun"]["runId"],
+    )["selectedRun"] is None
+    assert "selectedRun" not in build_agent_runs_bundle(path, tenant="local", limit=1)
+
+    async def request_list():
+        transport = httpx.ASGITransport(
+            app=create_app(storage=f"sqlite:///{path}", tenant_id="local")
+        )
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
+            return (
+                await client.get("/api/runs?view=list&limit=1"),
+                await client.get("/api/runs?view=list&selected_run_id=r-foreign"),
+                await client.get("/api/runs?view=unknown"),
+            )
+
+    listed, foreign, invalid = asyncio.run(request_list())
+    assert listed.status_code == 200 and listed.json() == result
+    assert foreign.status_code == 200 and foreign.json()["selectedRun"] is None
+    assert invalid.status_code == 400
+
+
 def test_agent_runs_can_filter_multiple_affected_runs_beyond_default_page(tmp_path):
     path = tmp_path / "runs.db"
     storage = SQLiteStorage(str(path))

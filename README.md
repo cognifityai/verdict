@@ -8,7 +8,13 @@ Verdict is a local-first agent profiler and reliability toolkit. It imports Clau
 
 ## Try Verdict
 
-Python 3.10+ is required. The latest public beta has its own [versioned install and provider support profile](docs/RELEASE_PROFILE.md). To try this development checkout's Agent Profiler workflow, install this checkout in an isolated environment and launch the loopback dashboard:
+For the released beta on Python 3.10–3.12, install the synchronized packages:
+
+```bash
+python -m pip install "cognifity-verdict[anthropic,openai,google,dashboard]==0.1.0b1" "cognifity-verdict-eval[semantic]==0.1.0b1" "cognifity-verdict-inspect==0.1.0b1"
+```
+
+See the [release profile](docs/RELEASE_PROFILE.md) for supported provider calls and verification. The Agent Profiler workflow below is available in this source branch and is planned for the next release. To try it, install this checkout in an isolated environment and launch the loopback dashboard:
 
 ```bash
 python -m venv .venv
@@ -22,8 +28,8 @@ For a fully synthetic, key-free demo, follow [Agent Profiler demo](docs/AGENT_PR
 
 ## The investigation flow
 
-1. **Usage:** See reported token activity by UTC day, source, model, and session. Open a contributor to reach its runs and turns.
-2. **Session / run:** The selected session report combines its runs, requests, recorded actions, outcomes, known usage, findings, historical saved evaluations, and suggested actions. Open a run for deeper evidence.
+1. **Overview:** Start with recorded issues and reported tokens by UTC day. Select a day and click **Explain this day** for a local comparison and its largest sessions and turns, then drill into a run. An optional AI interpretation previews aggregate metrics and destination before one approved provider call; it does not send chat or tool text. Active monitoring alerts remain prominent; historical checks follow the investigation cards.
+2. **Investigate:** A selected finding opens its run with the finding, linked event, and matching suggestion together. Technical coverage and the full timeline remain expandable.
 3. **Turn / action:** Click **Analyze** for a local inspection of recorded failures and tool results. A selected turn or genuine model call can be evaluated in Evaluator Lab. A bounded session, run, or tool action can be previewed for optional external evaluation.
 4. **Test a change:** Save a reviewed, runnable case set. A captured run can start an unsaved draft from its complete, redacted request; you supply the expected behavior and check. Reviewed case fields are stored and passed to the configured local runner exactly as entered, so remove private data before saving. The runner executes the same cases against baseline and candidate versions and reports fixes, collateral regressions, unchanged cases, and unverified runs.
 5. **Monitor:** An opt-in service can rescan approved local histories or analyze already captured agent activity, persist deterministic findings, and run an existing genuine model-call monitor. Its notifications require separate configuration. A reviewed bounded scope can also authorize one later external evaluation, with a one-attempt limit and a user-set static list-price estimate limit.
@@ -57,9 +63,15 @@ For an existing Python app, the [integration assistant guide](docs/AGENT_SKILL.m
 - Suggestions link to recorded evidence and are hypotheses until tested. A failed command can be followed by a successful recovery; an expensive turn is not automatically waste.
 - An optional LLM judgment is an evaluator's opinion about the bounded evidence shown before consent. Missing, truncated, and uncertain evidence remain visible; a judge cannot reconstruct hidden reasoning or absent files.
 
+## What it does not do
+
+- Infer hidden agent reasoning or establish task success from a fluent answer.
+- Guarantee token savings from a suggestion without a comparable test.
+- Judge an entire long session from partial evidence; [bounded reports](docs/AGENT_PROFILER.md#usage-and-run-report) expose their limits.
+
 ## Advanced capabilities
 
-Verdict also imports supported [existing telemetry](docs/ONBOARDING.md#4-import-telemetry-you-already-collect), provides [rubric judging](docs/ONBOARDING.md#6-judge-calibration-with-verdict_eval-only-if-you-want-quality-drift), and supports [prospective statistical monitoring](docs/STATS_PRIMER.md) of genuine provider model-call traces. Those monitors use reviewed cohorts and fixed evaluator identities; descriptive agent-session comparisons are not drift alerts. Explore, Evaluate, Monitor, Report, and Settings remain available after the first-use profiler path.
+Verdict also imports supported [existing telemetry](docs/ONBOARDING.md#4-import-telemetry-you-already-collect), provides [rubric judging](docs/ONBOARDING.md#6-judge-calibration-with-verdict_eval-only-if-you-want-quality-drift), and supports [prospective statistical monitoring](docs/STATS_PRIMER.md) of genuine provider model-call traces. Those monitors use reviewed cohorts and fixed evaluator identities; descriptive agent-session comparisons are not drift alerts. Investigate, Evaluate, and Monitor are the other main views; Report and Settings are available from the header.
 
 Content is recursively redacted on capture by default, but pattern-based redaction is not a compliance guarantee. Set `capture_content=False` for metadata-only SDK capture; content-dependent evaluation then becomes unavailable. Provider keys stay in environment variables. External judge calls and notification webhooks are opt-in.
 

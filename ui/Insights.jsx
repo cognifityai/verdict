@@ -55,7 +55,7 @@ export function Insights({ url, onOpenRuns, onAnalysisComplete, mode = "findings
     } finally { setRunning(false); }
   }, [load, onAnalysisComplete, url]);
   if (state.error) return <Notice icon={AlertTriangle}>Insights unavailable: {state.error}</Notice>;
-  if (!state.data) return <Notice icon={RefreshCw}>Analyzing captured evidence…</Notice>;
+  if (!state.data) return <Notice icon={RefreshCw}>Loading recorded findings…</Notice>;
   const data = state.data;
   const analysisState = data.analysisState || { status: "never_run" };
   const counts = data.dataHealth.counts;
@@ -98,12 +98,12 @@ export function Insights({ url, onOpenRuns, onAnalysisComplete, mode = "findings
     {!data.scope.complete && <Notice icon={AlertTriangle} color={C.amber}>This view is partial: {data.scope.analyzedRuns} of {data.scope.availableRuns} runs were analyzed.</Notice>}
     <section className="border p-5" style={{ borderColor: C.border, background: C.panel }}>
       <div className="flex flex-wrap items-start justify-between gap-3">
-        <div><div className="text-xs font-mono" style={{ color: C.green }}>PERSISTED ANALYSIS</div><h2 className="text-lg font-semibold mt-1">Issues in captured runs</h2>
+        <div><div className="text-xs font-mono" style={{ color: C.green }}>RECORDED EVIDENCE</div><h2 className="text-lg font-semibold mt-1">What needs attention</h2>
           <p className="text-sm mt-2" style={{ color: C.sub }}>{analysisState.status === "completed"
-            ? `Verdict analyzed ${data.scope.analyzedRuns.toLocaleString()} of ${data.scope.availableRuns.toLocaleString()} captured runs. Select an issue to inspect the run evidence.`
-            : `${counts.runs.toLocaleString()} captured runs. Run local analysis to inspect issues.`}</p>
+            ? `${issues.length} recorded issue ${issues.length === 1 ? "type" : "types"} across ${data.scope.analyzedRuns.toLocaleString()} of ${data.scope.availableRuns.toLocaleString()} captured runs. Select one to inspect what happened and what to do next.`
+            : `${counts.runs.toLocaleString()} captured runs. Run local analysis to find recorded issues.`}</p>
         </div>
-        <button disabled={running} onClick={runAnalysis} className="border px-3 py-2 text-xs" style={{ borderColor: C.green, color: C.green }}>{running ? "Analyzing…" : "Analyze latest evidence"}</button>
+        <button disabled={running} onClick={runAnalysis} className="border px-3 py-2 text-xs" style={{ borderColor: C.green, color: C.green }}>{running ? "Analyzing…" : analysisState.status === "completed" ? "Refresh local analysis" : "Run local analysis"}</button>
       </div>
       {issues.length ? <div role="group" aria-label="Recorded issues by affected runs" className="mt-5 space-y-3">
         {issues.slice(0, 5).map((finding) => FindingBar({ finding, maximum: largestIssueCount, onOpen: () => onOpenRuns?.(finding) }))}
@@ -111,7 +111,7 @@ export function Insights({ url, onOpenRuns, onAnalysisComplete, mode = "findings
           <summary className="cursor-pointer text-sm">Show {issues.length - 5} more issue types</summary>
           <div className="mt-3 space-y-3">{issues.slice(5).map((finding) => FindingBar({ finding, maximum: largestIssueCount, onOpen: () => onOpenRuns?.(finding) }))}</div>
         </details>}
-        <p className="text-xs" style={{ color: C.faint }}>Bars compare affected-run counts by issue type. A run may appear in more than one type; bar lengths use the largest count as the scale.</p>
+        <p className="text-xs" style={{ color: C.faint }}>A run may have more than one issue. Bars compare affected-run counts within this analysis.</p>
       </div> : <div className="flex items-center gap-2 text-sm mt-5" style={{ color: C.sub }}>{analysisState.status === "completed" ? <><CheckCircle2 size={15} style={{ color: C.green }} />No deterministic issues found in the analyzed evidence.</> : "No analyzed findings are available yet."}</div>}
       {evidenceGaps.length > 0 && <details className="mt-5 border-t pt-4" style={{ borderColor: C.border }}>
         <summary className="cursor-pointer text-sm font-semibold">Evidence gaps ({evidenceGaps.length} {evidenceGaps.length === 1 ? "type" : "types"})</summary>
@@ -170,7 +170,7 @@ function FindingBar({ finding, maximum, onOpen }) {
   return <button key={finding.code} type="button" onClick={onOpen} className="w-full border p-3 text-left" style={{ borderColor: C.border }}>
     <span className="flex justify-between gap-2 text-sm font-semibold"><span style={{ color }}>{FINDING_TITLES[finding.code] || finding.code.replaceAll("_", " ")}</span><span className="whitespace-nowrap">{finding.runs} run{finding.runs === 1 ? "" : "s"}</span></span>
     <span className="block h-2 mt-2" style={{ background: C.border }}><span className="block h-full" style={{ width: `${width}%`, background: color }} /></span>
-    <span className="block text-xs mt-2" style={{ color: C.sub }}>{finding.message} <span style={{ color: C.green }}>Inspect runs →</span></span>
+    <span className="block text-xs mt-2" style={{ color: C.green }}>Inspect affected runs →</span>
   </button>;
 }
 function Metric({ label, value, sub }) { return <div className="border p-4" style={{ borderColor: C.border, background: C.panel }}><div className="text-xs" style={{ color: C.faint }}>{label}</div><div className="text-2xl font-semibold mt-1">{value}</div><div className="text-xs mt-1" style={{ color: C.sub }}>{sub}</div></div>; }

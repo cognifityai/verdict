@@ -28,7 +28,7 @@ function componentStub(names) {
 }
 
 async function loadUiModule() {
-  const source = `${await readFile(UI_SOURCE, "utf8")}\nexport { Dashboard, Overview, Traces, TraceDetail, TabHelp, Judge, Compare, ManagementReport, mountedApiUrl, Monitor };\nexport { useOperations } from "./Operations.jsx";\nexport { RegistryView } from "./Registry.jsx";\nexport { EvaluatorLab } from "./EvaluatorLab.jsx";\nexport { ConversationEvaluation } from "./ConversationEvaluation.jsx";\nexport { MatchedConversationCompare } from "./MatchedConversationCompare.jsx";\nexport { Runs, TurnAnalysis } from "./Runs.jsx";\nexport { Usage } from "./Usage.jsx";\nexport { Experiments } from "./Experiments.jsx";\nexport { ScopedEvaluate } from "./ScopedEvaluate.jsx";\nexport { Insights } from "./Insights.jsx";\nexport { SetupWizard } from "./SetupWizard.jsx";`;
+  const source = `${await readFile(UI_SOURCE, "utf8")}\nexport { Dashboard, Overview, Traces, TraceDetail, TabHelp, Judge, Compare, ManagementReport, mountedApiUrl, Monitor };\nexport { useOperations } from "./Operations.jsx";\nexport { RegistryView } from "./Registry.jsx";\nexport { EvaluatorLab } from "./EvaluatorLab.jsx";\nexport { ConversationEvaluation } from "./ConversationEvaluation.jsx";\nexport { MatchedConversationCompare } from "./MatchedConversationCompare.jsx";\nexport { Runs, TurnAnalysis } from "./Runs.jsx";\nexport { Usage, DayExplanation, DayAiExplanation } from "./Usage.jsx";\nexport { Experiments } from "./Experiments.jsx";\nexport { ScopedEvaluate } from "./ScopedEvaluate.jsx";\nexport { Insights } from "./Insights.jsx";\nexport { SetupWizard } from "./SetupWizard.jsx";`;
   const result = await build({
     stdin: {
       contents: source,
@@ -1037,6 +1037,107 @@ test("usage chart drills from day to session and explains only captured numbers"
   assert.equal(requests.length, 3);
 });
 
+test("selected day explains its own contributors and optional AI requires preview and approval", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const opened = [];
+  const props = { url: "/api/usage", compact: true, onOpenRun: (id) => opened.push(id) };
+  const days = [
+    { day: "2026-10-07", turns: 1, tokenKnownTurns: 1, totalTokens: 100, pricedTurns: 0 },
+    { day: "2026-10-08", turns: 1, tokenKnownTurns: 1, totalTokens: 300, pricedTurns: 0 },
+  ];
+  render(ui.Usage, hooks, props);
+  hooks.flushEffects();
+  await resolveJson(requests[0], { window: { complete: true }, days, selectedDay: days[1].day,
+    dayModels: [], daySources: [], sessions: [], selectedSession: null });
+  let tree = render(ui.Usage, hooks, props);
+  const chart = findAll(tree, (node) => node.type?.name === "UsageChart")[0];
+  const chartTree = render(chart.type, createHooks(), chart.props);
+  findAll(chartTree, (node) => node.type === "button" && node.props["aria-label"]?.includes("2026-10-07"))[0].props.onClick();
+  render(ui.Usage, hooks, props);
+  hooks.flushEffects();
+  await resolveJson(requests[1], { window: { complete: true }, days, selectedDay: days[0].day,
+    dayModels: [], daySources: [], sessions: [], selectedSession: null,
+    dayExplanation: { day: days[0].day, totalTokens: 100, tokenKnownTurns: 1, turns: 1,
+      windowComplete: true, comparison: null,
+      topSessions: [{ sessionId: "session-a", sourceKind: "codex", dayTokens: 100,
+        sharePercent: 100, tokenKnownTurns: 1, turns: 1 }],
+      topTurns: [{ runId: "run-a", turnId: "turn-a", totalTokens: 100,
+        sharePercent: 100, models: [] }] } });
+  tree = render(ui.Usage, hooks, props);
+  assert.equal(requests.length, 2, "selecting a day does not invoke an AI provider");
+  findAll(tree, (node) => node.type === "button" && textOf(node) === "Explain this day")[0].props.onClick();
+  tree = render(ui.Usage, hooks, props);
+  const component = findAll(tree, (node) => node.type?.name === "DayExplanation")[0];
+  const explanation = render(component.type, createHooks(), component.props);
+  assert.match(textOf(explanation), /100\s+reported tokens/);
+  assert.match(textOf(explanation), /No reliable prior-day comparison/);
+  findAll(explanation, (node) => node.type === "button" && textOf(node) === "Open run")[0].props.onClick();
+  assert.deepEqual(opened, ["run-a"]);
+
+  const aiHooks = createEffectHooks();
+  const aiProps = { root: "", day: days[0].day };
+  render(ui.DayAiExplanation, aiHooks, aiProps);
+  aiHooks.flushEffects();
+  assert.equal(requests.length, 4);
+  await resolveJson(requests[2], { setupToken: "local-token" });
+  await resolveJson(requests[3], { providers: [{ provider: "anthropic", configured: true }] });
+  let ai = render(ui.DayAiExplanation, aiHooks, aiProps);
+  assert.equal(requests.length, 4, "opening the panel does not make a paid call");
+  const previewing = findAll(ai, (node) => node.type === "button" && textOf(node) === "Preview AI context")[0].props.onClick();
+  assert.equal(requests[4].url, "/api/usage/explain/preview");
+  assert.equal(findAll(render(ui.DayAiExplanation, aiHooks, aiProps),
+    (node) => node.type === "select")[0].props.disabled, true);
+  await resolveJson(requests[4], { day: days[0].day, provider: "anthropic", model: "claude-haiku-4-5",
+    destination: "https://api.anthropic.com", planFingerprint: "fingerprint", plannedCalls: 1,
+    providerAvailable: true,
+    upperStaticListPriceUsd: 0.01, messages: [{ role: "user", content: "aggregate metrics" }] });
+  await previewing;
+  ai = render(ui.DayAiExplanation, aiHooks, aiProps);
+  const run = findAll(ai, (node) => node.type === "button" && textOf(node) === "Ask AI why")[0];
+  assert.equal(run.props.disabled, true);
+  findAll(ai, (node) => node.type === "checkbox" || node.type === "input" && node.props.type === "checkbox")[0].props.onChange({ target: { checked: true } });
+  ai = render(ui.DayAiExplanation, aiHooks, aiProps);
+  const asking = findAll(ai, (node) => node.type === "button" && textOf(node) === "Ask AI why")[0].props.onClick();
+  assert.equal(requests[5].url, "/api/usage/explain/run");
+  assert.equal(findAll(render(ui.DayAiExplanation, aiHooks, aiProps),
+    (node) => node.type === "select")[0].props.disabled, true);
+  assert.deepEqual(JSON.parse(requests[5].options.body), { day: days[0].day, provider: "anthropic",
+    planFingerprint: "fingerprint", confirmExternalEgress: true });
+  await resolveJson(requests[5], { status: "completed", answer: "Session 1 contributed most." });
+  await asking;
+  assert.match(textOf(render(ui.DayAiExplanation, aiHooks, aiProps)), /Session 1 contributed most/);
+});
+
+test("Inspect session pins the displayed UTC day before loading its detail", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const props = { url: "/api/usage" };
+  render(ui.Usage, hooks, props);
+  hooks.flushEffects();
+  await resolveJson(requests[0], {
+    window: { complete: true },
+    days: [{ day: "2026-10-08", turns: 1, tokenKnownTurns: 1, totalTokens: 100 }],
+    selectedDay: "2026-10-08", dayModels: [], daySources: [], sessions: [],
+    selectedSession: null,
+    dayExplanation: { day: "2026-10-08", totalTokens: 100, tokenKnownTurns: 1,
+      turns: 1, windowComplete: true, comparison: null,
+      topSessions: [{ sessionId: "session-a", sourceKind: "codex", dayTokens: 100,
+        tokenKnownTurns: 1, turns: 1 }], topTurns: [] },
+  });
+  let tree = render(ui.Usage, hooks, props);
+  findAll(tree, (node) => node.type === "button" && textOf(node) === "Explain this day")[0].props.onClick();
+  tree = render(ui.Usage, hooks, props);
+  findAll(tree, (node) => node.type?.name === "DayExplanation")[0]
+    .props.onSelectSession({ sessionId: "session-a", sourceKind: "codex" });
+  render(ui.Usage, hooks, props);
+  hooks.flushEffects();
+  assert.equal(requests[1].url,
+    "/api/usage?day=2026-10-08&session_id=session-a&source_kind=codex");
+});
+
 test("usage labels identify source once and turns across runs", async () => {
   const ui = await loadUiModule();
   const hooks = createEffectHooks();
@@ -1156,7 +1257,7 @@ test("agent Overview starts with token and issue charts before technical detail"
   } finally { delete globalThis.window; }
 });
 
-test("Overview keeps monitoring status visible before recorded issue bars", async () => {
+test("Overview puts investigation before monitoring status", async () => {
   const ui = await loadUiModule();
   const data = bundle("judge-a");
   data.meta.totalAgentRuns = 2;
@@ -1164,24 +1265,29 @@ test("Overview keeps monitoring status visible before recorded issue bars", asyn
   globalThis.window = { location: { hash: "#tab=overview&section=summary", pathname: "/dashboard", search: "" },
     history: { pushState() {}, replaceState() {} }, addEventListener() {}, removeEventListener() {} };
   try {
-    const assertStatusBeforeIssues = (tree, label) => {
+    const assertInvestigationBeforeStatus = (tree, label) => {
       const nodes = findAll(tree, () => true);
       const statusIndex = nodes.findIndex((node) => node.type?.name?.startsWith("Panel") && textOf(node).includes(label));
       const issuesIndex = nodes.findIndex((node) => node.type?.name === "Insights");
-      assert.ok(statusIndex >= 0 && issuesIndex >= 0 && statusIndex < issuesIndex);
+      const usageIndex = nodes.findIndex((node) => node.type?.name === "Usage");
+      assert.ok(issuesIndex >= 0 && usageIndex > issuesIndex && statusIndex > usageIndex);
     };
     let tree = render(ui.Dashboard, createHooks(), { data, source: "live" });
-    assertStatusBeforeIssues(tree, "Monitoring not configured");
+    assert.doesNotMatch(textOf(tree), /Monitoring not configured/);
 
     data.monitor = { active: null, candidate: { state: "candidate",
       snapshot: { comparison: { status: "no_alert", metrics: [] } } } };
     tree = render(ui.Dashboard, createHooks(), { data, source: "live" });
-    assertStatusBeforeIssues(tree, "Historical comparison found no alert");
+    assertInvestigationBeforeStatus(tree, "Historical comparison found no alert");
 
     data.monitor = { active: { state: "active",
       snapshot: { comparison: { status: "alert", metrics: [{ alert: true }] } } }, candidate: null };
     tree = render(ui.Dashboard, createHooks(), { data, source: "live" });
-    assertStatusBeforeIssues(tree, "Active monitor found 1 alert");
+    const nodes = findAll(tree, () => true);
+    const alertIndex = nodes.findIndex((node) => node.type?.name?.startsWith("Panel")
+      && textOf(node).includes("Active monitor found 1 alert"));
+    const issuesIndex = nodes.findIndex((node) => node.type?.name === "Insights");
+    assert.ok(alertIndex >= 0 && alertIndex < issuesIndex, "an active alert remains prominent");
   } finally { delete globalThis.window; }
 });
 
@@ -1359,7 +1465,7 @@ test("Overview leads with actionable issues and keeps evidence limits and techni
   assert.equal(issueButtons.length, 2);
   assert.match(textOf(issueButtons[0]), /Tool failures recorded.*2\s+run/s);
   assert.match(textOf(issueButtons[1]), /Repeated identical tool calls.*3\s+run/s);
-  assert.match(textOf(tree), /analyzed 8 of 10 captured runs/i);
+  assert.match(textOf(tree), /8 of 10 captured runs/i);
   assert.match(textOf(tree), /This view is partial/i);
   assert.equal(findAll(tree, (node) => node.type === "details").length, 2);
   issueButtons[0].props.onClick();
@@ -1518,7 +1624,8 @@ test("management reporting is one top-level workspace backed by the current bund
   try {
     const tree = render(ui.Dashboard, createHooks(), { data: bundle("judge-a"), source: "live" });
     const navigation = findAll(tree, (node) => node.type === "nav")[0];
-    assert.match(textOf(navigation), /Report/);
+    assert.doesNotMatch(textOf(navigation), /Report/);
+    assert.ok(findAll(tree, (node) => node.type === "button" && node.props?.title === "Open report").length);
     assert.equal(findAll(
       tree,
       (node) => typeof node.type === "function" && node.type.name === "ManagementReport",
@@ -1736,18 +1843,36 @@ test("an inconsistent legacy run does not advertise its stale signal count", asy
   assert.equal(textOf(monitorButton).trim(), "Monitor");
 });
 
-test("dashboard exposes only the six product workspaces", async () => {
+test("dashboard shows four primary tasks and keeps report and settings accessible", async () => {
   const ui = await loadUiModule();
   const tree = render(ui.Dashboard, createHooks(), { data: bundle("judge-a") });
   const navigation = findAll(tree, (node) => node.type === "nav")[0];
   const labels = textOf(navigation);
 
-  for (const label of ["Overview", "Explore", "Evaluate", "Monitor", "Report", "Settings"]) {
+  for (const label of ["Overview", "Investigate", "Evaluate", "Monitor"]) {
     assert.match(labels, new RegExp(label));
   }
+  assert.doesNotMatch(labels, /Report|Settings/);
+  assert.ok(findAll(tree, (node) => node.type === "button" && node.props?.title === "Open report").length);
+  assert.ok(findAll(tree, (node) => node.type === "button" && node.props?.title === "Open settings").length);
   for (const oldLabel of ["Findings", "Reliability", "Performance", "Behavior", "Agent runs", "Trace explorer", "Judge scores", "Evaluators", "Compare LLMs", "Legacy History"]) {
     assert.doesNotMatch(labels, new RegExp(oldLabel));
   }
+});
+
+test("completed local capture leads to the Overview investigation", async () => {
+  const ui = await loadUiModule();
+  const data = bundle("judge-a");
+  let destination = null;
+  globalThis.window = { location: { hash: "#tab=settings&section=sources", pathname: "/dashboard", search: "" },
+    history: { pushState: (_state, _title, url) => { destination = url; }, replaceState() {} },
+    addEventListener() {}, removeEventListener() {} };
+  try {
+    const tree = render(ui.Dashboard, createHooks(), { data, source: "live", onReload() {} });
+    const setup = findAll(tree, (node) => node.type?.name === "SetupWizard")[0];
+    setup.props.onComplete("local");
+    assert.equal(destination, "#tab=overview&section=summary");
+  } finally { delete globalThis.window; }
 });
 
 test("overview prioritizes a stored historical monitor alert over absent legacy drift", async () => {
@@ -2546,6 +2671,45 @@ function runListPage(offset, runIds, available = 61) {
   };
 }
 
+test("Agent Runs requests lightweight rows and expands only the selected run", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const props = { url: "/api/runs" };
+  render(ui.Runs, hooks, props);
+  hooks.flushEffects();
+  assert.match(requests[0].url, /view=list/);
+  const page = runListPage(0, ["run-a", "run-b"], 2);
+  page.runs = page.runs.map(({ findings, metrics, ...row }) => row);
+  page.selectedRun = runListRow("run-a");
+  await resolveJson(requests[0], page);
+  let tree = render(ui.Runs, hooks, props);
+  hooks.flushEffects();
+  assert.match(textOf(tree), /run-a/);
+  assert.doesNotMatch(textOf(tree), /0 observed errors/);
+  const firstDetail = requests.find((request) => request.url.includes("/api/runs/run-a?"));
+  assert.ok(firstDetail);
+  await resolveJson(firstDetail, { runId: "run-a", turns: [{ turnId: "turn-a", request: "private-a" }],
+    events: [], page: { available: 0, shown: 0, offset: 0, limit: 100, truncated: false } });
+  render(ui.Runs, hooks, props);
+  const other = findAll(tree, (node) => node.type === "button"
+    && textOf(node).includes("run-b"))[0];
+  other.props.onClick();
+  tree = render(ui.Runs, hooks, props);
+  hooks.flushEffects();
+  const next = requests.find((request) => request.url.includes("selected_run_id=run-b"));
+  assert.ok(next);
+  assert.doesNotMatch(textOf(tree), /run-a.*source-reported tokens/s);
+  await resolveJson(next, { ...page, selectedRun: runListRow("run-b") });
+  tree = render(ui.Runs, hooks, props);
+  const selectedDetail = findAll(tree, (node) => node.type?.name === "RunDetail")[0];
+  assert.equal(selectedDetail.props.run.runId, "run-b");
+  assert.equal(selectedDetail.props.detail.data, null,
+    "old run evidence must not render even before the next effect clears it");
+  hooks.flushEffects();
+  assert.match(textOf(tree), /run-b/);
+});
+
 test("Agent Runs pages the full list and keeps an empty last page recoverable", async () => {
   const ui = await loadUiModule();
   const hooks = createEffectHooks();
@@ -2607,7 +2771,7 @@ test("Agent Runs can fetch one exact Turn evaluator without reusing Trace covera
   const initial = requests.find((request) => request.url.includes("/run-a?"));
   assert.ok(initial);
   assert.doesNotMatch(initial.url, /turn_evaluator_fingerprint/);
-  await resolveJson(initial, { turns: [], turnPage: { available: 0, shown: 0, offset: 0, limit: 20, truncated: false }, events: [], page: { available: 0, shown: 0, offset: 0, limit: 100, truncated: false } });
+  await resolveJson(initial, { runId: "run-a", turns: [], turnPage: { available: 0, shown: 0, offset: 0, limit: 20, truncated: false }, events: [], page: { available: 0, shown: 0, offset: 0, limit: 100, truncated: false } });
   tree = render(ui.Runs, hooks, props);
   let detail = findAll(tree, (node) => typeof node.type === "function" && node.type.name === "RunDetail")[0];
   assert.ok(detail);
@@ -2640,7 +2804,7 @@ test("Agent Runs can fetch one exact Turn evaluator without reusing Trace covera
   hooks.flushEffects();
   const exactB = requests.find((request) => request.url.includes(`turn_evaluator_fingerprint=${digestB}`));
   assert.ok(exactB);
-  const detailPage = (fingerprint) => ({ turns: [{ turnId: "turn-a", sequence: 0,
+  const detailPage = (fingerprint) => ({ runId: "run-a", turns: [{ turnId: "turn-a", sequence: 0,
     status: "completed", evaluation: { evaluatorFingerprint: fingerprint,
       status: "completed", rubricName: "quality", rubricVersion: "1", judgeModels: ["test"],
       dimensions: [], toolEvidence: "counts_v1",
@@ -3434,6 +3598,59 @@ test("Agent Runs keeps same-run Turn detail while focusing evidence and clears i
   tree = render(ui.Runs, hooks, props);
   detail = findAll(tree, (node) => node.type?.name === "RunDetail")[0];
   assert.equal(detail.props.detail.data, null);
+});
+
+test("a finding link opens its run with the finding, action, and evidence before technical detail", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const run = runListRow("run-a");
+  run.findings = [{ code: "test_failed", severity: "error", message: "1 test execution(s) reported failure.",
+    evidenceEventIds: ["event-failure", "event-followup"] },
+    { code: "tool_error", severity: "error", message: "A tool failed.", evidenceEventIds: ["event-tool"] }];
+  run.recommendations = [{ code: "inspect_test", status: "suggested", observation: "A test failed.",
+    action: "Inspect and rerun the test.", rationale: "The last recorded test failed.",
+    tradeoff: "A later test may have passed.", evidenceEventIds: ["event-failure"] }];
+  const props = { url: "/api/runs", focusRunIds: ["run-a"], selectedRunId: "run-a",
+    findingCode: "test_failed" };
+  render(ui.Runs, hooks, props);
+  hooks.flushEffects();
+  await resolveJson(requests[0], { ...runListPage(0, ["run-a"], 1), runs: [run] });
+  render(ui.Runs, hooks, props);
+  hooks.flushEffects();
+  const request = requests.find((item) => item.url.includes("event_id=event-failure"));
+  assert.ok(request, "the linked event must load even when it is outside the first page");
+  await resolveJson(request, { runId: "run-a", turns: [], events: [{ eventId: "event-failure",
+    timelineIndex: 3, type: "test_result", status: "failed", occurredAt: "2026-09-01T00:00:00Z",
+    attributes: { failed: 1 }, provenance: "synthetic:fixture", privacy: "metadata" }],
+    page: { available: 1, shown: 1, offset: 0, limit: 100, truncated: false } });
+  const tree = render(ui.Runs, hooks, props);
+  const detail = findAll(tree, (node) => node.type?.name === "RunDetail")[0];
+  assert.equal(detail.props.prioritizeDetail, true);
+  const rendered = render(detail.type, createHooks(), detail.props);
+  assert.match(rendered.props.className, /order-1 lg:order-2/);
+  const content = textOf(rendered);
+  assert.match(content, /Investigating: Test failed/);
+  assert.match(content, /Run outcome:\s+completed/);
+  assert.doesNotMatch(content, /Run status unavailable/);
+  assert.match(content, /1 test execution reported failure/);
+  assert.doesNotMatch(content, /test execution\(s\)/);
+  assert.ok(content.indexOf("1 test execution reported failure") < content.indexOf("Inspect and rerun the test."));
+  assert.ok(content.indexOf("Inspect and rerun the test.") < content.indexOf("Technical coverage and further evaluation"));
+  assert.match(content, /Recorded evidence/);
+  const evidence = findAll(rendered, (node) => node.type?.name === "EventRow" && node.props.focused)[0];
+  assert.equal(evidence.props.event.eventId, "event-failure");
+  assert.match(content, /Event\s+1\s+of\s+2/);
+  findAll(rendered, (node) => node.type === "button" && textOf(node) === "Next event")[0].props.onClick();
+  render(ui.Runs, hooks, props);
+  hooks.flushEffects();
+  assert.ok(requests.some((item) => item.url.includes("event_id=event-followup")),
+    "every linked evidence event must be reachable from the focused finding");
+  detail.props.onEventPage(100);
+  render(ui.Runs, hooks, props);
+  hooks.flushEffects();
+  assert.ok(requests.some((item) => item.url.includes("event_offset=100")
+    && !item.url.includes("event_id=")), "paging must leave the focused event and open the requested page");
 });
 
 test("a capture job that fails is reported instead of completing the setup", async () => {

@@ -811,6 +811,7 @@ def build_agent_runs_bundle(
     offset: int = 0,
     run_id: str | None = None, run_ids: tuple[str, ...] | None = None,
     evaluator_fingerprint: str | None = None,
+    view: str = "full", selected_run_id: str | None = None,
 ) -> dict:
     """Read a bounded, analyzed agent-run view without migrating the store."""
     if not isinstance(tenant, str) or not tenant or len(tenant.encode("utf-8")) > 256:
@@ -836,11 +837,11 @@ def build_agent_runs_bundle(
             raise ValueError("invalid run_ids")
         if len(set(run_ids)) != len(run_ids):
             raise ValueError("run_ids must be unique")
-        for selected_run_id in run_ids:
+        for requested_id in run_ids:
             if (
-                not isinstance(selected_run_id, str)
-                or not selected_run_id
-                or len(selected_run_id.encode("utf-8")) > 256
+                not isinstance(requested_id, str)
+                or not requested_id
+                or len(requested_id.encode("utf-8")) > 256
             ):
                 raise ValueError("invalid run_ids")
     if evaluator_fingerprint is not None and (
@@ -848,11 +849,18 @@ def build_agent_runs_bundle(
         or any(character not in "0123456789abcdef" for character in evaluator_fingerprint)
     ):
         raise ValueError("invalid evaluator fingerprint")
+    if view not in ("full", "list"):
+        raise ValueError("invalid runs view")
+    if selected_run_id is not None and (
+        view != "list" or not isinstance(selected_run_id, str)
+        or not selected_run_id or len(selected_run_id.encode("utf-8")) > 256
+    ):
+        raise ValueError("invalid selected_run_id")
     configured = str(storage)
 
     def builder(session: _QuerySession) -> dict:
         if not agent_evidence_queries.available(session):
-            return {
+            empty = {
                 "summary": {"available": 0, "shown": 0},
                 "page": {
                     "available": 0, "shown": 0, "offset": offset,
@@ -860,6 +868,9 @@ def build_agent_runs_bundle(
                 },
                 "runs": [],
             }
+            if view == "list":
+                empty["selectedRun"] = None
+            return empty
         selected_run_ids = run_ids or ((run_id,) if run_id is not None else None)
         if selected_run_ids is None:
             available_runs = agent_evidence_queries.count_runs(session, tenant)
@@ -871,9 +882,19 @@ def build_agent_runs_bundle(
                 (tenant, *selected_run_ids),
             ).fetchone()
             available_runs = int(count["count"] if count else 0)
-        bundles = agent_evidence_queries.load_bundles(
+        list_rows = agent_evidence_queries.list_run_rows(
             session, tenant, limit=limit, offset=offset, run_ids=selected_run_ids,
-        )
+        ) if view == "list" else None
+        listed_ids = {row["runId"] for row in list_rows} if list_rows is not None else set()
+        target_id = (selected_run_id if selected_run_id is not None else
+                     list_rows[0]["runId"] if list_rows else None)
+        bundles = agent_evidence_queries.load_bundles(
+            session, tenant,
+            limit=1 if view == "list" else limit,
+            offset=0 if view == "list" else offset,
+            run_ids=(target_id,) if view == "list" and target_id in listed_ids
+            else () if view == "list" else selected_run_ids,
+        ) if view != "list" or target_id in listed_ids else []
         runs = []
         linked_trace_ids: dict[str, set[str]] = defaultdict(set)
         from verdict.dashboard.scoped_evaluation import _projection
@@ -1001,26 +1022,29 @@ def build_agent_runs_bundle(
                 "notJudged": len(linked) - completed - errors,
                 "complete": True,
             }
+        shown_runs = list_rows if list_rows is not None else runs
         page_offset = 0 if selected_run_ids is not None else offset
         result = {
-            "summary": {"available": available_runs, "shown": len(runs)},
+            "summary": {"available": available_runs, "shown": len(shown_runs)},
             "page": {
                 "available": available_runs,
-                "shown": len(runs),
+                "shown": len(shown_runs),
                 "offset": page_offset,
                 "limit": len(selected_run_ids) if selected_run_ids is not None else limit,
                 "truncated": (
                     selected_run_ids is None
-                    and page_offset + len(runs) < available_runs
+                    and page_offset + len(shown_runs) < available_runs
                 ),
             },
-            "runs": runs,
+            "runs": shown_runs,
         }
+        if view == "list":
+            result["selectedRun"] = runs[0] if runs else None
         if selected_run_ids is not None:
             result["filter"] = {
                 "requested": len(selected_run_ids),
-                "matched": len(runs),
-                "complete": len(runs) == len(selected_run_ids),
+                "matched": len(shown_runs),
+                "complete": len(shown_runs) == len(selected_run_ids),
             }
         return result
 
@@ -3275,6 +3299,10 @@ def create_app(
                 "/api/registry",
                 "/api/runs",
                 "/api/usage",
+                "/api/session",
+                "/api/experiments",
+                "/api/scoped",
+                "/api/compare",
                 "/api/insights",
                 "/api/evaluators",
                 "/api/setup",
@@ -3294,7 +3322,7 @@ def create_app(
 
         Set VERDICT_USER and VERDICT_PASS to require a login. If either is unset
         (local dev), the gate is disabled. The dashboard shells at / and
-        /dashboard plus /api/data are protected; /api/health stays public.
+        /dashboard and dashboard API routes are protected; /api/health stays public.
         """
         user = os.environ.get("VERDICT_USER")
         pw = os.environ.get("VERDICT_PASS")
@@ -3358,6 +3386,7 @@ def create_app(
     _setup_authorized = setup_routes.authorized
 
     from verdict.dashboard.control_routes import ControlRoutes
+    from verdict.dashboard.day_explanation import register_day_explanation_routes
     from verdict.dashboard.experiments import register_experiment_routes
     from verdict.dashboard.lab_routes import register_lab_routes
     from verdict.dashboard.monitor_routes import MonitorRoutes
@@ -3366,6 +3395,7 @@ def create_app(
     register_lab_routes(app, setup_routes)
     register_experiment_routes(app, setup_routes)
     register_scoped_routes(app, setup_routes)
+    register_day_explanation_routes(app, setup_routes)
     monitor_routes = MonitorRoutes(setup_routes)
     monitor_routes.register(app)
     ControlRoutes(configured_storage, setup_routes, monitor_routes).register(app)
@@ -3467,6 +3497,8 @@ def create_app(
         offset: int = Query(default=0, ge=0, le=100_000),
         run_id: str | None = None,
         evaluator_fingerprint: str | None = None,
+        view: str = "full",
+        selected_run_id: str | None = None,
     ):
         try:
             authorized_tenant = _authorized_tenant(request)
@@ -3480,6 +3512,8 @@ def create_app(
                 run_id=run_id,
                 run_ids=selected_run_ids,
                 evaluator_fingerprint=evaluator_fingerprint,
+                view=view,
+                selected_run_id=selected_run_id,
             )
         except ValueError:
             return JSONResponse({"error": "invalid runs request"}, status_code=400)

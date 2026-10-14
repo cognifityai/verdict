@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 import httpx
 import verdict.dashboard.usage as usage_module
 from verdict.dashboard.app import build_agent_session_bundle, build_agent_usage_bundle, create_app
+from verdict.dashboard.day_explanation import _context
 from verdict.dashboard.recommendations import run_recommendations
 from verdict.evidence import (
     AgentEvent,
@@ -88,6 +89,12 @@ def test_usage_groups_turns_by_utc_day_and_drills_into_session_without_cross_ten
     assert report["selectedSession"]["topTurns"][0]["turnId"] == "a-2"
     assert report["daySources"][0]["sourceKind"] == "codex"
     assert report["daySources"][0]["totalTokens"] == 300
+    assert report["dayExplanation"]["day"] == "2026-10-08"
+    assert report["dayExplanation"]["totalTokens"] == 300
+    assert report["dayExplanation"]["comparison"] is None
+    assert report["dayExplanation"]["topSessions"][0]["dayTokens"] == 300
+    assert report["dayExplanation"]["topTurns"][0]["turnId"] == "a-2"
+    assert "a-1" not in {turn["turnId"] for turn in report["dayExplanation"]["topTurns"]}
     assert "secret" not in str(report)
     assert "hidden-canary-example" not in str(report)
 
@@ -99,6 +106,30 @@ def test_usage_groups_turns_by_utc_day_and_drills_into_session_without_cross_ten
     response = asyncio.run(request())
     assert response.status_code == 200
     assert response.json()["selectedSession"]["totalTokens"] == 400
+    assert response.json()["dayExplanation"]["topSessions"][0]["dayTokens"] == 300
+
+
+def test_day_explanation_compares_only_prior_active_utc_days(tmp_path):
+    path = tmp_path / "day-explanation.db"
+    storage = SQLiteStorage(str(path))
+    for day, total in ((1, 100), (4, 200), (8, 300), (13, 900)):
+        run_id = f"run-{day}"
+        bundle = _bundle(
+            "local", run_id, (_turn(run_id, f"turn-{day}", 0, _dt(day, 1), total),),
+            session_id=f"session-{day}",
+        )
+        storage.replace_agent_run_bundle(replace(
+            bundle, session=replace(bundle.session, source_locator_hash=hashlib.sha256(run_id.encode()).hexdigest()),
+        ))
+    storage.close()
+    report = build_agent_usage_bundle(path, tenant="local", now=_dt(13, 12), day="2026-10-13")
+    explanation = report["dayExplanation"]
+    assert explanation["comparison"] == {
+        "referenceDays": 3, "medianTokens": 200,
+        "differenceTokens": 700, "differencePercent": 350,
+    }
+    assert explanation["topSessions"][0]["dayTokens"] == 900
+    assert explanation["topTurns"][0]["totalTokens"] == 900
 
 
 def test_ambiguous_session_id_reports_source_choice_and_exact_source_selects(tmp_path):
@@ -132,6 +163,8 @@ def test_ambiguous_session_id_reports_source_choice_and_exact_source_selects(tmp
     assert {item["sourceKind"] for item in ambiguous.json()["sessions"]} == {
         "codex", "claude-code",
     }
+    context = _context(ambiguous.json())
+    assert [item["session"] for item in context["topTurns"]] == ["Session 1", "Session 2"]
     selected = asyncio.run(request("&source_kind=claude-code"))
     assert selected.status_code == 200
     assert selected.json()["selectedSession"]["sourceKind"] == "claude-code"
@@ -604,17 +637,57 @@ def test_usage_invalid_day_and_missing_session_do_not_expose_other_data(tmp_path
 
 def test_usage_respects_dashboard_basic_auth(tmp_path, monkeypatch):
     path = tmp_path / "protected.db"
-    SQLiteStorage(str(path)).close()
+    canary = "synthetic-auth-boundary-canary"
+    storage = SQLiteStorage(str(path))
+    turn = replace(
+        _turn("run-a", "turn-a", 0, _dt(8, 1), 10),
+        user_request_redacted=canary,
+        request_state="present",
+    )
+    storage.replace_agent_run_bundle(_bundle(
+        "local", "run-a", (turn,), session_id="x",
+    ))
+    storage.close()
     monkeypatch.setenv("VERDICT_USER", "reviewer")
     monkeypatch.setenv("VERDICT_PASS", "secret")
 
     async def request():
-        transport = httpx.ASGITransport(app=create_app(storage=f"sqlite:///{path}"))
+        transport = httpx.ASGITransport(app=create_app(
+            storage=f"sqlite:///{path}", tenant_id="local",
+        ))
         async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
-            denied = await client.get("/api/usage")
-            allowed = await client.get("/api/usage", auth=("reviewer", "secret"))
-            return denied, allowed
+            routes = (
+                "/api/usage",
+                "/api/session?source_kind=codex&session_id=x",
+                "/api/experiments",
+                "/api/scoped/scheduled",
+                "/api/runs/run-a/turns/turn-a/analysis",
+            )
+            return [(
+                route,
+                await client.get(route),
+                await client.get(route, auth=("reviewer", "secret")),
+            ) for route in routes]
 
-    denied, allowed = asyncio.run(request())
+    responses = asyncio.run(request())
+    for route, denied, allowed in responses:
+        assert denied.status_code == 401, route
+        assert canary not in denied.text, route
+        assert allowed.status_code == 200, route
+    assert canary in responses[1][2].text
+
+    async def compare_request():
+        transport = httpx.ASGITransport(app=create_app(
+            storage=f"sqlite:///{path}", tenant_id="local",
+        ))
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            route = "/api/compare/conversations/matched"
+            return (
+                await client.post(route, json={}),
+                await client.post(route, json={}, auth=("reviewer", "secret")),
+            )
+
+    denied, allowed = asyncio.run(compare_request())
     assert denied.status_code == 401
-    assert allowed.status_code == 200
+    assert canary not in denied.text
+    assert allowed.status_code == 403  # This write path also needs the setup token.

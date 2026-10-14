@@ -650,7 +650,7 @@ const TRUNCATION_LABELS = {
   traceSamples: "trace samples",
 };
 const TAB_HELP = {
-  overview: "What changed, what needs attention, and what evidence Verdict has. Reliability, performance, and behavior are judge-free views of the same captured data.",
+  overview: "Start with recorded issues and token activity. Select a finding or day to inspect its evidence. Reliability, performance, and behavior details are available below.",
   explore: "Inspect Agent Runs and genuine LLM calls, including their evidence and evaluation state. Provider comparison is descriptive unless traffic is matched.",
   evaluate: "Configure evaluators, inspect stored judgments, analyze one-off JSON exports, and review labels. Missing evidence stays not evaluable rather than being scored as a failure.",
   monitor: "Compare historical cohorts, activate ongoing monitoring, and optionally review segments.",
@@ -700,7 +700,7 @@ function TabHelp({ tab, label, text }) {
 }
 
 function WorkspaceNav({ tab, section, onSection }) {
-  if (WORKSPACE_SECTIONS[tab].length === 1) return null;
+  if (WORKSPACE_SECTIONS[tab].length === 1 || (tab === "overview" && section === "summary")) return null;
   return <nav aria-label={`${tab} sections`} className="mb-5 flex overflow-x-auto border-b" style={{ borderColor: C.border }}>
     {WORKSPACE_SECTIONS[tab].map(([id, label]) => <button key={id} onClick={() => onSection(id)}
       className="px-4 py-3 text-sm border-b-2 shrink-0"
@@ -862,12 +862,11 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
       : "Live Verdict store";
   const nav = [
     { id: "overview", label: "Overview", icon: Gauge },
-    { id: "explore", label: "Explore", icon: Search },
+    { id: "explore", label: "Investigate", icon: Search },
     { id: "evaluate", label: "Evaluate", icon: Scale },
     { id: "monitor", label: "Monitor", icon: Signal, badge: monitorAlertCount(DATA.monitor) },
-    { id: "report", label: "Report", icon: BarChart3 },
-    { id: "settings", label: "Settings", icon: Terminal },
   ];
+  const workspaceLabel = tab === "report" ? "Report" : tab === "settings" ? "Settings" : nav.find((item) => item.id === tab)?.label;
   return (
     <div style={{ background: C.bg, color: C.text, minHeight: "100%" }}>
       <header className="sticky top-0 z-20 border-b" style={{ background: "rgba(11,14,13,.96)", borderColor: C.border }}>
@@ -900,6 +899,16 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
             )}
           </nav>
           <div className="ml-auto flex items-center gap-2 text-xs">
+            <button type="button" onClick={() => setTab("report")} title="Open report" aria-label="Open report"
+              className="w-8 h-8 inline-flex items-center justify-center border"
+              style={{ borderColor: tab === "report" ? C.accent : C.border, borderRadius: 3, color: tab === "report" ? C.accent : C.sub }}>
+              <BarChart3 size={15} />
+            </button>
+            <button type="button" onClick={() => setTab("settings")} title="Open settings" aria-label="Open settings"
+              className="w-8 h-8 inline-flex items-center justify-center border"
+              style={{ borderColor: tab === "settings" ? C.accent : C.border, borderRadius: 3, color: tab === "settings" ? C.accent : C.sub }}>
+              <Terminal size={15} />
+            </button>
             <span className="flex items-center gap-1.5 px-1 sm:px-2 py-1" title={sourceLabel} style={{ color: sourceColor }}>
               <Dot color={sourceColor} />
               <span className="hidden sm:inline">{sourceLabel}</span>
@@ -918,7 +927,7 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
         <div className="mb-5 flex flex-col sm:flex-row sm:items-end justify-between gap-3">
           <div>
             <div className="text-xs font-mono" style={{ color: C.accent }}>{workloadLabel}</div>
-            <div className="flex items-center gap-2 mt-1"><h1 className="font-semibold" style={{ fontSize: 22, letterSpacing: 0 }}>{nav.find((n) => n.id === tab).label}</h1>{TAB_HELP[tab] && <TabHelp tab={tab} label={nav.find((n) => n.id === tab).label} text={TAB_HELP[tab]} />}</div>
+            <div className="flex items-center gap-2 mt-1"><h1 className="font-semibold" style={{ fontSize: 22, letterSpacing: 0 }}>{workspaceLabel}</h1>{TAB_HELP[tab] && <TabHelp tab={tab} label={workspaceLabel} text={TAB_HELP[tab]} />}</div>
           </div>
           {(source === "sample" || syntheticStore) && (
             <div className="max-w-full flex items-start gap-2 text-xs px-3 py-2 border" style={{ borderColor: "#6b5529", background: C.amberBg, color: C.amber, borderRadius: 3 }}>
@@ -966,22 +975,27 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
         )}
         {!summaryOpen && truncationNotice && <div className="mb-5">{truncationNotice}</div>}
         {tab === "overview" && route.section === "summary" && <div className="space-y-5">
-          {MonitorOverview({ monitor: DATA.monitor,
-            onOpen: (section) => commitRoute({ ...route, tab: "monitor", section }),
-            compact: true, showEmpty: source !== "loading" })}
+          <p className="text-sm" style={{ color: C.sub }}>Review recorded issues, inspect the activity behind them, then check where reported tokens went. Select a finding or a day to open its evidence.</p>
+          {monitorAlertCount(DATA.monitor) > 0 && MonitorOverview({ monitor: DATA.monitor,
+            onOpen: (section) => commitRoute({ ...route, tab: "monitor", section }), compact: true })}
           <div className="grid lg:grid-cols-2 gap-5 items-start">
-            {source === "live" && (DATA.meta.totalAgentRuns || 0) > 0
+            <Insights url={mountedInsightsUrl()} onOpenRuns={openFindingRun} onAnalysisComplete={onReload} />
+            {source === "loading"
+              ? <Panel className="p-5" style={{ minHeight: 320 }}><h2 className="font-semibold">Where tokens went</h2><p role="status" className="text-sm mt-2" style={{ color: C.sub }}>Loading agent activity…</p></Panel>
+              : source === "live" && (DATA.meta.totalAgentRuns || 0) > 0
               ? <Usage compact url={mountedUsageUrl()} onOpenRun={(runId) => commitRoute({ ...route, tab: "explore", section: "runs", findingCode: null, runIds: [runId], selectedRunId: runId, runIdsTruncated: false })} />
               : <Panel className="p-5"><h2 className="font-semibold">Token trend needs agent turns</h2>
                 <p className="text-sm mt-2" style={{ color: C.sub }}>Capture or import agent sessions to see reported tokens by day and drill into sessions here.</p>
                 <button type="button" className="text-sm underline mt-3" style={{ color: C.green }}
                   onClick={() => commitRoute({ ...route, tab: "settings", section: "sources" })}>Set up agent capture</button>
               </Panel>}
-            <Insights url={mountedInsightsUrl()} onOpenRuns={openFindingRun} onAnalysisComplete={onReload} />
           </div>
+          {monitorAlertCount(DATA.monitor) === 0 && MonitorOverview({ monitor: DATA.monitor,
+            onOpen: (section) => commitRoute({ ...route, tab: "monitor", section }), compact: true })}
           {truncationNotice}
           <details className="border p-5" style={{ borderColor: C.border, background: C.panel }}>
             <summary className="cursor-pointer font-semibold">Technical coverage and charts</summary>
+            <div className="mt-4 flex flex-wrap gap-3 text-sm">{WORKSPACE_SECTIONS.overview.slice(1).map(([section, label]) => <button type="button" key={section} className="underline" style={{ color: C.green }} onClick={() => commitRoute({ ...route, section })}>{label} details</button>)}</div>
             <div className="mt-5"><Overview data={DATA} includeMonitor={false} /></div>
           </details>
         </div>}
@@ -1030,7 +1044,7 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
         {tab === "monitor" && route.section === "segments" && <Registry url={mountedRegistryUrl()} operationsUrl={operationsUrl} configUrl={mountedConfigUrl()} />}
         {tab === "monitor" && route.section === "schedule" && <ControlCenter section="schedule" configUrl={mountedConfigUrl()} />}
         {tab === "report" && route.section === "management" && <ManagementReport data={DATA} source={source} onPeriodChange={onReload} />}
-        {tab === "settings" && route.section === "sources" && <SetupWizard configUrl={mountedConfigUrl()} agentSummary={DATA.meta} onRefresh={onReload} onNavigate={(destination) => navigateSetup(commitRoute, route, destination)} onComplete={(setupSource) => { onReload(); commitRoute({ ...route, tab: setupSource === "local" ? "explore" : "overview", section: setupSource === "local" ? "runs" : "summary" }); }} />}
+        {tab === "settings" && route.section === "sources" && <SetupWizard configUrl={mountedConfigUrl()} agentSummary={DATA.meta} onRefresh={onReload} onNavigate={(destination) => navigateSetup(commitRoute, route, destination)} onComplete={() => { onReload(); commitRoute({ ...route, tab: "overview", section: "summary" }); }} />}
         {tab === "settings" && route.section === "alerts" && <ControlCenter section="alerts" configUrl={mountedConfigUrl()} />}
         {tab === "settings" && route.section === "privacy" && <ControlCenter section="privacy" configUrl={mountedConfigUrl()} />}
         {tab === "settings" && route.section === "integrations" && (operationsUrl ? <Operations url={operationsUrl} costBreakdown={DATA.meta.costBreakdown} /> : <Panel className="p-5"><div className="font-semibold">No operations adapter configured</div><div className="text-sm mt-2" style={{ color: C.sub }}>Data ingestion and evaluation remain available. Configure an authenticated operations adapter to expose infrastructure metrics and backend jobs here.</div></Panel>)}

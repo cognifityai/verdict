@@ -105,8 +105,8 @@ response time. Verdict never stores the diagnostic body or raw Codex source
 identifiers.
 
 Successful capture opens **Overview**. Local execution evidence is under
-**Explore → Agent Runs & Tools** and genuine model calls are under
-**Explore → LLM Calls**. Data-source actions remain under
+**Investigate → Agent Runs & Tools** and genuine model calls are under
+**Investigate → LLM Calls**. Data-source actions remain under
 **Settings → Data Sources**, where **Manage data sources** asks you to approve local
 paths again. The header reports Agent Runs and LLM Calls separately.
 
@@ -145,7 +145,7 @@ components. Its total appears only after the turn is terminal and every
 response has complete input/output usage. Missing or malformed counters display
 as unavailable, not zero.
 Verdict does not put a cost on these traces. It shows a separate **estimated
-list price** for agent turns in Overview → Performance and in the per-source
+list price** for agent turns in Overview's Performance details and in the per-source
 table: the turn's token components priced at the public per-token rates for
 the one model the turn named, with cache reads and cache writes at the
 provider's cache rates (Claude Code counts exclude cached tokens from input;
@@ -157,7 +157,7 @@ its token basis is unknown; the figure states how many turns it covers.
 The static table recognizes GPT-6 Astra, Sol, 6.1 Sol, and Luna at their
 standard short-context text rates; it does not infer a price for other GPT-6
 variants or service tiers.
-**Overview → Performance** also has a 30-day UTC Agent Turn usage chart. A turn
+**Overview** shows a 30-day UTC Agent Turn usage chart; Performance details expands the same drilldown. A turn
 is assigned to the UTC date when it started. Choose a day to see sessions active
 on that date and their model breakdown; choose a session to see its largest
 turns across the report window. The session's **Analyze session** action explains
@@ -176,6 +176,10 @@ session-wide evaluation preview. That report is independent of the 30-day chart
 window and includes up to 20 runs, 20 turns, and 80 events. Larger sessions are
 marked partial and link to their individual runs; external evaluation is then
 unavailable for the whole session.
+From **Explain this day**, **Inspect session** moves focus to that session's
+detail after it loads. **Investigate → Agent Runs & Tools** loads a bounded run
+list first and expands only the selected run, so opening the list does not
+analyze every run on the page.
 Codex diagnostic traces include input/output tokens only when one valid usage
 event from the same session matches the completion timestamp. Prompt,
 response, latency, and cost remain unavailable, and the traces are not
@@ -557,7 +561,7 @@ row sort outside the selected window before preview sees it; reimport the
 source record to repair its snapshot.
 For two configurations tested on the same declared input, add an opaque
 `pair_id` and a `variant` to each Voice record's top-level `labels` object.
-Open **Explore → Compare**, enter the UTC campaign dates, the whole-conversation
+Open **Investigate → Compare**, enter the UTC campaign dates, the whole-conversation
 evaluator fingerprint and dimension, both label keys, and the two variant
 values. The view requires exactly one current conversation per variant and
 pair ID; it reports duplicate, unmatched, ineligible, ungraded, error, and
@@ -946,17 +950,23 @@ rendering an empty chart as zero evidence. Monitor separately distinguishes no
 configured comparison, an exploratory historical preview, prospective traffic
 collection, pending evaluator results, insufficient evidence, no alert, alert,
 and a stale reference. Only a closed prospective comparison can produce an
-active alert or no-alert decision. Overview Summary shows monitoring status,
-then reported tokens by day and recorded issues by affected runs. Select a day to inspect its
-sessions, or select an issue to inspect the affected runs. Capture limits are
-under Evidence gaps, and a stored historical monitor preview appears as one
-status linking to its full comparison in Monitor. Technical coverage and
+active alert or no-alert decision. Overview starts with recorded issues and
+reported tokens by day. Select an issue to inspect a focused run with its
+evidence and suggested action. Select a day and click **Explain this day** to
+see its largest recorded sessions and turns and a bounded prior-day comparison.
+The optional **Ask AI why** path first previews aggregate-only context,
+destination, and estimated list-price bound; it sends no chat or tool text and
+requires explicit approval for one call. A session report may span other days.
+Active Monitor alerts remain prominent; historical checks appear below, and
+unconfigured monitoring appears in Monitor. Capture limits are under Evidence
+gaps, and a stored historical monitor preview links to its full comparison in
+Monitor. Technical coverage and
 additional charts remain expandable. A mounted host that supplies the same-origin
 Operations adapter also exposes its action from the empty state.
 
 Set both `VERDICT_USER` and `VERDICT_PASS` before starting the server to require
-HTTP Basic authentication for the dashboard shells at `/` and `/dashboard` plus
-`/api/data`; `/api/health` remains public. Do not bind beyond localhost without that gate or a
+HTTP Basic authentication for the dashboard shells at `/` and `/dashboard` and
+dashboard API routes; `/api/health` remains public. Do not bind beyond localhost without that gate or a
 trusted reverse proxy. Dashboard time series include only observed hourly bins
 and half-hour latency bins. Presentation data is capped at the latest 100
 observed chart points, 8 providers, 20 usable intent clusters, 12 dimensions,

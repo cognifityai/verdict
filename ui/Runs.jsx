@@ -12,6 +12,10 @@ const findingLabel = (code) => {
   const words = code.replaceAll("_", " ");
   return words.charAt(0).toUpperCase() + words.slice(1);
 };
+const findingMessage = (message) => String(message || "").replace(
+  /\b(\d+) (tool result|command|test execution)\(s\)/g,
+  (_match, count, noun) => `${count} ${noun}${count === "1" ? "" : "s"}`,
+);
 
 export function Runs({
   url, focusRunIds = [], selectedRunId: routedRunId = null,
@@ -21,7 +25,7 @@ export function Runs({
 }) {
   const [state, setState] = useState({ loading: true, error: null, data: null });
   const [selected, setSelected] = useState(null);
-  const [detail, setDetail] = useState({ loading: false, error: null, data: null });
+  const [detail, setDetail] = useState({ runId: null, loading: false, error: null, data: null });
   const [eventOffset, setEventOffset] = useState(0);
   const [turnOffset, setTurnOffset] = useState(0);
   const [turnEvaluatorInput, setTurnEvaluatorInput] = useState("");
@@ -34,6 +38,8 @@ export function Runs({
     const requestId = ++listRequest.current;
     setState((current) => ({ ...current, loading: true, error: null }));
     const query = new URLSearchParams();
+    query.set("view", "list");
+    if (routedRunId || selected) query.set("selected_run_id", routedRunId || selected);
     focusRunIds.forEach((runId) => query.append("run_ids", runId));
     if (evaluatorFingerprint) query.set("evaluator_fingerprint", evaluatorFingerprint);
     if (!focusRunIds.length) {
@@ -56,7 +62,7 @@ export function Runs({
           setState({ loading: false, error: String(error), data: null });
         }
       });
-  }, [evaluatorFingerprint, focusRunIds.join("\u0000"), runOffset, url]);
+  }, [evaluatorFingerprint, focusRunIds.join("\u0000"), routedRunId, selected, runOffset, url]);
   useEffect(load, [load]);
 
   useEffect(() => {
@@ -76,6 +82,14 @@ export function Runs({
       && runOffset + runs.length < (state.data?.summary?.available || 0),
   };
   const selectedRunId = routedRunId || selected || runs[0]?.runId || null;
+  const selectedRun = state.data?.selectedRun?.runId === selectedRunId
+    ? state.data.selectedRun
+    : state.data?.selectedRun === undefined
+      ? runs.find((run) => run.runId === selectedRunId)
+      : null;
+  const linkedEventId = findingCode && selectedRun?.findings
+    .find((finding) => finding.code === findingCode)?.evidenceEventIds?.[0];
+  const effectiveFocusEventId = focusEventId === null ? linkedEventId || null : focusEventId;
   const changeRunPage = (nextOffset) => {
     setSelected(null);
     onSelectRun?.(null);
@@ -85,32 +99,33 @@ export function Runs({
     setRunOffset(nextOffset);
   };
   useEffect(() => {
-    if (!selectedRunId) return;
+    if (!selectedRun) return;
     const controller = new AbortController();
     const requestId = ++detailRequest.current;
     setDetail((current) => ({
-      loading: true, error: null,
+      runId: selectedRunId, loading: true, error: null,
       data: current.data?.runId === selectedRunId ? current.data : null,
     }));
-    const eventFocus = focusEventId ? `&event_id=${encodeURIComponent(focusEventId)}` : "";
+    const eventFocus = effectiveFocusEventId ? `&event_id=${encodeURIComponent(effectiveFocusEventId)}` : "";
     const turnEvaluator = turnEvaluatorFilter ? `&turn_evaluator_fingerprint=${turnEvaluatorFilter}` : "";
     fetch(`${url}/${encodeURIComponent(selectedRunId)}?event_limit=100&event_offset=${eventOffset}&turn_limit=20&turn_offset=${turnOffset}${eventFocus}${turnEvaluator}`, {
       credentials: "same-origin", headers: { Accept: "application/json" }, signal: controller.signal,
     })
       .then((response) => response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`)))
       .then((data) => {
+        if (data.runId !== selectedRunId) throw new Error("Run detail did not match selection");
         if (requestId === detailRequest.current && !controller.signal.aborted) {
-          setDetail({ loading: false, error: null, data });
+          setDetail({ runId: selectedRunId, loading: false, error: null, data });
         }
       })
       .catch((error) => {
         if (requestId === detailRequest.current && !controller.signal.aborted
             && error?.name !== "AbortError") {
-          setDetail({ loading: false, error: String(error), data: null });
+          setDetail({ runId: selectedRunId, loading: false, error: String(error), data: null });
         }
       });
     return () => controller.abort();
-  }, [eventOffset, focusEventId, selectedRunId, turnOffset, turnEvaluatorFilter, url]);
+  }, [eventOffset, effectiveFocusEventId, selectedRun?.runId, turnOffset, turnEvaluatorFilter, url]);
 
   if (state.error) return <Notice icon={AlertTriangle} text={`Runs unavailable: ${state.error}`} />;
   if (!state.data) return <Notice icon={RefreshCw} text="Loading agent runs…" />;
@@ -122,7 +137,7 @@ export function Runs({
   }
   return (
     <div className="grid lg:grid-cols-[360px_minmax(0,1fr)] gap-4">
-      <section className="border" style={{ borderColor: color.border, background: color.panel }}>
+      <section className={`border ${focusRunIds.length ? "order-2 lg:order-1" : "order-1"}`} style={{ borderColor: color.border, background: color.panel }}>
         {focusRunIds.length > 0 && <div className="p-3 border-b text-xs flex items-center justify-between gap-3" style={{ borderColor: color.amber, color: color.amber }}>
           <span>{findingCode ? `${findingLabel(findingCode)}: showing` : "Selected run: showing"} {runs.length} of {focusRunIds.length}{runIdsTruncated ? "+" : ""} {findingCode ? "affected runs" : "runs"}{state.data?.filter?.complete === false ? " (some are unavailable in this tenant)" : ""}.</span>
           <button className="underline shrink-0" onClick={() => { setRunOffset(0); onShowAll?.(); }}>Show all runs</button>
@@ -140,7 +155,6 @@ export function Runs({
         </div>
         {runs.map((run) => {
           const active = selectedRunId === run.runId;
-          const errors = run.findings.filter((finding) => finding.severity === "error").length;
           return (
             <button key={run.runId} onClick={() => { setSelected(run.runId); onSelectRun?.(run.runId); setFocusEventId(null); setEventOffset(0); setTurnOffset(0); }}
               className="w-full text-left p-4 border-b flex items-start gap-3"
@@ -149,7 +163,7 @@ export function Runs({
               <span className="min-w-0 flex-1">
                 <span className="block text-sm font-semibold">{run.agentName || run.sourceKind}</span>
                 <span className="block text-xs mt-1" style={{ color: color.sub }}>
-                  {run.sourceKind} · {run.turnCount} turns · {run.eventCount} events · {errors} observed errors
+                  {run.sourceKind} · {run.turnCount} {run.turnCount === 1 ? "turn" : "turns"} · {run.eventCount} {run.eventCount === 1 ? "event" : "events"}
                 </span>
                 <span className="block text-xs mt-1 font-mono truncate" style={{ color: color.faint }}>{run.startedAt}</span>
               </span>
@@ -162,7 +176,7 @@ export function Runs({
           <button disabled={state.loading || !page.truncated} onClick={() => changeRunPage(page.offset + page.limit)} className="border px-3 py-1">Next</button>
         </div>}
       </section>
-      <RunDetail url={url} run={runs.find((run) => run.runId === selectedRunId)} detail={detail} onEventPage={(offset) => { setFocusEventId(null); setEventOffset(offset); }} onTurnPage={setTurnOffset} onFocusEvent={(eventId) => { setFocusEventId(eventId); setEventOffset(0); }} focusEventId={focusEventId} onOpenTrace={onOpenTrace} onEvaluateTurn={onEvaluateTurn} onDraftCase={onDraftCase} turnEvaluatorInput={turnEvaluatorInput} onTurnEvaluatorInput={setTurnEvaluatorInput} turnEvaluatorFilter={turnEvaluatorFilter} onTurnEvaluatorFilter={setTurnEvaluatorFilter} />
+      <RunDetail url={url} run={selectedRun} detail={detail.runId === selectedRunId ? detail : { loading: true, error: null, data: null }} findingCode={findingCode} prioritizeDetail={focusRunIds.length > 0} onEventPage={(offset) => { setFocusEventId(""); setEventOffset(offset); }} onTurnPage={setTurnOffset} onFocusEvent={(eventId) => { setFocusEventId(eventId); setEventOffset(0); }} focusEventId={effectiveFocusEventId} onOpenTrace={onOpenTrace} onEvaluateTurn={onEvaluateTurn} onDraftCase={onDraftCase} turnEvaluatorInput={turnEvaluatorInput} onTurnEvaluatorInput={setTurnEvaluatorInput} turnEvaluatorFilter={turnEvaluatorFilter} onTurnEvaluatorFilter={setTurnEvaluatorFilter} />
     </div>
   );
 }
@@ -207,25 +221,78 @@ function turnTokenSummary(usage) {
   return "not captured";
 }
 
-function RunDetail({ url, run, detail, onEventPage, onTurnPage, onFocusEvent, focusEventId, onOpenTrace, onEvaluateTurn, onDraftCase, turnEvaluatorInput, onTurnEvaluatorInput, turnEvaluatorFilter, onTurnEvaluatorFilter }) {
+function RunDetail({ url, run, detail, findingCode, prioritizeDetail = false, onEventPage, onTurnPage, onFocusEvent, focusEventId, onOpenTrace, onEvaluateTurn, onDraftCase, turnEvaluatorInput, onTurnEvaluatorInput, turnEvaluatorFilter, onTurnEvaluatorFilter }) {
   if (!run) return null;
   const metrics = run.metrics || {};
   const sourceUsage = run.sourceTokenUsage || { totalTokens: null, state: "not_captured" };
   const sourceTokens = sourceTokenSummary(sourceUsage);
+  const focusedFinding = findingCode ? run.findings.find((finding) => finding.code === findingCode) : null;
+  const findings = focusedFinding ? [focusedFinding] : run.findings;
+  const otherFindings = focusedFinding ? run.findings.filter((finding) => finding !== focusedFinding) : [];
+  const focusedEvidence = new Set(focusedFinding?.evidenceEventIds || []);
+  const recommendations = run.recommendations || [];
+  const linkedRecommendations = focusedFinding
+    ? recommendations.filter((item) => item.evidenceEventIds?.some((eventId) => focusedEvidence.has(eventId)))
+    : recommendations;
+  const otherRecommendations = focusedFinding
+    ? recommendations.filter((item) => !linkedRecommendations.includes(item)) : [];
+  const selectedEvent = focusEventId ? detail.data?.events?.find((event) => event.eventId === focusEventId) : null;
+  const linkedEvidenceIds = (run.findings.find((finding) => finding.evidenceEventIds?.includes(focusEventId)) || focusedFinding)?.evidenceEventIds || [];
+  const selectedEvidenceIndex = linkedEvidenceIds.indexOf(focusEventId);
   return (
-    <section className="border p-5 min-w-0" style={{ borderColor: color.border, background: color.panel }}>
+    <section className={`border p-5 min-w-0 ${prioritizeDetail ? "order-1 lg:order-2" : "order-2"}`} style={{ borderColor: color.border, background: color.panel }}>
       <div className="flex flex-wrap justify-between gap-3">
         <div>
-          <div className="text-xs font-mono" style={{ color: color.green }}>{(run.agentName || run.sourceKind).toUpperCase()}</div>
-          <div className="font-semibold mt-1">{run.status === "unknown" ? "Run status unavailable" : run.status}</div>
+          <div className="text-xs font-mono" style={{ color: color.green }}>AGENT RUN</div>
+          <div className="font-semibold mt-1">{run.agentName || run.sourceKind}</div>
           <div className="text-xs mt-1" style={{ color: color.sub }}>
-            {[run.serviceName, run.environment, run.agentVersion].filter(Boolean).join(" · ") || run.sourceKind}
+            Run outcome: {run.status === "unknown" ? "not recorded by source" : run.status} · {[run.serviceName, run.environment, run.agentVersion].filter(Boolean).join(" · ") || run.sourceKind}
           </div>
         </div>
         <div className="text-xs" style={{ color: color.sub }}>
           {sourceTokens} · {metrics.tool_calls || 0} observed tool calls
         </div>
       </div>
+      <section className="mt-5" aria-label="Run investigation">
+        <h2 className="font-semibold">{focusedFinding ? `Investigating: ${findingLabel(focusedFinding.code)}` : "Recorded findings and next steps"}</h2>
+        {findingCode && !focusedFinding && <p className="text-sm mt-2" style={{ color: color.amber }}>The selected finding is no longer present in this run. Other recorded findings are shown below.</p>}
+        <div className="mt-3 space-y-2">
+          {findings.length ? findings.map((finding, index) => (
+            <button key={`${finding.code}-${index}`} disabled={!finding.evidenceEventIds?.length} onClick={() => onFocusEvent(finding.evidenceEventIds[0])} className="border p-3 text-sm text-left w-full" style={{ borderColor: finding === focusedFinding ? color.amber : color.border }}>
+              <span className="text-xs" style={{ color: finding.severity === "error" ? color.red : finding.severity === "warning" ? color.amber : color.sub }}>{findingLabel(finding.code)}</span>
+              <div className="mt-1">{findingMessage(finding.message)}</div>
+              <div className="text-xs mt-1" style={{ color: color.faint }}>{finding.evidenceEventIds?.length ? `Inspect ${finding.evidenceEventIds.length} linked evidence ${finding.evidenceEventIds.length === 1 ? "event" : "events"}` : "No event-level evidence is available for this finding."}</div>
+            </button>
+          )) : <div className="text-sm" style={{ color: color.sub }}>No deterministic findings in this run.</div>}
+        </div>
+        <h3 className="font-semibold mt-5">Suggested next action</h3>
+        <div className="mt-2 space-y-2">
+          {linkedRecommendations.length ? linkedRecommendations.map((item) => <div key={item.code} className="border p-3 text-sm" style={{ borderColor: color.border }}>
+            <div className="text-xs uppercase" style={{ color: color.amber }}>{item.status}</div>
+            <div className="mt-1">{item.observation}</div>
+            <div className="mt-1 font-semibold">{item.action}</div>
+            <div className="text-xs mt-1" style={{ color: color.sub }}>{item.rationale} Tradeoff: {item.tradeoff}</div>
+            {item.evidenceEventIds?.length > 0 && <button type="button" className="underline text-xs mt-2" onClick={() => onFocusEvent(item.evidenceEventIds[0])}>Inspect recorded evidence</button>}
+          </div>) : <div className="text-sm" style={{ color: color.sub }}>{focusedFinding ? "No action is linked to this finding. Inspect its recorded evidence before deciding what to change." : "No evidence-backed action suggested for this run."}</div>}
+          {otherRecommendations.length > 0 && <details className="border p-3" style={{ borderColor: color.border }}><summary className="cursor-pointer text-sm">Other suggested actions ({otherRecommendations.length})</summary>
+            <div className="mt-3 space-y-3">{otherRecommendations.map((item) => <div key={item.code} className="text-sm"><strong>{item.action}</strong><div className="text-xs mt-1" style={{ color: color.sub }}>{item.observation}</div></div>)}</div>
+          </details>}
+        </div>
+        {focusEventId && <div className="mt-5" aria-label="Recorded evidence"><h3 className="font-semibold mb-2">Recorded evidence</h3>
+          {linkedEvidenceIds.length > 1 && selectedEvidenceIndex >= 0 && <div className="flex items-center gap-3 text-xs mb-3">
+            <button type="button" className="underline disabled:opacity-40" disabled={selectedEvidenceIndex === 0} onClick={() => onFocusEvent(linkedEvidenceIds[selectedEvidenceIndex - 1])}>Previous event</button>
+            <span>Event {selectedEvidenceIndex + 1} of {linkedEvidenceIds.length}</span>
+            <button type="button" className="underline disabled:opacity-40" disabled={selectedEvidenceIndex === linkedEvidenceIds.length - 1} onClick={() => onFocusEvent(linkedEvidenceIds[selectedEvidenceIndex + 1])}>Next event</button>
+          </div>}
+          {selectedEvent ? <EventRow event={selectedEvent} root={url.replace(/\/api\/runs$/, "")} runId={run.runId} focused onOpenTrace={onOpenTrace} />
+            : <p role="status" className="text-sm" style={{ color: detail.loading ? color.sub : color.amber }}>{detail.loading ? "Loading linked evidence…" : "The selected evidence event is unavailable in this run."}</p>}
+        </div>}
+        {otherFindings.length > 0 && <details className="mt-5 border p-3" style={{ borderColor: color.border }}><summary className="cursor-pointer text-sm">Other recorded findings ({otherFindings.length})</summary>
+          <div className="mt-3 space-y-2">{otherFindings.map((finding, index) => <button key={`${finding.code}-${index}`} type="button" disabled={!finding.evidenceEventIds?.length} onClick={() => onFocusEvent(finding.evidenceEventIds[0])} className="w-full border p-3 text-left text-sm" style={{ borderColor: color.border }}>{findingLabel(finding.code)} · {findingMessage(finding.message)}</button>)}</div>
+        </details>}
+      </section>
+      <details className="mt-6 border p-4" style={{ borderColor: color.border }}>
+        <summary className="cursor-pointer font-semibold">Technical coverage and further evaluation</summary>
       <div className="mt-5 grid sm:grid-cols-3 gap-2">
         {Object.entries(run.evidenceCoverage || {}).map(([name, value]) => (
           <div key={name} className="border p-3" style={{ borderColor: color.border }}>
@@ -250,26 +317,9 @@ function RunDetail({ url, run, detail, onEventPage, onTurnPage, onFocusEvent, fo
           const turn = detail.data.turns.find((item) => typeof item.request === "string" && item.request.trim() && !item.requestTruncated);
           onDraftCase({ runId: run.runId, turnId: turn?.turnId || null, request: turn?.request || "", complete: Boolean(turn) });
         }}>Draft a reviewed case from this run…</button>}
-      <h2 className="font-semibold mt-6">Deterministic findings</h2>
-      <div className="mt-2 space-y-2">
-        {run.findings.length ? run.findings.map((finding, index) => (
-          <button key={`${finding.code}-${index}`} disabled={!finding.evidenceEventIds?.length} onClick={() => onFocusEvent(finding.evidenceEventIds[0])} className="border p-3 text-sm text-left w-full" style={{ borderColor: color.border }}>
-            <span className="text-xs" style={{ color: finding.severity === "error" ? color.red : finding.severity === "warning" ? color.amber : color.sub }}>{findingLabel(finding.code)}</span>
-            <div className="mt-1">{finding.message}</div>
-            <div className="text-xs mt-1" style={{ color: color.faint }}>{finding.evidenceEventIds?.length ? `Open ${finding.evidenceEventIds.length} linked evidence event(s)` : "No event-level evidence is available for this finding."}</div>
-          </button>
-        )) : <div className="text-sm" style={{ color: color.sub }}>No deterministic findings.</div>}
-      </div>
-      <h2 className="font-semibold mt-6">Suggested actions</h2>
-      <div className="mt-2 space-y-2">
-        {(run.recommendations || []).length ? run.recommendations.map((item) => <div key={item.code} className="border p-3 text-sm" style={{ borderColor: color.border }}>
-          <div className="text-xs uppercase" style={{ color: color.amber }}>{item.status}</div>
-          <div className="mt-1">{item.observation}</div>
-          <div className="mt-1 font-semibold">{item.action}</div>
-          <div className="text-xs mt-1" style={{ color: color.sub }}>{item.rationale} Tradeoff: {item.tradeoff}</div>
-          {item.evidenceEventIds?.length > 0 && <button type="button" className="underline text-xs mt-2" onClick={() => onFocusEvent(item.evidenceEventIds[0])}>Open recorded evidence</button>}
-        </div>) : <div className="text-sm" style={{ color: color.sub }}>No evidence-backed action suggested for this run.</div>}
-      </div>
+      </details>
+      <details className="mt-6" defaultOpen={!focusedFinding}>
+        <summary className="cursor-pointer font-semibold">Turns and full event timeline</summary>
       <h2 className="font-semibold mt-6">Turns</h2>
       <div className="text-xs mt-1" style={{ color: color.sub }}>{turnEvaluatorFilter ? "Showing only this exact Turn evaluator." : `Showing the latest valid current Turn result among the ${detail.data?.turnEvaluationScope?.maxEvaluatorsPerTurn || 8} newest evaluator slots per Turn, if any. Older results require an exact evaluator fingerprint. Trace evaluator coverage above is separate.`}</div>
       <div className="flex flex-wrap gap-2 mt-2 items-center text-xs"><input aria-label="Exact Turn evaluator fingerprint" placeholder="Exact 64-character evaluator fingerprint" value={turnEvaluatorInput} onChange={(event) => onTurnEvaluatorInput(event.target.value)} className="border p-2 bg-transparent min-w-[200px] flex-1 font-mono" /><button className="border px-3 py-2" disabled={!/^[0-9a-f]{64}$/.test(turnEvaluatorInput)} onClick={() => onTurnEvaluatorFilter(turnEvaluatorInput)}>Show exact evaluator</button><button className="border px-3 py-2" disabled={!turnEvaluatorFilter} onClick={() => { onTurnEvaluatorInput(""); onTurnEvaluatorFilter(null); }}>Show latest</button></div>
@@ -301,6 +351,7 @@ function RunDetail({ url, run, detail, onEventPage, onTurnPage, onFocusEvent, fo
         {!detail.data.events.length && <div className="text-sm" style={{ color: color.sub }}>No normalized events were captured for this run.</div>}
         <div className="flex items-center justify-between gap-2 text-xs" style={{ color: color.sub }}><span>Showing {detail.data.page.shown ? detail.data.page.offset + 1 : 0}-{detail.data.page.offset + detail.data.page.shown} of {detail.data.page.available} events.</span><span className="flex gap-2"><button disabled={detail.data.page.offset === 0} onClick={() => onEventPage(Math.max(0, detail.data.page.offset - detail.data.page.limit))} className="border px-3 py-1">Previous</button><button disabled={!detail.data.page.truncated} onClick={() => onEventPage(detail.data.page.offset + detail.data.page.limit)} className="border px-3 py-1">Next</button></span></div>
       </div>}
+      </details>
     </section>
   );
 }

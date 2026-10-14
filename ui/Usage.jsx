@@ -63,6 +63,87 @@ function SessionExplanation({ session, selectedDay, dayTotal }) {
   </div>;
 }
 
+export function DayAiExplanation({ root, day }) {
+  const [provider, setProvider] = useState("anthropic");
+  const [access, setAccess] = useState(null);
+  const [environment, setEnvironment] = useState(null);
+  const [preview, setPreview] = useState(null);
+  const [approved, setApproved] = useState(false);
+  const [result, setResult] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+  useEffect(() => {
+    let active = true;
+    Promise.all([
+      fetch(`${root}/api/setup/token`, { credentials: "same-origin" }).then((response) => response.json()),
+      fetch(`${root}/api/evaluators`, { credentials: "same-origin" }).then((response) => response.json()),
+    ]).then(([token, env]) => { if (active) { setAccess(token.setupToken); setEnvironment(env); } })
+      .catch((failure) => { if (active) setError(String(failure)); });
+    return () => { active = false; };
+  }, [root]);
+  const configured = environment?.providers?.find((item) => item.provider === provider)?.configured;
+  const post = async (path, body) => {
+    setBusy(true); setError(null);
+    try {
+      const response = await fetch(`${root}${path}`, { method: "POST", credentials: "same-origin",
+        headers: { "Content-Type": "application/json", "X-Verdict-Setup": access },
+        body: JSON.stringify(body) });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+      return data;
+    } catch (failure) { setError(String(failure)); return null; }
+    finally { setBusy(false); }
+  };
+  return <div className="border p-3 mt-4 text-sm" style={{ borderColor: C.border }}>
+    <div className="font-semibold">Optional AI interpretation</div>
+    <p className="mt-1" style={{ color: C.sub }}>Ask why this day used these reported tokens. The preview contains aggregate metrics and numbered contributors, without chat text or tool outputs. The answer is an interpretation; inspect linked runs before changing a workflow.</p>
+    <div className="flex flex-wrap items-end gap-3 mt-3">
+      <label>Provider<select className="block border p-2 mt-1 bg-transparent" value={provider} disabled={busy} onChange={(event) => { if (busy) return; setProvider(event.target.value); setPreview(null); setApproved(false); setResult(null); }}><option value="anthropic">Anthropic</option><option value="openai">OpenAI</option></select></label>
+      <button type="button" className="border px-3 py-2" disabled={!access || busy} onClick={async () => { const data = await post("/api/usage/explain/preview", { day, provider }); if (data) { setPreview(data); setApproved(false); setResult(null); } }}>Preview AI context</button>
+    </div>
+    {preview && <div className="border p-3 mt-3" style={{ borderColor: C.border }}>
+      <div>{preview.plannedCalls === 1 ? "One optional call" : "No usable token total for an AI explanation"} · {preview.provider}/{preview.model}</div>
+      <div style={{ color: C.sub }}>Destination: {preview.destination}. Static list-price bound: {price(preview.upperStaticListPriceUsd)}; actual billing may differ.</div>
+      <details className="mt-2"><summary className="cursor-pointer">Review exact messages and metrics</summary><pre className="whitespace-pre-wrap break-words max-h-72 overflow-auto mt-2 text-xs">{JSON.stringify(preview.messages, null, 2)}</pre></details>
+      <label className="flex gap-2 mt-3"><input type="checkbox" checked={approved} disabled={preview.plannedCalls !== 1} onChange={(event) => setApproved(event.target.checked)} />I approve sending these exact messages to {preview.destination} once.</label>
+      <button type="button" className="border px-3 py-2 mt-2" disabled={!approved || !configured || !preview.providerAvailable || busy || preview.plannedCalls !== 1} onClick={async () => { const data = await post("/api/usage/explain/run", { day, provider, planFingerprint: preview.planFingerprint, confirmExternalEgress: true }); if (data) setResult(data); }}>Ask AI why</button>
+      {!configured && <p style={{ color: C.amber }}>Provider key is not configured for this dashboard process.</p>}
+      {!preview.providerAvailable && <p style={{ color: C.amber }}>This provider needs the Verdict eval package and its SDK installed in the dashboard environment.</p>}
+    </div>}
+    {result && <div className="mt-3 border p-3" style={{ borderColor: C.border }} role="status">
+      {result.status === "completed" ? <><div className="font-semibold">AI interpretation</div><p className="mt-2 whitespace-pre-wrap">{result.answer}</p></>
+        : <p style={{ color: C.amber }}>The call has no available answer ({result.error || result.status}). This approved attempt will not run again automatically.</p>}
+    </div>}
+    {error && <p role="alert" className="mt-2" style={{ color: C.red }}>{error}</p>}
+  </div>;
+}
+
+export function DayExplanation({ explanation, url, onSelectSession, onOpenRun }) {
+  const comparison = explanation.comparison;
+  return <div className="border p-4 mt-4 text-sm" style={{ borderColor: C.border }} role="region" aria-label="Day usage explanation">
+    <div className="font-semibold">What drove {explanation.day} UTC</div>
+    <p className="mt-2">{explanation.totalTokens == null
+      ? "No captured turn on this day reported a usable token total."
+      : `${count(explanation.totalTokens)} reported tokens across ${coverage(explanation.tokenKnownTurns, explanation.turns)} with totals.`}</p>
+    <p className="mt-1" style={{ color: C.sub }}>{comparison && comparison.differencePercent != null
+      ? `${count(Math.abs(comparison.differenceTokens))} ${comparison.differenceTokens >= 0 ? "above" : "below"} the median of ${comparison.referenceDays} prior active days (${comparison.medianTokens.toLocaleString()} tokens); ${Math.abs(comparison.differencePercent)}% ${comparison.differenceTokens >= 0 ? "higher" : "lower"}.`
+      : "No reliable prior-day comparison is available from this bounded window."}</p>
+    {explanation.topSessions.length > 0 && <div className="mt-4"><div className="font-semibold">Largest sessions on this day</div>
+      {explanation.topSessions.map((item, index) => <div key={`${item.sourceKind}:${item.sessionId}`} className="flex flex-wrap justify-between gap-2 border-b py-2" style={{ borderColor: C.border }}>
+        <span>Session {index + 1} · {item.sourceKind} · {count(item.dayTokens)} tokens{item.sharePercent == null ? "" : ` · ${item.sharePercent}% of known day total`} ({coverage(item.tokenKnownTurns, item.turns)} with totals)</span>
+        <button type="button" className="underline" style={{ color: C.green }} onClick={() => onSelectSession(item)}>Inspect session</button>
+      </div>)}</div>}
+    {explanation.topTurns.length > 0 && <div className="mt-4"><div className="font-semibold">Largest turns on this day</div>
+      {explanation.topTurns.map((item, index) => <div key={`${item.runId}:${item.turnId}`} className="flex flex-wrap justify-between gap-2 border-b py-2" style={{ borderColor: C.border }}>
+        <span>Turn {index + 1} · {count(item.totalTokens)} tokens{item.sharePercent == null ? "" : ` · ${item.sharePercent}% of known day total`} · {item.models.join(", ") || "model unavailable"}</span>
+        <button type="button" className="underline" style={{ color: C.green }} onClick={() => onOpenRun?.(item.runId)}>Open run</button>
+      </div>)}</div>}
+    <p className="mt-3" style={{ color: C.sub }}>These are measured contributors. The day assigns each turn by its start time; a session report may include turns from other days. Token components can overlap, and observed elapsed time includes pauses and tool work.</p>
+    {!explanation.windowComplete && <p style={{ color: C.amber }}>The 30-day scan is partial; older turns may be omitted.</p>}
+    <DayAiExplanation root={url.replace(/\/api\/usage$/, "")} day={explanation.day} />
+  </div>;
+}
+
 function SessionReport({ root, sessionId, sourceKind, onOpenRun }) {
   const [state, setState] = useState({ loading: true, error: null, data: null });
   useEffect(() => {
@@ -101,8 +182,11 @@ export function Usage({ url, onOpenRun, compact = false }) {
   const [sourceKind, setSourceKind] = useState(null);
   const [measure, setMeasure] = useState("tokens");
   const [analyzing, setAnalyzing] = useState(false);
+  const [explainingDay, setExplainingDay] = useState(false);
   const [reportOpen, setReportOpen] = useState(false);
   const [state, setState] = useState({ loading: true, error: null, data: null });
+  const selectedSessionRef = React.useRef(null);
+  const pendingSessionRef = React.useRef(null);
   useEffect(() => {
     const controller = new AbortController();
     setState((current) => ({ ...current, loading: true, error: null }));
@@ -121,21 +205,49 @@ export function Usage({ url, onOpenRun, compact = false }) {
   const data = state.data;
   const chosenDay = data?.days?.find((item) => item.day === data.selectedDay);
   const session = data?.selectedSession;
+  useEffect(() => {
+    const pending = pendingSessionRef.current;
+    if (!pending || state.loading) return;
+    if (state.error || !session) {
+      pendingSessionRef.current = null;
+      return;
+    }
+    if (session.sessionId !== pending.sessionId
+        || session.sourceKind !== pending.sourceKind) return;
+    pendingSessionRef.current = null;
+    selectedSessionRef.current?.focus();
+    selectedSessionRef.current?.scrollIntoView({ block: "start", behavior: "smooth" });
+  }, [state.loading, state.error, session]);
+  const inspectSession = (item) => {
+    pendingSessionRef.current = item;
+    setDay(data?.selectedDay || null);
+    setSessionId(item.sessionId);
+    setSourceKind(item.sourceKind);
+    setAnalyzing(false);
+    setReportOpen(false);
+    if (session?.sessionId === item.sessionId && session?.sourceKind === item.sourceKind) {
+      selectedSessionRef.current?.focus();
+      selectedSessionRef.current?.scrollIntoView({ block: "start", behavior: "smooth" });
+      pendingSessionRef.current = null;
+    }
+  };
   const hasActivity = data?.days?.some((item) => item.turns > 0);
   const hasTokenTotals = data?.days?.some((item) => item.tokenKnownTurns > 0);
   const hasPricedTurns = data?.days?.some((item) => item.pricedTurns > 0);
   return <section className="min-w-0 border p-5" style={{ borderColor: C.border, background: C.panel }}>
     <div className="flex flex-wrap justify-between items-start gap-3">
       <div><div className="text-xs font-mono" style={{ color: C.green }}>LAST 30 UTC DAYS</div>
-        <h2 className="text-lg font-semibold mt-1">Reported tokens by day</h2>
-        <p className="text-sm mt-2" style={{ color: C.sub }}>Select a day to see its sessions, then a session to inspect the turns and recorded evidence.</p></div>
+        <h2 className="text-lg font-semibold mt-1">Where tokens went</h2>
+        <p className="text-sm mt-2" style={{ color: C.sub }}>Choose a day to explain its token use, then inspect the sessions and turns behind it.</p></div>
       <div className="flex gap-2 text-xs">
         <button type="button" aria-pressed={measure === "tokens"} onClick={() => setMeasure("tokens")} className="border px-3 py-2" style={{ borderColor: measure === "tokens" ? C.green : C.border }}>Tokens</button>
         <button type="button" aria-pressed={measure === "price"} disabled={data && !hasPricedTurns} onClick={() => setMeasure("price")} className="border px-3 py-2" style={{ borderColor: measure === "price" ? C.green : C.border, opacity: data && !hasPricedTurns ? 0.5 : 1 }}>Est. list price</button>
       </div>
     </div>
-    {state.loading && <div role="status" className="mt-4 text-sm" style={{ color: C.sub }}>Loading usage…</div>}
-    {state.error && <div role="alert" className="mt-4 text-sm" style={{ color: C.red }}>Usage unavailable: {state.error}</div>}
+    <div className="mt-4 text-sm" style={{ minHeight: 20 }} aria-live="polite">
+      {state.loading && <span role="status" style={{ color: C.sub }}>Loading usage…</span>}
+      {state.error && <span role="alert" style={{ color: C.red }}>Usage unavailable: {state.error}</span>}
+    </div>
     {data && <>
       {!data.window.complete && <div role="status" className="mt-4 text-sm" style={{ color: C.amber }}>This 30-day view is bounded and partial. {data.window.turnsComplete ? "Model attribution is incomplete for older turns; fully scanned newer turns retain list-price estimates." : "Older turns may be omitted."}</div>}
       {!hasActivity && <p className="mt-5 text-sm" style={{ color: C.sub }}>No agent turns were captured in this 30-day window.</p>}
@@ -143,7 +255,7 @@ export function Usage({ url, onOpenRun, compact = false }) {
       {compact && hasActivity && !hasTokenTotals && day == null && <button type="button" className="text-sm underline mt-3" style={{ color: C.green }} onClick={() => setDay(data.selectedDay)}>Inspect sessions with missing totals</button>}
       {hasTokenTotals && <>
         <div className="flex justify-between text-xs mt-4" style={{ color: C.sub }}><span>{measure === "price" ? "Estimated API list price per day" : "Reported tokens per day"}</span><span>Peak {measure === "price" ? price(Math.max(...data.days.map((item) => item.listPriceUsd || 0))) : count(Math.max(...data.days.map((item) => item.totalTokens || 0)))}</span></div>
-        <UsageChart days={data.days} selectedDay={data.selectedDay} measure={measure} compact={compact} onSelectDay={(value) => { setDay(value); setSessionId(null); setSourceKind(null); setAnalyzing(false); setReportOpen(false); }} />
+        <UsageChart days={data.days} selectedDay={data.selectedDay} measure={measure} compact={compact} onSelectDay={(value) => { pendingSessionRef.current = null; setDay(value); setSessionId(null); setSourceKind(null); setAnalyzing(false); setReportOpen(false); setExplainingDay(false); }} />
       </>}
       {hasTokenTotals && data.days.every((item) => item.totalTokens === 0) && <p className="mt-2 text-sm" style={{ color: C.sub }}>Captured turns reported zero total tokens in this window.</p>}
       {compact && day == null && hasTokenTotals && <p className="mt-3 text-sm" style={{ color: C.sub }}>Latest active day: {data.selectedDay} UTC · {count(chosenDay?.totalTokens)} reported tokens across {coverage(chosenDay?.tokenKnownTurns || 0, chosenDay?.turns || 0)} with totals. Click a bar to inspect sessions.</p>}
@@ -153,6 +265,9 @@ export function Usage({ url, onOpenRun, compact = false }) {
         <Fact label="Estimated list price" value={price(chosenDay?.listPriceUsd)} detail={`${coverage(chosenDay?.pricedTurns || 0, chosenDay?.turns || 0)} priced; not a subscription bill`} />
         <Fact label="Unattributed tokens" value={count(chosenDay?.unattributedTokens)} detail="Turns with missing, unknown, or multiple models" />
       </div>
+      {data.dayExplanation && <><button type="button" className="border px-3 py-2 mt-4 text-sm" style={{ borderColor: C.green, color: C.green }} onClick={() => setExplainingDay((value) => !value)}>{explainingDay ? "Hide day explanation" : "Explain this day"}</button>
+        {explainingDay && <DayExplanation key={data.selectedDay} explanation={data.dayExplanation} url={url}
+          onSelectSession={inspectSession} onOpenRun={onOpenRun} />}</>}
       {data.dayModels?.length > 0 && <div className="mt-5">
         <div className="font-semibold text-sm">Models on this day</div>
         <div className="mt-2 flex flex-wrap gap-2 text-xs">{data.dayModels.map((item) => <span key={item.model} className="border px-3 py-2" style={{ borderColor: C.border }}>{item.model}: {count(item.totalTokens)} tokens · {price(item.listPriceUsd)} ({coverage(item.tokenKnownTurns, item.turns)} with totals)</span>)}</div>
@@ -165,7 +280,7 @@ export function Usage({ url, onOpenRun, compact = false }) {
       </div>}
       <div className="mt-6 font-semibold">Sessions active on {data.selectedDay} UTC</div>
       <p className="text-xs mt-1" style={{ color: C.sub }}>Session totals here cover turns that started on this day. Selecting one shows all its turns in the 30-day window.</p>
-      {data.sessions.length ? <div className="mt-3 grid gap-2">{data.sessions.map((item) => <button key={`${item.sourceKind}:${item.sessionId}`} type="button" onClick={() => { setDay(data.selectedDay); setSessionId(item.sessionId); setSourceKind(item.sourceKind); setAnalyzing(false); setReportOpen(false); }}
+      {data.sessions.length ? <div className="mt-3 grid gap-2">{data.sessions.map((item) => <button key={`${item.sourceKind}:${item.sessionId}`} type="button" onClick={() => inspectSession(item)}
         className="w-full border p-3 text-left flex flex-wrap justify-between gap-2 text-sm"
         style={{ borderColor: item.sessionId === session?.sessionId && item.sourceKind === session?.sourceKind ? C.green : C.border }}>
         <span><strong>{item.agentName}</strong>{item.agentName === item.sourceKind ? "" : ` · ${item.sourceKind}`} · {item.runIds.length} run{item.runIds.length === 1 ? "" : "s"}</span>
@@ -173,7 +288,7 @@ export function Usage({ url, onOpenRun, compact = false }) {
       </button>)}</div> : <div className="text-sm mt-3" style={{ color: C.sub }}>No captured turns started on this day.</div>}
       {data.sessionsTruncated && <div className="text-xs mt-2" style={{ color: C.amber }}>Showing the 100 sessions with the most reported tokens on this day.</div>}
       {data.selectionReason === "ambiguous_source" && <p role="status" className="text-sm mt-3" style={{ color: C.amber }}>This session ID appears in more than one agent source. Select the source-specific session above.</p>}
-      {session && <div className="mt-6 border-t pt-5" style={{ borderColor: C.border }}>
+      {session && <div ref={selectedSessionRef} tabIndex={-1} className="mt-6 border-t pt-5" style={{ borderColor: C.border, scrollMarginTop: 24 }}>
         <div className="flex flex-wrap justify-between gap-3"><div><div className="font-semibold">Selected session</div>
           <div className="text-xs mt-1" style={{ color: C.sub }}>Full 30-day window: {count(session.totalTokens)} reported tokens across {session.turnCount} turns · {price(session.listPriceUsd)} estimated list price ({coverage(session.pricedTurns, session.turnCount)} priced)</div></div>
           <button type="button" onClick={() => setAnalyzing((value) => !value)} className="border px-3 py-2 text-sm" style={{ borderColor: C.green, color: C.green }}>{analyzing ? "Hide analysis" : "Analyze session"}</button></div>

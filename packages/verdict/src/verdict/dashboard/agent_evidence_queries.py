@@ -43,6 +43,42 @@ def count_runs(session: QuerySession, tenant_id: str) -> int:
     return int(row["count"] if row else 0)
 
 
+def list_run_rows(
+    session: QuerySession, tenant_id: str, *, limit: int, offset: int = 0,
+    run_ids: tuple[str, ...] | None = None,
+) -> list[dict]:
+    """Read page metadata and child counts without loading event content."""
+    where = "r.tenant_id=?"
+    params: tuple = (tenant_id,)
+    if run_ids is not None:
+        placeholders = ",".join("?" for _ in run_ids)
+        where += f" AND r.run_id IN ({placeholders})"  # nosec B608
+        params += run_ids
+    else:
+        params += (limit, offset)
+    pagination = "" if run_ids is not None else " LIMIT ? OFFSET ?"
+    rows = session.execute(
+        """SELECT r.run_id,r.started_at,r.status,r.agent_name,s.source_kind,
+                  (SELECT COUNT(*) FROM agent_turns t
+                   WHERE t.tenant_id=r.tenant_id AND t.run_id=r.run_id) AS turn_count,
+                  (SELECT COUNT(*) FROM agent_events e
+                   WHERE e.tenant_id=r.tenant_id AND e.run_id=r.run_id) AS event_count
+           FROM agent_runs r JOIN import_sources s
+             ON s.tenant_id=r.tenant_id AND s.source_session_id=r.source_session_id
+           WHERE """ + where + " ORDER BY r.started_at DESC,r.run_id DESC" + pagination,  # nosec B608
+        params,
+    )
+    return [
+        {
+            "runId": str(row["run_id"]), "sourceKind": row["source_kind"],
+            "startedAt": row["started_at"], "status": row["status"],
+            "agentName": row["agent_name"] or None,
+            "turnCount": int(row["turn_count"]), "eventCount": int(row["event_count"]),
+        }
+        for row in rows
+    ]
+
+
 def load_bundles(
     session: QuerySession,
     tenant_id: str,
