@@ -1,25 +1,27 @@
-# Verdict Python SDK and Agent Profiler
+# Verdict Python SDK
 
 PyPI distribution: `cognifity-verdict`. Python import: `verdict`.
 
-For the published `0.1.0b1` release, install and start its loopback-only UI:
+Verdict connects application-agent runs, turns, tools, tests, and explicit
+outcomes to supported provider model calls. Use the local dashboard to inspect
+recorded failures and usage, evaluate bounded evidence, compare a reviewed
+change on fixed cases, and monitor ongoing behavior. Prospective statistical
+alerts currently apply to genuine model-call traces; scheduled analysis can
+also persist deterministic findings from captured agent activity.
+
+For the `0.1.0b2` release, install and start its loopback-only UI:
 
 ```bash
-python -m pip install "cognifity-verdict[dashboard]==0.1.0b1"
+python -m pip install "cognifity-verdict[dashboard]==0.1.0b2"
 verdict
 ```
 
-The Agent Profiler workflow described below is under development in this
-checkout and is not included in the published wheel. To run it locally from
-the repository root, use an isolated environment:
+The `0.1.0b2` wheel includes the Agent Profiler workflow described below. The
+dashboard opens a local setup page; no Verdict source checkout is required for
+normal capture or investigation.
 
-```bash
-python -m venv .venv
-.venv/bin/python -m pip install -e 'packages/verdict[dashboard]' -e packages/verdict_eval
-.venv/bin/verdict-dashboard --storage sqlite:///./verdict.db --host 127.0.0.1
-```
-
-The initial setup page can approve and rescan local Claude Code/Codex histories,
+The initial setup page can connect an existing application store, approve and
+rescan local Claude Code/Codex histories,
 import supported telemetry files, show the SDK snippet, or open an existing
 store. Local histories are persisted as typed `AgentRun`/`AgentTurn`/
 `AgentEvent` evidence; they are not converted into fake provider LLM traces.
@@ -346,7 +348,7 @@ content capture when its documented coverage is insufficient.
 Import existing telemetry without instrumenting the application:
 
 ```bash
-pip install "cognifity-verdict[telemetry]==0.1.0b1"  # extra is for OTLP protobuf
+pip install "cognifity-verdict[telemetry]==0.1.0b2"  # extra is for OTLP protobuf
 verdict-import file traces.jsonl --format auto --storage sqlite:///./verdict.db
 verdict-import receive-otlp --storage sqlite:///./verdict.db
 ```
@@ -389,7 +391,7 @@ must supply truthful pair IDs and variant metadata; a shared ID does not prove
 identical interactive turns. At most 10,000 selected-variant rows enter a query.
 Extremely wide valid numeric ranges retain inspectable pairs but cannot show
 a finite aggregate or interval.
-Conversation snapshots and grading require synchronized `0.1.0b1` core and eval builds.
+Conversation snapshots and grading require synchronized `0.1.0b2` core and eval builds.
 
 OTLP message objects may provide text in `content`, `text`, or typed text
 `parts`. Verdict joins genuine text parts in order and ignores unsupported
@@ -433,7 +435,7 @@ deprecated trace-list endpoint, so Verdict receives one record per actual
 generation or embedding rather than a trace aggregate.
 
 For a pilot, follow the versioned
-[`0.1.0b1 release profile`](https://github.com/cognifityai/verdict/blob/v0.1.0b1/docs/POC_RELEASE_PROFILE.md).
+[`0.1.0b2 release profile`](../../docs/RELEASE_PROFILE.md).
 It pins the package set, provider entry points, persistence mode, and privacy
 boundary used for release verification.
 
@@ -483,7 +485,7 @@ each ended span is persisted once independently of provider success. `flush()` i
 a FIFO point-in-time barrier and accepts an optional timeout. `close()` rejects
 new reads/writes, drains every accepted FIFO write, stops and joins the worker,
 then closes the inner adapter; post-close `flush()` is an idempotent no-op.
-The `0.1.0b1` release profile uses `buffered_writes=False`. Buffered mode requires
+The `0.1.0b2` release profile uses `buffered_writes=False`. Buffered mode requires
 an explicit `shutdown()` imported from `verdict.client` before process exit.
 Fixed-window `DriftRun` snapshots created by older releases remain readable for
 compatibility; the current pipeline does not create or replace them.
@@ -525,7 +527,7 @@ client = Anthropic()
 Install and run the version-matched dashboard without a source checkout:
 
 ```bash
-python -m pip install "cognifity-verdict[dashboard]==0.1.0b1"
+python -m pip install "cognifity-verdict[dashboard]==0.1.0b2"
 verdict-dashboard --storage sqlite:///./verdict.db
 ```
 
@@ -628,7 +630,7 @@ and stable labels from the same active registry. Standalone and legacy stores
 without an active registry for the selected tenant continue to use
 `Trace.cluster_id`.
 
-For published release `0.1.0b1`, the bounded pilot entry points include Anthropic
+For published release `0.1.0b2`, the bounded pilot entry points include Anthropic
 `messages.create(...)` (including `stream=True`), OpenAI
 `chat.completions.create(...)` and its stream helper, and Google
 `models.generate_content(...)` / `generate_content_stream(...)`, plus the

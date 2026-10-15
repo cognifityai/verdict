@@ -6,7 +6,7 @@ description: Inspect an existing LLM application and plan, implement, or audit a
 # Instrument an App with Verdict
 
 Instrument only behavior supported by the released Verdict target, and distinguish
-what was executed from what was merely proposed. Verdict `0.1.0b1` is a Python
+what was executed from what was merely proposed. Verdict `0.1.0b2` is a Python
 public beta, not a production-readiness claim.
 
 ## Resolve the installed runtime before doing anything
@@ -29,10 +29,10 @@ Handle its state explicitly:
 
 | State | Required response |
 | --- | --- |
-| `absent` | Propose one pinned `0.1.0b1` install with only the approved provider, dashboard, semantic, and storage extras. |
-| `upgrade` | A synchronized `0.1.0a5` through `0.1.0b1` set exists. Preserve the backend and required extras, back up the store and lockfile, and propose an in-place `0.1.0b1` wheel upgrade. |
+| `absent` | Propose one pinned `0.1.0b2` install with only the approved provider, dashboard, semantic, and storage extras. |
+| `upgrade` | A synchronized `0.1.0a5` through `0.1.0b1` set exists. Preserve the backend and required extras, back up the store and lockfile, and propose an in-place `0.1.0b2` wheel upgrade. |
 | `current` | Continue discovery without reinstalling. Treat missing optional commands as a scope decision, not a version failure. |
-| `repair` | Missing or mixed Cognifity distributions exist. Show the mismatch and propose one synchronized `0.1.0b1` repair. |
+| `repair` | Missing or mixed Cognifity distributions exist. Show the mismatch and propose one synchronized `0.1.0b2` repair. |
 | `conflict` | The unrelated PyPI distribution named `verdict` is installed. Stop and propose a clean environment or its explicitly approved removal. |
 
 Never install or upgrade automatically. Present the exact command, data path,
@@ -63,7 +63,7 @@ release, refresh the skill from that tagged release before continuing.
 Read repository instructions and existing observability, privacy, deployment, and
 scheduler conventions. Identify the released Verdict version to use. For the
 compatibility target and its concrete limitations, read
-[`references/verdict-0.1.0b1.md`](references/verdict-0.1.0b1.md). Its capture
+[`references/verdict-0.1.0b2.md`](references/verdict-0.1.0b2.md). Its capture
 coverage is pinned in the version-matched release profile linked there.
 
 Do not treat an unpublished local Verdict worktree as released functionality.
@@ -174,7 +174,7 @@ verdict.init(
 )
 ```
 
-For a fresh install or approved upgrade, pin all three distributions to `0.1.0b1`
+For a fresh install or approved upgrade, pin all three distributions to `0.1.0b2`
 in the application's existing environment. Use `python -m pip`, not a bare `pip`,
 and add only the approved extras. An upgrade from an editable checkout to the
 published wheels does not require deleting or recloning that checkout.
@@ -225,18 +225,23 @@ narrow rubric remains valid without that context.
 Follow [`references/operations-and-verification.md`](references/operations-and-verification.md)
 for drift, retention, dashboard, and rollback verification.
 
-### 8. Schedule jobs outside the dashboard
+### 8. Schedule only the verified cycle
 
 Discover and recommend analysis, retention cleanup, and health checks separately.
-Reuse the customer's existing cron, systemd, GitHub Actions, Kubernetes,
-or cloud scheduler. Use a non-overlap lock. Base frequency on eligible trace volume,
+Verdict can save an opt-in analysis schedule in **Monitor > Schedule** and run it
+with `verdict-service --storage <approved-store> --once`. For a separately
+configured pipeline or retention job, reuse the customer's existing cron,
+systemd, GitHub Actions, Kubernetes, or cloud scheduler. Use a non-overlap lock.
+Base frequency on eligible trace volume,
 elapsed detection delay, provider latency, and evaluation cost—not a universal cron.
 
 Run one approved command manually through its final sink before enabling its
-schedule. The bundled dashboard does not configure schedules.
+schedule. A service cycle may consume a separately approved one-shot judge
+evaluation, so inspect pending approvals before triggering it.
 
-Generate the command from `verdict-pipeline --help` and test that exact command.
-Release `0.1.0b1` does not accept `--yes-spend` or
+Generate a pipeline command from `verdict-pipeline --help` and test that exact
+command. Check `verdict-service --help` separately for the local analysis cycle.
+Release `0.1.0b2` does not accept `--yes-spend` or
 `--max-spend-usd`; enforce approval, call ceilings, credentials, timeouts, and budget
 outside the runner. Pin the distribution versions in the deployment lockfile.
 
@@ -247,8 +252,9 @@ Monitor policy in SQLite or PostgreSQL. Earlier `DriftRun` rows are read-only
 history and are not current status. Launch the dashboard locally by default, or
 mount `verdict.dashboard.create_app()` behind the host application's
 authentication, and verify `/api/health`, `/api/data`, `/api/monitor`, and the
-rendered Monitor view. Do not promise outbound notifications unless the
-installed release actually supports them.
+rendered Monitor view. The local service can deliver separately configured
+finding or monitor alerts to a local log or HTTPS webhook; verify the
+destination and idempotent delivery before enabling it.
 
 ## Stop instead of guessing
 

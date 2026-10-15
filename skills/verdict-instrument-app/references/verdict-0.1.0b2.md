@@ -1,7 +1,7 @@
-# Verdict 0.1.0b1 target
+# Verdict 0.1.0b2 target
 
 This Python public beta uses the bounded
-[`0.1.0b1` release profile](https://github.com/cognifityai/verdict/blob/v0.1.0b1/docs/POC_RELEASE_PROFILE.md).
+[`0.1.0b2` release profile](https://github.com/cognifityai/verdict/blob/v0.1.0b2/docs/RELEASE_PROFILE.md).
 It is not a production-readiness claim.
 
 ## Install one synchronized set
@@ -11,9 +11,9 @@ provider and storage extras it needs:
 
 ```bash
 python -m pip install \
-  "cognifity-verdict[anthropic,dashboard]==0.1.0b1" \
-  "cognifity-verdict-eval[semantic]==0.1.0b1" \
-  "cognifity-verdict-inspect==0.1.0b1"
+  "cognifity-verdict[anthropic,dashboard]==0.1.0b2" \
+  "cognifity-verdict-eval[semantic]==0.1.0b2" \
+  "cognifity-verdict-inspect==0.1.0b2"
 ```
 
 Replace `anthropic` with `openai` or `google` when appropriate. Add `postgres`
@@ -52,7 +52,7 @@ dashboard against a non-production copy before restarting.
 
 ## Optional Agent evidence transport
 
-`0.1.0b1` includes the Agent Run SDK, process-owned JSONL capture segments,
+`0.1.0b2` includes the Agent Run SDK, process-owned JSONL capture segments,
 the authenticated PostgreSQL collector, and `verdict-shipper`. Do not add that
 transport merely to instrument supported provider calls; direct storage remains
 the smallest local path. Introduce the collector only for an approved remote or

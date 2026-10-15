@@ -1,10 +1,9 @@
 # Tester Onboarding
 
 Goal: get from installation to a first local report on your own approved agent
-or LLM application evidence. The Agent Profiler workflow described in the
-[Agent Profiler guide](AGENT_PROFILER.md) is available from this development
-checkout; it is not part of the published `0.1.0b1` wheel. Usage, run reports,
-Turn analysis, and deterministic suggestions in this checkout are key-free.
+or LLM application evidence. The `0.1.0b2` packages include the workflow in the
+[Agent Profiler guide](AGENT_PROFILER.md). Usage, run reports,
+Turn analysis, and deterministic suggestions are key-free.
 An external judge requires your own provider key and explicit evidence approval.
 
 ## 0. Prerequisites
@@ -17,18 +16,9 @@ An external judge requires your own provider key and explicit evidence approval.
 
 ## 1. Install
 
-For the Agent Profiler workflow in this checkout, create an isolated environment
-at the repository root and install the local core and eval packages:
-
-```bash
-python -m venv .venv
-.venv/bin/python -m pip install -e 'packages/verdict[dashboard]' -e packages/verdict_eval
-.venv/bin/verdict-dashboard --storage sqlite:///./verdict.db --host 127.0.0.1
-```
-
-The commands below install the published `0.1.0b1` release for its documented
-provider-call and monitoring workflows. They do not install this checkout's
-Agent Profiler features.
+The commands below install the synchronized `0.1.0b2` packages for agent
+profiling, provider-call capture, and monitoring. A source checkout is needed
+only for the contributor and research scripts identified later in this guide.
 
 The synchronized beta distributions are `cognifity-verdict`,
 `cognifity-verdict-eval`, and `cognifity-verdict-inspect`. Do not install the
@@ -40,9 +30,10 @@ uv venv --python 3.12 && source .venv/bin/activate     # or your own 3.10+ venv
 
 # Include the provider extras you want to test live. Google capture needs `google`.
 python -m pip install \
-  "cognifity-verdict[anthropic,openai,google,dashboard]==0.1.0b1" \
-  "cognifity-verdict-eval[semantic]==0.1.0b1" \
-  "cognifity-verdict-inspect==0.1.0b1"
+  "cognifity-verdict[anthropic,openai,google,dashboard]==0.1.0b2" \
+  "cognifity-verdict-eval[semantic]==0.1.0b2" \
+  "cognifity-verdict-inspect==0.1.0b2"
+verdict-dashboard --storage sqlite:///./verdict.db --host 127.0.0.1
 ```
 
 For a pilot on the public beta, use the pinned commands and provider
@@ -54,7 +45,7 @@ lists them as hard dependencies, so the line above brings them in.
 Minimal alternative without the local semantic model:
 
 ```bash
-python -m pip install "cognifity-verdict-eval==0.1.0b1"  # lexical hash fallback
+python -m pip install "cognifity-verdict-eval==0.1.0b2"  # lexical hash fallback
 ```
 
 Already on an earlier synchronized release? Back up the selected SQLite or
@@ -283,7 +274,7 @@ process-local `capture.dropped_records` runtime metric for records rejected by a
 full or failed spool; equivalent failures produce one bounded warning per
 failure class.
 
-For a central PostgreSQL deployment, install `0.1.0b1` with its `postgres`
+For a central PostgreSQL deployment, install `0.1.0b2` with its `postgres`
 extra and start the authenticated collector:
 
 ```bash
@@ -365,7 +356,7 @@ source uses OTLP protobuf. JSON files and hosted API readers do not require that
 extra:
 
 ```bash
-python -m pip install "cognifity-verdict[telemetry]==0.1.0b1"
+python -m pip install "cognifity-verdict[telemetry]==0.1.0b2"
 
 verdict-import file ./traces.ndjson --format auto \
   --storage sqlite:///./verdict.db --tenant-id my-team
@@ -579,7 +570,7 @@ stored time is rejected, but a direct database change can make a row sort
 outside the requested window before comparison sees it.
 For extremely wide numeric rubric bounds, individual scores remain visible
 when the aggregate cannot be represented as a finite number.
-This workflow is included in the synchronized `0.1.0b1` core and eval builds.
+This workflow is included in the synchronized `0.1.0b2` core and eval builds.
 
 ## 5. Instrument your own app (the five-line pattern)
 
@@ -631,12 +622,12 @@ a linear `@`-anchored scanner to keep malformed and long inputs bounded. It
 remains best effort, not a compliance control, and opaque metadata such as
 tenant/session/cluster IDs must be non-sensitive. Set `capture_content=False`
 when the approved customer boundary is metadata-only; error categories remain
-available, but provider and manual-span exception messages are omitted. The `0.1.0b1` release profile also keeps
+available, but provider and manual-span exception messages are omitted. The `0.1.0b2` release profile also keeps
 `buffered_writes=False`; buffered mode requires an explicit `shutdown()`
 imported from `verdict.client` before process exit.
 
 Use only the provider methods listed in the
-[`release profile`](RELEASE_PROFILE.md). Release `0.1.0b1` includes the
+[`release profile`](RELEASE_PROFILE.md). Release `0.1.0b2` includes the
 Anthropic `messages.stream(...)` helper plus OpenAI `responses.create(...)`,
 `responses.parse(...)`, and `responses.stream(...)` for new or existing
 responses, in addition to the earlier Chat/Google paths. OpenAI's
@@ -824,7 +815,7 @@ become part of the workload it evaluates. The flag is off by default.
 This flag is unavailable for Jev because its Choice API is not captured by the
 supported provider instrumentors.
 
-For PostgreSQL, install `cognifity-verdict[dashboard,postgres]==0.1.0b1` and pass
+For PostgreSQL, install `cognifity-verdict[dashboard,postgres]==0.1.0b2` and pass
 the same protected storage URL used by the SDK. Evidence tables use Verdict's
 normal additive schema initialization. The dashboard control plane lazily
 creates its append-only configuration table on first use.

@@ -8,7 +8,7 @@ Verdict connects an agent's runs, turns, tools, tests, and application-reported 
 
 Verdict is local-first. A Python application can write to SQLite or PostgreSQL, or spool bounded records for a separate local service to import. Claude Code and Codex history imports are additional ways to explore agent activity; they are not the scope of the product.
 
-The published `0.1.0b1` beta supports provider-call capture and monitoring. The agent execution and investigation workflow described here is in this source checkout and is planned for a later release.
+This README describes the `0.1.0b2` beta: application-agent capture and investigation, provider-call capture, evaluation, and monitoring. Install the synchronized packages below for the released build, or use this source checkout while reviewing the release candidate.
 
 ## What you can do
 
@@ -23,11 +23,14 @@ The [Agent Profiler guide](docs/AGENT_PROFILER.md) explains the investigation wo
 
 ## Instrument an application agent
 
-With Python 3.10-3.12, install this checkout in an isolated environment:
+With Python 3.10-3.12, install the synchronized beta packages in an isolated environment:
 
 ```bash
 python -m venv .venv
-.venv/bin/python -m pip install -e 'packages/verdict[dashboard]' -e packages/verdict_eval
+.venv/bin/python -m pip install \
+  'cognifity-verdict[anthropic,openai,google,dashboard]==0.1.0b2' \
+  'cognifity-verdict-eval==0.1.0b2' \
+  'cognifity-verdict-inspect==0.1.0b2'
 ```
 
 Call `verdict.init()` once at application startup, then record the work your application can actually observe:
@@ -78,9 +81,9 @@ The statistical monitor currently supports **model-call traces only**. Agent-ses
 - Content is bounded and recursively redacted by default, but pattern-based redaction is not a compliance guarantee. Set `capture_content=False` for metadata-only SDK capture; content-dependent evaluation is then unavailable. Dashboard scoped judge calls require an explicit evidence preview and approval. Provider keys stay in environment variables.
 - The dashboard binds to loopback by default. Non-loopback use requires credentials and an allowed-host configuration; see [deployment guidance](docs/RELEASE_PROFILE.md#6-pilot-acceptance-check).
 
-## Published beta and development
+## Development and release details
 
-For the published beta's pinned installation and supported SDK methods, use the [release profile](docs/RELEASE_PROFILE.md).
+For supported provider methods, upgrade checks, and deployment boundaries, use the [release profile](docs/RELEASE_PROFILE.md).
 
 Contributors can run the Python and UI checks and the synthetic smoke path from this checkout:
 
