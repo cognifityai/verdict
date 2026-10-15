@@ -1,8 +1,8 @@
-# Run a pilot with Verdict 0.1.0b1
+# Run a pilot with Verdict 0.1.0b2
 
-Use this profile to demonstrate Verdict on verified provider calls without
-presenting the public beta as production-ready. The historical `0.1.0a4`
-profile remains available from its release tag.
+Use this profile to demonstrate Verdict on captured application agents and
+verified provider calls without presenting the beta as production-ready. The
+historical `0.1.0a4` profile remains available from its release tag.
 
 ## 1. Install the exact synchronized release
 
@@ -11,20 +11,20 @@ provider, dashboard, semantic, and storage extras the pilot needs:
 
 ```bash
 python -m pip install \
-  "cognifity-verdict[anthropic,openai,google,dashboard]==0.1.0b1" \
-  "cognifity-verdict-eval[semantic]==0.1.0b1" \
-  "cognifity-verdict-inspect==0.1.0b1"
+  "cognifity-verdict[anthropic,openai,google,dashboard]==0.1.0b2" \
+  "cognifity-verdict-eval[semantic]==0.1.0b2" \
+  "cognifity-verdict-inspect==0.1.0b2"
 python -m pip check
 python -c "import verdict, verdict_eval, verdict_inspect; print(verdict.__version__, verdict_eval.__version__, verdict_inspect.__version__)"
 ```
 
-The final command must print `0.1.0b1 0.1.0b1 0.1.0b1`. Add the `postgres`
+The final command must print `0.1.0b2 0.1.0b2 0.1.0b2`. Add the `postgres`
 extra only when the existing deployment uses PostgreSQL. Back up an existing
 store and dependency lockfile before upgrading; the additive migrations
 preserve existing trace and evaluation tables.
 
 For a container deployment, use the versioned image
-`ghcr.io/cognifityai/verdict:0.1.0b1` after the release workflow succeeds.
+`ghcr.io/cognifityai/verdict:0.1.0b2` after the release workflow succeeds.
 It provides the dashboard and the matching eval package. Run PostgreSQL
 separately, keep its port private, and supply the storage URL and dashboard
 credentials through the deployment's secret mechanism.
@@ -68,6 +68,21 @@ store remain the safest pilot path.
 
 Provider credentials remain in the customer's environment. Never put API keys
 in the skill file, repository, SQLite database, screenshots, or support bundle.
+
+### Observe the surrounding agent
+
+Use `verdict.agent_run(...)` to record an application run, its turns, tool
+actions, tests, feedback, and explicit outcomes. Supported provider SDK calls
+inside a turn add linked model-call traces. Inspect the persisted run and its
+linked calls in the dashboard before relying on the report. Verdict does not
+infer an application outcome from the final answer. See the
+[Agent Profiler guide](AGENT_PROFILER.md) for the runnable, synthetic workflow
+and bounded evaluation and comparison rules.
+
+The opt-in `verdict-service` can analyze already captured agent activity and
+persist deterministic findings. Prospective statistical monitoring still
+operates on genuine provider model-call traces only. Notifications and external
+judge calls need separate configuration and approval.
 
 ## 4. Use supported intent grouping deliberately
 
@@ -117,16 +132,18 @@ semantic quality.
 
 The pilot is ready to show only when all of these are true:
 
-1. All three installed packages report `0.1.0b1` and `python -m pip check` passes.
+1. All three installed packages report `0.1.0b2` and `python -m pip check` passes.
 2. The application uses only a provider entry point in the supported column.
 3. `buffered_writes` is `False`; content capture is approved for the named pilot
    data or explicitly disabled before collection.
 4. Exactly one trace is stored for each sampled supported call.
 5. Tokens, latency, model, provider, finish reason, and errors are populated
    where the provider supplies them.
-6. Any registry demonstration uses the supported `explicit` lifecycle and the
+6. If showing agent profiling, the selected run, turns, events, explicit
+   outcomes, and any genuine linked calls appear in the selected store.
+7. Any registry demonstration uses the supported `explicit` lifecycle and the
    active tenant pointer; experimental strategies retain their disclosure.
-7. No credential or customer content appears in the skill, logs, screenshots,
+8. No credential or customer content appears in the skill, logs, screenshots,
    release material, or repository.
 
 The standalone dashboard binds to loopback by default. Non-loopback binding is

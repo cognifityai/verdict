@@ -6,6 +6,8 @@ the product is refined.
 
 ## [Unreleased]
 
+## [0.1.0b2] - 2026-10-15
+
 ### Added
 
 - The dashboard run list now loads bounded run metadata and analyzes only its
@@ -69,9 +71,9 @@ the product is refined.
   off. The schedule panel remains available for stores with imported activity
   only. Anthropic and OpenAI judge adapters accept `sdk_max_retries`; one-shot
   scheduled evaluation disables SDK and Verdict retries.
-- The README and core package description now introduce local-first agent
-  profiling and reliability. The Agent Profiler workflow is source-only until
-  its next release; the published beta retains its versioned install profile.
+- The README and core package description lead with application-agent
+  monitoring and investigation. The Agent Profiler workflow is included in
+  the synchronized beta packages.
 - Local history capture from Settings → Data Sources runs on a background
   thread. `POST /api/setup/capture` returns 202 with the job at once and
   `GET /api/setup/capture/status` reports `running`, `analyzing`, `completed`,
@@ -911,7 +913,8 @@ the product is refined.
   retain content must explicitly select metadata-only capture. Redaction remains
   best-effort rather than a compliance control.
 
-[Unreleased]: https://github.com/cognifityai/verdict/compare/v0.1.0b1...HEAD
+[Unreleased]: https://github.com/cognifityai/verdict/compare/v0.1.0b2...HEAD
+[0.1.0b2]: https://github.com/cognifityai/verdict/compare/v0.1.0b1...v0.1.0b2
 [0.1.0b1]: https://github.com/cognifityai/verdict/compare/v0.1.0a23...v0.1.0b1
 [0.1.0a23]: https://github.com/cognifityai/verdict/compare/v0.1.0a22...v0.1.0a23
 [0.1.0a22]: https://github.com/cognifityai/verdict/compare/v0.1.0a21...v0.1.0a22
