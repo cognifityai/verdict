@@ -2,46 +2,40 @@
 
 [![Tests](https://github.com/cognifityai/verdict/actions/workflows/test.yml/badge.svg)](https://github.com/cognifityai/verdict/actions/workflows/test.yml) [![PyPI](https://img.shields.io/pypi/v/cognifity-verdict.svg)](https://pypi.org/project/cognifity-verdict/) [![License](https://img.shields.io/github/license/cognifityai/verdict.svg)](LICENSE)
 
-**Find where agent time and tokens went, inspect what happened, and test a change before you trust it.**
+**Monitoring and investigation for AI agents in real applications.**
 
-Verdict is a local-first agent profiler and reliability toolkit. It imports Claude Code and Codex histories, captures explicitly instrumented application agents, and keeps genuine provider model calls separate from agent turns. The first report is deterministic and needs no judge key. Optional evaluation uses a provider you configure and requires an evidence preview and approval.
+Verdict connects an agent's runs, turns, tools, tests, and application-reported outcomes to the model calls made along the way. It helps answer what happened, where time and tokens went, which failures need attention, and whether measured behavior changed. The dashboard brings capture, investigation, evaluation, comparison, and monitoring into one workflow.
 
-## Try Verdict
+Verdict is local-first. A Python application can write to SQLite or PostgreSQL, or spool bounded records for a separate local service to import. Claude Code and Codex history imports are additional ways to explore agent activity; they are not the scope of the product.
 
-For the released beta on Python 3.10–3.12, install the synchronized packages:
+The published `0.1.0b1` beta supports provider-call capture and monitoring. The agent execution and investigation workflow described here is in this source checkout and is planned for a later release.
 
-```bash
-python -m pip install "cognifity-verdict[anthropic,openai,google,dashboard]==0.1.0b1" "cognifity-verdict-eval[semantic]==0.1.0b1" "cognifity-verdict-inspect==0.1.0b1"
-```
+## What you can do
 
-See the [release profile](docs/RELEASE_PROFILE.md) for supported provider calls and verification. The Agent Profiler workflow below is available in this source branch and is planned for the next release. To try it, install this checkout in an isolated environment and launch the loopback dashboard:
+| Workflow | Evidence and result |
+| --- | --- |
+| **Observe an application agent** | Record runs, turns, tool calls and results, tests, feedback, and explicit business outcomes. Supported Anthropic, OpenAI, and Google SDK calls add genuine model-call traces with provider-reported usage, latency, finish reason, and errors where available. |
+| **Investigate an issue** | Start from the overview's recorded issues and token chart, open the affected session or run, and inspect the linked event, timeline, and suggested next check. The report summarizes application and model-call activity with coverage shown. |
+| **Evaluate and test a change** | Run deterministic checks on recorded evidence. Preview a bounded session, run, turn, tool action, or model call before an optional judge evaluation. Save reviewed cases and compare a configured application baseline and candidate against the same checks. |
+| **Monitor ongoing activity** | Schedule deterministic analysis of captured agent activity. Separately, review and activate a prospective statistical monitor for genuine provider model calls, with sample and evaluator gates; configure notifications if needed. |
+
+The [Agent Profiler guide](docs/AGENT_PROFILER.md) explains the investigation workflow and its evidence limits. The [onboarding guide](docs/ONBOARDING.md) covers capture, imports, evaluation, and monitor setup.
+
+## Instrument an application agent
+
+With Python 3.10-3.12, install this checkout in an isolated environment:
 
 ```bash
 python -m venv .venv
 .venv/bin/python -m pip install -e 'packages/verdict[dashboard]' -e packages/verdict_eval
-.venv/bin/verdict-dashboard --storage sqlite:///./verdict.db --host 127.0.0.1
 ```
 
-In **Settings → Data Sources**, preview and approve the Claude Code / Codex history directories before importing. The import reads local files and stores normalized, redacted evidence in the selected database. It does not replay agent commands. A rescan is idempotent.
-
-For a fully synthetic, key-free demo, follow [Agent Profiler demo](docs/AGENT_PROFILER.md#synthetic-local-demo). The demo database is disposable and never reads your history or calls a provider.
-
-## The investigation flow
-
-1. **Overview:** Start with recorded issues and reported tokens by UTC day. Select a day and click **Explain this day** for a local comparison and its largest sessions and turns, then drill into a run. An optional AI interpretation previews aggregate metrics and destination before one approved provider call; it does not send chat or tool text. Active monitoring alerts remain prominent; historical checks follow the investigation cards.
-2. **Investigate:** A selected finding opens its run with the finding, linked event, and matching suggestion together. Technical coverage and the full timeline remain expandable.
-3. **Turn / action:** Click **Analyze** for a local inspection of recorded failures and tool results. A selected turn or genuine model call can be evaluated in Evaluator Lab. A bounded session, run, or tool action can be previewed for optional external evaluation.
-4. **Test a change:** Save a reviewed, runnable case set. A captured run can start an unsaved draft from its complete, redacted request; you supply the expected behavior and check. Reviewed case fields are stored and passed to the configured local runner exactly as entered, so remove private data before saving. The runner executes the same cases against baseline and candidate versions and reports fixes, collateral regressions, unchanged cases, and unverified runs.
-5. **Monitor:** An opt-in service can rescan approved local histories or analyze already captured agent activity, persist deterministic findings, and run an existing genuine model-call monitor. Its notifications require separate configuration. A reviewed bounded scope can also authorize one later external evaluation, with a one-attempt limit and a user-set static list-price estimate limit.
-
-See [Agent Profiler workflows and limits](docs/AGENT_PROFILER.md) for exact steps and evidence requirements.
-
-## Instrument an application agent
+Call `verdict.init()` once at application startup, then record the work your application can actually observe:
 
 ```python
 import verdict
 
-verdict.init(storage="sqlite:///./verdict.db", service_name="my-agent")
+verdict.init(storage="sqlite:///./verdict.db", service_name="support-agent")
 
 with verdict.agent_run(name="support-agent", session_id="session-123") as run:
     with run.turn(user_input="Look up the order") as turn:
@@ -51,37 +45,42 @@ with verdict.agent_run(name="support-agent", session_id="session-123") as run:
     run.record_business_outcome("resolved", True)
 ```
 
-The surrounding run, turn, tool, test, feedback, and outcome facts come from your application. Supported Anthropic, OpenAI, and Google SDK calls can additionally create genuine model-call traces. Verdict does not infer task success from a fluent final answer. The [SDK guide](docs/ONBOARDING.md#3a-instrument-the-surrounding-agent-execution) covers event helpers and capture options.
+Run your supported provider SDK calls inside the turn to link their captured model traces to the agent work. Install the corresponding provider extra when the SDK is not already available, and check the [supported entry points](docs/RELEASE_PROFILE.md#2-use-a-released-provider-entry-point). Verdict records the outcome you supply; it does not infer task success from the final answer. See [agent instrumentation](docs/ONBOARDING.md#3a-instrument-the-surrounding-agent-execution) for test, command, retry, and feedback events, and for storage and file transport options.
 
-For an existing Python app, the [integration assistant guide](docs/AGENT_SKILL.md) helps identify supported provider calls and choose a safe capture boundary.
+Start the local dashboard against the same store:
 
-## What the numbers mean
+```bash
+.venv/bin/verdict-dashboard --storage sqlite:///./verdict.db --host 127.0.0.1
+```
 
-- Token counts follow the source's reported semantics. Cache and reasoning components may already be included in input or output totals; Verdict does not add them again. Missing usage is **unknown**, not zero.
-- Price is a static API list-price estimate only where one supported model and valid input/output usage are attributable; a missing reported total stays unknown. It is not a Claude/Codex subscription bill. Unknown or mixed models remain unpriced.
-- A session's elapsed span includes tools and idle time. It is not model latency. Genuine provider calls have their own latency when captured.
-- Suggestions link to recorded evidence and are hypotheses until tested. A failed command can be followed by a successful recovery; an expensive turn is not automatically waste.
-- An optional LLM judgment is an evaluator's opinion about the bounded evidence shown before consent. Missing, truncated, and uncertain evidence remain visible; a judge cannot reconstruct hidden reasoning or absent files.
+Open **Overview** for activity and issues, **Investigate** for linked run and model-call evidence, **Evaluate** for a selected scope or reviewed case set, **Monitor** for comparisons and schedules, and **Report** for a period summary. A [fully synthetic demo](docs/AGENT_PROFILER.md#synthetic-local-demo) exercises the workflow without a provider key.
 
-## What it does not do
+## Monitor behavior over time
 
-- Infer hidden agent reasoning or establish task success from a fluent answer.
-- Guarantee token savings from a suggestion without a comparable test.
-- Judge an entire long session from partial evidence; [bounded reports](docs/AGENT_PROFILER.md#usage-and-run-report) expose their limits.
+Verdict has two complementary monitoring paths:
 
-## Advanced capabilities
+1. **Agent activity:** Opt in to a local schedule to analyze newly captured or imported runs and persist deterministic findings, such as recorded failures or repeated tool problems. A cycle can run once with `verdict-service --storage sqlite:///./verdict.db --once`, after the schedule is configured in **Monitor > Schedule**. Alerts can be delivered to a configured local log or webhook.
+2. **Model-call cohorts:** Preview historical calls, then activate a prospective monitor for genuine provider `Trace` records. It can compare provider errors, empty responses, refusal-language signals, and selected judge dimensions when a fixed evaluator has produced usable judgments. The monitor keeps reference and current cohorts separate, enforces sample and evidence gates, and links results back to calls. [How statistical monitoring works](docs/STATS_PRIMER.md).
 
-Verdict also imports supported [existing telemetry](docs/ONBOARDING.md#4-import-telemetry-you-already-collect), provides [rubric judging](docs/ONBOARDING.md#6-judge-calibration-with-verdict_eval-only-if-you-want-quality-drift), and supports [prospective statistical monitoring](docs/STATS_PRIMER.md) of genuine provider model-call traces. Those monitors use reviewed cohorts and fixed evaluator identities; descriptive agent-session comparisons are not drift alerts. Investigate, Evaluate, and Monitor are the other main views; Report and Settings are available from the header.
+The statistical monitor currently supports **model-call traces only**. Agent-session comparisons are descriptive; they are not prospective statistical alerts. Judge scores are optional and should be calibrated on held-out, human-labeled examples for the workload before being used as quality evidence. See [monitor setup](docs/ONBOARDING.md#7-see-findings-evaluate-deliberately-and-configure-monitoring) and the [release profile](docs/RELEASE_PROFILE.md) for the exact supported surface.
 
-Content is recursively redacted on capture by default, but pattern-based redaction is not a compliance guarantee. Set `capture_content=False` for metadata-only SDK capture; content-dependent evaluation then becomes unavailable. Provider keys stay in environment variables. External judge calls and notification webhooks are opt-in.
+## Bring in existing evidence
 
-## Import telemetry you already have
+- **Claude Code and Codex:** Preview and approve local history paths in **Settings > Data Sources**. The import is read-only against source files and does not replay commands. These histories can show sessions, turns, tools, and source-reported usage, but coverage differs from directly captured application agents and genuine provider calls.
+- **Other telemetry:** `verdict-import --help` lists supported local and hosted sources. Imported model-call traces remain distinct from native agent turns. See [telemetry import](docs/ONBOARDING.md#4-import-telemetry-you-already-collect).
 
-Use `verdict-import --help` for supported local and hosted sources. Imported model-call traces and native agent evidence have different coverage; an imported trace is not silently converted into an agent turn. The [onboarding guide](docs/ONBOARDING.md#4-import-telemetry-you-already-collect) documents source-specific requirements and limits.
+## Evidence and privacy boundaries
 
-## Development and verification
+- Token counts use the source's reported semantics; missing usage stays unknown. Cache and reasoning components are not added twice. Cost is a static API list-price estimate only when an attributable model and valid usage support it, not a subscription bill. Session elapsed time includes tools and idle time; captured model calls have separate latency.
+- Suggestions point to recorded evidence and are prompts to investigate, not proof of waste or guaranteed savings. Fixed-case comparisons test the checks you define; neither a fluent answer nor a judge opinion establishes an application outcome on its own.
+- Content is bounded and recursively redacted by default, but pattern-based redaction is not a compliance guarantee. Set `capture_content=False` for metadata-only SDK capture; content-dependent evaluation is then unavailable. Dashboard scoped judge calls require an explicit evidence preview and approval. Provider keys stay in environment variables.
+- The dashboard binds to loopback by default. Non-loopback use requires credentials and an allowed-host configuration; see [deployment guidance](docs/RELEASE_PROFILE.md#6-pilot-acceptance-check).
 
-The source checkout includes Python and UI tests, a synthetic demo agent, and a dashboard build. Run the checks using the repository's contributor environment:
+## Published beta and development
+
+For the published beta's pinned installation and supported SDK methods, use the [release profile](docs/RELEASE_PROFILE.md).
+
+Contributors can run the Python and UI checks and the synthetic smoke path from this checkout:
 
 ```bash
 python -m pytest -q
@@ -90,6 +89,4 @@ pnpm --dir ui build
 python scripts/smoke_test.py
 ```
 
-The synthetic demo proves the local wiring and fixed-case comparison, not live judge accuracy or real savings. For pilot claims, use the exact [release profile](docs/RELEASE_PROFILE.md) and validate the provider calls and evaluator on your own approved data.
-
-Apache 2.0. See [onboarding](docs/ONBOARDING.md), [architecture decisions](docs/adrs/), and [contributing](CONTRIBUTING.md).
+See [contributing](CONTRIBUTING.md), [architecture decisions](docs/adrs/), and [evaluation documentation](packages/verdict_eval/README.md). Apache 2.0.
