@@ -6,13 +6,20 @@ from datetime import datetime, timezone
 
 import httpx
 import pytest
-
 from verdict.dashboard.app import create_app
 from verdict.dashboard.control_plane import ControlStore
 from verdict.dashboard.day_explanation import preview_day_explanation, run_day_explanation
-from verdict.evidence import (AgentEvent, AgentEventType, AgentRun, AgentRunBundle,
-                              AgentTurn, EvidenceState, ExecutionStatus,
-                              PrivacyClassification, SourceSession)
+from verdict.evidence import (
+    AgentEvent,
+    AgentEventType,
+    AgentRun,
+    AgentRunBundle,
+    AgentTurn,
+    EvidenceState,
+    ExecutionStatus,
+    PrivacyClassification,
+    SourceSession,
+)
 from verdict.storage import SQLiteStorage
 from verdict_eval.providers import CompletionResponse
 

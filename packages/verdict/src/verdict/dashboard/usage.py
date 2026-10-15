@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import json
-from statistics import median
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
+from statistics import median
 from types import SimpleNamespace
 from typing import Any
 
