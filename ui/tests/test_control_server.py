@@ -1,16 +1,39 @@
 import asyncio
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
+from threading import Barrier
 
 import httpx
 import pytest
+import verdict.service as verdict_service
 from verdict.dashboard.app import create_app
 from verdict.dashboard.control_plane import ControlStore
 from verdict.evidence import AgentRun, AgentRunBundle, ExecutionStatus, SourceSession
 from verdict.monitoring import MonitorPolicy, monitor_policy_to_json
 from verdict.schema import DriftSignal, Trace
 from verdict.storage import SQLiteStorage
+
+
+def test_run_schedule_reports_non_posix_sqlite_lock_limit(tmp_path, monkeypatch):
+    database = tmp_path / "non-posix.db"
+
+    async def request():
+        transport = httpx.ASGITransport(app=create_app(storage=f"sqlite:///{database}"))
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            with monkeypatch.context() as patch:
+                patch.setattr(verdict_service.os, "name", "nt")
+                return await client.post(
+                    "/api/control/actions/run-schedule", json={"analyzeOnly": True},
+                    headers={"X-Verdict-Setup": token},
+                )
+
+    response = asyncio.run(request())
+    assert response.status_code == 501
+    assert "SQLite" in response.json()["error"]
+    assert "POSIX" in response.json()["error"]
 
 
 def test_control_documents_are_versioned_conflict_checked_and_rollbackable(tmp_path):
@@ -37,6 +60,82 @@ def test_control_documents_are_versioned_conflict_checked_and_rollbackable(tmp_p
     assert rolled_back["revision"] == 3
     assert rolled_back["payload"]["retentionDays"] == 30
     assert len(store.history("tenant", "settings", "default")) == 3
+
+
+@pytest.mark.parametrize("kind", ["experiment", "scoped_evaluation"])
+def test_result_documents_cannot_be_rolled_back_through_control_api(tmp_path, kind):
+    url = f"sqlite:///{tmp_path / 'results.db'}"
+    store = ControlStore(url)
+    store.append("__verdict_local__", kind=kind, document_id="synthetic-result",
+                 state="completed", payload={"status": "completed"},
+                 expected_revision=None)
+    before = store.history("__verdict_local__", kind, "synthetic-result")
+
+    async def scenario():
+        transport = httpx.ASGITransport(app=create_app(storage=url))
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            return await client.post(
+                f"/api/control/{kind}/synthetic-result/rollback",
+                headers={"X-Verdict-Setup": token},
+                json={"targetRevision": 1, "expectedRevision": 1},
+            )
+
+    response = asyncio.run(scenario())
+    assert response.status_code == 400
+    assert store.history("__verdict_local__", kind, "synthetic-result") == before
+
+
+def test_two_concurrent_approvals_for_one_plan_leave_one_pending(tmp_path):
+    url = f"sqlite:///{tmp_path / 'concurrent-approval.db'}"
+    store = ControlStore(url)
+    store.list_current("local")
+    barrier = Barrier(2)
+    payload = {"planFingerprint": "a" * 64, "config": {"scope": "run"}}
+
+    def queue(index):
+        barrier.wait()
+        try:
+            return store.append(
+                "local", kind="scheduled_evaluation", document_id=f"approval-{index}",
+                state="pending", payload=payload, expected_revision=None,
+            )["state"]
+        except ValueError:
+            return "rejected"
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(pool.map(queue, range(2)))
+    assert sorted(outcomes) == ["pending", "rejected"]
+    pending = [item for item in store.list_current("local")
+               if item["kind"] == "scheduled_evaluation" and item["state"] == "pending"]
+    assert len(pending) == 1
+
+
+def test_cancel_and_spend_race_has_one_terminal_winner(tmp_path):
+    url = f"sqlite:///{tmp_path / 'approval-race.db'}"
+    store = ControlStore(url)
+    payload = {"planFingerprint": "a" * 64, "config": {"scope": "run"}}
+    pending = store.append(
+        "local", kind="scheduled_evaluation", document_id="approval-race",
+        state="pending", payload=payload, expected_revision=None,
+    )
+    barrier = Barrier(2)
+
+    def transition(state):
+        barrier.wait()
+        try:
+            store.append(
+                "local", kind="scheduled_evaluation", document_id="approval-race",
+                state=state, payload=payload, expected_revision=pending["revision"],
+            )
+            return state
+        except ValueError:
+            return "rejected"
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(pool.map(transition, ("cancelled", "spent")))
+    assert "rejected" in outcomes
+    assert len(store.history("local", "scheduled_evaluation", "approval-race")) == 2
 
 
 def test_control_documents_reject_secret_values_and_invalid_schedules(tmp_path):
@@ -84,6 +183,61 @@ def test_control_api_requires_capability_and_exposes_no_secret_values(tmp_path):
         "captureContent": True, "providerKeyEnvVars": ["ANTHROPIC_API_KEY"],
     }
     assert "secret-value" not in snapshot.text
+
+
+def test_scheduled_analysis_can_run_on_existing_instrumented_agent_activity(tmp_path):
+    database = tmp_path / "analysis-only.db"
+    now = datetime.now(timezone.utc)
+    storage = SQLiteStorage(str(database))
+    storage.replace_agent_run_bundle(AgentRunBundle(
+        SourceSession("sdk-session", "__verdict_local__", "verdict_sdk", "a" * 64, now, now),
+        AgentRun("sdk-run", "sdk-session", "__verdict_local__", now,
+                 ExecutionStatus.COMPLETED, now),
+    ))
+    storage.close()
+
+    async def scenario():
+        transport = httpx.ASGITransport(app=create_app(storage=f"sqlite:///{database}"))
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            response = await client.post(
+                "/api/control/actions/run-schedule", headers={"X-Verdict-Setup": token},
+                json={"analyzeOnly": True, "runMonitor": False},
+            )
+            return response, await client.get("/api/insights")
+
+    response, insights = asyncio.run(scenario())
+    assert response.status_code == 200
+    assert response.json()["analysis"]["status"] == "completed"
+    assert insights.json()["analysisState"]["status"] == "completed"
+
+
+def test_default_schedule_with_blank_roots_saves_and_runs(tmp_path):
+    database = tmp_path / "blank-roots.db"
+    payload = {
+        "intervalHours": 24, "claudeRoot": "  ", "codexRoot": "",
+        "analyzeOnly": True, "runMonitor": False,
+    }
+
+    async def scenario():
+        app = create_app(storage=f"sqlite:///{database}")
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            headers = {"X-Verdict-Setup": token}
+            saved = await client.post(
+                "/api/control/schedule/daily", headers=headers,
+                json={"state": "active", "payload": payload, "expectedRevision": None},
+            )
+            run = await client.post(
+                "/api/control/actions/run-schedule", headers=headers, json=payload,
+            )
+            return saved, run
+
+    saved, run = asyncio.run(scenario())
+    assert saved.status_code == 200
+    assert run.status_code == 200
+    assert run.json()["analysis"]["status"] == "completed"
 
 
 def test_control_documents_use_the_configured_dashboard_tenant(tmp_path):

@@ -1,13 +1,13 @@
 [project]
 name = "cognifity-verdict"
 version = "0.1.0b1"
-description = "Verdict — open-source LLM observability & drift detection SDK"
+description = "Verdict — local-first agent profiling and LLM reliability"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE"]
 authors = [{name = "Cognifity AI"}]
-keywords = ["llm", "observability", "drift-detection", "evaluation", "monitoring"]
+keywords = ["ai-agents", "profiling", "llm", "evaluation", "monitoring"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "License :: OSI Approved :: Apache Software License",

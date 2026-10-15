@@ -26,7 +26,7 @@ record; turn-level timestamps do not set the conversation end time. Verdict
 stores the normalized UTC value as `event_at`. If neither source field is
 present, the snapshot is untimed and retention starts at first import.
 
-For an exploratory paired comparison in **Explore → Compare**, put an opaque
+For an exploratory paired comparison in **Investigate → Compare**, put an opaque
 `pair_id` and `variant` in each source conversation's top-level `labels`; use
 the same pair ID only for two variants of the same evaluation input. Both
 conversations need current whole-conversation grades from one evaluator and

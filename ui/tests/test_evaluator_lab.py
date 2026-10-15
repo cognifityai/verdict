@@ -310,7 +310,90 @@ def test_agent_turn_preview_uses_final_output_without_relabeling_provider_trace(
     assert preview["plannedCalls"] == 1
     assert preview["plannedTurns"][0]["runId"] == "run-1"
     assert preview["plannedTurns"][0]["turnId"] == "turn-1"
+
+
+def test_selected_turn_preview_binds_exact_evidence_and_rejects_stale_run():
+    storage = InMemoryStorage()
+    try:
+        bundle = _agent_turn_bundle()
+        storage.replace_agent_run_bundle(bundle)
+        config = {**_config(), "unit": "agent_turn", "runId": "run-1", "turnId": "turn-1"}
+        preview = preview_evaluation(storage, tenant_id="local", config=config)
+        assert preview["plannedCalls"] == 1
+        assert preview["evidencePreview"][0]["runId"] == "run-1"
+        assert preview["evidencePreview"][0]["request"] == bundle.turns[0].user_request_redacted
+        approved = {**config, "planFingerprint": preview["planFingerprint"],
+                    "plannedTurns": preview["plannedTurns"]}
+        with pytest.raises(ValueError, match="egress"):
+            execute_evaluation(storage, tenant_id="local", config=approved,
+                               confirm_external_egress=False, provider=CountingProvider())
+        storage.replace_agent_run_bundle(replace(bundle, turns=(replace(
+            bundle.turns[0], final_response_redacted=bundle.turns[0].final_response_redacted + " More detail.",
+        ),)))
+        with pytest.raises(ValueError, match="no longer current"):
+            execute_evaluation(storage, tenant_id="local", config=approved,
+                               confirm_external_egress=True, provider=CountingProvider())
+    finally:
+        storage.close()
+
+
+def test_selected_trace_preview_exposes_exact_evidence_and_is_tenant_scoped():
+    storage = InMemoryStorage()
+    try:
+        storage.insert_trace(_trace("trace-local", prompt="selected prompt"))
+        storage.insert_trace(replace(_trace("trace-other"), tenant_id="other"))
+        config = {**_config(), "traceId": "trace-local"}
+        preview = preview_evaluation(storage, tenant_id="local", config=config)
+        assert [item["traceId"] for item in preview["plannedTraces"]] == ["trace-local"]
+        assert preview["evidencePreview"][0]["prompt"] == "selected prompt"
+        assert preview_evaluation(
+            storage, tenant_id="local", config={**_config(), "traceId": "trace-other"},
+        )["plannedCalls"] == 0
+        with pytest.raises(ValueError):
+            preview_evaluation(storage, tenant_id="local",
+                               config={**_config(), "unit": "agent_turn", "traceId": "trace-local"})
+    finally:
+        storage.close()
     assert storage.list_judgments_for_trace("provider-tool-call") == []
+
+
+@pytest.mark.parametrize("unit", ["trace", "agent_turn"])
+@pytest.mark.parametrize("judge_provider", ["anthropic", "openai"])
+def test_selected_approval_rejects_changed_destination_before_provider_call(
+    monkeypatch, unit, judge_provider,
+):
+    storage = InMemoryStorage()
+    if unit == "trace":
+        storage.insert_trace(_trace("selected-trace"))
+        selection = {"traceId": "selected-trace"}
+    else:
+        storage.replace_agent_run_bundle(_agent_turn_bundle())
+        selection = {"unit": "agent_turn", "runId": "run-1", "turnId": "turn-1"}
+    config = {**_config(), **selection, "provider": judge_provider,
+              "model": "gpt-4o-mini" if judge_provider == "openai" else "claude-haiku-4-5"}
+    env_name = "OPENAI_BASE_URL" if judge_provider == "openai" else "ANTHROPIC_BASE_URL"
+    monkeypatch.setenv(env_name, "https://user:secret@first.example/v1?token=hidden")
+    preview = preview_evaluation(storage, tenant_id="local", config=config)
+    approved = {**config, "planFingerprint": preview["planFingerprint"]}
+    approved["plannedTurns" if unit == "agent_turn" else "plannedTraces"] = (
+        preview["plannedTurns" if unit == "agent_turn" else "plannedTraces"]
+    )
+
+    class MatchingProvider(CountingProvider):
+        name = judge_provider
+
+        def temperature_supported(self, model):
+            return True
+
+    provider = MatchingProvider()
+    monkeypatch.setenv(env_name, "https://second.example/v1")
+    with pytest.raises(ValueError, match=r"no longer current|does not match"):
+        execute_evaluation(storage, tenant_id="local", config=approved,
+                           confirm_external_egress=True, provider=provider)
+    assert provider.calls == 0
+    assert preview["destination"] == "https://first.example/v1"
+    assert "secret" not in str(preview)
+    storage.close()
 
 
 @pytest.mark.parametrize("backend", ["memory", "sqlite"])

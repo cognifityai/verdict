@@ -44,7 +44,7 @@ test("configured empty stores are distinct without trusting arbitrary metadata",
   }
 });
 
-test("agent runs open the findings-first overview", () => {
+test("agent runs open the chart-first overview", () => {
   const meta = { totalTraces: 0, totalAgentRuns: 55 };
   assert.equal(initialDashboardTab(meta), "overview");
 });

@@ -11,6 +11,7 @@ import hashlib
 import json
 import math
 import re
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -512,6 +513,22 @@ class AgentEvent:
             raise ValueError("producer_sequence must be a non-negative 64-bit integer")
         if self.parent_event_id == self.event_id:
             raise ValueError("event cannot be its own parent")
+
+
+def event_order_key(event: AgentEvent | Mapping[str, Any]) -> tuple[Any, str, str, int, str]:
+    """Display order; SQL equivalent is timestamp, run, producer, COALESCE(producer_sequence, sequence), ID.
+
+    This ordering is deterministic across equal timestamps, not causal proof
+    across independent producers. A typed event belongs to one selected run.
+    """
+    if isinstance(event, AgentEvent):
+        return (event.occurred_at, "", event.producer_id,
+                event.producer_sequence if event.producer_sequence is not None else event.sequence,
+                event.event_id)
+    producer_sequence = event.get("producerSequence")
+    return (event["occurredAt"], event.get("runId", ""), event.get("producerId", ""),
+            producer_sequence if producer_sequence is not None else event["sequence"],
+            event["eventId"])
 
 
 def _canonical_value(value: Any) -> Any:

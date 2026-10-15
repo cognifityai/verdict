@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import errno
 import hashlib
 import json
 import logging
@@ -21,6 +23,7 @@ from verdict.analysis_records import (
 from verdict.client import _resolve_storage
 from verdict.dashboard.analysis_service import run_analysis
 from verdict.dashboard.control_plane import ControlStore
+from verdict.dashboard.storage_url import is_postgres_storage
 from verdict.monitor_inputs import (
     LOCAL_TENANT,
     LOCAL_TRACE_SCOPE,
@@ -28,11 +31,56 @@ from verdict.monitor_inputs import (
     advance_monitor,
 )
 from verdict.monitoring import MonitorRebootstrapRequired, MonitorStateConflict
+from verdict.storage.sqlite import sqlite_path
 from verdict.telemetry.local_agents import capture_local_agents
 
 _log = logging.getLogger("verdict.service")
 TENANT = LOCAL_TENANT
 SCOPE = LOCAL_TRACE_SCOPE
+
+
+class CycleBusy(RuntimeError):
+    """Another cycle owns this store's analysis lease."""
+
+
+class UnsupportedCyclePlatform(OSError):
+    """Local SQLite cycle locking is unavailable on this platform."""
+
+
+@contextlib.contextmanager
+def cycle_guard(storage_url: str):
+    """Serialize local cycles across processes; an interrupted process releases its lease."""
+    if is_postgres_storage(storage_url):
+        import psycopg
+
+        with psycopg.connect(storage_url, autocommit=True) as connection:
+            acquired = connection.execute(
+                "SELECT pg_try_advisory_lock(%s)", (0x5645524449435401,),
+            ).fetchone()[0]
+            if not acquired:
+                raise CycleBusy("a scheduled cycle is already running")
+            try:
+                yield
+            finally:
+                connection.execute("SELECT pg_advisory_unlock(%s)", (0x5645524449435401,))
+        return
+    if os.name != "posix":
+        raise UnsupportedCyclePlatform("SQLite cycle locking requires POSIX; use PostgreSQL on this platform")
+    import fcntl
+
+    path = sqlite_path(storage_url)
+    lock_path = path.with_name(path.name + ".service.lock")
+    with lock_path.open("a+b") as handle:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            if exc.errno in {errno.EACCES, errno.EAGAIN}:
+                raise CycleBusy("a scheduled cycle is already running") from exc
+            raise
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
 
 
 def _schedule(storage_url: str) -> dict[str, object]:
@@ -149,6 +197,11 @@ def _notify(
 
 
 def run_cycle(storage_url: str, schedule: dict[str, object]) -> dict[str, object]:
+    with cycle_guard(storage_url):
+        return _run_cycle_unlocked(storage_url, schedule)
+
+
+def _run_cycle_unlocked(storage_url: str, schedule: dict[str, object]) -> dict[str, object]:
     storage = _resolve_storage(storage_url)
     try:
         capture = capture_local_agents(
@@ -219,11 +272,15 @@ def run_cycle(storage_url: str, schedule: dict[str, object]) -> dict[str, object
         for finding in analysis.get("findings", [])
         if finding.get("severity") in {"warning", "error"}
     ]
+    from verdict.dashboard.scoped_evaluation import run_scheduled_once
+
+    scheduled_evaluation = run_scheduled_once(storage_url, tenant=TENANT)
     return {
         "capture": capture.as_dict(),
         "analysis": analysis["analysisState"],
         "monitor": monitor,
         "notifications": notifications,
+        "scheduledEvaluation": scheduled_evaluation,
     }
 
 
@@ -235,7 +292,16 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO)
     while True:
         schedule = _schedule(args.storage)
-        print(json.dumps(run_cycle(args.storage, schedule), sort_keys=True))
+        try:
+            result = run_cycle(args.storage, schedule)
+        except CycleBusy:
+            if args.once:
+                print(json.dumps({"status": "busy", "cycleRan": False}), flush=True)
+                return 2
+            _log.info("scheduled cycle is busy; retrying")
+            threading.Event().wait(1)
+            continue
+        print(json.dumps(result, sort_keys=True), flush=True)
         if args.once:
             return 0
         interval = int(schedule.get("intervalHours", 24))

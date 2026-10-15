@@ -1,13 +1,43 @@
 # Changelog
 
 All notable changes to Verdict are documented here. This project follows
-[Semantic Versioning](https://semver.org/); alpha releases can still change as
+[Semantic Versioning](https://semver.org/); prereleases can still change as
 the product is refined.
 
 ## [Unreleased]
 
 ### Added
 
+- The dashboard run list now loads bounded run metadata and analyzes only its
+  selected run; the default `/api/runs` response remains unchanged. Selecting
+  **Inspect session** focuses the loaded session detail, and usage refreshes
+  keep their status space stable.
+- Selected UTC usage days now offer a deterministic comparison and links to the
+  largest sessions and turns on that day. A separate, optional AI explanation
+  previews metadata-only context and destination, requires one-call approval,
+  and saves its terminal or unknown outcome without automatic retries.
+- Agent usage endpoints (`/api/usage`, `/api/session`) report source-qualified
+  UTC token activity, supported static list-price estimates, bounded session
+  and turn evidence, and deterministic review suggestions. Ambiguous session
+  IDs now return `selectionReason: "ambiguous_source"` until a source is chosen.
+- `/api/runs/{run}/turns/{turn}/analysis` inspects a selected turn's recorded
+  actions and failures locally without a judge call. Evaluator Lab accepts an
+  exact selected turn or genuine model-call trace from the dashboard.
+- Scoped session, run, and tool-action evaluation endpoints (`/api/scoped/*`)
+  preview bounded evidence and destination before one approved judge call.
+  The append-only control store now records `scoped_evaluation` results and
+  one-shot `scheduled_evaluation` approvals and outcomes. Unknown bracket labels
+  in judge prose are not evidence citations; only captured `[turn:...]` and
+  `[event:...]` references are validated and linked.
+- Reviewed case sets and fixed-case comparisons use `/api/experiments/*` and
+  append-only `case_set` and `experiment` documents. The dashboard host must
+  configure `VERDICT_EXPERIMENT_RUNNER` as a trusted Python module/function and
+  `VERDICT_EXPERIMENT_CONFIGS` as versioned variants. Trial timeout is host-set
+  with `VERDICT_EXPERIMENT_TRIAL_TIMEOUT_SECONDS` (1–300 seconds; default 120).
+  A synchronous comparison is rejected before execution when its cases × two
+  sides × trials × timeout exceeds 600 configured runner seconds. Case inputs
+  are stored and passed to the configured local runner as reviewed;
+  captured-run drafts begin with already-redacted input.
 - Local Claude Code and Codex history shows an estimated list price for agent
   turns, in Overview → Performance and per source. Each turn's token components
   are priced at the public rates for the one model the turn named, with cache
@@ -22,6 +52,26 @@ the product is refined.
 
 ### Changed
 
+- The dashboard starts with recorded issues and token activity, opens a selected
+  finding with its linked run evidence and suggestion, and places advanced run
+  details behind disclosure. Four primary tasks remain visible; Report and
+  Settings move to header utilities without changing route identifiers.
+- Manual `POST /api/control/actions/run-schedule` can consume an already
+  approved, pending one-shot scoped evaluation and make one external judge call
+  during the cycle. The approval is spent before egress; running the cycle
+  without a pending approval makes no such call. On non-POSIX platforms, the
+  SQLite run-now path returns a specific unsupported-platform error; PostgreSQL
+  remains supported.
+- The service uses a cross-process cycle lock. SQLite writes a
+  `<database>.service.lock` file beside its database; PostgreSQL uses an advisory
+  lock. Schedule defaults now leave local history roots empty, enable analysis
+  of already captured agent activity, and leave the genuine model-call monitor
+  off. The schedule panel remains available for stores with imported activity
+  only. Anthropic and OpenAI judge adapters accept `sdk_max_retries`; one-shot
+  scheduled evaluation disables SDK and Verdict retries.
+- The README and core package description now introduce local-first agent
+  profiling and reliability. The Agent Profiler workflow is source-only until
+  its next release; the published beta retains its versioned install profile.
 - Local history capture from Settings → Data Sources runs on a background
   thread. `POST /api/setup/capture` returns 202 with the job at once and
   `GET /api/setup/capture/status` reports `running`, `analyzing`, `completed`,
@@ -42,6 +92,9 @@ the product is refined.
 
 ### Fixed
 
+- Dashboard Basic Auth now covers session reports, saved experiments, scoped
+  evaluation routes, and matched-conversation comparisons when credentials are
+  configured. Matched comparisons still require their setup token.
 - Redaction is idempotent: redacting already-redacted text returns it
   unchanged in both `redact` and `hash` modes. Previously a placeholder edge
   could satisfy a word-boundary or lookaround assertion that the original
@@ -858,7 +911,8 @@ the product is refined.
   retain content must explicitly select metadata-only capture. Redaction remains
   best-effort rather than a compliance control.
 
-[Unreleased]: https://github.com/cognifityai/verdict/compare/v0.1.0a23...HEAD
+[Unreleased]: https://github.com/cognifityai/verdict/compare/v0.1.0b1...HEAD
+[0.1.0b1]: https://github.com/cognifityai/verdict/compare/v0.1.0a23...v0.1.0b1
 [0.1.0a23]: https://github.com/cognifityai/verdict/compare/v0.1.0a22...v0.1.0a23
 [0.1.0a22]: https://github.com/cognifityai/verdict/compare/v0.1.0a21...v0.1.0a22
 [0.1.0a21]: https://github.com/cognifityai/verdict/compare/v0.1.0a20...v0.1.0a21

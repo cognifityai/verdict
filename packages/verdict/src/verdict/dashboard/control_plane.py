@@ -6,21 +6,35 @@ import json
 import re
 import sqlite3
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
 from verdict.dashboard.storage_url import is_postgres_storage
+from verdict.storage.sqlite import sqlite_path
 
-KINDS = {"settings", "schedule", "alert", "proposal", "review"}
+KINDS = {"settings", "schedule", "alert", "proposal", "review", "case_set", "experiment", "scoped_evaluation", "scheduled_evaluation", "usage_explanation"}
 STATES = {
     "settings": {"active"},
     "schedule": {"active", "disabled"},
     "alert": {"active", "disabled"},
     "proposal": {"pending", "approved", "rejected", "rolled_back"},
     "review": {"open", "resolved"},
+    "case_set": {"active", "disabled"},
+    "experiment": {"completed"},
+    "scoped_evaluation": {"completed", "error"},
+    "scheduled_evaluation": {"pending", "spent", "cancelled"},
+    "usage_explanation": {"reserved", "completed", "error"},
 }
 _IDENTITY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
 _ENV_NAME = re.compile(r"[A-Z][A-Z0-9_]{0,127}")
+
+
+def normalize_source_root(value: object) -> str | None:
+    """Treat an unfilled source field as absent, preserving real path spelling."""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    if not isinstance(value, str) or len(value.encode("utf-8")) > 4096:
+        raise ValueError("invalid schedule source path")
+    return value
 
 
 def _safe_json(payload: object) -> str:
@@ -68,9 +82,9 @@ def _validate(kind: str, document_id: str, state: str, payload: dict[str, Any]) 
         if isinstance(interval, bool) or not isinstance(interval, int) or not 1 <= interval <= 168:
             raise ValueError("schedule interval must be 1-168 hours")
         for name in ("claudeRoot", "codexRoot"):
-            value = payload.get(name)
-            if value is not None and (not isinstance(value, str) or not value):
-                raise ValueError("invalid schedule source path")
+            normalize_source_root(payload.get(name))
+        if payload.get("analyzeOnly") not in (None, True, False):
+            raise ValueError("analyzeOnly must be a boolean")
     elif kind == "settings":
         retention = payload.get("retentionDays")
         if retention is not None and (
@@ -97,6 +111,35 @@ def _validate(kind: str, document_id: str, state: str, payload: dict[str, Any]) 
     elif kind == "review":
         if payload.get("label") not in {None, "pass", "fail", "unclear", "not_evaluable"}:
             raise ValueError("invalid review label")
+    elif kind == "case_set":
+        if payload.get("reviewed") is not True:
+            raise ValueError("case set requires reviewed inputs and expected behavior")
+        cases = payload.get("cases")
+        if not isinstance(cases, list) or not 1 <= len(cases) <= 10:
+            raise ValueError("case set requires 1-10 cases")
+        ids = set()
+        for case in cases:
+            if not isinstance(case, dict) or set(case) - {
+                "id", "input", "context", "expectedBehavior", "checks",
+            }:
+                raise ValueError("invalid case")
+            case_id = case.get("id")
+            if not isinstance(case_id, str) or _IDENTITY.fullmatch(case_id) is None or case_id in ids:
+                raise ValueError("invalid or duplicate case id")
+            ids.add(case_id)
+            for name in ("input", "expectedBehavior"):
+                if not isinstance(case.get(name), str) or not case[name].strip():
+                    raise ValueError(f"case {name} is required")
+            if case.get("context") is not None and not isinstance(case["context"], str):
+                raise ValueError("invalid case context")
+            checks = case.get("checks")
+            if not isinstance(checks, list) or not 1 <= len(checks) <= 5:
+                raise ValueError("case requires 1-5 checks")
+            for check in checks:
+                if (not isinstance(check, dict) or set(check) != {"kind", "value"}
+                        or check.get("kind") not in {"exact", "contains", "not_contains"}
+                        or not isinstance(check.get("value"), str) or not check["value"]):
+                    raise ValueError("invalid deterministic check")
     return _safe_json(payload)
 
 
@@ -115,8 +158,7 @@ class ControlStore:
             except ImportError as exc:
                 raise ImportError("control plane requires the postgres extra") from exc
             return psycopg.connect(self.storage, autocommit=False, row_factory=dict_row)
-        path = self.storage[len("sqlite:///"):] if self.storage.startswith("sqlite:///") else self.storage
-        connection = sqlite3.connect(Path(path))
+        connection = sqlite3.connect(sqlite_path(self.storage))
         connection.row_factory = sqlite3.Row
         return connection
 
@@ -205,16 +247,61 @@ class ControlStore:
             connection.execute(self._schema(self.postgres))
             if self.postgres:
                 connection.execute("LOCK TABLE product_control_documents IN SHARE ROW EXCLUSIVE MODE")
+            elif kind == "scheduled_evaluation":
+                connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
-                "SELECT MAX(revision) AS revision FROM product_control_documents "
+                "SELECT revision,state,payload_json FROM product_control_documents "
                 "WHERE tenant_id=" + placeholder + " AND kind=" + placeholder +
-                " AND document_id=" + placeholder,
+                " AND document_id=" + placeholder + " ORDER BY revision DESC LIMIT 1",
                 (tenant, kind, document_id),
             ).fetchone()
             current = row["revision"] if row else None
             if current != expected_revision:
                 connection.rollback()
                 raise ValueError("control revision conflict")
+            if kind == "scheduled_evaluation" and state == "pending":
+                plan_fingerprint = payload.get("planFingerprint")
+                if not isinstance(plan_fingerprint, str) or not plan_fingerprint:
+                    connection.rollback()
+                    raise ValueError("scheduled approval requires a plan fingerprint")
+                active = connection.execute(
+                    "SELECT d.payload_json FROM product_control_documents d JOIN ("
+                    "SELECT document_id,MAX(revision) AS revision FROM product_control_documents "
+                    "WHERE tenant_id=" + placeholder + " AND kind='scheduled_evaluation' "
+                    "GROUP BY document_id) latest ON latest.document_id=d.document_id "
+                    "AND latest.revision=d.revision WHERE d.tenant_id=" + placeholder + " "
+                    "AND d.kind='scheduled_evaluation' AND d.state='pending'",
+                    (tenant, tenant),
+                )
+                for pending in active:
+                    saved = pending["payload_json"]
+                    if isinstance(saved, str):
+                        saved = json.loads(saved)
+                    if saved.get("planFingerprint") == plan_fingerprint:
+                        connection.rollback()
+                        raise ValueError("scheduled evaluation approval already pending")
+            current_payload = row["payload_json"] if row else None
+            if isinstance(current_payload, str):
+                current_payload = json.loads(current_payload)
+            records_spent_outcome = (
+                row is not None and row["state"] == "spent" and state == "spent"
+                and current_payload.get("outcome") == "attempt_reserved"
+                and payload.get("outcome") in {"completed", "error"}
+                and isinstance(payload.get("resultId"), str)
+                and re.fullmatch(r"[0-9a-f]{64}", payload["resultId"]) is not None
+                and {key: value for key, value in payload.items()
+                     if key not in {"outcome", "resultId", "error"}}
+                    == {key: value for key, value in current_payload.items()
+                        if key != "outcome"}
+            ) if isinstance(current_payload, dict) else False
+            if kind == "scheduled_evaluation" and not (
+                (row is None and state == "pending")
+                or (row is not None and row["state"] == "pending"
+                    and state in {"spent", "cancelled"})
+                or records_spent_outcome
+            ):
+                connection.rollback()
+                raise ValueError("scheduled evaluation approval is terminal")
             revision = 1 if current is None else int(current) + 1
             now = datetime.now(timezone.utc)
             connection.execute(
@@ -231,6 +318,8 @@ class ControlStore:
         self, tenant: str, *, kind: str, document_id: str,
         target_revision: int, expected_revision: int,
     ) -> dict[str, object]:
+        if kind == "scheduled_evaluation":
+            raise ValueError("spent external-evaluation approvals cannot be rearmed")
         history = self.history(tenant, kind, document_id)
         target = next((item for item in history if item["revision"] == target_revision), None)
         if target is None:

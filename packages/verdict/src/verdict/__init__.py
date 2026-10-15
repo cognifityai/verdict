@@ -1,4 +1,4 @@
-"""Verdict — open-source LLM observability & drift detection.
+"""Verdict — local-first agent profiling and LLM reliability.
 
 Five-line install pattern:
 

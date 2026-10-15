@@ -704,22 +704,22 @@ def _parse_iso(s: str | None) -> datetime | None:
     return datetime.fromisoformat(s) if s else None
 
 
-def _normalize_sqlite_path(path: str) -> str:
-    """Accept either a filesystem path or the public ``sqlite:///`` URL form."""
+def sqlite_path(path: str) -> Path:
+    """Resolve the file used by SQLite storage, dashboard reads, and cycle locks."""
     if path.startswith("sqlite:///"):
         path = path[len("sqlite:///") :]
     elif "://" in path:
         raise ValueError(f"Expected a SQLite path or sqlite:/// URL, got {path!r}")
     if not path:
         raise ValueError("SQLite path cannot be empty")
-    return path
+    return Path(path) if path == ":memory:" else Path(path).expanduser().resolve()
 
 
 class SQLiteStorage:
     """Durable single-file storage. Thread-safe via a single connection + lock."""
 
     def __init__(self, path: str) -> None:
-        path = _normalize_sqlite_path(path)
+        path = str(sqlite_path(path))
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         self._judge_lock_path = (
             None if path == ":memory:" else str(Path(path).resolve()) + ".judge-lock"

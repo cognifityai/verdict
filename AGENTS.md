@@ -5,10 +5,12 @@ without re-learning the architecture each session.
 
 ## What Verdict Is
 
-Verdict is an open-source LLM observability and drift-detection toolkit. It
-captures supported provider calls, stores traces, evaluates responses with a
-rubric, and helps inspect quality, cost, latency, and drift across similar
-workloads.
+Verdict is a local-first agent profiler and reliability toolkit. It helps
+inspect source-reported token use, agent actions and failures, and bounded
+evidence for optional evaluation. Reviewed cases compare an explicitly
+configured application baseline and candidate. Supported provider-call
+capture, rubric evaluation, and prospective statistical monitoring remain
+available for genuine model traces.
 
 Current scope includes individual LLM calls plus normalized session, run, turn,
 model-call, tool, command, and test evidence from local Claude Code/Codex
@@ -33,6 +35,11 @@ success, or retry causality when the source history does not establish it.
 - **Reference baseline**: the historical distribution used for drift comparison.
 - **Drift signal**: a statistically meaningful change for a cluster/dimension.
 - **Shadow traffic**: sampled traffic mirrored to another model for comparison.
+- **Case set**: reviewed runnable inputs and expected behavior, versioned before
+  a baseline/candidate comparison.
+- **Scoped evaluation**: one bounded session, run, or tool action sent to an
+  explicitly approved judge destination; a scheduled evaluation is a separate
+  one-attempt approval.
 
 ## Architecture Principles
 
@@ -66,6 +73,18 @@ success, or retry causality when the source history does not establish it.
 - Semantic clusters and judge output are optional, reviewable evidence. Neither
   is required for key-free findings, and neither becomes authoritative merely
   because it is repeatable.
+- `dashboard/usage.py` projects reported usage; `turn_analysis.py` and
+  `recommendations.py` derive local findings from stored evidence.
+  `day_explanation.py` previews aggregate-only day context and owns its
+  one-attempt optional AI interpretation.
+  `scoped_evaluation.py` owns bounded preview, consent, and one-attempt judge
+  execution. `experiments.py` owns reviewed case APIs, `experiment_worker.py`
+  runs the configured local comparison, and `demo_task.py` is synthetic demo
+  configuration. The dashboard routes expose these capabilities; they do not
+  change the ownership of provider-call `Trace` records.
+- `service.py` serializes cycles across processes. SQLite uses a sidecar
+  `.service.lock` file and requires POSIX for cycles; PostgreSQL uses an
+  advisory lock. A cycle may consume one separately approved scoped evaluation.
 
 ## Working Conventions
 

@@ -1,7 +1,7 @@
 const SECTIONS = {
   overview: new Set(["summary", "reliability", "performance", "behavior"]),
   explore: new Set(["runs", "calls", "compare"]),
-  evaluate: new Set(["results", "lab", "inspect", "review"]),
+  evaluate: new Set(["results", "lab", "cases", "inspect", "review"]),
   monitor: new Set(["status", "history", "segments", "schedule"]),
   report: new Set(["management"]),
   settings: new Set(["sources", "alerts", "integrations", "privacy"]),

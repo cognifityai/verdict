@@ -1,8 +1,11 @@
 # Tester Onboarding
 
-Goal: get from installation to "I can see Verdict working on my own data" in
-about 10 minutes. Most of this runs **key-free**; only the judge layer needs a
-provider key (bring your own — Verdict never ships one).
+Goal: get from installation to a first local report on your own approved agent
+or LLM application evidence. The Agent Profiler workflow described in the
+[Agent Profiler guide](AGENT_PROFILER.md) is available from this development
+checkout; it is not part of the published `0.1.0b1` wheel. Usage, run reports,
+Turn analysis, and deterministic suggestions in this checkout are key-free.
+An external judge requires your own provider key and explicit evidence approval.
 
 ## 0. Prerequisites
 
@@ -12,9 +15,22 @@ provider key (bring your own — Verdict never ships one).
   `GOOGLE_API_KEY`, or `TYPESAFE_API_KEY` for Jev) if you want the judge / quality-drift layer. Everything
   else works without one.
 
-## 1. Install (one chain covers all three packages)
+## 1. Install
 
-The public-alpha distributions are `cognifity-verdict`,
+For the Agent Profiler workflow in this checkout, create an isolated environment
+at the repository root and install the local core and eval packages:
+
+```bash
+python -m venv .venv
+.venv/bin/python -m pip install -e 'packages/verdict[dashboard]' -e packages/verdict_eval
+.venv/bin/verdict-dashboard --storage sqlite:///./verdict.db --host 127.0.0.1
+```
+
+The commands below install the published `0.1.0b1` release for its documented
+provider-call and monitoring workflows. They do not install this checkout's
+Agent Profiler features.
+
+The synchronized beta distributions are `cognifity-verdict`,
 `cognifity-verdict-eval`, and `cognifity-verdict-inspect`. Do not install the
 unrelated `verdict` distribution from PyPI; it exposes the same import namespace
 and cannot safely coexist in one environment.
@@ -41,9 +57,10 @@ Minimal alternative without the local semantic model:
 python -m pip install "cognifity-verdict-eval==0.1.0b1"  # lexical hash fallback
 ```
 
-Already on an earlier synchronized alpha? Use the upgrade command in the repository
-[README](../README.md#upgrade-from-an-earlier-synchronized-alpha). It preserves the selected SQLite or
-PostgreSQL store and does not require deleting or recloning an existing checkout.
+Already on an earlier synchronized release? Back up the selected SQLite or
+PostgreSQL store and dependency lockfile, then follow the exact
+[beta release profile](RELEASE_PROFILE.md). The additive migrations preserve
+existing trace and evaluation tables.
 
 ## 2. Confirm it's healthy (30 seconds, no key)
 
@@ -88,8 +105,8 @@ response time. Verdict never stores the diagnostic body or raw Codex source
 identifiers.
 
 Successful capture opens **Overview**. Local execution evidence is under
-**Explore → Agent Runs & Tools** and genuine model calls are under
-**Explore → LLM Calls**. Data-source actions remain under
+**Investigate → Agent Runs & Tools** and genuine model calls are under
+**Investigate → LLM Calls**. Data-source actions remain under
 **Settings → Data Sources**, where **Manage data sources** asks you to approve local
 paths again. The header reports Agent Runs and LLM Calls separately.
 
@@ -104,6 +121,12 @@ A parent reference can remain unresolved if the source no longer contains that
 parent history. Local sources that do not expose a genuine provider
 call do not create fake `Trace` rows, so the LLM-call Monitor may truthfully be
 empty while agent evidence is useful.
+
+Open a Turn and select **Analyze turn** for an on-demand, local review of
+recorded actions, matched tool results, and reported failure signals. The
+linked events let you inspect the evidence behind the review. A partial
+capture is labeled, and no judge request is sent. The review shows observable
+behavior; it cannot reconstruct private reasoning or prove task correctness.
 
 Agent timelines are stored as normalized source/run/turn/event rows. Genuine
 model calls link to existing `Trace` records rather than copying their content
@@ -122,7 +145,7 @@ components. Its total appears only after the turn is terminal and every
 response has complete input/output usage. Missing or malformed counters display
 as unavailable, not zero.
 Verdict does not put a cost on these traces. It shows a separate **estimated
-list price** for agent turns in Overview → Performance and in the per-source
+list price** for agent turns in Overview's Performance details and in the per-source
 table: the turn's token components priced at the public per-token rates for
 the one model the turn named, with cache reads and cache writes at the
 provider's cache rates (Claude Code counts exclude cached tokens from input;
@@ -134,6 +157,29 @@ its token basis is unknown; the figure states how many turns it covers.
 The static table recognizes GPT-6 Astra, Sol, 6.1 Sol, and Luna at their
 standard short-context text rates; it does not infer a price for other GPT-6
 variants or service tiers.
+**Overview** shows a 30-day UTC Agent Turn usage chart; Performance details expands the same drilldown. A turn
+is assigned to the UTC date when it started. Choose a day to see sessions active
+on that date and their model breakdown; choose a session to see its largest
+turns across the report window. The session's **Analyze session** action explains
+the recorded token contributors and links each turn back to its Agent Run. It
+uses deterministic arithmetic and makes no external evaluator call. Token and
+price coverage count turns with reported totals and priceable turns, respectively,
+over all captured turns;
+unavailable counts remain unavailable. The view scans at most 20,000 turns and
+100,000 model/context events, shows up to 100 sessions per day and 50 turns per
+session, and marks a partial scan. Child runs sharing a logical session ID are
+grouped for this view. The observed first-to-last Turn span includes pauses and
+tool work, so it is not provider latency. Genuine model-call latency remains in
+the LLM Trace performance view when the source supplies it.
+The selected session also opens one combined evidence report and an optional
+session-wide evaluation preview. That report is independent of the 30-day chart
+window and includes up to 20 runs, 20 turns, and 80 events. Larger sessions are
+marked partial and link to their individual runs; external evaluation is then
+unavailable for the whole session.
+From **Explain this day**, **Inspect session** moves focus to that session's
+detail after it loads. **Investigate → Agent Runs & Tools** loads a bounded run
+list first and expands only the selected run, so opening the list does not
+analyze every run on the page.
 Codex diagnostic traces include input/output tokens only when one valid usage
 event from the same session matches the completion timestamp. Prompt,
 response, latency, and cost remain unavailable, and the traces are not
@@ -515,7 +561,7 @@ row sort outside the selected window before preview sees it; reimport the
 source record to repair its snapshot.
 For two configurations tested on the same declared input, add an opaque
 `pair_id` and a `variant` to each Voice record's top-level `labels` object.
-Open **Explore → Compare**, enter the UTC campaign dates, the whole-conversation
+Open **Investigate → Compare**, enter the UTC campaign dates, the whole-conversation
 evaluator fingerprint and dimension, both label keys, and the two variant
 values. The view requires exactly one current conversation per variant and
 pair ID; it reports duplicate, unmatched, ineligible, ungraded, error, and
@@ -647,7 +693,8 @@ Capture starts when `verdict.init()` installs the supported provider wrappers.
 By default, bounded redacted content from calls that pass the sampling policy is
 persisted during capture; `capture_content=False` is the explicit metadata-only
 mode. With `buffered_writes=True`, records are queued for a background writer.
-Start the findings-first dashboard against the same store:
+Start the dashboard against the same store. Overview opens with token usage and
+recorded issues for captured agent activity:
 
 ```bash
 verdict --storage sqlite:///./verdict.db
@@ -762,6 +809,8 @@ production scheduling. The continuous `verdict-service` loop is also available.
 Manual capture path approval exists only in the current dashboard process. An
 explicitly saved daily schedule intentionally retains the approved source paths
 as local configuration so this worker can rescan them.
+Blank Claude Code and Codex source fields are treated as absent, so an
+analysis-only schedule can be saved and run without local history paths.
 Daily Operations shows Claude Code and Codex path controls only after local
 agent history has been captured or a local schedule has been saved. A
 telemetry-only store continues through Data sources or SDK ingestion instead.
@@ -901,12 +950,23 @@ rendering an empty chart as zero evidence. Monitor separately distinguishes no
 configured comparison, an exploratory historical preview, prospective traffic
 collection, pending evaluator results, insufficient evidence, no alert, alert,
 and a stale reference. Only a closed prospective comparison can produce an
-active alert or no-alert decision. A mounted host that supplies the same-origin
+active alert or no-alert decision. Overview starts with recorded issues and
+reported tokens by day. Select an issue to inspect a focused run with its
+evidence and suggested action. Select a day and click **Explain this day** to
+see its largest recorded sessions and turns and a bounded prior-day comparison.
+The optional **Ask AI why** path first previews aggregate-only context,
+destination, and estimated list-price bound; it sends no chat or tool text and
+requires explicit approval for one call. A session report may span other days.
+Active Monitor alerts remain prominent; historical checks appear below, and
+unconfigured monitoring appears in Monitor. Capture limits are under Evidence
+gaps, and a stored historical monitor preview links to its full comparison in
+Monitor. Technical coverage and
+additional charts remain expandable. A mounted host that supplies the same-origin
 Operations adapter also exposes its action from the empty state.
 
 Set both `VERDICT_USER` and `VERDICT_PASS` before starting the server to require
-HTTP Basic authentication for the dashboard shells at `/` and `/dashboard` plus
-`/api/data`; `/api/health` remains public. Do not bind beyond localhost without that gate or a
+HTTP Basic authentication for the dashboard shells at `/` and `/dashboard` and
+dashboard API routes; `/api/health` remains public. Do not bind beyond localhost without that gate or a
 trusted reverse proxy. Dashboard time series include only observed hourly bins
 and half-hour latency bins. Presentation data is capped at the latest 100
 observed chart points, 8 providers, 20 usable intent clusters, 12 dimensions,
@@ -942,7 +1002,7 @@ the other captured workloads.
   every judgeable trace was assigned by your own stable external clusterer.
   For the versioned registry, `verdict-cluster fit` requires a deliberate
   strategy: `explicit` is supported, while automatic `semantic` and `hybrid`
-  semantic fallback are experimental opt-in alpha features. Inspect reports the
+  semantic fallback are experimental opt-in features. Inspect reports the
   strategy status. The frozen semantic evaluation missed its 30% dominant-
   cluster limit by one example, so do not present it as generally validated or
   enable it silently for customers.
@@ -1042,10 +1102,10 @@ the other captured workloads.
 | Judge PASS/FAIL quality monitoring | Yes (BYOK) |
 | Optional `verdict-inspect` judge sample | Yes (Anthropic BYOK) |
 
-## Honest expectations for this alpha
+## Evidence and evaluation expectations
 
-- This is an early local-first toolkit, not a hosted monitoring service or a
-  substitute for workload-specific calibration.
+- This is a local-first beta toolkit, not a substitute for workload-specific
+  calibration.
 - Calibrate the judge on your own labeled traces before relying on quality
   alerts.
 - Local Claude Code/Codex capture and explicit application SDK contexts produce

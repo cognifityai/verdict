@@ -25,7 +25,17 @@ from verdict.dashboard.app import (
     build_agent_insights_bundle,
     build_agent_run_detail,
     build_agent_runs_bundle,
+    build_agent_session_bundle,
     create_app,
+)
+from verdict.dashboard.control_plane import ControlStore
+from verdict.dashboard.evaluator_lab import _IdentityOnlyProvider
+from verdict.dashboard.scoped_evaluation import (
+    cancel_scheduled_once,
+    execute_scoped,
+    preview_scoped,
+    run_scheduled_once,
+    schedule_scoped_once,
 )
 from verdict.evidence import (
     AgentEvent,
@@ -40,6 +50,7 @@ from verdict.evidence import (
 )
 from verdict.schema import DimensionScore, Operation, Trace, Verdict
 from verdict.storage import SQLiteStorage
+from verdict_eval.providers import CompletionResponse
 
 
 def _bundle(
@@ -72,6 +83,168 @@ def _bundle(
         turns,
         events,
     )
+
+
+def test_run_and_session_list_eligibility_matches_their_preview(tmp_path):
+    path = tmp_path / "eligibility.db"
+    url = f"sqlite:///{path}"
+    storage = SQLiteStorage(str(path))
+    now = datetime(2026, 10, 11, tzinfo=timezone.utc)
+    bundle = _bundle("local", now, with_turn=True)
+    storage.replace_agent_run_bundle(replace(bundle, turns=(replace(
+        bundle.turns[0], final_response_redacted="synthetic " * 900,
+    ),)))
+    config = {"scope": "run", "runId": "r-local", "provider": "anthropic",
+              "model": "claude-haiku-4-5", "maxOutputTokens": 256,
+              "rubric": {"name": "task_review", "version": "1", "dimensions": [{
+                  "name": "completion", "description": "Did the recorded work meet the stated task?",
+              }]}}
+    run_preview = preview_scoped(storage, tenant="local", config=config)
+    run = build_agent_runs_bundle(url, tenant="local")["runs"][0]
+    assert run["scopedEvaluationEligible"] is (run_preview["plannedCalls"] == 1)
+    assert run["scopedEvaluationUnavailableReason"] == run_preview["unavailableReason"]
+    session_config = {**config, "scope": "session", "sessionId": "s-local",
+                      "sourceKind": "codex"}
+    session_config.pop("runId")
+    session_preview = preview_scoped(storage, tenant="local", config=session_config,
+                                     storage_url=url)
+    report = build_agent_session_bundle(
+        url, tenant="local", source_kind="codex", session_id="s-local",
+    )
+    assert report["scopedEvaluationEligible"] is (session_preview["plannedCalls"] == 1)
+    assert report["scopedEvaluationUnavailableReason"] == session_preview["unavailableReason"]
+    assert run_preview["unavailableReason"] == session_preview["unavailableReason"] == "evidence_limit"
+    eligible_path = tmp_path / "eligible.db"
+    eligible_url = f"sqlite:///{eligible_path}"
+    eligible_storage = SQLiteStorage(str(eligible_path))
+    eligible_storage.replace_agent_run_bundle(bundle)
+    run_preview = preview_scoped(eligible_storage, tenant="local", config=config)
+    run = build_agent_runs_bundle(eligible_url, tenant="local")["runs"][0]
+    report = build_agent_session_bundle(
+        eligible_url, tenant="local", source_kind="codex", session_id="s-local",
+    )
+    session_preview = preview_scoped(eligible_storage, tenant="local", config=session_config,
+                                     storage_url=eligible_url)
+    assert run["scopedEvaluationEligible"] is True
+    assert report["scopedEvaluationEligible"] is True
+    assert run_preview["plannedCalls"] == session_preview["plannedCalls"] == 1
+    eligible_storage.close()
+    storage.close()
+
+
+def test_identical_scoped_execution_replays_stored_result_without_provider_call(tmp_path):
+    path = tmp_path / "stored-replay.db"
+    url = f"sqlite:///{path}"
+    storage = SQLiteStorage(str(path))
+    storage.replace_agent_run_bundle(_bundle(
+        "local", datetime(2026, 10, 11, tzinfo=timezone.utc), with_turn=True,
+    ))
+    config = {"scope": "run", "runId": "r-local", "provider": "anthropic",
+              "model": "claude-haiku-4-5", "maxOutputTokens": 256,
+              "rubric": {"name": "task_review", "version": "1", "dimensions": [{
+                  "name": "completion", "description": "Did the recorded work meet the stated task?",
+              }]}}
+    preview = preview_scoped(storage, tenant="local", config=config)
+
+    class CountingProvider:
+        name = "anthropic"
+        supports_temperature = _IdentityOnlyProvider("anthropic").supports_temperature
+
+        def __init__(self):
+            self.calls = 0
+
+        def complete(self, request):
+            self.calls += 1
+            return CompletionResponse(text=(
+                '{"completion":{"reasoning":"[event:event-1] records the action",'
+                '"verdict":"PASS"}}'
+            ), input_tokens=10, output_tokens=10)
+
+    provider = CountingProvider()
+    approved = {**config, "planFingerprint": preview["planFingerprint"]}
+    first = execute_scoped(storage, storage_url=url, tenant="local", config=approved,
+                           confirm_external_egress=True, provider=provider)
+    second = execute_scoped(storage, storage_url=url, tenant="local", config=approved,
+                            confirm_external_egress=True, provider=provider)
+    assert provider.calls == 1
+    assert second == first
+    assert second["status"] == "completed"
+    error_config = {**config, "rubric": {**config["rubric"], "version": "2"}}
+    error_preview = preview_scoped(storage, tenant="local", config=error_config)
+
+    class ErrorProvider(CountingProvider):
+        def complete(self, request):
+            self.calls += 1
+            raise RuntimeError("synthetic provider error")
+
+    failing = ErrorProvider()
+    error_approved = {**error_config, "planFingerprint": error_preview["planFingerprint"]}
+    first_error = execute_scoped(storage, storage_url=url, tenant="local", config=error_approved,
+                                 confirm_external_egress=True, provider=failing)
+    second_error = execute_scoped(storage, storage_url=url, tenant="local", config=error_approved,
+                                  confirm_external_egress=True, provider=failing)
+    assert failing.calls == 1
+    assert first_error == second_error
+    assert first_error["status"] == "error"
+    storage.close()
+
+
+def test_cancelled_and_preflight_failed_approval_can_be_queued_again(tmp_path, monkeypatch):
+    path = tmp_path / "approval-requeue.db"
+    url = f"sqlite:///{path}"
+    storage = SQLiteStorage(str(path))
+    storage.replace_agent_run_bundle(_bundle(
+        "local", datetime(2026, 10, 11, tzinfo=timezone.utc), with_turn=True,
+    ))
+    config = {"scope": "run", "runId": "r-local", "provider": "anthropic",
+              "model": "claude-haiku-4-5", "maxOutputTokens": 256,
+              "rubric": {"name": "task_review", "version": "1", "dimensions": [{
+                  "name": "completion", "description": "Did the recorded work meet the stated task?",
+              }]}}
+    preview = preview_scoped(storage, tenant="local", config=config)
+    approved = {**config, "planFingerprint": preview["planFingerprint"]}
+
+    def queue():
+        return schedule_scoped_once(
+            storage, storage_url=url, tenant="local", config=approved,
+            max_estimated_usd=1, confirm_persistent_egress=True,
+        )
+
+    first = queue()
+    cancel_scheduled_once(url, tenant="local", job_id=first["jobId"],
+                          expected_revision=first["revision"])
+    second = queue()
+    assert second["jobId"] != first["jobId"]
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "synthetic-test-key")
+    from verdict_eval.providers import AnthropicAdapter as installed_adapter
+
+    def missing_sdk(*args, **kwargs):
+        if kwargs.get("api_key") == "unused-preview-key":
+            return installed_adapter(*args, **kwargs)
+        raise ImportError("synthetic missing provider extra")
+
+    monkeypatch.setattr("verdict_eval.providers.AnthropicAdapter", missing_sdk)
+    preflight = run_scheduled_once(url, tenant="local")
+    assert preflight["status"] == "cancelled"
+    assert preflight["reason"] == "preflight_failed"
+    assert ControlStore(url).history("local", "scheduled_evaluation", second["jobId"])[0]["state"] == "cancelled"
+    third = queue()
+    assert third["jobId"] not in {first["jobId"], second["jobId"]}
+    monkeypatch.setattr(
+        "verdict.dashboard.scoped_evaluation.execute_scoped",
+        lambda *args, **kwargs: pytest.fail("provider execution must not start before preflight"),
+    )
+    monkeypatch.setattr(
+        "verdict_eval.providers.AnthropicAdapter",
+        lambda *args, **kwargs: (_ for _ in ()).throw(ImportError("synthetic missing SDK")),
+    )
+    missing_during_plan = run_scheduled_once(url, tenant="local")
+    assert missing_during_plan["reason"] == "preflight_failed"
+    assert missing_during_plan["status"] == "cancelled"
+    monkeypatch.setattr("verdict_eval.providers.AnthropicAdapter", installed_adapter)
+    fourth = queue()
+    assert fourth["jobId"] not in {first["jobId"], second["jobId"], third["jobId"]}
+    storage.close()
 
 
 def test_run_detail_shows_current_native_turn_scores_without_cross_tenant_leak(tmp_path):
@@ -1170,6 +1343,8 @@ def test_component_only_source_usage_is_partial_not_unavailable(tmp_path):
         "reasoningOutputTokens": None,
         "turns": 1,
         "state": "partial",
+        "pricedTurns": 0,
+        "listPriceUsd": None,
     }
     [activity] = insights["sourceActivity"]
     assert activity["inputTokens"] == 9
@@ -1354,6 +1529,31 @@ def test_incompatible_persisted_insights_are_not_served_as_current(tmp_path):
     }
 
 
+def test_agent_only_store_reports_persisted_analysis_coverage(tmp_path):
+    path = tmp_path / "agent-only-coverage.db"
+    url = f"sqlite:///{path}"
+    tenant = "__verdict_local__"
+    storage = SQLiteStorage(str(path))
+    storage.replace_agent_run_bundle(_bundle(tenant, datetime(2026, 10, 11, tzinfo=timezone.utc),
+                                            with_turn=True))
+    storage.close()
+    run_analysis(url, tenant=tenant, build=lambda: build_agent_insights_bundle(
+        url, tenant=tenant, _include_input_fingerprint=True,
+    ))
+
+    async def request():
+        transport = httpx.ASGITransport(app=create_app(storage=url))
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            return await client.get("/api/data")
+
+    response = asyncio.run(request())
+    assert response.status_code == 200
+    coverage = response.json()["coverage"]["deterministicAnalysis"]
+    assert coverage["status"] == "completed"
+    assert coverage["availableRuns"] == coverage["analyzedRuns"] == 1
+    assert coverage["complete"] is True
+
+
 def test_current_analysis_is_reused_after_a_newer_rollback_version(tmp_path):
     path = tmp_path / "analysis-rollback.db"
     storage_url = f"sqlite:///{path}"
@@ -1408,6 +1608,68 @@ def test_agent_runs_can_select_an_exact_tenant_scoped_run(tmp_path):
     assert build_agent_runs_bundle(
         path, tenant="local", run_id="r-other"
     )["runs"] == []
+
+
+def test_agent_runs_list_view_loads_only_the_selected_run(tmp_path, monkeypatch):
+    path = tmp_path / "runs-list.db"
+    storage = SQLiteStorage(str(path))
+    now = datetime(2026, 8, 31, tzinfo=timezone.utc)
+    for index, tenant in enumerate(("local-a", "local-b", "foreign")):
+        bundle = _bundle(tenant, now)
+        if tenant != "foreign":
+            bundle = AgentRunBundle(
+                replace(bundle.session, tenant_id="local", source_locator_hash=f"{index:064x}"),
+                replace(bundle.run, tenant_id="local"),
+                bundle.turns, bundle.events,
+            )
+        storage.replace_agent_run_bundle(bundle)
+    storage.close()
+
+    from verdict.dashboard import agent_evidence_queries
+    original = agent_evidence_queries.load_bundles
+    loaded = []
+
+    def record_load(*args, **kwargs):
+        loaded.append(kwargs.get("run_ids"))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(agent_evidence_queries, "load_bundles", record_load)
+    result = build_agent_runs_bundle(path, tenant="local", view="list", limit=1)
+    assert len(result["runs"]) == 1
+    assert set(result["runs"][0]) == {
+        "runId", "sourceKind", "startedAt", "status", "agentName",
+        "turnCount", "eventCount",
+    }
+    assert result["selectedRun"]["runId"] == result["runs"][0]["runId"]
+    assert "findings" in result["selectedRun"]
+    assert loaded == [(result["selectedRun"]["runId"],)]
+    assert build_agent_runs_bundle(
+        path, tenant="local", view="list", limit=1,
+        selected_run_id="r-foreign",
+    )["selectedRun"] is None
+    assert build_agent_runs_bundle(
+        path, tenant="local", view="list", limit=1, offset=1,
+        selected_run_id=result["selectedRun"]["runId"],
+    )["selectedRun"] is None
+    assert "selectedRun" not in build_agent_runs_bundle(path, tenant="local", limit=1)
+
+    async def request_list():
+        transport = httpx.ASGITransport(
+            app=create_app(storage=f"sqlite:///{path}", tenant_id="local")
+        )
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
+            return (
+                await client.get("/api/runs?view=list&limit=1"),
+                await client.get("/api/runs?view=list&selected_run_id=r-foreign"),
+                await client.get("/api/runs?view=unknown"),
+            )
+
+    listed, foreign, invalid = asyncio.run(request_list())
+    assert listed.status_code == 200 and listed.json() == result
+    assert foreign.status_code == 200 and foreign.json()["selectedRun"] is None
+    assert invalid.status_code == 400
 
 
 def test_agent_runs_can_filter_multiple_affected_runs_beyond_default_page(tmp_path):

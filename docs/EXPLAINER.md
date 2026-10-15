@@ -1,18 +1,22 @@
 # Verdict Explainer
 
-Verdict is a local-first observability toolkit for LLM applications and agent
-systems. It helps teams capture model calls, evaluate response quality with a
-rubric, and look for meaningful changes in behavior over time.
+Verdict is a local-first agent profiler and reliability toolkit. It helps users
+see reported token activity, inspect recorded agent actions and failures, and
+test a proposed change on reviewed cases. It also captures genuine LLM calls
+for rubric evaluation and prospective monitoring.
 
 This document is intentionally public-facing. It explains what the project does,
 what you can try today, and where to look for implementation details.
 
 ## Short Version
 
-Verdict can instrument your Python LLM app with a small SDK call or import the
-telemetry you already collect. Both paths store the same normalized traces
-locally by default, run rubric-based evaluation with a judge model you choose,
-and expose quality, cost, and drift across your own traffic.
+Verdict imports Claude Code and Codex histories and can instrument the agent
+work surrounding supported Python LLM calls. It presents reported usage by
+day/session/turn, the recorded run timeline, deterministic findings, and
+evidence-linked suggestions without a judge key. Users may preview bounded
+evidence for optional selected-scope evaluation, then test changes on fixed
+reviewed cases using a trusted local runner. See the
+[Agent Profiler guide](AGENT_PROFILER.md) for the exact workflow and limits.
 
 For agents, Verdict captures supported provider calls and can also retain the
 application-declared run, turn, tool, command, test, retry, feedback, and outcome
@@ -74,7 +78,7 @@ business outcome, Agent Insights surfaces that failure without a judge call.
 3. **Group when useful**: reviewed provider/model or cluster facets can isolate
    a workload, but the default Monitor comparison covers all eligible traffic.
    Exact-key `explicit` clustering is supported; automatic MiniLM `semantic`
-   and `hybrid` fallback remain experimental opt-in alpha features.
+   and `hybrid` fallback remain experimental opt-in features.
 4. **Evaluate**: the separately invoked batch pipeline or Evaluator Lab selects
    traces and scores them with a configured judge and rubric.
    Evaluator Lab additionally offers a distinct Agent Turn unit: a completed,

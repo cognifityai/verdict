@@ -12,6 +12,7 @@ from verdict.dashboard.control_plane import ControlStore
 from verdict.dashboard.monitor_routes import MonitorRoutes
 from verdict.dashboard.setup_routes import SetupRoutes
 from verdict.monitoring import MonitorRebootstrapRequired, monitor_requires_rebootstrap
+from verdict.service import CycleBusy, UnsupportedCyclePlatform, cycle_guard
 from verdict.telemetry.local_agents import capture_local_agents
 
 
@@ -37,7 +38,8 @@ class ControlRoutes:
                 return JSONResponse({"error": "control unavailable"}, status_code=403)
             writable = self.setup.writable_storage()
             try:
-                documents = ControlStore(self.storage_url).list_current(self.tenant_id)
+                documents = [item for item in ControlStore(self.storage_url).list_current(self.tenant_id)
+                             if item["kind"] in {"settings", "schedule", "alert", "proposal", "review"}]
                 attempts = writable.list_notification_delivery_attempts_for_tenant(
                     self.tenant_id, limit=100
                 )
@@ -97,6 +99,8 @@ class ControlRoutes:
                 return JSONResponse(
                     {"error": "control authorization required"}, status_code=403
                 )
+            if kind in {"case_set", "experiment", "scoped_evaluation", "scheduled_evaluation"}:
+                return JSONResponse({"error": "use the experiment workflow"}, status_code=400)
             try:
                 body = payload.get("payload")
                 if not isinstance(body, dict):
@@ -123,6 +127,9 @@ class ControlRoutes:
                 return JSONResponse(
                     {"error": "control authorization required"}, status_code=403
                 )
+            if kind in {"scheduled_evaluation", "experiment", "scoped_evaluation"}:
+                return JSONResponse({"error": "result or egress record cannot be rolled back"},
+                                    status_code=400)
             try:
                 return ControlStore(self.storage_url).rollback(
                     self.tenant_id,
@@ -146,56 +153,67 @@ class ControlRoutes:
                 )
             try:
                 claude_root, codex_root = self.setup.roots(payload)
-                if claude_root is None and codex_root is None:
+                if claude_root is None and codex_root is None and payload.get("analyzeOnly") is not True:
                     raise ValueError("schedule source approval required")
-                writable = self.setup.writable_storage()
-                try:
-                    monitor_policy = None
-                    if payload.get("runMonitor") is True:
-                        monitor_policy = writable.get_active_monitor_policy(self.scope)
-                        if monitor_policy is not None:
-                            previous = writable.get_latest_monitor_snapshot(
-                                monitor_policy.policy_id
-                            )
-                            if monitor_requires_rebootstrap(
-                                monitor_policy,
-                                previous[0] if previous is not None else None,
-                                active=True,
-                            ):
-                                raise MonitorRebootstrapRequired(
-                                    "monitor requires re-bootstrap"
+                with cycle_guard(self.storage_url):
+                    writable = self.setup.writable_storage()
+                    try:
+                        monitor_policy = None
+                        if payload.get("runMonitor") is True:
+                            monitor_policy = writable.get_active_monitor_policy(self.scope)
+                            if monitor_policy is not None:
+                                previous = writable.get_latest_monitor_snapshot(
+                                    monitor_policy.policy_id
                                 )
-                    summary = capture_local_agents(
-                        writable,
-                        tenant_id=self.tenant_id,
-                        claude_root=claude_root,
-                        codex_root=codex_root,
-                        capture_content=True,
-                    )
-                    monitor_result = self._run_monitor(writable, monitor_policy)
-                finally:
-                    writable.close()
-                from verdict.dashboard.app import build_agent_insights_bundle
+                                if monitor_requires_rebootstrap(
+                                    monitor_policy,
+                                    previous[0] if previous is not None else None,
+                                    active=True,
+                                ):
+                                    raise MonitorRebootstrapRequired(
+                                        "monitor requires re-bootstrap"
+                                    )
+                        summary = capture_local_agents(
+                            writable,
+                            tenant_id=self.tenant_id,
+                            claude_root=claude_root,
+                            codex_root=codex_root,
+                            capture_content=True,
+                        )
+                        monitor_result = self._run_monitor(writable, monitor_policy)
+                    finally:
+                        writable.close()
+                    from verdict.dashboard.app import build_agent_insights_bundle
 
-                analysis = run_analysis(
-                    self.storage_url,
-                    tenant=self.tenant_id,
-                    build=lambda: build_agent_insights_bundle(
+                    analysis = run_analysis(
                         self.storage_url,
                         tenant=self.tenant_id,
-                        _include_input_fingerprint=True,
-                    ),
-                )
+                        build=lambda: build_agent_insights_bundle(
+                            self.storage_url,
+                            tenant=self.tenant_id,
+                            _include_input_fingerprint=True,
+                        ),
+                    )
+                    from verdict.dashboard.scoped_evaluation import run_scheduled_once
+
+                    scheduled_evaluation = run_scheduled_once(
+                        self.storage_url, tenant=self.tenant_id,
+                    )
                 return {
                     "capture": summary.as_dict(),
                     "analysis": analysis["analysisState"],
                     "monitor": monitor_result,
+                    "scheduledEvaluation": scheduled_evaluation,
                 }
             except MonitorRebootstrapRequired:
                 return JSONResponse(
                     {"error": "monitor requires re-bootstrap"},
                     status_code=409,
                 )
+            except CycleBusy:
+                return JSONResponse({"error": "scheduled cycle already running"}, status_code=409)
+            except UnsupportedCyclePlatform as exc:
+                return JSONResponse({"error": str(exc)}, status_code=501)
             except (OSError, TypeError, UnicodeError, ValueError):
                 return JSONResponse({"error": "scheduled cycle failed"}, status_code=400)
 
