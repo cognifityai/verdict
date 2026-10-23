@@ -36,6 +36,37 @@ def test_pipeline_defaults_to_semantic_clustering():
     assert args.capture_judge_telemetry is False
 
 
+def test_pipeline_skips_historical_encoded_trace_before_judging(tmp_path, capsys):
+    path = tmp_path / "historical-pipeline.db"
+    now = datetime(2026, 8, 11, 12, tzinfo=timezone.utc)
+    store = SQLiteStorage(str(path))
+    for trace_id in ("safe", "historical"):
+        store.insert_trace(Trace(
+            trace_id=trace_id, started_at=now - timedelta(hours=1),
+            prompt_redacted="Synthetic question", response_redacted="Synthetic answer",
+            cluster_id="c1",
+        ))
+    store._conn.execute(
+        "UPDATE traces SET prompt_redacted=? WHERE trace_id=?",
+        (r'Observed: {"misc":"\u0073k-proj-AAAAAAAAAAAAAAAAAAAAAAAA"}', "historical"),
+    )
+    store.close()
+    assert main([
+        "--storage", f"sqlite:///{path}", "--judge-provider", "fake",
+        "--judge-model", "synthetic-judge", "--embedder", "deterministic",
+        "--trust-existing-clusters", "--sampling", "uniform", "--sample-rate", "1.0",
+        "--as-of", now.isoformat(),
+    ]) == 0
+    output = capsys.readouterr().out
+    assert "Persisted 1 completed judgment(s)" in output, output
+    check = SQLiteStorage(str(path))
+    try:
+        assert check.list_judgments_for_trace("historical") == []
+        assert len(check.list_judgments_for_trace("safe")) == 1
+    finally:
+        check.close()
+
+
 @pytest.mark.parametrize("init_fails", [False, True])
 def test_pipeline_telemetry_shutdown_uses_client_api(monkeypatch, init_fails) -> None:
     import verdict

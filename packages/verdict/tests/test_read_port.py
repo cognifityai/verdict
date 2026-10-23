@@ -5,6 +5,7 @@ import json
 from dataclasses import fields
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import get_type_hints
 
 import pytest
@@ -33,6 +34,7 @@ from verdict.read_port import (
     VerdictReadPort,
     agent_run_read_to_json,
 )
+from verdict.schema import Trace
 from verdict.storage import BufferedStorage, InMemoryStorage, SQLiteStorage
 from verdict.telemetry.local_agents import capture_local_agents
 
@@ -115,9 +117,11 @@ def _bundle(
 
 
 class _StorageStub:
-    def __init__(self, result: object = None, error: Exception | None = None) -> None:
+    def __init__(self, result: object = None, error: Exception | None = None,
+                 trace_tenant: str | None = "tenant-included") -> None:
         self.result = result
         self.error = error
+        self.trace_tenant = trace_tenant
         self.calls: list[tuple[str, str]] = []
 
     def get_agent_run_bundle(self, tenant_id: str, run_id: str) -> object:
@@ -125,6 +129,55 @@ class _StorageStub:
         if self.error is not None:
             raise self.error
         return self.result
+
+    def get_trace(self, trace_id: str):
+        return SimpleNamespace(tenant_id=self.trace_tenant) if self.trace_tenant else None
+
+
+def test_v1_read_port_withholds_foreign_trace_link() -> None:
+    bundle = _bundle(events=(_model_call(),))
+    foreign = StorageVerdictReadPort(_StorageStub(bundle, trace_tenant="other"))
+    read = foreign.get_agent_run(tenant_id="tenant-included", run_id="run-included")
+    assert read is not None
+    assert read.model_calls[0].trace_id is None
+
+
+def test_v1_read_port_trace_lookup_failure_is_read_unavailable() -> None:
+    canary = "trace-lookup-secret-canary"
+
+    class FailingTraceStorage(_StorageStub):
+        def get_trace(self, trace_id: str):
+            raise RuntimeError(canary)
+
+    with pytest.raises(VerdictReadError) as error:
+        StorageVerdictReadPort(FailingTraceStorage(_bundle())).get_agent_run(
+            tenant_id="tenant-included", run_id="run-included",
+        )
+    _assert_detached_read_error(error.value, "read_unavailable", canary)
+
+
+def test_v1_read_port_resolves_stored_links_in_tenant(tmp_path: Path) -> None:
+    storage = SQLiteStorage(str(tmp_path / "links.db"))
+    try:
+        bundle = _bundle(tenant_id="__verdict_local__", events=(_model_call(trace_id=None),))
+        storage.replace_agent_run_bundle(bundle)
+        storage.insert_trace(Trace(trace_id="foreign", started_at=NOW, tenant_id="other"))
+        storage.insert_trace(Trace(trace_id="legacy", started_at=NOW, tenant_id=None))
+        port = StorageVerdictReadPort(storage)
+        storage._conn.execute(
+            "UPDATE agent_events SET trace_id=? WHERE tenant_id=? AND run_id=?",
+            ("foreign", "__verdict_local__", "run-included"),
+        )
+        foreign = port.get_agent_run(tenant_id="__verdict_local__", run_id="run-included")
+        assert foreign is not None and foreign.model_calls[0].trace_id is None
+        storage._conn.execute(
+            "UPDATE agent_events SET trace_id=? WHERE tenant_id=? AND run_id=?",
+            ("legacy", "__verdict_local__", "run-included"),
+        )
+        legacy = port.get_agent_run(tenant_id="__verdict_local__", run_id="run-included")
+        assert legacy is not None and legacy.model_calls[0].trace_id == "legacy"
+    finally:
+        storage.close()
 
 
 def _empty_read(**changes: object) -> AgentRunRead:
@@ -680,9 +733,9 @@ def test_canonicalization_precedes_analysis_and_makes_storage_order_irrelevant(
     observed_orders: list[tuple[str, ...]] = []
     real_analyze = read_port_module.analysis.analyze_agent_run
 
-    def observing_analyzer(bundle: AgentRunBundle) -> AgentRunAnalysis:
+    def observing_analyzer(bundle: AgentRunBundle, *, local_revision=None) -> AgentRunAnalysis:
         observed_orders.append(tuple(event.event_id for event in bundle.events))
-        return real_analyze(bundle)
+        return real_analyze(bundle, local_revision=local_revision)
 
     monkeypatch.setattr(read_port_module.analysis, "analyze_agent_run", observing_analyzer)
     shuffled_read = StorageVerdictReadPort(_StorageStub(shuffled)).get_agent_run(
@@ -717,7 +770,7 @@ def test_model_call_and_finding_totals_are_measured_before_truncation(monkeypatc
         for index in range(5)
     )
 
-    def five_findings(bundle: AgentRunBundle) -> AgentRunAnalysis:
+    def five_findings(bundle: AgentRunBundle, *, local_revision=None) -> AgentRunAnalysis:
         return AgentRunAnalysis(bundle.run.run_id, {}, {}, findings)
 
     monkeypatch.setattr(read_port_module.analysis, "analyze_agent_run", five_findings)
@@ -893,19 +946,21 @@ def test_real_local_import_storage_and_read_port_turn_boundary(
     storage = SQLiteStorage(str(tmp_path / f"local-{turn_count}.db"))
     try:
         summary = capture_local_agents(storage, tenant_id="local", codex_root=root)
-        [bundle] = storage.list_agent_run_bundles("local")
-        assert summary.stored == 1
-        assert len(bundle.turns) == turn_count
         if accepted:
+            [bundle] = storage.list_agent_run_bundles("local")
+            assert summary.stored == 1
+            assert len(bundle.turns) == turn_count
             value = StorageVerdictReadPort(storage).get_agent_run(
                 tenant_id="local", run_id=bundle.run.run_id
             )
             assert value is not None
         else:
-            with pytest.raises(VerdictReadError) as error:
+            [bundle] = storage.list_agent_run_bundles("local")
+            assert summary.stored == 1
+            assert len(bundle.turns) == 1_000
+            with pytest.raises(VerdictReadError, match="invalid_read_model"):
                 StorageVerdictReadPort(storage).get_agent_run(
-                    tenant_id="local", run_id=bundle.run.run_id
+                    tenant_id="local", run_id=bundle.run.run_id,
                 )
-            assert error.value.code == "invalid_read_model"
     finally:
         storage.close()

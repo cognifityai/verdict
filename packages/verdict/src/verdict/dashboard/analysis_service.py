@@ -14,8 +14,9 @@ from verdict.analysis_records import (
     DeterministicAnalysisRun,
 )
 from verdict.dashboard.storage_url import is_postgres_storage
+from verdict.delivery_queue import NotificationIntent
 
-ANALYZER_VERSION = "agent-insights-v3"
+ANALYZER_VERSION = "agent-insights-v5"
 SCOPE_KEY = "agent-and-trace"
 
 
@@ -50,6 +51,7 @@ def _run_response(
         "analyzerVersion": run.analyzer_version,
         "cutoff": run.cutoff.isoformat(),
         "completedAt": run.completed_at.isoformat(),
+        "verifiedRevision": run.verified_revision,
         "inputFingerprint": run.input_fingerprint,
     }
     return result
@@ -63,6 +65,7 @@ def never_run_response(empty_result: dict[str, Any]) -> dict[str, Any]:
         "analyzerVersion": ANALYZER_VERSION,
         "cutoff": None,
         "completedAt": None,
+        "verifiedRevision": None,
         "inputFingerprint": None,
     }
     return result
@@ -90,14 +93,25 @@ def run_analysis(
     *,
     tenant: str,
     build: Callable[[], dict[str, Any]],
+    delivery_intent_factory: Callable[[dict[str, Any]], list[NotificationIntent]] | None = None,
 ) -> dict[str, Any]:
     """Compute once, then publish one immutable terminal snapshot atomically."""
+    # Ensure the evidence revision schema exists before the read-only builder
+    # takes its snapshot. Close the writer handle before any evidence scan.
+    storage = _storage(storage_url)
+    storage.close()
     cutoff = datetime.now(timezone.utc)
     try:
         result = build()
         fingerprint = result.pop("_analysisInputFingerprint", None)
+        evidence_revision = result.pop("_analysisEvidenceRevision", None)
         if not isinstance(fingerprint, str) or len(fingerprint) != 64:
             raise ValueError("analysis builder did not provide an input fingerprint")
+        if evidence_revision is not None and (
+            isinstance(evidence_revision, bool) or not isinstance(evidence_revision, int)
+            or evidence_revision < 0
+        ):
+            raise ValueError("analysis builder did not provide a valid evidence revision")
         status = AnalysisRunStatus.COMPLETED
     except Exception as exc:
         result = {
@@ -109,32 +123,36 @@ def run_analysis(
             },
         }
         fingerprint = hashlib.sha256(_canonical(result)).hexdigest()
+        evidence_revision = None
         status = AnalysisRunStatus.ERROR
 
+    identity_material = {
+        "tenant": tenant,
+        "scope": SCOPE_KEY,
+        "version": ANALYZER_VERSION,
+        "input": fingerprint,
+        "status": status.value,
+    }
+    analysis_id = hashlib.sha256(_canonical(identity_material)).hexdigest()
+    intents = delivery_intent_factory(result) if delivery_intent_factory is not None else []
     storage = _storage(storage_url)
     try:
-        latest = storage.get_latest_deterministic_analysis_run(
-            tenant,
-            SCOPE_KEY,
-            analyzer_version=ANALYZER_VERSION,
-        )
-        if (
-            latest is not None
-            and latest.analyzer_version == ANALYZER_VERSION
-            and latest.input_fingerprint == fingerprint
-            and latest.status is status
-        ):
-            return _run_response(latest)
-        identity_material = {
-            "tenant": tenant,
-            "scope": SCOPE_KEY,
-            "version": ANALYZER_VERSION,
-            "input": fingerprint,
-            "status": status.value,
-        }
+        prior = storage.get_deterministic_analysis_run(analysis_id)
+        if prior is not None:
+            if prior.result != result or prior.status is not status:
+                raise ValueError("analysis input produced different content")
+            prior = (
+                storage.verify_worker_analysis_run(
+                    analysis_id, revision=evidence_revision, intents=intents,
+                ) if delivery_intent_factory is not None else
+                storage.verify_deterministic_analysis_run(
+                    analysis_id, revision=evidence_revision,
+                )
+            )
+            return _run_response(prior)
         completed_at = datetime.now(timezone.utc)
         run = DeterministicAnalysisRun(
-            analysis_id=hashlib.sha256(_canonical(identity_material)).hexdigest(),
+            analysis_id=analysis_id,
             tenant_id=tenant,
             scope_key=SCOPE_KEY,
             cutoff=cutoff,
@@ -143,9 +161,34 @@ def run_analysis(
             analyzer_version=ANALYZER_VERSION,
             input_fingerprint=fingerprint,
             result=result,
+            verified_revision=evidence_revision,
         )
-        storage.save_deterministic_analysis_run(run)
-        response = _run_response(run)
+        try:
+            if delivery_intent_factory is not None:
+                storage.save_worker_analysis_run(run, intents)
+                published = storage.verify_worker_analysis_run(
+                    analysis_id, revision=evidence_revision, intents=intents,
+                )
+            else:
+                storage.save_deterministic_analysis_run(run)
+                published = storage.verify_deterministic_analysis_run(
+                    analysis_id, revision=evidence_revision,
+                )
+            response = _run_response(published)
+        except ValueError:
+            # Another process may have saved the same identity after our read.
+            prior = storage.get_deterministic_analysis_run(analysis_id)
+            if prior is None or prior.result != result or prior.status is not status:
+                raise
+            prior = (
+                storage.verify_worker_analysis_run(
+                    analysis_id, revision=evidence_revision, intents=intents,
+                ) if delivery_intent_factory is not None else
+                storage.verify_deterministic_analysis_run(
+                    analysis_id, revision=evidence_revision,
+                )
+            )
+            response = _run_response(prior)
     finally:
         storage.close()
     return response

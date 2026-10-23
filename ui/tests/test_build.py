@@ -3,8 +3,6 @@ from ui import build
 
 def test_tracked_dashboard_pages_match_local_asset_shells():
     for filename, (title, script) in build.PAGES.items():
-        if filename == "VerdictUI.html":
-            continue
         assert (build.HERE / filename).read_text() == build.page(title, script)
     assert (build.DASHBOARD / "dashboard.html").read_text() == build.page(
         "Verdict - Dashboard", "dashboard.js", build.DASHBOARD
@@ -13,8 +11,6 @@ def test_tracked_dashboard_pages_match_local_asset_shells():
 
 def test_generated_pages_fingerprint_local_assets():
     for filename, (_title, script) in build.PAGES.items():
-        if filename == "VerdictUI.html":
-            continue
         html = (build.HERE / filename).read_text()
         assert f'assets/{script}?v=' in html
         assert 'assets/verdict.css?v=' in html
@@ -24,19 +20,17 @@ def test_generated_pages_fingerprint_local_assets():
 
 
 def test_cluster_ids_are_not_reformatted_as_rubric_dimensions():
-    source = (build.HERE / "VerdictUI.jsx").read_text()
+    source = (build.HERE / "Registry.jsx").read_text()
     assert "label: dimensionLabel(cluster.cluster_id)" not in source
-    assert "label: cluster.display_name || cluster.cluster_id" in source
+    assert "{cluster.displayName}" in source
 
 
-def test_overview_uses_the_canonical_monitor_read_model():
+def test_overview_uses_guided_home_and_no_retired_summary():
     source = (build.HERE / "VerdictUI.jsx").read_text()
-    assert "MonitorOverview({ monitor: DATA.monitor })" in source
-    assert 'label="Cohort monitor alerts"' in source
+    assert "<GuidedHome" in source
+    assert "function MonitorOverview" not in source
+    assert "function Overview" not in source
     assert 'label="Evaluation drift signals"' not in source
-    assert '["signals", "Legacy History"]' not in source
-    assert "function DriftSignals" not in source
-    assert "LATEST COMPLETED RUN" not in source
 
 
 def test_setup_sdk_example_captures_agent_run_and_turn_boundaries():
@@ -65,10 +59,16 @@ def test_pages_do_not_load_runtime_code_from_public_cdns():
 
 def test_compiled_assets_exist():
     assets = build.HERE / "assets"
-    for filename in ("landing.js", "all-in-one.js", "verdict.css"):
+    for filename in ("landing.js", "verdict.css"):
         assert (assets / filename).is_file()
     for filename in ("dashboard.js", "verdict.css"):
         assert (build.DASHBOARD / "assets" / filename).is_file()
+
+
+def test_superseded_standalone_demo_is_not_built():
+    assert set(build.PAGES) == {"landing.html"}
+    assert not (build.HERE / "VerdictUI.html").exists()
+    assert not (build.HERE / "assets" / "all-in-one.js").exists()
 
 
 def test_tailwind_scans_split_dashboard_components():

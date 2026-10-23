@@ -18,6 +18,28 @@ test("finding routes preserve every bounded affected run and the selected run", 
   });
 });
 
+test("recorded source and agent group routes filter runs without carrying an old selection", () => {
+  for (const [field, parameter, value] of [
+    ["sourceKind", "source", "custom/agent"],
+    ["agentName", "agent", "research worker"],
+  ]) {
+    const hash = serializeDashboardRoute({ tab: "explore", section: "runs", [field]: value,
+      runIds: [], selectedRunId: "old-run", eventId: "old-event" });
+    assert.match(hash, new RegExp(`${parameter}=`));
+    const parsed = parseDashboardRoute(hash);
+    assert.equal(parsed[field], value);
+    assert.equal(parsed.selectedRunId, null);
+    assert.equal(parsed.eventId, null);
+  }
+  assert.equal(parseDashboardRoute(`#tab=explore&section=runs&source=${"x".repeat(257)}`).sourceKind, undefined);
+  const combined = parseDashboardRoute(serializeDashboardRoute({ tab: "explore", section: "runs",
+    sourceKind: "codex", agentName: "writer", runIds: [], selectedRunId: "old-run" }));
+  assert.equal(combined.sourceKind, "codex");
+  assert.equal(combined.agentName, "writer");
+  assert.equal(combined.selectedRunId, null);
+  assert.doesNotMatch(serializeDashboardRoute({ tab: "monitor", section: "status", sourceKind: "codex" }), /source=/);
+});
+
 test("invalid direct-link state fails closed without preserving unrelated runs", () => {
   assert.deepEqual(parseDashboardRoute("#tab=nope&run=&selected=secret", "insights"), {
     tab: "overview", section: "summary", explicit: false, findingCode: null, runIds: [],
@@ -36,12 +58,30 @@ test("trace evaluator filters and exact trace links round trip", () => {
   assert.equal(route.evaluatorId, "evaluator-2");
 });
 
+test("UTC model-call date survives trace route selection and rejects impossible dates", () => {
+  const route = parseDashboardRoute(serializeDashboardRoute({
+    tab: "explore", section: "calls", traceDate: "2026-10-07", traceJudgeStatus: "fail",
+    traceId: "trace-7",
+  }));
+  assert.equal(route.traceDate, "2026-10-07");
+  assert.equal(route.traceId, "trace-7");
+  assert.equal(route.traceJudgeStatus, "fail");
+  assert.equal(parseDashboardRoute("#tab=explore&section=calls&date=2026-02-30").traceDate ?? null, null);
+  assert.equal(parseDashboardRoute("#tab=explore&section=runs&date=2026-10-07").traceDate ?? null, null);
+});
+
 test("drift subsection survives refreshable direct links", () => {
   assert.equal(
     parseDashboardRoute("#tab=drift&drift=clusters").tab,
     "monitor",
   );
   assert.equal(parseDashboardRoute("#tab=drift&drift=clusters").section, "segments");
+});
+
+test("Monitor opens its operational status before the setup and advanced views", () => {
+  assert.equal(parseDashboardRoute("#tab=monitor").section, "status");
+  assert.equal(parseDashboardRoute("#tab=monitor&section=plan").section, "plan");
+  assert.equal(parseDashboardRoute("#tab=monitor&section=history").section, "history");
 });
 
 test("retired signals and drift links redirect to Monitor History", () => {
@@ -155,6 +195,30 @@ test("event focus is dropped outside one selected Agent Run", () => {
   ]) {
     assert.equal(serializeDashboardRoute(route).includes("event_id="), false);
   }
+});
+
+test("exact notice context survives a selected run hash and clears outside runs", () => {
+  const route = { tab: "explore", section: "runs", runIds: ["failed-run"],
+    selectedRunId: "failed-run", eventId: "failed-event", noticeId: "notice-one" };
+  const hash = serializeDashboardRoute(route);
+  assert.equal(parseDashboardRoute(hash).noticeId, "notice-one");
+  assert.equal(serializeDashboardRoute({ ...route, tab: "monitor", section: "status" }).includes("notice="), false);
+  assert.equal(serializeDashboardRoute({ ...route, runIds: [], selectedRunId: null }).includes("notice="), false);
+  assert.equal(serializeDashboardRoute({ ...route, noticeId: "bad\0notice" }).includes("notice="), false);
+});
+
+test("exact recent event links retain revision and original IDs only for a selected run", () => {
+  const route = { tab: "explore", section: "runs", runIds: ["large-run"],
+    selectedRunId: "large-run", recentRevision: "a".repeat(64),
+    recentTurnId: "turn-original", recentEventId: "event-original" };
+  const hash = serializeDashboardRoute(route);
+  assert.match(hash, /recent_rev=/);
+  const restored = parseDashboardRoute(hash);
+  assert.equal(restored.recentRevision, route.recentRevision);
+  assert.equal(restored.recentTurnId, route.recentTurnId);
+  assert.equal(restored.recentEventId, route.recentEventId);
+  assert.doesNotMatch(serializeDashboardRoute({ ...route, runIds: [], selectedRunId: null }), /recent_/);
+  assert.doesNotMatch(serializeDashboardRoute({ ...route, recentRevision: "bad" }), /recent_/);
 });
 
 test("unknown duplicate malformed and oversized public selections fail closed", () => {

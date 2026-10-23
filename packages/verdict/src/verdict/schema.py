@@ -398,6 +398,7 @@ class SpanRecord:
     duration_ms: float | None = None
     attributes: dict = field(default_factory=dict)
     error: str | None = None
+    tenant_id: str | None = None
 
 
 # ---------------------------------------------------------------------------

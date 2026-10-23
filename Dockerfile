@@ -13,26 +13,9 @@ WORKDIR /app
 RUN pip install --no-cache-dir \
     "cognifity-verdict[dashboard,postgres,eval,anthropic,openai,google]==${VERDICT_VERSION}"
 
-# A maintainer may place verdict.db in docker-db/ before building. A clean
-# checkout creates an empty schema through the real storage adapter instead of
-# carrying a second copy of the schema in this Dockerfile.
-COPY docker-db/ /tmp/verdict-db/
-RUN python - <<'PY'
-from pathlib import Path
-from shutil import copy2
-
-from verdict.storage import SQLiteStorage
-
-provided = Path("/tmp/verdict-db/verdict.db")
-target = Path("/app/verdict.db")
-if provided.is_file():
-    auxiliary = sorted(provided.parent.glob(f"{provided.name}-*"))
-    if auxiliary:
-        raise SystemExit("Checkpoint verdict.db before building; SQLite sidecar files exist")
-    copy2(provided, target)
-else:
-    SQLiteStorage(str(target)).close()
-PY
+# Initialize an empty local schema only. Capture stores belong outside the
+# image and are supplied at runtime through VERDICT_STORAGE.
+RUN python -c 'from verdict.storage import SQLiteStorage; SQLiteStorage("/app/verdict.db").close()'
 
 EXPOSE 8080
 

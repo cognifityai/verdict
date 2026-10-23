@@ -3,6 +3,7 @@ import random
 import re
 import string
 from copy import deepcopy
+from datetime import datetime, timezone
 
 import pytest
 import verdict.redaction as redaction_module
@@ -1037,7 +1038,10 @@ def test_sensitive_mapping_fields_redact_the_entire_opaque_value(field: str) -> 
     output = redact_structure({"outer": {field: canary}})
 
     assert canary not in json.dumps(output)
-    assert output["outer"][field].startswith("<")
+    if "\\u" in field:
+        assert field not in output["outer"]
+    else:
+        assert output["outer"][field].startswith("<")
 
 
 @pytest.mark.parametrize(
@@ -1251,6 +1255,93 @@ def test_deeply_serialized_credential_is_removed_from_raw_messages_storage() -> 
 
     assert stored is not None
     assert canary not in repr(stored.raw_messages)
+
+
+def test_json_escaped_provider_key_is_removed_from_content_fields_before_sqlite_storage(tmp_path):
+    from verdict.evidence import (
+        AgentRun,
+        AgentRunBundle,
+        AgentTurn,
+        EvidenceState,
+        ExecutionStatus,
+        SourceSession,
+    )
+    from verdict.schema import DimensionScore, Judgment, SpanRecord, Trace, Verdict
+    from verdict.storage.sqlite import SQLiteStorage
+
+    canary = "sk-proj-BBBBBBBBBBBBBBBBBBBBBBBB"
+    encoded = r'{"misc":"\u0073k-proj-BBBBBBBBBBBBBBBBBBBBBBBB","error":"schema mismatch"}'
+    storage = SQLiteStorage(str(tmp_path / "json-escaped.db"))
+    now = datetime(2026, 10, 19, tzinfo=timezone.utc)
+    storage.insert_trace(Trace(trace_id="trace", tenant_id="local", started_at=now, ended_at=now,
+                               prompt_redacted=encoded, response_redacted=encoded, error=encoded))
+    storage.insert_span(SpanRecord(span_id="span", trace_id="trace", tenant_id="local",
+                                   started_at=now, ended_at=now, error=encoded,
+                                   attributes={r"\u0073k-proj-GGGGGGGGGGGGGGGGGGGGGGGG": "x"}))
+    storage.insert_judgment(Judgment(trace_id="trace", error=encoded, dimensions=[
+        DimensionScore(name="quality", verdict=Verdict.FAIL, reasoning=encoded)]))
+    source = SourceSession("source", "local", "synthetic", "a" * 64, now, now)
+    run = AgentRun("run", "source", "local", now, ExecutionStatus.COMPLETED, now)
+    turn = AgentTurn("turn", "run", 0, now, ExecutionStatus.COMPLETED, now,
+                     encoded, encoded, EvidenceState.PRESENT, EvidenceState.PRESENT)
+    storage.replace_agent_run_bundle(AgentRunBundle(source, run, (turn,), ()))
+
+    trace = storage.get_trace("trace")
+    span = storage.list_spans(span_id="span", tenant_id="local")[0]
+    assert not any("\\u0073k-proj" in key for key in span.attributes)
+    judgment = storage.list_judgments_for_trace("trace")[0]
+    stored_turn = storage.get_agent_run_bundle("local", "run").turns[0]
+    for text in (trace.prompt_redacted, trace.response_redacted, trace.error,
+                 span.error, judgment.error, judgment.dimensions[0].reasoning,
+                 stored_turn.user_request_redacted, stored_turn.final_response_redacted):
+        assert canary not in json.dumps(json.loads(text))
+        assert json.loads(text) == {"error": "schema mismatch", "misc": "<PROVIDER_KEY>"}
+    mixed = r'Here is data: {"misc":"\u0073k-proj-BBBBBBBBBBBBBBBBBBBBBBBB"}'
+    storage.insert_trace(Trace(trace_id="mixed", tenant_id="local", started_at=now,
+                               ended_at=now, prompt_redacted=mixed))
+    assert storage.get_trace("mixed").prompt_redacted == "<REDACTED>"
+    storage.close()
+
+
+def test_json_escaped_provider_key_is_removed_from_other_persisted_text_contracts(tmp_path):
+    from verdict.agent_judgment import AgentTurnJudgment
+    from verdict.conversation_assessments import validate_rubric
+    from verdict.conversations import validate_conversation
+    from verdict.schema import DimensionScore, Verdict
+    from verdict.storage.sqlite import SQLiteStorage
+
+    canary = "sk-proj-CCCCCCCCCCCCCCCCCCCCCCCC"
+    mixed = r'Observed: {"misc":"\u0073k-proj-CCCCCCCCCCCCCCCCCCCCCCCC"}'
+    judgment = AgentTurnJudgment(
+        tenant_id="local", run_id="run", turn_id="turn",
+        evaluator_fingerprint="a" * 64, evidence_fingerprint="b" * 64,
+        evaluator_provider="openai", evaluator_config={}, judge_models=["model"],
+        expected_dimensions=["quality"], rubric_name="quality", rubric_version="1",
+        dimensions=[DimensionScore(name="quality", verdict=Verdict.FAIL, reasoning=mixed)],
+        error=mixed,
+    )
+    assert judgment.error == "<REDACTED>"
+    assert judgment.dimensions[0].reasoning == "<REDACTED>"
+    conversation = validate_conversation({
+        "id": "a" * 32, "tenant_id": "local", "source_scope": "b" * 16,
+        "messages": [{"role": "user", "content": mixed}], "end_status": "complete",
+        "input_issues": [], "labels": {"intent": mixed},
+    })
+    assert conversation["messages"][0]["content"] == "<REDACTED>"
+    assert conversation["labels"]["intent"] == "<REDACTED>"
+    storage = SQLiteStorage(str(tmp_path / "conversation-escaped.db"))
+    storage.save_conversation(conversation)
+    saved = storage.get_conversation("local", conversation["id"])
+    assert saved["messages"][0]["content"] == "<REDACTED>"
+    storage.close()
+    rubric = validate_rubric({
+        "name": "quality", "version": "1", "target": "conversation",
+        "instructions": mixed,
+        "dimensions": [{"name": "answer", "description": mixed, "type": "binary"}],
+    })
+    assert rubric["instructions"] == "<REDACTED>"
+    assert rubric["dimensions"][0]["description"] == "<REDACTED>"
+    assert canary not in json.dumps([judgment.error, conversation, rubric])
 
 
 def test_flat_github_and_basic_authorization_credentials_are_redacted() -> None:

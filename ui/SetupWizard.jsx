@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import {
   configuredStorePresentation,
   observedSourcePresentation,
@@ -24,6 +24,9 @@ export function SetupWizard({ configUrl, onComplete, onNavigate, onRefresh, agen
   const [busy, setBusy] = useState(false);
   const [busyLabel, setBusyLabel] = useState(null);
   const [result, setResult] = useState(null);
+  const [latestLocalSummary, setLatestLocalSummary] = useState(null);
+  const [attemptStatus, setAttemptStatus] = useState(null);
+  const captureGeneration = useRef(0);
   const [error, setError] = useState(null);
   const [claudeRoot, setClaudeRoot] = useState("~/.claude/projects");
   const [codexRoot, setCodexRoot] = useState("~/.codex/sessions");
@@ -75,10 +78,14 @@ export function SetupWizard({ configUrl, onComplete, onNavigate, onRefresh, agen
       const status = await fetch(`${root}/api/setup/capture/status?job=${encodeURIComponent(job.jobId)}`, { credentials: "same-origin", headers: { Accept: "application/json" } });
       if (status.status === 404) throw new Error("another capture replaced this one; its result is shown under Data Sources");
       if (!status.ok) throw new Error(`HTTP ${status.status}`);
-      job = (await status.json()).job;
+      const body = await status.json();
+      if (body.attempts) setAttemptStatus(body.attempts);
+      job = body.job;
     }
+    if (job?.summary) setLatestLocalSummary(job.summary);
     if (!job || job.state !== "completed") throw new Error(job?.error || "capture did not complete");
     const result = { summary: job.summary, analysis: job.analysis };
+    setLatestLocalSummary(job.summary);
     setResult(result); return result;
   }
 
@@ -92,6 +99,7 @@ export function SetupWizard({ configUrl, onComplete, onNavigate, onRefresh, agen
       });
       const body = await response.json();
       if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
+      captureGeneration.current += 1;
       return await followCaptureJob(body.job);
     } catch (failure) {
       setError(setupFailureMessage(failure, serverOrigin)); return null;
@@ -102,11 +110,20 @@ export function SetupWizard({ configUrl, onComplete, onNavigate, onRefresh, agen
   // On load, pick up the job that is still running and show its progress.
   useEffect(() => {
     let active = true;
+    const generation = captureGeneration.current;
     fetch(`${root}/api/setup/capture/status`, { credentials: "same-origin", headers: { Accept: "application/json" } })
       .then((response) => response.ok ? response.json() : null)
       .then(async (body) => {
         const job = body?.job;
-        if (!active || !job || (job.state !== "running" && job.state !== "analyzing")) return;
+        if (!active || generation !== captureGeneration.current) return;
+        if (body?.attempts) setAttemptStatus(body.attempts);
+        if (!job) return;
+        if (body.lastImportedSummary) setLatestLocalSummary(body.lastImportedSummary);
+        if (job.summary) setLatestLocalSummary(job.summary);
+        if (job.state === "completed") {
+          return;
+        }
+        if (job.state !== "running" && job.state !== "analyzing") return;
         setBusy(true); setError(null);
         try { if (await followCaptureJob(job)) onComplete("local"); }
         catch (failure) { if (active) setError(setupFailureMessage(failure, serverOrigin)); }
@@ -124,6 +141,26 @@ export function SetupWizard({ configUrl, onComplete, onNavigate, onRefresh, agen
   const importKey = JSON.stringify([filePath, fileFormat]);
   const statusNotice = busy && busyLabel && <div role="status" aria-live="polite" className={panel} style={{ ...style, color: "#94a39d" }}>{busyLabel}</div>;
   const errorNotice = error && <div role="alert" className={panel} style={{ ...style, color: "#ff6b6b" }}>{error}</div>;
+  const limitedSessionCount = Number.isInteger(latestLocalSummary?.event_limited_runs) && latestLocalSummary.event_limited_runs > 0
+    ? latestLocalSummary.event_limited_runs : 0;
+  const recentSampleErrors = Number.isInteger(latestLocalSummary?.recent_sample_errors) && latestLocalSummary.recent_sample_errors > 0
+    ? latestLocalSummary.recent_sample_errors : 0;
+  const deferredFiles = Number.isInteger(latestLocalSummary?.deferred) && latestLocalSummary.deferred > 0
+    ? latestLocalSummary.deferred : 0;
+  const skippedFiles = Number.isInteger(latestLocalSummary?.skipped) && latestLocalSummary.skipped > 0
+    ? latestLocalSummary.skipped : 0;
+  const incompleteNotice = (deferredFiles > 0 || skippedFiles > 0) && <div role="alert" className={panel} style={{ ...style, color: "#f2c879" }}>
+    Local history capture is incomplete: {deferredFiles} {deferredFiles === 1 ? "history file" : "history files"} deferred and {skippedFiles} skipped. Captured evidence is available, but rescan to process remaining files. A skipped file may need repair before it can be captured.
+  </div>;
+  const durableAttemptNotice = attemptStatus?.failedFiles > 0 && <div role="alert" className={panel} style={{ ...style, color: "#f2c879" }}>
+    Latest recorded scan attempts failed for {attemptStatus.failedFiles} {attemptStatus.failedFiles === 1 ? "history file" : "history files"}. Reasons: {Object.entries(attemptStatus.failureReasons || {}).map(([reason, count]) => `${reason.replaceAll("_", " ")} (${count})`).join(", ") || "unavailable"}. Check the current source files and rescan. This status survives a dashboard restart.
+  </div>;
+  const coverageNotice = limitedSessionCount > 0 && <div role="alert" className={panel} style={{ ...style, color: "#f2c879" }}>
+    A recent local import reported {limitedSessionCount} {limitedSessionCount === 1 ? "session" : "sessions"} beyond the bounded run view. Open the run to inspect its recent sample and use Browse recorded events when a complete captured page is available. Selected recorded failures can become monitored issues after monitoring is activated, and linked model calls can support call-level evaluation. The bounded run view alone cannot establish a whole-run issue or no-issue result.
+  </div>;
+  const sampleErrorNotice = recentSampleErrors > 0 && <div role="alert" className={panel} style={{ ...style, color: "#f2c879" }}>
+    A recent local import could not refresh the recent event sample for {recentSampleErrors} {recentSampleErrors === 1 ? "session" : "sessions"}. An older dated sample may still be visible. Check the source file and rescan after resolving the conflict.
+  </div>;
   if (hasObservedStore && !editing) {
     const sourceText = (Array.isArray(agentSummary.agentRunSources) ? agentSummary.agentRunSources : [])
       .filter((item) => typeof item?.sourceKind === "string" && item.sourceKind && Number.isInteger(Number(item.runs)) && Number(item.runs) > 0)
@@ -133,6 +170,10 @@ export function SetupWizard({ configUrl, onComplete, onNavigate, onRefresh, agen
       <div className="max-w-4xl space-y-4">
         {statusNotice}
         {errorNotice}
+        {incompleteNotice}
+        {durableAttemptNotice}
+        {coverageNotice}
+        {sampleErrorNotice}
         <section className={panel} style={style}>
           <div className="text-xs font-mono" style={{ color: "#4ee1aa" }}>{storePresentation.connectedEmpty ? "CONNECTED VERDICT STORE" : "OBSERVED DATA SOURCES"}</div>
           <h2 className="text-lg font-semibold mt-1">{storePresentation.connectedEmpty ? `Connected ${storePresentation.backendLabel} store` : sourcePresentation.heading}</h2>
@@ -155,6 +196,7 @@ export function SetupWizard({ configUrl, onComplete, onNavigate, onRefresh, agen
   }
   return (
     <div className="max-w-4xl space-y-4">
+      {durableAttemptNotice}
       <section className={panel} style={style}>
         <div className="text-xs font-mono" style={{ color: "#4ee1aa" }}>{hasObservedStore ? "ADD OR RESCAN DATA" : "1 · SOURCE"}</div>
         <h2 className="text-lg font-semibold mt-1">{hasObservedStore ? "Add, import, or rescan a source" : "What do you want to analyze?"}</h2>
@@ -203,10 +245,13 @@ export function SetupWizard({ configUrl, onComplete, onNavigate, onRefresh, agen
 
       {statusNotice}
       {errorNotice}
+      {incompleteNotice}
+      {coverageNotice}
+      {sampleErrorNotice}
       {result && <section className={panel} style={style}>
         <div className="text-xs font-mono" style={{ color: "#4ee1aa" }}>RESULT</div>
         <pre className="mt-3 text-xs overflow-x-auto">{JSON.stringify(result, null, 2)}</pre>
-        {(result.summary?.stored > 0) && <div className="mt-4"><div className="text-xs font-mono" style={{ color: "#56b6ff" }}>3 · INITIAL ANALYSIS</div><p className="text-sm mt-2" style={{ color: "#94a39d" }}>Capture/import is complete. Review deterministic findings and evidence coverage first; a judge and clusters are optional next decisions.</p><div className="flex flex-wrap gap-2 mt-3"><button onClick={() => onNavigate?.("insights")} className="px-4 py-2 text-sm" style={{ background: "#4ee1aa", color: "#0b0e0d" }}>Review findings</button><button onClick={() => onNavigate?.("evaluators")} className="border px-4 py-2 text-sm">Configure judge</button><button onClick={() => onNavigate?.("explore")} className="border px-4 py-2 text-sm">Explore cohorts / clusters</button><button onClick={() => onNavigate?.("control")} className="border px-4 py-2 text-sm">Schedule production monitoring</button></div></div>}
+        {(result.summary?.stored > 0) && <div className="mt-4"><div className="text-xs font-mono" style={{ color: "#56b6ff" }}>3 · REVIEW THE EVIDENCE</div><p className="text-sm mt-2" style={{ color: "#94a39d" }}>Import finished. Review what was captured and any recorded failures, then follow the suggested monitoring plan. Answer-quality evaluation remains a separate choice.</p><button onClick={() => onNavigate?.("insights")} className="mt-3 px-4 py-2 text-sm" style={{ background: "#4ee1aa", color: "#0b0e0d" }}>Open overview and next step</button></div>}
       </section>}
     </div>
   );

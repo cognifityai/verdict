@@ -64,7 +64,7 @@ _TRACE_TRANSPORT_V1_FIELDS = frozenset(
     }
 )
 _TRACE_TRANSPORT_FIELDS = _TRACE_TRANSPORT_V1_FIELDS | {"service_name", "environment"}
-_SPAN_TRANSPORT_FIELDS = frozenset(
+_SPAN_TRANSPORT_V1_FIELDS = frozenset(
     {
         "span_id",
         "name",
@@ -77,6 +77,7 @@ _SPAN_TRANSPORT_FIELDS = frozenset(
         "error",
     }
 )
+_SPAN_TRANSPORT_FIELDS = _SPAN_TRANSPORT_V1_FIELDS | {"tenant_id"}
 CaptureKind = Literal["trace", "agent", "span"]
 _SEGMENT_NAME = re.compile(
     r"^verdict-agent-(?P<producer>[A-Za-z0-9][A-Za-z0-9._:-]{0,127})-"
@@ -161,14 +162,19 @@ class StorageCaptureSink:
         prepared = deepcopy(span)
         if prepared.trace_id is not None:
             try:
-                trace_exists = getattr(self.storage, "trace_exists", None)
-                if callable(trace_exists):
-                    link_exists = bool(trace_exists(prepared.trace_id))
+                owner_lookup = getattr(self.storage, "trace_owner", None)
+                if callable(owner_lookup):
+                    trace_owner = owner_lookup(prepared.trace_id)
                 else:
-                    link_exists = self.storage.get_trace(prepared.trace_id) is not None
-            except Exception:
+                    trace = self.storage.get_trace(prepared.trace_id)
+                    trace_owner = (trace.tenant_id or "__verdict_local__") if trace else None
+            except Exception as exc:
+                raise RuntimeError("trace lookup unavailable") from exc
+            link_exists = trace_owner is not None
+            if (trace_owner is not None and prepared.tenant_id is not None
+                    and prepared.tenant_id != trace_owner):
                 link_exists = False
-                prepared.attributes.setdefault("verdict.link_status", "trace_lookup_failed")
+                prepared.attributes.setdefault("verdict.link_status", "tenant_mismatch")
             if not link_exists:
                 prepared.trace_id = None
                 prepared.attributes.setdefault("verdict.link_status", "trace_not_found")
@@ -225,9 +231,10 @@ def _span_to_payload(span: SpanRecord) -> dict[str, Any]:
 
 
 def _span_from_payload(payload: object) -> SpanRecord:
-    if not isinstance(payload, dict) or set(payload) != _SPAN_TRANSPORT_FIELDS:
+    if not isinstance(payload, dict) or frozenset(payload) not in {_SPAN_TRANSPORT_V1_FIELDS, _SPAN_TRANSPORT_FIELDS}:
         raise ValueError("capture Span has an invalid shape")
     values = dict(payload)
+    values.setdefault("tenant_id", None)
     try:
         started_raw = values.pop("started_at")
         ended_raw = values.pop("ended_at")
@@ -243,6 +250,7 @@ def _span_from_payload(payload: object) -> SpanRecord:
     _require_transport_text(span.span_id, field="span_id", maximum=256)
     _require_transport_text(span.name, field="span name", maximum=4096, allow_empty=True)
     _require_transport_text(span.trace_id, field="span trace_id", maximum=256, optional=True)
+    _require_transport_text(span.tenant_id, field="span tenant_id", maximum=256, optional=True)
     _require_transport_text(
         span.parent_name,
         field="span parent name",

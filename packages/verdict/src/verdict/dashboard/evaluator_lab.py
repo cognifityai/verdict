@@ -26,7 +26,7 @@ from verdict.agent_judgment import (
 )
 from verdict.monitor_inputs import LOCAL_TENANT
 from verdict.pricing import PRICING_LAST_VERIFIED, compute_cost_usd
-from verdict.redaction import redact
+from verdict.redaction import redact_structure
 from verdict.schema import Judgment, JudgmentStatus, Trace
 from verdict.storage.base import Storage
 from verdict.trace_facts import trace_evidence_reason
@@ -179,10 +179,15 @@ def _validated_config(config: dict[str, Any]):
 
 
 def _eligibility(trace: Trace) -> str | None:
+    if any(redact_structure(value) != value for value in (
+        trace.prompt_redacted, trace.response_redacted,
+    ) if value is not None):
+        return "redacted_evidence"
     return trace_evidence_reason(
         error=trace.error,
         prompt=trace.prompt_redacted,
         response=trace.response_redacted,
+        ended_at=trace.ended_at,
     )
 
 
@@ -309,7 +314,8 @@ def _pending(
 
 def _planned_trace(trace: Trace) -> dict[str, str]:
     evidence = json.dumps(
-        [trace.trace_id, trace.prompt_redacted, trace.response_redacted],
+        [trace.trace_id, trace.prompt_redacted, trace.response_redacted,
+         trace.error, trace.ended_at.isoformat() if trace.ended_at else None],
         ensure_ascii=False,
         separators=(",", ":"),
     )
@@ -395,6 +401,11 @@ def _turn_candidates(storage, tenant_id, identity, config, max_calls):
         turn, judgment = item[:2]
         counts = item[2] if tool_mode else None
         reason = turn_evidence_reason(turn) or (counts.unavailable_reason if counts else None)
+        if reason is None and any(redact_structure(value) != value for value in (
+            turn.user_request_redacted, turn.final_response_redacted,
+            counts.prompt_block() if counts else None,
+        ) if value is not None):
+            reason = "redacted_evidence"
         if reason:
             reasons[reason] += 1
             continue
@@ -562,12 +573,12 @@ def _provider(name: str):
         return _IdentityOnlyProvider("jev")
     if name == "anthropic":
         from verdict_eval.providers import AnthropicAdapter
-        return AnthropicAdapter()
+        return AnthropicAdapter(max_retries=1, sdk_max_retries=0)
     if name == "openai":
         from verdict_eval.providers import OpenAIAdapter
-        return OpenAIAdapter()
+        return OpenAIAdapter(max_retries=1, sdk_max_retries=0)
     from verdict_eval.providers import GoogleAdapter
-    return GoogleAdapter()
+    return GoogleAdapter(max_retries=1)
 
 
 def execute_evaluation(
@@ -635,10 +646,16 @@ def _execute_evaluation(
     completed = 0
     errors = 0
     for trace in selected:
+        current = storage.get_trace(trace.trace_id)
+        if (current is None or current.tenant_id != tenant_id or
+            _eligibility(current) is not None or
+            _planned_trace(current) != _planned_trace(trace)):
+            errors += 1
+            continue
         try:
             storage.insert_judgment(judge.judge(
-                query=trace.prompt_redacted or "",
-                response=trace.response_redacted or "",
+                query=current.prompt_redacted or "",
+                response=current.response_redacted or "",
                 trace_id=trace.trace_id,
             ))
             completed += 1
@@ -646,7 +663,7 @@ def _execute_evaluation(
             storage.insert_judgment(Judgment(
                 trace_id=trace.trace_id,
                 status=JudgmentStatus.ERROR,
-                error=redact(str(exc)) or "judge error",
+                error=redact_structure(str(exc)) or "judge error",
                 **identity,
             ))
             errors += 1
@@ -701,6 +718,11 @@ def _execute_turn_evaluation(storage, tenant_id, config, provider_name, model,
             current_counts = candidate[2] if candidate is not None and tool_mode else None
             if (candidate is None or turn_evidence_reason(candidate[0]) is not None or
                 (current_counts is not None and current_counts.unavailable_reason is not None) or
+                any(redact_structure(value) != value for value in (
+                    candidate[0].user_request_redacted,
+                    candidate[0].final_response_redacted,
+                    current_counts.prompt_block() if current_counts else None,
+                ) if value is not None) or
                 turn_evidence_fingerprint(candidate[0], current_counts) !=
                 turn_evidence_fingerprint(turn, counts)):
                 stale += 1
@@ -723,7 +745,7 @@ def _execute_turn_evaluation(storage, tenant_id, config, provider_name, model,
                     tenant_id=tenant_id, run_id=turn.run_id, turn_id=turn.turn_id,
                     evidence_fingerprint=turn_evidence_fingerprint(turn, current_counts),
                     status=JudgmentStatus.ERROR,
-                    error=(redact(str(exc)) or "judge error")[:2000], **identity,
+                    error=(redact_structure(str(exc)) or "judge error")[:2000], **identity,
                 )
             outcome = storage.save_agent_turn_judgment_if_current(record)
         if outcome == "saved":

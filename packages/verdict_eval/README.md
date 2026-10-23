@@ -74,6 +74,13 @@ current exact transcript revision, target, rubric, provider, model, prompt
 version, and endpoint. Partial coverage and judge errors stay visible.
 Conversation grading supports Anthropic, OpenAI, and Google providers; Jev is
 available for Trace and Turn evaluation only.
+Older stored conversations whose content no longer passes the current
+redaction and revision checks are excluded before preview and checked again
+before judging. Recapture or migrate them after review; Verdict does not
+silently rewrite approved evidence. The batch trace pipeline likewise skips
+older unsafe prompt and response text before sampling and rechecks before a
+provider call. Semantic clustering sanitizes selected historical user text
+before embedding.
 This does not execute a custom scoring formula or establish agreement with
 human labels. See the repository's example rubric and onboarding guide.
 This conversation unit is included in the synchronized `0.1.0b2` core and eval builds.

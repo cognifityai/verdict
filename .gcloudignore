@@ -1,23 +1,11 @@
-# Used by `gcloud run deploy --source` INSTEAD OF .gitignore.
-# This file is essential: .gitignore excludes *.db, which would strip the
-# validation database the image bakes in. Here we upload only what the build
-# needs — and we explicitly keep verdict_experiment.db*.
+# Used by `gcloud run deploy --source` instead of .gitignore. The Dockerfile
+# installs a published wheel and needs no local repository source files.
 *
-
 !Dockerfile
 !.dockerignore
-!ui/
-!ui/**
-!verdict_experiment.db
-!verdict_experiment.db-wal
-!verdict_experiment.db-shm
 
-# trim things under ui/ that the server doesn't need
-ui/__pycache__/
-ui/VerdictUI.html
-ui/VerdictUI.jsx
-
-# Final deny rules: never upload local secret fallbacks or direnv state even if
-# the source allowlist grows.
+# Final denies guard against future context allowlist changes.
+*.db
+*.db-*
 *.[Ee][Nn][Vv]*
 .[Dd][Ii][Rr][Ee][Nn][Vv]/

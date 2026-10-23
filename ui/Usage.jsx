@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { ScopedEvaluate } from "./ScopedEvaluate.jsx";
+import { EvidenceExplain } from "./EvidenceExplain.jsx";
 
 const C = { panel: "#111715", border: "#26332e", sub: "#94a39d", faint: "#68766f", green: "#4ee1aa", bar: "#38b993", amber: "#f2b84b", red: "#ff6b6b" };
 
@@ -8,7 +9,7 @@ const price = (value) => value == null ? "Not priced" : `$${Number(value).toFixe
 const coverage = (known, total) => `${known}/${total} turns`;
 const component = (session, name, label) => `${count(session[name])} ${label} (${coverage(session.componentCoverage?.[name] || 0, session.turnCount)})`;
 
-function UsageChart({ days, selectedDay, measure, onSelectDay, compact = false }) {
+export function UsageChart({ days, selectedDay, measure, onSelectDay, compact = false, issueOnly = false }) {
   const scrollRef = React.useRef(null);
   useEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollLeft = scrollRef.current.scrollWidth;
@@ -25,23 +26,82 @@ function UsageChart({ days, selectedDay, measure, onSelectDay, compact = false }
   };
   return <div ref={scrollRef} className="min-w-0 overflow-x-auto mt-4">
     <div className={`w-full ${compact ? "min-w-[300px]" : "min-w-[650px]"}`}>
-    <div className="flex gap-1 h-32 items-end border-b" style={{ borderColor: C.border }} role="group" aria-label="Daily agent usage in UTC">
+    <div className="flex gap-1 h-32 items-end border-b" style={{ borderColor: C.border }} role="group" aria-label={issueOnly ? "Recorded issue events by UTC day" : "Daily agent usage in UTC"}>
       {days.map((day) => {
         const value = day[metric];
         const height = value == null ? 0 : Math.max(value > 0 ? 4 : 0, value / maximum * 118);
-        const label = `${day.day} UTC: ${measure === "price" ? price(value) : `${count(value)} reported tokens`}; ${measure === "price" ? coverage(day.pricedTurns, day.turns) + " priced" : coverage(day.tokenKnownTurns, day.turns) + " with totals"}`;
-        return <button key={day.day} type="button" aria-label={label} aria-pressed={selectedDay === day.day}
-          title={label} onClick={() => onSelectDay(day.day)}
-          className={`flex-1 ${compact ? "min-w-[6px]" : "min-w-[16px]"} h-full flex flex-col justify-end items-center`}
-          style={{ color: selectedDay === day.day ? C.green : C.bar }}>
-          <span className="w-full rounded-t-sm" style={{ height, background: selectedDay === day.day ? C.green : C.bar }} />
-        </button>;
+        const usageLabel = day.turns === 0 ? `${day.day} UTC: no captured turns`
+          : measure === "price"
+            ? `${day.day} UTC: ${day.pricedTurns ? price(value) : "list price unavailable"}; ${coverage(day.pricedTurns, day.turns)} priced`
+            : `${day.day} UTC: ${day.tokenKnownTurns ? `${count(value)} reported tokens` : "token totals unavailable"}; ${coverage(day.tokenKnownTurns, day.turns)} with totals`;
+        const issueLabel = day.recordedIssueEvents == null ? "; recorded issue scan incomplete"
+          : day.recordedIssueEvents > 0 ? `; ${day.issueSourcePartial ? "at least " : ""}${day.recordedIssueEvents} recorded issue event${day.recordedIssueEvents === 1 ? "" : "s"}` : "";
+        const label = `${usageLabel}${day.sourcePartial ? "; local turn coverage incomplete or unverified" : ""}${day.issueSourcePartial ? "; local issue-event coverage incomplete or unverified" : ""}${issueLabel}`;
+        const className = `flex-1 ${compact ? "min-w-[6px]" : "min-w-[16px]"} h-full flex flex-col justify-end items-center`;
+        const style = { color: selectedDay === day.day ? C.green : C.bar };
+        const bar = <span className="w-full rounded-t-sm" style={{ height, background: selectedDay === day.day ? C.green : C.bar }} />;
+        const marker = day.recordedIssueEvents > 0 && <span aria-hidden="true" className="w-2 h-2 rounded-full mb-1" style={{ background: C.red }} />;
+        return day.turns === 0 && !day.recordedIssueEvents && !day.sourcePartial && !day.issueSourcePartial
+          ? <span key={day.day} role="img" aria-label={label} title={label} className={className} style={style}>{bar}</span>
+          : <button key={day.day} type="button" aria-label={label} aria-pressed={selectedDay === day.day}
+            title={label} onClick={() => onSelectDay(day.day)} className={className} style={style}>{marker}{bar}</button>;
       })}
     </div>
     <div className="flex justify-between gap-2 mt-2 text-[11px]" style={{ color: C.sub }} aria-label="UTC date axis">
       {tickIndices.map((index) => <span key={days[index].day} className="whitespace-nowrap">{dateLabel(days[index].day)}</span>)}
     </div>
     </div>
+  </div>;
+}
+
+export function DayIssueSummary({ day, issues, onOpenRun }) {
+  if (!issues) return null;
+  const partialSource = !issues.complete && issues.sourcePartial && Number.isInteger(issues.observedCount);
+  return <section className="border p-3 mt-4 text-sm" style={{ borderColor: C.border }} aria-label="Recorded issue events on selected UTC day">
+    <h3 className="font-semibold">Recorded issues on {day} UTC</h3>
+    {!issues.complete && !partialSource ? <p className="mt-2" style={{ color: C.amber }}>The bounded event scan is incomplete; no issue count is shown.</p>
+      : <><p className="mt-2">{partialSource
+        ? issues.observedCount > 0
+          ? `At least ${issues.observedCount} recorded issue event${issues.observedCount === 1 ? "" : "s"} in captured evidence; source history is partial, so the full-day count is unknown.`
+          : "No recorded issue events in captured evidence; source history is partial, so the full-day count is unknown."
+        : `${issues.count} event${issues.count === 1 ? "" : "s"} matched the recorded issue checks on this date. This is based on event time, not when the issue was processed or when a run started.`}</p>
+        {issues.events.length > 0 && <div className="flex flex-wrap gap-3 mt-2">{issues.events.map((item, index) => <button key={`${item.runId}:${item.eventId}`} type="button" className="underline" style={{ color: C.red }} onClick={() => onOpenRun?.(item.runId, item.eventId, item.recentRevision, item.recentTurnId)}>Inspect {item.code.replaceAll("_", " ")} {index + 1}</button>)}</div>}
+        {issues.eventsTruncated && <p className="mt-2" style={{ color: C.amber }}>Showing the first {issues.events.length} recorded events; open Investigation for more.</p>}
+        <p className="mt-2" style={{ color: C.sub }}>These counts do not establish task success. Late capture may update an earlier day.</p></>}
+  </section>;
+}
+
+function ModelCallTrend({ report, onOpenCalls }) {
+  const rows = report?.timeline?.rows || [];
+  const periodDays = report?.period?.days;
+  const periodLabel = periodDays === 0 ? "all captured dates"
+    : Number.isInteger(periodDays) && periodDays > 0 ? `last ${periodDays} UTC days`
+      : "selected report period";
+  const known = rows.filter((row) => row.tokenKnownCalls > 0);
+  const [selectedDate, setSelectedDate] = useState(null);
+  const selected = rows.find((row) => row.date === selectedDate) || known.at(-1);
+  if (!known.length) return null;
+  const maximum = Math.max(1, ...known.map((row) => row.totalTokens || 0));
+  return <div className="mt-2" role="region" aria-label="Daily model-call token usage">
+    <div className="text-sm font-semibold">Recorded model-call tokens by UTC day · {periodLabel}</div>
+    {report?.timeline?.availableDates > rows.length && <p className="text-xs mt-1" style={{ color: C.sub }}>Showing the newest {rows.length} of {report.timeline.availableDates} active dates in this period.</p>}
+    <p className="text-xs mt-1" style={{ color: C.sub }}>Provider response records have token totals even when agent turns do not. Missing call totals are excluded.</p>
+    <div className="flex gap-1 items-end h-28 mt-3 border-b overflow-x-auto" style={{ borderColor: C.border }}>
+      {rows.map((row) => <button key={row.date} type="button"
+        aria-label={`${row.date} UTC: ${row.tokenKnownCalls ? count(row.totalTokens) : "unknown"} model-call tokens; ${row.tokenKnownCalls}/${row.calls} calls with totals`}
+        aria-pressed={selected?.date === row.date}
+        onClick={() => setSelectedDate(row.date)}
+        className="flex-none h-full flex flex-col justify-end"
+        style={{ width: Math.max(8, Math.min(40, Math.floor(660 / rows.length))) }}
+        title={`${row.date}: ${row.tokenKnownCalls ? count(row.totalTokens) : "unknown"} tokens (${row.tokenKnownCalls}/${row.calls} calls)`}>
+        <span className="w-full rounded-t-sm" style={{ height: row.tokenKnownCalls ? `${Math.max(4, (row.totalTokens || 0) / maximum * 100)}%` : 0,
+          background: selected?.date === row.date ? C.green : C.bar }} />
+      </button>)}
+    </div>
+    <div className="flex justify-between text-[11px] mt-2" style={{ color: C.sub }}><span>{rows[0]?.date}</span>{rows.length > 1 && <span>{rows.at(-1)?.date}</span>}</div>
+    {selected && <div className="text-sm mt-3">{selected.date} UTC · {selected.tokenKnownCalls ? `${count(selected.totalTokens)} recorded model-call tokens` : "Token total unavailable"} · {selected.tokenKnownCalls}/{selected.calls} calls with totals</div>}
+    {onOpenCalls && <button type="button" className="text-sm underline mt-2" style={{ color: C.green }}
+      onClick={() => onOpenCalls(selected.date)}>Inspect model calls on {selected.date} UTC</button>}
   </div>;
 }
 
@@ -128,6 +188,11 @@ export function DayExplanation({ explanation, url, onSelectSession, onOpenRun })
     <p className="mt-1" style={{ color: C.sub }}>{comparison && comparison.differencePercent != null
       ? `${count(Math.abs(comparison.differenceTokens))} ${comparison.differenceTokens >= 0 ? "above" : "below"} the median of ${comparison.referenceDays} prior active days (${comparison.medianTokens.toLocaleString()} tokens); ${Math.abs(comparison.differencePercent)}% ${comparison.differenceTokens >= 0 ? "higher" : "lower"}.`
       : "No reliable prior-day comparison is available from this bounded window."}</p>
+    {(explanation.sourcePartial || explanation.referenceSourcePartial) && <p className="mt-1" style={{ color: C.amber }}>
+      {explanation.sourcePartial ? "The selected day's local-history capture is incomplete or unverified. " : ""}
+      {explanation.referenceSourcePartial ? "A prior comparison day's local-history capture is incomplete or unverified. " : ""}
+      Reported totals are shown, but the day comparison waits for a complete verified import.
+    </p>}
     {explanation.topSessions.length > 0 && <div className="mt-4"><div className="font-semibold">Largest sessions on this day</div>
       {explanation.topSessions.map((item, index) => <div key={`${item.sourceKind}:${item.sessionId}`} className="flex flex-wrap justify-between gap-2 border-b py-2" style={{ borderColor: C.border }}>
         <span>Session {index + 1} · {item.sourceKind} · {count(item.dayTokens)} tokens{item.sharePercent == null ? "" : ` · ${item.sharePercent}% of known day total`} ({coverage(item.tokenKnownTurns, item.turns)} with totals)</span>
@@ -171,12 +236,13 @@ function SessionReport({ root, sessionId, sourceKind, onOpenRun }) {
       {report.turns?.length > 0 && <div><div className="font-semibold">Requests and outcomes</div>{report.turns.map((turn) => <details key={`${turn.runId}:${turn.turnId}`} className="border p-2 mt-2" style={{ borderColor: C.border }}><summary>{turn.startedAt} · {turn.runId} · turn {turn.sequence + 1} · {turn.status} · {count(turn.totalTokens)} tokens</summary><p className="mt-2 whitespace-pre-wrap break-words">Request: {turn.request || "Not captured"}</p><p className="mt-2 whitespace-pre-wrap break-words">Response: {turn.response || "Not captured"}</p></details>)}</div>}
       {report.events?.length > 0 && <details><summary>Recorded event timeline ({report.events.length}{report.coverage === "complete" ? "" : " shown; details in run"})</summary>{report.events.map((event) => <div key={`${event.runId}:${event.eventId}`} className="border p-2 mt-2" style={{ borderColor: C.border }}><span>{event.occurredAt} · {event.type} · {event.status} · {event.runId}</span>{report.coverage === "complete" && <pre className="whitespace-pre-wrap break-words text-xs mt-1">{JSON.stringify(event.attributes, null, 2)}</pre>}</div>)}</details>}
       {report.coverage === "complete" && report.scopedEvaluationEligible !== false && <ScopedEvaluate key={`${sourceKind}:${sessionId}`} root={root} scope="session" sessionId={sessionId} sourceKind={sourceKind} />}
+      <EvidenceExplain root={root} scope="session" sessionId={sessionId} sourceKind={sourceKind} />
       {report.scopedEvaluationEligible === false && <p className="text-xs" style={{ color: C.sub }}>Whole-session evaluation unavailable: {report.scopedEvaluationUnavailableReason?.replaceAll("_", " ") || "incomplete evidence"}. Open a run to inspect smaller evidence.</p>}
     </>}
   </div>;
 }
 
-export function Usage({ url, onOpenRun, compact = false }) {
+export function Usage({ url, onOpenRun, compact = false, home = false, modelCallReport = null, onOpenCalls = null, onData = null }) {
   const [day, setDay] = useState(null);
   const [sessionId, setSessionId] = useState(null);
   const [sourceKind, setSourceKind] = useState(null);
@@ -197,8 +263,8 @@ export function Usage({ url, onOpenRun, compact = false }) {
     const address = `${url}${query.size ? `?${query}` : ""}`;
     fetch(address, { credentials: "same-origin", headers: { Accept: "application/json" }, signal: controller.signal })
       .then((response) => response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`)))
-      .then((data) => { if (!controller.signal.aborted) setState({ loading: false, error: null, data }); })
-      .catch((error) => { if (!controller.signal.aborted && error?.name !== "AbortError") setState({ loading: false, error: String(error), data: null }); });
+      .then((data) => { if (!controller.signal.aborted) { setState({ loading: false, error: null, data }); onData?.(url, data); } })
+      .catch((error) => { if (!controller.signal.aborted && error?.name !== "AbortError") { setState({ loading: false, error: String(error), data: null }); onData?.(url, null); } });
     return () => controller.abort();
   }, [url, day, sessionId, sourceKind]);
 
@@ -234,37 +300,57 @@ export function Usage({ url, onOpenRun, compact = false }) {
   const hasActivity = data?.days?.some((item) => item.turns > 0);
   const hasTokenTotals = data?.days?.some((item) => item.tokenKnownTurns > 0);
   const hasPricedTurns = data?.days?.some((item) => item.pricedTurns > 0);
+  const hasRecordedIssues = data?.days?.some((item) => item.recordedIssueEvents > 0);
+  const latestIssueDay = data?.days?.slice().reverse().find((item) => item.recordedIssueEvents > 0);
+  const showDayChart = hasTokenTotals || (!compact && (hasRecordedIssues || data?.selectedDayIssues?.complete === false));
+  const showModelCallTrend = !hasTokenTotals && modelCallReport?.timeline?.rows?.some((row) => row.tokenKnownCalls > 0);
+  const issueOnly = !hasTokenTotals && !showModelCallTrend && hasRecordedIssues;
+  const issueOnlyChart = !hasTokenTotals && hasRecordedIssues;
+  const selectedDayReady = day == null || data?.selectedDay === day;
   return <section className="min-w-0 border p-5" style={{ borderColor: C.border, background: C.panel }}>
     <div className="flex flex-wrap justify-between items-start gap-3">
-      <div><div className="text-xs font-mono" style={{ color: C.green }}>LAST 30 UTC DAYS</div>
-        <h2 className="text-lg font-semibold mt-1">Where tokens went</h2>
-        <p className="text-sm mt-2" style={{ color: C.sub }}>Choose a day to explain its token use, then inspect the sessions and turns behind it.</p></div>
-      <div className="flex gap-2 text-xs">
+      {!home && <>
+      <div><div className="text-xs font-mono" style={{ color: C.green }}>{issueOnly ? "RECORDED ISSUES" : showModelCallTrend ? "TOKEN USAGE" : "LAST 30 UTC DAYS"}</div>
+        <h2 className="text-lg font-semibold mt-1">{issueOnly ? "Recorded issue events" : "Where tokens went"}</h2>
+        <p className="text-sm mt-2" style={{ color: C.sub }}>{issueOnly ? "Choose an issue date to inspect its recorded events." : showModelCallTrend ? "Select a day to inspect recorded model-call usage and coverage." : hasActivity && !hasTokenTotals ? "Inspect sessions with missing token totals." : "Choose a day to explain its token use, then inspect the sessions and turns behind it."}</p></div>
+      </>}
+      {!home && hasTokenTotals && !showModelCallTrend && <div className="flex gap-2 text-xs">
         <button type="button" aria-pressed={measure === "tokens"} onClick={() => setMeasure("tokens")} className="border px-3 py-2" style={{ borderColor: measure === "tokens" ? C.green : C.border }}>Tokens</button>
         <button type="button" aria-pressed={measure === "price"} disabled={data && !hasPricedTurns} onClick={() => setMeasure("price")} className="border px-3 py-2" style={{ borderColor: measure === "price" ? C.green : C.border, opacity: data && !hasPricedTurns ? 0.5 : 1 }}>Est. list price</button>
-      </div>
+      </div>}
     </div>
-    <div className="mt-4 text-sm" style={{ minHeight: 20 }} aria-live="polite">
+    <div className="mt-4 text-sm" style={{ minHeight: state.loading || state.error ? 20 : 0 }} aria-live="polite">
       {state.loading && <span role="status" style={{ color: C.sub }}>Loading usage…</span>}
       {state.error && <span role="alert" style={{ color: C.red }}>Usage unavailable: {state.error}</span>}
     </div>
     {data && <>
-      {!data.window.complete && <div role="status" className="mt-4 text-sm" style={{ color: C.amber }}>This 30-day view is bounded and partial. {data.window.turnsComplete ? "Model attribution is incomplete for older turns; fully scanned newer turns retain list-price estimates." : "Older turns may be omitted."}</div>}
-      {!hasActivity && <p className="mt-5 text-sm" style={{ color: C.sub }}>No agent turns were captured in this 30-day window.</p>}
-      {hasActivity && !hasTokenTotals && <p className="mt-5 text-sm" style={{ color: C.amber }}>Agent turns were captured, but none reported a usable token total. A token trend is unavailable.</p>}
+      {!data.window.complete && <div role="status" className="mt-4 text-sm" style={{ color: C.amber }}>
+        This 30-day view is bounded and partial.
+        {data.window.turnsComplete === false && " Older turns may be omitted."}
+        {data.window.modelEvidenceComplete === false && " Model attribution is incomplete for older turns; fully scanned newer turns retain list-price estimates."}
+        {data.days.some((item) => item.sourcePartial) && " Local turn history is incomplete or unverified; recorded token totals may omit source activity."}
+        {data.days.some((item) => item.issueSourcePartial) && " Local issue-event history is incomplete or unverified; issue counts are lower bounds."}
+      </div>}
+      {showModelCallTrend && <ModelCallTrend report={modelCallReport} onOpenCalls={onOpenCalls} />}
+      {!hasActivity && !showModelCallTrend && <p className="mt-5 text-sm" style={{ color: C.sub }}>No agent turns were captured in this 30-day window.</p>}
+      {hasActivity && !hasTokenTotals && <p className="mt-3 text-sm" style={{ color: C.sub }}>Agent turns did not report usable token totals. Session-level token attribution is unavailable.</p>}
       {compact && hasActivity && !hasTokenTotals && day == null && <button type="button" className="text-sm underline mt-3" style={{ color: C.green }} onClick={() => setDay(data.selectedDay)}>Inspect sessions with missing totals</button>}
-      {hasTokenTotals && <>
-        <div className="flex justify-between text-xs mt-4" style={{ color: C.sub }}><span>{measure === "price" ? "Estimated API list price per day" : "Reported tokens per day"}</span><span>Peak {measure === "price" ? price(Math.max(...data.days.map((item) => item.listPriceUsd || 0))) : count(Math.max(...data.days.map((item) => item.totalTokens || 0)))}</span></div>
-        <UsageChart days={data.days} selectedDay={data.selectedDay} measure={measure} compact={compact} onSelectDay={(value) => { pendingSessionRef.current = null; setDay(value); setSessionId(null); setSourceKind(null); setAnalyzing(false); setReportOpen(false); setExplainingDay(false); }} />
+      {compact && !hasTokenTotals && latestIssueDay && day == null && <button type="button" className="block text-sm underline mt-3" style={{ color: C.green }} onClick={() => setDay(latestIssueDay.day)}>Inspect recorded issue events on {latestIssueDay.day} UTC →</button>}
+      {compact && !hasTokenTotals && data.selectedDayIssues?.complete === false && <p className="mt-3 text-sm" style={{ color: C.amber }}>{data.selectedDayIssues.sourcePartial ? "Local history is partial; recorded issues are a lower bound, not a full-day total." : "The recorded issue scan is incomplete; no issue total is assumed."}</p>}
+      {compact && !hasTokenTotals && !hasRecordedIssues && data.selectedDayIssues?.sourcePartial && day == null && <button type="button" className="block text-sm underline mt-3" style={{ color: C.green }} onClick={() => setDay(data.selectedDay)}>Inspect incomplete day {data.selectedDay} UTC →</button>}
+      {showDayChart && <>
+        <div className="flex justify-between text-xs mt-4" style={{ color: C.sub }}><span>{!hasTokenTotals ? hasRecordedIssues ? "Recorded issue events by day" : "Issue scan incomplete" : measure === "price" ? "Estimated API list price per day" : "Reported tokens per day"}</span>{hasTokenTotals && <span>Peak {measure === "price" ? price(Math.max(...data.days.map((item) => item.listPriceUsd || 0))) : count(Math.max(...data.days.map((item) => item.totalTokens || 0)))}</span>}</div>
+        <UsageChart days={data.days} selectedDay={data.selectedDay} measure={measure} compact={compact} issueOnly={issueOnlyChart} onSelectDay={(value) => { pendingSessionRef.current = null; setDay(value); setSessionId(null); setSourceKind(null); setAnalyzing(false); setReportOpen(false); setExplainingDay(false); }} />
       </>}
       {hasTokenTotals && data.days.every((item) => item.totalTokens === 0) && <p className="mt-2 text-sm" style={{ color: C.sub }}>Captured turns reported zero total tokens in this window.</p>}
-      {compact && day == null && hasTokenTotals && <p className="mt-3 text-sm" style={{ color: C.sub }}>Latest active day: {data.selectedDay} UTC · {count(chosenDay?.totalTokens)} reported tokens across {coverage(chosenDay?.tokenKnownTurns || 0, chosenDay?.turns || 0)} with totals. Click a bar to inspect sessions.</p>}
-      {(!compact || day != null) && <>
+      {compact && day == null && hasTokenTotals && <p className="mt-3 text-sm" style={{ color: C.sub }}>Latest active day: {data.selectedDay} UTC · {chosenDay?.tokenKnownTurns ? `${count(chosenDay.totalTokens)} reported tokens` : "token totals unavailable"} across {coverage(chosenDay?.tokenKnownTurns || 0, chosenDay?.turns || 0)} with totals. Click a bar to inspect sessions.</p>}
+      {(!compact || day != null) && selectedDayReady && <>
       <div className="mt-5 grid sm:grid-cols-3 gap-2 text-sm">
-        <Fact label={`${data.selectedDay} UTC`} value={`${count(chosenDay?.totalTokens)} reported tokens`} detail={`${coverage(chosenDay?.tokenKnownTurns || 0, chosenDay?.turns || 0)} with totals`} />
-        <Fact label="Estimated list price" value={price(chosenDay?.listPriceUsd)} detail={`${coverage(chosenDay?.pricedTurns || 0, chosenDay?.turns || 0)} priced; not a subscription bill`} />
-        <Fact label="Unattributed tokens" value={count(chosenDay?.unattributedTokens)} detail="Turns with missing, unknown, or multiple models" />
+        <Fact label={`${data.selectedDay} UTC`} value={chosenDay?.tokenKnownTurns ? `${count(chosenDay.totalTokens)} reported tokens` : chosenDay?.turns ? "Token totals unavailable" : "No captured token report"} detail={`${coverage(chosenDay?.tokenKnownTurns || 0, chosenDay?.turns || 0)} with totals`} />
+        <Fact label="Estimated list price" value={chosenDay?.pricedTurns ? price(chosenDay.listPriceUsd) : "Not priced"} detail={`${coverage(chosenDay?.pricedTurns || 0, chosenDay?.turns || 0)} priced; not a subscription bill`} />
+        <Fact label="Tokens without one recorded model" value={chosenDay?.tokenKnownTurns ? count(chosenDay.unattributedTokens) : "Not captured"} detail="Reported turn totals with no model name or multiple model names" />
       </div>
+      <DayIssueSummary day={data.selectedDay} issues={data.selectedDayIssues} onOpenRun={onOpenRun} />
       {data.dayExplanation && <><button type="button" className="border px-3 py-2 mt-4 text-sm" style={{ borderColor: C.green, color: C.green }} onClick={() => setExplainingDay((value) => !value)}>{explainingDay ? "Hide day explanation" : "Explain this day"}</button>
         {explainingDay && <DayExplanation key={data.selectedDay} explanation={data.dayExplanation} url={url}
           onSelectSession={inspectSession} onOpenRun={onOpenRun} />}</>}

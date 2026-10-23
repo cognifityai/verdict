@@ -27,6 +27,7 @@ from verdict.agent_transport import CaptureSink, FileCaptureSink, StorageCapture
 from verdict.runtime_metrics import RuntimeMetrics
 from verdict.storage.base import Storage
 from verdict.storage.sqlite import SQLiteStorage
+from verdict.storage_url import is_postgres_storage
 
 if TYPE_CHECKING:
     from verdict.instrumentors.base import BaseInstrumentor
@@ -108,7 +109,7 @@ def init(
         api_key: Reserved for API-compatible integrations; currently unused.
         service_name: Identifies your service in traces.
         environment: e.g. "production", "staging", "dev".
-        storage: Either a URL ("sqlite:///path.db") or a Storage instance.
+        storage: SQLite path/URL, PostgreSQL URL/libpq keyword conninfo, or a Storage instance.
         capture_content: If True (the default), bounded prompts/completions are
                          stored after recursive redaction. Set False for a
                          metadata-only deployment.
@@ -225,7 +226,7 @@ def _resolve_storage(url: str) -> Storage:
         from verdict.storage.memory import InMemoryStorage
 
         return InMemoryStorage()
-    if url.startswith("postgres://") or url.startswith("postgresql://"):
+    if is_postgres_storage(url):
         from verdict.storage.postgres import PostgresStorage
 
         return PostgresStorage(url)

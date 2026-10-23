@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 import logging
 import math
@@ -125,6 +126,35 @@ def test_full_agent_context_persists_typed_timeline_and_one_trace_owner() -> Non
     )
     assert read is not None
     assert read.model_calls[0].trace_id == correlation_id
+
+
+def test_command_and_test_check_ids_are_hashed_metadata_not_raw_content() -> None:
+    storage = InMemoryStorage()
+    verdict.init(storage=storage, tenant_id="tenant-a", capture_content=False,
+                 instrumentors=[])
+    with verdict.agent_run(name="worker") as run:
+        with run.turn(user_input="synthetic") as turn:
+            turn.record_command(command="synthetic", exit_code=1,
+                                check_id="alice@example.com")
+            turn.record_test(command="synthetic", exit_code=0, failed=0,
+                             check_id="alice@example.com")
+            turn.record_test(command="synthetic", exit_code=0, failed=0,
+                             check_id="bob@example.com")
+            with pytest.raises(ValueError):
+                turn.record_test(command="synthetic", exit_code=0, check_id="")
+            with pytest.raises(ValueError):
+                turn.record_test(command="synthetic", exit_code=0, check_id="x" * 257)
+            with pytest.raises(ValueError):
+                turn.record_test(command="synthetic", exit_code=0, check_id="\ud800")
+    events = storage.list_agent_run_bundles("tenant-a")[0].events
+    relevant = [event for event in events if event.event_type in
+                {AgentEventType.COMMAND, AgentEventType.TEST_RESULT}]
+    assert len(relevant) == 3
+    expected = hashlib.sha256(b"alice@example.com").hexdigest()
+    assert [event.attributes["check_id_hash"] for event in relevant] == [
+        expected, expected, hashlib.sha256(b"bob@example.com").hexdigest()]
+    assert all("alice@example.com" not in str(event.attributes) for event in relevant)
+    assert all("bob@example.com" not in str(event.attributes) for event in relevant)
 
 
 def test_business_outcome_status_preserves_failure_without_content_capture() -> None:
@@ -867,6 +897,26 @@ def test_nested_agent_run_restores_parent_turn_context() -> None:
     assert by_name["child"].run.parent_run_id == by_name["parent"].run.run_id
     assert any(event.trace_id == child_trace.trace_id for event in by_name["child"].events)
     assert any(event.trace_id == parent_trace.trace_id for event in by_name["parent"].events)
+
+
+def test_explicit_parent_run_id_links_separate_agent_executions() -> None:
+    storage = InMemoryStorage()
+    verdict.init(storage=storage, tenant_id="tenant-a", instrumentors=[])
+    with verdict.agent_run(name="coordinator", session_id="handoff") as parent:
+        with parent.turn(user_input="delegate") as turn:
+            turn.set_output("delegated")
+        parent_id = parent.run_id
+    with verdict.agent_run(
+        name="research-agent", session_id="handoff", parent_run_id=parent_id,
+    ) as child:
+        with child.turn(user_input="research") as turn:
+            turn.set_output("result")
+
+    by_name = {bundle.run.agent_name: bundle for bundle in
+               storage.list_agent_run_bundles("tenant-a")}
+    assert by_name["research-agent"].run.parent_run_id == parent_id
+    assert by_name["research-agent"].run.session_id == by_name["coordinator"].run.session_id
+    verdict.shutdown()
 
 
 def test_tool_context_records_only_explicit_typed_origin_with_content_disabled() -> None:

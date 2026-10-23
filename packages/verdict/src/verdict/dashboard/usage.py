@@ -9,7 +9,9 @@ from statistics import median
 from types import SimpleNamespace
 from typing import Any
 
-from verdict.dashboard.query import QuerySession
+from verdict.analysis import recorded_event_issue
+from verdict.dashboard.local_history_page import verified_local_positions
+from verdict.dashboard.query import PostgresSession, QuerySession
 from verdict.pricing import estimate_turn_cost_usd
 
 MAX_USAGE_TURNS = 20_000
@@ -19,6 +21,9 @@ MAX_SESSION_TURNS = 50
 MAX_DAY_MODELS = 20
 MAX_DAY_SOURCES = 20
 MAX_DAY_EXPLANATION_ITEMS = 5
+MAX_ISSUE_EVENTS = 20_000
+MAX_DAY_ISSUE_EXAMPLES = 5
+MAX_USAGE_FULL_PROOFS = 20
 
 # Codex input includes cached input; Claude's provider response usage does not.
 _TURN_INPUT_INCLUDES_CACHED = {
@@ -75,6 +80,109 @@ def models_by_turn(events) -> dict[str, frozenset[str]]:
     for event in events:
         _record_model_evidence(models, event.turn_id, event.event_type.value, event.attributes)
     return {turn_id: _complete_models(names) for turn_id, names in models.items()}
+
+
+def _recorded_issues_by_day(
+    session: QuerySession, tenant: str, first: str, last: str,
+    dates: list[str], selected_day: str,
+) -> tuple[dict[str, int | None], dict[str, Any]]:
+    """Join explicit event failures to UTC event date, with no inferred success."""
+    counts: dict[str, int | None] = dict.fromkeys(dates, 0)
+    event_sources = []
+    has_canonical_events = session.table_exists("agent_events")
+    if has_canonical_events:
+        event_sources.append(
+            "SELECT run_id,event_id,occurred_at,event_type,status,attributes_json,"
+            "NULL AS first_seen_revision,NULL AS turn_id FROM agent_events "
+            "WHERE tenant_id=? AND occurred_at>=? AND occurred_at<? "
+            "AND event_type IN ('tool_result','command','test_result','outcome')"
+        )
+    if session.table_exists("local_recent_event_facts"):
+        recent_source = (
+            "SELECT run_id,event_id,occurred_at,event_type,status,attributes_json,"
+            "first_seen_revision,turn_id FROM local_recent_event_facts recent "
+            "WHERE tenant_id=? AND occurred_at>=? AND occurred_at<? "
+            "AND event_type IN ('tool_result','command','test_result','outcome')"
+        )
+        if has_canonical_events:
+            recent_source += (
+                " AND NOT EXISTS (SELECT 1 FROM agent_events canonical "
+                "WHERE canonical.tenant_id=recent.tenant_id "
+                "AND canonical.run_id=recent.run_id "
+                "AND canonical.event_id=recent.event_id)"
+            )
+        event_sources.append(recent_source)
+    if not event_sources:
+        return counts, {"complete": True, "count": 0, "events": [],
+                        "eventsTruncated": False}
+    if isinstance(session, PostgresSession):
+        attributes_sql = (
+            "CASE WHEN jsonb_typeof(attributes_json->'is_error')='boolean' "
+            "AND attributes_json->>'is_error'='true' THEN 1 ELSE 0 END AS error_true,"
+            "CASE WHEN jsonb_typeof(attributes_json->'exit_code')='number' "
+            "AND length(attributes_json->>'exit_code')<=20 "
+            "THEN attributes_json->>'exit_code' END AS exit_code,"
+            "CASE WHEN jsonb_typeof(attributes_json->'failed')='number' "
+            "AND length(attributes_json->>'failed')<=20 "
+            "THEN attributes_json->>'failed' END AS failed_count "
+        )
+    else:
+        attributes_sql = (
+            "CASE WHEN json_valid(attributes_json) THEN "
+            "CASE WHEN json_type(attributes_json,'$.is_error')='true' "
+            "THEN 1 ELSE 0 END ELSE 0 END AS error_true,"
+            "CASE WHEN json_valid(attributes_json) THEN "
+            "CASE WHEN json_type(attributes_json,'$.exit_code')='integer' "
+            "THEN json_extract(attributes_json,'$.exit_code') END END AS exit_code,"
+            "CASE WHEN json_valid(attributes_json) THEN "
+            "CASE WHEN json_type(attributes_json,'$.failed')='integer' "
+            "THEN json_extract(attributes_json,'$.failed') END END AS failed_count "
+        )
+    rows = session.execute(
+        "SELECT run_id,event_id,occurred_at,event_type,status,"
+        "first_seen_revision,turn_id," + attributes_sql +
+        "FROM (" + " UNION ALL ".join(event_sources) + ") evidence "
+        "ORDER BY occurred_at DESC,run_id DESC,event_id DESC LIMIT ?",
+        (*((tenant, first, last) * len(event_sources)), MAX_ISSUE_EVENTS + 1),
+    )
+    examples = []
+    scanned = 0
+    for row in rows:
+        scanned += 1
+        if scanned > MAX_ISSUE_EVENTS:
+            return dict.fromkeys(dates), {"complete": False, "count": None,
+                                          "events": [], "eventsTruncated": False}
+        try:
+            event_day = _utc(row["occurred_at"]).date().isoformat()
+        except (TypeError, ValueError):
+            return dict.fromkeys(dates), {"complete": False, "count": None,
+                                          "events": [], "eventsTruncated": False}
+        attributes: dict[str, Any] = {"is_error": row["error_true"] == 1}
+        for field, column in (("exit_code", "exit_code"), ("failed", "failed_count")):
+            value = row[column]
+            if value is None:
+                continue
+            try:
+                parsed = json.loads(str(value))
+            except (TypeError, ValueError):
+                continue
+            if type(parsed) is int:
+                attributes[field] = parsed
+        code = recorded_event_issue(row["event_type"], row["status"], attributes)
+        if code is None or event_day not in counts:
+            continue
+        counts[event_day] += 1
+        if event_day == selected_day and len(examples) < MAX_DAY_ISSUE_EXAMPLES:
+            example = {"code": code, "runId": row["run_id"],
+                       "eventId": row["event_id"]}
+            if row["first_seen_revision"] is not None:
+                example["recentRevision"] = row["first_seen_revision"]
+                example["recentTurnId"] = row["turn_id"]
+            examples.append(example)
+    selected_count = counts[selected_day]
+    return counts, {"complete": True, "count": selected_count,
+                    "events": examples,
+                    "eventsTruncated": selected_count > len(examples)}
 
 
 def turn_list_price_usd(turn, models: frozenset[str]) -> float | None:
@@ -191,16 +299,25 @@ def _present(summary: dict[str, Any], *, include_models: bool = False) -> dict[s
 def _day_explanation(
     day: str, dates: list[str], daily: dict[str, dict[str, Any]],
     turns: list[dict[str, Any]], ranked_sessions: list[dict[str, Any]],
-    *, complete: bool, model_complete: bool,
+    *, complete: bool, model_complete: bool, current_day: str,
+    partial_source_days: set[str],
 ) -> dict[str, Any]:
     """Describe measured contributors without inferring waste or task quality."""
     selected = daily[day]
     total = selected["totalTokens"] if selected["tokenKnownTurns"] else None
     previous = [value for value in dates[:dates.index(day)]
-                if daily[value]["tokenKnownTurns"]][-7:]
-    references = [daily[value]["totalTokens"] for value in previous]
+                if daily[value]["turns"]][-7:]
+    selected_covered = (selected["turns"] == selected["tokenKnownTurns"]
+                        and day not in partial_source_days)
+    references_covered = all(
+        daily[value]["turns"] == daily[value]["tokenKnownTurns"]
+        and value not in partial_source_days
+        for value in previous
+    )
     comparison = None
-    if complete and len(references) >= 3 and total is not None:
+    if (complete and day != current_day and total is not None and selected_covered
+            and references_covered and len(previous) >= 3):
+        references = [daily[value]["totalTokens"] for value in previous]
         reference = median(references)
         comparison = {
             "referenceDays": len(references), "medianTokens": reference,
@@ -237,6 +354,8 @@ def _day_explanation(
         "tokenKnownTurns": selected["tokenKnownTurns"],
         "pricedTurns": selected["pricedTurns"],
         "windowComplete": complete, "modelEvidenceComplete": model_complete,
+        "sourcePartial": day in partial_source_days,
+        "referenceSourcePartial": any(value in partial_source_days for value in previous),
         "comparison": comparison, "topSessions": top_sessions,
         "topTurns": top_turns,
     }
@@ -260,12 +379,18 @@ def build_usage_view(
         return {
             "window": {"startDay": dates[0], "endDay": dates[-1], "timezone": "UTC",
                        "complete": True, "scannedTurns": 0},
-            "days": [{"day": value, **_present(empty_daily[value])} for value in dates],
+            "days": [{"day": value, **_present(empty_daily[value]),
+                      "sourcePartial": False,
+                      "recordedIssueEvents": 0} for value in dates],
             "selectedDay": selected_day, "dayModels": [], "daySources": [], "sessions": [],
+            "selectedDayIssues": {"complete": True, "count": 0,
+                                  "events": [], "eventsTruncated": False},
             "sessionsTruncated": False, "selectedSession": None,
             "selectionReason": None,
             "dayExplanation": _day_explanation(
                 selected_day, dates, empty_daily, [], [], complete=True, model_complete=True,
+                current_day=now.astimezone(timezone.utc).date().isoformat(),
+                partial_source_days=set(),
             ),
         }
     rows = list(session.execute(
@@ -282,8 +407,126 @@ def build_usage_view(
            LIMIT ?""",
         (tenant, first, last, MAX_USAGE_TURNS + 1),
     ))
+    tail_keys: set[tuple[str, str]] = set()
+    if session.table_exists("local_tail_turn_facts"):
+        for retained in session.execute(
+            "SELECT f.payload_json,f.run_id AS stored_run_id,"
+            "f.turn_id AS stored_turn_id,f.sequence AS stored_sequence,"
+            "r.session_id,r.source_session_id,r.agent_name,"
+            "s.source_kind FROM local_tail_turn_facts f JOIN agent_runs r "
+            "ON r.tenant_id=f.tenant_id AND r.run_id=f.run_id "
+            "JOIN import_sources s ON s.tenant_id=r.tenant_id "
+            "AND s.source_session_id=r.source_session_id "
+            "WHERE f.tenant_id=? AND f.started_at>=? AND f.started_at<? "
+            "ORDER BY f.started_at DESC,f.run_id DESC,f.sequence DESC LIMIT ?",
+            (tenant, first, last, MAX_USAGE_TURNS + 1),
+        ):
+            try:
+                turn = json.loads(retained["payload_json"])
+                if (not isinstance(turn, dict)
+                        or turn.get("run_id") != retained["stored_run_id"]
+                        or turn.get("turn_id") != retained["stored_turn_id"]
+                        or turn.get("sequence") != retained["stored_sequence"]):
+                    continue
+                tail_keys.add((turn["run_id"], turn["turn_id"]))
+                rows.append({
+                    **turn, "session_id": retained["session_id"],
+                    "source_session_id": retained["source_session_id"],
+                    "agent_name": retained["agent_name"],
+                    "source_kind": retained["source_kind"],
+                })
+            except (KeyError, TypeError, ValueError):
+                continue
+    rows.sort(key=lambda row: (_utc(row["started_at"]), row["run_id"],
+                               row["sequence"], row["turn_id"]), reverse=True)
     complete = len(rows) <= MAX_USAGE_TURNS
     rows = rows[:MAX_USAGE_TURNS]
+    partial_source_days: set[str] = set()
+    partial_issue_source_days: set[str] = set()
+    source_columns = set(session.columns("import_sources"))
+    if {"local_full_bytes", "local_partial_line", "local_source_turn_count",
+        "local_source_event_count", "local_v1_turn_count",
+        "local_v1_event_count"} <= source_columns:
+        source_gap = (
+            "(s.local_full_bytes IS NULL OR s.local_partial_line=TRUE OR "
+            "s.local_source_turn_count IS NULL OR s.local_source_event_count IS NULL OR "
+            "s.local_v1_turn_count IS NULL OR s.local_v1_event_count IS NULL OR "
+            "s.local_source_turn_count>s.local_v1_turn_count OR "
+            "s.local_source_event_count>s.local_v1_event_count)"
+        )
+    else:
+        # An older schema cannot establish source completeness.
+        source_gap = "1=1"
+    full_mode = ("s.local_projection_complete" if "local_projection_complete" in source_columns
+                 else "NULL AS local_projection_complete")
+    coverage_fields = (
+        "s.local_full_bytes,s.local_partial_line,s.local_source_turn_count,"
+        "s.local_v1_turn_count,s.local_min_turn_at,s.local_max_turn_at," + full_mode if {
+            "local_full_bytes", "local_partial_line", "local_source_turn_count",
+            "local_source_event_count", "local_v1_turn_count", "local_v1_event_count",
+            "local_min_turn_at", "local_max_turn_at",
+        } <= source_columns else
+        "NULL AS local_full_bytes,NULL AS local_partial_line,"
+        "NULL AS local_source_turn_count,NULL AS local_v1_turn_count,"
+        "NULL AS local_min_turn_at,NULL AS local_max_turn_at," + full_mode
+    )
+    incomplete_sources = list(session.execute(
+        f"SELECT r.run_id,{coverage_fields} FROM import_sources s JOIN agent_runs r "
+        "ON r.tenant_id=s.tenant_id AND r.source_session_id=s.source_session_id "
+        "WHERE s.tenant_id=? AND s.source_kind IN ('codex','claude-code') "
+        f"AND {source_gap} LIMIT ?",
+        (tenant, MAX_USAGE_TURNS + 1),
+    ))
+    source_list_truncated = len(incomplete_sources) > MAX_USAGE_TURNS
+    if not source_list_truncated:
+        verified_runs: set[str] = set()
+        for source in incomplete_sources:
+            if (len(verified_runs) >= MAX_USAGE_FULL_PROOFS
+                    or not source["local_projection_complete"]):
+                continue
+            try:
+                verified_local_positions(session, tenant, source["run_id"])
+            except (ValueError, RuntimeError):
+                continue
+            verified_runs.add(source["run_id"])
+        incomplete_sources = [source for source in incomplete_sources
+                              if source["run_id"] not in verified_runs]
+    def token_gap_days(source: Any) -> set[str]:
+        if (source["local_full_bytes"] is None
+                or source["local_partial_line"] is None
+                or bool(source["local_partial_line"])
+                or source["local_source_turn_count"] is None
+                or source["local_v1_turn_count"] is None):
+            return set(dates)
+        if source["local_source_turn_count"] <= source["local_v1_turn_count"]:
+            return set()
+        try:
+            start_day = _utc(source["local_min_turn_at"]).date().isoformat()
+            end_day = _utc(source["local_max_turn_at"]).date().isoformat()
+        except (TypeError, ValueError, AttributeError):
+            return set(dates)
+        if start_day > end_day:
+            return set(dates)
+        return {value for value in dates if start_day <= value <= end_day}
+
+    source_token_days = [token_gap_days(source) for source in incomplete_sources]
+    partial_run_ids = {
+        str(source["run_id"]) for source, gap_days in zip(
+            incomplete_sources[:MAX_USAGE_TURNS], source_token_days, strict=False,
+        ) if gap_days
+    }
+    partial_run_ids_truncated = source_list_truncated
+    if incomplete_sources:
+        # Retained events enter the issue scan above; only sources without a
+        # verified complete projection leave unknown event-time coverage.
+        partial_issue_source_days.update(dates)
+        # An event-only cap does not omit Turn tokens. For a verified parsed
+        # Turn deficit, only the committed full-source Turn interval can.
+        if partial_run_ids_truncated:
+            partial_source_days.update(dates)
+        else:
+            for gap_days in source_token_days:
+                partial_source_days.update(gap_days)
     turn_rank = {(row["run_id"], row["turn_id"]): index for index, row in enumerate(rows)}
     models: dict[tuple[str, str], set[str | None]] = defaultdict(set)
     event_count = 0
@@ -318,14 +561,17 @@ def build_usage_view(
         _record_model_evidence(
             models, (event["run_id"], event["turn_id"]), event["event_type"], attributes,
         )
-    model_complete = event_count <= MAX_MODEL_EVENTS
+    # Tail Turns are retained for token totals, but their model evidence is
+    # outside the canonical event query above. Keep price/model coverage open.
+    model_complete = event_count <= MAX_MODEL_EVENTS and not tail_keys
 
     daily = {value: _summary() for value in dates}
     turns = []
     for index, row in enumerate(rows):
         started = _utc(row["started_at"])
         turn_day = started.date().isoformat()
-        model_evidence_complete = model_complete or index < incomplete_from_rank
+        model_evidence_complete = ((model_complete or index < incomplete_from_rank)
+                                   and (row["run_id"], row["turn_id"]) not in tail_keys)
         turn_models = (_complete_models(models[(row["run_id"], row["turn_id"])])
                        if model_evidence_complete else frozenset())
         price = (turn_list_price_usd(SimpleNamespace(**row), turn_models)
@@ -337,6 +583,17 @@ def build_usage_view(
         _add(daily[turn_day], item)
 
     selected_day = day or next((value for value in reversed(dates) if daily[value]["turns"]), dates[-1])
+    issue_counts, selected_day_issues = _recorded_issues_by_day(
+        session, tenant, first, last, dates, selected_day,
+    )
+    if selected_day in partial_issue_source_days and selected_day_issues["complete"]:
+        selected_day_issues = {
+            **selected_day_issues,
+            "complete": False,
+            "count": None,
+            "observedCount": selected_day_issues["count"],
+            "sourcePartial": True,
+        }
     source_summaries: dict[str, dict[str, Any]] = defaultdict(_summary)
     for turn in turns:
         if turn["day"] == selected_day:
@@ -412,13 +669,25 @@ def build_usage_view(
             "topTurns": [turn_view(turn) for turn in ranked_turns[:3]],
             "selectedDayTokens": day_sessions[selected_key]["summary"]["totalTokens"]
             if day_sessions[selected_key]["summary"]["tokenKnownTurns"] else None,
+            "sourcePartial": bool(
+                selected_day in partial_source_days
+                and (day_sessions[selected_key]["runIds"] & partial_run_ids
+                     or (partial_run_ids_truncated
+                         and selected_key[0] in {"codex", "claude-code"}))
+            ),
         }
     return {
         "window": {"startDay": dates[0], "endDay": dates[-1], "timezone": "UTC",
-                   "complete": complete and model_complete, "turnsComplete": complete,
+                   "complete": complete and model_complete and not partial_source_days
+                   and not partial_issue_source_days,
+                   "turnsComplete": complete,
                    "modelEvidenceComplete": model_complete, "scannedTurns": len(turns)},
-        "days": [{"day": value, **_present(daily[value])} for value in dates],
+        "days": [{"day": value, **_present(daily[value]),
+                  "sourcePartial": value in partial_source_days,
+                  "issueSourcePartial": value in partial_issue_source_days,
+                  "recordedIssueEvents": issue_counts[value]} for value in dates],
         "selectedDay": selected_day,
+        "selectedDayIssues": selected_day_issues,
         "dayModels": _present(daily[selected_day], include_models=True)["models"],
         "dayModelsTruncated": _present(daily[selected_day], include_models=True)["modelsTruncated"],
         "daySources": [{"sourceKind": source, **_present(summary)}
@@ -431,5 +700,7 @@ def build_usage_view(
         "dayExplanation": _day_explanation(
             selected_day, dates, daily, turns, ranked_sessions,
             complete=complete, model_complete=model_complete,
+            current_day=now.astimezone(timezone.utc).date().isoformat(),
+            partial_source_days=partial_source_days,
         ),
     }

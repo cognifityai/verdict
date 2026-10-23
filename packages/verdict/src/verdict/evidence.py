@@ -27,6 +27,8 @@ _MAX_ATTRIBUTE_STRING_BYTES = 4096
 _MAX_TURN_CONTENT_BYTES = 65_536
 _MAX_ATTRIBUTES_JSON_BYTES = 16_384
 _MAX_BUNDLE_JSON_BYTES = 4_194_304
+# The V1 analysis read contract cannot accept a larger canonical run.
+AGENT_RUN_READ_MAX_TURNS = 1_000
 _TOKEN_USAGE_BASES = frozenset({"codex_turn_delta", "claude_provider_response_sum"})
 _TURN_TOKEN_FIELDS = (
     "input_tokens",
@@ -106,9 +108,9 @@ _EVENT_FIELDS: dict[AgentEventType, frozenset[str]] = {
         {"tool_name", "arguments", "call_id", "tool_origin"}
     ),
     AgentEventType.TOOL_RESULT: frozenset({"tool_name", "result", "call_id", "is_error"}),
-    AgentEventType.COMMAND: frozenset({"command", "cwd_hash", "exit_code", "stdout", "stderr"}),
+    AgentEventType.COMMAND: frozenset({"command", "cwd_hash", "exit_code", "stdout", "stderr", "check_id_hash"}),
     AgentEventType.TEST_RESULT: frozenset(
-        {"command", "exit_code", "passed", "failed", "skipped", "output"}
+        {"command", "exit_code", "passed", "failed", "skipped", "output", "check_id_hash"}
     ),
     AgentEventType.ARTIFACT: frozenset({"path_hash", "action", "authoritative", "state"}),
     AgentEventType.SUBAGENT: frozenset({"agent_name", "action", "child_run_id", "state"}),
@@ -145,6 +147,7 @@ _TEXT_FIELDS = frozenset(
         "call_id",
         "command",
         "cwd_hash",
+        "check_id_hash",
         "stdout",
         "stderr",
         "output",
@@ -252,6 +255,10 @@ def _validate_attributes(event_type: AgentEventType, attributes: dict[str, Any])
             f"event attribute {sorted(unexpected)[0]!r} is not allowed for {event_type.value}"
         )
     for name, value in attributes.items():
+        if name == "check_id_hash" and (
+            not isinstance(value, str) or not _HEX_DIGEST.fullmatch(value)
+        ):
+            raise ValueError("event check_id_hash must be a lowercase SHA-256 digest")
         if value is None or name in {"arguments", "result"}:
             if name == "tool_origin":
                 raise ValueError("event attribute 'tool_origin' must be a ToolOrigin value")
@@ -287,6 +294,11 @@ def _validate_attributes(event_type: AgentEventType, attributes: dict[str, Any])
     ).encode("utf-8")
     if len(encoded) > _MAX_ATTRIBUTES_JSON_BYTES:
         raise ValueError("event attributes must be bounded")
+
+
+def disclosed_event_attributes(attributes: dict[str, Any]) -> dict[str, Any]:
+    """Omit internal check-identity digests from dashboard and judge evidence."""
+    return {key: value for key, value in attributes.items() if key != "check_id_hash"}
 
 
 @dataclass(frozen=True)

@@ -32,6 +32,7 @@ supplies an explicit stable join.
 | Evidence contains prompts, responses, model names, tool arguments/results, commands, errors, arbitrary tags, secrets, or PII | Those fields do not exist in the DTO; exclusion canaries stay absent from its `repr` and JSON | Public DTO and serializer |
 | Included identifiers themselves contain operator or personal data | Tenant, run, event, and Trace IDs are treated as protected Verdict metadata, not declared non-sensitive | Trusted composition root, DTO, and JSON |
 | A model call has no Trace link | The call remains present with `trace_id=None`; absence is not converted into a guessed join | Model-call DTO and correlation result |
+| A historical model call points to a missing or foreign-tenant Trace | The event remains present, but the adapter returns `trace_id=None`; a local tenant may also read historical tenantless Traces | Model-call DTO and downstream Trace lookup |
 | A run is open, failed, cancelled, timed out, or has no events/findings | Status and optional end time remain explicit; an absent run alone returns `None` | Agent Run DTO |
 | Tuple order differs across storage adapters | The bundle is canonicalized before both analysis and projection | Memory, SQLite, buffered SQLite, and PostgreSQL parity fixture |
 | A run has more model calls/findings than V1 returns | Pre-truncation totals and collection-level truncation flags are explicit | DTO and JSON |
@@ -108,8 +109,10 @@ or metrics do not trigger a bump. A consumer maintains its own explicit
 analysis-version allowlist and rejects an unsupported value; it must not
 interpret every value carried by a schema-V1 DTO as equivalent.
 
-`StorageVerdictReadPort` is the only default adapter. It calls the existing
-exact `Storage.get_agent_run_bundle(tenant_id, run_id)` method. A dependent
+`StorageVerdictReadPort` is the only default adapter. It reads the exact stored
+bundle and local source checkpoint together where that storage operation is
+available, then validates each returned Trace link through storage before
+exposing it. A dependent
 package types only against `VerdictReadPort` and the three read DTOs; its
 trusted host composition root constructs the concrete storage adapter. The
 dependent package never imports a storage implementation, opens a Verdict
@@ -183,6 +186,14 @@ bounds projection, analysis CPU/memory, and output, but does **not** claim a
 hard pre-I/O backing-store bound. It is restricted to the trusted same-process
 composition in this ADR. A hard database-read bound requires a separately
 justified storage primitive and does not belong in this PR.
+
+Current unreleased local-import behavior retains the first 1,000 turns as a
+stable historical prefix and records source counts in the same transaction.
+V1 refuses whole-run projection when the source exceeds that prefix; older
+complete turns remain available through their existing links. A separate
+bounded recent window supports scoped deterministic checks without claiming
+whole-run coverage. Published beta records with more than 1,000 stored turns
+still return `invalid_read_model`.
 
 For an accepted-size bundle, the adapter validates it and constructs one
 canonical `AgentRunBundle` before doing any analysis:

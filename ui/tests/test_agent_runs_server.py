@@ -1,13 +1,17 @@
 import asyncio
+import hashlib
 import json
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from threading import Event, current_thread
 
 import httpx
 import pytest
 import verdict
 import verdict.dashboard.analysis_service as analysis_service
+import verdict.dashboard.app as dashboard_app
 import verdict.dashboard.query as dashboard_query
 from fastapi import FastAPI, Request
 from verdict.agent_judgment import (
@@ -26,6 +30,7 @@ from verdict.dashboard.app import (
     build_agent_run_detail,
     build_agent_runs_bundle,
     build_agent_session_bundle,
+    build_bundle,
     create_app,
 )
 from verdict.dashboard.control_plane import ControlStore
@@ -48,13 +53,15 @@ from verdict.evidence import (
     PrivacyClassification,
     SourceSession,
 )
-from verdict.schema import DimensionScore, Operation, Trace, Verdict
+from verdict.normalized_evidence import normalized_bundle_digest
+from verdict.schema import DimensionScore, Judgment, Operation, Trace, Verdict
 from verdict.storage import SQLiteStorage
 from verdict_eval.providers import CompletionResponse
 
 
 def _bundle(
     tenant: str, now: datetime, *, with_turn: bool = False, trace_link: bool = False,
+    source_kind: str = "synthetic-test-agent",
 ) -> AgentRunBundle:
     turns = (
         AgentTurn(
@@ -78,11 +85,495 @@ def _bundle(
         ),
     ) if with_turn else ()
     return AgentRunBundle(
-        SourceSession(f"s-{tenant}", tenant, "codex", "a" * 64, now, now),
+        SourceSession(f"s-{tenant}", tenant, source_kind, "a" * 64, now, now),
         AgentRun(f"r-{tenant}", f"s-{tenant}", tenant, now, ExecutionStatus.UNKNOWN),
         turns,
         events,
     )
+
+
+@pytest.mark.parametrize("event_type, attributes, failure_key, coverage_key", [
+    (AgentEventType.TOOL_RESULT, {"tool_name": "search"},
+     "toolErrors", "toolOutcomesReported"),
+    (AgentEventType.COMMAND, {"command": "pytest"},
+     "commandFailures", "commandOutcomesReported"),
+    (AgentEventType.TEST_RESULT, {"command": "pytest"},
+     "testFailures", "testOutcomesReported"),
+])
+def test_explicit_timeout_counts_as_reported_outcome_in_insights_api(
+    tmp_path, event_type, attributes, failure_key, coverage_key,
+):
+    path = tmp_path / "timeout-coverage.db"
+    url = f"sqlite:///{path}"
+    now = datetime(2026, 10, 19, tzinfo=timezone.utc)
+    original = _bundle("local", now, with_turn=True)
+    timeout = replace(original.events[1], sequence=0, event_type=event_type,
+                      status=ExecutionStatus.TIMED_OUT, attributes=attributes)
+    storage = SQLiteStorage(str(path))
+    try:
+        storage.replace_agent_run_bundle(replace(original, events=(timeout,)))
+    finally:
+        storage.close()
+    run_analysis(url, tenant="local", build=lambda: build_agent_insights_bundle(
+        url, tenant="local", _include_input_fingerprint=True,
+    ))
+
+    async def request():
+        app = create_app(storage=url, tenant_id="local")
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        ) as client:
+            return await client.get("/api/insights?tenant=local")
+
+    response = asyncio.run(request())
+    assert response.status_code == 200
+    reliability = response.json()["reliability"]
+    assert reliability[failure_key] == 1
+    assert reliability[coverage_key] == 1
+
+
+def test_dashboard_reports_tenant_scoped_last_bundle_write_on_same_count_reimport(tmp_path):
+    path = tmp_path / "freshness.db"
+    url = f"sqlite:///{path}"
+    now = datetime(2026, 10, 17, tzinfo=timezone.utc)
+    storage = SQLiteStorage(str(path))
+    original = _bundle("local", now, with_turn=True)
+    storage.replace_agent_run_bundle(original)
+    storage.replace_agent_run_bundle(_bundle("other", now, with_turn=True))
+    before = build_bundle(url, registry_tenant="local")["meta"]
+    other_before = build_bundle(url, registry_tenant="other")["meta"]["lastAgentStoredAt"]
+    analysis = run_analysis(url, tenant="local", build=lambda: build_agent_insights_bundle(
+        url, tenant="local", _include_input_fingerprint=True,
+    ))
+    changed = replace(original, run=replace(original.run, status=ExecutionStatus.FAILED,
+                                            ended_at=now))
+    storage.replace_agent_run_bundle(changed)
+    after = build_bundle(url, registry_tenant="local")["meta"]
+    assert after["totalAgentRuns"] == before["totalAgentRuns"] == 1
+    assert after["lastAgentStoredAt"] > analysis["analysisState"]["cutoff"]
+    assert after["lastAgentStoredAt"] > before["lastAgentStoredAt"]
+    assert build_bundle(url, registry_tenant="other")["meta"]["lastAgentStoredAt"] == other_before
+    storage.close()
+
+
+def test_unchanged_rescan_reverifies_deduplicated_analysis(tmp_path):
+    path = tmp_path / "unchanged-rescan.db"
+    url = f"sqlite:///{path}"
+    storage = SQLiteStorage(str(path))
+    bundle = _bundle("local", datetime(2026, 10, 17, tzinfo=timezone.utc), with_turn=True)
+    storage.replace_agent_run_bundle(bundle)
+    def build():
+        return build_agent_insights_bundle(
+            url, tenant="local", _include_input_fingerprint=True,
+        )
+    first = run_analysis(url, tenant="local", build=build)
+    first_revision = first["analysisState"]["verifiedRevision"]
+    storage.replace_agent_run_bundle(bundle)
+    current_revision = build_bundle(url, registry_tenant="local")["meta"]["evidenceRevision"]
+    assert current_revision > first_revision
+    second = run_analysis(url, tenant="local", build=build)
+    assert second["analysisState"]["analysisId"] == first["analysisState"]["analysisId"]
+    assert second["analysisState"]["cutoff"] == first["analysisState"]["cutoff"]
+    assert second["analysisState"]["verifiedRevision"] == current_revision
+    assert read_latest_analysis(url, tenant="local", empty_result={})["analysisState"][
+        "verifiedRevision"
+    ] == current_revision
+    storage.close()
+
+
+def test_legacy_analysis_builder_reuses_without_fabricating_revision(tmp_path):
+    url = f"sqlite:///{tmp_path / 'legacy-builder.db'}"
+    def build():
+        return {
+            "schema": "agent-insights-v2",
+            "sourceActivity": [],
+            "_analysisInputFingerprint": "a" * 64,
+        }
+    first = run_analysis(url, tenant="local", build=build)
+    second = run_analysis(url, tenant="local", build=build)
+    assert first == second
+    assert second["analysisState"]["verifiedRevision"] is None
+    assert read_latest_analysis(url, tenant="local", empty_result={}) == second
+    coverage = build_bundle(url, registry_tenant="local")["coverage"]["deterministicAnalysis"]
+    assert coverage["status"] == "completed"
+    assert coverage["needsRefresh"] is True
+
+
+def test_read_only_dashboard_reports_legacy_analysis_without_revision_column(tmp_path):
+    path = tmp_path / "legacy-analysis-column.db"
+    storage = SQLiteStorage(str(path))
+    now = datetime(2026, 10, 17, tzinfo=timezone.utc)
+    storage.save_deterministic_analysis_run(DeterministicAnalysisRun(
+        analysis_id="a" * 64, tenant_id="local", scope_key="agent-and-trace",
+        cutoff=now, completed_at=now, status=AnalysisRunStatus.COMPLETED,
+        analyzer_version="agent-insights-v5", input_fingerprint="b" * 64,
+        result={"schema": "agent-insights-v2", "scope": {"availableRuns": 0,
+            "analyzedRuns": 0, "complete": True, "traces": {"available": 0,
+                "analyzed": 0, "complete": True}}},
+    ))
+    storage.close()
+    with sqlite3.connect(path) as connection:
+        connection.execute("ALTER TABLE deterministic_analysis_runs DROP COLUMN verified_revision")
+    coverage = build_bundle(f"sqlite:///{path}", registry_tenant="local")["coverage"][
+        "deterministicAnalysis"
+    ]
+    assert coverage["status"] == "completed"
+    assert coverage["complete"] is True
+    assert coverage["needsRefresh"] is True
+
+
+def test_previous_trace_outcome_analyzer_is_not_current_after_semantic_change(tmp_path):
+    path = tmp_path / "old-outcomes.db"
+    url = f"sqlite:///{path}"
+    storage = SQLiteStorage(str(path))
+    now = datetime.now(timezone.utc)
+    storage.save_deterministic_analysis_run(DeterministicAnalysisRun(
+        analysis_id="a" * 64, tenant_id="local", scope_key="agent-and-trace",
+        cutoff=now, completed_at=now, status=AnalysisRunStatus.COMPLETED,
+        analyzer_version="agent-insights-v4", input_fingerprint="b" * 64,
+        result={"schema": "agent-insights-v2", "reliability": {
+            "traceOutcomes": {"succeeded": 1},
+        }},
+    ))
+    storage.close()
+    current = read_latest_analysis(url, tenant="local", empty_result={
+        "schema": "agent-insights-v2", "reliability": {"traceOutcomes": {}},
+    })
+    assert current["analysisState"]["status"] == "never_run"
+    assert current["analysisState"]["analyzerVersion"] == "agent-insights-v5"
+    assert current["reliability"]["traceOutcomes"] == {}
+
+    async def request_data():
+        transport = httpx.ASGITransport(app=create_app(storage=f"sqlite:///{path}", tenant_id="local"))
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            return await client.get("/api/data")
+
+    response = asyncio.run(request_data())
+    assert response.status_code == 200
+    assert response.json()["coverage"]["deterministicAnalysis"]["status"] == "never_run"
+
+
+def test_concurrent_same_identity_analysis_recheck_publishes_the_returned_row(
+    tmp_path, monkeypatch,
+):
+    url = f"sqlite:///{tmp_path / 'analysis-race.db'}"
+    instant = datetime(2026, 10, 17, tzinfo=timezone.utc)
+
+    class FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return instant if tz is not None else instant.replace(tzinfo=None)
+
+    monkeypatch.setattr(analysis_service, "datetime", FrozenDatetime)
+    original_save = SQLiteStorage.save_deterministic_analysis_run
+    entered, resume = Event(), Event()
+
+    def delayed_save(self, run):
+        if current_thread().name.startswith("delayed-analysis"):
+            entered.set()
+            assert resume.wait(10)
+        return original_save(self, run)
+
+    monkeypatch.setattr(SQLiteStorage, "save_deterministic_analysis_run", delayed_save)
+
+    def build(fingerprint):
+        return lambda: {"schema": "agent-insights-v2", "sourceActivity": [],
+                        "_analysisInputFingerprint": fingerprint}
+
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="delayed-analysis") as pool:
+        delayed = pool.submit(run_analysis, url, tenant="local", build=build("a" * 64))
+        assert entered.wait(10)
+        try:
+            competing = run_analysis(url, tenant="local", build=build("a" * 64))
+            newer = run_analysis(url, tenant="local", build=build("b" * 64))
+            assert read_latest_analysis(url, tenant="local", empty_result={})[
+                "analysisState"
+            ]["analysisId"] == newer["analysisState"]["analysisId"]
+        finally:
+            resume.set()
+        returned = delayed.result(timeout=10)
+    assert returned["analysisState"]["analysisId"] == competing[
+        "analysisState"
+    ]["analysisId"]
+    assert read_latest_analysis(url, tenant="local", empty_result={})[
+        "analysisState"
+    ]["analysisId"] == returned["analysisState"]["analysisId"]
+
+
+def test_failed_analysis_remains_latest_after_reload_until_successful_recheck(tmp_path):
+    url = f"sqlite:///{tmp_path / 'analysis-attempt.db'}"
+    storage = SQLiteStorage(str(tmp_path / "analysis-attempt.db"))
+    storage.replace_agent_run_bundle(_bundle(
+        "local", datetime(2026, 10, 17, tzinfo=timezone.utc), with_turn=True,
+    ))
+    def build():
+        return build_agent_insights_bundle(
+            url, tenant="local", _include_input_fingerprint=True,
+        )
+    completed = run_analysis(url, tenant="local", build=build)
+    failed = run_analysis(
+        url, tenant="local",
+        build=lambda: (_ for _ in ()).throw(RuntimeError("synthetic build failure")),
+    )
+    assert failed["analysisState"]["status"] == "error"
+    latest = read_latest_analysis(url, tenant="local", empty_result={"scope": {}})
+    assert latest["analysisState"]["analysisId"] == failed["analysisState"]["analysisId"]
+    assert build_bundle(url, registry_tenant="local")["coverage"]["deterministicAnalysis"][
+        "analysisId"
+    ] == failed["analysisState"]["analysisId"]
+    rechecked = run_analysis(url, tenant="local", build=build)
+    assert rechecked["analysisState"]["analysisId"] == completed["analysisState"]["analysisId"]
+    assert read_latest_analysis(url, tenant="local", empty_result={})["analysisState"][
+        "analysisId"
+    ] == rechecked["analysisState"]["analysisId"]
+    assert build_bundle(url, registry_tenant="local")["coverage"]["deterministicAnalysis"][
+        "analysisId"
+    ] == rechecked["analysisState"]["analysisId"]
+    storage.close()
+
+
+def test_dashboard_latest_analysis_and_coverage_follow_terminal_attempt(tmp_path, monkeypatch):
+    url = f"sqlite:///{tmp_path / 'analysis-api.db'}"
+    storage = SQLiteStorage(str(tmp_path / "analysis-api.db"))
+    storage.replace_agent_run_bundle(_bundle(
+        "local", datetime(2026, 10, 17, tzinfo=timezone.utc), with_turn=True,
+    ))
+    storage.close()
+    original = dashboard_app.build_agent_insights_bundle
+
+    async def request():
+        transport = httpx.ASGITransport(app=create_app(storage=url, tenant_id="local"))
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            headers = {"X-Verdict-Setup": token}
+            first = (await client.post("/api/insights/run", headers=headers)).json()
+
+            def fail_build(*args, **kwargs):
+                raise RuntimeError("synthetic analysis fault")
+
+            monkeypatch.setattr(dashboard_app, "build_agent_insights_bundle", fail_build)
+            failed = (await client.post("/api/insights/run", headers=headers)).json()
+            latest = (await client.get("/api/insights")).json()
+            coverage = (await client.get("/api/data")).json()["coverage"]["deterministicAnalysis"]
+            assert failed["analysisState"]["status"] == "error"
+            assert latest["analysisState"]["analysisId"] == failed["analysisState"]["analysisId"]
+            assert coverage["analysisId"] == failed["analysisState"]["analysisId"]
+            monkeypatch.setattr(dashboard_app, "build_agent_insights_bundle", original)
+            rechecked = (await client.post("/api/insights/run", headers=headers)).json()
+            latest = (await client.get("/api/insights")).json()
+            coverage = (await client.get("/api/data")).json()["coverage"]["deterministicAnalysis"]
+            assert rechecked["analysisState"]["analysisId"] == first["analysisState"]["analysisId"]
+            assert latest["analysisState"]["analysisId"] == rechecked["analysisState"]["analysisId"]
+            assert coverage["analysisId"] == rechecked["analysisState"]["analysisId"]
+
+    asyncio.run(request())
+
+
+def test_same_count_trace_rewrite_and_revert_advance_tenant_revision(tmp_path):
+    path = tmp_path / "trace-revision.db"
+    url = f"sqlite:///{path}"
+    storage = SQLiteStorage(str(path))
+    now = datetime(2026, 10, 17, tzinfo=timezone.utc)
+    trace = Trace(trace_id="same-trace", tenant_id="local", started_at=now,
+                  prompt_redacted="synthetic request", response_redacted="synthetic reply")
+    storage.insert_trace(trace)
+    def build():
+        return build_agent_insights_bundle(
+            url, tenant="local", _include_input_fingerprint=True,
+        )
+    first = run_analysis(url, tenant="local", build=build)
+    other_before = build_bundle(url, registry_tenant="other")["meta"]["evidenceRevision"]
+    storage.insert_trace(replace(trace, error="synthetic provider error"))
+    changed_meta = build_bundle(url, registry_tenant="local")["meta"]
+    assert changed_meta["totalTraces"] == 1
+    assert changed_meta["evidenceRevision"] > first["analysisState"]["verifiedRevision"]
+    stale_coverage = build_bundle(url, registry_tenant="local")["coverage"][
+        "deterministicAnalysis"
+    ]
+    assert stale_coverage["complete"] is True
+    assert stale_coverage["needsRefresh"] is True
+    second = run_analysis(url, tenant="local", build=build)
+    assert second["analysisState"]["analysisId"] != first["analysisState"]["analysisId"]
+    storage.insert_trace(trace)
+    third = run_analysis(url, tenant="local", build=build)
+    assert third["analysisState"]["analysisId"] == first["analysisState"]["analysisId"]
+    assert third["analysisState"]["verifiedRevision"] > second["analysisState"]["verifiedRevision"]
+    assert build_bundle(url, registry_tenant="local")["coverage"]["deterministicAnalysis"][
+        "analysisId"
+    ] == third["analysisState"]["analysisId"]
+    assert build_bundle(url, registry_tenant="local")["coverage"]["deterministicAnalysis"][
+        "needsRefresh"
+    ] is False
+    storage.insert_trace(replace(trace, trace_id="other-trace", tenant_id="other"))
+    assert build_bundle(url, registry_tenant="local")["meta"]["evidenceRevision"] == third[
+        "analysisState"
+    ]["verifiedRevision"]
+    assert build_bundle(url, registry_tenant="other")["meta"]["evidenceRevision"] > other_before
+    storage.delete_trace("same-trace")
+    assert build_bundle(url, registry_tenant="local")["meta"]["evidenceRevision"] > third[
+        "analysisState"
+    ]["verifiedRevision"]
+    storage.close()
+
+
+def test_trace_identity_cannot_be_reused_across_tenants(tmp_path):
+    storage = SQLiteStorage(str(tmp_path / "tenant-trace.db"))
+    trace = Trace(
+        trace_id="shared-id", tenant_id="tenant-a",
+        started_at=datetime(2026, 10, 17, tzinfo=timezone.utc),
+        prompt_redacted="synthetic A", response_redacted="synthetic reply",
+    )
+    storage.insert_trace(trace)
+    before = storage.get_evidence_revision("tenant-a")
+    with pytest.raises(ValueError, match="tenant"):
+        storage.insert_trace(replace(trace, tenant_id="tenant-b",
+                                     response_redacted="synthetic B"))
+    with pytest.raises(sqlite3.IntegrityError, match="tenant"):
+        storage._conn.execute(
+            "UPDATE traces SET tenant_id=? WHERE trace_id=?", ("tenant-b", trace.trace_id),
+        )
+    assert storage.get_trace(trace.trace_id).tenant_id == "tenant-a"
+    assert storage.get_trace(trace.trace_id).response_redacted == "synthetic reply"
+    assert storage.get_evidence_revision("tenant-a") == before
+    assert storage.get_evidence_revision("tenant-b") == 0
+    storage.replace_agent_run_bundle(_bundle(
+        "tenant-a", datetime(2026, 10, 17, tzinfo=timezone.utc), with_turn=True,
+    ))
+    run_revision = storage.get_evidence_revision("tenant-a")
+    with pytest.raises(sqlite3.IntegrityError, match="tenant"):
+        storage._conn.execute(
+            "UPDATE agent_runs SET tenant_id=? WHERE tenant_id=?",
+            ("tenant-b", "tenant-a"),
+        )
+    assert storage.get_evidence_revision("tenant-a") == run_revision
+    assert storage.get_evidence_revision("tenant-b") == 0
+    storage.close()
+
+
+def test_source_metadata_without_legacy_update_column_is_unknown(tmp_path):
+    from verdict.dashboard.query import SQLiteSession
+
+    connection = sqlite3.connect(tmp_path / "legacy-agent.db")
+    connection.row_factory = sqlite3.Row
+    connection.executescript("""
+        CREATE TABLE import_sources (tenant_id TEXT,source_session_id TEXT,source_kind TEXT);
+        CREATE TABLE agent_runs (tenant_id TEXT,run_id TEXT,source_session_id TEXT,started_at TEXT);
+        CREATE TABLE agent_turns (tenant_id TEXT);
+        CREATE TABLE agent_events (tenant_id TEXT);
+        INSERT INTO import_sources VALUES ('local','s-local','codex');
+        INSERT INTO agent_runs VALUES ('local','r-local','s-local','2026-10-17T10:00:00+00:00');
+    """)
+    metadata = agent_evidence_queries.source_metadata(SQLiteSession(connection), "local")
+    assert metadata["available"] == 1
+    assert metadata["lastStoredAt"] is None
+    assert metadata["agents"] == []
+    connection.close()
+
+
+def test_dashboard_agent_groups_are_tenant_scoped_and_bounded(tmp_path):
+    path = tmp_path / "agent-groups.db"
+    url = f"sqlite:///{path}"
+    storage = SQLiteStorage(str(path))
+    now = datetime(2026, 10, 17, tzinfo=timezone.utc)
+    for index, (tenant, name) in enumerate((
+        ("local", "researcher"), ("local", "researcher"),
+        ("local", "writer"), ("other", "private-agent"),
+    )):
+        original = _bundle(tenant, now)
+        source_id = f"source-{tenant}-{index}"
+        storage.replace_agent_run_bundle(replace(
+            original,
+            session=replace(original.session, source_session_id=source_id,
+                            source_locator_hash=f"{index + 1:064x}"),
+            run=replace(original.run, run_id=f"run-{tenant}-{index}",
+                        source_session_id=source_id, agent_name=name),
+        ))
+    local = build_bundle(url, registry_tenant="local")["meta"]
+    other = build_bundle(url, registry_tenant="other")["meta"]
+    assert local["agentRunAgents"] == [
+        {"agentName": "researcher", "runs": 2},
+        {"agentName": "writer", "runs": 1},
+    ]
+    assert local["agentRunAgentsTruncated"] is False
+    assert other["agentRunAgents"] == [{"agentName": "private-agent", "runs": 1}]
+    storage.close()
+
+
+def test_group_selection_filters_the_tenant_scoped_run_list(tmp_path):
+    path = tmp_path / "filtered-runs.db"
+    url = f"sqlite:///{path}"
+    storage = SQLiteStorage(str(path))
+    now = datetime(2026, 10, 17, tzinfo=timezone.utc)
+    for index, (tenant, source, agent) in enumerate((
+        ("local", "codex", "researcher"),
+        ("local", "custom-agent", "writer"),
+        ("local", "custom-agent", "researcher"),
+        ("other", "codex", "researcher"),
+    )):
+        original = _bundle(tenant, now)
+        source_id = f"source-{tenant}-{index}"
+        storage.replace_agent_run_bundle(replace(
+            original,
+            session=replace(original.session, source_session_id=source_id,
+                            source_kind=source, source_locator_hash=f"{index + 1:064x}"),
+            run=replace(original.run, run_id=f"run-{tenant}-{index}",
+                        source_session_id=source_id, agent_name=agent),
+        ))
+    by_source = build_agent_runs_bundle(url, tenant="local", view="list", source_kind="codex")
+    by_agent = build_agent_runs_bundle(url, tenant="local", view="list", agent_name="researcher")
+    exact_group = build_agent_runs_bundle(
+        url, tenant="local", view="list", source_kind="codex", agent_name="researcher",
+    )
+    assert by_source["summary"]["available"] == 1
+    assert [run["runId"] for run in by_source["runs"]] == ["run-local-0"]
+    assert {run["runId"] for run in by_agent["runs"]} == {"run-local-0", "run-local-2"}
+    assert [run["runId"] for run in exact_group["runs"]] == ["run-local-0"]
+    assert by_source["selectedRun"]["runId"] == "run-local-0"
+    with pytest.raises(ValueError, match="group filter"):
+        build_agent_runs_bundle(url, tenant="local", view="list", source_kind="x" * 257)
+    with pytest.raises(ValueError, match="group filter"):
+        build_agent_runs_bundle(url, tenant="local", view="list", source_kind="codex",
+                                run_ids=("run-local-1",))
+    async def read_exact_group():
+        transport = httpx.ASGITransport(app=create_app(storage=url, tenant_id="local"))
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            return await client.get("/api/runs?view=list&source_kind=codex&agent_name=researcher")
+
+    response = asyncio.run(read_exact_group())
+    assert response.status_code == 200
+    assert [run["runId"] for run in response.json()["runs"]] == ["run-local-0"]
+    storage.close()
+
+
+def test_run_detail_links_only_recorded_children_in_same_tenant(tmp_path):
+    path = tmp_path / "agent-family.db"
+    storage = SQLiteStorage(str(path))
+    now = datetime(2026, 10, 17, tzinfo=timezone.utc)
+    parent = _bundle("local", now)
+    child = replace(parent, run=replace(parent.run, run_id="child-local",
+                                        parent_run_id=parent.run.run_id, agent_name="researcher"))
+    sibling = replace(parent, run=replace(parent.run, run_id="child-local-2",
+                                          parent_run_id=parent.run.run_id, agent_name="writer"))
+    orphan = replace(parent, run=replace(parent.run, run_id="orphan-local",
+                                         parent_run_id="missing-local", agent_name="writer"))
+    foreign = _bundle("other", now)
+    foreign_child = replace(foreign, run=replace(foreign.run, run_id="child-other",
+                                               parent_run_id=parent.run.run_id))
+    for bundle in (parent, child, sibling, orphan, foreign_child):
+        storage.replace_agent_run_bundle(bundle)
+    report = build_agent_run_detail(f"sqlite:///{path}", tenant="local", run_id=parent.run.run_id)
+    assert report["children"] == [
+        {"runId": "child-local", "agentName": "researcher",
+         "status": "unknown", "startedAt": now.isoformat()},
+        {"runId": "child-local-2", "agentName": "writer",
+         "status": "unknown", "startedAt": now.isoformat()},
+    ]
+    assert report["childrenTruncated"] is False
+    assert report["parentAvailable"] is None
+    assert build_agent_run_detail(f"sqlite:///{path}", tenant="local", run_id="child-local")["parentAvailable"] is True
+    assert build_agent_run_detail(f"sqlite:///{path}", tenant="local", run_id="orphan-local")["parentAvailable"] is False
+    assert build_agent_run_detail(f"sqlite:///{path}", tenant="other", run_id="child-other")["parentAvailable"] is False
+    storage.close()
 
 
 def test_run_and_session_list_eligibility_matches_their_preview(tmp_path):
@@ -90,7 +581,7 @@ def test_run_and_session_list_eligibility_matches_their_preview(tmp_path):
     url = f"sqlite:///{path}"
     storage = SQLiteStorage(str(path))
     now = datetime(2026, 10, 11, tzinfo=timezone.utc)
-    bundle = _bundle("local", now, with_turn=True)
+    bundle = _bundle("local", now, with_turn=True, source_kind="synthetic-test-agent")
     storage.replace_agent_run_bundle(replace(bundle, turns=(replace(
         bundle.turns[0], final_response_redacted="synthetic " * 900,
     ),)))
@@ -104,12 +595,12 @@ def test_run_and_session_list_eligibility_matches_their_preview(tmp_path):
     assert run["scopedEvaluationEligible"] is (run_preview["plannedCalls"] == 1)
     assert run["scopedEvaluationUnavailableReason"] == run_preview["unavailableReason"]
     session_config = {**config, "scope": "session", "sessionId": "s-local",
-                      "sourceKind": "codex"}
+                      "sourceKind": "synthetic-test-agent"}
     session_config.pop("runId")
     session_preview = preview_scoped(storage, tenant="local", config=session_config,
                                      storage_url=url)
     report = build_agent_session_bundle(
-        url, tenant="local", source_kind="codex", session_id="s-local",
+        url, tenant="local", source_kind="synthetic-test-agent", session_id="s-local",
     )
     assert report["scopedEvaluationEligible"] is (session_preview["plannedCalls"] == 1)
     assert report["scopedEvaluationUnavailableReason"] == session_preview["unavailableReason"]
@@ -121,7 +612,7 @@ def test_run_and_session_list_eligibility_matches_their_preview(tmp_path):
     run_preview = preview_scoped(eligible_storage, tenant="local", config=config)
     run = build_agent_runs_bundle(eligible_url, tenant="local")["runs"][0]
     report = build_agent_session_bundle(
-        eligible_url, tenant="local", source_kind="codex", session_id="s-local",
+        eligible_url, tenant="local", source_kind="synthetic-test-agent", session_id="s-local",
     )
     session_preview = preview_scoped(eligible_storage, tenant="local", config=session_config,
                                      storage_url=eligible_url)
@@ -138,6 +629,7 @@ def test_identical_scoped_execution_replays_stored_result_without_provider_call(
     storage = SQLiteStorage(str(path))
     storage.replace_agent_run_bundle(_bundle(
         "local", datetime(2026, 10, 11, tzinfo=timezone.utc), with_turn=True,
+        source_kind="synthetic-test-agent",
     ))
     config = {"scope": "run", "runId": "r-local", "provider": "anthropic",
               "model": "claude-haiku-4-5", "maxOutputTokens": 256,
@@ -195,6 +687,7 @@ def test_cancelled_and_preflight_failed_approval_can_be_queued_again(tmp_path, m
     storage = SQLiteStorage(str(path))
     storage.replace_agent_run_bundle(_bundle(
         "local", datetime(2026, 10, 11, tzinfo=timezone.utc), with_turn=True,
+        source_kind="synthetic-test-agent",
     ))
     config = {"scope": "run", "runId": "r-local", "provider": "anthropic",
               "model": "claude-haiku-4-5", "maxOutputTokens": 256,
@@ -743,6 +1236,113 @@ def test_agent_runs_api_exposes_typed_analysis_without_raw_envelopes(tmp_path):
     assert "payload_json" not in json.dumps(direct)
 
 
+def test_runs_api_leads_with_recorded_tool_failure_and_keeps_tenant_boundary(tmp_path):
+    path = tmp_path / "run-actions.db"
+    now = datetime(2026, 10, 19, tzinfo=timezone.utc)
+    storage = SQLiteStorage(str(path))
+    for tenant in ("local", "foreign"):
+        bundle = _bundle(tenant, now, with_turn=True)
+        call = AgentEvent(
+            f"{tenant}-call", "turn", 2, now, AgentEventType.TOOL_CALL,
+            ExecutionStatus.UNKNOWN, "synthetic:tool",
+            {"tool_name": "shell", "call_id": f"{tenant}-1"},
+        )
+        result = AgentEvent(
+            f"{tenant}-failure", "turn", 3, now, AgentEventType.TOOL_RESULT,
+            ExecutionStatus.TIMED_OUT, "synthetic:result",
+            {"tool_name": "shell", "call_id": f"{tenant}-1", "is_error": False},
+        )
+        gap = replace(call, event_id=f"{tenant}-gap", sequence=4,
+                      attributes={"tool_name": "shell", "call_id": f"{tenant}-2"})
+        storage.replace_agent_run_bundle(replace(bundle, events=(*bundle.events, call, result, gap)))
+    storage.close()
+
+    async def request_runs():
+        transport = httpx.ASGITransport(
+            app=create_app(storage=f"sqlite:///{path}", tenant_id="local")
+        )
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            return await client.get("/api/runs?tenant=foreign")
+
+    response = asyncio.run(request_runs())
+    assert response.status_code == 200
+    runs = response.json()["runs"]
+    assert [run["runId"] for run in runs] == ["r-local"]
+    assert [item["code"] for item in runs[0]["recommendations"][:2]] == [
+        "review_tool_failure", "review_missing_tool_outcomes",
+    ]
+    assert runs[0]["recommendations"][0]["evidenceEventIds"] == ["local-failure"]
+
+
+def test_runs_api_links_only_the_unmatched_call_beyond_first_twenty(tmp_path):
+    path = tmp_path / "late-gap.db"
+    now = datetime(2026, 10, 19, tzinfo=timezone.utc)
+    bundle = _bundle("local", now, with_turn=True, source_kind="synthetic-test-agent")
+    call = bundle.events[0]
+    result = bundle.events[1]
+    calls = tuple(replace(call, event_id=f"call-{index}", sequence=index,
+                          event_type=AgentEventType.TOOL_CALL,
+                          status=ExecutionStatus.UNKNOWN,
+                          attributes={"tool_name": "shell", "call_id": f"c{index}"})
+                  for index in range(21))
+    results = tuple(replace(result, event_id=f"result-{index}",
+                            sequence=21 + index, event_type=AgentEventType.TOOL_RESULT,
+                            status=ExecutionStatus.COMPLETED,
+                            attributes={"tool_name": "shell", "call_id": f"c{index}",
+                                        "is_error": False})
+                    for index in range(20))
+    storage = SQLiteStorage(str(path))
+    storage.replace_agent_run_bundle(replace(bundle, events=(*calls, *results)))
+    storage.close()
+
+    async def request_runs():
+        transport = httpx.ASGITransport(
+            app=create_app(storage=f"sqlite:///{path}", tenant_id="local")
+        )
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            return (await client.get("/api/runs"),
+                    await client.get("/api/runs/r-local", params={
+                        "event_id": "call-20", "event_limit": 1,
+                    }))
+
+    listing, detail = asyncio.run(request_runs())
+    assert listing.status_code == detail.status_code == 200
+    run = listing.json()["runs"][0]
+    gap = next(item for item in run["findings"]
+               if item["code"] == "tool_outcomes_incomplete")
+    advice = next(item for item in run["recommendations"]
+                  if item["code"] == "review_missing_tool_outcomes")
+    assert gap["evidenceEventIds"] == advice["evidenceEventIds"] == ["call-20"]
+    assert detail.json()["events"][0]["eventId"] == "call-20"
+
+
+def test_run_detail_does_not_label_historical_boolean_exit_code_as_failure(tmp_path):
+    path = tmp_path / "historical-boolean.db"
+    now = datetime(2026, 10, 19, tzinfo=timezone.utc)
+    bundle = _bundle("local", now, with_turn=True)
+    command = replace(bundle.events[1], status=ExecutionStatus.COMPLETED,
+                      attributes={"command": "synthetic-check", "exit_code": 0})
+    storage = SQLiteStorage(str(path))
+    storage.replace_agent_run_bundle(replace(bundle, events=(bundle.events[0], command)))
+    storage.close()
+    with sqlite3.connect(path) as connection:
+        connection.execute("UPDATE agent_events SET attributes_json=? WHERE event_id=?",
+                           ('{"command":"synthetic-check","exit_code":true}', "event-2"))
+
+    async def request_detail():
+        transport = httpx.ASGITransport(
+            app=create_app(storage=f"sqlite:///{path}", tenant_id="local")
+        )
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            return await client.get("/api/runs/r-local", params={"event_id": "event-2"})
+
+    detail = asyncio.run(request_detail())
+    assert detail.status_code == 200
+    command_event = next(item for item in detail.json()["events"]
+                         if item["eventId"] == "event-2")
+    assert command_event["issueCode"] is None
+
+
 def test_configured_dashboard_tenant_is_the_default_agent_run_scope(tmp_path):
     path = tmp_path / "configured-runs.db"
     storage = SQLiteStorage(str(path))
@@ -950,7 +1550,180 @@ def test_agent_run_detail_exposes_ordered_bounded_events_and_trace_links(tmp_pat
     assert [event["eventId"] for event in focused.json()["events"]] == ["event-2"]
     assert focused.json()["focusEventId"] == "event-2"
     assert focused.json()["page"]["offset"] == 1
-    assert "payload_json" not in response.text
+
+
+def test_run_reads_withhold_malformed_foreign_trace_link_and_judgment(tmp_path):
+    path = tmp_path / "foreign-trace-link.db"
+    storage = SQLiteStorage(str(path))
+    now = datetime(2026, 10, 19, tzinfo=timezone.utc)
+    storage.replace_agent_run_bundle(_bundle("local", now, with_turn=True))
+    storage.insert_trace(Trace(trace_id="foreign-trace", tenant_id="other", started_at=now,
+                               prompt_redacted="foreign secret canary"))
+    fingerprint = "f" * 64
+    storage.insert_judgment(Judgment(
+        judgment_id="foreign-judgment", trace_id="foreign-trace",
+        evaluator_fingerprint=fingerprint,
+        dimensions=[DimensionScore("foreign-quality", Verdict.FAIL)],
+    ))
+    # Simulate a malformed legacy link without weakening the validated capture API.
+    storage._conn.execute(
+        "UPDATE agent_events SET trace_id=? WHERE tenant_id=? AND run_id=? AND event_id=?",
+        ("foreign-trace", "local", "r-local", "event-1"),
+    )
+    storage.close()
+
+    async def request():
+        transport = httpx.ASGITransport(app=create_app(storage=f"sqlite:///{path}", tenant_id="local"))
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            return (
+                await client.get("/api/runs/r-local"),
+                await client.get(f"/api/runs?view=list&evaluator_fingerprint={fingerprint}"),
+            )
+
+    detail_response, list_response = asyncio.run(request())
+    assert detail_response.status_code == 200
+    assert list_response.status_code == 200
+    detail = detail_response.json()
+    model_call = next(event for event in detail["events"] if event["eventId"] == "event-1")
+    assert model_call["traceId"] is None
+    assert model_call["judgment"] is None
+    assert "foreign-quality" not in json.dumps(detail)
+    run = list_response.json()["selectedRun"]
+    assert run["evaluationCoverage"]["linkedTraces"] == 0
+    assert run["evaluationCoverage"]["judged"] == 0
+    assert build_agent_insights_bundle(path, tenant="local")["dataHealth"]["traceLinks"] == {
+        "modelCalls": 1, "linked": 0, "unlinked": 1,
+    }
+
+
+def test_insights_foreign_link_change_has_new_immutable_analysis_identity(tmp_path):
+    path = tmp_path / "foreign-link-analysis.db"
+    url = f"sqlite:///{path}"
+    now = datetime(2026, 10, 19, tzinfo=timezone.utc)
+    storage = SQLiteStorage(str(path))
+    storage.replace_agent_run_bundle(_bundle("local", now, with_turn=True))
+    storage.insert_trace(Trace(trace_id="foreign", tenant_id="other", started_at=now))
+    storage._conn.execute(
+        "UPDATE agent_events SET trace_id=? WHERE tenant_id=? AND run_id=? AND event_id=?",
+        ("foreign", "local", "r-local", "event-1"),
+    )
+    stored = storage.get_agent_run_bundle("local", "r-local")
+    current = build_agent_insights_bundle(url, tenant="local", _include_input_fingerprint=True)
+    old_hasher = hashlib.sha256()
+    old_hasher.update(normalized_bundle_digest(stored).encode("ascii"))
+    old_hasher.update(b"null")
+    old_hasher.update(b"bounded-scope-v2\0")
+    old_hasher.update(json.dumps(
+        {"scanLimit": 10_000, "scope": current["scope"]},
+        sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8"))
+    old_fingerprint = old_hasher.hexdigest()
+    assert current["_analysisInputFingerprint"] != old_fingerprint
+    old_identity = hashlib.sha256(analysis_service._canonical({
+        "tenant": "local", "scope": analysis_service.SCOPE_KEY,
+        "version": analysis_service.ANALYZER_VERSION,
+        "input": old_fingerprint, "status": "completed",
+    })).hexdigest()
+    old_result = {key: value for key, value in current.items() if not key.startswith("_")}
+    old_result["dataHealth"]["traceLinks"] = {
+        "modelCalls": 1, "linked": 1, "unlinked": 0,
+    }
+    storage.save_deterministic_analysis_run(DeterministicAnalysisRun(
+        analysis_id=old_identity, tenant_id="local", scope_key=analysis_service.SCOPE_KEY,
+        cutoff=now, completed_at=now, status=AnalysisRunStatus.COMPLETED,
+        analyzer_version=analysis_service.ANALYZER_VERSION,
+        input_fingerprint=old_fingerprint, result=old_result,
+    ))
+    storage.close()
+    published = run_analysis(
+        url, tenant="local", build=lambda: build_agent_insights_bundle(
+            url, tenant="local", _include_input_fingerprint=True,
+        ),
+    )
+    assert published["analysisState"]["analysisId"] != old_identity
+    assert published["dataHealth"]["traceLinks"]["linked"] == 0
+
+
+def test_postgres_run_reads_withhold_malformed_foreign_trace_link():
+    import os
+
+    from verdict.storage.postgres import PostgresStorage
+
+    from packages.verdict.tests._postgres_test_safety import isolated_test_dsn, validate_test_dsn
+
+    dsn, reason = validate_test_dsn(
+        os.environ.get("VERDICT_TEST_POSTGRES_DSN"), allow_any_database=False,
+    )
+    if dsn is None:
+        pytest.skip(reason)
+    import psycopg
+
+    now = datetime(2026, 10, 19, tzinfo=timezone.utc)
+    with isolated_test_dsn(dsn) as storage_url:
+        storage = PostgresStorage(storage_url)
+        try:
+            storage.replace_agent_run_bundle(_bundle("local", now, with_turn=True))
+            storage.insert_trace(Trace(trace_id="foreign-trace", tenant_id="other", started_at=now))
+            storage.insert_judgment(Judgment(
+                judgment_id="foreign-judgment", trace_id="foreign-trace",
+                evaluator_fingerprint="f" * 64,
+                dimensions=[DimensionScore("foreign-quality", Verdict.FAIL)],
+            ))
+        finally:
+            storage.close()
+        with psycopg.connect(storage_url, autocommit=True) as connection:
+            connection.execute(
+                "UPDATE agent_events SET trace_id=%s WHERE tenant_id=%s AND run_id=%s AND event_id=%s",
+                ("foreign-trace", "local", "r-local", "event-1"),
+            )
+        detail = build_agent_run_detail(storage_url, tenant="local", run_id="r-local")
+        model_call = next(event for event in detail["events"] if event["eventId"] == "event-1")
+        assert model_call["traceId"] is None
+        assert model_call["judgment"] is None
+        selected = build_agent_runs_bundle(
+            storage_url, tenant="local", view="list", evaluator_fingerprint="f" * 64,
+        )["selectedRun"]
+        assert selected["evaluationCoverage"]["linkedTraces"] == 0
+        assert selected["evaluationCoverage"]["judged"] == 0
+        assert build_agent_insights_bundle(storage_url, tenant="local")["dataHealth"]["traceLinks"] == {
+            "modelCalls": 1, "linked": 0, "unlinked": 1,
+        }
+
+
+def test_local_run_reads_keep_historical_tenantless_trace_link(tmp_path):
+    tenant = "__verdict_local__"
+    path = tmp_path / "tenantless-link.db"
+    storage = SQLiteStorage(str(path))
+    now = datetime(2026, 10, 19, tzinfo=timezone.utc)
+    storage.replace_agent_run_bundle(_bundle(tenant, now, with_turn=True))
+    storage.insert_trace(Trace(trace_id="legacy-trace", tenant_id=None, started_at=now))
+    storage._conn.execute(
+        "UPDATE agent_events SET trace_id=? WHERE tenant_id=? AND run_id=? AND event_id=?",
+        ("legacy-trace", tenant, f"r-{tenant}", "event-1"),
+    )
+    storage.close()
+    detail = build_agent_run_detail(path, tenant=tenant, run_id=f"r-{tenant}")
+    assert detail["events"][0]["traceId"] == "legacy-trace"
+    assert build_agent_insights_bundle(path, tenant=tenant)["dataHealth"]["traceLinks"] == {
+        "modelCalls": 1, "linked": 1, "unlinked": 0,
+    }
+
+
+def test_run_detail_withholds_malformed_binary_trace_link(tmp_path):
+    path = tmp_path / "binary-trace-link.db"
+    storage = SQLiteStorage(str(path))
+    now = datetime(2026, 10, 19, tzinfo=timezone.utc)
+    storage.replace_agent_run_bundle(_bundle("local", now, with_turn=True))
+    storage.close()
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "UPDATE agent_events SET trace_id=? WHERE tenant_id=? AND run_id=? AND event_id=?",
+            (sqlite3.Binary(b"\xff"), "local", "r-local", "event-1"),
+        )
+    detail = build_agent_run_detail(path, tenant="local", run_id="r-local")
+    model_call = next(event for event in detail["events"] if event["eventId"] == "event-1")
+    assert model_call["traceId"] is None
+    assert model_call["judgment"] is None
 
 
 def test_agent_run_detail_redacts_historical_semantic_and_plural_credentials(tmp_path):
@@ -1202,7 +1975,7 @@ def test_agent_insights_reports_dataset_wide_evidence_and_findings(tmp_path):
     assert {key: value for key, value in persisted.items() if key != "analysisState"} == report
     assert report["schema"] == "agent-insights-v2"
     assert report["scope"] == {
-        "availableRuns": 1, "analyzedRuns": 1, "complete": True,
+        "availableRuns": 1, "analyzedRuns": 1, "partialRuns": 0, "complete": True,
         "traces": {"available": 2, "analyzed": 2, "complete": True},
     }
     assert report["dataHealth"]["counts"] == {"runs": 1, "turns": 1, "events": 2}
@@ -1211,7 +1984,9 @@ def test_agent_insights_reports_dataset_wide_evidence_and_findings(tmp_path):
         "modelCalls": 1, "linked": 1, "unlinked": 0
     }
     assert report["reliability"]["commandFailures"] == 1
-    assert report["reliability"]["traceOutcomes"] == {"failed": 1, "succeeded": 1}
+    assert report["reliability"]["traceOutcomes"] == {
+        "ended_no_error_recorded": 1, "error_recorded": 1,
+    }
     assert report["dataHealth"]["traceEvidence"] == {
         "promptPresent": 2,
         "responsePresent": 1,
@@ -1229,7 +2004,7 @@ def test_agent_insights_reports_dataset_wide_evidence_and_findings(tmp_path):
     assert report["behavior"]["capturedResponses"] == 1
     assert report["behavior"]["apologyStarts"] == 1
     assert report["behavior"]["hedges"] == 1
-    assert report["sourceActivity"][0]["source"] == "codex"
+    assert report["sourceActivity"][0]["source"] == "synthetic-test-agent"
     assert report["sourceActivity"][0]["runs"] == 1
     assert report["sourceActivity"][0]["turns"] == 1
     assert report["sourceActivity"][0]["finalResponses"] == 1
@@ -1243,6 +2018,34 @@ def test_agent_insights_reports_dataset_wide_evidence_and_findings(tmp_path):
     assert command_finding["runIdsTruncated"] is False
     assert "prompt-evidence" not in json.dumps(report)
     assert "I'm sorry" not in json.dumps(report)
+
+
+def test_insights_trace_evidence_states_include_unfinished_metadata(tmp_path):
+    path = tmp_path / "insights-states.db"
+    storage = SQLiteStorage(str(path))
+    now = datetime(2026, 10, 19, tzinfo=timezone.utc)
+    storage.replace_agent_run_bundle(_bundle("local", now, with_turn=True))
+    for trace_id, ended_at, error in (
+        ("ended-metadata", now, None),
+        ("unfinished-metadata", None, None),
+        ("provider-error", None, "timeout"),
+        ("empty-error", now, ""),
+    ):
+        storage.insert_trace(Trace(
+            trace_id=trace_id, started_at=now, ended_at=ended_at,
+            provider="openai", request_model="test", tenant_id="local",
+            error=error,
+            prompt_redacted="question" if trace_id == "unfinished-metadata" else None,
+            response_redacted="partial answer" if trace_id == "unfinished-metadata" else None,
+        ))
+    storage.close()
+    insights = build_agent_insights_bundle(path, tenant="local")
+    assert insights["reliability"]["traceOutcomes"] == {
+        "ended_no_error_recorded": 1, "error_recorded": 2, "unfinished": 1,
+    }
+    assert sum(insights["reliability"]["traceOutcomes"].values()) == 4
+    assert insights["dataHealth"]["traceEvidence"]["notEvaluableReasons"][
+        "trace_unfinished"] == 1
 
 
 def test_local_insights_include_tenantless_historical_imports(tmp_path):
@@ -1419,6 +2222,7 @@ def test_insights_surface_explicit_failed_business_outcomes(tmp_path):
         "runs": 1,
         "runIds": ["r-local"],
         "runIdsTruncated": False,
+        "partialRuns": 0,
     }
 
 
@@ -1437,16 +2241,26 @@ def test_analysis_failure_is_persisted_and_returned_as_an_explicit_state(tmp_pat
     assert "secret source detail" not in json.dumps(result)
 
 
-def test_analysis_build_finishes_before_persistent_storage_is_opened(monkeypatch):
+def test_analysis_build_does_not_hold_persistent_storage_open(monkeypatch):
     events = []
 
     class RecordingStorage:
-        def get_latest_deterministic_analysis_run(self, *args, **kwargs):
+        def __init__(self):
+            self.saved = None
+
+        def get_deterministic_analysis_run(self, *args, **kwargs):
             events.append("read")
             return None
 
         def save_deterministic_analysis_run(self, run):
             events.append("save")
+            self.saved = run
+
+        def verify_deterministic_analysis_run(self, analysis_id, *, revision):
+            events.append("verify")
+            assert self.saved.analysis_id == analysis_id
+            assert self.saved.verified_revision == revision
+            return self.saved
 
         def close(self):
             events.append("close")
@@ -1457,7 +2271,7 @@ def test_analysis_build_finishes_before_persistent_storage_is_opened(monkeypatch
 
     def build():
         events.append("build")
-        assert "storage_open" not in events
+        assert events == ["storage_open", "close", "build"]
         return {
             "schema": "agent-insights-v2",
             "_analysisInputFingerprint": "a" * 64,
@@ -1468,7 +2282,7 @@ def test_analysis_build_finishes_before_persistent_storage_is_opened(monkeypatch
     result = run_analysis("unused", tenant="local", build=build)
 
     assert result["analysisState"]["status"] == "completed"
-    assert events == ["build", "storage_open", "read", "save", "close"]
+    assert events == ["storage_open", "close", "build", "storage_open", "read", "save", "verify", "close"]
 
 
 def test_incompatible_persisted_insights_are_not_served_as_current(tmp_path):
@@ -1514,7 +2328,7 @@ def test_incompatible_persisted_insights_are_not_served_as_current(tmp_path):
     assert insights_response.status_code == 200
     assert data_response.status_code == 200
     assert result["analysisState"]["status"] == "never_run"
-    assert result["analysisState"]["analyzerVersion"] == "agent-insights-v3"
+    assert result["analysisState"]["analyzerVersion"] == "agent-insights-v5"
     assert result["schema"] == "agent-insights-v2"
     assert "comparisons" not in result
     assert data_response.json()["coverage"]["deterministicAnalysis"] == {
@@ -1526,6 +2340,7 @@ def test_incompatible_persisted_insights_are_not_served_as_current(tmp_path):
         "availableTraces": 1,
         "analyzedTraces": 0,
         "complete": False,
+        "needsRefresh": False,
     }
 
 
@@ -1552,6 +2367,7 @@ def test_agent_only_store_reports_persisted_analysis_coverage(tmp_path):
     assert coverage["status"] == "completed"
     assert coverage["availableRuns"] == coverage["analyzedRuns"] == 1
     assert coverage["complete"] is True
+    assert coverage["needsRefresh"] is False
 
 
 def test_current_analysis_is_reused_after_a_newer_rollback_version(tmp_path):
@@ -1887,5 +2703,68 @@ def test_snapshot_from_the_previous_analyzer_version_is_recomputed_on_unchanged_
 
     assert builds == [1]
     assert result["analysisState"]["status"] == "completed"
-    assert result["analysisState"]["analyzerVersion"] == "agent-insights-v3"
+    assert result["analysisState"]["analyzerVersion"] == "agent-insights-v5"
     assert result["performance"]["agentTurnListPriceUsd"] == 0.5
+
+
+def test_bounded_insights_fingerprint_changes_when_unscanned_evidence_arrives(tmp_path):
+    now = datetime(2026, 10, 19, tzinfo=timezone.utc)
+    path = tmp_path / "bounded-coverage.db"
+    url = f"sqlite:///{path}"
+    storage = SQLiteStorage(str(path))
+    storage.replace_agent_run_bundle(_bundle("local", now))
+    storage.close()
+
+    def build():
+        return build_agent_insights_bundle(
+            url, tenant="local", scan_limit=1, _include_input_fingerprint=True,
+        )
+
+    initial = run_analysis(url, tenant="local", build=build)
+    storage = SQLiteStorage(str(path))
+    storage.replace_agent_run_bundle(_bundle("foreign", now - timedelta(days=2)))
+    storage.close()
+    assert run_analysis(url, tenant="local", build=build)["analysisState"]["analysisId"] == initial[
+        "analysisState"
+    ]["analysisId"]
+
+    storage = SQLiteStorage(str(path))
+    later = _bundle("local", now + timedelta(days=1))
+    storage.replace_agent_run_bundle(AgentRunBundle(
+        replace(later.session, source_session_id="s-later", source_locator_hash="b" * 64),
+        replace(later.run, run_id="r-later", source_session_id="s-later"),
+        (), (),
+    ))
+    storage.close()
+    changed = run_analysis(url, tenant="local", build=build)
+    assert changed["scope"]["availableRuns"] == 2
+    assert changed["scope"]["analyzedRuns"] == 1
+    assert changed["scope"]["complete"] is False
+    assert changed["analysisState"]["analysisId"] != initial["analysisState"]["analysisId"]
+    assert run_analysis(url, tenant="local", build=build)["analysisState"]["analysisId"] == changed[
+        "analysisState"
+    ]["analysisId"]
+
+    trace_path = tmp_path / "bounded-traces.db"
+    trace_url = f"sqlite:///{trace_path}"
+    storage = SQLiteStorage(str(trace_path))
+    storage.insert_trace(Trace(trace_id="earlier", started_at=now, tenant_id="local"))
+    storage.close()
+
+    def build_traces():
+        return build_agent_insights_bundle(
+            trace_url, tenant="local", scan_limit=1, _include_input_fingerprint=True,
+        )
+
+    first_trace = run_analysis(trace_url, tenant="local", build=build_traces)
+    storage = SQLiteStorage(str(trace_path))
+    storage.insert_trace(Trace(trace_id="later", started_at=now + timedelta(hours=1),
+                               tenant_id="local"))
+    storage.close()
+    changed_trace = run_analysis(trace_url, tenant="local", build=build_traces)
+    assert changed_trace["scope"]["traces"] == {
+        "available": 2, "analyzed": 1, "complete": False,
+    }
+    assert changed_trace["analysisState"]["analysisId"] != first_trace[
+        "analysisState"
+    ]["analysisId"]

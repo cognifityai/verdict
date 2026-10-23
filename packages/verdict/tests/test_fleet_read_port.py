@@ -10,12 +10,16 @@ import pytest
 from verdict.fleet_read_port import (
     VERDICT_FLEET_READ_SCHEMA_VERSION,
     PostgresVerdictFleetReadPortV1,
+    PostgresVerdictFleetReadPortV2,
     TraceContributionReadV1,
+    TraceContributionReadV2,
     TraceWindowReadV1,
+    TraceWindowReadV2,
     VerdictFleetReadError,
     VerdictFleetReadPortV1,
     main,
     trace_window_read_to_json,
+    trace_window_read_v2_to_json,
 )
 
 NOW = datetime(2026, 9, 14, 12, tzinfo=timezone.utc)
@@ -113,6 +117,38 @@ def test_public_fleet_v1_contract_has_exact_fields_and_signatures() -> None:
     ]
     assert list(inspect.signature(PostgresVerdictFleetReadPortV1.close).parameters) == ["self"]
     assert VERDICT_FLEET_READ_SCHEMA_VERSION == "verdict.trace-window-read.v1"
+
+
+def test_fleet_v2_states_do_not_infer_success_and_keep_v1_shape_frozen() -> None:
+    ended = TraceContributionReadV2(**(
+        _contribution().__dict__ | {"trace_id": "trace-1", "request_status": "ended_no_error_recorded"}
+    ))
+    errored = TraceContributionReadV2(**(
+        _contribution().__dict__ | {"trace_id": "trace-0", "ended_at": None, "request_status": "error_recorded"}
+    ))
+    window = TraceWindowReadV2(**(
+        _window().__dict__ | {
+            "schema_version": "verdict.trace-window-read.v2",
+            "items": (errored, ended), "item_count": 2,
+        }
+    ))
+    assert window.items[0].request_status == "error_recorded"
+    assert '"request_status":"ended_no_error_recorded"' in trace_window_read_v2_to_json(window)
+    assert list(inspect.signature(PostgresVerdictFleetReadPortV2.read_trace_window).parameters) == [
+        "self", "tenant_id", "window_start", "window_end",
+    ]
+    with pytest.raises(ValueError, match="request_status"):
+        TraceContributionReadV2(**(_contribution().__dict__ | {
+            "request_status": "succeeded",
+        }))
+    with pytest.raises(ValueError, match="exact TraceContributionReadV2"):
+        TraceWindowReadV2(**(_window().__dict__ | {
+            "schema_version": "verdict.trace-window-read.v2",
+        }))
+    with pytest.raises(ValueError, match="tenant"):
+        TraceWindowReadV2(**(window.__dict__ | {"tenant_id": "tenant-b"}))
+    with pytest.raises(VerdictFleetReadError, match="invalid_read_model"):
+        trace_window_read_to_json(window)
 
 
 def test_postgres_adapter_rejects_non_postgres_and_invalid_tenant_before_import(

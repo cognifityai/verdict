@@ -13,6 +13,7 @@ import threading
 from contextlib import contextmanager
 from dataclasses import replace
 from datetime import datetime
+from pathlib import Path
 
 from verdict.agent_judgment import (
     MAX_TOOL_EVIDENCE_EVENTS,
@@ -45,6 +46,24 @@ from verdict.evidence import (
     AgentTurn,
     SourceSession,
 )
+from verdict.local_recent_facts import (
+    LocalFullProjection,
+    LocalRecentFact,
+    reject_lost_model_usage,
+    require_all_retained_facts,
+    trace_evidence_fingerprint,
+    validate_full_projection,
+    validate_historical_facts,
+    validate_recent_facts,
+)
+from verdict.local_source_revision import (
+    LocalSourceRevision,
+    local_scope_partial,
+    same_recent_window,
+    validate_recent_window_json,
+    verify_retained_local_evidence,
+    verify_source_revision,
+)
 from verdict.monitoring import (
     CohortManifest,
     MonitorComparison,
@@ -59,6 +78,7 @@ from verdict.monitoring import (
 from verdict.normalized_evidence import (
     _LegacyLocalTextUpgrade,
     _prepare_legacy_local_text_upgrade,
+    _prepare_linked_traces,
     merge_agent_event,
     merge_agent_run,
     merge_agent_turn,
@@ -124,6 +144,16 @@ class InMemoryStorage:
         self._conversations: dict[tuple[str, str], tuple[str, str]] = {}
         self._conversation_assessments: dict[tuple[str, str, str, int], str] = {}
         self._import_sources: dict[tuple[str, str], SourceSession] = {}
+        self._local_source_revisions: dict[tuple[str, str], LocalSourceRevision] = {}
+        self._local_recent_windows: dict[tuple[str, str], dict[str, object]] = {}
+        self._local_recent_facts: dict[
+            tuple[str, str, str], tuple[LocalRecentFact, str]
+        ] = {}
+        self._local_tail_turns: dict[tuple[str, str, str], AgentTurn] = {}
+        self._local_projection_complete: set[tuple[str, str]] = set()
+        self._local_recent_trace_evidence: dict[str, str] = {}
+        self._local_scan_attempts: dict[tuple[str, str, str, str], dict[str, object]] = {}
+        self._judgment_recent_evidence: dict[str, str | None] = {}
         self._agent_runs: dict[tuple[str, str], AgentRun] = {}
         self._agent_turns: dict[tuple[str, str, str], AgentTurn] = {}
         self._agent_turn_judgments: dict[tuple[str, str, str, str], str] = {}
@@ -168,31 +198,35 @@ class InMemoryStorage:
         # clusterer assigns cluster_id after the trace is first written, and a
         # later content/usage update would otherwise erase it. (COALESCE parity
         # with sqlite/postgres ON CONFLICT.)
-        existing = self._traces.get(trace.trace_id)
-        if existing is not None:
-            for name in (
-                "started_at",
-                "provider",
-                "operation",
-                "request_model",
-                "temperature",
-                "max_tokens",
-                "raw_messages",
-                "tenant_id",
-                "session_id",
-                "user_id_hash",
-                "tags",
-                "analysis_started_at_us",
-                "analysis_started_at_state",
-                "analysis_raw_messages_utf8_bytes",
-                "analysis_raw_messages_state",
-            ):
-                setattr(trace, name, copy.deepcopy(getattr(existing, name)))
-            if trace.cluster_id is None and existing.cluster_id is not None:
-                trace.cluster_id = existing.cluster_id
-            if trace.parent_span_id is None and existing.parent_span_id is not None:
-                trace.parent_span_id = existing.parent_span_id
         with self._cluster_v2_lock:
+            existing = self._traces.get(trace.trace_id)
+            if existing is not None:
+                if (existing.tenant_id or "__verdict_local__") != (
+                    trace.tenant_id or "__verdict_local__"
+                ):
+                    raise ValueError("trace identity belongs to another tenant")
+                for name in (
+                    "started_at",
+                    "provider",
+                    "operation",
+                    "request_model",
+                    "temperature",
+                    "max_tokens",
+                    "raw_messages",
+                    "tenant_id",
+                    "session_id",
+                    "user_id_hash",
+                    "tags",
+                    "analysis_started_at_us",
+                    "analysis_started_at_state",
+                    "analysis_raw_messages_utf8_bytes",
+                    "analysis_raw_messages_state",
+                ):
+                    setattr(trace, name, copy.deepcopy(getattr(existing, name)))
+                if trace.cluster_id is None and existing.cluster_id is not None:
+                    trace.cluster_id = existing.cluster_id
+                if trace.parent_span_id is None and existing.parent_span_id is not None:
+                    trace.parent_span_id = existing.parent_span_id
             self._traces[trace.trace_id] = trace
 
     def _agent_bundle(self, tenant_id: str, run_id: str) -> AgentRunBundle | None:
@@ -231,17 +265,83 @@ class InMemoryStorage:
         sanitized, capture_traces, linked_trace_ids = prepare_agent_capture(bundle, traces)
         self._store_agent_capture(sanitized, capture_traces, linked_trace_ids, None)
 
+    def list_local_scan_attempts(
+        self, tenant_id: str, source_kind: str, source_scope: str,
+    ) -> dict[str, str]:
+        with self._agent_evidence_lock:
+            return {
+                locator: str(row["started_at"])
+                for (tenant, kind, scope, locator), row in self._local_scan_attempts.items()
+                if (tenant, kind, scope) == (tenant_id, source_kind, source_scope)
+            }
+
+    def claim_local_scan_attempt(
+        self, tenant_id: str, source_kind: str, source_scope: str,
+        locator_hash: str, started_at: str, observed_size: int,
+        observed_mtime_ns: int,
+    ) -> int:
+        key = (tenant_id, source_kind, source_scope, locator_hash)
+        with self._agent_evidence_lock:
+            generation = int(self._local_scan_attempts.get(key, {}).get("generation", 0)) + 1
+            self._local_scan_attempts[key] = {
+                "generation": generation, "started_at": started_at,
+                "observed_size": observed_size, "observed_mtime_ns": observed_mtime_ns,
+                "outcome_code": None,
+            }
+            return generation
+
+    def finish_local_scan_attempt(
+        self, tenant_id: str, source_kind: str, source_scope: str,
+        locator_hash: str, generation: int, finished_at: str,
+        outcome_code: str, accepted_revision: str | None,
+        projection_complete: bool, source_line_complete: bool,
+    ) -> bool:
+        key = (tenant_id, source_kind, source_scope, locator_hash)
+        with self._agent_evidence_lock:
+            row = self._local_scan_attempts.get(key)
+            if row is None or row["generation"] != generation:
+                return False
+            row.update({
+                "finished_at": finished_at, "outcome_code": outcome_code,
+                "accepted_revision": accepted_revision,
+                "projection_complete": projection_complete,
+                "source_line_complete": source_line_complete,
+            })
+            return True
+
     def _replace_local_agent_capture(
         self,
         bundle: AgentRunBundle,
         traces: tuple[Trace, ...],
-        legacy_text_upgrade: _LegacyLocalTextUpgrade,
+        legacy_text_upgrade: _LegacyLocalTextUpgrade | None,
+        *,
+        source_revision: LocalSourceRevision | None = None,
+        source_path: Path | None = None,
+        recent_window_json: str | None = None,
+        recent_facts=(),
+        historical_facts=(),
+        full_projection=None,
+        recent_traces=(),
     ) -> None:
         sanitized, capture_traces, linked_trace_ids = prepare_agent_capture(bundle, traces)
-        upgrade = _prepare_legacy_local_text_upgrade(
-            sanitized, capture_traces, legacy_text_upgrade
+        prepared_recent, recent_ids = _prepare_linked_traces(
+            tuple(fact.event for fact in (*recent_facts, *historical_facts,
+                                          *(full_projection.facts if full_projection else ()))),
+            recent_traces,
         )
-        self._store_agent_capture(sanitized, capture_traces, linked_trace_ids, upgrade)
+        if linked_trace_ids & recent_ids:
+            raise ValueError("local recent fact duplicates a prefix Trace")
+        upgrade = (
+            _prepare_legacy_local_text_upgrade(sanitized, capture_traces, legacy_text_upgrade)
+            if legacy_text_upgrade is not None else None
+        )
+        self._store_agent_capture(
+            sanitized, capture_traces + prepared_recent, linked_trace_ids | recent_ids, upgrade,
+            local_revision=source_revision, local_path=source_path,
+            recent_window_json=recent_window_json,
+            recent_facts=recent_facts, historical_facts=historical_facts,
+            full_projection=full_projection,
+        )
 
     def append_agent_capture(
         self,
@@ -257,9 +357,65 @@ class InMemoryStorage:
         capture_traces: tuple[Trace, ...],
         linked_trace_ids: frozenset[str],
         text_compatibility: _LegacyLocalTextUpgrade | None,
+        *,
+        local_revision: LocalSourceRevision | None = None,
+        local_path: Path | None = None,
+        recent_window_json: str | None = None,
+        recent_facts: tuple[LocalRecentFact, ...] = (),
+        historical_facts: tuple[LocalRecentFact, ...] = (),
+        full_projection: LocalFullProjection | None = None,
     ) -> None:
+        window = (validate_recent_window_json(
+            recent_window_json, run_id=capture.run.run_id, revision=local_revision,
+        ) if local_revision is not None else None)
+        if recent_window_json is not None and window is None:
+            raise ValueError("local source revision is required for recent window")
+        validate_recent_facts(
+            recent_facts, window, frozenset(event.event_id for event in capture.events),
+        )
+        validate_historical_facts(
+            recent_facts, historical_facts,
+            frozenset(event.event_id for event in capture.events),
+        )
+        validate_full_projection(full_projection, capture, recent_facts,
+                                 historical_facts, local_revision)
+        all_recent_facts = (*recent_facts, *historical_facts,
+                            *(full_projection.facts if full_projection else ()))
         with self._agent_evidence_lock:
             capture = normalize_bundle_timestamps(capture)
+            tenant_id = capture.run.tenant_id
+            source_key = (tenant_id, capture.session.source_session_id)
+            old_synthetic: set[tuple[str, str, str]] = set()
+            if local_revision is not None:
+                require_all_retained_facts(
+                    {event_id for scope, run, event_id in self._local_recent_facts
+                     if scope == tenant_id and run == capture.run.run_id},
+                    recent_facts, historical_facts,
+                )
+                if local_path is None or not isinstance(capture, AgentRunBundle):
+                    raise ValueError("local source path is required")
+                prior = self._local_source_revisions.get(source_key)
+                rewritten = verify_source_revision(
+                    local_path, local_revision, prior,
+                )
+                if source_key in self._import_sources and (prior is None or rewritten):
+                    verify_retained_local_evidence(
+                        self._agent_bundle(tenant_id, capture.run.run_id), capture,
+                        require_recorded_content=rewritten,
+                        legacy_turn_previews=(
+                            text_compatibility.turn_previews
+                            if text_compatibility is not None else None
+                        ),
+                    )
+                current_limits = {event.event_id for event in capture.events
+                                  if event.provenance == "verdict:capture_limit"}
+                old_synthetic = {
+                    key for key, value in self._agent_events.items()
+                    if key[0] == tenant_id and key[1] == capture.run.run_id
+                    and (value.provenance == "verdict:partial_source_line"
+                         or (value.provenance == "verdict:capture_limit"
+                             and value.event_id not in current_limits))
+                }
             prepared_traces = [
                 merge_capture_trace(
                     self._traces.get(trace.trace_id),
@@ -271,8 +427,6 @@ class InMemoryStorage:
                 )
                 for trace in capture_traces
             ]
-            tenant_id = capture.run.tenant_id
-            source_key = (tenant_id, capture.session.source_session_id)
             source = merge_source_session(self._import_sources.get(source_key), capture.session)
             run_key = (tenant_id, capture.run.run_id)
             run = merge_agent_run(self._agent_runs.get(run_key), capture.run)
@@ -293,6 +447,24 @@ class InMemoryStorage:
                 )
                 for event in capture.events
             ]
+            merged_recent: list[tuple[LocalRecentFact, str]] = []
+            for fact in all_recent_facts:
+                key = (tenant_id, run.run_id, fact.event.event_id)
+                prior_fact = self._local_recent_facts.get(key)
+                if prior_fact is not None and (
+                    prior_fact[0].source_ordinal != fact.source_ordinal
+                    or prior_fact[0].turn_sequence != fact.turn_sequence
+                ):
+                    raise ValueError("local recent fact source identity changed")
+                reject_lost_model_usage(
+                    prior_fact[0].event if prior_fact is not None else None, fact.event,
+                )
+                merged_recent.append((
+                    replace(fact, event=merge_agent_event(
+                        prior_fact[0].event if prior_fact is not None else None, fact.event,
+                    )),
+                    prior_fact[1] if prior_fact is not None else local_revision.full_sha256,
+                ))
             locator_owner = next(
                 (
                     value.source_session_id
@@ -322,9 +494,10 @@ class InMemoryStorage:
                 owner = next(
                     (
                         value.event_id
-                        for (scope, owner_run_id, _event_id), value in self._agent_events.items()
-                        if scope == tenant_id
-                        and owner_run_id == run.run_id
+                        for key, value in self._agent_events.items()
+                        if key[0] == tenant_id
+                        and key[1] == run.run_id
+                        and key not in old_synthetic
                         and value.turn_id == event.turn_id
                         and value.sequence == event.sequence
                     ),
@@ -336,12 +509,9 @@ class InMemoryStorage:
                     trace_owner = next(
                         (
                             value.event_id
-                            for (
-                                scope,
-                                _owner_run_id,
-                                _event_id,
-                            ), value in self._agent_events.items()
-                            if scope == tenant_id and value.trace_id == event.trace_id
+                            for key, value in self._agent_events.items()
+                            if key[0] == tenant_id and key not in old_synthetic
+                            and value.trace_id == event.trace_id
                         ),
                         event.event_id,
                     )
@@ -351,13 +521,10 @@ class InMemoryStorage:
                     producer_owner = next(
                         (
                             value.event_id
-                            for (
-                                scope,
-                                owner_run_id,
-                                _event_id,
-                            ), value in self._agent_events.items()
-                            if scope == tenant_id
-                            and owner_run_id == run.run_id
+                            for key, value in self._agent_events.items()
+                            if key[0] == tenant_id
+                            and key[1] == run.run_id
+                            and key not in old_synthetic
                             and value.producer_id == event.producer_id
                             and value.producer_sequence == event.producer_sequence
                         ),
@@ -377,7 +544,33 @@ class InMemoryStorage:
             with self._cluster_v2_lock:
                 for trace in prepared_traces:
                     self._traces[trace.trace_id] = trace
+                    if any(fact.event.trace_id == trace.trace_id for fact in all_recent_facts):
+                        self._local_recent_trace_evidence[trace.trace_id] = (
+                            trace_evidence_fingerprint(trace)
+                        )
+            for key in old_synthetic:
+                self._agent_events.pop(key, None)
             self._import_sources[source_key] = copy.deepcopy(source)
+            if local_revision is not None:
+                self._local_source_revisions[source_key] = local_revision
+                self._local_tail_turns = {
+                    key: value for key, value in self._local_tail_turns.items()
+                    if key[:2] != run_key
+                }
+                self._local_projection_complete.discard(run_key)
+                if full_projection is not None:
+                    self._local_tail_turns.update({
+                        (tenant_id, run.run_id, turn.turn_id): copy.deepcopy(turn)
+                        for turn in full_projection.tail_turns
+                    })
+                    self._local_projection_complete.add(run_key)
+                if window is not None and not same_recent_window(
+                    self._local_recent_windows.get(run_key), window,
+                ):
+                    self._local_recent_windows[run_key] = copy.deepcopy(window)
+                elif (window is None and self._local_recent_windows.get(run_key, {}).get("schema")
+                      == "local-recent-window-v2"):
+                    self._local_recent_windows.pop(run_key, None)
             self._agent_runs[run_key] = copy.deepcopy(run)
             self._agent_turns.update(
                 {(tenant_id, run.run_id, turn.turn_id): copy.deepcopy(turn) for turn in turns}
@@ -385,6 +578,10 @@ class InMemoryStorage:
             self._agent_events.update(
                 {(tenant_id, run.run_id, event.event_id): copy.deepcopy(event) for event in events}
             )
+            self._local_recent_facts.update({
+                (tenant_id, run.run_id, fact.event.event_id): (copy.deepcopy(fact), first_seen)
+                for fact, first_seen in merged_recent
+            })
 
     def replace_agent_run_bundle(self, bundle: AgentRunBundle) -> None:
         self.replace_agent_capture(bundle)
@@ -405,6 +602,38 @@ class InMemoryStorage:
             for event in events
         ])
 
+    def _turn_source_partial(
+        self, tenant_id: str, turn: AgentTurn, *, last_sequence: int | None = None,
+        first_capture_limit: int | None = None,
+    ) -> bool:
+        if first_capture_limit is None:
+            first_capture_limit = min(
+                (marker_turn.sequence for (scope, owner, _), event in self._agent_events.items()
+                 if scope == tenant_id and owner == turn.run_id
+                 and event.provenance == "verdict:capture_limit"
+                 if (marker_turn := self._agent_turns.get(
+                     (tenant_id, turn.run_id, event.turn_id))) is not None),
+                default=-1,
+            )
+        if first_capture_limit >= 0 and turn.sequence >= first_capture_limit:
+            return True
+        run = self._agent_runs.get((tenant_id, turn.run_id))
+        if run is None:
+            return True
+        source = self._import_sources.get((tenant_id, run.source_session_id))
+        if source is None:
+            return True
+        revision = self._local_source_revisions.get((tenant_id, run.source_session_id))
+        if last_sequence is None:
+            last_sequence = max(
+                (item.sequence for (scope, owner, _), item in self._agent_turns.items()
+                 if scope == tenant_id and owner == turn.run_id),
+                default=turn.sequence,
+            )
+        return local_scope_partial(
+            source.source_kind, revision, last_sequence, turn.sequence,
+        )
+
     def list_agent_turn_evaluation_candidates(
         self, tenant_id: str, evaluator_fingerprint: str, *, limit: int = 100,
         before: tuple[datetime, str, str] | None = None,
@@ -412,8 +641,25 @@ class InMemoryStorage:
     ) -> tuple[list[tuple[AgentTurn, JudgmentStatus | None]], bool]:
         validate_turn_scan(tenant_id, evaluator_fingerprint, limit, before)
         with self._agent_evidence_lock:
+            last_sequences: dict[str, int] = {}
+            first_limits: dict[str, int] = {}
+            for (scope, owner, _), turn in self._agent_turns.items():
+                if scope == tenant_id:
+                    last_sequences[owner] = max(last_sequences.get(owner, -1), turn.sequence)
+            for (scope, owner, _), event in self._agent_events.items():
+                if scope != tenant_id or event.provenance != "verdict:capture_limit":
+                    continue
+                marker_turn = self._agent_turns.get((tenant_id, owner, event.turn_id))
+                if marker_turn is not None:
+                    first_limits[owner] = min(
+                        first_limits.get(owner, marker_turn.sequence), marker_turn.sequence,
+                    )
             turns = [turn for (scope, _, _), turn in self._agent_turns.items()
-                     if scope == tenant_id and (before is None or
+                     if scope == tenant_id and not self._turn_source_partial(
+                         tenant_id, turn, last_sequence=last_sequences[turn.run_id],
+                         first_capture_limit=first_limits.get(turn.run_id, -1),
+                     )
+                     and (before is None or
                      (turn.started_at, turn.run_id, turn.turn_id) < before)]
             turns.sort(key=lambda turn: (turn.started_at, turn.run_id, turn.turn_id), reverse=True)
             items = []
@@ -439,6 +685,9 @@ class InMemoryStorage:
         judgment, payload = sanitized_turn_judgment(judgment)
         key = (judgment.tenant_id, judgment.run_id, judgment.turn_id, judgment.evaluator_fingerprint)
         with self._agent_evidence_lock:
+            current_turn = self._agent_turns.get(key[:3])
+            if current_turn is None or self._turn_source_partial(judgment.tenant_id, current_turn):
+                return "stale"
             prior = self._agent_turn_judgments.get(key)
             tool_counts = (
                 self._turn_tool_counts(*key[:3])
@@ -446,7 +695,7 @@ class InMemoryStorage:
                 else None
             )
             decision = turn_judgment_write_decision(
-                self._agent_turns.get(key[:3]), judgment,
+                current_turn, judgment,
                 trusted_turn_judgment(
                     prior, tenant_id=judgment.tenant_id, run_id=judgment.run_id,
                     turn_id=judgment.turn_id,
@@ -477,7 +726,7 @@ class InMemoryStorage:
         validate_turn_scan(tenant_id, evaluator_fingerprint, 1, None)
         with self._agent_evidence_lock:
             turn = self._agent_turns.get((tenant_id, run_id, turn_id))
-            if turn is None:
+            if turn is None or self._turn_source_partial(tenant_id, turn):
                 return None
             counts = self._turn_tool_counts(tenant_id, run_id, turn_id) if tool_evidence else None
             raw = self._agent_turn_judgments.get((tenant_id, run_id, turn_id, evaluator_fingerprint))
@@ -510,6 +759,35 @@ class InMemoryStorage:
         _validate_agent_bundle_run_id(run_id)
         with self._agent_evidence_lock:
             return self._agent_bundle(tenant_id, run_id)
+
+    def get_agent_capture_snapshot(
+        self, tenant_id: str, run_id: str,
+    ) -> tuple[AgentRunBundle | None, LocalSourceRevision | None]:
+        _validate_agent_bundle_query(tenant_id, 1)
+        _validate_agent_bundle_run_id(run_id)
+        with self._agent_evidence_lock:
+            bundle = self._agent_bundle(tenant_id, run_id)
+            revision = (
+                self._local_source_revisions.get((tenant_id, bundle.session.source_session_id))
+                if bundle is not None else None
+            )
+            return bundle, revision
+
+    def get_recent_local_events(self, tenant_id: str, run_id: str) -> dict | None:
+        with self._agent_evidence_lock:
+            window = self._local_recent_windows.get((tenant_id, run_id))
+            return copy.deepcopy(window) if window is not None else None
+
+    def list_local_recent_fact_positions(
+        self, tenant_id: str, run_id: str,
+    ) -> tuple[tuple[int, int, int, str], ...]:
+        with self._agent_evidence_lock:
+            return tuple(sorted(
+                (fact.source_ordinal, fact.turn_sequence, fact.event.sequence,
+                 fact.event.event_id)
+                for (scope, run, _), (fact, _) in self._local_recent_facts.items()
+                if scope == tenant_id and run == run_id
+            ))
 
     def list_agent_run_bundles(
         self,
@@ -970,6 +1248,10 @@ class InMemoryStorage:
     def trace_exists(self, trace_id: str) -> bool:
         return trace_id in self._traces
 
+    def trace_owner(self, trace_id: str) -> str | None:
+        trace = self._traces.get(trace_id)
+        return (trace.tenant_id or "__verdict_local__") if trace is not None else None
+
     def list_traces(
         self,
         *,
@@ -1250,6 +1532,13 @@ class InMemoryStorage:
     def insert_judgment(self, judgment: Judgment) -> None:
         sanitize_judgment(judgment)
         self._judgments[judgment.judgment_id] = judgment
+        self._judgment_recent_evidence[judgment.judgment_id] = (
+            self._local_recent_trace_evidence.get(judgment.trace_id)
+        )
+
+    def _current_judgment(self, judgment: Judgment) -> bool:
+        current = self._local_recent_trace_evidence.get(judgment.trace_id)
+        return current is None or self._judgment_recent_evidence.get(judgment.judgment_id) == current
 
     def list_judgments_for_cluster(
         self,
@@ -1260,6 +1549,8 @@ class InMemoryStorage:
     ) -> list[Judgment]:
         out = []
         for j in self._judgments.values():
+            if not self._current_judgment(j):
+                continue
             trace = self._traces.get(j.trace_id)
             if trace is None or trace.cluster_id != cluster_id:
                 continue
@@ -1279,7 +1570,8 @@ class InMemoryStorage:
         if not isinstance(trace_id, str) or not trace_id or not 1 <= limit <= 10_000:
             raise ValueError("invalid trace judgment query")
         return sorted(
-            (item for item in self._judgments.values() if item.trace_id == trace_id),
+            (item for item in self._judgments.values()
+             if item.trace_id == trace_id and self._current_judgment(item)),
             key=lambda item: (item.created_at, item.judgment_id),
             reverse=True,
         )[:limit]
@@ -1294,6 +1586,8 @@ class InMemoryStorage:
         _validate_evaluator_judgment_query(tenant_id, evaluator_fingerprint, limit)
         latest: dict[str, Judgment] = {}
         for judgment in self._judgments.values():
+            if not self._current_judgment(judgment):
+                continue
             trace = self._traces.get(judgment.trace_id)
             if (
                 trace is None
@@ -1327,6 +1621,7 @@ class InMemoryStorage:
             item.trace_id == trace_id
             and item.evaluator_fingerprint == evaluator_fingerprint
             and item.status is JudgmentStatus.COMPLETED
+            and self._current_judgment(item)
             for item in self._judgments.values()
         )
 
@@ -1458,13 +1753,24 @@ class InMemoryStorage:
 
     def insert_span(self, span: SpanRecord) -> None:
         sanitize_span(span)
-        self._spans[span.span_id] = span
+        with self._cluster_v2_lock:
+            current = self._spans.get(span.span_id)
+            if current is not None and (current.tenant_id or "__verdict_local__") != (
+                span.tenant_id or "__verdict_local__"
+            ):
+                raise ValueError("span identity belongs to another tenant")
+            self._spans[span.span_id] = span
 
-    def list_spans(self, *, trace_id: str | None = None, limit: int = 100) -> list[SpanRecord]:
+    def list_spans(self, *, trace_id: str | None = None, limit: int = 100,
+                   tenant_id: str | None = None, span_id: str | None = None) -> list[SpanRecord]:
         items = sorted(self._spans.values(), key=lambda s: s.started_at, reverse=True)
         out = []
         for s in items:
             if trace_id is not None and s.trace_id != trace_id:
+                continue
+            if tenant_id is not None and s.tenant_id != tenant_id:
+                continue
+            if span_id is not None and s.span_id != span_id:
                 continue
             out.append(s)
             if len(out) >= limit:
@@ -1645,7 +1951,8 @@ class InMemoryStorage:
             and item.cluster_id == cluster_id
         }
         rows = sorted(
-            (item for item in self._judgments.values() if item.trace_id in trace_ids),
+            (item for item in self._judgments.values()
+             if item.trace_id in trace_ids and self._current_judgment(item)),
             key=lambda item: item.created_at,
             reverse=True,
         )
@@ -2017,6 +2324,8 @@ class InMemoryStorage:
     def close(self) -> None:
         self._traces.clear()
         self._import_sources.clear()
+        self._local_source_revisions.clear()
+        self._local_recent_windows.clear()
         self._agent_runs.clear()
         self._agent_turns.clear()
         self._agent_events.clear()

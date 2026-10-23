@@ -26,6 +26,7 @@ _FAILURE_LABELS = {
 def analyze_turn_events(
     *, run_id: str, turn_id: str, rows: Sequence[Mapping[str, Any]],
     available: int, request_state: str, response_state: str, producer_count: int = 1,
+    source_partial_from_run: bool = False,
 ) -> dict[str, Any]:
     """Describe observations only; source histories cannot reveal hidden intent."""
     events = list(rows[:MAX_TURN_ANALYSIS_EVENTS])
@@ -85,7 +86,9 @@ def analyze_turn_events(
                 signals.append({"eventId": event["event_id"], "code": failure[0],
                                 "label": failure[1]})
 
-    source_partial = any(event["provenance"] == "verdict:capture_limit" for event in events)
+    source_partial = source_partial_from_run or any(
+        event["provenance"] == "verdict:capture_limit" for event in events
+    )
     complete = available <= len(events) and not source_partial
     last_test = next((event for event in reversed(events)
                       if event["event_type"] == "test_result"), None)

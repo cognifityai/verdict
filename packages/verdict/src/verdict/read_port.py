@@ -14,7 +14,12 @@ from datetime import datetime, timezone
 from typing import Protocol
 
 import verdict.analysis as analysis
-from verdict.evidence import AgentEvent, AgentEventType, AgentRunBundle
+from verdict.evidence import (
+    AGENT_RUN_READ_MAX_TURNS,
+    AgentEvent,
+    AgentEventType,
+    AgentRunBundle,
+)
 from verdict.storage.base import Storage
 
 AGENT_RUN_READ_SCHEMA_VERSION = "verdict.agent-run-read.v1"
@@ -35,7 +40,7 @@ _SEVERITY_RANK = {"error": 0, "warning": 1, "info": 2}
 _VERSION_PATTERN = re.compile(r"[a-z0-9.-]{1,64}")
 _MAX_IDENTIFIER_BYTES = 256
 _MAX_FINDING_CODE_BYTES = 64
-_MAX_SOURCE_TURNS = 1_000
+_MAX_SOURCE_TURNS = AGENT_RUN_READ_MAX_TURNS
 _MAX_SOURCE_EVENTS = 1_500
 _MAX_MODEL_CALLS = 16
 _MAX_FINDINGS = 4
@@ -256,7 +261,12 @@ class StorageVerdictReadPort:
 
         read_unavailable = False
         try:
-            bundle = self._storage.get_agent_run_bundle(tenant_id, run_id)
+            snapshot = getattr(self._storage, "get_agent_capture_snapshot", None)
+            if callable(snapshot):
+                bundle, local_revision = snapshot(tenant_id, run_id)
+            else:
+                bundle = self._storage.get_agent_run_bundle(tenant_id, run_id)
+                local_revision = None
         except Exception:
             bundle = None
             read_unavailable = True
@@ -267,7 +277,42 @@ class StorageVerdictReadPort:
 
         invalid_read_model = False
         try:
-            projected = _project_agent_run(bundle, tenant_id=tenant_id, run_id=run_id)
+            projected = _project_agent_run(
+                bundle, tenant_id=tenant_id, run_id=run_id,
+                local_revision=local_revision,
+            )
+        except Exception:
+            projected = None
+            invalid_read_model = True
+        if invalid_read_model:
+            raise VerdictReadError("invalid_read_model")
+
+        read_unavailable = False
+        owned_calls = []
+        for call in projected.model_calls:
+            if call.trace_id is None:
+                owned_calls.append(call)
+                continue
+            try:
+                trace = self._storage.get_trace(call.trace_id)
+            except Exception:
+                read_unavailable = True
+                break
+            try:
+                owner = None if trace is None else trace.tenant_id
+                valid = (trace is not None and (owner == tenant_id or (
+                    tenant_id == "__verdict_local__" and owner in (None, "")
+                )))
+                owned_calls.append(call if valid else replace(call, trace_id=None))
+            except Exception:
+                invalid_read_model = True
+                break
+        if read_unavailable:
+            raise VerdictReadError("read_unavailable")
+        if invalid_read_model:
+            raise VerdictReadError("invalid_read_model")
+        try:
+            projected = replace(projected, model_calls=tuple(owned_calls))
         except Exception:
             projected = None
             invalid_read_model = True
@@ -276,7 +321,9 @@ class StorageVerdictReadPort:
         return projected
 
 
-def _project_agent_run(bundle: object, *, tenant_id: str, run_id: str) -> AgentRunRead:
+def _project_agent_run(
+    bundle: object, *, tenant_id: str, run_id: str, local_revision=None,
+) -> AgentRunRead:
     if type(bundle) is not AgentRunBundle:
         raise ValueError("storage returned an invalid Agent Run bundle")
     if type(bundle.turns) is not tuple or type(bundle.events) is not tuple:
@@ -285,9 +332,15 @@ def _project_agent_run(bundle: object, *, tenant_id: str, run_id: str) -> AgentR
         raise ValueError("stored Agent Run exceeds the V1 analysis limit")
     if bundle.run.tenant_id != tenant_id or bundle.run.run_id != run_id:
         raise ValueError("stored Agent Run does not match the exact query")
+    if bundle.session.source_kind in {"codex", "claude-code"}:
+        if (local_revision is None or local_revision.source_turn_count is None
+                or local_revision.source_turn_count != local_revision.v1_turn_count
+                or local_revision.source_event_count != local_revision.v1_event_count
+                or local_revision.partial_final_line):
+            raise ValueError("stored local Agent Run has unverified or partial coverage")
 
     canonical = _canonical_bundle(bundle)
-    report = analysis.analyze_agent_run(canonical)
+    report = analysis.analyze_agent_run(canonical, local_revision=local_revision)
     if (
         type(report) is not analysis.AgentRunAnalysis
         or report.run_id != canonical.run.run_id

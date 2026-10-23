@@ -8,7 +8,7 @@ async function evaluate(expression) {
   const built = await esbuild.build({
     stdin: {
       contents: `
-        import { canRunActiveMonitor, monitorStateParts } from "./Monitor.jsx";
+        import { canRunActiveMonitor, monitorStateParts, referenceReadyForActivation } from "./Monitor.jsx";
         export default ${expression};
       `,
       resolveDir: new URL("..", import.meta.url).pathname,
@@ -55,9 +55,49 @@ test("monitor offers existing evaluators but defaults to deterministic checks", 
   assert.match(html, /Measurement/);
   assert.match(html, /judge · quality v1/);
   assert.match(html, /<option value="" selected="">Deterministic trace checks only<\/option>/);
-  assert.match(html, /provider errors, empty responses, and refusal-like language/);
+  assert.match(html, /provider errors, blank captured response text, and refusal-like language/);
   assert.match(html, /Preview comparison/);
   assert.doesNotMatch(html, /Preview candidate/);
+});
+
+test("model drift setup requires genuine calls even when agent sessions exist", async () => {
+  const html = await render(`React.createElement(Monitor, {
+    configUrl: "/api/config", view: "history", traceCount: 0, agentRunCount: 3,
+    onSetup: () => {},
+  })`);
+  assert.match(html, /No eligible provider model calls/);
+  assert.match(html, /Set up model-call capture/);
+  assert.match(html, /Capture genuine completed provider calls before previewing a statistical comparison/);
+  assert.doesNotMatch(html, /Worker and delivery status verified/);
+  assert.doesNotMatch(html, /Compare sessions/);
+  assert.doesNotMatch(html, /Preview all-call check/);
+});
+
+test("drift setup does not display static readiness checks as verified facts", async () => {
+  const html = await render(`React.createElement(Monitor, {
+    configUrl: "/api/config", view: "history", traceCount: 43, totalTraces: 50,
+    onPlan: () => {}, onGroups: () => {},
+  })`);
+  assert.match(html, /Preview a comparison to see its actual cohort counts and sample readiness/);
+  assert.match(html, /Destination: in-app Monitoring/);
+  assert.match(html, /A saved policy does not start the separate worker/);
+  assert.match(html, /43 of 50 stored traces eligible · 7 excluded/);
+  assert.match(html, /Review worker and delivery setup/);
+  assert.doesNotMatch(html, /○ Reviewed sample floor|○ Worker and delivery status verified/);
+});
+
+test("drift eligibility omits an invalid total instead of inventing exclusions", async () => {
+  const html = await render(`React.createElement(Monitor, {
+    configUrl: "/api/config", view: "history", traceCount: 43, totalTraces: 40,
+  })`);
+  assert.doesNotMatch(html, /stored traces eligible · .*excluded/);
+});
+
+test("one eligible provider call is labeled in the singular", async () => {
+  const html = await render(`React.createElement(Monitor, {
+    configUrl: "/api/config", view: "history", traceCount: 1, totalTraces: 2,
+  })`);
+  assert.match(html, /1 eligible completed model call</);
 });
 
 test("logical-session preview is explicitly descriptive and has no alert claim", async () => {
@@ -82,6 +122,19 @@ test("active Trace manual run remains available beside a logical-session preview
   assert.equal(await evaluate(`canRunActiveMonitor({ state: "active",
     policy: { analysis_unit: "trace" } })`), true);
   assert.equal(await evaluate(`canRunActiveMonitor({ state: "candidate" })`), false);
+});
+
+test("a grouped reference needs a metric above its group floor before activation", async () => {
+  const candidate = { policy: { minimum_reference: 40 }, snapshot: { manifest: {
+    reference_unit_ids: Array(60).fill("call"),
+    reference_summary: { metrics: [
+      { group_id: "model-a", true_count: 30, false_count: 0 },
+      { group_id: "model-b", true_count: 25, false_count: 5 },
+    ] },
+  } } };
+  assert.equal(await evaluate(`referenceReadyForActivation(${JSON.stringify(candidate)})`), false);
+  candidate.snapshot.manifest.reference_summary.metrics[0].true_count = 40;
+  assert.equal(await evaluate(`referenceReadyForActivation(${JSON.stringify(candidate)})`), true);
 });
 
 test("bounded Agent Turn evaluator discovery discloses omitted older identities", async () => {
@@ -142,6 +195,22 @@ test("grouped comparison renders reviewed labels instead of opaque identities", 
   })`);
   assert.match(html, /Group:.*Billing questions/);
   assert.doesNotMatch(html, />clu_internal</);
+});
+
+test("unchanged model metrics stay behind a closed detail control even with no alerts", async () => {
+  const html = await render(`React.createElement(MonitorComparisonMetrics, {
+    comparison: { metrics: [
+      { group_id: "anthropic:model-x", metric: "provider_error", alert: false,
+        reference_value: 0, current_value: 0, effect: 0,
+        p_adjusted: 1, reference_n: 30, current_n: 30 },
+      { group_id: "anthropic:model-x", metric: "response_empty", alert: false,
+        reference_value: 0, current_value: 0, effect: 0,
+        p_adjusted: 1, reference_n: 30, current_n: 30 },
+    ], metric_coverage: [], groups: [] }
+  })`);
+  assert.match(html, /<details class="border"/);
+  assert.doesNotMatch(html, /<details open=""/);
+  assert.match(html, /2 metric details/);
 });
 
 test("alert comparison leads with drift analysis, charts both cohorts, and links evidence", async () => {
@@ -253,7 +322,36 @@ test("monitor status shows active authority beside a newer candidate", async () 
   assert.match(html, /ACTIVE PROSPECTIVE MONITOR/);
   assert.match(html, /Provider error rate/);
   assert.match(html, /EXPLORATORY HISTORICAL COMPARISON/);
-  assert.match(html, /Empty-response rate/);
+  assert.match(html, /Blank captured response-text rate/);
+  assert.match(html, /A tool-only completion can have no response text/);
+});
+
+test("blank captured text alerts describe a change without claiming a quality regression", async () => {
+  const html = await render(`React.createElement(MonitorComparisonMetrics, {
+    comparison: { metrics: [{ metric: "response_empty", alert: true,
+      reference_value: 0.1, current_value: 0.9, effect: 0.8,
+      p_value: 0.001, p_adjusted: 0.003, reference_n: 30, current_n: 30 }],
+      metric_coverage: [], groups: [] }
+  })`);
+  assert.match(html, /Blank captured response-text rate/);
+  assert.match(html, /TEXT PATTERN CHANGED/);
+  assert.doesNotMatch(html, /REGRESSION|IMPROVEMENT/);
+});
+
+test("collecting monitor does not turn its historical no-alert preview into current status", async () => {
+  const manifest = { reference_unit_ids: Array(30).fill("r"), current_unit_ids: [],
+    prospective_open: true, comparison_index: 0 };
+  const active = { state: "active", policy: { prospective_target: 30, grouping_mode: "none" },
+    snapshot: { manifest, comparison: { status: "insufficient", metrics: [],
+      metric_coverage: [], groups: [], unseen_group_share: 0 } },
+    approvedHistoricalSnapshot: { manifest: { ...manifest, current_unit_ids: Array(30).fill("c") },
+      comparison: { status: "no_alert", metrics: [], metric_coverage: [], groups: [], unseen_group_share: 0 } } };
+  const html = await render(`React.createElement(Monitor, {
+    configUrl: "/api/config", view: "status", initialState: { active: ${JSON.stringify(active)} }
+  })`);
+  assert.match(html, /Collecting 0\/30/);
+  assert.match(html, /no comparison or alert decision has run/);
+  assert.match(html, /Historical preview: no alert/);
 });
 
 test("full prospective cohort says it is awaiting evaluator results", async () => {

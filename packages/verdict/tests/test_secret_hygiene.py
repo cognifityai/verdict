@@ -115,6 +115,31 @@ def test_container_and_gcloud_contexts_end_with_secret_denies():
         assert _active_patterns(ignore_file)[-len(FINAL_SECRET_DENIES) :] == FINAL_SECRET_DENIES
 
 
+def test_container_build_definitions_never_admit_local_trace_databases():
+    """Guard the source/build policy; image-layer verification is a separate gate."""
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    docker_patterns = _active_patterns(".dockerignore")
+    cloud_patterns = _active_patterns(".gcloudignore")
+
+    assert "COPY docker-db/" not in dockerfile
+    assert "copy2(" not in dockerfile
+    assert "*.db" in docker_patterns
+    assert "*.db-*" in docker_patterns
+    assert "*.db" in cloud_patterns
+    assert "*.db-*" in cloud_patterns
+    assert not any(pattern.startswith("!") and ".db" in pattern for pattern in docker_patterns)
+    assert not any(pattern.startswith("!") and ".db" in pattern for pattern in cloud_patterns)
+    # The customer-managed image admits only the reviewed wheel directory in
+    # addition to the published-image build instructions.
+    assert [pattern for pattern in docker_patterns if pattern.startswith("!")] == [
+        "!Dockerfile", "!.dockerignore", "!build/",
+        "!build/customer-managed/", "!build/customer-managed/*.whl",
+    ]
+    assert [pattern for pattern in cloud_patterns if pattern.startswith("!")] == [
+        "!Dockerfile", "!.dockerignore",
+    ]
+
+
 @pytest.mark.parametrize(
     "member",
     [

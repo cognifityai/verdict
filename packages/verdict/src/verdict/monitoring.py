@@ -1405,7 +1405,7 @@ def trace_monitor_units(
             or trace.tags.get("verdict.workload") in {"judge", "paired_replay"}
         ):
             continue
-        metrics = {"provider_error": bool(trace.error)}
+        metrics = {"provider_error": trace.error is not None}
         if trace.response_redacted is not None:
             metrics.update({
                 "response_empty": not bool(trace.response_redacted.strip()),
@@ -1425,6 +1425,7 @@ def trace_monitor_units(
                 error=trace.error,
                 prompt=trace.prompt_redacted,
                 response=trace.response_redacted,
+                ended_at=trace.ended_at,
             )
             if evidence_reason is not None:
                 evaluator_state = "not_evaluable"

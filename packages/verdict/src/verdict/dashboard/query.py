@@ -86,7 +86,8 @@ class SQLiteSession:
 
     def table_exists(self, table: str) -> bool:
         return bool(self.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,),
+            "SELECT 1 FROM sqlite_master WHERE type IN ('table','view') AND name=?",
+            (table,),
         ).fetchone())
 
     def columns(self, table: str) -> set[str]:

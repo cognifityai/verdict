@@ -189,6 +189,72 @@ def test_monitor_preview_includes_default_tenantless_sdk_traces(tmp_path):
     assert len(manifest["current_unit_ids"]) == 10
 
 
+def test_monitor_activation_cannot_use_a_foreign_tenant_policy_id(tmp_path):
+    database = tmp_path / "shared.db"
+    _insert_traces(database, 20, tenant="customer-b")
+
+    async def exercise():
+        foreign_app = create_app(storage=f"sqlite:///{database}", tenant_id="customer-b")
+        own_app = create_app(storage=f"sqlite:///{database}", tenant_id="customer-a")
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=foreign_app), base_url="http://testserver"
+        ) as foreign:
+            token = (await foreign.get("/api/setup/token")).json()["setupToken"]
+            preview = await foreign.post(
+                "/api/monitor/preview", headers={"X-Verdict-Setup": token},
+                json={"analysisUnit": "trace", "windowMode": "count",
+                      "referenceRatio": 0.5, "minimumReference": 5,
+                      "minimumCurrent": 5},
+            )
+            assert preview.status_code == 200
+            policy_id = preview.json()["policy"]["policy_id"]
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=own_app), base_url="http://testserver"
+        ) as own:
+            token = (await own.get("/api/setup/token")).json()["setupToken"]
+            activation = await own.post(
+                "/api/monitor/activate", headers={"X-Verdict-Setup": token},
+                json={"policyId": policy_id, "expectedActivePolicyId": None},
+            )
+            missing = await own.post(
+                "/api/monitor/activate", headers={"X-Verdict-Setup": token},
+                json={"policyId": "policy-does-not-exist",
+                      "expectedActivePolicyId": None},
+            )
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=foreign_app), base_url="http://testserver"
+        ) as foreign:
+            token = (await foreign.get("/api/setup/token")).json()["setupToken"]
+            accepted = await foreign.post(
+                "/api/monitor/activate", headers={"X-Verdict-Setup": token},
+                json={"policyId": policy_id, "expectedActivePolicyId": None},
+            )
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=own_app), base_url="http://testserver"
+        ) as own:
+            token = (await own.get("/api/setup/token")).json()["setupToken"]
+            state = await own.get("/api/monitor")
+            run = await own.post("/api/monitor/run", headers={"X-Verdict-Setup": token})
+        return activation, missing, accepted, state, run, policy_id
+
+    activation, missing, accepted, state, run, policy_id = asyncio.run(exercise())
+    assert activation.status_code == 400
+    assert activation.json() == {"error": "invalid monitor activation"}
+    assert (missing.status_code, missing.json()) == (activation.status_code, activation.json())
+    assert accepted.status_code == 200
+    assert state.status_code == 200
+    assert state.json()["state"] == "not_configured"
+    assert run.status_code == 409
+    assert run.json() == {"error": "no active monitor"}
+    storage = SQLiteStorage(str(database))
+    try:
+        assert storage.get_monitor_policy(policy_id)[1] == "active"
+        assert storage.get_active_monitor_policy("customer-b:application:trace") is not None
+        assert storage.get_active_monitor_policy("customer-a:application:trace") is None
+    finally:
+        storage.close()
+
+
 def test_logical_session_preview_is_descriptive_private_and_not_persisted(tmp_path):
     database = tmp_path / "logical-sessions.db"
     _insert_logical_session_runs(
@@ -631,6 +697,66 @@ def test_dashboard_data_uses_the_host_authorized_monitor_scope(tmp_path):
     assert response.json()["monitor"]["candidate"]["policy"]["scope_key"] == (
         "customer-b:application:trace"
     )
+
+
+def test_insufficient_historical_comparison_cannot_be_activated(tmp_path):
+    database = tmp_path / "insufficient.db"
+    _insert_traces(database, 1)
+
+    async def exercise():
+        app = create_app(storage=f"sqlite:///{database}")
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            headers = {"X-Verdict-Setup": token}
+            preview = await client.post("/api/monitor/preview", headers=headers, json={})
+            assert preview.status_code == 200
+            assert preview.json()["snapshot"]["comparison"]["status"] == "insufficient"
+            response = await client.post("/api/monitor/activate", headers=headers, json={
+                "policyId": preview.json()["policy"]["policy_id"], "expectedActivePolicyId": None,
+            })
+            assert response.status_code == 400
+            state = await client.get("/api/monitor")
+            assert state.json()["active"] is None
+
+    asyncio.run(exercise())
+
+
+def test_grouped_reference_needs_one_metric_above_its_group_floor(tmp_path):
+    database = tmp_path / "sparse-groups.db"
+    storage = SQLiteStorage(str(database))
+    for index in range(120):
+        started = NOW + timedelta(minutes=index)
+        storage.insert_trace(Trace(
+            trace_id=f"grouped-{index:03d}", tenant_id="__verdict_local__",
+            started_at=started, ended_at=started + timedelta(seconds=1),
+            provider="openai", request_model="model-a" if index % 2 else "model-b",
+            prompt_redacted="request", response_redacted="answer",
+        ))
+    storage.close()
+
+    async def exercise():
+        app = create_app(storage=f"sqlite:///{database}")
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            headers = {"X-Verdict-Setup": token}
+            sparse = await client.post("/api/monitor/preview", headers=headers, json={
+                "windowMode": "count", "referenceRatio": 0.5, "groupingMode": "provider_model",
+                "minimumReference": 40, "minimumCurrent": 20,
+            })
+            assert sparse.status_code == 200
+            manifest = sparse.json()["snapshot"]["manifest"]
+            assert len(manifest["reference_unit_ids"]) == 60
+            assert max(metric["true_count"] + metric["false_count"]
+                       for metric in manifest["reference_summary"]["metrics"]) == 30
+            rejected = await client.post("/api/monitor/activate", headers=headers, json={
+                "policyId": sparse.json()["policy"]["policy_id"], "expectedActivePolicyId": None,
+            })
+            assert rejected.status_code == 400
+            assert (await client.get("/api/monitor")).json()["active"] is None
+
+    asyncio.run(exercise())
 
 
 def test_monitor_preview_activation_and_prospective_run(tmp_path):

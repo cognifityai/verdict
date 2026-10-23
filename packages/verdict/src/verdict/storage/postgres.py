@@ -2,11 +2,15 @@
 
 Proves the Storage Protocol scales beyond SQLite. Multi-process safe (real
 DB locks, not in-process locks). For v0 this is opt-in — you have to install
-`psycopg[binary,pool]` and pass a postgres URL to `verdict.init()`.
+`psycopg[binary,pool]` and pass a PostgreSQL URL or valid libpq keyword
+connection string to `verdict.init()`.
 
 URL form (any libpq-compatible URL works):
     postgres://user:pass@host:5432/dbname
     postgresql://user:pass@host:5432/dbname
+
+Keyword form:
+    host=localhost port=5432 dbname=verdict user=verdict
 
 The schema mirrors SQLiteStorage so migrations are linear: the same logical
 data lives in both adapters; only the SQL dialect differs.
@@ -17,10 +21,12 @@ from __future__ import annotations
 import hashlib
 import json
 import threading
+from collections.abc import Callable
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime, timezone
+from pathlib import Path
 
 from verdict.agent_judgment import (
     TOOL_EVIDENCE_MODE,
@@ -43,12 +49,38 @@ from verdict.analysis_records import (
     notification_attempt_to_json,
     validate_delivery_query,
 )
+from verdict.delivery_queue import (
+    DeliveryQueueItem,
+    NotificationIntent,
+    intent_from_json,
+    intent_to_json,
+    validate_delivery_cursor,
+)
 from verdict.evidence import (
     AgentCaptureBatch,
     AgentRunBundle,
     AgentTurn,
     ExecutionStatus,
     agent_run_bundle_from_json,
+)
+from verdict.local_recent_facts import (
+    LocalFullProjection,
+    LocalRecentFact,
+    reject_lost_model_usage,
+    require_all_retained_facts,
+    tail_turn_json,
+    trace_evidence_fingerprint,
+    validate_full_projection,
+    validate_historical_facts,
+    validate_recent_facts,
+)
+from verdict.local_source_revision import (
+    LocalSourceRevision,
+    revision_from_row,
+    same_recent_window,
+    validate_recent_window_json,
+    verify_retained_local_evidence,
+    verify_source_revision,
 )
 from verdict.monitoring import (
     CohortManifest,
@@ -66,6 +98,7 @@ from verdict.normalized_evidence import (
     LEGACY_AGENT_WRITER_MIGRATION,
     _LegacyLocalTextUpgrade,
     _prepare_legacy_local_text_upgrade,
+    _prepare_linked_traces,
     agent_event_from_row,
     agent_run_from_row,
     agent_turn_from_row,
@@ -142,6 +175,26 @@ def _trace_tenant_clause(requested: str, column: str = "tenant_id") -> str:
         f"({column} IS NULL OR {column}=%s)" if requested == "__verdict_local__" else f"{column}=%s"
     )
 
+
+_EVALUABLE_LOCAL_TURN = (
+    "(s.source_kind NOT IN ('codex','claude-code') OR "
+    "(s.local_full_bytes IS NOT NULL AND "
+    "(s.local_partial_line=FALSE OR EXISTS ("
+    "SELECT 1 FROM agent_turns newer WHERE newer.tenant_id=t.tenant_id "
+    "AND newer.run_id=t.run_id AND newer.sequence>t.sequence)))) "
+    "AND NOT EXISTS (SELECT 1 FROM agent_events marker_event "
+    "JOIN agent_turns marker_turn ON marker_turn.tenant_id=marker_event.tenant_id "
+    "AND marker_turn.run_id=marker_event.run_id "
+    "AND marker_turn.turn_id=marker_event.turn_id "
+    "WHERE marker_event.tenant_id=t.tenant_id AND marker_event.run_id=t.run_id "
+    "AND marker_event.provenance='verdict:capture_limit' "
+    "AND marker_turn.sequence<=t.sequence)"
+)
+
+# Bump this marker whenever _SCHEMA or the startup migrations below change.
+# It is committed with those changes so an already-current process restart
+# does not take DDL locks against active evidence writers.
+_SCHEMA_REVISION = "schema_2026_10_20_p9_tail"
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS conversation_snapshots (
@@ -225,6 +278,18 @@ CREATE TABLE IF NOT EXISTS import_sources (
     started_at TIMESTAMPTZ NOT NULL,
     observed_at TIMESTAMPTZ NOT NULL,
     ended_at TIMESTAMPTZ,
+    local_full_bytes BIGINT,
+    local_full_sha256 TEXT,
+    local_prefix_bytes BIGINT,
+    local_prefix_sha256 TEXT,
+    local_partial_line BOOLEAN,
+    local_source_turn_count BIGINT,
+    local_source_event_count BIGINT,
+    local_v1_turn_count BIGINT,
+    local_v1_event_count BIGINT,
+    local_projection_complete BOOLEAN,
+    local_min_turn_at TIMESTAMPTZ,
+    local_max_turn_at TIMESTAMPTZ,
     PRIMARY KEY (tenant_id, source_session_id),
     UNIQUE (tenant_id, source_kind, source_locator_hash)
 );
@@ -253,6 +318,9 @@ CREATE TABLE IF NOT EXISTS agent_runs (
 );
 CREATE INDEX IF NOT EXISTS idx_agent_runs_tenant_started
     ON agent_runs(tenant_id, started_at DESC, run_id DESC);
+CREATE INDEX IF NOT EXISTS idx_agent_runs_tenant_ended
+    ON agent_runs(tenant_id, ended_at DESC, run_id DESC)
+    WHERE ended_at IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_agent_runs_tenant_agent_started
     ON agent_runs(tenant_id, agent_name, agent_version, started_at DESC, run_id DESC);
 CREATE INDEX IF NOT EXISTS idx_agent_runs_tenant_session
@@ -343,8 +411,82 @@ CREATE TABLE IF NOT EXISTS agent_events (
 );
 CREATE INDEX IF NOT EXISTS idx_agent_events_run_time
     ON agent_events(tenant_id, run_id, occurred_at, event_id);
+CREATE INDEX IF NOT EXISTS idx_agent_events_tenant_time
+    ON agent_events(tenant_id, occurred_at, run_id, event_id);
 CREATE INDEX IF NOT EXISTS idx_agent_events_turn
     ON agent_events(tenant_id, run_id, turn_id, sequence, event_id);
+CREATE TABLE IF NOT EXISTS local_recent_events (
+    tenant_id TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    source_prefix_bytes BIGINT NOT NULL CHECK(source_prefix_bytes >= 0),
+    source_prefix_sha256 TEXT NOT NULL CHECK(octet_length(source_prefix_sha256) = 64),
+    captured_at TIMESTAMPTZ NOT NULL,
+    sample_json TEXT NOT NULL CHECK(octet_length(sample_json) <= 1048576),
+    PRIMARY KEY (tenant_id, run_id),
+    FOREIGN KEY (tenant_id, run_id) REFERENCES agent_runs(tenant_id, run_id)
+        ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS local_recent_event_facts (
+    tenant_id TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    event_id TEXT NOT NULL,
+    turn_id TEXT NOT NULL,
+    source_ordinal BIGINT NOT NULL CHECK(source_ordinal >= 0),
+    turn_sequence BIGINT NOT NULL CHECK(turn_sequence >= 0),
+    sequence BIGINT NOT NULL CHECK(sequence >= 0),
+    occurred_at TIMESTAMPTZ NOT NULL,
+    event_type TEXT NOT NULL,
+    status TEXT NOT NULL,
+    provenance TEXT NOT NULL,
+    attributes_json JSONB NOT NULL,
+    privacy_classification TEXT NOT NULL,
+    omission_reason TEXT,
+    trace_id TEXT,
+    first_seen_revision TEXT NOT NULL CHECK(octet_length(first_seen_revision) = 64),
+    PRIMARY KEY (tenant_id,run_id,event_id),
+    UNIQUE (tenant_id,run_id,source_ordinal),
+    UNIQUE (tenant_id,run_id,turn_id,sequence),
+    FOREIGN KEY (tenant_id,run_id) REFERENCES agent_runs(tenant_id,run_id)
+        ON DELETE CASCADE,
+    FOREIGN KEY (trace_id) REFERENCES traces(trace_id) ON DELETE SET NULL
+);
+CREATE TABLE IF NOT EXISTS local_tail_turn_facts (
+    tenant_id TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    turn_id TEXT NOT NULL,
+    sequence BIGINT NOT NULL CHECK(sequence >= 0),
+    started_at TIMESTAMPTZ NOT NULL,
+    payload_json TEXT NOT NULL,
+    PRIMARY KEY (tenant_id,run_id,turn_id),
+    UNIQUE (tenant_id,run_id,sequence),
+    FOREIGN KEY (tenant_id,run_id) REFERENCES agent_runs(tenant_id,run_id)
+        ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_local_tail_turns_time
+    ON local_tail_turn_facts(tenant_id,started_at,run_id,sequence);
+CREATE TABLE IF NOT EXISTS local_source_scan_attempts (
+    tenant_id TEXT NOT NULL,
+    source_kind TEXT NOT NULL,
+    source_scope TEXT NOT NULL CHECK(length(source_scope)=64),
+    source_locator_hash TEXT NOT NULL CHECK(length(source_locator_hash)=64),
+    generation BIGINT NOT NULL CHECK(generation >= 1),
+    started_at TIMESTAMPTZ NOT NULL,
+    finished_at TIMESTAMPTZ,
+    outcome_code TEXT,
+    observed_size BIGINT CHECK(observed_size IS NULL OR observed_size >= 0),
+    observed_mtime_ns BIGINT,
+    accepted_revision TEXT,
+    projection_complete BOOLEAN,
+    source_line_complete BOOLEAN,
+    PRIMARY KEY (tenant_id,source_kind,source_scope,source_locator_hash)
+);
+CREATE INDEX IF NOT EXISTS idx_local_recent_facts_tenant_time
+    ON local_recent_event_facts(tenant_id,occurred_at,run_id,event_id);
+CREATE TABLE IF NOT EXISTS local_recent_trace_evidence (
+    trace_id TEXT PRIMARY KEY REFERENCES traces(trace_id) ON DELETE CASCADE,
+    tenant_id TEXT NOT NULL,
+    evidence_fingerprint TEXT NOT NULL CHECK(octet_length(evidence_fingerprint)=64)
+);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_events_trace
     ON agent_events(tenant_id, trace_id) WHERE trace_id IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_events_producer_sequence
@@ -356,6 +498,66 @@ CREATE TABLE IF NOT EXISTS verdict_schema_migrations (
     applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS evidence_revisions (
+    tenant_id TEXT PRIMARY KEY,
+    revision BIGINT NOT NULL CHECK(revision >= 0)
+);
+
+CREATE OR REPLACE FUNCTION verdict_advance_evidence_revision() RETURNS trigger
+LANGUAGE plpgsql AS $verdict_revision$
+DECLARE revision_tenant TEXT;
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        revision_tenant := OLD.tenant_id;
+    ELSE
+        revision_tenant := NEW.tenant_id;
+    END IF;
+    IF TG_TABLE_NAME = 'traces' THEN
+        revision_tenant := COALESCE(NULLIF(revision_tenant,''),'__verdict_local__');
+    END IF;
+    INSERT INTO evidence_revisions(tenant_id,revision) VALUES(revision_tenant,1)
+    ON CONFLICT(tenant_id) DO UPDATE
+        SET revision=evidence_revisions.revision+1;
+    IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
+    RETURN NEW;
+END
+$verdict_revision$;
+
+CREATE OR REPLACE FUNCTION verdict_guard_evidence_tenant() RETURNS trigger
+LANGUAGE plpgsql AS $verdict_tenant$
+BEGIN
+    IF OLD.tenant_id IS DISTINCT FROM NEW.tenant_id THEN
+        RAISE EXCEPTION 'evidence tenant identity is immutable' USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END
+$verdict_tenant$;
+
+DO $verdict_revision$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_trigger
+                   WHERE tgname='verdict_traces_revision' AND tgrelid='traces'::regclass) THEN
+        CREATE TRIGGER verdict_traces_revision AFTER INSERT OR UPDATE OR DELETE ON traces
+        FOR EACH ROW EXECUTE FUNCTION verdict_advance_evidence_revision();
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_trigger
+                   WHERE tgname='verdict_agent_runs_revision' AND tgrelid='agent_runs'::regclass) THEN
+        CREATE TRIGGER verdict_agent_runs_revision AFTER INSERT OR UPDATE OR DELETE ON agent_runs
+        FOR EACH ROW EXECUTE FUNCTION verdict_advance_evidence_revision();
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_trigger
+                   WHERE tgname='verdict_traces_tenant_immutable' AND tgrelid='traces'::regclass) THEN
+        CREATE TRIGGER verdict_traces_tenant_immutable BEFORE UPDATE OF tenant_id ON traces
+        FOR EACH ROW EXECUTE FUNCTION verdict_guard_evidence_tenant();
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_trigger
+                   WHERE tgname='verdict_agent_runs_tenant_immutable' AND tgrelid='agent_runs'::regclass) THEN
+        CREATE TRIGGER verdict_agent_runs_tenant_immutable BEFORE UPDATE OF tenant_id ON agent_runs
+        FOR EACH ROW EXECUTE FUNCTION verdict_guard_evidence_tenant();
+    END IF;
+END
+$verdict_revision$;
+
 CREATE TABLE IF NOT EXISTS deterministic_analysis_runs (
     analysis_id TEXT PRIMARY KEY CHECK(length(analysis_id)=64),
     tenant_id TEXT NOT NULL CHECK(octet_length(tenant_id) BETWEEN 1 AND 256),
@@ -365,11 +567,32 @@ CREATE TABLE IF NOT EXISTS deterministic_analysis_runs (
     status TEXT NOT NULL CHECK(status IN ('completed','error')),
     analyzer_version TEXT NOT NULL CHECK(octet_length(analyzer_version) BETWEEN 1 AND 128),
     input_fingerprint TEXT NOT NULL CHECK(length(input_fingerprint)=64),
+    verified_revision BIGINT,
     payload_json TEXT NOT NULL CHECK(octet_length(payload_json)<=4194304),
     UNIQUE(tenant_id, scope_key, analyzer_version, input_fingerprint, status)
 );
 CREATE INDEX IF NOT EXISTS idx_analysis_runs_tenant_scope_latest
     ON deterministic_analysis_runs(tenant_id, scope_key, completed_at DESC, analysis_id DESC);
+
+CREATE TABLE IF NOT EXISTS deterministic_analysis_current (
+    tenant_id TEXT NOT NULL,
+    scope_key TEXT NOT NULL,
+    analyzer_version TEXT NOT NULL,
+    analysis_id TEXT NOT NULL REFERENCES deterministic_analysis_runs(analysis_id) ON DELETE CASCADE,
+    PRIMARY KEY (tenant_id, scope_key, analyzer_version)
+);
+
+CREATE OR REPLACE FUNCTION verdict_set_current_analysis() RETURNS trigger
+LANGUAGE plpgsql AS $verdict_current$
+BEGIN
+    INSERT INTO deterministic_analysis_current
+        (tenant_id,scope_key,analyzer_version,analysis_id)
+    VALUES (NEW.tenant_id,NEW.scope_key,NEW.analyzer_version,NEW.analysis_id)
+    ON CONFLICT(tenant_id,scope_key,analyzer_version) DO UPDATE
+        SET analysis_id=EXCLUDED.analysis_id;
+    RETURN NEW;
+END
+$verdict_current$;
 
 CREATE TABLE IF NOT EXISTS notification_delivery_attempts (
     attempt_id TEXT PRIMARY KEY CHECK(length(attempt_id)=64),
@@ -384,6 +607,27 @@ CREATE INDEX IF NOT EXISTS idx_notification_attempts_lookup
     ON notification_delivery_attempts(
         notification_id, destination_fingerprint, attempted_at DESC, attempt_id DESC
     );
+
+CREATE TABLE IF NOT EXISTS notification_delivery_queue (
+    intent_id TEXT PRIMARY KEY CHECK(length(intent_id)=64),
+    tenant_id TEXT NOT NULL CHECK(octet_length(tenant_id) BETWEEN 1 AND 256),
+    source_kind TEXT NOT NULL CHECK(source_kind IN ('analysis','monitor')),
+    source_id TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL,
+    status TEXT NOT NULL CHECK(status IN
+        ('pending','unbound','failed','delivered','blocked','exhausted','superseded')),
+    destination_fingerprint TEXT,
+    attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count>=0),
+    next_due_at TIMESTAMPTZ,
+    next_probe_at TIMESTAMPTZ,
+    last_error_code TEXT,
+    superseded_by_id TEXT,
+    payload_json JSONB NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_notification_queue_due
+    ON notification_delivery_queue(tenant_id,status,next_due_at,intent_id);
+CREATE INDEX IF NOT EXISTS idx_notification_queue_probe
+    ON notification_delivery_queue(tenant_id,status,next_probe_at,intent_id);
 
 CREATE TABLE IF NOT EXISTS monitor_policies (
     policy_id TEXT PRIMARY KEY CHECK(octet_length(policy_id) BETWEEN 1 AND 256),
@@ -425,7 +669,8 @@ CREATE TABLE IF NOT EXISTS judgments (
     evaluator_fingerprint    TEXT,
     expected_dimensions      JSONB,
     status                   TEXT DEFAULT 'completed',
-    error                    TEXT
+    error                    TEXT,
+    local_recent_evidence_fingerprint TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_judgments_trace   ON judgments(trace_id);
 CREATE INDEX IF NOT EXISTS idx_judgments_created ON judgments(created_at);
@@ -634,6 +879,7 @@ CREATE TABLE IF NOT EXISTS spans (
     span_id      TEXT PRIMARY KEY,
     name         TEXT,
     trace_id     TEXT,
+    tenant_id    TEXT,
     parent_name  TEXT,
     started_at   TIMESTAMPTZ NOT NULL,
     ended_at     TIMESTAMPTZ,
@@ -642,6 +888,7 @@ CREATE TABLE IF NOT EXISTS spans (
     error        TEXT
 );
 ALTER TABLE spans ADD COLUMN IF NOT EXISTS parent_name TEXT;
+ALTER TABLE spans ADD COLUMN IF NOT EXISTS tenant_id TEXT;
 CREATE INDEX IF NOT EXISTS idx_spans_trace   ON spans(trace_id);
 CREATE INDEX IF NOT EXISTS idx_spans_started ON spans(started_at DESC);
 
@@ -683,7 +930,39 @@ class PostgresStorage:
                     "SELECT pg_advisory_xact_lock("
                     "hashtextextended(current_database() || ':verdict-schema', 0))"
                 )
+                cur.execute(
+                    "SELECT 1 FROM pg_class c JOIN pg_namespace n "
+                    "ON n.oid=c.relnamespace "
+                    "WHERE n.nspname=current_schema() "
+                    "AND c.relname='verdict_schema_migrations' "
+                    "AND c.relkind IN ('r','p')"
+                )
+                if cur.fetchone() is not None:
+                    cur.execute(
+                        "SELECT 1 FROM verdict_schema_migrations WHERE name=%s",
+                        (_SCHEMA_REVISION,),
+                    )
+                    if cur.fetchone() is not None:
+                        return
                 cur.execute(_SCHEMA)
+                cur.execute(
+                    "ALTER TABLE deterministic_analysis_runs "
+                    "ADD COLUMN IF NOT EXISTS verified_revision BIGINT"
+                )
+                cur.execute(
+                    """DO $verdict_current$
+                    BEGIN
+                      IF NOT EXISTS (SELECT 1 FROM pg_trigger
+                        WHERE tgname='verdict_analysis_current'
+                          AND tgrelid='deterministic_analysis_runs'::regclass) THEN
+                        CREATE TRIGGER verdict_analysis_current
+                        AFTER INSERT OR UPDATE OF verified_revision
+                        ON deterministic_analysis_runs
+                        FOR EACH ROW EXECUTE FUNCTION verdict_set_current_analysis();
+                      END IF;
+                    END
+                    $verdict_current$"""
+                )
                 # Idempotent migration for databases created before the May-2026
                 # effect-size refresh. Postgres supports ADD COLUMN IF NOT EXISTS,
                 # so this is safe to run on every startup.
@@ -702,8 +981,15 @@ class PostgresStorage:
                     ("expected_dimensions", "JSONB"),
                     ("status", "TEXT DEFAULT 'completed'"),
                     ("error", "TEXT"),
+                    ("local_recent_evidence_fingerprint", "TEXT"),
                 ]:
                     cur.execute(f"ALTER TABLE judgments ADD COLUMN IF NOT EXISTS {col} {ddl}")
+                cur.execute(
+                    "CREATE OR REPLACE VIEW current_judgments AS "
+                    "SELECT j.* FROM judgments j LEFT JOIN local_recent_trace_evidence r "
+                    "ON r.trace_id=j.trace_id WHERE r.trace_id IS NULL OR "
+                    "j.local_recent_evidence_fingerprint=r.evidence_fingerprint"
+                )
                 for col, ddl in [
                     ("tenant_id", "TEXT"),
                     ("correct_examples", "INTEGER NOT NULL DEFAULT 0"),
@@ -727,6 +1013,23 @@ class PostgresStorage:
                     ("environment", "TEXT NOT NULL DEFAULT ''"),
                 ]:
                     cur.execute(f"ALTER TABLE traces ADD COLUMN IF NOT EXISTS {col} {ddl}")
+                for col, ddl in (
+                    ("local_full_bytes", "BIGINT"),
+                    ("local_full_sha256", "TEXT"),
+                    ("local_prefix_bytes", "BIGINT"),
+                    ("local_prefix_sha256", "TEXT"),
+                    ("local_partial_line", "BOOLEAN"),
+                    ("local_source_turn_count", "BIGINT"),
+                    ("local_source_event_count", "BIGINT"),
+                    ("local_v1_turn_count", "BIGINT"),
+                    ("local_v1_event_count", "BIGINT"),
+                    ("local_projection_complete", "BOOLEAN"),
+                    ("local_min_turn_at", "TIMESTAMPTZ"),
+                    ("local_max_turn_at", "TIMESTAMPTZ"),
+                ):
+                    cur.execute(
+                        f"ALTER TABLE import_sources ADD COLUMN IF NOT EXISTS {col} {ddl}"
+                    )
                 for col, ddl in [
                     ("input_tokens", "BIGINT CHECK(input_tokens IS NULL OR input_tokens >= 0)"),
                     (
@@ -772,6 +1075,11 @@ class PostgresStorage:
                     "CREATE INDEX IF NOT EXISTS idx_traces_parent_span ON traces(parent_span_id)"
                 )
                 orphaned_legacy_write = self._migrate_agent_run_bundles_cursor(cur)
+                if not orphaned_legacy_write:
+                    cur.execute(
+                        "INSERT INTO verdict_schema_migrations(name) VALUES (%s)",
+                        (_SCHEMA_REVISION,),
+                    )
         if orphaned_legacy_write:
             self._pool.close()
             raise RuntimeError(LEGACY_AGENT_WRITER_ERROR)
@@ -782,10 +1090,11 @@ class PostgresStorage:
     def _iso(dt: datetime | None) -> datetime | None:
         return dt  # psycopg handles datetime natively
 
-    def _exec(self, sql: str, params: tuple) -> None:
+    def _exec(self, sql: str, params: tuple) -> int:
         with self._pool.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(sql, params)
+                return cur.rowcount
 
     def _fetchone(self, sql: str, params: tuple):
         if (conn := self._cluster_snapshot_connection.get()) is not None:
@@ -837,7 +1146,9 @@ class PostgresStorage:
             "response_redacted = EXCLUDED.response_redacted, "
             "parent_span_id = COALESCE(EXCLUDED.parent_span_id, traces.parent_span_id), "
             "cluster_id = COALESCE(EXCLUDED.cluster_id, traces.cluster_id), "
-            "cost_usd = EXCLUDED.cost_usd"
+            "cost_usd = EXCLUDED.cost_usd "
+            "WHERE COALESCE(NULLIF(traces.tenant_id,''),'__verdict_local__') = "
+            "COALESCE(NULLIF(EXCLUDED.tenant_id,''),'__verdict_local__')"
         )
         cur.execute(
             sql,
@@ -874,6 +1185,8 @@ class PostgresStorage:
                 trace.environment,
             ),
         )
+        if cur.rowcount != 1:
+            raise ValueError("trace identity belongs to another tenant")
 
     def insert_trace(self, trace: Trace) -> None:
         sanitize_trace(trace)
@@ -1283,17 +1596,107 @@ class PostgresStorage:
         sanitized, capture_traces, linked_trace_ids = prepare_agent_capture(bundle, traces)
         self._store_agent_capture(sanitized, capture_traces, linked_trace_ids, None)
 
+    def list_local_scan_attempts(
+        self, tenant_id: str, source_kind: str, source_scope: str,
+    ) -> dict[str, str]:
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT source_locator_hash,started_at FROM local_source_scan_attempts "
+                    "WHERE tenant_id=%s AND source_kind=%s AND source_scope=%s",
+                    (tenant_id, source_kind, source_scope),
+                )
+                rows = cur.fetchall()
+        return {locator: started.isoformat() for locator, started in rows}
+
+    def local_scan_attempt_summary(self, tenant_id: str) -> list[tuple[str | None, int, str]]:
+        """Return grouped latest per-file outcomes without paths or locator hashes."""
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT outcome_code,COUNT(*),MAX(started_at) "
+                    "FROM local_source_scan_attempts WHERE tenant_id=%s GROUP BY outcome_code",
+                    (tenant_id,),
+                )
+                rows = cur.fetchall()
+        return [(code, int(count), started.isoformat()) for code, count, started in rows]
+
+    def claim_local_scan_attempt(
+        self, tenant_id: str, source_kind: str, source_scope: str,
+        locator_hash: str, started_at: str, observed_size: int,
+        observed_mtime_ns: int,
+    ) -> int:
+        with self._pool.connection() as conn:
+            with conn.transaction(), conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO local_source_scan_attempts "
+                    "(tenant_id,source_kind,source_scope,source_locator_hash,generation,"
+                    "started_at,observed_size,observed_mtime_ns) "
+                    "VALUES (%s,%s,%s,%s,1,%s,%s,%s) ON CONFLICT "
+                    "(tenant_id,source_kind,source_scope,source_locator_hash) "
+                    "DO UPDATE SET generation=local_source_scan_attempts.generation+1,"
+                    "started_at=excluded.started_at,finished_at=NULL,outcome_code=NULL,"
+                    "observed_size=excluded.observed_size,"
+                    "observed_mtime_ns=excluded.observed_mtime_ns,"
+                    "accepted_revision=NULL,projection_complete=NULL,source_line_complete=NULL "
+                    "RETURNING generation",
+                    (tenant_id, source_kind, source_scope, locator_hash, started_at,
+                     observed_size, observed_mtime_ns),
+                )
+                return int(cur.fetchone()[0])
+
+    def finish_local_scan_attempt(
+        self, tenant_id: str, source_kind: str, source_scope: str,
+        locator_hash: str, generation: int, finished_at: str,
+        outcome_code: str, accepted_revision: str | None,
+        projection_complete: bool, source_line_complete: bool,
+    ) -> bool:
+        with self._pool.connection() as conn:
+            with conn.transaction(), conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE local_source_scan_attempts SET finished_at=%s,outcome_code=%s,"
+                    "accepted_revision=%s,projection_complete=%s,source_line_complete=%s "
+                    "WHERE tenant_id=%s AND source_kind=%s AND source_scope=%s "
+                    "AND source_locator_hash=%s AND generation=%s",
+                    (finished_at, outcome_code, accepted_revision,
+                     projection_complete, source_line_complete, tenant_id,
+                     source_kind, source_scope, locator_hash, generation),
+                )
+                return cur.rowcount == 1
+
     def _replace_local_agent_capture(
         self,
         bundle: AgentRunBundle,
         traces: tuple[Trace, ...],
-        legacy_text_upgrade: _LegacyLocalTextUpgrade,
+        legacy_text_upgrade: _LegacyLocalTextUpgrade | None,
+        *,
+        source_revision: LocalSourceRevision | None = None,
+        source_path: Path | None = None,
+        recent_window_json: str | None = None,
+        recent_facts: tuple[LocalRecentFact, ...] = (),
+        historical_facts: tuple[LocalRecentFact, ...] = (),
+        full_projection: LocalFullProjection | None = None,
+        recent_traces: tuple[Trace, ...] = (),
     ) -> None:
         sanitized, capture_traces, linked_trace_ids = prepare_agent_capture(bundle, traces)
-        upgrade = _prepare_legacy_local_text_upgrade(
-            sanitized, capture_traces, legacy_text_upgrade
+        prepared_recent, recent_ids = _prepare_linked_traces(
+            tuple(fact.event for fact in (*recent_facts, *historical_facts,
+                                          *(full_projection.facts if full_projection else ()))),
+            recent_traces,
         )
-        self._store_agent_capture(sanitized, capture_traces, linked_trace_ids, upgrade)
+        if linked_trace_ids & recent_ids:
+            raise ValueError("local recent fact duplicates a prefix Trace")
+        upgrade = (
+            _prepare_legacy_local_text_upgrade(sanitized, capture_traces, legacy_text_upgrade)
+            if legacy_text_upgrade is not None else None
+        )
+        self._store_agent_capture(
+            sanitized, capture_traces + prepared_recent, linked_trace_ids | recent_ids, upgrade,
+            local_revision=source_revision, local_path=source_path,
+            recent_window_json=recent_window_json,
+            recent_facts=recent_facts, historical_facts=historical_facts,
+            full_projection=full_projection,
+        )
 
     def append_agent_capture(
         self,
@@ -1309,7 +1712,30 @@ class PostgresStorage:
         capture_traces: tuple[Trace, ...],
         linked_trace_ids: frozenset[str],
         text_compatibility: _LegacyLocalTextUpgrade | None,
+        *,
+        local_revision: LocalSourceRevision | None = None,
+        local_path: Path | None = None,
+        recent_window_json: str | None = None,
+        recent_facts: tuple[LocalRecentFact, ...] = (),
+        historical_facts: tuple[LocalRecentFact, ...] = (),
+        full_projection: LocalFullProjection | None = None,
     ) -> None:
+        window = (validate_recent_window_json(
+            recent_window_json, run_id=capture.run.run_id, revision=local_revision,
+        ) if local_revision is not None else None)
+        if recent_window_json is not None and window is None:
+            raise ValueError("local source revision is required for recent window")
+        validate_recent_facts(
+            recent_facts, window, frozenset(event.event_id for event in capture.events),
+        )
+        validate_historical_facts(
+            recent_facts, historical_facts,
+            frozenset(event.event_id for event in capture.events),
+        )
+        validate_full_projection(full_projection, capture, recent_facts,
+                                 historical_facts, local_revision)
+        all_recent_facts = (*recent_facts, *historical_facts,
+                            *(full_projection.facts if full_projection else ()))
         from psycopg import IntegrityError
 
         try:
@@ -1328,6 +1754,62 @@ class PostgresStorage:
                     "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
                     (f"agent-run:{capture.run.tenant_id}:{capture.run.run_id}",),
                 )
+                if local_revision is not None:
+                    if local_path is None or not isinstance(capture, AgentRunBundle):
+                        raise ValueError("local source path is required")
+                    cur.execute(
+                        "SELECT * FROM import_sources WHERE tenant_id=%s "
+                        "AND source_session_id=%s FOR UPDATE",
+                        (capture.run.tenant_id, capture.session.source_session_id),
+                    )
+                    source_row = cur.fetchone()
+                    prior = revision_from_row(
+                        dict(zip([column.name for column in cur.description], source_row,
+                                 strict=True)) if source_row is not None else None
+                    )
+                    rewritten = verify_source_revision(local_path, local_revision, prior)
+                    cur.execute(
+                        "SELECT event_id FROM local_recent_event_facts "
+                        "WHERE tenant_id=%s AND run_id=%s",
+                        (capture.run.tenant_id, capture.run.run_id),
+                    )
+                    require_all_retained_facts(
+                        {row[0] for row in cur.fetchall()},
+                        recent_facts, historical_facts,
+                    )
+                    if source_row is not None and (prior is None or rewritten):
+                        previous = self._read_normalized_bundles_connection(
+                            conn, capture.run.tenant_id, (capture.run.run_id,),
+                        )
+                        verify_retained_local_evidence(
+                            previous[0] if previous else None, capture,
+                            require_recorded_content=rewritten,
+                            legacy_turn_previews=(
+                                text_compatibility.turn_previews
+                                if text_compatibility is not None else None
+                            ),
+                        )
+                    cur.execute(
+                        "DELETE FROM agent_events WHERE tenant_id=%s AND run_id=%s "
+                        "AND provenance='verdict:partial_source_line'",
+                        (capture.run.tenant_id, capture.run.run_id),
+                    )
+                    current_limits = {
+                        event.event_id for event in capture.events
+                        if event.provenance == "verdict:capture_limit"
+                    }
+                    cur.execute(
+                        "SELECT event_id FROM agent_events WHERE tenant_id=%s AND run_id=%s "
+                        "AND provenance='verdict:capture_limit'",
+                        (capture.run.tenant_id, capture.run.run_id),
+                    )
+                    for (prior_limit,) in cur.fetchall():
+                        if prior_limit not in current_limits:
+                            cur.execute(
+                                "DELETE FROM agent_events WHERE tenant_id=%s AND run_id=%s "
+                                "AND event_id=%s",
+                                (capture.run.tenant_id, capture.run.run_id, prior_limit),
+                            )
                 prepared_traces = []
                 message_updates: set[str] = set()
                 for trace in capture_traces:
@@ -1365,6 +1847,20 @@ class PostgresStorage:
                                 trace.trace_id,
                             ),
                         )
+                recent_trace_ids = {
+                    fact.event.trace_id for fact in all_recent_facts
+                    if fact.event.trace_id is not None
+                }
+                for trace in prepared_traces:
+                    if trace.trace_id in recent_trace_ids:
+                        cur.execute(
+                            "INSERT INTO local_recent_trace_evidence "
+                            "(trace_id,tenant_id,evidence_fingerprint) VALUES (%s,%s,%s) "
+                            "ON CONFLICT(trace_id) DO UPDATE SET "
+                            "evidence_fingerprint=EXCLUDED.evidence_fingerprint",
+                            (trace.trace_id, capture.run.tenant_id,
+                             trace_evidence_fingerprint(trace)),
+                        )
                 linked_ids = tuple(sorted(linked_trace_ids))
                 if linked_ids:
                     placeholders = ",".join("%s" for _ in linked_ids)
@@ -1382,11 +1878,190 @@ class PostgresStorage:
                     self._write_normalized_bundle_cursor(
                         cur, capture, text_compatibility
                     )
+                if local_revision is not None:
+                    cur.execute(
+                        "DELETE FROM local_tail_turn_facts WHERE tenant_id=%s AND run_id=%s",
+                        (capture.run.tenant_id, capture.run.run_id),
+                    )
+                    if full_projection is not None:
+                        cur.executemany(
+                            "INSERT INTO local_tail_turn_facts "
+                            "(tenant_id,run_id,turn_id,sequence,started_at,payload_json) "
+                            "VALUES (%s,%s,%s,%s,%s,%s)",
+                            [(capture.run.tenant_id, capture.run.run_id, turn.turn_id,
+                              turn.sequence, turn.started_at, tail_turn_json(turn))
+                             for turn in full_projection.tail_turns],
+                        )
+                    for fact in all_recent_facts:
+                        cur.execute(
+                            "SELECT * FROM local_recent_event_facts WHERE tenant_id=%s "
+                            "AND run_id=%s AND event_id=%s FOR UPDATE",
+                            (capture.run.tenant_id, capture.run.run_id, fact.event.event_id),
+                        )
+                        record = cur.fetchone()
+                        prior_fact = (
+                            dict(zip((column.name for column in cur.description), record,
+                                     strict=True)) if record is not None else None
+                        )
+                        if prior_fact is not None and (
+                            prior_fact["source_ordinal"] != fact.source_ordinal
+                            or prior_fact["turn_sequence"] != fact.turn_sequence
+                        ):
+                            raise ValueError("local recent fact source identity changed")
+                        old_event = (
+                            agent_event_from_row(prior_fact) if prior_fact is not None
+                            else None
+                        )
+                        reject_lost_model_usage(old_event, fact.event)
+                        event = merge_agent_event(old_event, fact.event)
+                        first_seen = (
+                            prior_fact["first_seen_revision"] if prior_fact is not None
+                            else local_revision.full_sha256
+                        )
+                        cur.execute(
+                            "INSERT INTO local_recent_event_facts "
+                            "(tenant_id,run_id,event_id,turn_id,source_ordinal,turn_sequence,"
+                            "sequence,occurred_at,event_type,status,provenance,attributes_json,"
+                            "privacy_classification,omission_reason,trace_id,first_seen_revision) "
+                            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s) "
+                            "ON CONFLICT(tenant_id,run_id,event_id) DO UPDATE SET "
+                            "status=EXCLUDED.status,attributes_json=EXCLUDED.attributes_json,"
+                            "privacy_classification=EXCLUDED.privacy_classification,"
+                            "omission_reason=EXCLUDED.omission_reason,trace_id=EXCLUDED.trace_id",
+                            (capture.run.tenant_id, capture.run.run_id, event.event_id,
+                             event.turn_id, fact.source_ordinal, fact.turn_sequence,
+                             event.sequence, event.occurred_at, event.event_type.value,
+                             event.status.value, event.provenance,
+                             json.dumps(event.attributes, ensure_ascii=False),
+                             event.privacy_classification.value, event.omission_reason,
+                             event.trace_id, first_seen),
+                        )
+                    cur.execute(
+                        "UPDATE import_sources SET local_full_bytes=%s,local_full_sha256=%s,"
+                        "local_prefix_bytes=%s,local_prefix_sha256=%s,local_partial_line=%s,"
+                        "local_source_turn_count=%s,local_source_event_count=%s,"
+                        "local_v1_turn_count=%s,local_v1_event_count=%s,"
+                        "local_projection_complete=%s,"
+                        "local_min_turn_at=%s,local_max_turn_at=%s "
+                        "WHERE tenant_id=%s AND source_session_id=%s",
+                        (local_revision.full_bytes, local_revision.full_sha256,
+                         local_revision.complete_prefix_bytes,
+                         local_revision.complete_prefix_sha256,
+                         local_revision.partial_final_line,
+                         local_revision.source_turn_count, local_revision.source_event_count,
+                         local_revision.v1_turn_count, local_revision.v1_event_count,
+                         full_projection is not None,
+                         local_revision.min_turn_at, local_revision.max_turn_at,
+                         capture.run.tenant_id,
+                         capture.session.source_session_id),
+                    )
+                    if window is not None:
+                        cur.execute(
+                            "SELECT sample_json FROM local_recent_events "
+                            "WHERE tenant_id=%s AND run_id=%s FOR UPDATE",
+                            (capture.run.tenant_id, capture.run.run_id),
+                        )
+                        old_window = cur.fetchone()
+                        if not (old_window is not None and same_recent_window(
+                            json.loads(old_window[0]), window,
+                        )):
+                            cur.execute(
+                            "INSERT INTO local_recent_events "
+                            "(tenant_id,run_id,source_prefix_bytes,source_prefix_sha256,"
+                            "captured_at,sample_json) VALUES (%s,%s,%s,%s,%s,%s) "
+                            "ON CONFLICT(tenant_id,run_id) DO UPDATE SET "
+                            "source_prefix_bytes=excluded.source_prefix_bytes,"
+                            "source_prefix_sha256=excluded.source_prefix_sha256,"
+                            "captured_at=excluded.captured_at,sample_json=excluded.sample_json",
+                            (capture.run.tenant_id, capture.run.run_id,
+                             local_revision.full_bytes, local_revision.full_sha256,
+                             window["capturedAt"], recent_window_json),
+                            )
+                    else:
+                        cur.execute(
+                            "SELECT sample_json FROM local_recent_events "
+                            "WHERE tenant_id=%s AND run_id=%s FOR UPDATE",
+                            (capture.run.tenant_id, capture.run.run_id),
+                        )
+                        old_window = cur.fetchone()
+                        if (old_window is not None and
+                                json.loads(old_window[0]).get("schema")
+                                == "local-recent-window-v2"):
+                            cur.execute(
+                                "DELETE FROM local_recent_events WHERE tenant_id=%s AND run_id=%s",
+                                (capture.run.tenant_id, capture.run.run_id),
+                            )
         except IntegrityError as exc:
             raise ValueError("agent capture conflicts with existing evidence") from exc
 
     def replace_agent_run_bundle(self, bundle: AgentRunBundle) -> None:
         self.replace_agent_capture(bundle)
+
+    def save_recent_local_events(
+        self, tenant_id: str, run_id: str, sample_json: str,
+        source_prefix_bytes: int, source_prefix_sha256: str,
+        prefix_digest: Callable[[int], str],
+    ) -> bool:
+        """Preserve the legacy inspection writer without replacing atomic V2 windows."""
+        if (not 0 <= source_prefix_bytes <= 2**63 - 1
+                or len(source_prefix_sha256) != 64
+                or len(sample_json.encode("utf-8")) > 1048576):
+            raise ValueError("recent_sample_limit")
+        candidate = json.loads(sample_json)
+        if not isinstance(candidate, dict) or candidate.get("schema") != "local-recent-events-v1":
+            raise ValueError("recent_sample_superseded")
+        with self._pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
+            cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
+                        (f"verdict-local-recent:{tenant_id}:{run_id}",))
+            if prefix_digest(source_prefix_bytes) != source_prefix_sha256:
+                raise ValueError("recent_sample_source_changed")
+            cur.execute(
+                "SELECT source_prefix_bytes,source_prefix_sha256,sample_json FROM local_recent_events "
+                "WHERE tenant_id=%s AND run_id=%s FOR UPDATE", (tenant_id, run_id),
+            )
+            prior = cur.fetchone()
+            if prior is not None:
+                old_bytes, old_hash, old_sample_json = prior
+                if json.loads(old_sample_json).get("schema") == "local-recent-window-v2":
+                    raise ValueError("recent_sample_superseded")
+                if (source_prefix_bytes < old_bytes
+                        or prefix_digest(old_bytes) != old_hash
+                        or (source_prefix_bytes == old_bytes
+                            and source_prefix_sha256 != old_hash)):
+                    raise ValueError("recent_sample_source_conflict")
+                if source_prefix_bytes == old_bytes:
+                    return False
+            cur.execute(
+                "INSERT INTO local_recent_events "
+                "(tenant_id,run_id,source_prefix_bytes,source_prefix_sha256,captured_at,sample_json) "
+                "VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT(tenant_id,run_id) DO UPDATE SET "
+                "source_prefix_bytes=excluded.source_prefix_bytes,"
+                "source_prefix_sha256=excluded.source_prefix_sha256,"
+                "captured_at=excluded.captured_at,sample_json=excluded.sample_json",
+                (tenant_id, run_id, source_prefix_bytes, source_prefix_sha256,
+                 json.loads(sample_json)["capturedAt"], sample_json),
+            )
+            return True
+
+    def get_recent_local_events(self, tenant_id: str, run_id: str) -> dict | None:
+        with self._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT sample_json FROM local_recent_events WHERE tenant_id=%s AND run_id=%s",
+                (tenant_id, run_id),
+            )
+            row = cur.fetchone()
+        return json.loads(row[0]) if row is not None else None
+
+    def list_local_recent_fact_positions(
+        self, tenant_id: str, run_id: str,
+    ) -> tuple[tuple[int, int, int, str], ...]:
+        with self._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT source_ordinal,turn_sequence,sequence,event_id "
+                "FROM local_recent_event_facts WHERE tenant_id=%s AND run_id=%s "
+                "ORDER BY source_ordinal", (tenant_id, run_id),
+            )
+            return tuple(cur.fetchall())
 
     def list_agent_turn_evaluation_candidates(
         self, tenant_id: str, evaluator_fingerprint: str, *, limit: int = 100,
@@ -1405,9 +2080,13 @@ class PostgresStorage:
             cur.execute(
                 "SELECT t.*, j.evidence_fingerprint AS judgment_evidence,"
                 "j.status AS judgment_status,j.result_json AS judgment_json FROM agent_turns t "
+                "JOIN agent_runs r ON r.tenant_id=t.tenant_id AND r.run_id=t.run_id "
+                "JOIN import_sources s ON s.tenant_id=r.tenant_id "
+                "AND s.source_session_id=r.source_session_id "
                 "LEFT JOIN agent_turn_judgments j ON j.tenant_id=t.tenant_id "
                 "AND j.run_id=t.run_id AND j.turn_id=t.turn_id "
                 "AND j.evaluator_fingerprint=%s WHERE t.tenant_id=%s "
+                "AND (" + _EVALUABLE_LOCAL_TURN + ") "
                 + cursor_clause + " ORDER BY t.started_at DESC,t.run_id DESC,t.turn_id DESC LIMIT %s",
                 params,
             )
@@ -1445,8 +2124,22 @@ class PostgresStorage:
     def save_agent_turn_judgment_if_current(self, judgment: AgentTurnJudgment) -> str:
         judgment, payload = sanitized_turn_judgment(judgment)
         with self._pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
+            # Capture locks the source before updating turns. Read that revision
+            # under a conflicting lock before checking the turn and writing a
+            # judgment, so a partial append cannot race this commit.
             cur.execute(
-                "SELECT * FROM agent_turns WHERE tenant_id=%s AND run_id=%s AND turn_id=%s FOR UPDATE",
+                "SELECT s.source_session_id FROM import_sources s JOIN agent_runs r "
+                "ON r.tenant_id=s.tenant_id AND r.source_session_id=s.source_session_id "
+                "WHERE r.tenant_id=%s AND r.run_id=%s FOR SHARE OF s",
+                (judgment.tenant_id, judgment.run_id),
+            )
+            cur.execute(
+                "SELECT t.* FROM agent_turns t "
+                "JOIN agent_runs r ON r.tenant_id=t.tenant_id AND r.run_id=t.run_id "
+                "JOIN import_sources s ON s.tenant_id=r.tenant_id "
+                "AND s.source_session_id=r.source_session_id "
+                "WHERE t.tenant_id=%s AND t.run_id=%s AND t.turn_id=%s "
+                "AND (" + _EVALUABLE_LOCAL_TURN + ") FOR UPDATE OF t",
                 (judgment.tenant_id, judgment.run_id, judgment.turn_id),
             )
             row = cur.fetchone()
@@ -1500,9 +2193,13 @@ class PostgresStorage:
             cur.execute(
                 "SELECT t.*,j.evidence_fingerprint AS judgment_evidence,"
                 "j.status AS judgment_status,j.result_json AS judgment_json FROM agent_turns t "
+                "JOIN agent_runs r ON r.tenant_id=t.tenant_id AND r.run_id=t.run_id "
+                "JOIN import_sources s ON s.tenant_id=r.tenant_id "
+                "AND s.source_session_id=r.source_session_id "
                 "LEFT JOIN agent_turn_judgments j ON j.tenant_id=t.tenant_id "
                 "AND j.run_id=t.run_id AND j.turn_id=t.turn_id "
-                "AND j.evaluator_fingerprint=%s WHERE t.tenant_id=%s AND t.run_id=%s AND t.turn_id=%s",
+                "AND j.evaluator_fingerprint=%s WHERE t.tenant_id=%s AND t.run_id=%s AND t.turn_id=%s "
+                "AND (" + _EVALUABLE_LOCAL_TURN + ")",
                 (evaluator_fingerprint, tenant_id, run_id, turn_id),
             )
             raw = cur.fetchone()
@@ -1552,11 +2249,30 @@ class PostgresStorage:
         tenant_id: str,
         run_id: str,
     ) -> AgentRunBundle | None:
+        bundle, _revision = self.get_agent_capture_snapshot(tenant_id, run_id)
+        return bundle
+
+    def get_agent_capture_snapshot(
+        self, tenant_id: str, run_id: str,
+    ) -> tuple[AgentRunBundle | None, LocalSourceRevision | None]:
+        """Read local coverage and normalized evidence in one MVCC snapshot."""
         _validate_agent_bundle_query(tenant_id, 1)
         _validate_agent_bundle_run_id(run_id)
-        with self._pool.connection() as conn:
+        with self._pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
+            cur.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
             bundles = self._read_normalized_bundles_connection(conn, tenant_id, (run_id,))
-        return bundles[0] if bundles else None
+            cur.execute(
+                "SELECT s.* FROM import_sources s JOIN agent_runs r "
+                "ON r.tenant_id=s.tenant_id AND r.source_session_id=s.source_session_id "
+                "WHERE r.tenant_id=%s AND r.run_id=%s",
+                (tenant_id, run_id),
+            )
+            row = cur.fetchone()
+            revision = revision_from_row(
+                dict(zip([column.name for column in cur.description], row, strict=True))
+                if row is not None else None
+            )
+        return (bundles[0] if bundles else None), revision
 
     def list_agent_run_bundles(
         self,
@@ -1826,8 +2542,8 @@ class PostgresStorage:
             cur.execute(
                 """INSERT INTO deterministic_analysis_runs (
                        analysis_id,tenant_id,scope_key,cutoff,completed_at,status,
-                       analyzer_version,input_fingerprint,payload_json
-                   ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                       analyzer_version,input_fingerprint,verified_revision,payload_json
+                   ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                    ON CONFLICT DO NOTHING""",
                 (
                     run.analysis_id,
@@ -1838,6 +2554,7 @@ class PostgresStorage:
                     run.status.value,
                     run.analyzer_version,
                     run.input_fingerprint,
+                    run.verified_revision,
                     payload,
                 ),
             )
@@ -1869,6 +2586,38 @@ class PostgresStorage:
             if previous.result != run.result or previous.cutoff != run.cutoff:
                 raise ValueError("analysis input produced different content")
 
+    def get_evidence_revision(self, tenant_id: str) -> int:
+        row = self._fetchone(
+            "SELECT revision FROM evidence_revisions WHERE tenant_id=%s", (tenant_id,)
+        )
+        return int(row[0]) if row is not None else 0
+
+    def get_deterministic_analysis_run(self, analysis_id: str) -> DeterministicAnalysisRun | None:
+        row = self._fetchone(
+            "SELECT payload_json,verified_revision FROM deterministic_analysis_runs "
+            "WHERE analysis_id=%s", (analysis_id,),
+        )
+        return replace(analysis_run_from_json(row[0]), verified_revision=row[1]) if row else None
+
+    def verify_deterministic_analysis_run(
+        self, analysis_id: str, *, revision: int | None,
+    ) -> DeterministicAnalysisRun:
+        if revision is not None and (type(revision) is not int or revision < 0):
+            raise ValueError("invalid evidence revision")
+        with self._pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
+            cur.execute(
+                "UPDATE deterministic_analysis_runs SET verified_revision="
+                "CASE WHEN %s::bigint IS NULL THEN verified_revision "
+                "ELSE GREATEST(COALESCE(verified_revision, -1), %s) END "
+                "WHERE analysis_id=%s "
+                "RETURNING payload_json,verified_revision",
+                (revision, revision, analysis_id),
+            )
+            row = cur.fetchone()
+        if row is None:
+            raise ValueError("analysis identity does not exist")
+        return replace(analysis_run_from_json(row[0]), verified_revision=row[1])
+
     def get_latest_deterministic_analysis_run(
         self,
         tenant_id: str,
@@ -1877,20 +2626,39 @@ class PostgresStorage:
         analyzer_version: str | None = None,
     ) -> DeterministicAnalysisRun | None:
         if analyzer_version is None:
+            pointer = self._fetchone(
+                """SELECT r.payload_json,r.verified_revision
+                   FROM deterministic_analysis_current c
+                   JOIN deterministic_analysis_runs r ON r.analysis_id=c.analysis_id
+                   WHERE c.tenant_id=%s AND c.scope_key=%s
+                   ORDER BY r.completed_at DESC,r.analysis_id DESC LIMIT 1""",
+                (tenant_id, scope_key),
+            )
+        else:
+            pointer = self._fetchone(
+                """SELECT r.payload_json,r.verified_revision
+                   FROM deterministic_analysis_current c
+                   JOIN deterministic_analysis_runs r ON r.analysis_id=c.analysis_id
+                   WHERE c.tenant_id=%s AND c.scope_key=%s AND c.analyzer_version=%s""",
+                (tenant_id, scope_key, analyzer_version),
+            )
+        if pointer is not None:
+            return replace(analysis_run_from_json(pointer[0]), verified_revision=pointer[1])
+        if analyzer_version is None:
             row = self._fetchone(
-                """SELECT payload_json FROM deterministic_analysis_runs
+                """SELECT payload_json,verified_revision FROM deterministic_analysis_runs
                    WHERE tenant_id=%s AND scope_key=%s
-                   ORDER BY completed_at DESC, analysis_id DESC LIMIT 1""",
+                   ORDER BY completed_at DESC,analysis_id DESC LIMIT 1""",
                 (tenant_id, scope_key),
             )
         else:
             row = self._fetchone(
-                """SELECT payload_json FROM deterministic_analysis_runs
+                """SELECT payload_json,verified_revision FROM deterministic_analysis_runs
                    WHERE tenant_id=%s AND scope_key=%s AND analyzer_version=%s
-                   ORDER BY completed_at DESC, analysis_id DESC LIMIT 1""",
+                   ORDER BY completed_at DESC,analysis_id DESC LIMIT 1""",
                 (tenant_id, scope_key, analyzer_version),
             )
-        return analysis_run_from_json(row[0]) if row is not None else None
+        return replace(analysis_run_from_json(row[0]), verified_revision=row[1]) if row else None
 
     def save_notification_delivery_attempt(
         self,
@@ -1966,6 +2734,323 @@ class PostgresStorage:
             (tenant_id, limit),
         )
         return [notification_attempt_from_json(row[0]) for row in rows]
+
+    @staticmethod
+    def _delivery_queue_item(row) -> DeliveryQueueItem:
+        payload = row[12]
+        intent = intent_from_json(json.dumps(payload) if isinstance(payload, dict) else payload)
+        return DeliveryQueueItem(
+            intent=replace(intent, destination_fingerprint=row[6]),
+            status=row[5],
+            attempt_count=row[7],
+            next_due_at=row[8],
+            next_probe_at=row[9],
+            last_error_code=row[10],
+            superseded_by_id=row[11],
+        )
+
+    @staticmethod
+    def _insert_delivery_intent(cur, intent: NotificationIntent) -> None:
+        payload = intent_to_json(intent)
+        cur.execute(
+            """INSERT INTO notification_delivery_queue (
+                   intent_id,tenant_id,source_kind,source_id,created_at,status,
+                   destination_fingerprint,next_due_at,next_probe_at,payload_json
+               ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+               ON CONFLICT DO NOTHING""",
+            (
+                intent.intent_id, intent.tenant_id, intent.source_kind, intent.source_id,
+                intent.created_at,
+                "pending" if intent.destination_fingerprint else "unbound",
+                intent.destination_fingerprint,
+                intent.created_at if intent.destination_fingerprint else None,
+                None if intent.destination_fingerprint else intent.created_at,
+                payload,
+            ),
+        )
+        cur.execute(
+            "SELECT payload_json FROM notification_delivery_queue WHERE intent_id=%s",
+            (intent.intent_id,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            raise RuntimeError("notification intent insert could not be resolved")
+        prior = intent_from_json(json.dumps(row[0]) if isinstance(row[0], dict) else row[0])
+        if replace(
+            intent, created_at=prior.created_at,
+            destination_fingerprint=prior.destination_fingerprint,
+        ) != prior:
+            raise ValueError("notification intent identity has different content")
+
+    def save_worker_analysis_run(
+        self, run: DeterministicAnalysisRun, intents: list[NotificationIntent],
+    ) -> None:
+        if any(intent.tenant_id != run.tenant_id or intent.source_kind != "analysis"
+               for intent in intents):
+            raise ValueError("analysis intent source mismatch")
+        payload = analysis_run_to_json(run)
+        with self._pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO deterministic_analysis_runs (
+                       analysis_id,tenant_id,scope_key,cutoff,completed_at,status,
+                       analyzer_version,input_fingerprint,verified_revision,payload_json
+                   ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                   ON CONFLICT DO NOTHING""",
+                (run.analysis_id, run.tenant_id, run.scope_key, run.cutoff, run.completed_at,
+                 run.status.value, run.analyzer_version, run.input_fingerprint,
+                 run.verified_revision, payload),
+            )
+            cur.execute(
+                "SELECT payload_json FROM deterministic_analysis_runs WHERE analysis_id=%s",
+                (run.analysis_id,),
+            )
+            row = cur.fetchone()
+            if row is None or row[0] != payload:
+                raise ValueError("analysis identity has different content")
+            for intent in intents:
+                self._insert_delivery_intent(cur, intent)
+
+    def verify_worker_analysis_run(
+        self, analysis_id: str, *, revision: int | None,
+        intents: list[NotificationIntent],
+    ) -> DeterministicAnalysisRun:
+        if revision is not None and (type(revision) is not int or revision < 0):
+            raise ValueError("invalid evidence revision")
+        with self._pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
+            cur.execute(
+                """UPDATE deterministic_analysis_runs SET verified_revision=
+                   CASE WHEN %s::bigint IS NULL THEN verified_revision
+                   ELSE GREATEST(COALESCE(verified_revision,-1),%s) END
+                   WHERE analysis_id=%s RETURNING payload_json,verified_revision""",
+                (revision, revision, analysis_id),
+            )
+            row = cur.fetchone()
+            if row is None:
+                raise ValueError("analysis identity does not exist")
+            run = replace(analysis_run_from_json(row[0]), verified_revision=row[1])
+            if any(intent.tenant_id != run.tenant_id or intent.source_kind != "analysis"
+                   for intent in intents):
+                raise ValueError("analysis intent source mismatch")
+            for intent in intents:
+                self._insert_delivery_intent(cur, intent)
+            return run
+
+    def list_due_delivery_intents(
+        self, tenant_id: str, *, now: datetime, limit: int = 100,
+    ) -> list[DeliveryQueueItem]:
+        _validate_agent_bundle_query(tenant_id, limit)
+        rows = self._fetchall(
+            """SELECT * FROM notification_delivery_queue
+               WHERE tenant_id=%s AND status IN ('pending','failed')
+                 AND destination_fingerprint IS NOT NULL AND next_due_at<=%s
+               ORDER BY next_due_at,intent_id LIMIT %s""",
+            (tenant_id, now, limit),
+        )
+        return [self._delivery_queue_item(row) for row in rows]
+
+    def list_unbound_delivery_intents(
+        self, tenant_id: str, *, now: datetime, limit: int = 100,
+    ) -> list[DeliveryQueueItem]:
+        _validate_agent_bundle_query(tenant_id, limit)
+        rows = self._fetchall(
+            """SELECT * FROM notification_delivery_queue
+               WHERE tenant_id=%s AND status='unbound' AND next_probe_at<=%s
+               ORDER BY next_probe_at,intent_id LIMIT %s""",
+            (tenant_id, now, limit),
+        )
+        return [self._delivery_queue_item(row) for row in rows]
+
+    def get_delivery_intent(self, tenant_id: str, intent_id: str) -> DeliveryQueueItem | None:
+        _validate_agent_bundle_query(tenant_id, 1)
+        row = self._fetchone(
+            "SELECT * FROM notification_delivery_queue WHERE tenant_id=%s AND intent_id=%s",
+            (tenant_id, intent_id),
+        )
+        return self._delivery_queue_item(row) if row else None
+
+    def list_delivery_intents_for_tenant(
+        self, tenant_id: str, *, limit: int = 100,
+        after: tuple[datetime, str] | None = None,
+        actionable_only: bool = False,
+    ) -> list[DeliveryQueueItem]:
+        _validate_agent_bundle_query(tenant_id, limit)
+        params: list[object] = [tenant_id, actionable_only]
+        cursor_clause = ""
+        if after is not None:
+            created_at, intent_id = validate_delivery_cursor(after)
+            cursor_clause = "AND (created_at < %s OR (created_at = %s AND intent_id < %s))"
+            params.extend((created_at, created_at, intent_id))
+        params.append(limit)
+        rows = self._fetchall(
+            f"""SELECT * FROM notification_delivery_queue WHERE tenant_id=%s
+                 AND (%s=FALSE OR status IN ('pending','unbound','failed','blocked','exhausted'))
+               {cursor_clause}
+               ORDER BY created_at DESC,intent_id DESC LIMIT %s""",
+            tuple(params),
+        )
+        return [self._delivery_queue_item(row) for row in rows]
+
+    def delivery_queue_counts(self, tenant_id: str) -> dict[str, int]:
+        _validate_agent_bundle_query(tenant_id, 1)
+        rows = self._fetchall(
+            """SELECT status,COUNT(*) FROM notification_delivery_queue
+               WHERE tenant_id=%s GROUP BY status""",
+            (tenant_id,),
+        )
+        return {row[0]: row[1] for row in rows}
+
+    def probe_delivery_intent(
+        self, tenant_id: str, intent_id: str, *, now: datetime,
+        fingerprint: str | None, next_probe_at: datetime | None,
+    ) -> bool:
+        if fingerprint is None and next_probe_at is None:
+            raise ValueError("unbound intent requires a later probe")
+        if fingerprint is not None:
+            validate_delivery_query(intent_id, fingerprint, 1)
+        with self._pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
+            cur.execute(
+                """UPDATE notification_delivery_queue SET
+                   status=CASE WHEN %s::text IS NULL THEN 'unbound' ELSE 'pending' END,
+                   destination_fingerprint=%s,next_due_at=%s,next_probe_at=%s
+                   WHERE tenant_id=%s AND intent_id=%s AND status='unbound'""",
+                (fingerprint, fingerprint, now if fingerprint else None,
+                 next_probe_at, tenant_id, intent_id),
+            )
+            return cur.rowcount == 1
+
+    def block_delivery_intent(self, tenant_id: str, intent_id: str) -> bool:
+        with self._pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
+            cur.execute(
+                """UPDATE notification_delivery_queue SET status='blocked',
+                   next_due_at=NULL,next_probe_at=NULL
+                   WHERE tenant_id=%s AND intent_id=%s
+                     AND status IN ('pending','failed','unbound')""",
+                (tenant_id, intent_id),
+            )
+            return cur.rowcount == 1
+
+    def mark_delivery_intent_previously_delivered(
+        self, tenant_id: str, intent_id: str, *, expected_count: int,
+    ) -> bool:
+        """Close a queue row when a beta-era attempt already reached this endpoint."""
+        with self._pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
+            cur.execute(
+                """UPDATE notification_delivery_queue AS queue
+                   SET status='delivered',next_due_at=NULL,last_error_code=NULL
+                   WHERE queue.tenant_id=%s AND queue.intent_id=%s
+                     AND queue.status IN ('pending','failed') AND queue.attempt_count=%s
+                     AND EXISTS (SELECT 1 FROM notification_delivery_attempts AS prior
+                                 WHERE prior.tenant_id=queue.tenant_id
+                                   AND prior.notification_id=queue.payload_json->>'notification_id'
+                                   AND prior.destination_fingerprint=queue.destination_fingerprint
+                                   AND prior.outcome='delivered')""",
+                (tenant_id, intent_id, expected_count),
+            )
+            return cur.rowcount == 1
+
+    def finish_delivery_intent_attempt(
+        self, tenant_id: str, intent_id: str, attempt: NotificationDeliveryAttempt,
+        *, expected_count: int, next_due_at: datetime | None, max_attempts: int = 8,
+    ) -> bool:
+        with self._pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
+            cur.execute(
+                """SELECT payload_json,destination_fingerprint,attempt_count,status
+                   FROM notification_delivery_queue WHERE tenant_id=%s AND intent_id=%s
+                   FOR UPDATE""",
+                (tenant_id, intent_id),
+            )
+            row = cur.fetchone()
+            if row is None or row[3] not in {"pending", "failed"} or row[2] != expected_count:
+                return False
+            intent = intent_from_json(json.dumps(row[0]) if isinstance(row[0], dict) else row[0])
+            if (attempt.tenant_id != tenant_id or attempt.notification_id != intent.notification_id
+                    or attempt.destination_fingerprint != row[1]):
+                raise ValueError("delivery attempt does not match intent")
+            cur.execute(
+                """INSERT INTO notification_delivery_attempts (
+                       attempt_id,notification_id,tenant_id,destination_fingerprint,
+                       attempted_at,outcome,payload_json
+                   ) VALUES (%s,%s,%s,%s,%s,%s,%s)""",
+                (attempt.attempt_id, attempt.notification_id, attempt.tenant_id,
+                 attempt.destination_fingerprint, attempt.attempted_at, attempt.outcome.value,
+                 notification_attempt_to_json(attempt)),
+            )
+            count = expected_count + 1
+            status = (
+                "delivered" if attempt.outcome is DeliveryOutcome.DELIVERED else
+                "exhausted" if count >= max_attempts else "failed"
+            )
+            cur.execute(
+                """UPDATE notification_delivery_queue SET
+                   status=%s,attempt_count=%s,next_due_at=%s,last_error_code=%s
+                   WHERE tenant_id=%s AND intent_id=%s""",
+                (status, count, next_due_at if status == "failed" else None,
+                 attempt.error_code, tenant_id, intent_id),
+            )
+            return True
+
+    def replay_delivery_intent(
+        self, tenant_id: str, intent_id: str, *, now: datetime, expected_count: int,
+    ) -> bool:
+        with self._pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
+            cur.execute(
+                """UPDATE notification_delivery_queue SET status='failed',next_due_at=%s
+                   WHERE tenant_id=%s AND intent_id=%s AND status='exhausted'
+                     AND attempt_count=%s""",
+                (now, tenant_id, intent_id, expected_count),
+            )
+            return cur.rowcount == 1
+
+    def rebind_delivery_intent(
+        self, tenant_id: str, old_intent_id: str, *,
+        expected_status: str, expected_count: int,
+        new_intent: NotificationIntent,
+    ) -> bool:
+        if new_intent.tenant_id != tenant_id or new_intent.rebind_from_id != old_intent_id:
+            raise ValueError("rebind source mismatch")
+        with self._pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
+            cur.execute("LOCK TABLE product_control_documents IN SHARE ROW EXCLUSIVE MODE")
+            cur.execute(
+                """SELECT * FROM notification_delivery_queue
+                   WHERE tenant_id=%s AND intent_id=%s FOR UPDATE""",
+                (tenant_id, old_intent_id),
+            )
+            old = cur.fetchone()
+            if old is None or old[5] != expected_status or old[7] != expected_count \
+                    or old[5] not in {"pending", "failed", "blocked", "exhausted"}:
+                return False
+            prior = self._delivery_queue_item(old).intent
+            if (new_intent.notification_id != prior.notification_id
+                    or new_intent.source_kind != prior.source_kind
+                    or new_intent.source_id != prior.source_id
+                    or new_intent.notification != prior.notification
+                    or (new_intent.alert_revision == prior.alert_revision
+                        and new_intent.destination_fingerprint == prior.destination_fingerprint)):
+                raise ValueError("rebind must preserve the notification and change destination")
+            cur.execute(
+                """SELECT revision,state,payload_json FROM product_control_documents
+                   WHERE tenant_id=%s AND kind='alert' AND document_id='default'
+                   ORDER BY revision DESC LIMIT 1""",
+                (tenant_id,),
+            )
+            alert = cur.fetchone()
+            if alert is None or alert[0] != new_intent.alert_revision or alert[1] != "active":
+                return False
+            config = alert[2] if isinstance(alert[2], dict) else json.loads(alert[2])
+            if config.get("destination") != new_intent.destination \
+                    or (new_intent.destination == "webhook" and config.get(
+                        "webhookUrlEnvVar") != new_intent.webhook_url_env_var) \
+                    or config.get("drift" if prior.notification.get("kind") == "drift"
+                                  else "findings") is not True:
+                return False
+            self._insert_delivery_intent(cur, new_intent)
+            cur.execute(
+                """UPDATE notification_delivery_queue SET status='superseded',
+                   next_due_at=NULL,next_probe_at=NULL,superseded_by_id=%s
+                   WHERE tenant_id=%s AND intent_id=%s""",
+                (new_intent.intent_id, tenant_id, old_intent_id),
+            )
+            return True
 
     def _save_monitor_policy(self, cur, policy: MonitorPolicy) -> None:
         validate_monitor_analysis_unit(policy)
@@ -2122,9 +3207,36 @@ class PostgresStorage:
         *,
         expected_state: str,
     ) -> None:
+        self._save_monitor_successor(
+            policy_id, expected_snapshot_id, manifest, comparison,
+            expected_state=expected_state, delivery_intent=None,
+        )
+
+    def save_worker_monitor_successor(
+        self, policy_id: str, expected_snapshot_id: str,
+        manifest: CohortManifest, comparison: MonitorComparison, *,
+        expected_state: str, delivery_intent: NotificationIntent,
+    ) -> None:
+        self._save_monitor_successor(
+            policy_id, expected_snapshot_id, manifest, comparison,
+            expected_state=expected_state, delivery_intent=delivery_intent,
+        )
+
+    def _save_monitor_successor(
+        self, policy_id: str, expected_snapshot_id: str,
+        manifest: CohortManifest, comparison: MonitorComparison, *,
+        expected_state: str, delivery_intent: NotificationIntent | None,
+    ) -> None:
         if expected_state not in {"active", "candidate"}:
             raise ValueError("monitor expected state is invalid")
         monitor_snapshot_to_json(manifest, comparison)
+        if delivery_intent is not None and (
+            delivery_intent.source_kind != "monitor"
+            or delivery_intent.source_id != manifest.snapshot_id
+            or comparison.status.value not in {"alert", "reference_stale"}
+            or delivery_intent.notification.get("status") != comparison.status.value
+        ):
+            raise ValueError("monitor intent source mismatch")
         with self._pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
             cur.execute("LOCK TABLE monitor_policies IN SHARE ROW EXCLUSIVE MODE")
             cur.execute(
@@ -2143,6 +3255,37 @@ class PostgresStorage:
             if head is None or head[0] != expected_snapshot_id:
                 raise MonitorStateConflict("monitor snapshot changed")
             self._save_monitor_snapshot(cur, policy_id, manifest, comparison)
+            if delivery_intent is not None:
+                self._insert_delivery_intent(cur, delivery_intent)
+
+    def attach_worker_monitor_intent(
+        self, policy_id: str, manifest: CohortManifest,
+        comparison: MonitorComparison, intent: NotificationIntent,
+    ) -> None:
+        if intent.source_kind != "monitor" or intent.source_id != manifest.snapshot_id \
+                or intent.notification.get("status") != comparison.status.value:
+            raise ValueError("monitor intent source mismatch")
+        with self._pool.connection() as conn, conn.transaction(), conn.cursor() as cur:
+            cur.execute("LOCK TABLE monitor_policies IN SHARE ROW EXCLUSIVE MODE")
+            cur.execute(
+                "SELECT state,scope_key FROM monitor_policies WHERE policy_id=%s",
+                (policy_id,),
+            )
+            policy = cur.fetchone()
+            cur.execute(
+                """SELECT snapshot_id,payload_json FROM monitor_snapshots
+                   WHERE policy_id=%s ORDER BY created_at DESC,write_sequence DESC LIMIT 1""",
+                (policy_id,),
+            )
+            head = cur.fetchone()
+            payload = self._monitor_policy_payload(head[1]) if head else None
+            if (policy is None or policy[0] != "active"
+                    or policy[1] != f"{intent.tenant_id}:application:trace"
+                    or head is None or head[0] != manifest.snapshot_id
+                    or monitor_snapshot_from_json(payload) != (manifest, comparison)
+                    or comparison.status.value not in {"alert", "reference_stale"}):
+                raise MonitorStateConflict("winning monitor alert changed")
+            self._insert_delivery_intent(cur, intent)
 
     def get_latest_monitor_snapshot(
         self, policy_id: str
@@ -2191,6 +3334,13 @@ class PostgresStorage:
             )
             is not None
         )
+
+    def trace_owner(self, trace_id: str) -> str | None:
+        row = self._fetchone(
+            "SELECT tenant_id FROM traces WHERE trace_id = %s",
+            (trace_id,),
+        )
+        return (row[0] or "__verdict_local__") if row is not None else None
 
     def list_traces(
         self,
@@ -2598,9 +3748,11 @@ class PostgresStorage:
                 judgment_id, trace_id, rubric_name, rubric_version, created_at,
                 judge_models, dimensions, position_swap_consistent,
                 evaluator_provider, evaluator_config, evaluator_fingerprint,
-                expected_dimensions, status, error
+                expected_dimensions, status, error,
+                local_recent_evidence_fingerprint
             ) VALUES (
-                %s,%s,%s,%s,%s,%s::jsonb,%s::jsonb,%s,%s,%s::jsonb,%s,%s::jsonb,%s,%s
+                %s,%s,%s,%s,%s,%s::jsonb,%s::jsonb,%s,%s,%s::jsonb,%s,%s::jsonb,%s,%s,
+                (SELECT evidence_fingerprint FROM local_recent_trace_evidence WHERE trace_id=%s)
             ) ON CONFLICT (judgment_id) DO UPDATE SET
                 trace_id = EXCLUDED.trace_id,
                 rubric_name = EXCLUDED.rubric_name,
@@ -2614,7 +3766,8 @@ class PostgresStorage:
                 evaluator_fingerprint = EXCLUDED.evaluator_fingerprint,
                 expected_dimensions = EXCLUDED.expected_dimensions,
                 status = EXCLUDED.status,
-                error = EXCLUDED.error""",
+                error = EXCLUDED.error,
+                local_recent_evidence_fingerprint = EXCLUDED.local_recent_evidence_fingerprint""",
             (
                 judgment.judgment_id,
                 judgment.trace_id,
@@ -2630,6 +3783,7 @@ class PostgresStorage:
                 json.dumps(judgment.expected_dimensions),
                 judgment.status.value,
                 judgment.error,
+                judgment.trace_id,
             ),
         )
 
@@ -2681,7 +3835,7 @@ class PostgresStorage:
             params.append(since_iso)
         params.append(limit)
         rows = self._fetchall(
-            f"""SELECT {self._JUDGMENT_COLUMNS} FROM judgments j
+            f"""SELECT {self._JUDGMENT_COLUMNS} FROM current_judgments j
                 JOIN traces t ON j.trace_id = t.trace_id
                 WHERE t.cluster_id = %s{clause}
                 ORDER BY j.created_at DESC LIMIT %s""",
@@ -2698,7 +3852,7 @@ class PostgresStorage:
         if not isinstance(trace_id, str) or not trace_id or not 1 <= limit <= 10_000:
             raise ValueError("invalid trace judgment query")
         rows = self._fetchall(
-            f"SELECT {self._JUDGMENT_COLUMNS} FROM judgments j "  # nosec B608
+            f"SELECT {self._JUDGMENT_COLUMNS} FROM current_judgments j "  # nosec B608
             "WHERE j.trace_id=%s ORDER BY j.created_at DESC, j.judgment_id DESC LIMIT %s",
             (trace_id, limit),
         )
@@ -2715,7 +3869,7 @@ class PostgresStorage:
         rows = self._fetchall(
             f"""SELECT * FROM (
                     SELECT DISTINCT ON (j.trace_id) {self._JUDGMENT_COLUMNS}
-                    FROM judgments j JOIN traces t ON t.trace_id=j.trace_id
+                    FROM current_judgments j JOIN traces t ON t.trace_id=j.trace_id
                     WHERE {_trace_tenant_clause(tenant_id, "t.tenant_id")}
                       AND j.evaluator_fingerprint=%s
                     ORDER BY j.trace_id,
@@ -2734,7 +3888,7 @@ class PostgresStorage:
     ) -> bool:
         return (
             self._fetchone(
-                "SELECT 1 FROM judgments WHERE trace_id=%s "
+                "SELECT 1 FROM current_judgments WHERE trace_id=%s "
                 "AND evaluator_fingerprint=%s AND status=%s LIMIT 1",
                 (trace_id, evaluator_fingerprint, JudgmentStatus.COMPLETED.value),
             )
@@ -3103,25 +4257,29 @@ class PostgresStorage:
 
     def insert_span(self, span: SpanRecord) -> None:
         sanitize_span(span)
-        self._exec(
+        written = self._exec(
             """INSERT INTO spans (
-                span_id, name, trace_id, parent_name, started_at,
+                span_id, name, trace_id, tenant_id, parent_name, started_at,
                 ended_at, duration_ms, attributes, error
             ) VALUES (
-                %s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s
+                %s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s
             ) ON CONFLICT (span_id) DO UPDATE SET
                 -- Assign, not COALESCE: a link retraction rewrites trace_id to
                 -- NULL, and COALESCE would silently keep the stale link, making
                 -- the retraction guarantee backend-dependent.
                 trace_id    = EXCLUDED.trace_id,
+                tenant_id   = EXCLUDED.tenant_id,
                 ended_at    = EXCLUDED.ended_at,
                 duration_ms = EXCLUDED.duration_ms,
                 attributes  = EXCLUDED.attributes,
-                error       = EXCLUDED.error""",
+                error       = EXCLUDED.error
+            WHERE COALESCE(NULLIF(spans.tenant_id,''),'__verdict_local__') =
+                  COALESCE(NULLIF(EXCLUDED.tenant_id,''),'__verdict_local__')""",
             (
                 span.span_id,
                 span.name,
                 span.trace_id,
+                span.tenant_id,
                 span.parent_name,
                 span.started_at,
                 span.ended_at,
@@ -3130,31 +4288,41 @@ class PostgresStorage:
                 span.error,
             ),
         )
+        if written != 1:
+            raise ValueError("span identity belongs to another tenant")
 
     def _row_to_span(self, row) -> SpanRecord:
         return SpanRecord(
             span_id=row[0],
             name=row[1] or "",
             trace_id=row[2],
-            parent_name=row[3],
-            started_at=row[4],
-            ended_at=row[5],
-            duration_ms=row[6],
-            attributes=row[7]
-            if isinstance(row[7], dict)
-            else (json.loads(row[7]) if row[7] else {}),
-            error=row[8],
+            tenant_id=row[3],
+            parent_name=row[4],
+            started_at=row[5],
+            ended_at=row[6],
+            duration_ms=row[7],
+            attributes=row[8]
+            if isinstance(row[8], dict)
+            else (json.loads(row[8]) if row[8] else {}),
+            error=row[9],
         )
 
-    def list_spans(self, *, trace_id: str | None = None, limit: int = 100) -> list[SpanRecord]:
+    def list_spans(self, *, trace_id: str | None = None, limit: int = 100,
+                   tenant_id: str | None = None, span_id: str | None = None) -> list[SpanRecord]:
         clauses, params = [], []
         if trace_id is not None:
             clauses.append("trace_id = %s")
             params.append(trace_id)
+        if tenant_id is not None:
+            clauses.append("tenant_id = %s")
+            params.append(tenant_id)
+        if span_id is not None:
+            clauses.append("span_id = %s")
+            params.append(span_id)
         where = "WHERE " + " AND ".join(clauses) if clauses else ""
         params.append(limit)
         rows = self._fetchall(
-            f"""SELECT span_id, name, trace_id, parent_name, started_at,
+            f"""SELECT span_id, name, trace_id, tenant_id, parent_name, started_at,
                        ended_at, duration_ms, attributes, error
                 FROM spans {where} ORDER BY started_at DESC LIMIT %s""",
             tuple(params),
@@ -3450,7 +4618,7 @@ class PostgresStorage:
         limit: int = 1_000,
     ) -> list[Judgment]:
         rows = self._fetchall(
-            f"""SELECT {self._JUDGMENT_COLUMNS} FROM judgments j
+            f"""SELECT {self._JUDGMENT_COLUMNS} FROM current_judgments j
               JOIN trace_cluster_assignments a ON a.trace_id=j.trace_id
               WHERE a.tenant_id=%s AND a.version_id=%s AND a.status='assigned'
                 AND a.cluster_id=%s ORDER BY j.created_at DESC LIMIT %s""",  # nosec B608

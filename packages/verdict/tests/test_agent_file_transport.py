@@ -99,6 +99,30 @@ def test_file_transport_replays_idempotently_into_sqlite(tmp_path: Path) -> None
         storage.close()
 
 
+def test_file_transport_keeps_raw_check_id_out_of_spool_and_import(tmp_path: Path) -> None:
+    spool = tmp_path / "spool"
+    database = tmp_path / "verdict.db"
+    verdict.init(transport="file", spool_directory=spool, tenant_id="tenant-file",
+                 service_name="worker", capture_content=False, instrumentors=[])
+    with verdict.agent_run(name="file-agent") as run:
+        with run.turn(user_input="synthetic") as turn:
+            turn.record_test(command="synthetic", exit_code=1, failed=1,
+                             check_id="alice@example.com")
+    verdict.shutdown()
+    segments = list(spool.rglob("*.jsonl"))
+    assert segments
+    assert all(b"alice@example.com" not in path.read_bytes() for path in segments)
+    assert import_main(["agent-file", str(spool), "--storage", f"sqlite:///{database}"]) == 0
+    storage = SQLiteStorage(str(database))
+    try:
+        [bundle] = storage.list_agent_run_bundles("tenant-file")
+        [test_event] = [event for event in bundle.events
+                        if event.event_type is AgentEventType.TEST_RESULT]
+        assert re.fullmatch(r"[0-9a-f]{64}", test_event.attributes["check_id_hash"])
+    finally:
+        storage.close()
+
+
 def test_file_transport_preserves_optional_turn_usage(tmp_path: Path) -> None:
     now = datetime.now(timezone.utc)
     source = SourceSession("source", "tenant-file", "codex", "a" * 64, now, now)
@@ -558,13 +582,13 @@ def test_file_transport_rotates_segments_and_enforces_its_byte_quota(tmp_path: P
         started_at=now,
         ended_at=now,
         provider="test",
-        response_redacted="x" * 2_200_000,
+        response_redacted="x" * 900_000,
     )
 
-    sink.capture_trace(trace)
-    sink.capture_trace(Trace(**{**trace.__dict__, "trace_id": "second"}))
+    for index in range(5):
+        sink.capture_trace(Trace(**{**trace.__dict__, "trace_id": f"trace-{index}"}))
     with pytest.raises(CaptureQuotaExceeded, match="quota"):
-        sink.capture_trace(Trace(**{**trace.__dict__, "trace_id": "third"}))
+        sink.capture_trace(Trace(**{**trace.__dict__, "trace_id": "trace-5"}))
     sink.close()
 
     files = sorted(tmp_path.glob("verdict-agent-*.jsonl"))
@@ -589,20 +613,20 @@ def test_file_transport_reclaims_quota_after_shipper_deletes_sealed_segment(
         started_at=now,
         ended_at=now,
         provider="test",
-        response_redacted="x" * 2_200_000,
+        response_redacted="x" * 900_000,
     )
-    sink.capture_trace(trace)
-    sink.capture_trace(Trace(**{**trace.__dict__, "trace_id": "second"}))
+    for index in range(5):
+        sink.capture_trace(Trace(**{**trace.__dict__, "trace_id": f"trace-{index}"}))
     [sealed] = tmp_path.glob("verdict-agent-*.jsonl")
     sealed.unlink()
 
-    sink.capture_trace(Trace(**{**trace.__dict__, "trace_id": "third"}))
+    sink.capture_trace(Trace(**{**trace.__dict__, "trace_id": "trace-5"}))
     sink.close()
 
     records = list(agent_transport.iter_capture_records(tmp_path))
     assert [record.trace.trace_id for record in records if record.trace is not None] == [
-        "second",
-        "third",
+        "trace-4",
+        "trace-5",
     ]
 
 

@@ -1,6 +1,9 @@
 import builtins
+import subprocess
+import sys
 
 import pytest
+from verdict.dashboard.control_plane import ControlStore
 from verdict.dashboard.storage_url import is_postgres_storage
 
 
@@ -37,3 +40,20 @@ def test_dashboard_storage_classification_without_optional_driver(monkeypatch):
     assert is_postgres_storage("dbname=verdict.db") is True
     assert is_postgres_storage("unknown=value") is False
     assert is_postgres_storage("/tmp/verdict=a15.db") is False
+
+
+def test_malformed_keyword_conninfo_never_creates_a_sqlite_file(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    malformed = "host=127.0.0.1 password='unterminated"
+    with pytest.raises(ValueError, match="Invalid PostgreSQL connection string") as error:
+        ControlStore(malformed)
+    assert "unterminated" not in str(error.value)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_public_sdk_import_does_not_load_dashboard_modules():
+    result = subprocess.run(
+        [sys.executable, "-c", "import sys, verdict; print('verdict.dashboard.app' in sys.modules)"],
+        check=True, capture_output=True, text=True,
+    )
+    assert result.stdout.strip() == "False"

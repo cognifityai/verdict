@@ -5,3 +5,8 @@ export function normalizeSchedulePayload(schedule) {
   }
   return payload;
 }
+
+export function schedulePlanKey(schedule) {
+  return JSON.stringify(Object.entries(normalizeSchedulePayload(schedule))
+    .sort(([left], [right]) => left.localeCompare(right)));
+}

@@ -13,6 +13,16 @@ from verdict.structural import (
 )
 
 _JUDGE_EVIDENCE_DIGEST_VERSION = "judge-evidence-v1"
+_END_NOT_SUPPLIED = object()
+
+
+def trace_evidence_state(*, error: object, ended_at: object) -> str:
+    """Classify recorded execution evidence without inferring provider success."""
+    if error is not None:
+        return "error_recorded"
+    if ended_at is not None:
+        return "ended_no_error_recorded"
+    return "unfinished"
 
 
 def text_is_present(value: object) -> bool:
@@ -20,10 +30,15 @@ def text_is_present(value: object) -> bool:
     return isinstance(value, str) and bool(value.strip())
 
 
-def trace_evidence_reason(*, error: object, prompt: object, response: object) -> str | None:
+def trace_evidence_reason(
+    *, error: object, prompt: object, response: object,
+    ended_at: object = _END_NOT_SUPPLIED,
+) -> str | None:
     """Return the first reason a trace is not eligible for response judging."""
-    if error:
+    if error is not None:
         return "provider_call_failed"
+    if ended_at is None:
+        return "trace_unfinished"
     if not text_is_present(prompt):
         return "prompt_not_captured"
     if not text_is_present(response):
@@ -44,14 +59,17 @@ def deterministic_trace_facts(
     error: object,
     prompt: object,
     response: object,
+    ended_at: object = _END_NOT_SUPPLIED,
 ) -> dict[str, object]:
     """Return bounded, judge-free facts for one stored LLM trace."""
     prompt_present = text_is_present(prompt)
     response_present = text_is_present(response)
-    reason = trace_evidence_reason(error=error, prompt=prompt, response=response)
+    reason = trace_evidence_reason(
+        error=error, prompt=prompt, response=response, ended_at=ended_at,
+    )
     response_text = response if isinstance(response, str) else None
     return {
-        "provider_outcome": "failed" if error else "succeeded",
+        "provider_outcome": "failed" if error is not None else "no_error_recorded",
         "prompt_present": prompt_present,
         "response_present": response_present,
         "judge_eligible": reason is None,

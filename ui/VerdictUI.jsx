@@ -1,10 +1,9 @@
 import React, { useState, useEffect, useRef } from "react";
 import {
-  LineChart, Line, AreaChart, Area, BarChart, Bar, XAxis, YAxis, CartesianGrid,
-  Tooltip, ResponsiveContainer, ReferenceLine, Cell,
+  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell,
 } from "recharts";
 import {
-  Activity, AlertTriangle, ArrowRight, ArrowLeft, BarChart3, Boxes, CheckCircle2,
+  Activity, AlertTriangle, ArrowRight, ArrowLeft, BarChart3, CheckCircle2,
   Code2, Database, Layers, Scale, Search, Shield, Signal,
   TrendingDown, Github, Terminal, Gauge, FlaskConical, DollarSign,
   Filter, X, Sparkles, Eye, Network, RefreshCw, Info,
@@ -16,6 +15,10 @@ import { Registry } from "./Registry.jsx";
 import { Runs } from "./Runs.jsx";
 import { Usage } from "./Usage.jsx";
 import { Insights } from "./Insights.jsx";
+import { GuidedHome } from "./GuidedHome.jsx";
+import { isEvidenceGap } from "./guided-flow.mjs";
+import { IssueInbox } from "./IssueInbox.jsx";
+import { EvidenceExplain } from "./EvidenceExplain.jsx";
 import { EvaluatorLab } from "./EvaluatorLab.jsx";
 import { InspectLab } from "./InspectLab.jsx";
 import { ManagementReport } from "./ManagementReport.jsx";
@@ -29,7 +32,7 @@ import {
   canonicalDashboardHash, parseDashboardRoute, parseDashboardSelection,
   serializeDashboardRoute,
 } from "./dashboard-route.mjs";
-import { formatCaptureRange, formatLatency, timelineTick } from "./presentation-format.mjs";
+import { formatLatency } from "./presentation-format.mjs";
 
 // Embedded synthetic sample data. This keeps the static dashboard renderable when
 // no live API is reachable. It is not a benchmark, experiment result, or claim
@@ -46,20 +49,20 @@ const SEED = /* @__PURE__ */ (() => {
     { hour: 7, anthropic_lat: 2.3, anthropic_err: 0, anthropic_n: 12, openai_lat: 2.5, openai_err: 0, openai_n: 12, google_lat: 3.0, google_err: 0, google_n: 12 },
   ];
   const metric = (calls, failedCalls, inputTokens, outputTokens, costUsd, averageLatencyMs) => ({
-    calls, successfulCalls: calls - failedCalls, failedCalls,
-    successRatePct: Math.round((calls - failedCalls) / calls * 1000) / 10,
+    calls, errorRecordedCalls: failedCalls,
+    endedNoErrorRecordedCalls: calls - failedCalls, unfinishedCalls: 0,
     inputTokens, outputTokens, totalTokens: inputTokens + outputTokens,
     tokenKnownCalls: calls, costUsd, costKnownCalls: calls,
     averageLatencyMs, latencyKnownCalls: calls,
   });
   return {
     meta: {
-      runStart: 'sample-data', durationHours: 8, totalTraces: 96, totalJudged: 48,
+      runStart: 'sample-data', durationHours: 8, totalTraces: 96, monitorEligibleCalls: 96, totalJudged: 48,
       totalCost: 0.42, totalCostStatus: 'complete', regressionHour: null,
       providers: 3, clusters: 4, workload: 'sample-service',
     },
     managementReport: {
-      schema: "management-report-v1",
+      schema: "management-report-v2",
       period: { days: 30, startDate: "2026-08-13", endDate: "2026-09-11" },
       scope: {
         firstCapturedAt: "2026-09-04T08:00:00+00:00", latestCapturedAt: "2026-09-11T20:00:00+00:00",
@@ -213,7 +216,7 @@ const SEED = /* @__PURE__ */ (() => {
 })();
 
 const EMPTY = {
-  meta: { totalTraces: 0, totalAgentRuns: 0, agentRunSources: [], agentRunSourcesTruncated: false, lastAgentCaptureAt: null, totalJudged: 0, totalCost: null, providers: 0, clusters: 0, workload: null },
+  meta: { totalTraces: 0, monitorEligibleCalls: 0, totalAgentRuns: 0, agentRunSources: [], agentRunSourcesTruncated: false, agentRunAgents: [], agentRunAgentsTruncated: false, lastAgentCaptureAt: null, totalJudged: 0, totalCost: null, providers: 0, clusters: 0, workload: null },
   evaluation: { status: "empty", selectedId: null, availableIdentities: [] },
   providers: [], clusters: [], dimensionOverall: [], tsRows: [],
   passrate: [], clusterPassrate: [], haikuDim: [], samples: [], providerDimension: [],
@@ -272,12 +275,13 @@ function useOperationsConfig() {
 
 const API_URL = mountedApiUrl();
 
-function apiUrlForEvaluator(evaluatorId, traceOffset = 0, traceJudgeStatus = "all", traceId = null, reportDays = 30) {
+function apiUrlForEvaluator(evaluatorId, traceOffset = 0, traceJudgeStatus = "all", traceId = null, reportDays = 30, traceDate = null) {
   const params = new URLSearchParams();
   if (evaluatorId) params.set("evaluator", evaluatorId);
   if (traceOffset > 0) params.set("trace_offset", String(traceOffset));
   if (traceJudgeStatus !== "all") params.set("trace_judge_status", traceJudgeStatus);
   if (traceId) params.set("trace_id", traceId);
+  if (traceDate) params.set("trace_date", traceDate);
   params.set("report_days", String(reportDays));
   return `${API_URL}?${params.toString()}`;
 }
@@ -291,11 +295,12 @@ function useDashboardData() {
     traceOffset: 0,
     traceJudgeStatus: "all",
     traceId: null,
+    traceDate: null,
   });
   const requestSequence = useRef(0);
   const activeController = useRef(null);
 
-  const load = React.useCallback(async (evaluatorId = null, traceOffset = 0, traceJudgeStatus = "all", traceId = null, reportDays = 30) => {
+  const load = React.useCallback(async (evaluatorId = null, traceOffset = 0, traceJudgeStatus = "all", traceId = null, reportDays = 30, traceDate = null) => {
     const requestId = requestSequence.current + 1;
     requestSequence.current = requestId;
     if (activeController.current) activeController.current.abort();
@@ -303,7 +308,7 @@ function useDashboardData() {
     activeController.current = controller;
     setState((current) => ({ ...current, loading: true, error: null }));
     try {
-      const response = await fetch(apiUrlForEvaluator(evaluatorId, traceOffset, traceJudgeStatus, traceId, reportDays), {
+      const response = await fetch(apiUrlForEvaluator(evaluatorId, traceOffset, traceJudgeStatus, traceId, reportDays, traceDate), {
         headers: { Accept: "application/json" },
         signal: controller.signal,
       });
@@ -312,7 +317,8 @@ function useDashboardData() {
         if (response.status === 503 && failure?.state === "store_not_created") {
           // Setup has not created the local store yet: first run, not an error.
           if (requestId !== requestSequence.current) return false;
-          setState((current) => ({ ...current, loading: false, error: null }));
+          setState((current) => ({ ...current, snapshot: EMPTY, source: "new", loading: false, error: null,
+            traceOffset: 0, traceJudgeStatus: "all", traceId: null, traceDate: null }));
           return false;
         }
         throw new Error(`HTTP ${response.status}`);
@@ -322,7 +328,7 @@ function useDashboardData() {
         throw new Error("invalid dashboard response");
       }
       if (requestId !== requestSequence.current) return false;
-      setState({ snapshot, source: "live", loading: false, error: null, traceOffset, traceJudgeStatus, traceId });
+      setState({ snapshot, source: "live", loading: false, error: null, traceOffset, traceJudgeStatus, traceId, traceDate });
       return true;
     } catch (error) {
       if (requestId !== requestSequence.current) return false;
@@ -361,10 +367,16 @@ function useDashboardData() {
   const reportDays = state.snapshot.managementReport?.period?.days ?? 30;
   return {
     ...state,
-    load: (evaluatorId) => load(evaluatorId, 0, state.traceJudgeStatus, state.traceId, reportDays),
-    loadTracePage: (traceOffset) => load(state.snapshot.evaluation?.selectedId || null, traceOffset, state.traceJudgeStatus, state.traceId, reportDays),
-    loadTraceFilter: (traceJudgeStatus, traceId = null) => load(state.snapshot.evaluation?.selectedId || null, 0, traceJudgeStatus, traceId, reportDays),
-    reload: (days = reportDays) => load(state.snapshot.evaluation?.selectedId || null, state.traceOffset, state.traceJudgeStatus, state.traceId, days),
+    load: (evaluatorId) => load(evaluatorId, 0, state.traceJudgeStatus, state.traceId, reportDays, state.traceDate),
+    loadTracePage: (traceOffset) => load(state.snapshot.evaluation?.selectedId || null, traceOffset, state.traceJudgeStatus, state.traceId, reportDays, state.traceDate),
+    loadTraceFilter: (traceJudgeStatus, traceId = null, traceDate = null) => {
+      const selectedOnCurrentPage = traceId && traceJudgeStatus === state.traceJudgeStatus
+        && traceDate === state.traceDate
+        && state.snapshot.samples?.some((sample) => sample.trace_id === traceId);
+      return load(state.snapshot.evaluation?.selectedId || null,
+        selectedOnCurrentPage ? state.traceOffset : 0, traceJudgeStatus, traceId, reportDays, traceDate);
+    },
+    reload: (days = reportDays) => load(state.snapshot.evaluation?.selectedId || null, state.traceOffset, state.traceJudgeStatus, state.traceId, days, state.traceDate),
   };
 }
 
@@ -398,9 +410,16 @@ function traceTime(sample) {
   const absolute = `${TRACE_MONTHS[date.getUTCMonth()]} ${date.getUTCDate()}, ${String(date.getUTCHours()).padStart(2, "0")}:${String(date.getUTCMinutes()).padStart(2, "0")} UTC`;
   const elapsedSeconds = Math.max(0, Math.floor((Date.now() - date.getTime()) / 1000));
   let relative = "just now";
-  if (elapsedSeconds >= 86400) relative = `${Math.floor(elapsedSeconds / 86400)} days ago`;
-  else if (elapsedSeconds >= 3600) relative = `${Math.floor(elapsedSeconds / 3600)} hours ago`;
-  else if (elapsedSeconds >= 60) relative = `${Math.floor(elapsedSeconds / 60)} minutes ago`;
+  if (elapsedSeconds >= 86400) {
+    const days = Math.floor(elapsedSeconds / 86400);
+    relative = `${days} ${days === 1 ? "day" : "days"} ago`;
+  } else if (elapsedSeconds >= 3600) {
+    const hours = Math.floor(elapsedSeconds / 3600);
+    relative = `${hours} ${hours === 1 ? "hour" : "hours"} ago`;
+  } else if (elapsedSeconds >= 60) {
+    const minutes = Math.floor(elapsedSeconds / 60);
+    relative = `${minutes} ${minutes === 1 ? "minute" : "minutes"} ago`;
+  }
   return { absolute, relative };
 }
 
@@ -653,16 +672,16 @@ const TAB_HELP = {
   overview: "Start with recorded issues and token activity. Select a finding or day to inspect its evidence. Reliability, performance, and behavior details are available below.",
   explore: "Inspect Agent Runs and genuine LLM calls, including their evidence and evaluation state. Provider comparison is descriptive unless traffic is matched.",
   evaluate: "Configure evaluators, inspect stored judgments, analyze one-off JSON exports, and review labels. Missing evidence stays not evaluable rather than being scored as a failure.",
-  monitor: "Compare historical cohorts, activate ongoing monitoring, and optionally review segments.",
+  monitor: "Review recorded issues, recurring checks, and worker state. Model-call drift and grouping have separate evidence and setup paths.",
   report: "A management-level view of utilization, reliability, quality evidence, and current Monitor state. Exports contain aggregates only.",
-  settings: "Configure data sources, schedules, alert destinations, integrations, and privacy controls.",
+  settings: "Configure data sources, alert destinations, integrations, and privacy controls.",
 };
 
 const WORKSPACE_SECTIONS = {
   overview: [["summary", "Summary"], ["reliability", "Reliability"], ["performance", "Performance"], ["behavior", "Behavior"]],
   explore: [["runs", "Agent Runs & Tools"], ["calls", "LLM Calls"], ["compare", "Compare"]],
   evaluate: [["results", "Results"], ["lab", "Evaluator Lab"], ["cases", "Saved Cases"], ["inspect", "Inspect JSON"], ["review", "Review Queue"]],
-  monitor: [["status", "Status"], ["history", "Compare History"], ["segments", "Segments"], ["schedule", "Schedule"]],
+  monitor: [["status", "Monitoring"], ["plan", "Suggested setup"], ["history", "Model drift setup"], ["segments", "Groups"], ["schedule", "Schedule"]],
   report: [["management", "Management Report"]],
   settings: [["sources", "Data Sources"], ["alerts", "Alerts"], ["integrations", "Integrations"], ["privacy", "Privacy"]],
 };
@@ -700,7 +719,18 @@ function TabHelp({ tab, label, text }) {
 }
 
 function WorkspaceNav({ tab, section, onSection }) {
-  if (WORKSPACE_SECTIONS[tab].length === 1 || (tab === "overview" && section === "summary")) return null;
+  if (WORKSPACE_SECTIONS[tab].length === 1 || (tab === "overview" && section === "summary")
+    || (tab === "monitor" && ["plan", "status", "segments", "history"].includes(section))
+    || (tab === "explore" && section === "runs")) return null;
+  if (tab === "monitor") return <nav aria-label="monitor sections" className="mb-5 flex flex-wrap items-center gap-2 border-b pb-2" style={{ borderColor: C.border }}>
+    {WORKSPACE_SECTIONS.monitor.slice(0, 2).map(([id, label]) => <button key={id} onClick={() => onSection(id)}
+      className="px-4 py-3 text-sm border-b-2" style={{ color: section === id ? C.text : C.sub, borderColor: section === id ? C.accent : "transparent" }}>{label}</button>)}
+    <details className="relative ml-auto text-sm" open={["history", "segments", "schedule"].includes(section) ? true : undefined}>
+      <summary className="cursor-pointer px-3 py-2" style={{ color: C.sub }}>Advanced views</summary>
+      <div className="flex flex-wrap gap-2 pb-2">{WORKSPACE_SECTIONS.monitor.slice(2).map(([id, label]) =>
+        <button key={id} onClick={() => onSection(id)} className="border px-3 py-2" style={{ borderColor: C.border, color: section === id ? C.accent : C.sub }}>{label}</button>)}</div>
+    </details>
+  </nav>;
   return <nav aria-label={`${tab} sections`} className="mb-5 flex overflow-x-auto border-b" style={{ borderColor: C.border }}>
     {WORKSPACE_SECTIONS[tab].map(([id, label]) => <button key={id} onClick={() => onSection(id)}
       className="px-4 py-3 text-sm border-b-2 shrink-0"
@@ -713,14 +743,6 @@ function WorkspaceNav({ tab, section, onSection }) {
 function monitorAlertCount(monitor) {
   return (monitor?.active?.snapshot?.comparison?.metrics || [])
     .filter((metric) => metric.alert).length;
-}
-
-function monitorAlertSummary(monitor) {
-  if (!monitor?.active && !monitor?.candidate) return "not configured";
-  const count = (response) => (response?.snapshot?.comparison?.metrics || [])
-    .filter((metric) => metric.alert).length;
-  if (!monitor?.active) return `${count(monitor.candidate)} in historical preview`;
-  return `${count(monitor.active)} in the active monitor`;
 }
 
 function navigateWorkflow(commitRoute, route, target) {
@@ -740,7 +762,7 @@ function navigateSetup(commitRoute, route, destination) {
   commitRoute({ ...route, tab: target[0], section: target[1] });
 }
 
-function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluatorChange, onTracePageChange, onTraceFilterChange, traceOffset = 0, reloading, loadError, operationsUrl = null, operationsPageUrl = null }) {
+function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluatorChange, onTracePageChange, onTraceFilterChange, traceOffset = 0, loadedTraceFilter = { traceDate: null, traceJudgeStatus: "all", traceId: null }, reloading, loadError, operationsUrl = null, operationsPageUrl = null }) {
   const DATA = data;
   const initialSelection = useRef(parseDashboardSelection(
     typeof window === "undefined" ? "" : window.location.search,
@@ -816,9 +838,9 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
   useEffect(() => { traceFilterCallback.current = onTraceFilterChange; }, [onTraceFilterChange]);
   useEffect(() => {
     if (source === "live" && route.tab === "explore" && route.section === "calls" && traceFilterCallback.current) {
-      traceFilterCallback.current(route.traceJudgeStatus, route.traceId);
+      traceFilterCallback.current(route.traceJudgeStatus, route.traceId, route.traceDate || null);
     }
-  }, [route.section, route.tab, route.traceId, route.traceJudgeStatus, source]);
+  }, [route.section, route.tab, route.traceId, route.traceJudgeStatus, route.traceDate, source]);
   const initialRouteResolved = useRef(
     source !== "loading" || initialRoute.current.explicit
       || initialSelection.current.state === "valid",
@@ -840,6 +862,9 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
     }
   }, [evaluation.selectedId, evaluatorRelevant, route.evaluatorId, source]);
   const evaluatorSelectionNeeded = ["selection_required", "invalid_selection"].includes(evaluation.status);
+  const traceFilterMatches = (route.traceDate || null) === (loadedTraceFilter.traceDate || null)
+    && route.traceJudgeStatus === loadedTraceFilter.traceJudgeStatus
+    && (route.traceId || null) === (loadedTraceFilter.traceId || null);
   const boundedResources = Object.entries(DATA.truncation?.resources || {})
     .filter(([name, resource]) => (source !== "live" || name !== "traceSamples") && resource.shown < resource.available);
   const summaryOpen = tab === "overview" && route.section === "summary";
@@ -852,90 +877,92 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
       )).join("; ")}.</span>
     </div>
   );
-  const syntheticStore = source === "live" && DATA.meta.agentRunSources?.some((item) => item.sourceKind === "synthetic-codex");
-  const sourceLabel = syntheticStore ? "Synthetic demo" : source === "live" ? "Live store" : source === "sample" ? "Synthetic sample" : "Waiting for live store";
-  const sourceColor = source === "live" && !syntheticStore ? C.green : C.amber;
+  const syntheticStore = source === "live" && DATA.meta.dataProvenance === "synthetic";
+  const sourceLabel = syntheticStore ? "Synthetic demo" : source === "live" ? "Connected store" : source === "sample" ? "Synthetic sample" : source === "new" ? "No store yet" : loadError && !reloading ? "Evidence unavailable" : "Checking evidence";
   const workloadLabel = syntheticStore ? "Synthetic local demo" : source === "sample"
     ? "Sample workload"
+    : source === "loading" ? "Verdict workspace"
+    : source === "new" ? "New workspace"
     : DATA.meta.workload
       ? `Workload: ${DATA.meta.workload}`
-      : "Live Verdict store";
-  const nav = [
-    { id: "overview", label: "Overview", icon: Gauge },
-    { id: "explore", label: "Investigate", icon: Search },
-    { id: "evaluate", label: "Evaluate", icon: Scale },
-    { id: "monitor", label: "Monitor", icon: Signal, badge: monitorAlertCount(DATA.monitor) },
+      : "Verdict store";
+  const primaryNav = [
+    { tab: "overview", section: "summary", label: "Home", icon: Gauge },
+    { tab: "monitor", section: "plan", label: "Suggested setup", icon: Sparkles },
+    { tab: "monitor", section: "status", label: "Monitoring", icon: Signal, badge: monitorAlertCount(DATA.monitor) },
+    { tab: "explore", section: "runs", label: "Investigation", icon: Search },
+    { tab: "monitor", section: "segments", label: "Groups", icon: Layers },
+    { tab: "monitor", section: "history", label: "Model drift setup", icon: Activity },
   ];
-  const workspaceLabel = tab === "report" ? "Report" : tab === "settings" ? "Settings" : nav.find((item) => item.id === tab)?.label;
+  const secondaryNav = [
+    { tab: "evaluate", section: "results", label: "Evaluate", icon: Scale },
+    { tab: "report", section: "management", label: "Report", icon: BarChart3 },
+    { tab: "settings", section: "sources", label: "Settings", icon: Terminal },
+  ];
+  const focusedIssueHeading = {
+    test_failed: "A captured run recorded a failed test",
+    command_failed: "A captured command failed",
+    tool_error: "A tool action reported an error",
+    business_outcome_failed: "A reported outcome failed",
+    possible_tool_loop: "Repeated tool calls need review",
+  }[route.findingCode] || "Inspect the recorded finding";
+  const focusedGap = isEvidenceGap({ code: route.findingCode });
+  const pageIntro = {
+    "overview/summary": ["Home", "Know what needs attention", "Verdict summarizes captured evidence and points to the next useful action."],
+    "monitor/plan": ["Suggested setup", "A monitoring plan for this workspace", "Review captured evidence and the checks that will run before you enable recurring monitoring."],
+    "monitor/status": ["Monitoring", "What Verdict watches", "Scheduled agent checks, evidence freshness, and eligible model-call changes in one place."],
+    "explore/runs": route.findingCode
+      ? ["Investigation", focusedGap ? "Inspect an evidence gap" : focusedIssueHeading,
+        focusedGap ? "Review what was and was not recorded before drawing conclusions." : "Review the recorded finding, its linked evidence, and the next check."]
+      : route.selectedRunId || route.eventId
+      ? ["Investigation", "Inspect agent evidence", "Review what happened in this run, its recorded evidence, and the next check."]
+      : ["Investigation", "Investigate recorded evidence", "Open a run, turn, or event to see what happened and what to check next."],
+    "monitor/segments": ["Groups", "Find where a problem is concentrated",
+      Number(DATA.meta.totalTraces || 0) > 0
+        ? "Start with recorded source and model fields; add semantic groups only when the evidence supports them."
+        : "Start with recorded sources and agent names. Provider/model groups need captured model calls; semantic groups need usable prompt evidence."],
+    "monitor/history": ["Model drift setup", "Set up a model-call alert", "Review genuine provider calls, the reference cohort, and sample coverage before activation."],
+  }[`${tab}/${route.section}`] || [tab === "report" ? "Report" : tab === "settings" ? "Settings" : tab === "explore" ? "Investigation" : tab === "overview" ? "Home" : tab === "monitor" ? "Monitoring" : "Evaluate", WORKSPACE_SECTIONS[tab]?.find(([section]) => section === route.section)?.[1] || "Verdict", null];
+  const workspaceLabel = pageIntro[1];
+  const activeNav = (item) => tab === item.tab && (route.section === item.section
+    || ["overview", "explore", "evaluate", "report", "settings"].includes(item.tab)
+    || (item.tab === "monitor" && item.section === "plan" && route.section === "schedule"));
+  const navigateSidebar = (item) => commitRoute({ ...route, tab: item.tab, section: item.section,
+    findingCode: null, runIds: [], selectedRunId: null, runIdsTruncated: false,
+    eventId: null, traceId: null, evaluatorId: null, sourceKind: null, agentName: null });
+  const openUsageRun = (runId, eventId = null, recentRevision = null, recentTurnId = null) =>
+    commitRoute({ ...route, tab: "explore", section: "runs", findingCode: null,
+      runIds: [runId], selectedRunId: runId, runIdsTruncated: false,
+      eventId: recentRevision ? null : eventId,
+      recentRevision: recentRevision || null, recentTurnId: recentTurnId || null,
+      recentEventId: recentRevision ? eventId : null, noticeId: null });
   return (
-    <div style={{ background: C.bg, color: C.text, minHeight: "100%" }}>
-      <header className="sticky top-0 z-20 border-b" style={{ background: "rgba(11,14,13,.96)", borderColor: C.border }}>
-        <div className="max-w-screen-2xl mx-auto px-4 sm:px-6 min-h-16 flex flex-wrap items-center gap-x-5">
-          <button onClick={onExit} title="Back to home" className="h-16 flex items-center gap-2 shrink-0">
-            <Logo size={24} />
-            <span className="font-semibold">Verdict</span>
-          </button>
-          <span className="hidden lg:inline text-xs font-mono" style={{ color: C.faint }}>{syntheticStore ? "Synthetic local demo" : source === "sample" ? "Sample service" : "Live Verdict store"}</span>
-          <nav className="order-3 w-full sm:order-none sm:w-auto sm:self-stretch flex overflow-x-auto border-t sm:border-t-0" style={{ borderColor: C.border }}>
-            {nav.map((n) => {
-              const on = tab === n.id;
-              return (
-                <button key={n.id} onClick={() => setTab(n.id)}
-                  className="h-11 sm:h-16 shrink-0 flex items-center gap-2 px-3 text-xs sm:text-sm border-b-2"
-                  style={{ color: on ? C.text : C.sub, background: on ? C.raised : "transparent", borderColor: on ? C.accent : "transparent", fontWeight: on ? 650 : 450 }}>
-                  <n.icon size={15} style={{ color: on ? C.accent : C.faint }} />
-                  {n.label}
-                  {n.badge ? <span className="text-xs font-semibold px-1.5" style={{ background: C.redBg, color: C.red, borderRadius: 2 }}>{n.badge}</span> : null}
-                </button>
-              );
-            })}
-            {operationsPageUrl === "/operations" && (
-              <button type="button" onClick={() => window.location.assign(operationsPageUrl)}
-                className="h-11 sm:h-16 shrink-0 flex items-center gap-2 px-3 text-xs sm:text-sm border-b-2"
-                style={{ color: C.sub, borderColor: "transparent", fontWeight: 450 }}>
-                <Activity size={15} style={{ color: C.faint }} />
-                Operations
-              </button>
-            )}
-          </nav>
-          <div className="ml-auto flex items-center gap-2 text-xs">
-            <button type="button" onClick={() => setTab("report")} title="Open report" aria-label="Open report"
-              className="w-8 h-8 inline-flex items-center justify-center border"
-              style={{ borderColor: tab === "report" ? C.accent : C.border, borderRadius: 3, color: tab === "report" ? C.accent : C.sub }}>
-              <BarChart3 size={15} />
-            </button>
-            <button type="button" onClick={() => setTab("settings")} title="Open settings" aria-label="Open settings"
-              className="w-8 h-8 inline-flex items-center justify-center border"
-              style={{ borderColor: tab === "settings" ? C.accent : C.border, borderRadius: 3, color: tab === "settings" ? C.accent : C.sub }}>
-              <Terminal size={15} />
-            </button>
-            <span className="flex items-center gap-1.5 px-1 sm:px-2 py-1" title={sourceLabel} style={{ color: sourceColor }}>
-              <Dot color={sourceColor} />
-              <span className="hidden sm:inline">{sourceLabel}</span>
-            </span>
-            <span className="hidden xl:inline font-mono" style={{ color: C.faint }}>{(DATA.meta.totalAgentRuns || 0).toLocaleString()} agent runs · {DATA.meta.totalTraces.toLocaleString()} LLM traces</span>
-            <button onClick={() => onReload()} disabled={reloading} title="Refresh from API"
-              className="w-8 h-8 inline-flex items-center justify-center border"
-              style={{ borderColor: C.border, borderRadius: 3, color: C.sub, opacity: reloading ? 0.5 : 1 }}>
-              <RefreshCw size={14} style={{ animation: reloading ? "vspin 0.8s linear infinite" : "none" }} />
-            </button>
-          </div>
-        </div>
-      </header>
+    <div className="verdict-workspace-shell" style={{ background: "#0b100f", color: C.text }}>
+      <aside className="verdict-workspace-sidebar">
+        <button type="button" onClick={onExit} title="Back to home" className="verdict-workspace-brand"><Logo size={27} /><span>Verdict</span></button>
+        <div className="verdict-workspace-context"><strong>{workloadLabel}</strong><span>{sourceLabel}</span><small>{source === "loading" ? "Captured evidence not loaded yet" : source === "new" ? "Create a local store to begin" : <>{Number(DATA.meta.totalAgentRuns || 0).toLocaleString()} recorded agent runs · {Number(DATA.meta.totalTraces || 0).toLocaleString()} model calls</>}</small></div>
+        <div className="verdict-nav-label">WORKSPACE</div>
+        <nav aria-label="Workspace" className="verdict-workspace-nav">
+          {primaryNav.map((item) => <button key={item.label} type="button" onClick={() => navigateSidebar(item)} aria-current={activeNav(item) ? "page" : undefined} className={`verdict-nav-item ${activeNav(item) ? "active" : ""}`}><item.icon size={17} /><span>{item.label}</span>{item.badge ? <b>{item.badge}</b> : null}</button>)}
+        </nav>
+        <div className="verdict-nav-label">MORE</div>
+        <nav aria-label="More" className="verdict-workspace-nav">
+          {secondaryNav.map((item) => <button key={item.label} type="button" onClick={() => navigateSidebar(item)} aria-current={activeNav(item) ? "page" : undefined} className={`verdict-nav-item ${activeNav(item) ? "active" : ""}`}><item.icon size={17} /><span>{item.label}</span></button>)}
+          {operationsPageUrl === "/operations" && <button type="button" onClick={() => window.location.assign(operationsPageUrl)} className="verdict-nav-item"><Activity size={17} /><span>Operations</span></button>}
+        </nav>
+      </aside>
+      <div className="verdict-workspace-body">
+        <header className="verdict-workspace-topbar"><span>{workloadLabel} / Agent reliability</span><div className="verdict-topbar-actions">{(source === "sample" || syntheticStore) && <span className="verdict-synthetic-tag">ILLUSTRATIVE SYNTHETIC DATA</span>}<button onClick={() => onReload()} disabled={reloading} title="Refresh from API" aria-label="Refresh from API" className="verdict-refresh-button"><RefreshCw size={15} style={{ animation: reloading ? "vspin 0.8s linear infinite" : "none" }} /></button></div></header>
 
-      <main className="max-w-screen-2xl mx-auto px-4 sm:px-6 py-6 overflow-x-hidden">
-        <div className="mb-5 flex flex-col sm:flex-row sm:items-end justify-between gap-3">
-          <div>
-            <div className="text-xs font-mono" style={{ color: C.accent }}>{workloadLabel}</div>
-            <div className="flex items-center gap-2 mt-1"><h1 className="font-semibold" style={{ fontSize: 22, letterSpacing: 0 }}>{workspaceLabel}</h1>{TAB_HELP[tab] && <TabHelp tab={tab} label={workspaceLabel} text={TAB_HELP[tab]} />}</div>
-          </div>
-          {(source === "sample" || syntheticStore) && (
-            <div className="max-w-full flex items-start gap-2 text-xs px-3 py-2 border" style={{ borderColor: "#6b5529", background: C.amberBg, color: C.amber, borderRadius: 3 }}>
-              <FlaskConical size={14} style={{ flexShrink: 0 }} /> <span>Wholly synthetic demo data; not a provider benchmark or measured savings</span>
-            </div>
-          )}
+      <main className="verdict-workspace-content overflow-x-hidden">
+        {tab === "explore" && route.section === "runs" && (route.selectedRunId || route.eventId) && <button type="button" className="verdict-back-link" onClick={() => commitRoute({ ...route, tab: "monitor", section: "status", findingCode: null, runIds: [], selectedRunId: null, eventId: null })}>View monitoring</button>}
+        <div className="verdict-page-intro">
+          <div className="verdict-page-eyebrow">{pageIntro[0]}</div>
+          <div className="flex items-center gap-2 mt-1"><h1>{workspaceLabel}</h1>{TAB_HELP[tab] && <TabHelp tab={tab} label={workspaceLabel} text={TAB_HELP[tab]} />}</div>
+          {pageIntro[2] && <p>{pageIntro[2]}</p>}
         </div>
         <WorkspaceNav tab={tab} section={route.section} onSection={(section) => commitRoute({ ...route, section })} />
+        {tab === "explore" && route.section === "runs" && !route.findingCode && <details className="verdict-secondary-path"><summary>Other investigation views</summary><div><button type="button" onClick={() => commitRoute({ ...route, section: "calls", runIds: [], selectedRunId: null, eventId: null, traceId: null })}>Browse model calls</button><button type="button" onClick={() => commitRoute({ ...route, section: "compare", runIds: [], selectedRunId: null, eventId: null })}>Compare recorded conversations</button></div></details>}
         {evaluatorRelevant && evaluation.availableIdentities.length > 0 && (
           <div className="mb-5 flex flex-col md:flex-row md:items-center gap-3 px-3 py-3 border"
             style={{ borderColor: evaluatorSelectionNeeded ? "#6b5529" : C.border, background: evaluatorSelectionNeeded ? C.amberBg : C.panel2, borderRadius: 3 }}>
@@ -973,35 +1000,18 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
             <span>The requested Verdict link is invalid. No trace or agent activity was selected.</span>
           </div>
         )}
-        {!summaryOpen && truncationNotice && <div className="mb-5">{truncationNotice}</div>}
-        {tab === "overview" && route.section === "summary" && <div className="space-y-5">
-          <p className="text-sm" style={{ color: C.sub }}>Review recorded issues, inspect the activity behind them, then check where reported tokens went. Select a finding or a day to open its evidence.</p>
-          {monitorAlertCount(DATA.monitor) > 0 && MonitorOverview({ monitor: DATA.monitor,
-            onOpen: (section) => commitRoute({ ...route, tab: "monitor", section }), compact: true })}
-          <div className="grid lg:grid-cols-2 gap-5 items-start">
-            <Insights url={mountedInsightsUrl()} onOpenRuns={openFindingRun} onAnalysisComplete={onReload} />
-            {source === "loading"
-              ? <Panel className="p-5" style={{ minHeight: 320 }}><h2 className="font-semibold">Where tokens went</h2><p role="status" className="text-sm mt-2" style={{ color: C.sub }}>Loading agent activity…</p></Panel>
-              : source === "live" && (DATA.meta.totalAgentRuns || 0) > 0
-              ? <Usage compact url={mountedUsageUrl()} onOpenRun={(runId) => commitRoute({ ...route, tab: "explore", section: "runs", findingCode: null, runIds: [runId], selectedRunId: runId, runIdsTruncated: false })} />
-              : <Panel className="p-5"><h2 className="font-semibold">Token trend needs agent turns</h2>
-                <p className="text-sm mt-2" style={{ color: C.sub }}>Capture or import agent sessions to see reported tokens by day and drill into sessions here.</p>
-                <button type="button" className="text-sm underline mt-3" style={{ color: C.green }}
-                  onClick={() => commitRoute({ ...route, tab: "settings", section: "sources" })}>Set up agent capture</button>
-              </Panel>}
-          </div>
-          {monitorAlertCount(DATA.monitor) === 0 && MonitorOverview({ monitor: DATA.monitor,
-            onOpen: (section) => commitRoute({ ...route, tab: "monitor", section }), compact: true })}
+        {!summaryOpen && tab !== "monitor" && truncationNotice && <div className="mb-5">{truncationNotice}</div>}
+        {tab === "overview" && route.section === "summary" && <>
+          <GuidedHome meta={DATA.meta} monitor={DATA.monitor} managementReport={DATA.managementReport} source={source}
+            insightsUrl={mountedInsightsUrl()} usageUrl={mountedUsageUrl()} configUrl={mountedConfigUrl()}
+            onReload={onReload} onOpenFinding={openFindingRun}
+            onOpenRun={openUsageRun}
+            onNavigate={(nextTab, section, traceDate = null) => commitRoute({ ...route, tab: nextTab, section, traceDate, traceId: null })} />
           {truncationNotice}
-          <details className="border p-5" style={{ borderColor: C.border, background: C.panel }}>
-            <summary className="cursor-pointer font-semibold">Technical coverage and charts</summary>
-            <div className="mt-4 flex flex-wrap gap-3 text-sm">{WORKSPACE_SECTIONS.overview.slice(1).map(([section, label]) => <button type="button" key={section} className="underline" style={{ color: C.green }} onClick={() => commitRoute({ ...route, section })}>{label} details</button>)}</div>
-            <div className="mt-5"><Overview data={DATA} includeMonitor={false} /></div>
-          </details>
-        </div>}
+        </>}
         {tab === "overview" && route.section === "reliability" && <Insights url={mountedInsightsUrl()} onOpenRuns={openFindingRun} onAnalysisComplete={onReload} mode="reliability" />}
         {tab === "overview" && route.section === "performance" && <div className="space-y-5">
-          {source === "live" && <Usage url={mountedUsageUrl()} onOpenRun={(runId) => commitRoute({ ...route, tab: "explore", section: "runs", findingCode: null, runIds: [runId], selectedRunId: runId, runIdsTruncated: false })} />}
+          {source === "live" && <Usage url={mountedUsageUrl()} onOpenRun={openUsageRun} />}
           {source === "live" ? <details className="border p-5" style={{ borderColor: C.border, background: C.panel }}>
             <summary className="cursor-pointer font-semibold">Model-call diagnostics</summary>
             <div className="mt-5"><Insights url={mountedInsightsUrl()} onOpenRuns={openFindingRun} onAnalysisComplete={onReload} mode="performance" /></div>
@@ -1014,17 +1024,50 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
           selectedRunId={route.selectedRunId}
           findingCode={route.findingCode}
           runIdsTruncated={route.runIdsTruncated}
+          sourceKind={route.runIds.length ? null : route.sourceKind || null}
+          agentName={route.runIds.length ? null : route.agentName || null}
+          onClearGroup={() => commitRoute({ ...route, sourceKind: null, agentName: null, selectedRunId: null, eventId: null })}
           evaluatorFingerprint={evaluation.selectedIdentity?.fingerprint || null}
           routedEventId={route.eventId || null}
-          onSelectRun={(runId) => commitRoute({ ...route, selectedRunId: runId })}
-          onShowAll={() => commitRoute({ ...route, tab: "explore", section: "runs", findingCode: null, runIds: [], selectedRunId: null })}
+          recentRevision={route.recentRevision || null}
+          recentTurnId={route.recentTurnId || null}
+          recentEventId={route.recentEventId || null}
+          onOpenRecentEvent={({ runId, revision, turnId, eventId }) => commitRoute({
+            ...route, runIds: [runId], selectedRunId: runId, recentRevision: revision,
+            recentTurnId: turnId, recentEventId: eventId,
+          })}
+          noticeId={route.noticeId || null}
+          onOpenNoticeEvidence={(runId, eventId, recentRevision, recentTurnId) => commitRoute({ ...route, tab: "explore", section: "runs", findingCode: null, runIds: [runId], selectedRunId: runId, runIdsTruncated: false, eventId: recentRevision ? null : eventId, recentRevision: recentRevision || null, recentTurnId: recentTurnId || null, recentEventId: recentRevision ? eventId : null })}
+          onSelectRun={(runId) => commitRoute({ ...route, selectedRunId: runId,
+            noticeId: null, recentRevision: null, recentTurnId: null, recentEventId: null })}
+          onOpenRelatedRun={(runId) => commitRoute({ ...route, tab: "explore", section: "runs", findingCode: null, runIds: [runId], selectedRunId: runId, runIdsTruncated: false, eventId: null, noticeId: null })}
+          onBrowseRecordedGroup={({ agentName, sourceKind }) => commitRoute({
+            ...route, tab: "explore", section: "runs", findingCode: null,
+            runIds: [], selectedRunId: null, runIdsTruncated: false, eventId: null,
+            agentName, sourceKind,
+          })}
+          onShowAll={() => commitRoute({ ...route, tab: "explore", section: "runs", findingCode: null, runIds: [], selectedRunId: null, sourceKind: null, agentName: null })}
           onOpenTrace={(traceId) => commitRoute({ ...route, tab: "explore", section: "calls", traceJudgeStatus: "all", traceId })}
           onEvaluateTurn={(runId, turnId) => { setEvaluationSelection({ unit: "agent_turn", runId, turnId }); commitRoute({ ...route, tab: "evaluate", section: "lab" }); }}
           onDraftCase={(draft) => { setCaseDraft(draft); commitRoute({ ...route, tab: "evaluate", section: "cases" }); }}
         />}
-        {tab === "explore" && route.section === "calls" && <Traces key={evaluation.selectedId || "none"} data={DATA} source={source}
+        {tab === "explore" && route.section === "calls" && source === "new"
+          && <Panel className="p-5"><p role="status" className="text-sm" style={{ color: C.sub }}>
+            No local store is available. Start capture in Settings, then return to investigate model calls.
+          </p></Panel>}
+        {tab === "explore" && route.section === "calls" && source === "loading"
+          && <Panel className="p-5"><p role="status" className="text-sm" style={{ color: C.sub }}>
+            Loading model calls…
+          </p></Panel>}
+        {tab === "explore" && route.section === "calls" && source === "live" && !traceFilterMatches
+          && <Panel className="p-5"><p role={loadError && !reloading ? "alert" : "status"} className="text-sm" style={{ color: loadError && !reloading ? C.amber : C.sub }}>
+            {loadError && !reloading ? "Could not load calls for the selected filter. The previous result is hidden." : "Loading calls for the selected filter…"}
+          </p>{loadError && !reloading && <button type="button" className="mt-3 text-sm underline" style={{ color: C.accent }}
+            onClick={() => onTraceFilterChange?.(route.traceJudgeStatus, route.traceId, route.traceDate || null)}>Retry loading calls</button>}</Panel>}
+        {tab === "explore" && route.section === "calls" && (source === "sample" || (source === "live" && traceFilterMatches)) && <Traces key={evaluation.selectedId || "none"} data={DATA} source={source}
           traceOffset={traceOffset} reloading={reloading} onTracePageChange={onTracePageChange}
-          judgeStatus={route.traceJudgeStatus} selectedTraceId={route.traceId}
+          judgeStatus={route.traceJudgeStatus} selectedTraceId={route.traceId} traceDate={route.traceDate || null}
+          onClearDate={() => commitRoute({ ...route, traceDate: null, traceId: null })}
           onJudgeStatus={(traceJudgeStatus) => commitRoute({
             ...route, tab: "explore", section: "calls", traceJudgeStatus, traceId: null,
           })}
@@ -1039,246 +1082,18 @@ function Dashboard({ data = SEED, onExit, source = "sample", onReload, onEvaluat
         {tab === "evaluate" && route.section === "cases" && <Experiments root={mountedConfigUrl().replace(/\/api\/config$/, "")} draft={caseDraft} />}
         {tab === "evaluate" && route.section === "inspect" && <InspectLab configUrl={mountedConfigUrl()} />}
         {tab === "evaluate" && route.section === "review" && <ControlCenter section="review" configUrl={mountedConfigUrl()} onNavigate={(target) => navigateWorkflow(commitRoute, route, target)} />}
-        {tab === "monitor" && route.section === "status" && <Monitor view="status" initialState={DATA.monitor} configUrl={mountedConfigUrl()} evaluation={data.evaluation} onChanged={onReload} onOpenTrace={(traceId, evaluatorId) => commitRoute({ ...route, tab: "explore", section: "calls", traceId, evaluatorId })} />}
-        {tab === "monitor" && route.section === "history" && <Monitor view="history" initialState={DATA.monitor} configUrl={mountedConfigUrl()} evaluation={data.evaluation} onChanged={onReload} onOpenTrace={(traceId, evaluatorId) => commitRoute({ ...route, tab: "explore", section: "calls", traceId, evaluatorId })} />}
-        {tab === "monitor" && route.section === "segments" && <Registry url={mountedRegistryUrl()} operationsUrl={operationsUrl} configUrl={mountedConfigUrl()} />}
-        {tab === "monitor" && route.section === "schedule" && <ControlCenter section="schedule" configUrl={mountedConfigUrl()} />}
+        {tab === "monitor" && source === "loading" && <Panel className="p-5"><p role={loadError && !reloading ? "alert" : "status"} className="text-sm" style={{ color: loadError && !reloading ? C.amber : C.sub }}>{loadError && !reloading ? "Could not load this workspace's evidence. Monitoring and setup are unavailable until it loads." : "Checking captured evidence and monitoring setup…"}</p>{loadError && !reloading && <button type="button" className="mt-3 text-sm underline" style={{ color: C.accent }} onClick={() => onReload?.()}>Retry loading evidence</button>}</Panel>}
+        {tab === "monitor" && source !== "loading" && route.section === "status" && <IssueInbox configUrl={mountedConfigUrl()} insightsUrl={mountedInsightsUrl()} meta={DATA.meta} monitor={DATA.monitor} onRefreshStore={onReload} onOpenFinding={openFindingRun} onOpenPlan={() => commitRoute({ ...route, tab: "monitor", section: "plan", evaluatorId: null })} onOpenUsage={() => commitRoute({ ...route, tab: "overview", section: "summary", evaluatorId: null })} onOpenHistory={() => commitRoute({ ...route, tab: "monitor", section: "history", evaluatorId: null })} onOpenGroups={() => commitRoute({ ...route, tab: "monitor", section: "segments", evaluatorId: null })} onOpenDeliveries={() => commitRoute({ ...route, tab: "settings", section: "alerts", evaluatorId: null })} onOpenEvidence={(issue) => commitRoute({ ...route, tab: "explore", section: "runs", findingCode: null, runIds: [issue.runId], selectedRunId: issue.runId, runIdsTruncated: false, eventId: issue.recentRevision ? null : issue.eventId, recentRevision: issue.recentRevision || null, recentTurnId: issue.recentTurnId || null, recentEventId: issue.recentRevision ? issue.eventId : null, noticeId: issue.noticeId || null, evaluatorId: null })} />}
+        {tab === "monitor" && source !== "loading" && route.section === "history" && <Monitor view="history" initialState={DATA.monitor} configUrl={mountedConfigUrl()} evaluation={data.evaluation} traceCount={DATA.meta.monitorEligibleCalls || 0} totalTraces={DATA.meta.totalTraces} agentRunCount={DATA.meta.totalAgentRuns} onSetup={() => commitRoute({ ...route, tab: "settings", section: "sources" })} onPlan={() => commitRoute({ ...route, tab: "monitor", section: "plan" })} onGroups={() => commitRoute({ ...route, tab: "monitor", section: "segments" })} onChanged={onReload} onOpenTrace={(traceId, evaluatorId) => commitRoute({ ...route, tab: "explore", section: "calls", traceId, evaluatorId })} />}
+        {tab === "monitor" && source !== "loading" && route.section === "segments" && <Registry url={mountedRegistryUrl()} operationsUrl={operationsUrl} configUrl={mountedConfigUrl()} traceCount={DATA.meta.monitorEligibleCalls || 0} sourceGroups={DATA.meta.agentRunSources || []} sourceGroupsTruncated={DATA.meta.agentRunSourcesTruncated} agentGroups={DATA.meta.agentRunAgents || []} agentGroupsTruncated={DATA.meta.agentRunAgentsTruncated} modelRows={DATA.managementReport?.models?.rows || []} modelRowsAvailable={DATA.managementReport?.models?.availableRows || 0} onSourceGroup={(sourceKind) => commitRoute({ ...route, tab: "explore", section: "runs", sourceKind, agentName: null, runIds: [], selectedRunId: null, eventId: null })} onAgentGroup={(agentName) => commitRoute({ ...route, tab: "explore", section: "runs", agentName, sourceKind: null, runIds: [], selectedRunId: null, eventId: null })} onRuns={() => commitRoute({ ...route, tab: "explore", section: "runs", sourceKind: null, agentName: null, runIds: [], selectedRunId: null, eventId: null })} onOpenRun={(runId) => commitRoute({ ...route, tab: "explore", section: "runs", sourceKind: null, agentName: null, runIds: [runId], selectedRunId: runId, eventId: null })} onPlan={() => commitRoute({ ...route, tab: "monitor", section: "plan" })} onMonitor={() => commitRoute({ ...route, tab: "monitor", section: "history" })} onSetup={() => commitRoute({ ...route, tab: "settings", section: "sources" })} />}
+        {tab === "monitor" && source !== "loading" && ["plan", "schedule"].includes(route.section) && <ControlCenter section="schedule" embedded={route.section === "plan"} configUrl={mountedConfigUrl()} meta={DATA.meta} monitor={DATA.monitor} onNavigate={(target) => navigateWorkflow(commitRoute, route, target)} />}
         {tab === "report" && route.section === "management" && <ManagementReport data={DATA} source={source} onPeriodChange={onReload} />}
         {tab === "settings" && route.section === "sources" && <SetupWizard configUrl={mountedConfigUrl()} agentSummary={DATA.meta} onRefresh={onReload} onNavigate={(destination) => navigateSetup(commitRoute, route, destination)} onComplete={() => { onReload(); commitRoute({ ...route, tab: "overview", section: "summary" }); }} />}
         {tab === "settings" && route.section === "alerts" && <ControlCenter section="alerts" configUrl={mountedConfigUrl()} />}
         {tab === "settings" && route.section === "privacy" && <ControlCenter section="privacy" configUrl={mountedConfigUrl()} />}
         {tab === "settings" && route.section === "integrations" && (operationsUrl ? <Operations url={operationsUrl} costBreakdown={DATA.meta.costBreakdown} /> : <Panel className="p-5"><div className="font-semibold">No operations adapter configured</div><div className="text-sm mt-2" style={{ color: C.sub }}>Data ingestion and evaluation remain available. Configure an authenticated operations adapter to expose infrastructure metrics and backend jobs here.</div></Panel>)}
       </main>
-    </div>
-  );
-}
-
-function MetricCell({ label, value, sub, icon: Icon, accent }) {
-  return (
-    <div className="px-4 py-5 min-w-0" style={{ background: "transparent" }}>
-      <div className="flex items-center justify-between">
-        <span className="text-xs font-mono" style={{ color: C.sub }}>{label}</span>
-        {Icon && <Icon size={15} style={{ color: accent || C.faint }} />}
       </div>
-      <div className="mt-2 font-semibold" style={{ fontSize: 24, color: accent || C.text }}>{value}</div>
-      {sub && <div className="text-xs mt-0.5" style={{ color: C.faint }}>{sub}</div>}
-    </div>
-  );
-}
-
-function MonitorResult({ current, onOpen, compact = false }) {
-  const candidate = current.policyState === "candidate" || current.state === "candidate";
-  const snapshot = current.snapshot;
-  const manifest = snapshot?.manifest;
-  const comparison = snapshot?.comparison;
-  const collecting = manifest?.prospective_open === true;
-  const pendingEvaluations = manifest?.pending_evaluator_units?.length || 0;
-  const target = current.policy?.prospective_target || 0;
-  const awaitingEvaluator = collecting
-    && (manifest?.current_unit_ids?.length || 0) >= target && pendingEvaluations > 0;
-  const alerts = (comparison?.metrics || []).filter((metric) => metric.alert).length;
-  const title = current.state === "requires_rebootstrap" ? "Re-bootstrap required"
-    : awaitingEvaluator ? `Awaiting ${pendingEvaluations} evaluator results`
-      : collecting ? `Collecting ${manifest?.current_unit_ids?.length || 0}/${target} new traces`
-      : comparison?.status === "alert" ? `${candidate ? "Historical comparison" : "Active monitor"} found ${alerts || 1} alert${alerts === 1 ? "" : "s"}`
-        : comparison?.status === "no_alert" ? candidate ? "Historical comparison found no alert" : "No alert in the latest active comparison"
-          : "Comparison needs more evidence";
-  const color = current.state === "requires_rebootstrap" ? C.amber
-    : comparison?.status === "alert" && !collecting ? C.red
-      : collecting || comparison?.status !== "no_alert" ? C.amber : C.green;
-  const description = current.state === "requires_rebootstrap"
-    ? "The active reference needs to be rebuilt before this monitor can decide."
-    : awaitingEvaluator ? "Membership is fixed. Run the selected evaluator, then run the monitor again."
-      : collecting ? "The frozen reference is waiting for a complete prospective cohort."
-        : candidate ? "Stored historical check; not active monitoring. Review the comparison in Monitor."
-          : comparison?.status === "no_alert" ? "The selected metrics did not meet the alert threshold. This does not establish task quality."
-            : comparison?.status === "alert" ? "A selected metric crossed its alert threshold. Inspect the comparison and evidence in Monitor."
-              : "The selected metrics cannot support a decision yet. Inspect coverage in Monitor.";
-  return <Panel className={compact ? "px-5 py-3" : "p-5"} style={{ borderColor: color }}>
-    <div className="flex flex-wrap items-start justify-between gap-3">
-      <div>
-        <div className="text-xs font-mono" style={{ color }}>{candidate ? "HISTORICAL CHECK" : "ACTIVE MONITOR"}</div>
-        <div className="font-semibold mt-1">{title}</div>
-        <div className="text-sm mt-1" style={{ color: C.sub }}>{description}</div>
-      </div>
-      {onOpen && <button type="button" className="text-sm underline" style={{ color: C.green }}
-        onClick={() => onOpen(candidate ? "history" : "status")}>Open Monitor details</button>}
-    </div>
-  </Panel>;
-}
-
-function MonitorOverview({ monitor, onOpen, compact = false, showEmpty = false }) {
-  if (!monitor?.active && !monitor?.candidate) {
-    if (!showEmpty) return null;
-    const unconfigured = monitor?.state === "not_configured";
-    return <Panel className="px-5 py-3" style={{ borderColor: C.border }}>
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div><div className="text-xs font-mono" style={{ color: C.amber }}>MONITORING STATUS</div>
-          <div className="font-semibold mt-1">{unconfigured ? "Monitoring not configured" : "Monitoring status unavailable"}</div>
-          <p className="text-xs mt-1" style={{ color: C.sub }}>Recorded issues below are findings, not active monitoring alerts.</p></div>
-        {onOpen && <button type="button" className="text-sm underline" style={{ color: C.green }} onClick={() => onOpen("status")}>Open Monitor</button>}
-      </div>
-    </Panel>;
-  }
-  return <div className="space-y-3">
-    {monitor.active && MonitorResult({ current: monitor.active, onOpen, compact })}
-    {monitor.candidate && MonitorResult({ current: monitor.candidate, onOpen, compact })}
-  </div>;
-}
-
-function Overview({ data = SEED, includeMonitor = true }) {
-  const DATA = data;
-  const m = DATA.meta;
-  const health = DATA.clusterHealth || { status: "empty", messages: [], minSampleSize: 30, clustersMeetingSampleFloor: 0, nClusters: 0 };
-  const healthColor = health.status === "ready" ? C.green : health.status === "fragmented" ? C.red : C.amber;
-  const healthLabel = health.status === "ready" ? "Ready" : health.status === "fragmented" ? "Fragmented" : "Needs volume";
-  const coverage = DATA.coverage || {};
-  const deterministic = coverage.deterministicAnalysis || {
-    status: "never_run", availableRuns: m.totalAgentRuns || 0, analyzedRuns: 0,
-    availableTraces: m.totalTraces || 0, analyzedTraces: 0, complete: false,
-  };
-  const evaluationCoverage = coverage.evaluation || {
-    traces: m.totalTraces || 0, judged: m.totalJudged || 0,
-    notJudged: Math.max(0, (m.totalTraces || 0) - (m.totalJudged || 0)),
-    judgeErrors: 0, completedCalls: m.totalJudged || 0, errorCalls: 0,
-  };
-  const seriesColors = [C.accent, C.accent2, C.amber, C.green, C.blue, C.cyan];
-  const providerSeries = DATA.providers.map((provider, index) => {
-    const presentation = providerPresentation(
-      provider.rawProvider ?? provider.key,
-      provider.model,
-      provider.label,
-    );
-    return {
-      key: provider.key,
-      label: presentation.label,
-      color: presentation.color || seriesColors[index % seriesColors.length],
-    };
-  });
-  const clusterMode = providerSeries.length === 1
-    && DATA.clusters.length > 1
-    && (DATA.clusterPassrate || []).length > 0;
-  const clusterSeries = DATA.clusters.map((cluster, index) => ({
-    key: cluster.cluster_id,
-    label: cluster.display_name || cluster.cluster_id,
-    color: seriesColors[(index + 1) % seriesColors.length],
-  }));
-  const qualitySeries = clusterMode ? clusterSeries : providerSeries;
-  const qualityRows = clusterMode ? DATA.clusterPassrate : DATA.passrate;
-  return (
-    <div className="space-y-5">
-      {includeMonitor && MonitorOverview({ monitor: DATA.monitor })}
-
-      <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-px border-y" style={{ borderColor: C.border, background: C.border }}>
-        <MetricCell label="Agent runs" value={(m.totalAgentRuns || 0).toLocaleString()} sub={(m.agentRunSources || []).map((item) => `${item.sourceKind}: ${item.runs}`).join(" · ") || "No agent runs"} icon={Boxes} accent={C.green} />
-        <MetricCell label="Traces captured" value={m.totalTraces.toLocaleString()} sub={`${m.providers} providers`} icon={Activity} accent={C.accent} />
-        <MetricCell label="Responses judged" value={m.totalJudged} sub={`${DATA.dimensionOverall.length}-dimension rubric`} icon={Scale} accent={C.blue} />
-        <MetricCell label="Cohort monitor alerts" value={monitorAlertCount(DATA.monitor)} sub={monitorAlertSummary(DATA.monitor)} icon={Signal} accent={monitorAlertCount(DATA.monitor) ? C.red : C.green} />
-        <MetricCell label="Estimated spend" value={usd(m.totalCost)} sub={m.totalCostStatus === "partial" ? "partial pricing coverage" : m.totalCostStatus === "unavailable" ? "pricing unavailable" : formatCaptureRange(m.runStart, m.runEnd, m.durationHours)} icon={DollarSign} accent={m.totalCostStatus === "complete" ? C.green : C.amber} />
-        <MetricCell label="Intent clusters" value={m.clusters} sub={`median ${health.medianClusterSize || 0} traces`} icon={Layers} accent={healthColor} />
-        <MetricCell label="Cluster readiness" value={healthLabel} sub={`${health.clustersMeetingSampleFloor}/${health.nClusters} meet n=${health.minSampleSize}`} icon={Gauge} accent={healthColor} />
-      </div>
-
-      <Panel className="p-5">
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div><div className="font-semibold text-sm">Evidence and analysis coverage</div><div className="text-xs mt-1" style={{ color: C.faint }}>Capture, deterministic analysis, judge execution, and drift are reported independently.</div></div>
-          <Pill color={deterministic.status === "completed" ? C.green : deterministic.status === "error" ? C.red : C.amber}>{deterministic.status.replaceAll("_", " ")}</Pill>
-        </div>
-        <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3 mt-4">
-          <MetricCell label="Agent runs analyzed" value={`${deterministic.analyzedRuns}/${deterministic.availableRuns}`} sub={deterministic.complete ? "complete persisted snapshot" : "partial or not run"} />
-          <MetricCell label="Traces analyzed" value={`${deterministic.analyzedTraces}/${deterministic.availableTraces}`} sub="deterministic, judge-free analysis" />
-          <MetricCell label="Selected Trace evaluator" value={`${evaluationCoverage.judged} judged`} sub={`${evaluationCoverage.notJudged} not judged · ${evaluationCoverage.judgeErrors} judge errors`} />
-        </div>
-      </Panel>
-
-      {health.messages && health.messages.length > 0 && (
-        <div className="px-4 py-3 border flex items-start gap-2 text-sm" style={{ borderColor: healthColor, background: C.amberBg, color: C.text, borderRadius: 3 }}>
-          <AlertTriangle size={16} style={{ color: healthColor, marginTop: 1, flexShrink: 0 }} />
-          <span>{health.messages.join(" ")}</span>
-        </div>
-      )}
-
-      <div className="grid lg:grid-cols-12 gap-5">
-        <Panel className="p-5 lg:col-span-8">
-          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-1">
-            <div className="font-semibold text-sm">Judge pass-rate over time</div>
-            <SeriesLegend series={qualitySeries} />
-          </div>
-          <div className="text-xs mb-3" style={{ color: C.sub }}>
-            {clusterMode ? "Pass rate by intent cluster · single-provider store" : "Pass rate by provider · current capture window"}
-          </div>
-          <ResponsiveContainer width="100%" height={260}>
-            <LineChart data={qualityRows} margin={{ top: 5, right: 8, left: -18, bottom: 0 }}>
-              <CartesianGrid stroke={C.grid} vertical={false} />
-              <XAxis dataKey="hour" tick={{ fill: C.sub, fontSize: 12 }} stroke={C.border} tickFormatter={(hour) => timelineTick(m.runStart, hour)} />
-              <YAxis domain={[0, 100]} tick={{ fill: C.sub, fontSize: 12 }} stroke={C.border} tickFormatter={(v) => `${v}%`} />
-              <Tooltip content={<ChartTooltip unit="%" />} />
-              {Number.isFinite(m.regressionHour) && (
-                <ReferenceLine x={m.regressionHour} stroke={C.red} strokeDasharray="4 4" label={{ value: "change point", fill: C.red, fontSize: 11, position: "top" }} />
-              )}
-              {qualitySeries.map((series) => (
-                <Line key={series.key} type="monotone" dataKey={series.key} name={series.label} stroke={series.color} strokeWidth={2.4} dot={{ r: 2.5 }} connectNulls isAnimationActive={false} />
-              ))}
-            </LineChart>
-          </ResponsiveContainer>
-        </Panel>
-
-        <Panel className="p-5 lg:col-span-4" style={{ background: C.panel2 }}>
-          <div className="flex items-start justify-between gap-3 mb-1">
-            <div>
-              <div className="font-semibold text-sm">Intent readiness</div>
-              <div className="text-xs mt-1" style={{ color: C.sub }}>Stable assignment volume by cluster</div>
-            </div>
-            <Pill color={healthColor} bg={health.status === "ready" ? C.greenBg : C.amberBg}>{healthLabel}</Pill>
-          </div>
-          <div className="grid grid-cols-2 gap-px my-4" style={{ background: C.border }}>
-            <div className="p-3" style={{ background: C.panel }}>
-              <div className="text-xs font-mono" style={{ color: C.faint }}>READY CLUSTERS</div>
-              <div className="font-semibold mt-1">{health.clustersMeetingSampleFloor}/{health.nClusters}</div>
-            </div>
-            <div className="p-3" style={{ background: C.panel }}>
-              <div className="text-xs font-mono" style={{ color: C.faint }}>SAMPLE FLOOR</div>
-              <div className="font-semibold mt-1">n={health.minSampleSize}</div>
-            </div>
-          </div>
-          <ResponsiveContainer width="100%" height={188}>
-            <BarChart data={DATA.clusters} layout="vertical" margin={{ top: 0, right: 16, left: 8, bottom: 0 }}>
-              <XAxis type="number" hide />
-              <YAxis type="category" dataKey={(cluster) => cluster.display_name || cluster.cluster_id} tick={{ fill: C.sub, fontSize: 12 }} stroke={C.border} width={120} />
-              <Tooltip content={<ChartTooltip title=" " />} cursor={{ fill: "rgba(78,225,170,0.05)" }} />
-              <Bar dataKey="n" name="traces" radius={[0, 2, 2, 0]} fill={C.accent} isAnimationActive={false}>
-                {DATA.clusters.map((_, i) => <Cell key={i} fill={i % 2 ? C.accent2 : C.accent} />)}
-              </Bar>
-            </BarChart>
-          </ResponsiveContainer>
-        </Panel>
-      </div>
-
-      <Panel className="p-5">
-        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-3">
-          <div className="font-semibold text-sm">Mean latency by provider</div>
-          <SeriesLegend series={providerSeries} />
-        </div>
-        <ResponsiveContainer width="100%" height={210}>
-          <AreaChart data={DATA.tsRows} margin={{ top: 5, right: 8, left: -18, bottom: 0 }}>
-            <defs>
-              {providerSeries.map((series) => (
-                <linearGradient key={series.key} id={`g-${series.key}`} x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%" stopColor={series.color} stopOpacity={0.35} />
-                  <stop offset="100%" stopColor={series.color} stopOpacity={0.02} />
-                </linearGradient>
-              ))}
-            </defs>
-            <CartesianGrid stroke={C.grid} vertical={false} />
-            <XAxis dataKey="hour" tick={{ fill: C.sub, fontSize: 12 }} stroke={C.border} tickFormatter={(hour) => timelineTick(m.runStart, hour)} />
-            <YAxis tick={{ fill: C.sub, fontSize: 12 }} stroke={C.border} tickFormatter={formatLatency} />
-            <Tooltip content={<ChartTooltip unit="s" />} />
-            {providerSeries.map((series) => (
-              <Area key={series.key} type="monotone" dataKey={`${series.key}_lat`} name={series.label} stroke={series.color} strokeWidth={2} fill={`url(#g-${series.key})`} connectNulls isAnimationActive={false} />
-            ))}
-          </AreaChart>
-        </ResponsiveContainer>
-      </Panel>
     </div>
   );
 }
@@ -1292,25 +1107,16 @@ function GateCell({ label, value, color }) {
   );
 }
 
-function SeriesLegend({ series }) {
-  return (
-    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs" style={{ color: C.sub }}>
-      {series.map((item) => (
-        <span key={item.key} className="flex items-center gap-1.5"><Dot color={item.color} />{item.label}</span>
-      ))}
-    </div>
-  );
-}
-
 /* ---------------------------------------------------------------- TRACES */
-function Traces({ data = SEED, source = "sample", traceOffset = 0, reloading = false, onTracePageChange = null, judgeStatus = "all", selectedTraceId: routedTraceId = null, onJudgeStatus = null, onSelectTrace = null, onEvaluateTrace = null }) {
+function Traces({ data = SEED, source = "sample", traceOffset = 0, reloading = false, onTracePageChange = null, judgeStatus = "all", selectedTraceId: routedTraceId = null, traceDate = null, onClearDate = null, onJudgeStatus = null, onSelectTrace = null, onEvaluateTrace = null }) {
   const DATA = data;
   const [prov, setProv] = useState("all");
   const [capture, setCapture] = useState("all");
   const [q, setQ] = useState("");
   const [selectedTraceId, setSelectedTraceId] = useState(routedTraceId);
   useEffect(() => setSelectedTraceId(routedTraceId), [routedTraceId]);
-  const sel = DATA.samples.find((sample) => sample.trace_id === selectedTraceId) || null;
+  const sel = DATA.samples.find((sample) => sample.trace_id === selectedTraceId)
+    || (DATA.selectedTrace?.trace_id === selectedTraceId ? DATA.selectedTrace : null);
   const providerOptions = DATA.providers.map((provider) => {
     const presentation = providerPresentation(
       provider.rawProvider ?? provider.key,
@@ -1335,6 +1141,10 @@ function Traces({ data = SEED, source = "sample", traceOffset = 0, reloading = f
   return (
     <div className="flex flex-col xl:flex-row gap-5">
       <div className="flex-1 min-w-0">
+        {traceDate && <div className="mb-3 text-sm flex flex-wrap items-center gap-3" role="status">
+          <span>Model calls on {traceDate} UTC</span>
+          <button type="button" className="underline" style={{ color: C.accent }} onClick={onClearDate}>Show all dates</button>
+        </div>}
         <div className="flex items-center gap-2 mb-3 flex-wrap">
           <div className="flex items-center gap-2 px-3 py-1.5 border flex-1" style={{ borderColor: C.border, background: C.panel, minWidth: 180, borderRadius: 3 }}>
             <Search size={14} style={{ color: C.faint }} />
@@ -1395,7 +1205,7 @@ function Traces({ data = SEED, source = "sample", traceOffset = 0, reloading = f
                   <span><Pill color={C.sub}>{s.cluster_label || s.cluster_id || "Unassigned"}</Pill></span>
                   <span className="text-xs" style={{ color: C.sub }}>{s.input_tokens ?? "—"}/{s.output_tokens ?? "—"}</span>
                   <span className="text-xs" style={{ color: C.sub }}>{s.latency_ms ? `${(s.latency_ms / 1000).toFixed(1)}s` : "—"}</span>
-                  <span>{s.providerStatus === "provider_error" ? <Pill color={C.red} bg={C.redBg}>provider error</Pill> : <Pill color={C.green} bg={C.greenBg}>provider succeeded</Pill>}</span>
+                  <span>{s.traceState === "unfinished" ? <Pill color={C.amber} bg={C.amberBg}>Unfinished</Pill> : s.providerStatus === "provider_error" ? <Pill color={C.red} bg={C.redBg}>provider error</Pill> : <Pill color={C.faint}>No provider error recorded</Pill>}</span>
                   <span>{judgmentStatus === "judge_error" ? <Pill color={C.red} bg={C.redBg}>judge error</Pill> : judgmentStatus === "fail" ? <Pill color={C.red} bg={C.redBg}>fail</Pill> : judgmentStatus === "unclear" ? <Pill color={C.amber} bg={C.amberBg}>unclear</Pill> : judgmentStatus === "pass" ? <Pill color={C.green} bg={C.greenBg}>pass</Pill> : <Pill color={C.faint}>not evaluated</Pill>}</span>
                 </button>
               );
@@ -1406,7 +1216,9 @@ function Traces({ data = SEED, source = "sample", traceOffset = 0, reloading = f
         </Panel>
         {source === "live" ? (
           <div className="text-xs mt-2 flex flex-wrap items-center gap-2" style={{ color: C.faint }}>
-            <span className="flex-1">{`Showing ${pageStart.toLocaleString()}–${pageEnd.toLocaleString()} of ${available.toLocaleString()} application traces. Judge telemetry remains excluded. Filters apply to this page.`}</span>
+            <span className="flex-1">{traceDate
+              ? `Showing ${pageStart.toLocaleString()}–${pageEnd.toLocaleString()} of ${available.toLocaleString()} model calls on this UTC date. Judge and replay traffic are excluded. Date filters before paging; other filters apply to this page.`
+              : `Showing ${pageStart.toLocaleString()}–${pageEnd.toLocaleString()} of ${available.toLocaleString()} application traces. Judge telemetry remains excluded. Filters apply to this page.`}</span>
             <button onClick={() => onTracePageChange(Math.max(0, traceOffset - pageSize))}
               disabled={reloading || traceOffset === 0 || !onTracePageChange}
               className="px-2.5 py-1 border" style={{ borderColor: C.border, borderRadius: 3 }}>Previous</button>
@@ -1423,7 +1235,7 @@ function Traces({ data = SEED, source = "sample", traceOffset = 0, reloading = f
 
       {/* detail */}
       <div className="shrink-0" style={{ width: "min(100%, 360px)" }}>
-        {sel ? <TraceDetail s={sel} onEvaluate={onEvaluateTrace ? () => onEvaluateTrace(sel.trace_id) : null} onClose={() => {
+        {sel ? <TraceDetail s={sel} source={source} onEvaluate={onEvaluateTrace ? () => onEvaluateTrace(sel.trace_id) : null} onClose={() => {
           setSelectedTraceId(null);
           onSelectTrace?.(null);
         }} /> : (
@@ -1439,13 +1251,48 @@ function Traces({ data = SEED, source = "sample", traceOffset = 0, reloading = f
   );
 }
 
-function TraceDetail({ s, onClose, onEvaluate = null }) {
+function TraceSpans({ traceId, root }) {
+  const [state, setState] = useState({ spans: [], truncated: false, loading: true, error: null });
+  const [selected, setSelected] = useState(null);
+  useEffect(() => {
+    let active = true;
+    setState({ spans: [], truncated: false, loading: true, error: null });
+    setSelected(null);
+    fetch(`${root}/api/setup/token`, { credentials: "same-origin" })
+      .then((response) => response.ok ? response.json() : Promise.reject(new Error("Span access unavailable")))
+      .then((auth) => fetch(`${root}/api/explain/spans/${encodeURIComponent(traceId)}`, {
+        credentials: "same-origin", headers: { "X-Verdict-Setup": auth.setupToken },
+      }))
+      .then((response) => response.ok ? response.json() : Promise.reject(new Error("Span list unavailable")))
+      .then((body) => { if (active) setState({ spans: body.spans || [], truncated: Boolean(body.truncated), loading: false, error: null }); })
+      .catch((error) => { if (active) setState({ spans: [], truncated: false, loading: false, error: String(error) }); });
+    return () => { active = false; };
+  }, [root, traceId]);
+  return <div className="border p-3 text-xs" style={{ borderColor: C.border }}>
+    <strong>Recorded spans</strong>
+    {state.loading ? <p className="mt-2" style={{ color: C.sub }}>Loading spans…</p>
+      : state.error ? <p role="alert" className="mt-2" style={{ color: C.amber }}>{state.error}</p>
+        : state.spans.length === 0 ? <p className="mt-2" style={{ color: C.sub }}>No tenant-owned spans recorded for this call.</p>
+          : <><div className="mt-2 space-y-1">{state.spans.map((span) => <button type="button"
+            key={span.spanId} onClick={() => setSelected(span)}
+            className="block text-left w-full border p-2" style={{ borderColor: selected?.spanId === span.spanId ? C.green : C.border }}>
+            <strong>{span.name || "Unnamed span"}</strong> · {span.durationMs == null ? "duration unknown" : `${span.durationMs} ms`}
+            {span.error && <span style={{ color: C.red }}> · {span.error}</span>}
+          </button>)}</div>
+            {state.truncated && <p className="mt-2" style={{ color: C.amber }}>Showing the newest 100 tenant-owned spans.</p>}
+            {selected && <EvidenceExplain key={selected.spanId} root={root} scope="span"
+              traceId={traceId} spanId={selected.spanId} />}</>}
+  </div>;
+}
+
+function TraceDetail({ s, onClose, onEvaluate = null, source = "sample" }) {
   const provider = providerPresentation(s.provider, s.request_model);
   const recorded = traceTime(s);
   const hasContent = capturedContent(s);
   const hasPrompt = s.prompt_redacted != null;
   const hasResponse = s.response_redacted != null;
-  const toolOnlyResponse = !hasResponse && hasPrompt && !s.error && s.finish_reason === "tool_use";
+  const traceErrorRecorded = s.providerStatus === "provider_error" || s.error != null;
+  const toolOnlyResponse = !hasResponse && hasPrompt && !traceErrorRecorded && s.finish_reason === "tool_use";
   const contentLabel = hasPrompt && hasResponse
     ? "Content captured"
     : hasContent
@@ -1458,6 +1305,7 @@ function TraceDetail({ s, onClose, onEvaluate = null }) {
   const facts = s.deterministicFacts || null;
   const evidenceReason = {
     provider_call_failed: "Provider call failed",
+    trace_unfinished: "Call unfinished; response may be partial",
     prompt_not_captured: "Prompt evidence missing",
     response_not_captured: toolOnlyResponse ? "No assistant text (tool use)" : "Response evidence missing",
   }[facts?.notEvaluableReason] || facts?.notEvaluableReason;
@@ -1474,7 +1322,7 @@ function TraceDetail({ s, onClose, onEvaluate = null }) {
         <div className="flex flex-wrap gap-1.5">
           <Pill color={C.sub}>{s.cluster_label || s.cluster_id || "Unassigned"}</Pill>
           <Pill color={hasContent ? C.green : C.amber} bg={hasContent ? C.greenBg : C.amberBg}>{contentLabel}</Pill>
-          <Pill color={s.error ? C.red : C.green} bg={s.error ? C.redBg : C.greenBg}>{s.error ? "Failed trace" : "Provider succeeded"}</Pill>
+          <Pill color={s.traceState === "unfinished" ? C.amber : traceErrorRecorded ? C.red : C.faint} bg={s.traceState === "unfinished" ? C.amberBg : traceErrorRecorded ? C.redBg : undefined}>{s.traceState === "unfinished" ? "Unfinished" : traceErrorRecorded ? "Provider error recorded" : "No provider error recorded"}</Pill>
           <Pill color={judgeStatus === "judge_error" ? C.red : s.judgment ? C.blue : C.faint}>{judgeLabel}</Pill>
         </div>
         <div className="text-xs font-mono" style={{ color: C.sub }}>{recorded.absolute}{recorded.relative ? ` · ${recorded.relative}` : ""}</div>
@@ -1508,7 +1356,7 @@ function TraceDetail({ s, onClose, onEvaluate = null }) {
           <div className="text-xs font-mono" style={{ color: C.accent2 }}>JUDGE-FREE TRACE FACTS</div>
           <div className="text-xs mt-1" style={{ color: C.faint }}>Literal evidence and structural checks only; these do not determine correctness, sentiment, or response quality.</div>
           {facts ? <div className="grid grid-cols-2 gap-x-3 gap-y-2 mt-3">
-            <TraceFact label="Provider outcome" value={facts.providerOutcome} />
+            <TraceFact label="Provider outcome" value={s.traceState === "unfinished" ? "Unfinished; no provider error recorded" : facts.providerOutcome === "failed" ? "Provider error recorded" : "No provider error recorded"} />
             <TraceFact label="Judge evidence" value={facts.judgeEligible ? "Eligible" : evidenceReason || "Not evaluable"} />
             <TraceFact label="Prompt evidence" value={facts.promptPresent ? "Present" : "Missing"} />
             <TraceFact label="Response evidence" value={facts.responsePresent ? "Present" : toolOnlyResponse ? "No assistant text (tool use)" : "Missing"} />
@@ -1555,6 +1403,8 @@ function TraceDetail({ s, onClose, onEvaluate = null }) {
         )}
         <div className="text-xs font-mono pt-1" style={{ color: C.faint }}>trace {s.trace_id.slice(0, 12)}</div>
         {onEvaluate && <button type="button" onClick={onEvaluate} className="border px-3 py-2 text-sm w-full" style={{ borderColor: C.green, color: C.green }}>Evaluate this model call</button>}
+        {source === "live" && <EvidenceExplain root={mountedConfigUrl().replace(/\/api\/config$/, "")} scope="trace" traceId={s.trace_id} />}
+        {source === "live" && <TraceSpans traceId={s.trace_id} root={mountedConfigUrl().replace(/\/api\/config$/, "")} />}
       </div>
     </Panel>
   );
@@ -1820,20 +1670,6 @@ function MiniBar({ title, data, fmt }) {
 }
 
 /* ------------------------------------------------------------------- APP */
-function App({ data = SEED, source = "sample", onReload, onEvaluatorChange, onTracePageChange, onTraceFilterChange, traceOffset = 0, reloading, loadError, operationsUrl = null, operationsPageUrl = null }) {
-  const [mode, setMode] = useState("landing");
-  return (
-    <div style={{ fontFamily: "ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif", height: "100%", background: C.bg }}>
-      {mode === "landing"
-        ? <Landing onEnter={() => setMode("dashboard")} />
-        : <Dashboard data={data} onExit={() => setMode("landing")} source={source} onReload={onReload}
-          onEvaluatorChange={onEvaluatorChange} onTracePageChange={onTracePageChange} onTraceFilterChange={onTraceFilterChange} traceOffset={traceOffset}
-          reloading={reloading} loadError={loadError}
-          operationsUrl={operationsUrl} operationsPageUrl={operationsPageUrl} />}
-    </div>
-  );
-}
-
 export function LandingRoot() {
   return (
     <div style={{ fontFamily: "ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif", minHeight: "100%", background: C.bg }}>
@@ -1850,16 +1686,8 @@ export function DashboardRoot() {
       <Dashboard data={data.snapshot} onExit={() => { window.location.href = "/"; }} source={data.source}
         onReload={data.reload} onEvaluatorChange={data.load} onTracePageChange={data.loadTracePage}
         onTraceFilterChange={data.loadTraceFilter}
-        traceOffset={data.traceOffset} reloading={data.loading}
+        traceOffset={data.traceOffset} loadedTraceFilter={{ traceDate: data.traceDate, traceJudgeStatus: data.traceJudgeStatus, traceId: data.traceId }} reloading={data.loading}
         loadError={data.error} operationsUrl={operationsUrl} operationsPageUrl={operationsPageUrl} />
     </div>
   );
-}
-
-export default function Root() {
-  const data = useDashboardData();
-  const { operationsUrl, operationsPageUrl } = useOperationsConfig();
-  return <App data={data.snapshot} source={data.source} onReload={data.reload}
-    onEvaluatorChange={data.load} onTracePageChange={data.loadTracePage} onTraceFilterChange={data.loadTraceFilter} traceOffset={data.traceOffset}
-    reloading={data.loading} loadError={data.error} operationsUrl={operationsUrl} operationsPageUrl={operationsPageUrl} />;
 }

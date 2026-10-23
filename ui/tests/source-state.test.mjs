@@ -49,9 +49,10 @@ test("agent runs open the chart-first overview", () => {
   assert.equal(initialDashboardTab(meta), "overview");
 });
 
-test("trace-only and empty stores retain their distinct first destinations", () => {
+test("trace-only and empty stores enter the source-aware Home flow", () => {
   assert.equal(initialDashboardTab({ totalTraces: 1, totalAgentRuns: 0 }), "overview");
-  assert.equal(initialDashboardTab({ totalTraces: 0, totalAgentRuns: 0 }), "settings");
+  assert.equal(initialDashboardTab({ totalTraces: 0, totalAgentRuns: 0 }), "overview");
+  assert.equal(initialDashboardTab({}), "overview");
 });
 
 test("setup network failures identify the unreachable Verdict origin", () => {

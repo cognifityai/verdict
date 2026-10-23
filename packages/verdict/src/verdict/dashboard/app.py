@@ -24,12 +24,13 @@ import sqlite3
 from collections import Counter, defaultdict
 from collections.abc import Mapping
 from copy import deepcopy
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
+from itertools import islice
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from verdict.analysis import analyze_agent_run, outcome_reported
+from verdict.analysis import analyze_agent_run, outcome_reported, recorded_event_issue
 from verdict.analysis_records import analysis_run_from_json
 from verdict.cluster_health import UNCLUSTERED_ID, assess_cluster_health
 from verdict.dashboard import agent_evidence_queries
@@ -38,6 +39,10 @@ from verdict.dashboard.analysis_service import (
     SCOPE_KEY,
     read_latest_analysis,
     run_analysis,
+)
+from verdict.dashboard.local_history_page import (
+    complete_local_bundle,
+    verified_local_positions,
 )
 from verdict.dashboard.query import PostgresSession as _PostgresSession
 from verdict.dashboard.query import QuerySession as _QuerySession
@@ -51,6 +56,7 @@ from verdict.dashboard.registry import (
 from verdict.dashboard.registry import (
     build_registry_bundle as _build_registry_bundle,
 )
+from verdict.dashboard.run_outcome_preview import build_run_outcome_preview
 from verdict.dashboard.storage_url import is_postgres_storage
 from verdict.dashboard.turn_analysis import MAX_TURN_ANALYSIS_EVENTS, analyze_turn_events
 from verdict.dashboard.usage import build_usage_view
@@ -60,15 +66,20 @@ from verdict.evidence import (
     EvidenceState,
     ToolOrigin,
     _load_json_without_duplicate_tool_origin,
+    disclosed_event_attributes,
     event_order_key,
 )
+from verdict.local_source_revision import local_scope_partial, verified_recent_findings
 from verdict.metrics import ScoreCounts, verdict_label
 from verdict.monitor_inputs import LOCAL_TENANT
-from verdict.normalized_evidence import agent_turn_from_row, normalized_bundle_digest
+from verdict.normalized_evidence import (
+    agent_turn_from_row,
+    normalized_bundle_digest,
+)
 from verdict.redaction import redact, redact_structure, sanitize_agent_event_attributes
 from verdict.storage.sqlite import sqlite_path
 from verdict.telemetry.model import safe_tenant_id
-from verdict.trace_facts import deterministic_trace_facts
+from verdict.trace_facts import deterministic_trace_facts, trace_evidence_state
 
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
@@ -125,11 +136,14 @@ MAX_TRACE_SAMPLES = 30
 # without weakening the default fail-closed budget used by capture paths.
 MAX_AGENT_DETAIL_REDACTION_NODES = 50_000
 MAX_AGENT_DETAIL_REDACTION_CHARACTERS = 16_000_000
+MAX_INSIGHT_LOCAL_EXPANSION_ROWS = 5_000
 _DISPLAY_WORKLOAD = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,63}")
 _FINDING_SUMMARIES = {
     "run_status_unknown": "The source does not expose a terminal status for these agent sessions.",
     "response_not_evaluable": "At least one response is unavailable, so response quality is not evaluable.",
     "event_capture_partial": "The source exceeded the bounded event limit; event analysis is partial.",
+    "source_capture_partial": "The local source has evidence outside the captured prefix, an incomplete final record, or unverified coverage; whole-run analysis is partial.",
+    "tool_outcomes_incomplete": "Recorded tool calls do not all have matching results; outcome coverage is incomplete.",
     "tool_error": "One or more captured tool results reported failure.",
     "command_failed": "One or more captured commands returned a non-zero status.",
     "business_outcome_failed": "One or more explicit business outcomes reported failure.",
@@ -218,7 +232,8 @@ def _dashboard_agent_event_attributes(event_type: object, raw: object) -> dict[s
         return {}
     if not isinstance(decoded, dict):
         return {}
-    attributes = sanitize_agent_event_attributes(event_type, decoded)
+    attributes = disclosed_event_attributes(
+        sanitize_agent_event_attributes(event_type, decoded))
     origin = attributes.pop("tool_origin", None)
     if (
         event_type == "tool_call"
@@ -394,6 +409,32 @@ def _trace_tenant_scope(
     return f"{alias}.tenant_id=?", (tenant,)
 
 
+def _owned_trace_ids(
+    session: _QuerySession, tenant: str, trace_ids: set[object],
+) -> set[str]:
+    """Resolve bounded Agent Event links through the tenant-owned Trace table."""
+    identifiers = sorted(
+        trace_id for trace_id in trace_ids
+        if isinstance(trace_id, str) and trace_id and "\x00" not in trace_id
+        and len(trace_id.encode("utf-8")) <= 256
+    )
+    if not identifiers or not session.table_exists("traces"):
+        return set()
+    scope, scope_params = _trace_tenant_scope(
+        tenant, session.columns("traces"), alias="t",
+    )
+    owned: set[str] = set()
+    for start in range(0, len(identifiers), 500):
+        chunk = identifiers[start:start + 500]
+        placeholders = ",".join("?" for _ in chunk)
+        owned.update(str(row["trace_id"]) for row in session.execute(
+            "SELECT t.trace_id FROM traces t WHERE "
+            f"t.trace_id IN ({placeholders}) AND {scope}",  # nosec B608 -- fixed predicate and placeholders
+            (*chunk, *scope_params),
+        ))
+    return owned
+
+
 # --------------------------------------------------------------------------- #
 #  Aggregation — produces the exact shape the dashboard consumes
 # --------------------------------------------------------------------------- #
@@ -405,6 +446,7 @@ def build_bundle(
     trace_offset: int = 0,
     trace_judge_status: str = "all",
     trace_id: str | None = None,
+    trace_date: str | None = None,
     report_days: int = 0,
 ) -> dict:
     if type(report_days) is not int or report_days not in REPORT_PERIOD_DAYS:
@@ -423,6 +465,14 @@ def build_bundle(
         not isinstance(trace_id, str) or not trace_id or len(trace_id.encode("utf-8")) > 256
     ):
         raise ValueError("invalid trace_id")
+    if trace_date is not None:
+        if not isinstance(trace_date, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", trace_date):
+            raise ValueError("invalid trace_date")
+        try:
+            if date.fromisoformat(trace_date).isoformat() != trace_date:
+                raise ValueError("invalid trace_date")
+        except ValueError as exc:
+            raise ValueError("invalid trace_date") from exc
     configured = str(storage)
     if _is_postgres(configured):
         return _build_from_postgres(
@@ -432,6 +482,7 @@ def build_bundle(
             trace_offset=trace_offset,
             trace_judge_status=trace_judge_status,
             trace_id=trace_id,
+            trace_date=trace_date,
             report_days=report_days,
         )
     path = _sqlite_path(configured)
@@ -443,6 +494,7 @@ def build_bundle(
             trace_offset=trace_offset,
             trace_judge_status=trace_judge_status,
             trace_id=trace_id,
+            trace_date=trace_date,
             report_days=report_days,
         )
     except sqlite3.OperationalError as exc:
@@ -463,6 +515,7 @@ def build_bundle(
             trace_offset=trace_offset,
             trace_judge_status=trace_judge_status,
             trace_id=trace_id,
+            trace_date=trace_date,
             report_days=report_days,
         )
 
@@ -559,7 +612,7 @@ def build_agent_usage_bundle(
             raise ImportError("PostgreSQL dashboard support requires the postgres extra") from exc
         with psycopg.connect(configured, autocommit=False, row_factory=dict_row) as connection:
             with connection.transaction():
-                connection.execute("SET TRANSACTION READ ONLY")
+                connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
                 result = builder(_PostgresSession(connection))
     else:
         path = _sqlite_path(configured)
@@ -571,9 +624,20 @@ def build_agent_usage_bundle(
             connection.commit()
         finally:
             connection.close()
-    redacted = redact_structure(result)
+    # Exact run/event IDs are dashboard navigation keys. Preserve only the
+    # bounded selected-day issue examples after redacting descriptive fields;
+    # changing an ID would make its evidence link resolve to a different key.
+    issue_events = result.get("selectedDayIssues", {}).get("events", [])
+    display = {**result, "selectedDayIssues": {
+        **result["selectedDayIssues"],
+        "events": [{**event, "runId": "", "eventId": ""} for event in issue_events],
+    }}
+    redacted = redact_structure(display)
     if not isinstance(redacted, dict):
         raise DashboardBundleLimitError("bounded agent usage bundle exceeded redaction budget")
+    for event, exact in zip(redacted["selectedDayIssues"]["events"], issue_events, strict=True):
+        event["runId"] = exact["runId"]
+        event["eventId"] = exact["eventId"]
     return redacted
 
 
@@ -673,6 +737,9 @@ def build_agent_session_bundle(
         bundles = agent_evidence_queries.load_bundles(
             session, tenant, limit=len(run_ids), run_ids=run_ids, oldest_first=True,
         )
+        local_revisions = agent_evidence_queries.local_revisions(
+            session, tenant, tuple(bundle.run.run_id for bundle in bundles),
+        )
         turns = []
         events = []
         runs = []
@@ -682,17 +749,31 @@ def build_agent_session_bundle(
         known_tokens = 0
         list_price = 0.0
         priced_turns = 0
+        session_source_partial = False
         for bundle in bundles:
             run_id = bundle.run.run_id
-            analysis = analyze_agent_run(bundle)
+            local_revision = local_revisions.get(run_id)
+            source_partial = local_scope_partial(
+                bundle.session.source_kind, local_revision,
+                max((turn.sequence for turn in bundle.turns), default=-1), None,
+            )
+            session_source_partial |= source_partial
+            analysis = analyze_agent_run(
+                bundle, include_tool_outcome_coverage=True,
+                local_revision=local_revision,
+            )
             runs.append({"runId": run_id, "status": bundle.run.status.value,
                          "startedAt": bundle.run.started_at.isoformat(),
                          "agentName": bundle.run.agent_name or None})
             for finding in analysis.findings:
                 findings.append({"runId": run_id, "code": finding.code,
                                  "severity": finding.severity, "message": finding.message,
+                                 "scope": "historical_prefix" if source_partial else "run",
                                  "evidenceEventIds": list(finding.evidence_event_ids)})
-            for recommendation in run_recommendations(bundle):
+            for recommendation in run_recommendations(
+                bundle,
+                source_partial=source_partial,
+            ):
                 recommendations.append({"runId": run_id, **recommendation})
             models = _models_by_turn(bundle.events)
             for turn in bundle.turns:
@@ -723,7 +804,8 @@ def build_agent_session_bundle(
                                "type": event.event_type.value, "status": event.status.value,
                                "producerId": event.producer_id,
                                "producerSequence": event.producer_sequence,
-                               "provenance": event.provenance, "attributes": event.attributes})
+                               "provenance": event.provenance,
+                               "attributes": disclosed_event_attributes(event.attributes)})
         turns.sort(key=lambda item: (item["startedAt"], item["runId"], item["sequence"], item["turnId"]))
         events.sort(key=event_order_key)
         evaluations = []
@@ -760,7 +842,10 @@ def build_agent_session_bundle(
             "sessionId": session_id, "sourceKind": source_kind,
             "runIds": list(run_ids), "runCountAtLeast": available,
             "turnCount": turn_count, "eventCount": event_count,
-            "coverage": "complete", "unavailableReason": None,
+            "coverage": "partial" if session_source_partial else "complete",
+            "unavailableReason": (
+                "source_capture_partial" if session_source_partial else None
+            ),
             "runs": runs, "turns": turns, "events": events,
             "findings": findings, "recommendations": recommendations,
             "usage": {"totalTokens": total_tokens if known_tokens else None,
@@ -812,6 +897,7 @@ def build_agent_runs_bundle(
     run_id: str | None = None, run_ids: tuple[str, ...] | None = None,
     evaluator_fingerprint: str | None = None,
     view: str = "full", selected_run_id: str | None = None,
+    source_kind: str | None = None, agent_name: str | None = None,
 ) -> dict:
     """Read a bounded, analyzed agent-run view without migrating the store."""
     if not isinstance(tenant, str) or not tenant or len(tenant.encode("utf-8")) > 256:
@@ -856,6 +942,11 @@ def build_agent_runs_bundle(
         or not selected_run_id or len(selected_run_id.encode("utf-8")) > 256
     ):
         raise ValueError("invalid selected_run_id")
+    group_values = [value for value in (source_kind, agent_name) if value is not None]
+    if ((group_values and (view != "list" or run_id is not None or run_ids is not None))
+        or any(not isinstance(value, str) or not value or "\x00" in value
+               or len(value.encode("utf-8")) > 256 for value in group_values)):
+        raise ValueError("invalid group filter")
     configured = str(storage)
 
     def builder(session: _QuerySession) -> dict:
@@ -873,7 +964,9 @@ def build_agent_runs_bundle(
             return empty
         selected_run_ids = run_ids or ((run_id,) if run_id is not None else None)
         if selected_run_ids is None:
-            available_runs = agent_evidence_queries.count_runs(session, tenant)
+            available_runs = agent_evidence_queries.count_runs(
+                session, tenant, source_kind=source_kind, agent_name=agent_name,
+            )
         else:
             placeholders = ",".join("?" for _ in selected_run_ids)
             count = session.execute(
@@ -884,6 +977,7 @@ def build_agent_runs_bundle(
             available_runs = int(count["count"] if count else 0)
         list_rows = agent_evidence_queries.list_run_rows(
             session, tenant, limit=limit, offset=offset, run_ids=selected_run_ids,
+            source_kind=source_kind, agent_name=agent_name,
         ) if view == "list" else None
         listed_ids = {row["runId"] for row in list_rows} if list_rows is not None else set()
         target_id = (selected_run_id if selected_run_id is not None else
@@ -895,15 +989,23 @@ def build_agent_runs_bundle(
             run_ids=(target_id,) if view == "list" and target_id in listed_ids
             else () if view == "list" else selected_run_ids,
         ) if view != "list" or target_id in listed_ids else []
+        local_revisions = agent_evidence_queries.local_revisions(
+            session, tenant, tuple(bundle.run.run_id for bundle in bundles),
+        )
         runs = []
         linked_trace_ids: dict[str, set[str]] = defaultdict(set)
         from verdict.dashboard.scoped_evaluation import _projection
 
         for bundle in bundles:
+            local_revision = local_revisions.get(bundle.run.run_id)
             scoped_evidence = _projection(
                 None, tenant, {"scope": "run", "runId": bundle.run.run_id}, bundle=bundle,
+                local_revision=local_revision,
             )
-            analysis = analyze_agent_run(bundle)
+            analysis = analyze_agent_run(
+                bundle, include_tool_outcome_coverage=True,
+                local_revision=local_revision,
+            )
             turn_models = _models_by_turn(bundle.events)
             turn_prices = [
                 price for turn in bundle.turns
@@ -936,6 +1038,7 @@ def build_agent_runs_bundle(
             runs.append({
                 "runId": bundle.run.run_id,
                 "sourceKind": bundle.session.source_kind,
+                "sourcePartial": analysis.evidence_coverage["event_stream"] == "partial",
                 "startedAt": bundle.run.started_at.isoformat(),
                 "status": bundle.run.status.value,
                 "sourceOutcome": bundle.run.status.value,
@@ -963,7 +1066,8 @@ def build_agent_runs_bundle(
                     "listPriceUsd": round(sum(turn_prices), 8) if turn_prices else None,
                     "state": (
                         "complete"
-                        if bundle.turns and len(total_usage_turns) == len(bundle.turns)
+                        if (bundle.turns and len(total_usage_turns) == len(bundle.turns)
+                            and analysis.evidence_coverage["event_stream"] == "present")
                         else "partial" if usage_turns else "not_captured"
                     ),
                 },
@@ -974,28 +1078,50 @@ def build_agent_runs_bundle(
                 "findings": [{
                     "code": finding.code, "severity": finding.severity,
                     "message": finding.message,
+                    "scope": "historical_prefix" if analysis.evidence_coverage["event_stream"] == "partial" else "run",
                     "evidenceEventIds": list(finding.evidence_event_ids),
                     "judgeUsed": finding.judge_used,
                 } for finding in analysis.findings],
-                "recommendations": run_recommendations(bundle),
+                "recommendations": run_recommendations(
+                    bundle,
+                    source_partial=local_scope_partial(
+                        bundle.session.source_kind, local_revision,
+                        max((turn.sequence for turn in bundle.turns), default=-1), None,
+                    ),
+                ),
                 "scopedEvaluationEligible": scoped_evidence["coverage"] == "complete",
                 "scopedEvaluationUnavailableReason": scoped_evidence["unavailableReason"],
             })
             linked_trace_ids[bundle.run.run_id].update(
                 event.trace_id for event in bundle.events if event.trace_id is not None
             )
+        owned_links = _owned_trace_ids(
+            session, tenant, set().union(*linked_trace_ids.values()) if linked_trace_ids else set(),
+        )
+        for links in linked_trace_ids.values():
+            links.intersection_update(owned_links)
         runs_by_id = {run["runId"]: run for run in runs}
         latest_judgment_status: dict[str, tuple[tuple[str, str], str]] = {}
-        if evaluator_fingerprint is not None and runs and session.table_exists("judgments"):
+        if (evaluator_fingerprint is not None and runs
+                and session.table_exists("judgments") and session.table_exists("traces")):
+            judgment_source = (
+                "current_judgments" if session.table_exists("current_judgments")
+                else "judgments"
+            )
+            trace_scope, trace_scope_params = _trace_tenant_scope(
+                tenant, session.columns("traces"), alias="t",
+            )
             placeholders = ",".join("?" for _ in runs_by_id)
             for judgment in session.execute(
-                """SELECT j.trace_id,j.status,j.created_at,j.judgment_id
-                   FROM judgments j JOIN agent_events e ON e.trace_id=j.trace_id
+                f"""SELECT j.trace_id,j.status,j.created_at,j.judgment_id
+                   FROM {judgment_source} j JOIN agent_events e ON e.trace_id=j.trace_id
+                   JOIN traces t ON t.trace_id=e.trace_id
                    WHERE e.tenant_id=? AND e.run_id IN ("""
                 + placeholders
-                + ") AND j.evaluator_fingerprint=? "
+                + ") AND j.evaluator_fingerprint=? AND "
+                + trace_scope + " "
                 "ORDER BY j.created_at,j.judgment_id",  # nosec B608
-                (tenant, *runs_by_id, evaluator_fingerprint),
+                (tenant, *runs_by_id, evaluator_fingerprint, *trace_scope_params),
             ):
                 key = (judgment["created_at"] or "", judgment["judgment_id"] or "")
                 current = latest_judgment_status.get(judgment["trace_id"])
@@ -1056,7 +1182,7 @@ def build_agent_runs_bundle(
             raise ImportError("PostgreSQL dashboard support requires the postgres extra") from exc
         with psycopg.connect(configured, autocommit=False, row_factory=dict_row) as connection:
             with connection.transaction():
-                connection.execute("SET TRANSACTION READ ONLY")
+                connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
                 result = builder(_PostgresSession(connection))
     else:
         path = _sqlite_path(configured)
@@ -1071,6 +1197,50 @@ def build_agent_runs_bundle(
     redacted = redact_structure(result)
     if not isinstance(redacted, dict):
         raise DashboardBundleLimitError("bounded agent-run bundle exceeded redaction budget")
+    # These are dashboard navigation keys, not display content. Preserve the
+    # exact stored identifiers after content redaction so a finding link can
+    # resolve even when an opaque ID resembles PII.
+    if (not isinstance(redacted.get("runs"), list)
+            or len(redacted["runs"]) != len(result["runs"])
+            or any(not isinstance(row, dict) for row in redacted["runs"])):
+        raise DashboardBundleLimitError("agent-run navigation exceeded redaction budget")
+    for original, safe in zip(result["runs"], redacted["runs"], strict=True):
+        safe["runId"] = original["runId"]
+        if "parentRunId" in original:
+            safe["parentRunId"] = original["parentRunId"]
+        for field in ("findings", "recommendations"):
+            if field not in original:
+                continue
+            if (not isinstance(safe.get(field), list)
+                    or len(safe[field]) != len(original[field])):
+                raise DashboardBundleLimitError("agent-run navigation exceeded redaction budget")
+            for source_item, safe_item in zip(
+                original.get(field, ()), safe.get(field, ()), strict=True,
+            ):
+                if not isinstance(safe_item, dict):
+                    raise DashboardBundleLimitError("agent-run navigation exceeded redaction budget")
+                for key in ("evidenceEventIds", "evidenceTurnIds"):
+                    if key in source_item:
+                        safe_item[key] = source_item[key]
+    if result.get("selectedRun") is not None:
+        original = result["selectedRun"]
+        safe = redacted.get("selectedRun")
+        if not isinstance(safe, dict):
+            raise DashboardBundleLimitError("agent-run navigation exceeded redaction budget")
+        safe["runId"] = original["runId"]
+        safe["parentRunId"] = original["parentRunId"]
+        for field in ("findings", "recommendations"):
+            if (not isinstance(safe.get(field), list)
+                    or len(safe[field]) != len(original[field])):
+                raise DashboardBundleLimitError("agent-run navigation exceeded redaction budget")
+            for source_item, safe_item in zip(
+                original[field], safe[field], strict=True,
+            ):
+                if not isinstance(safe_item, dict):
+                    raise DashboardBundleLimitError("agent-run navigation exceeded redaction budget")
+                for key in ("evidenceEventIds", "evidenceTurnIds"):
+                    if key in source_item:
+                        safe_item[key] = source_item[key]
     return redacted
 
 
@@ -1133,10 +1303,44 @@ def build_agent_run_detail(
         if page is None:
             raise KeyError(run_id)
         run = page["run"]
+        parent_available = None
+        if run["parent_run_id"]:
+            parent_available = next(iter(session.execute(
+                "SELECT 1 FROM agent_runs WHERE tenant_id=? AND run_id=? LIMIT 1",
+                (tenant, run["parent_run_id"]),
+            )), None) is not None
+        related_rows = list(session.execute(
+            "SELECT run_id,agent_name,status,started_at FROM agent_runs "
+            "WHERE tenant_id=? AND parent_run_id=? "
+            "ORDER BY started_at,run_id LIMIT 31",
+            (tenant, run_id),
+        ))
+        children = [{
+            "runId": row["run_id"], "agentName": row["agent_name"] or None,
+            "status": row["status"], "startedAt": _dashboard_time(row["started_at"]),
+        } for row in related_rows[:30]]
         shown = page["events"]
         shown_turns = [agent_turn_from_row(turn) for turn in page["turns"]]
         turn_judgments = {}
-        eligible_turns = [turn for turn in shown_turns if turn_evidence_reason(turn) is None]
+        local_revision = agent_evidence_queries.local_revisions(
+            session, tenant, (run_id,),
+        ).get(run_id)
+        last_turn = session.execute(
+            "SELECT MAX(sequence) AS sequence FROM agent_turns "
+            "WHERE tenant_id=? AND run_id=?", (tenant, run_id),
+        ).fetchone()
+        last_sequence = int(last_turn["sequence"]) if last_turn["sequence"] is not None else -1
+        first_capture_limit = agent_evidence_queries.first_capture_limit_sequence(
+            session, tenant, run_id,
+        )
+        eligible_turns = [
+            turn for turn in shown_turns
+            if turn_evidence_reason(turn) is None
+            and (first_capture_limit is None or turn.sequence < first_capture_limit)
+            and not local_scope_partial(
+                run["source_kind"], local_revision, last_sequence, turn.sequence,
+            )
+        ]
         if eligible_turns and session.table_exists("agent_turn_judgments"):
             evidence_by_turn = {}
             counts_by_turn = {}
@@ -1211,16 +1415,24 @@ def build_agent_run_detail(
         available = page["eventCount"]
         available_turns = page["turnCount"]
         resolved_event_offset = page["eventOffset"]
+        owned_links = _owned_trace_ids(
+            session, tenant, {event["trace_id"] for event in shown if event["trace_id"]},
+        )
         judgment_summaries: dict[str, dict[str, object]] = {}
         if session.table_exists("judgments"):
+            judgment_source = (
+                "current_judgments" if session.table_exists("current_judgments")
+                else "judgments"
+            )
             columns = session.columns("judgments")
             dimensions_column = (
                 "dimensions_json" if "dimensions_json" in columns else "dimensions"
             )
-            for trace_id in {event["trace_id"] for event in shown if event["trace_id"]}:
+            for trace_id in owned_links:
                 judgment = session.execute(
                     f"SELECT judgment_id,evaluator_fingerprint,status,{dimensions_column} AS dimensions "  # nosec B608 -- schema-selected identifier
-                    "FROM judgments WHERE trace_id=? ORDER BY created_at DESC,judgment_id DESC LIMIT 1",
+                    f"FROM {judgment_source} WHERE trace_id=? "
+                    "ORDER BY created_at DESC,judgment_id DESC LIMIT 1",
                     (trace_id,),
                 ).fetchone()
                 if judgment is None:
@@ -1247,7 +1459,7 @@ def build_agent_run_detail(
                     "status": judgment["status"],
                     "dimensions": safe_dimensions,
                 }
-        return {
+        detail = {
             "runId": run["run_id"],
             "turnEvaluationScope": {
                 "mode": "exact_evaluator" if turn_evaluator_fingerprint else "latest_valid_bounded",
@@ -1266,6 +1478,9 @@ def build_agent_run_detail(
             "instanceId": run["instance_id"] or None,
             "sessionId": run["session_id"],
             "parentRunId": run["parent_run_id"],
+            "parentAvailable": parent_available,
+            "children": children,
+            "childrenTruncated": len(related_rows) > 30,
             "producerCount": page["producerCount"],
             "turns": [{
                 "turnId": turn.turn_id, "sequence": turn.sequence,
@@ -1304,7 +1519,7 @@ def build_agent_run_detail(
                 "provenance": event["provenance"],
                 "privacy": event["privacy_classification"],
                 "omissionReason": event["omission_reason"],
-                "traceId": event["trace_id"],
+                "traceId": event["trace_id"] if event["trace_id"] in owned_links else None,
                 "producerId": event["producer_id"] or None,
                 "producerSequence": event["producer_sequence"],
                 "parentEventId": event["parent_event_id"],
@@ -1321,6 +1536,11 @@ def build_agent_run_detail(
                 "truncated": resolved_event_offset + len(shown) < available,
             },
         }
+        for event in detail["events"]:
+            event["issueCode"] = recorded_event_issue(
+                event["type"], event["status"], event["attributes"],
+            )
+        return detail
 
     if _is_postgres(configured):
         try:
@@ -1350,6 +1570,451 @@ def build_agent_run_detail(
     )
     if not isinstance(redacted, dict):
         raise DashboardBundleLimitError("bounded agent-run detail exceeded redaction budget")
+    for key in ("runId", "focusEventId", "parentRunId"):
+        redacted[key] = result[key]
+    for field, keys in (
+        ("children", ("runId",)),
+        ("turns", ("turnId",)),
+        ("events", ("eventId", "turnId", "traceId", "parentEventId")),
+    ):
+        if (not isinstance(redacted.get(field), list)
+                or len(redacted[field]) != len(result[field])
+                or any(not isinstance(row, dict) for row in redacted[field])):
+            raise DashboardBundleLimitError("agent-run navigation exceeded redaction budget")
+        for original, safe in zip(result[field], redacted[field], strict=True):
+            for key in keys:
+                safe[key] = original[key]
+    return redacted
+
+
+def build_full_local_event_page(
+    storage: str | os.PathLike[str], *, tenant: str, run_id: str,
+    revision: str, limit: int = 100, after_ordinal: int | None = None,
+    after_event_id: str | None = None,
+) -> dict:
+    """Page retained recorded events only after one snapshot proves coverage."""
+    if (not tenant or not run_id or len(tenant.encode()) > 256
+            or len(run_id.encode()) > 256 or not re.fullmatch(r"[0-9a-f]{64}", revision)
+            or type(limit) is not int or not 1 <= limit <= 100
+            or ((after_ordinal is None) != (after_event_id is None))
+            or (after_ordinal is not None and (type(after_ordinal) is not int
+                                               or after_ordinal < 0
+                                               or not isinstance(after_event_id, str)
+                                               or len(after_event_id.encode()) > 256))):
+        raise ValueError("invalid local event page request")
+    configured = str(storage)
+
+    def read(session: _QuerySession) -> dict:
+        current_revision, positions = verified_local_positions(session, tenant, run_id)
+        if current_revision != revision:
+            raise ValueError("stale_revision")
+        start = 0
+        if after_ordinal is not None:
+            start = next((index + 1 for index, position in enumerate(positions)
+                          if position[0] == after_ordinal
+                          and position[1] == after_event_id), -1)
+            if start < 0:
+                raise ValueError("stale_cursor")
+        chosen = positions[start:start + limit]
+        prefix_ids = [row[1] for row in chosen if not row[5]]
+        fact_ids = [row[1] for row in chosen if row[5]]
+        details: dict[str, dict] = {}
+        for table, ids in (("agent_events", prefix_ids),
+                           ("local_recent_event_facts", fact_ids)):
+            if not ids:
+                continue
+            slots = ",".join("?" for _ in ids)
+            for row in session.execute(
+                "SELECT event_id,turn_id,sequence,occurred_at,event_type,status,"
+                "provenance,attributes_json,trace_id"
+                + (",first_seen_revision" if table == "local_recent_event_facts"
+                   else ",NULL AS first_seen_revision")
+                + f" FROM {table} WHERE tenant_id=? AND run_id=? "
+                + f"AND event_id IN ({slots})", (tenant, run_id, *ids),
+            ):
+                details[row["event_id"]] = row
+        if len(details) != len(chosen):
+            raise RuntimeError("missing local event page fact")
+        owned_links = _owned_trace_ids(session, tenant, {
+            row["trace_id"] for row in details.values()
+            if isinstance(row["trace_id"], str)
+        })
+        events = []
+        for ordinal, event_id, turn_id, turn_sequence, event_sequence, _fact in chosen:
+            row = details[event_id]
+            if row["turn_id"] != turn_id or row["sequence"] != event_sequence:
+                raise RuntimeError("changed local event page fact")
+            attributes = _dashboard_agent_event_attributes(
+                row["event_type"], row["attributes_json"],
+            )
+            events.append({
+                "sourceOrdinal": ordinal, "eventId": event_id,
+                "turnId": turn_id, "turnSequence": turn_sequence,
+                "eventSequence": event_sequence, "occurredAt": row["occurred_at"],
+                "type": row["event_type"], "status": row["status"],
+                "provenance": row["provenance"], "attributes": attributes,
+                "issueCode": recorded_event_issue(
+                    row["event_type"], row["status"], attributes,
+                ),
+                "traceId": (row["trace_id"] if row["trace_id"] in owned_links else None),
+                "firstSeenRevision": row["first_seen_revision"],
+            })
+        next_cursor = (
+            {"sourceOrdinal": chosen[-1][0], "eventId": chosen[-1][1]}
+            if chosen and start + len(chosen) < len(positions) else None
+        )
+        return {"sourceRevision": current_revision,
+                "sourceEventCount": len(positions),
+                "coverage": "complete_recorded", "events": events,
+                "nextCursor": next_cursor}
+
+    if _is_postgres(configured):
+        import psycopg
+        from psycopg.rows import dict_row
+
+        with psycopg.connect(configured, autocommit=False, row_factory=dict_row) as connection:
+            with connection.transaction():
+                connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+                connection.execute("SET TRANSACTION READ ONLY")
+                result = read(_PostgresSession(connection))
+    else:
+        connection = sqlite3.connect(f"file:{_sqlite_path(configured)}?mode=ro", uri=True)
+        connection.row_factory = sqlite3.Row
+        try:
+            connection.execute("BEGIN")
+            result = read(_SQLiteSession(connection))
+            connection.commit()
+        finally:
+            connection.close()
+    safe = redact_structure(result, _max_nodes=MAX_AGENT_DETAIL_REDACTION_NODES,
+                            _max_characters=MAX_AGENT_DETAIL_REDACTION_CHARACTERS)
+    if (not isinstance(safe, dict) or not isinstance(safe.get("events"), list)
+            or len(safe["events"]) != len(result["events"])):
+        raise DashboardBundleLimitError("local event page exceeded redaction budget")
+    return safe
+
+
+def build_full_local_run_analysis(
+    storage: str | os.PathLike[str], *, tenant: str, run_id: str,
+) -> dict:
+    """Analyze one admitted local run from all recorded typed evidence."""
+    if (not tenant or not run_id or len(tenant.encode()) > 256
+            or len(run_id.encode()) > 256):
+        raise ValueError("invalid local run analysis request")
+    configured = str(storage)
+
+    def read(session: _QuerySession) -> dict:
+        revision, positions = verified_local_positions(session, tenant, run_id)
+        bundles = agent_evidence_queries.load_bundles(
+            session, tenant, limit=1, run_ids=(run_id,),
+        )
+        if len(bundles) != 1:
+            raise KeyError(run_id)
+        full = complete_local_bundle(session, tenant, bundles[0], positions)
+        analysis = analyze_agent_run(full, include_tool_outcome_coverage=True)
+        recommendations = run_recommendations(full)
+        event_indexes = {position[1]: index for index, position in enumerate(positions)}
+        def evidence_cursor(event_id: str | None):
+            index = event_indexes.get(event_id) if event_id else None
+            if index is None or index == 0:
+                return None
+            previous = positions[index - 1]
+            return {"sourceOrdinal": previous[0], "eventId": previous[1]}
+        return {
+            "runId": run_id, "sourceRevision": revision,
+            "coverage": "complete_recorded",
+            "recordedTurns": len(full.turns), "recordedEvents": len(full.events),
+            "metrics": analysis.metrics,
+            "evidenceCoverage": analysis.evidence_coverage,
+            "findings": [{
+                "code": finding.code, "severity": finding.severity,
+                "message": finding.message,
+                "evidenceEventIds": list(finding.evidence_event_ids),
+                "firstEvidenceCursor": evidence_cursor(
+                    finding.evidence_event_ids[0] if finding.evidence_event_ids else None
+                ),
+            } for finding in analysis.findings[:20]],
+            "findingsTruncated": len(analysis.findings) > 20,
+            "recommendations": [{
+                **item,
+                "firstEvidenceCursor": evidence_cursor(
+                    item["evidenceEventIds"][0] if item["evidenceEventIds"] else None
+                ),
+            } for item in recommendations],
+        }
+
+    if _is_postgres(configured):
+        import psycopg
+        from psycopg.rows import dict_row
+
+        with psycopg.connect(configured, autocommit=False, row_factory=dict_row) as connection:
+            with connection.transaction():
+                connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+                connection.execute("SET TRANSACTION READ ONLY")
+                result = read(_PostgresSession(connection))
+    else:
+        connection = sqlite3.connect(f"file:{_sqlite_path(configured)}?mode=ro", uri=True)
+        connection.row_factory = sqlite3.Row
+        try:
+            connection.execute("BEGIN")
+            result = read(_SQLiteSession(connection))
+            connection.commit()
+        finally:
+            connection.close()
+    safe = redact_structure(result, _max_nodes=MAX_AGENT_DETAIL_REDACTION_NODES,
+                            _max_characters=MAX_AGENT_DETAIL_REDACTION_CHARACTERS)
+    if (not isinstance(safe, dict) or not isinstance(safe.get("findings"), list)
+            or len(safe["findings"]) != len(result["findings"])):
+        raise DashboardBundleLimitError("local run analysis exceeded redaction budget")
+    safe["runId"] = run_id
+    for original, redacted in zip(result["findings"], safe["findings"], strict=True):
+        redacted["evidenceEventIds"] = original["evidenceEventIds"]
+    return safe
+
+
+def build_recent_local_sample(
+    storage: str | os.PathLike[str], *, tenant: str, run_id: str,
+    revision: str | None = None, turn_id: str | None = None,
+    event_id: str | None = None,
+) -> dict:
+    """Read the bounded recent window from the same source snapshot."""
+    for name, value in (("tenant", tenant), ("run_id", run_id)):
+        if not isinstance(value, str) or not value or len(value.encode("utf-8")) > 256:
+            raise ValueError(f"invalid {name}")
+    configured = str(storage)
+
+    def verify_facts(session: _QuerySession, sample: dict) -> None:
+        if sample.get("durableFacts") is not True:
+            return  # Older inspection-only V2 rows have no durable fact contract.
+        events = sample.get("events")
+        prefix_count = sample.get("canonicalPrefixEvents")
+        source_count = sample.get("sourceEventCount")
+        if (not isinstance(events, list) or len(events) > 50
+                or type(prefix_count) is not int or prefix_count < 0
+                or type(source_count) is not int or source_count < prefix_count):
+            raise ValueError("invalid durable recent local index")
+        ids = [event.get("eventId") for event in events if isinstance(event, dict)]
+        ordinals = [event.get("sourceOrdinal") for event in events if isinstance(event, dict)]
+        if (len(ids) != len(events) or len(set(ids)) != len(ids)
+                or any(not isinstance(value, str) or not value for value in ids)
+                or len(ordinals) != len(events)
+                or any(type(value) is not int or value < 0 for value in ordinals)
+                or ordinals != sorted(set(ordinals))
+                or any(value >= source_count for value in ordinals)
+                or sample.get("firstOrdinal") != (ordinals[0] if ordinals else None)
+                or sample.get("lastOrdinal") != (ordinals[-1] if ordinals else None)):
+            raise ValueError("invalid durable recent local index")
+        if not ids:
+            return
+        slots = ",".join("?" for _ in ids)
+        facts = list(session.execute(
+            "SELECT * FROM local_recent_event_facts WHERE tenant_id=? AND run_id=? "
+            f"AND event_id IN ({slots})", (tenant, run_id, *ids),
+        ))
+        prefix = list(session.execute(
+            "SELECT * FROM agent_events WHERE tenant_id=? AND run_id=? "
+            f"AND event_id IN ({slots})", (tenant, run_id, *ids),
+        ))
+        prefix_order = list(session.execute(
+            "SELECT e.event_id,t.sequence AS turn_sequence FROM agent_events e "
+            "JOIN agent_turns t ON t.tenant_id=e.tenant_id AND t.run_id=e.run_id "
+            "AND t.turn_id=e.turn_id WHERE e.tenant_id=? AND e.run_id=? "
+            "AND e.provenance NOT IN ('verdict:capture_limit',"
+            "'verdict:partial_source_line') ORDER BY t.sequence,e.sequence",
+            (tenant, run_id),
+        ))
+        if len(prefix_order) != prefix_count:
+            raise ValueError("invalid durable recent local prefix")
+        prefix_position = {
+            row["event_id"]: (ordinal, row["turn_sequence"])
+            for ordinal, row in enumerate(prefix_order)
+        }
+        fact_by_id = {row["event_id"]: row for row in facts}
+        prefix_by_id = {row["event_id"]: row for row in prefix}
+        for item in events:
+            ordinal = item.get("sourceOrdinal")
+            turn_sequence = item.get("turnSequence")
+            event_sequence = item.get("eventSequence")
+            turn_id = item.get("turnId")
+            if (type(turn_sequence) is not int or turn_sequence < 0
+                    or type(event_sequence) is not int or event_sequence < 0
+                    or not isinstance(turn_id, str) or not turn_id):
+                raise ValueError("invalid durable recent local locator")
+            stored = (prefix_by_id if ordinal < prefix_count else fact_by_id).get(
+                item["eventId"]
+            )
+            if stored is None:
+                raise ValueError("missing durable recent local event")
+            if (stored["turn_id"] != item.get("turnId")
+                    or stored["sequence"] != item.get("eventSequence")
+                    or (ordinal < prefix_count and prefix_position.get(
+                        item["eventId"]
+                    ) != (ordinal, item.get("turnSequence")))
+                    or (ordinal >= prefix_count and (
+                        stored["source_ordinal"] != ordinal
+                        or stored["turn_sequence"] != item.get("turnSequence")
+                    ))):
+                raise ValueError("recent local index differs from retained fact")
+            event_id = item["eventId"]
+            item.clear()
+            item.update({
+                "sourceOrdinal": ordinal, "eventId": event_id,
+                "turnId": turn_id, "turnSequence": turn_sequence,
+                "eventSequence": event_sequence,
+                "occurredAt": str(stored["occurred_at"]),
+                "type": stored["event_type"], "status": stored["status"],
+                "provenance": stored["provenance"],
+                "attributes": _json_value(stored["attributes_json"], {}),
+                "privacy": stored["privacy_classification"],
+                "omissionReason": stored["omission_reason"],
+                "traceId": stored["trace_id"],
+                "firstSeenRevision": (
+                    stored["first_seen_revision"] if ordinal >= prefix_count else None
+                ),
+            })
+
+    def read(session: _QuerySession) -> dict:
+        if not session.table_exists("local_recent_events"):
+            raise KeyError(run_id)
+        row = session.execute(
+            "SELECT sample.sample_json,sample.source_prefix_bytes,"
+            "sample.source_prefix_sha256,source.local_full_bytes,"
+            "source.local_full_sha256,source.local_prefix_bytes,"
+            "source.local_prefix_sha256,source.local_source_turn_count,"
+            "source.local_source_event_count,source.local_partial_line "
+            "FROM local_recent_events sample "
+            "JOIN agent_runs run ON run.tenant_id=sample.tenant_id "
+            "AND run.run_id=sample.run_id "
+            "JOIN import_sources source ON source.tenant_id=run.tenant_id "
+            "AND source.source_session_id=run.source_session_id "
+            "WHERE sample.tenant_id=? AND sample.run_id=?",
+            (tenant, run_id),
+        ).fetchone()
+        if row is None:
+            raise KeyError(run_id)
+        raw_sample = row["sample_json"]
+        if not isinstance(raw_sample, str) or len(raw_sample.encode("utf-8")) > 1_048_576:
+            raise ValueError("invalid stored recent local sample")
+        try:
+            sample = json.loads(raw_sample)
+        except (ValueError, RecursionError) as exc:
+            raise ValueError("invalid recent local sample") from exc
+        if not isinstance(sample, dict) or sample.get("runId") != run_id:
+            raise ValueError("invalid recent local sample")
+        events = sample.get("events")
+        if (not isinstance(events, list) or len(events) > 50
+                or any(not isinstance(event, dict) for event in events)):
+            raise ValueError("invalid bounded recent local events")
+        if sample.get("schema") == "local-recent-window-v2":
+            if (row["source_prefix_bytes"] != row["local_full_bytes"]
+                    or row["source_prefix_sha256"] != row["local_full_sha256"]
+                    or sample.get("sourceRevision") != row["local_full_sha256"]
+                    or sample.get("sourceTurnCount") != row["local_source_turn_count"]
+                    or sample.get("sourceEventCount") != row["local_source_event_count"]):
+                raise KeyError(run_id)
+            verify_facts(session, sample)
+            sample["findings"] = verified_recent_findings(
+                sample, partial_final_line=bool(row["local_partial_line"]),
+            )
+        elif sample.get("schema") == "local-recent-events-v1":
+            if (row["source_prefix_bytes"] != row["local_prefix_bytes"]
+                    or row["source_prefix_sha256"] != row["local_prefix_sha256"]):
+                raise KeyError(run_id)
+        else:
+            raise ValueError("invalid recent local sample")
+        current = None
+        if revision is not None and event_id is not None:
+            current = next((event for event in events
+                            if event.get("eventId") == event_id
+                            and event.get("turnId") == turn_id), None)
+            if current is not None:
+                proof = current.get("firstSeenRevision") or sample.get("sourceRevision")
+                if revision != proof:
+                    raise KeyError("stale_revision")
+                sample["focusedEvent"] = deepcopy(current)
+                sample["historicalFocusedEvent"] = False
+        if (current is None and revision is not None and event_id is not None
+                and sample.get("sourceRevision") != revision):
+            retained = session.execute(
+                "SELECT * FROM local_recent_event_facts WHERE tenant_id=? AND run_id=? "
+                "AND turn_id=? AND event_id=? AND first_seen_revision=?",
+                (tenant, run_id, turn_id, event_id, revision),
+            ).fetchone()
+            if retained is None:
+                raise KeyError("stale_revision")
+            sample["focusedEvent"] = {
+                "sourceOrdinal": retained["source_ordinal"],
+                "eventId": retained["event_id"], "turnId": retained["turn_id"],
+                "turnSequence": retained["turn_sequence"],
+                "eventSequence": retained["sequence"],
+                "occurredAt": str(retained["occurred_at"]),
+                "type": retained["event_type"], "status": retained["status"],
+                "provenance": retained["provenance"],
+                "attributes": _json_value(retained["attributes_json"], {}),
+                "privacy": retained["privacy_classification"],
+                "omissionReason": retained["omission_reason"],
+                "traceId": retained["trace_id"],
+                "firstSeenRevision": retained["first_seen_revision"],
+            }
+            sample["historicalFocusedEvent"] = True
+        linked_events = list(events)
+        focused = sample.get("focusedEvent")
+        if focused is not None:
+            if not isinstance(focused, dict):
+                raise ValueError("invalid focused recent local event")
+            linked_events.append(focused)
+        owned_links = _owned_trace_ids(session, tenant, {
+            trace_id for event in linked_events
+            if isinstance(trace_id := event.get("traceId"), str)
+        })
+        for event in linked_events:
+            trace_id = event.get("traceId")
+            if "traceId" in event and (not isinstance(trace_id, str)
+                                       or trace_id not in owned_links):
+                event["traceId"] = None
+        return sample
+
+    if _is_postgres(configured):
+        import psycopg
+        from psycopg.rows import dict_row
+
+        with psycopg.connect(configured, autocommit=False, row_factory=dict_row) as connection:
+            with connection.transaction():
+                connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+                connection.execute("SET TRANSACTION READ ONLY")
+                sample = read(_PostgresSession(connection))
+    else:
+        path = _sqlite_path(configured)
+        connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        connection.row_factory = sqlite3.Row
+        try:
+            connection.execute("BEGIN")
+            sample = read(_SQLiteSession(connection))
+            connection.commit()
+        finally:
+            connection.close()
+    redacted = redact_structure(
+        sample, _max_nodes=MAX_AGENT_DETAIL_REDACTION_NODES,
+        _max_characters=MAX_AGENT_DETAIL_REDACTION_CHARACTERS,
+    )
+    if (not isinstance(redacted, dict)
+            or not isinstance(redacted.get("events"), list)
+            or len(redacted["events"]) != len(sample["events"])
+            or len(redacted["events"]) > 50):
+        raise DashboardBundleLimitError("recent local sample exceeded redaction budget")
+    for original, safe in zip(sample["events"], redacted["events"], strict=True):
+        if (not isinstance(safe, dict)
+                or safe.get("sourceOrdinal") != original.get("sourceOrdinal")):
+            raise DashboardBundleLimitError("recent local event lost its structure")
+        if "traceId" in original:
+            safe["traceId"] = original["traceId"]
+    if "focusedEvent" in sample:
+        focused = redacted.get("focusedEvent")
+        if (not isinstance(focused, dict)
+                or focused.get("sourceOrdinal") != sample["focusedEvent"].get("sourceOrdinal")):
+            raise DashboardBundleLimitError("focused recent local event lost its structure")
+        if "traceId" in sample["focusedEvent"]:
+            focused["traceId"] = sample["focusedEvent"]["traceId"]
     return redacted
 
 
@@ -1366,13 +2031,66 @@ def build_agent_turn_analysis(
         if not agent_evidence_queries.available(session):
             raise KeyError(turn_id)
         turn = session.execute(
-            "SELECT t.request_state,t.response_state FROM agent_turns t "
+            "SELECT t.request_state,t.response_state,t.sequence,s.source_kind "
+            "FROM agent_turns t "
             "JOIN agent_runs r ON r.tenant_id=t.tenant_id AND r.run_id=t.run_id "
+            "JOIN import_sources s ON s.tenant_id=r.tenant_id "
+            "AND s.source_session_id=r.source_session_id "
             "WHERE t.tenant_id=? AND t.run_id=? AND t.turn_id=?",
             (tenant, run_id, turn_id),
         ).fetchone()
         if turn is None:
-            raise KeyError(turn_id)
+            if not session.table_exists("local_tail_turn_facts"):
+                raise KeyError(turn_id)
+            tail = session.execute(
+                "SELECT f.payload_json FROM local_tail_turn_facts f "
+                "JOIN agent_runs r ON r.tenant_id=f.tenant_id AND r.run_id=f.run_id "
+                "WHERE f.tenant_id=? AND f.run_id=? AND f.turn_id=?",
+                (tenant, run_id, turn_id),
+            ).fetchone()
+            if tail is None:
+                raise KeyError(turn_id)
+            try:
+                _, positions = verified_local_positions(session, tenant, run_id)
+            except ValueError as exc:
+                raise KeyError(turn_id) from exc
+            try:
+                payload = json.loads(tail["payload_json"])
+                request_state = EvidenceState(payload["request_state"]).value
+                response_state = EvidenceState(payload["response_state"]).value
+            except (TypeError, ValueError, KeyError) as exc:
+                raise RuntimeError("invalid local tail turn") from exc
+            available = sum(position[2] == turn_id for position in positions)
+            rows = list(session.execute(
+                "SELECT event_id,event_type,status,provenance,attributes_json "
+                "FROM local_recent_event_facts WHERE tenant_id=? AND run_id=? "
+                "AND turn_id=? ORDER BY sequence,event_id LIMIT ?",
+                (tenant, run_id, turn_id, MAX_TURN_ANALYSIS_EVENTS + 1),
+            ))
+            if len(rows) != min(available, MAX_TURN_ANALYSIS_EVENTS + 1):
+                raise RuntimeError("invalid local tail events")
+            events = [{**row, "attributes": _dashboard_agent_event_attributes(
+                row["event_type"], row["attributes_json"],
+            )} for row in rows[:MAX_TURN_ANALYSIS_EVENTS]]
+            return analyze_turn_events(
+                run_id=run_id, turn_id=turn_id, rows=events,
+                available=available, request_state=request_state,
+                response_state=response_state,
+            )
+        last_turn = session.execute(
+            "SELECT MAX(sequence) AS sequence FROM agent_turns "
+            "WHERE tenant_id=? AND run_id=?", (tenant, run_id),
+        ).fetchone()
+        source_partial = local_scope_partial(
+            turn["source_kind"],
+            agent_evidence_queries.local_revisions(session, tenant, (run_id,)).get(run_id),
+            int(last_turn["sequence"]), int(turn["sequence"]),
+        )
+        first_capture_limit = agent_evidence_queries.first_capture_limit_sequence(
+            session, tenant, run_id,
+        )
+        source_limit = (first_capture_limit is not None
+                        and first_capture_limit <= int(turn["sequence"]))
         count = session.execute(
             "SELECT COUNT(*) AS count,COUNT(DISTINCT producer_id) AS producers FROM agent_events "
             "WHERE tenant_id=? AND run_id=? AND turn_id=?",
@@ -1394,6 +2112,7 @@ def build_agent_turn_analysis(
             available=int(count["count"]), request_state=turn["request_state"],
             response_state=turn["response_state"],
             producer_count=int(count["producers"]),
+            source_partial_from_run=source_limit or source_partial,
         )
 
     if _is_postgres(configured):
@@ -1445,9 +2164,12 @@ def build_agent_insights_bundle(
     def builder(session: _QuerySession) -> dict:
         if not agent_evidence_queries.available(session):
             return _empty_agent_insights()
+        evidence_revision = _evidence_revision(session, tenant)
         available = agent_evidence_queries.count_runs(session, tenant)
         input_hasher = hashlib.sha256()
-        bundles = agent_evidence_queries.iter_bundles(session, tenant, limit=scan_limit)
+        bundles = agent_evidence_queries.iter_capture_snapshots(
+            session, tenant, limit=scan_limit,
+        )
         event_types: Counter[str] = Counter()
         event_statuses: Counter[str] = Counter()
         run_outcomes: Counter[str] = Counter()
@@ -1455,6 +2177,7 @@ def build_agent_insights_bundle(
         prompt_states: Counter[str] = Counter()
         response_states: Counter[str] = Counter()
         finding_counts: Counter[tuple[str, str]] = Counter()
+        prefix_finding_counts: Counter[tuple[str, str]] = Counter()
         finding_messages: dict[tuple[str, str], str] = {}
         finding_run_ids: dict[tuple[str, str], list[str]] = defaultdict(list)
         source_metrics: dict[str, Counter[str]] = defaultdict(Counter)
@@ -1486,7 +2209,7 @@ def build_agent_insights_bundle(
             trace_rows = list(session.execute(
                 "SELECT provider, request_model, operation, finish_reason, input_tokens, "
                 "output_tokens, latency_ms, cost_usd, error, prompt_redacted, "
-                "response_redacted "
+                "response_redacted, ended_at "
                 f"FROM traces WHERE {trace_tenant_predicate} "  # nosec B608 -- fixed predicate
                 "ORDER BY started_at ASC, trace_id ASC LIMIT ?",
                 (tenant, scan_limit),
@@ -1515,11 +2238,12 @@ def build_agent_insights_bundle(
                         trace_tokens[f"{name}_known"] += 1
                         metrics[name] += value
                         metrics[f"{name}_known"] += 1
-                if trace["error"]:
+                state = trace_evidence_state(
+                    error=trace["error"], ended_at=trace["ended_at"],
+                )
+                trace_outcomes[state] += 1
+                if state == "error_recorded":
                     metrics["errors"] += 1
-                    trace_outcomes["failed"] += 1
-                else:
-                    trace_outcomes["succeeded"] += 1
                 latency = trace["latency_ms"]
                 if isinstance(latency, (int, float)) and not isinstance(latency, bool):
                     trace_latency_values.append(float(latency))
@@ -1534,6 +2258,7 @@ def build_agent_insights_bundle(
                 response = trace["response_redacted"]
                 facts = deterministic_trace_facts(
                     error=trace["error"], prompt=prompt, response=response,
+                    ended_at=trace["ended_at"],
                 )
                 trace_evidence["prompt_present"] += int(facts["prompt_present"])
                 trace_evidence["response_present"] += int(facts["response_present"])
@@ -1551,14 +2276,79 @@ def build_agent_insights_bundle(
                     behavior["apology_starts"] += int(facts["apology_start"])
                     behavior["hedges"] += int(facts["hedge_phrases"] or 0)
                     behavior["valid_json"] += int(facts["valid_json"])
+        def capture_pages_with_owned_links():
+            expansion_remaining = MAX_INSIGHT_LOCAL_EXPANSION_ROWS
+            while page := list(islice(bundles, 100)):
+                expanded = []
+                for bundle, revision in page:
+                    complete = False
+                    if (bundle.session.source_kind in {"codex", "claude-code"}
+                            and revision is not None
+                            and revision.source_turn_count is not None
+                            and revision.source_event_count is not None
+                            and revision.v1_turn_count is not None
+                            and revision.v1_event_count is not None):
+                        extra = (revision.source_turn_count - revision.v1_turn_count
+                                 + revision.source_event_count - revision.v1_event_count)
+                        if 0 < extra <= expansion_remaining:
+                            try:
+                                _, positions = verified_local_positions(
+                                    session, tenant, bundle.run.run_id,
+                                )
+                            except ValueError as exc:
+                                if str(exc) != "partial_projection":
+                                    raise
+                            else:
+                                bundle = complete_local_bundle(session, tenant, bundle, positions)
+                                expansion_remaining -= extra
+                                complete = True
+                    expanded.append((bundle, revision, complete))
+                owned = _owned_trace_ids(session, tenant, {
+                    event.trace_id for bundle, _revision, _complete in expanded
+                    for event in bundle.events
+                    if event.event_type.value == "model_call" and event.trace_id
+                })
+                for bundle, revision, complete in expanded:
+                    yield bundle, revision, owned, complete
+
         analyzed = 0
-        for bundle in bundles:
+        partial_runs = 0
+        for bundle, local_revision, owned_links, complete_local in capture_pages_with_owned_links():
             input_hasher.update(normalized_bundle_digest(bundle).encode("ascii"))
+            # Ownership changes the linked-call result even when the Agent
+            # Event row is unchanged. Include the effective projection in the
+            # immutable analysis identity so prior snapshots are not reused.
+            input_hasher.update(json.dumps(sorted({
+                event.trace_id for event in bundle.events
+                if event.trace_id in owned_links
+            }), separators=(",", ":")).encode("utf-8"))
+            input_hasher.update(json.dumps(
+                None if local_revision is None else [
+                    local_revision.full_bytes, local_revision.full_sha256,
+                    local_revision.complete_prefix_bytes,
+                    local_revision.complete_prefix_sha256,
+                    local_revision.partial_final_line,
+                    local_revision.source_turn_count,
+                    local_revision.source_event_count,
+                    local_revision.v1_turn_count,
+                    local_revision.v1_event_count,
+                    local_revision.min_turn_at,
+                    local_revision.max_turn_at,
+                ], separators=(",", ":"),
+            ).encode("ascii"))
             analyzed += 1
-            analysis = analyze_agent_run(bundle)
+            analysis = analyze_agent_run(
+                bundle, include_tool_outcome_coverage=True,
+                **({} if complete_local else {"local_revision": local_revision}),
+            )
             source = bundle.session.source_kind
-            run_outcomes[bundle.run.status.value] += 1
-            source_outcomes[source][bundle.run.status.value] += 1
+            source_partial = analysis.evidence_coverage["event_stream"] == "partial"
+            if source_partial:
+                partial_runs += 1
+                source_metrics[source]["partial_runs"] += 1
+            else:
+                run_outcomes[bundle.run.status.value] += 1
+                source_outcomes[source][bundle.run.status.value] += 1
             source_metrics[source]["runs"] += 1
             source_metrics[source]["child_runs"] += int(bundle.run.parent_run_id is not None)
             turn_models = _models_by_turn(bundle.events)
@@ -1603,7 +2393,7 @@ def build_agent_insights_bundle(
                 if event.event_type.value == "model_call":
                     totals["model_calls"] += 1
                     source_metrics[source]["model_calls"] += 1
-                    if event.trace_id:
+                    if event.trace_id in owned_links:
                         totals["linked_model_calls"] += 1
                 elif event.event_type.value == "tool_call":
                     totals["tool_calls"] += 1
@@ -1623,6 +2413,8 @@ def build_agent_insights_bundle(
             for finding in analysis.findings:
                 key = (finding.code, finding.severity)
                 finding_counts[key] += 1
+                if source_partial:
+                    prefix_finding_counts[key] += 1
                 finding_messages.setdefault(key, finding.message)
                 if len(finding_run_ids[key]) < 50:
                     finding_run_ids[key].append(bundle.run.run_id)
@@ -1632,6 +2424,7 @@ def build_agent_insights_bundle(
                 "severity": severity,
                 "message": _FINDING_SUMMARIES.get(code, finding_messages[(code, severity)]),
                 "runs": count,
+                "partialRuns": prefix_finding_counts[(code, severity)],
                 "runIds": finding_run_ids[(code, severity)],
                 "runIdsTruncated": count > len(finding_run_ids[(code, severity)]),
             }
@@ -1647,6 +2440,7 @@ def build_agent_insights_bundle(
             source_activity.append({
                 "source": source,
                 "runs": metrics["runs"],
+                "partialRuns": metrics["partial_runs"],
                 "childRuns": metrics["child_runs"],
                 "turns": turns,
                 "finalResponses": metrics["final_responses"],
@@ -1683,7 +2477,7 @@ def build_agent_insights_bundle(
                 "totalTokens": metrics["total_tokens"] if total_token_turns else None,
                 "tokenUsageTurns": token_usage_turns,
                 "tokenUsageState": (
-                    "complete" if turns and total_token_turns == turns
+                    "complete" if turns and total_token_turns == turns and not metrics["partial_runs"]
                     else "partial" if token_usage_turns else "not_captured"
                 ),
                 "runOutcomes": dict(sorted(source_outcomes[source].items())),
@@ -1720,7 +2514,8 @@ def build_agent_insights_bundle(
             "scope": {
                 "availableRuns": available,
                 "analyzedRuns": analyzed,
-                "complete": analyzed == available,
+                "partialRuns": partial_runs,
+                "complete": analyzed == available and partial_runs == 0,
                 "traces": trace_scope,
             },
             "findings": findings,
@@ -1803,7 +2598,15 @@ def build_agent_insights_bundle(
             "sourceActivity": source_activity,
             "modelComparisons": model_comparisons,
         }
+        # A bounded scan can retain the same sampled rows while new evidence
+        # changes only coverage. Its immutable result must get a new identity.
+        input_hasher.update(b"bounded-scope-v2\0")
+        input_hasher.update(json.dumps(
+            {"scanLimit": scan_limit, "scope": result["scope"]},
+            sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8"))
         result["_analysisInputFingerprint"] = input_hasher.hexdigest()
+        result["_analysisEvidenceRevision"] = evidence_revision
         return result
 
     if _is_postgres(configured):
@@ -1814,7 +2617,7 @@ def build_agent_insights_bundle(
             raise ImportError("PostgreSQL dashboard support requires the postgres extra") from exc
         with psycopg.connect(configured, autocommit=False, row_factory=dict_row) as connection:
             with connection.transaction():
-                connection.execute("SET TRANSACTION READ ONLY")
+                connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
                 result = builder(_PostgresSession(connection))
     else:
         path = _sqlite_path(configured)
@@ -1831,6 +2634,7 @@ def build_agent_insights_bundle(
         raise DashboardBundleLimitError("bounded agent insights exceeded redaction budget")
     if not _include_input_fingerprint:
         redacted.pop("_analysisInputFingerprint", None)
+        redacted.pop("_analysisEvidenceRevision", None)
     return redacted
 
 
@@ -1845,7 +2649,7 @@ _OUTCOME_REPORTED_METRICS = {
 def _empty_agent_insights() -> dict:
     return {
         "schema": "agent-insights-v2",
-        "scope": {"availableRuns": 0, "analyzedRuns": 0, "complete": True,
+        "scope": {"availableRuns": 0, "analyzedRuns": 0, "partialRuns": 0, "complete": True,
                   "traces": {"available": 0, "analyzed": 0, "complete": True}},
         "findings": [],
         "dataHealth": {
@@ -1888,6 +2692,7 @@ def _build_from_connection(
     trace_offset: int = 0,
     trace_judge_status: str = "all",
     trace_id: str | None = None,
+    trace_date: str | None = None,
     report_days: int = 0,
 ) -> dict:
     con.row_factory = sqlite3.Row
@@ -1902,6 +2707,7 @@ def _build_from_connection(
             trace_offset=trace_offset,
             trace_judge_status=trace_judge_status,
             trace_id=trace_id,
+            trace_date=trace_date,
             report_days=report_days,
         )
         if not isinstance(bundle, dict):
@@ -1925,6 +2731,7 @@ def _build_from_postgres(
     trace_offset: int = 0,
     trace_judge_status: str = "all",
     trace_id: str | None = None,
+    trace_date: str | None = None,
     report_days: int = 0,
 ) -> dict:
     try:
@@ -1938,7 +2745,7 @@ def _build_from_postgres(
 
     with psycopg.connect(dsn, autocommit=False, row_factory=dict_row) as connection:
         with connection.transaction():
-            connection.execute("SET TRANSACTION READ ONLY")
+            connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
             return _redacted_bundle(
                 _PostgresSession(connection),
                 evaluator_id=evaluator_id,
@@ -1946,6 +2753,7 @@ def _build_from_postgres(
                 trace_offset=trace_offset,
                 trace_judge_status=trace_judge_status,
                 trace_id=trace_id,
+                trace_date=trace_date,
                 report_days=report_days,
             )
 
@@ -1958,23 +2766,40 @@ def _redacted_bundle(
     trace_offset: int,
     trace_judge_status: str,
     trace_id: str | None,
+    trace_date: str | None,
     report_days: int,
 ) -> dict:
-    bundle = redact_structure(
-        _build(
-            session,
-            evaluator_id=evaluator_id,
-            registry_tenant=registry_tenant,
-            trace_offset=trace_offset,
-            trace_judge_status=trace_judge_status,
-            trace_id=trace_id,
-            report_days=report_days,
-        )
+    raw = _build(
+        session,
+        evaluator_id=evaluator_id,
+        registry_tenant=registry_tenant,
+        trace_offset=trace_offset,
+        trace_judge_status=trace_judge_status,
+        trace_id=trace_id,
+        trace_date=trace_date,
+        report_days=report_days,
     )
+    bundle = redact_structure(raw)
     if not isinstance(bundle, dict):
         raise DashboardBundleLimitError(
             "bounded dashboard bundle exceeded the redaction structure budget"
         )
+    # Trace IDs are authenticated navigation keys, not captured content. Keep
+    # only these known structural fields exact after recursively redacting the
+    # bundle; an email-shaped ID must still resolve to its persisted Trace.
+    samples = bundle.get("samples")
+    original_samples = raw.get("samples")
+    if not isinstance(samples, list) or not isinstance(original_samples, list) or len(samples) != len(original_samples):
+        raise DashboardBundleLimitError("dashboard trace sample structure changed during redaction")
+    for sample, original in zip(samples, original_samples, strict=True):
+        if not isinstance(sample, dict) or not isinstance(original, dict):
+            raise DashboardBundleLimitError("dashboard trace sample structure changed during redaction")
+        sample["trace_id"] = original["trace_id"]
+    if raw.get("selectedTrace") is not None:
+        selected = bundle.get("selectedTrace")
+        if not isinstance(selected, dict):
+            raise DashboardBundleLimitError("dashboard selected trace structure changed during redaction")
+        selected["trace_id"] = raw["selectedTrace"]["trace_id"]
     return bundle
 
 
@@ -2006,14 +2831,25 @@ def _agent_run_metadata(cur: _QuerySession, tenant: str) -> dict[str, Any]:
     return agent_evidence_queries.source_metadata(cur, tenant)
 
 
+def _evidence_revision(cur: _QuerySession, tenant: str) -> int | None:
+    if not cur.table_exists("evidence_revisions"):
+        return None
+    row = cur.execute(
+        "SELECT revision FROM evidence_revisions WHERE tenant_id=?", (tenant,)
+    ).fetchone()
+    return int(row["revision"]) if row is not None else 0
+
+
 def _empty_bundle(
     *, agent_runs: dict[str, Any] | None = None, report_days: int = 0,
     analysis_time: datetime | None = None,
     coverage: dict[str, Any] | None = None,
+    evidence_revision: int | None = None,
 ) -> dict:
     run_metadata = agent_runs or {
         "available": 0, "sources": [], "sourcesTruncated": False,
-        "lastCapturedAt": None,
+        "agents": [], "agentsTruncated": False,
+        "lastCapturedAt": None, "lastStoredAt": None,
     }
     period = _report_period(report_days, analysis_time or _now_utc())[2]
     truncation = _truncation_metadata({
@@ -2032,10 +2868,15 @@ def _empty_bundle(
             "runEnd": None,
             "durationHours": 0,
             "totalTraces": 0,
+            "evidenceRevision": evidence_revision,
+            "monitorEligibleCalls": 0,
             "totalAgentRuns": run_metadata["available"],
             "agentRunSources": run_metadata["sources"],
             "agentRunSourcesTruncated": run_metadata["sourcesTruncated"],
+            "agentRunAgents": run_metadata["agents"],
+            "agentRunAgentsTruncated": run_metadata["agentsTruncated"],
             "lastAgentCaptureAt": run_metadata["lastCapturedAt"],
+            "lastAgentStoredAt": run_metadata.get("lastStoredAt"),
             "totalJudged": 0,
             "totalCost": None,
             "totalCostStatus": "unavailable",
@@ -2074,9 +2915,10 @@ def _empty_bundle(
         "focusProvider": None,
         "focusProviderLabel": None,
         "samples": [],
+        "selectedTrace": None,
         "providerDimension": [],
         "managementReport": {
-            "schema": "management-report-v1",
+            "schema": "management-report-v2",
             "period": period,
             "scope": {
                 **_finish_management_metric(_empty_management_metric()),
@@ -2104,18 +2946,28 @@ def _trace_samples(
     requested_trace_id: str | None,
     trace_judge_status: str,
     trace_offset: int,
+    trace_date: str | None,
     explorer_trace_ids: list[str],
+    day_explorer_trace_ids: list[str],
     judgment_status_by_trace: dict[str, str],
     ttime: dict[str, str],
     tcluster: dict[str, str | None],
     cluster_labels: dict[str, str],
     cluster_select: str,
     operation_select: str,
+    ended_at_select: str,
     judg_by_trace: dict[str, dict[str, Any]],
     t0: datetime,
-) -> tuple[list[dict[str, Any]], list[str]]:
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None, list[str]]:
     """Build one evaluator-aware, bounded Trace Explorer page."""
     filtered_trace_ids = explorer_trace_ids
+    if trace_date is not None:
+        chart_trace_ids = set(day_explorer_trace_ids)
+        filtered_trace_ids = [
+            candidate for candidate in filtered_trace_ids
+            if candidate in chart_trace_ids
+            and _dt(ttime[candidate]).date().isoformat() == trace_date
+        ]
     if trace_judge_status != "all":
         def matches_judge_status(candidate: str) -> bool:
             status = judgment_status_by_trace.get(candidate, "not_judged")
@@ -2132,16 +2984,16 @@ def _trace_samples(
         key=lambda candidate: (_dt(ttime[candidate]), candidate),
         reverse=True,
     )
-    sample_trace_ids = ordered_trace_ids[
+    page_trace_ids = ordered_trace_ids[
         trace_offset:trace_offset + MAX_TRACE_SAMPLES
     ]
-    if (
+    selected_outside_page = (
         requested_trace_id in filtered_trace_ids
-        and requested_trace_id not in sample_trace_ids
-    ):
-        sample_trace_ids = [
-            *sample_trace_ids[:MAX_TRACE_SAMPLES - 1], requested_trace_id,
-        ]
+        and requested_trace_id not in page_trace_ids
+    )
+    sample_trace_ids = [
+        *page_trace_ids, *([requested_trace_id] if selected_outside_page else []),
+    ]
     placeholders = ",".join("?" for _ in sample_trace_ids) or "NULL"
     sample_rows = [dict(row) for row in cur.execute(
         # The select expressions are closed-set schema compatibility values.
@@ -2149,6 +3001,7 @@ def _trace_samples(
         f"{cluster_select}, {operation_select}, "  # nosec B608
         "input_tokens, output_tokens, "
         "latency_ms, cost_usd, finish_reason, error, started_at, "
+        f"{ended_at_select}, "
         f"prompt_redacted, response_redacted FROM traces WHERE trace_id IN ({placeholders})",
         tuple(sample_trace_ids),
     )]
@@ -2161,7 +3014,7 @@ def _trace_samples(
             sample["cluster_id"], sample["cluster_id"]
         )
         for content_field in ("prompt_redacted", "response_redacted", "error"):
-            sample[content_field] = redact(sample.get(content_field))
+            sample[content_field] = redact_structure(sample.get(content_field))
         sample["providerKey"] = _provider_key(row["provider"])
         sample["contentCaptured"] = (
             row["prompt_redacted"] is not None or row["response_redacted"] is not None
@@ -2177,7 +3030,10 @@ def _trace_samples(
         if judgment:
             sample["judgment"] = judgment
         sample["providerStatus"] = (
-            "provider_error" if sample.get("error") else "provider_succeeded"
+            "provider_error" if sample.get("error") is not None else "no_error_recorded"
+        )
+        sample["traceState"] = trace_evidence_state(
+            error=row["error"], ended_at=row["ended_at"],
         )
         sample["judgeStatus"] = judgment_status_by_trace.get(
             row["trace_id"], "not_judged"
@@ -2186,6 +3042,7 @@ def _trace_samples(
             error=row["error"],
             prompt=row["prompt_redacted"],
             response=row["response_redacted"],
+            ended_at=row["ended_at"],
         )
         sample["deterministicFacts"] = {
             "providerOutcome": facts["provider_outcome"],
@@ -2200,14 +3057,16 @@ def _trace_samples(
             "hedgePhrases": facts["hedge_phrases"],
         }
         samples.append(sample)
-    return samples, filtered_trace_ids
+    selected_trace = samples.pop() if selected_outside_page else None
+    return samples, selected_trace, filtered_trace_ids
 
 
 def _empty_management_metric() -> dict[str, Any]:
     return {
         "calls": 0,
-        "successfulCalls": 0,
-        "failedCalls": 0,
+        "errorRecordedCalls": 0,
+        "endedNoErrorRecordedCalls": 0,
+        "unfinishedCalls": 0,
         "inputTokens": 0,
         "outputTokens": 0,
         "tokenKnownCalls": 0,
@@ -2242,10 +3101,12 @@ def _record_management_metric(
     metric: dict[str, Any], row: Mapping[str, Any], tags: object
 ) -> None:
     metric["calls"] += 1
-    if row["error"]:
-        metric["failedCalls"] += 1
-    else:
-        metric["successfulCalls"] += 1
+    state = trace_evidence_state(error=row["error"], ended_at=row["ended_at"])
+    metric[{
+        "error_recorded": "errorRecordedCalls",
+        "ended_no_error_recorded": "endedNoErrorRecordedCalls",
+        "unfinished": "unfinishedCalls",
+    }[state]] += 1
     input_tokens = _nonnegative_number(row["input_tokens"])
     output_tokens = _nonnegative_number(row["output_tokens"])
     if input_tokens is not None:
@@ -2274,10 +3135,9 @@ def _finish_management_metric(metric: Mapping[str, Any]) -> dict[str, Any]:
     known_latency = int(metric["latencyKnownCalls"])
     return {
         "calls": calls,
-        "successfulCalls": int(metric["successfulCalls"]),
-        "failedCalls": int(metric["failedCalls"]),
-        "successRatePct": round(100 * metric["successfulCalls"] / calls, 1)
-        if calls else None,
+        "errorRecordedCalls": int(metric["errorRecordedCalls"]),
+        "endedNoErrorRecordedCalls": int(metric["endedNoErrorRecordedCalls"]),
+        "unfinishedCalls": int(metric["unfinishedCalls"]),
         "inputTokens": int(metric["inputTokens"]),
         "outputTokens": int(metric["outputTokens"]),
         "totalTokens": int(metric["inputTokens"] + metric["outputTokens"]),
@@ -2332,7 +3192,7 @@ def _time_series_read_model(
         bucket = int((_dt(row["started_at"]) - t0).total_seconds() // bin_seconds)
         cell = bins[provider_key][bucket]
         cell["n"] += 1
-        if row["error"]:
+        if row["error"] is not None:
             cell["err"] += 1
         latency = _round_or_none(row["latency_ms"], 6)
         if latency is not None:
@@ -2426,6 +3286,8 @@ def _analysis_coverage(
     cur: _QuerySession,
     *,
     tenant: str,
+    evidence_revision: int | None,
+    total_traces: int,
     agent_runs: dict[str, Any],
     explorer_trace_ids: list[str],
     judgment_status_by_trace: dict[str, str],
@@ -2441,14 +3303,30 @@ def _analysis_coverage(
         "availableTraces": len(explorer_trace_ids),
         "analyzedTraces": 0,
         "complete": False,
+        "needsRefresh": False,
     }
     if _table_exists(cur, "deterministic_analysis_runs"):
-        row = cur.execute(
-            """SELECT payload_json FROM deterministic_analysis_runs
-               WHERE tenant_id=? AND scope_key=? AND analyzer_version=?
-               ORDER BY completed_at DESC, analysis_id DESC LIMIT 1""",
-            (tenant, SCOPE_KEY, ANALYZER_VERSION),
-        ).fetchone()
+        revision_select = (
+            "r.verified_revision" if "verified_revision" in cur.columns(
+                "deterministic_analysis_runs"
+            ) else "NULL AS verified_revision"
+        )
+        row = None
+        if _table_exists(cur, "deterministic_analysis_current"):
+            row = cur.execute(
+                f"""SELECT r.payload_json, {revision_select} FROM deterministic_analysis_current c
+                   JOIN deterministic_analysis_runs r ON r.analysis_id=c.analysis_id
+                   WHERE c.tenant_id=? AND c.scope_key=? AND c.analyzer_version=?""",  # nosec B608 -- fixed projection from schema introspection
+                (tenant, SCOPE_KEY, ANALYZER_VERSION),
+            ).fetchone()
+        if row is None:
+            # Pre-pointer records retain their original completion-time order.
+            row = cur.execute(
+                f"""SELECT r.payload_json, {revision_select} FROM deterministic_analysis_runs r
+                   WHERE tenant_id=? AND scope_key=? AND analyzer_version=?
+                   ORDER BY completed_at DESC, analysis_id DESC LIMIT 1""",  # nosec B608 -- fixed projection from schema introspection
+                (tenant, SCOPE_KEY, ANALYZER_VERSION),
+            ).fetchone()
         if row is not None:
             payload = row["payload_json"]
             if isinstance(payload, dict):
@@ -2468,6 +3346,12 @@ def _analysis_coverage(
                 "analyzedTraces": trace_scope.get("analyzed", 0),
                 "complete": bool(
                     scope.get("complete") and trace_scope.get("complete")
+                ),
+                "needsRefresh": persisted.status.value == "completed" and (
+                    row["verified_revision"] is None
+                    or row["verified_revision"] != evidence_revision
+                    or scope.get("availableRuns") != agent_runs["available"]
+                    or trace_scope.get("available") != total_traces
                 ),
             }
     application_trace_ids = set(explorer_trace_ids)
@@ -2505,19 +3389,22 @@ def _build(
     trace_offset: int = 0,
     trace_judge_status: str = "all",
     trace_id: str | None = None,
+    trace_date: str | None = None,
     report_days: int = 0,
 ) -> dict:
     requested_trace_id = trace_id
     agent_runs = _agent_run_metadata(cur, registry_tenant or "__verdict_local__")
+    evidence_revision = _evidence_revision(cur, registry_tenant or "__verdict_local__")
     analysis_time = _now_utc()
     report_start, report_end, report_period = _report_period(report_days, analysis_time)
     if not _table_exists(cur, "traces"):
         coverage = _analysis_coverage(cur, tenant=registry_tenant or "__verdict_local__",
+                                      evidence_revision=evidence_revision, total_traces=0,
                                       agent_runs=agent_runs, explorer_trace_ids=[],
                                       judgment_status_by_trace={}, selected_evaluator_id=None)
         return _empty_bundle(
             agent_runs=agent_runs, report_days=report_days, analysis_time=analysis_time,
-            coverage=coverage,
+            coverage=coverage, evidence_revision=evidence_revision,
         )
     trace_columns = cur.columns("traces")
     trace_scope, trace_scope_params = _trace_tenant_scope(
@@ -2530,11 +3417,12 @@ def _build(
     ).fetchone()
     if not t0row or not t0row["m"]:
         coverage = _analysis_coverage(cur, tenant=registry_tenant or "__verdict_local__",
+                                      evidence_revision=evidence_revision, total_traces=0,
                                       agent_runs=agent_runs, explorer_trace_ids=[],
                                       judgment_status_by_trace={}, selected_evaluator_id=None)
         return _empty_bundle(
             agent_runs=agent_runs, report_days=report_days, analysis_time=analysis_time,
-            coverage=coverage,
+            coverage=coverage, evidence_revision=evidence_revision,
         )
     t0, tmax = _dt(t0row["m"]), _dt(t0row["x"])
     cluster_select = (
@@ -2553,6 +3441,8 @@ def _build(
     response_model_column = (
         "response_model" if "response_model" in trace_columns else "'' AS response_model"
     )
+    ended_at_column = "ended_at" if "ended_at" in trace_columns else "NULL AS ended_at"
+    tenant_id_column = "tenant_id" if "tenant_id" in trace_columns else "NULL AS tenant_id"
     environment_column = (
         "environment" if "environment" in trace_columns else "'' AS environment"
     )
@@ -2572,10 +3462,12 @@ def _build(
     }
     total_cost = 0.0
     priced_traces = 0
+    monitor_eligible_calls = 0
 
     display_workloads: set[str] = set()
     has_undisplayable_workload = False
     explorer_trace_ids: list[str] = []
+    day_explorer_trace_ids: list[str] = []
 
     # trace_id -> (provider, started_at) and provider model
     tp, ttime, tcluster, model_of, models_of, raw_provider_of = (
@@ -2586,7 +3478,7 @@ def _build(
         # ``cluster_select`` is selected from the two literals above; it never
         # contains request data or a database value.
         "SELECT trace_id, provider, request_model, "
-        f"{response_model_column}, started_at, "  # nosec B608
+        f"{response_model_column}, started_at, {ended_at_column}, {tenant_id_column}, "  # nosec B608
         "input_tokens, output_tokens, error, latency_ms, cost_usd, "
         f"{cluster_select}, {tags_column} AS workload_tags, "  # nosec B608
         f"{service_column}, {environment_column} FROM traces "  # nosec B608
@@ -2605,9 +3497,14 @@ def _build(
             isinstance(tags, dict) and "verdict.workload" in tags
         )
         workload = tags.get("verdict.workload") if isinstance(tags, dict) else None
+        if (r["ended_at"] is not None and workload not in {"judge", "paired_replay"}
+                and not (registry_tenant == LOCAL_TENANT and r["tenant_id"] == "")):
+            monitor_eligible_calls += 1
         group = workload if workload in {"agent", "judge"} else "unclassified"
         if workload != "judge":
             explorer_trace_ids.append(r["trace_id"])
+        if workload not in {"judge", "paired_replay"}:
+            day_explorer_trace_ids.append(r["trace_id"])
         if workload not in {"judge", "paired_replay"} and (
             report_start is None or report_start <= _dt(r["started_at"]) < report_end
         ):
@@ -2648,11 +3545,8 @@ def _build(
             day["calls"] += 1
             input_tokens = _nonnegative_number(r["input_tokens"])
             output_tokens = _nonnegative_number(r["output_tokens"])
-            if input_tokens is not None:
-                day["totalTokens"] += int(input_tokens)
-            if output_tokens is not None:
-                day["totalTokens"] += int(output_tokens)
             if input_tokens is not None and output_tokens is not None:
+                day["totalTokens"] += int(input_tokens) + int(output_tokens)
                 day["tokenKnownCalls"] += 1
             latency = _nonnegative_number(r["latency_ms"])
             if latency is not None:
@@ -2707,9 +3601,12 @@ def _build(
         trace_columns,
         alias="t",
     )
+    judgment_source = (
+        "current_judgments" if _table_exists(cur, "current_judgments") else "judgments"
+    )
     judgment_rows = (
         cur.execute(
-            "SELECT j.* FROM judgments AS j "
+            f"SELECT j.* FROM {judgment_source} AS j "
             "JOIN traces AS t ON t.trace_id=j.trace_id "
             f"WHERE {judgment_scope}",  # nosec B608 -- fixed tenant predicate
             judgment_scope_params,
@@ -2884,7 +3781,7 @@ def _build(
             normalized_dims.append({
                 "name": name,
                 "verdict": verdict,
-                "reasoning": redact(str(dimension.get("reasoning", ""))) or "",
+                "reasoning": redact_structure(str(dimension.get("reasoning", ""))) or "",
             })
             dim_overall[name][verdict] += 1
             prov_dim[prov][name][verdict] += 1
@@ -3027,18 +3924,21 @@ def _build(
         model_of=model_of,
     )
 
-    samples, filtered_explorer_trace_ids = _trace_samples(
+    samples, selected_trace, filtered_explorer_trace_ids = _trace_samples(
         cur,
         requested_trace_id=requested_trace_id,
         trace_judge_status=trace_judge_status,
         trace_offset=trace_offset,
+        trace_date=trace_date,
         explorer_trace_ids=explorer_trace_ids,
+        day_explorer_trace_ids=day_explorer_trace_ids,
         judgment_status_by_trace=judgment_status_by_trace,
         ttime=ttime,
         tcluster=tcluster,
         cluster_labels=cluster_labels,
         cluster_select=cluster_select,
         operation_select=operation_select,
+        ended_at_select=ended_at_column,
         judg_by_trace=judg_by_trace,
         t0=t0,
     )
@@ -3098,6 +3998,8 @@ def _build(
     coverage = _analysis_coverage(
         cur,
         tenant=registry_tenant or "__verdict_local__",
+        evidence_revision=evidence_revision,
+        total_traces=total_traces,
         agent_runs=agent_runs,
         explorer_trace_ids=explorer_trace_ids,
         judgment_status_by_trace=judgment_status_by_trace,
@@ -3153,7 +4055,7 @@ def _build(
             "endDate": management_latest.date().isoformat() if management_latest else None,
         })
     management_report = {
-        "schema": "management-report-v1",
+        "schema": "management-report-v2",
         "period": report_period,
         "scope": scope,
         "timeline": {
@@ -3178,10 +4080,15 @@ def _build(
             "runEnd": tmax.isoformat(),
             "durationHours": max(1, round((tmax - t0).total_seconds() / 3600)),
             "totalTraces": total_traces,
+            "evidenceRevision": evidence_revision,
+            "monitorEligibleCalls": monitor_eligible_calls,
             "totalAgentRuns": agent_runs["available"],
             "agentRunSources": agent_runs["sources"],
             "agentRunSourcesTruncated": agent_runs["sourcesTruncated"],
+            "agentRunAgents": agent_runs["agents"],
+            "agentRunAgentsTruncated": agent_runs["agentsTruncated"],
             "lastAgentCaptureAt": agent_runs["lastCapturedAt"],
+            "lastAgentStoredAt": agent_runs.get("lastStoredAt"),
             "totalJudged": len(judg_by_trace),
             "totalCost": total_cost if priced_traces else None,
             "totalCostStatus": total_cost_status,
@@ -3217,6 +4124,7 @@ def _build(
         "focusProvider": series["focusProvider"],
         "focusProviderLabel": series["focusProviderLabel"],
         "samples": samples,
+        "selectedTrace": selected_trace,
         "providerDimension": providerDimension,
         "managementReport": management_report,
         "truncation": truncation,
@@ -3233,6 +4141,7 @@ def create_app(
     operations_page_url: str | None = None,
     allowed_hosts: list[str] | None = None,
     tenant_id: str = LOCAL_TENANT,
+    synthetic_demo: bool = False,
 ):
     import base64
     import secrets
@@ -3293,23 +4202,8 @@ def create_app(
     # The dashboard shell and live data require the password. Health and static
     # assets contain no stored telemetry and remain public.
     def _is_gated(path: str) -> bool:
-        core_path = path in {"/", "/dashboard", "/api/config"} or path.startswith(
-            (
-                "/api/data",
-                "/api/registry",
-                "/api/runs",
-                "/api/usage",
-                "/api/session",
-                "/api/experiments",
-                "/api/scoped",
-                "/api/compare",
-                "/api/insights",
-                "/api/evaluators",
-                "/api/setup",
-                "/api/monitor",
-                "/api/clusters",
-                "/api/control",
-            )
+        core_path = path in {"/", "/dashboard"} or (
+            path.startswith("/api/") and path != "/api/health"
         )
         operations_path = operations_page_url is not None and (
             path == operations_page_url or path.startswith(operations_page_url + "/")
@@ -3326,7 +4220,11 @@ def create_app(
         """
         user = os.environ.get("VERDICT_USER")
         pw = os.environ.get("VERDICT_PASS")
-        if user and pw and request.method != "OPTIONS" and _is_gated(request.url.path):
+        path = request.scope["path"]
+        root_path = request.scope.get("root_path", "").rstrip("/")
+        if root_path and (path == root_path or path.startswith(root_path + "/")):
+            path = path[len(root_path):] or "/"
+        if user and pw and request.method != "OPTIONS" and _is_gated(path):
             header = request.headers.get("authorization", "")
             ok = False
             if header.startswith("Basic "):
@@ -3387,6 +4285,7 @@ def create_app(
 
     from verdict.dashboard.control_routes import ControlRoutes
     from verdict.dashboard.day_explanation import register_day_explanation_routes
+    from verdict.dashboard.evidence_explanation import register_explanation_routes
     from verdict.dashboard.experiments import register_experiment_routes
     from verdict.dashboard.lab_routes import register_lab_routes
     from verdict.dashboard.monitor_routes import MonitorRoutes
@@ -3396,6 +4295,7 @@ def create_app(
     register_experiment_routes(app, setup_routes)
     register_scoped_routes(app, setup_routes)
     register_day_explanation_routes(app, setup_routes)
+    register_explanation_routes(app, setup_routes)
     monitor_routes = MonitorRoutes(setup_routes)
     monitor_routes.register(app)
     ControlRoutes(configured_storage, setup_routes, monitor_routes).register(app)
@@ -3415,6 +4315,7 @@ def create_app(
         trace_offset: int = Query(default=0, ge=0),
         trace_judge_status: str = "all",
         trace_id: str | None = None,
+        trace_date: str | None = None,
         report_days: int = 30,
     ):
         if report_days not in REPORT_PERIOD_DAYS:
@@ -3444,11 +4345,17 @@ def create_app(
                 trace_offset=trace_offset,
                 trace_judge_status=trace_judge_status,
                 trace_id=trace_id,
+                trace_date=trace_date,
                 report_days=report_days,
             )
             bundle["meta"]["storageBackend"] = backend
+            bundle["meta"]["dataProvenance"] = (
+                "synthetic" if synthetic_demo else "unspecified"
+            )
             bundle["monitor"] = monitor_routes.read_state(tenant_id=authorized_tenant)
             return bundle
+        except ValueError:
+            return JSONResponse({"error": "invalid data request"}, status_code=422)
         except DashboardBundleLimitError:
             _log.exception("dashboard bundle exceeded its safety budget")
             return JSONResponse(
@@ -3499,6 +4406,8 @@ def create_app(
         evaluator_fingerprint: str | None = None,
         view: str = "full",
         selected_run_id: str | None = None,
+        source_kind: str | None = None,
+        agent_name: str | None = None,
     ):
         try:
             authorized_tenant = _authorized_tenant(request)
@@ -3514,6 +4423,8 @@ def create_app(
                 evaluator_fingerprint=evaluator_fingerprint,
                 view=view,
                 selected_run_id=selected_run_id,
+                source_kind=source_kind,
+                agent_name=agent_name,
             )
         except ValueError:
             return JSONResponse({"error": "invalid runs request"}, status_code=400)
@@ -3523,6 +4434,20 @@ def create_app(
 
     agent_runs.__annotations__["request"] = Request
     app.get("/api/runs")(agent_runs)
+
+    def agent_run_outcomes(request):
+        try:
+            return build_run_outcome_preview(
+                configured_storage, tenant=_authorized_tenant(request),
+            )
+        except ValueError:
+            return JSONResponse({"error": "invalid run outcome request"}, status_code=400)
+        except (OSError, sqlite3.DatabaseError):
+            _log.exception("failed to build %s run outcome preview", backend)
+            return JSONResponse({"error": "run outcome preview unavailable"}, status_code=503)
+
+    agent_run_outcomes.__annotations__["request"] = Request
+    app.get("/api/agent-run-outcomes")(agent_run_outcomes)
 
     def agent_usage(request, day: str | None = None, session_id: str | None = None,
                     source_kind: str | None = None):
@@ -3591,6 +4516,98 @@ def create_app(
     agent_run_detail.__annotations__["request"] = Request
     app.get("/api/runs/{run_id}")(agent_run_detail)
 
+    def recent_local_events(
+        run_id: str, request, revision: str | None = None,
+        turn_id: str | None = None, event_id: str | None = None,
+    ):
+        try:
+            if revision is not None and (len(revision) != 64
+                                         or any(char not in "0123456789abcdef" for char in revision)):
+                return JSONResponse({"error": "invalid recent local sample request"}, status_code=400)
+            if ((turn_id is None) != (event_id is None)
+                    or (turn_id is not None and revision is None)
+                    or any(not isinstance(value, str) or not value
+                           or len(value.encode("utf-8")) > 256
+                           for value in (turn_id, event_id) if value is not None)):
+                return JSONResponse({"error": "invalid recent local sample request"}, status_code=400)
+            sample = build_recent_local_sample(
+                configured_storage, tenant=_authorized_tenant(request), run_id=run_id,
+                revision=revision, turn_id=turn_id, event_id=event_id,
+            )
+            if (revision is not None and sample.get("sourceRevision") != revision
+                    and sample.get("historicalFocusedEvent") is not True
+                    and sample.get("focusedEvent") is None):
+                return JSONResponse({"error": "stale_revision"}, status_code=409)
+            if event_id is not None and sample.get("historicalFocusedEvent") is not True:
+                if sample.get("schema") != "local-recent-window-v2":
+                    return JSONResponse({"error": "recent event not found"}, status_code=404)
+                selected = next((event for event in sample["events"]
+                                 if event.get("eventId") == event_id
+                                 and event.get("turnId") == turn_id), None)
+                if selected is None:
+                    return JSONResponse({"error": "recent event not found"}, status_code=404)
+                sample["focusedEvent"] = selected
+            return sample
+        except KeyError:
+            if revision is not None:
+                current = build_agent_runs_bundle(
+                    configured_storage, tenant=_authorized_tenant(request), run_id=run_id,
+                )
+                if current.get("runs"):
+                    return JSONResponse({"error": "stale_revision"}, status_code=409)
+            return JSONResponse({"error": "recent local sample not found"}, status_code=404)
+        except ValueError:
+            _log.exception("invalid stored %s recent local sample", backend)
+            return JSONResponse({"error": "recent local sample unavailable"}, status_code=503)
+        except (DashboardBundleLimitError, OSError, sqlite3.DatabaseError):
+            _log.exception("failed to read %s recent local sample", backend)
+            return JSONResponse({"error": "recent local sample unavailable"}, status_code=503)
+
+    recent_local_events.__annotations__["request"] = Request
+    app.get("/api/runs/{run_id}/recent-local-events")(recent_local_events)
+
+    def full_local_events(
+        run_id: str, request, revision: str, limit: int = 100,
+        after_ordinal: int | None = None, after_event_id: str | None = None,
+    ):
+        try:
+            return build_full_local_event_page(
+                configured_storage, tenant=_authorized_tenant(request),
+                run_id=run_id, revision=revision, limit=limit,
+                after_ordinal=after_ordinal, after_event_id=after_event_id,
+            )
+        except KeyError:
+            return JSONResponse({"error": "local history not found"}, status_code=404)
+        except ValueError as exc:
+            reason = str(exc)
+            if reason in {"stale_revision", "stale_cursor", "partial_projection"}:
+                return JSONResponse({"error": reason}, status_code=409)
+            return JSONResponse({"error": "invalid local event page request"}, status_code=400)
+        except (RuntimeError, DashboardBundleLimitError, OSError, sqlite3.DatabaseError):
+            _log.exception("failed to read %s full local event page", backend)
+            return JSONResponse({"error": "local event page unavailable"}, status_code=503)
+
+    full_local_events.__annotations__["request"] = Request
+    app.get("/api/runs/{run_id}/local-events")(full_local_events)
+
+    def full_local_analysis(run_id: str, request):
+        try:
+            return build_full_local_run_analysis(
+                configured_storage, tenant=_authorized_tenant(request), run_id=run_id,
+            )
+        except KeyError:
+            return JSONResponse({"error": "local history not found"}, status_code=404)
+        except ValueError as exc:
+            if str(exc) == "partial_projection":
+                return JSONResponse({"error": "partial_projection"}, status_code=409)
+            return JSONResponse({"error": "invalid local run analysis request"}, status_code=400)
+        except (RuntimeError, DashboardBundleLimitError, OSError, sqlite3.DatabaseError):
+            _log.exception("failed to analyze %s full local run", backend)
+            return JSONResponse({"error": "local run analysis unavailable"}, status_code=503)
+
+    full_local_analysis.__annotations__["request"] = Request
+    app.get("/api/runs/{run_id}/recorded-analysis")(full_local_analysis)
+
     def agent_turn_analysis(run_id: str, turn_id: str, request):
         try:
             return build_agent_turn_analysis(
@@ -3601,7 +4618,7 @@ def create_app(
             return JSONResponse({"error": "agent turn not found"}, status_code=404)
         except ValueError:
             return JSONResponse({"error": "invalid turn analysis request"}, status_code=400)
-        except (DashboardBundleLimitError, OSError, sqlite3.DatabaseError):
+        except (DashboardBundleLimitError, RuntimeError, OSError, sqlite3.DatabaseError):
             _log.exception("failed to build %s agent turn analysis", backend)
             return JSONResponse({"error": "agent turn analysis unavailable"}, status_code=503)
 
@@ -3672,6 +4689,10 @@ def main(argv: list[str] | None = None) -> int:
         help="Tenant scope to read and mutate (default: VERDICT_TENANT_ID or local)",
     )
     parser.add_argument("--open-browser", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--synthetic-demo", action="store_true",
+        help="Label the connected store as illustrative synthetic data",
+    )
     source = parser.add_mutually_exclusive_group()
     source.add_argument("--storage", help="SQLite URL/path or PostgreSQL DSN")
     source.add_argument("--db", help="legacy SQLite path")
@@ -3705,7 +4726,10 @@ def main(argv: list[str] | None = None) -> int:
             0.5, webbrowser.open, args=(f"http://{args.host}:{args.port}/dashboard",),
         ).start()
     uvicorn.run(
-        create_app(storage=configured_storage, tenant_id=args.tenant_id),
+        create_app(
+            storage=configured_storage, tenant_id=args.tenant_id,
+            synthetic_demo=args.synthetic_demo,
+        ),
         host=args.host,
         port=args.port,
     )

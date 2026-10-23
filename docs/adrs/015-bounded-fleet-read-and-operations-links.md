@@ -4,6 +4,19 @@
 **Date:** 2026-09-14
 **Decider:** Cognifity AI
 
+**Current reader contract:** A stored end time and
+missing error cannot prove provider success. The V1 DTO and serializer remain
+exact, but the V1 live reader now fails the whole window with
+`unsupported_version` for ended/no-error or error-before-end rows rather than
+emitting a misleading `succeeded` or `in_progress` value. Integrations should
+move to `PostgresVerdictFleetReadPortV2` and
+`trace_window_read_v2_to_json`. V2 reuses the same tenant-scoped, bounded
+views/query and fields; its request statuses are `in_progress`,
+`error_recorded`, and `ended_no_error_recorded`. An error field is considered
+recorded when it is non-null, including an empty string. Neither an ended
+call nor a missing error proves response or task success. Existing V1 prepared
+views remain valid; no database reconfiguration is needed for the V2 reader.
+
 ## Context
 
 Verdict's accepted Agent Run ReadPort V1 intentionally reads one selected run.
@@ -96,9 +109,9 @@ class VerdictFleetReadError(RuntimeError):
     code: str
 ```
 
-V1 classes and signatures never grow fields or operations. A future shape gets
-new V2 types and protocol. The existing `verdict.read_port` exports and analysis
-version remain unchanged.
+V1 classes and signatures never grow fields or operations. The V2 shape uses
+new types and a protocol. This fleet boundary does not change the selected-run
+`verdict.read_port` exports.
 
 ### Exact values and invariants
 
@@ -110,10 +123,12 @@ version remain unchanged.
   strings normalize to null. NUL and invalid Unicode are rejected.
 - Counts are exact non-Boolean integers in `0..2^63-1`. Latency is an integer in
   `0..86_400_000_000` microseconds. Cost is an integer in `0..10^15` micro-USD.
-- `started_at` lies in the requested window. `ended_at` is null exactly for
-  `in_progress`, otherwise it is UTC in `[started_at,started_at+24h]` and status
-  is `succeeded` or `failed`. Failed/succeeded uses only stored error presence;
-  error text never crosses the view or port.
+- `started_at` lies in the requested window. `ended_at`, when present, is UTC
+  in `[started_at,started_at+24h]`. V2 reports an error field first (even if
+  end time is missing), then `in_progress` without end or error, otherwise
+  `ended_no_error_recorded`. Error text never crosses the view or port. The
+  original V1 shape supports only its representable `failed` and
+  `in_progress` rows on the current reader; an ambiguous row fails the window.
 - Source `latency_ms` becomes microseconds with
   `Decimal(str(value))*1000`, integer round-half-even. Finite nonnegative
   `cost_usd` becomes micro-USD with `Decimal(str(value))*1_000_000`, integer
@@ -232,7 +247,7 @@ disabling the private package does not leave a reader authorized. The port binds
 `tenant_id` at construction and
 rejects any call tenant that does not byte-match it before pool access.
 
-`PostgresVerdictFleetReadPortV1` is the only default adapter. It lazily imports
+Both versioned PostgreSQL adapters use the same lazy reader implementation. It imports
 the existing PostgreSQL extra and owns one connection pool with min/max size one.
 Startup opens the pool within two seconds, validates PostgreSQL 16, exact view
 columns/version and grants, a read-only role/search path, zero memberships,
@@ -362,6 +377,8 @@ Python signature, storage row, authentication boundary, or content policy.
 
 - Public signature/field-order/version fixtures; exact constructors, subclass
   rejection/revalidation, JSON order/UTC, 2 MiB boundary, and every stable error.
+- Bound projected Trace and linked-agent text before client materialization;
+  reject overlong UTF-8 fields through DTO validation in both read versions.
 - Empty/exact/2,000/2,001 windows, one-second density, malformed rows, UTC and
   duration/number overflow, duplicate IDs, and update/delete/stream completion.
 - Error-presence status without error content; prompt/response/error/session/

@@ -181,6 +181,8 @@ jobs:
 
       - name: Install Postgres test dependencies
         run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client
           python -m pip install --disable-pip-version-check \
             httpx pytest "psycopg[binary,pool]"
           python -m pip install --disable-pip-version-check \
@@ -191,7 +193,9 @@ jobs:
         run: >-
           python -m pytest -v
           packages/verdict/tests/test_postgres_integration.py
+          packages/verdict/tests/test_postgres_backup_restore.py
           packages/verdict/tests/test_telemetry_postgres.py
+          packages/verdict/tests/test_customer_topology.py
           ui/tests/test_postgres_dashboard.py
 
   release-artifacts:

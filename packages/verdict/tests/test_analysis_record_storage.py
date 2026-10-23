@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
@@ -84,6 +85,66 @@ def test_analysis_snapshot_round_trips_explicit_zero_findings(storage) -> None:
         "tenant-a", "agent-and-trace"
     ) == run
     assert run.result["findings"] == []
+
+
+def test_sqlite_existing_analysis_migrates_as_unverified(tmp_path) -> None:
+    path = tmp_path / "older-analysis.db"
+    storage = SQLiteStorage(str(path))
+    storage.save_deterministic_analysis_run(_analysis())
+    storage.close()
+    with sqlite3.connect(path) as connection:
+        connection.execute("ALTER TABLE deterministic_analysis_runs DROP COLUMN verified_revision")
+        connection.execute("DROP TABLE evidence_revisions")
+    reopened = SQLiteStorage(str(path))
+    try:
+        run = reopened.get_latest_deterministic_analysis_run("tenant-a", "agent-and-trace")
+        assert run is not None
+        assert run.verified_revision is None
+        assert reopened.get_evidence_revision("tenant-a") == 0
+    finally:
+        reopened.close()
+
+
+def test_sqlite_latest_attempt_precedes_older_verified_record(tmp_path) -> None:
+    storage = SQLiteStorage(str(tmp_path / "analysis-order.db"))
+    verified = replace(_analysis(), verified_revision=0)
+    unverified = replace(
+        _analysis(analysis_id="c" * 64, input_fingerprint="d" * 64),
+        completed_at=NOW + timedelta(hours=1),
+    )
+    try:
+        storage.save_deterministic_analysis_run(verified)
+        storage.save_deterministic_analysis_run(unverified)
+        assert storage.get_latest_deterministic_analysis_run(
+            "tenant-a", "agent-and-trace", analyzer_version="agent-insights-v1",
+        ) == unverified
+    finally:
+        storage.close()
+
+
+def test_sqlite_analysis_pointer_and_recheck_roll_back_together(tmp_path) -> None:
+    storage = SQLiteStorage(str(tmp_path / "analysis-atomic.db"))
+    first = _analysis()
+    second = _analysis(analysis_id="c" * 64, input_fingerprint="d" * 64)
+    storage.save_deterministic_analysis_run(first)
+    storage.save_deterministic_analysis_run(second)
+    assert storage.get_latest_deterministic_analysis_run(
+        "tenant-a", "agent-and-trace", analyzer_version="agent-insights-v1",
+    ) == second
+    with storage._lock:
+        storage._conn.execute("""
+            CREATE TRIGGER block_analysis_pointer BEFORE UPDATE ON deterministic_analysis_current
+            BEGIN SELECT RAISE(ABORT, 'synthetic pointer write failure'); END
+        """)
+    try:
+        with pytest.raises(sqlite3.IntegrityError, match="synthetic pointer"):
+            storage.verify_deterministic_analysis_run(first.analysis_id, revision=3)
+        assert storage.get_deterministic_analysis_run(first.analysis_id).verified_revision is None
+        assert storage.get_latest_deterministic_analysis_run(
+            "tenant-a", "agent-and-trace", analyzer_version="agent-insights-v1",
+        ) == second
+    finally:
+        storage.close()
 
 
 def test_analysis_identity_cannot_change_content(storage) -> None:

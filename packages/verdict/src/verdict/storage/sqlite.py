@@ -10,8 +10,9 @@ import hashlib
 import json
 import sqlite3
 import threading
+from collections.abc import Callable
 from contextlib import contextmanager
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -36,12 +37,38 @@ from verdict.analysis_records import (
     notification_attempt_to_json,
     validate_delivery_query,
 )
+from verdict.delivery_queue import (
+    DeliveryQueueItem,
+    NotificationIntent,
+    intent_from_json,
+    intent_to_json,
+    validate_delivery_cursor,
+)
 from verdict.evidence import (
     AgentCaptureBatch,
     AgentRunBundle,
     AgentTurn,
     ExecutionStatus,
     agent_run_bundle_from_json,
+)
+from verdict.local_recent_facts import (
+    LocalFullProjection,
+    LocalRecentFact,
+    reject_lost_model_usage,
+    require_all_retained_facts,
+    tail_turn_json,
+    trace_evidence_fingerprint,
+    validate_full_projection,
+    validate_historical_facts,
+    validate_recent_facts,
+)
+from verdict.local_source_revision import (
+    LocalSourceRevision,
+    revision_from_row,
+    same_recent_window,
+    validate_recent_window_json,
+    verify_retained_local_evidence,
+    verify_source_revision,
 )
 from verdict.monitoring import (
     CohortManifest,
@@ -59,6 +86,7 @@ from verdict.normalized_evidence import (
     LEGACY_AGENT_WRITER_MIGRATION,
     _LegacyLocalTextUpgrade,
     _prepare_legacy_local_text_upgrade,
+    _prepare_linked_traces,
     agent_event_from_row,
     agent_run_from_row,
     agent_turn_from_row,
@@ -135,6 +163,21 @@ def _trace_tenant_clause(requested: str, column: str = "tenant_id") -> str:
         f"({column} IS NULL OR {column}=?)" if requested == "__verdict_local__" else f"{column}=?"
     )
 
+
+_EVALUABLE_LOCAL_TURN = (
+    "(s.source_kind NOT IN ('codex','claude-code') OR "
+    "(s.local_full_bytes IS NOT NULL AND "
+    "(s.local_partial_line=0 OR EXISTS ("
+    "SELECT 1 FROM agent_turns newer WHERE newer.tenant_id=t.tenant_id "
+    "AND newer.run_id=t.run_id AND newer.sequence>t.sequence)))) "
+    "AND NOT EXISTS (SELECT 1 FROM agent_events marker_event "
+    "JOIN agent_turns marker_turn ON marker_turn.tenant_id=marker_event.tenant_id "
+    "AND marker_turn.run_id=marker_event.run_id "
+    "AND marker_turn.turn_id=marker_event.turn_id "
+    "WHERE marker_event.tenant_id=t.tenant_id AND marker_event.run_id=t.run_id "
+    "AND marker_event.provenance='verdict:capture_limit' "
+    "AND marker_turn.sequence<=t.sequence)"
+)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS conversation_snapshots (
@@ -234,6 +277,18 @@ CREATE TABLE IF NOT EXISTS import_sources (
     started_at TEXT NOT NULL,
     observed_at TEXT NOT NULL,
     ended_at TEXT,
+    local_full_bytes INTEGER,
+    local_full_sha256 TEXT,
+    local_prefix_bytes INTEGER,
+    local_prefix_sha256 TEXT,
+    local_partial_line INTEGER,
+    local_source_turn_count INTEGER,
+    local_source_event_count INTEGER,
+    local_v1_turn_count INTEGER,
+    local_v1_event_count INTEGER,
+    local_projection_complete INTEGER,
+    local_min_turn_at TEXT,
+    local_max_turn_at TEXT,
     PRIMARY KEY (tenant_id, source_session_id),
     UNIQUE (tenant_id, source_kind, source_locator_hash)
 );
@@ -262,6 +317,9 @@ CREATE TABLE IF NOT EXISTS agent_runs (
 );
 CREATE INDEX IF NOT EXISTS idx_agent_runs_tenant_started
     ON agent_runs(tenant_id, started_at DESC, run_id DESC);
+CREATE INDEX IF NOT EXISTS idx_agent_runs_tenant_ended
+    ON agent_runs(tenant_id, ended_at DESC, run_id DESC)
+    WHERE ended_at IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_agent_runs_tenant_agent_started
     ON agent_runs(tenant_id, agent_name, agent_version, started_at DESC, run_id DESC);
 CREATE INDEX IF NOT EXISTS idx_agent_runs_tenant_session
@@ -352,8 +410,82 @@ CREATE TABLE IF NOT EXISTS agent_events (
 );
 CREATE INDEX IF NOT EXISTS idx_agent_events_run_time
     ON agent_events(tenant_id, run_id, occurred_at, event_id);
+CREATE INDEX IF NOT EXISTS idx_agent_events_tenant_time
+    ON agent_events(tenant_id, occurred_at, run_id, event_id);
 CREATE INDEX IF NOT EXISTS idx_agent_events_turn
     ON agent_events(tenant_id, run_id, turn_id, sequence, event_id);
+CREATE TABLE IF NOT EXISTS local_recent_events (
+    tenant_id TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    source_prefix_bytes INTEGER NOT NULL CHECK(source_prefix_bytes >= 0),
+    source_prefix_sha256 TEXT NOT NULL CHECK(length(source_prefix_sha256) = 64),
+    captured_at TEXT NOT NULL,
+    sample_json TEXT NOT NULL CHECK(length(CAST(sample_json AS BLOB)) <= 1048576),
+    PRIMARY KEY (tenant_id, run_id),
+    FOREIGN KEY (tenant_id, run_id) REFERENCES agent_runs(tenant_id, run_id)
+        ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS local_recent_event_facts (
+    tenant_id TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    event_id TEXT NOT NULL,
+    turn_id TEXT NOT NULL,
+    source_ordinal INTEGER NOT NULL CHECK(source_ordinal >= 0),
+    turn_sequence INTEGER NOT NULL CHECK(turn_sequence >= 0),
+    sequence INTEGER NOT NULL CHECK(sequence >= 0),
+    occurred_at TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    status TEXT NOT NULL,
+    provenance TEXT NOT NULL,
+    attributes_json TEXT NOT NULL,
+    privacy_classification TEXT NOT NULL,
+    omission_reason TEXT,
+    trace_id TEXT,
+    first_seen_revision TEXT NOT NULL CHECK(length(first_seen_revision) = 64),
+    PRIMARY KEY (tenant_id,run_id,event_id),
+    UNIQUE (tenant_id,run_id,source_ordinal),
+    UNIQUE (tenant_id,run_id,turn_id,sequence),
+    FOREIGN KEY (tenant_id,run_id) REFERENCES agent_runs(tenant_id,run_id)
+        ON DELETE CASCADE,
+    FOREIGN KEY (trace_id) REFERENCES traces(trace_id) ON DELETE SET NULL
+);
+CREATE TABLE IF NOT EXISTS local_tail_turn_facts (
+    tenant_id TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    turn_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL CHECK(sequence >= 0),
+    started_at TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    PRIMARY KEY (tenant_id,run_id,turn_id),
+    UNIQUE (tenant_id,run_id,sequence),
+    FOREIGN KEY (tenant_id,run_id) REFERENCES agent_runs(tenant_id,run_id)
+        ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_local_tail_turns_time
+    ON local_tail_turn_facts(tenant_id,started_at,run_id,sequence);
+CREATE TABLE IF NOT EXISTS local_source_scan_attempts (
+    tenant_id TEXT NOT NULL,
+    source_kind TEXT NOT NULL,
+    source_scope TEXT NOT NULL CHECK(length(source_scope)=64),
+    source_locator_hash TEXT NOT NULL CHECK(length(source_locator_hash)=64),
+    generation INTEGER NOT NULL CHECK(generation >= 1),
+    started_at TEXT NOT NULL,
+    finished_at TEXT,
+    outcome_code TEXT,
+    observed_size INTEGER CHECK(observed_size IS NULL OR observed_size >= 0),
+    observed_mtime_ns INTEGER,
+    accepted_revision TEXT,
+    projection_complete INTEGER,
+    source_line_complete INTEGER,
+    PRIMARY KEY (tenant_id,source_kind,source_scope,source_locator_hash)
+);
+CREATE INDEX IF NOT EXISTS idx_local_recent_facts_tenant_time
+    ON local_recent_event_facts(tenant_id,occurred_at,run_id,event_id);
+CREATE TABLE IF NOT EXISTS local_recent_trace_evidence (
+    trace_id TEXT PRIMARY KEY REFERENCES traces(trace_id) ON DELETE CASCADE,
+    tenant_id TEXT NOT NULL,
+    evidence_fingerprint TEXT NOT NULL CHECK(length(evidence_fingerprint)=64)
+);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_events_trace
     ON agent_events(tenant_id, trace_id) WHERE trace_id IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_events_producer_sequence
@@ -363,6 +495,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_events_producer_sequence
 CREATE TABLE IF NOT EXISTS verdict_schema_migrations (
     name TEXT PRIMARY KEY,
     applied_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS evidence_revisions (
+    tenant_id TEXT PRIMARY KEY,
+    revision INTEGER NOT NULL CHECK(revision >= 0)
 );
 
 CREATE TABLE IF NOT EXISTS deterministic_analysis_runs (
@@ -375,12 +512,21 @@ CREATE TABLE IF NOT EXISTS deterministic_analysis_runs (
     analyzer_version TEXT NOT NULL
         CHECK(length(CAST(analyzer_version AS BLOB)) BETWEEN 1 AND 128),
     input_fingerprint TEXT NOT NULL CHECK(length(input_fingerprint)=64),
+    verified_revision INTEGER,
     payload_json TEXT NOT NULL
         CHECK(length(CAST(payload_json AS BLOB)) BETWEEN 2 AND 4194304),
     UNIQUE(tenant_id, scope_key, analyzer_version, input_fingerprint, status)
 );
 CREATE INDEX IF NOT EXISTS idx_analysis_runs_tenant_scope_latest
     ON deterministic_analysis_runs(tenant_id, scope_key, completed_at DESC, analysis_id DESC);
+
+CREATE TABLE IF NOT EXISTS deterministic_analysis_current (
+    tenant_id TEXT NOT NULL,
+    scope_key TEXT NOT NULL,
+    analyzer_version TEXT NOT NULL,
+    analysis_id TEXT NOT NULL REFERENCES deterministic_analysis_runs(analysis_id) ON DELETE CASCADE,
+    PRIMARY KEY (tenant_id, scope_key, analyzer_version)
+);
 
 CREATE TABLE IF NOT EXISTS notification_delivery_attempts (
     attempt_id TEXT PRIMARY KEY CHECK(length(attempt_id)=64),
@@ -396,6 +542,27 @@ CREATE INDEX IF NOT EXISTS idx_notification_attempts_lookup
     ON notification_delivery_attempts(
         notification_id, destination_fingerprint, attempted_at DESC, attempt_id DESC
     );
+
+CREATE TABLE IF NOT EXISTS notification_delivery_queue (
+    intent_id TEXT PRIMARY KEY CHECK(length(intent_id)=64),
+    tenant_id TEXT NOT NULL CHECK(length(CAST(tenant_id AS BLOB)) BETWEEN 1 AND 256),
+    source_kind TEXT NOT NULL CHECK(source_kind IN ('analysis','monitor')),
+    source_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN
+        ('pending','unbound','failed','delivered','blocked','exhausted','superseded')),
+    destination_fingerprint TEXT,
+    attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count>=0),
+    next_due_at TEXT,
+    next_probe_at TEXT,
+    last_error_code TEXT,
+    superseded_by_id TEXT,
+    payload_json TEXT NOT NULL CHECK(length(CAST(payload_json AS BLOB)) BETWEEN 2 AND 4194304)
+);
+CREATE INDEX IF NOT EXISTS idx_notification_queue_due
+    ON notification_delivery_queue(tenant_id,status,next_due_at,intent_id);
+CREATE INDEX IF NOT EXISTS idx_notification_queue_probe
+    ON notification_delivery_queue(tenant_id,status,next_probe_at,intent_id);
 
 CREATE TABLE IF NOT EXISTS monitor_policies (
     policy_id TEXT PRIMARY KEY CHECK(length(CAST(policy_id AS BLOB)) BETWEEN 1 AND 256),
@@ -435,6 +602,7 @@ CREATE TABLE IF NOT EXISTS judgments (
     expected_dimensions_json TEXT,
     status TEXT DEFAULT 'completed',
     error TEXT,
+    local_recent_evidence_fingerprint TEXT,
     FOREIGN KEY (trace_id) REFERENCES traces(trace_id)
 );
 CREATE INDEX IF NOT EXISTS idx_judgments_trace ON judgments(trace_id);
@@ -676,6 +844,7 @@ CREATE TABLE IF NOT EXISTS spans (
     span_id TEXT PRIMARY KEY,
     name TEXT,
     trace_id TEXT,
+    tenant_id TEXT,
     parent_name TEXT,
     started_at TEXT NOT NULL,
     ended_at TEXT,
@@ -702,6 +871,13 @@ def _iso(dt: datetime | None) -> str | None:
 
 def _parse_iso(s: str | None) -> datetime | None:
     return datetime.fromisoformat(s) if s else None
+
+
+def _analysis_row(row: sqlite3.Row) -> DeterministicAnalysisRun:
+    return replace(
+        analysis_run_from_json(row["payload_json"]),
+        verified_revision=row["verified_revision"],
+    )
 
 
 def sqlite_path(path: str) -> Path:
@@ -764,6 +940,8 @@ class SQLiteStorage:
                 span_columns = {row[1] for row in self._conn.execute("PRAGMA table_info(spans)")}
                 if "parent_name" not in span_columns:
                     self._conn.execute("ALTER TABLE spans ADD COLUMN parent_name TEXT")
+                if "tenant_id" not in span_columns:
+                    self._conn.execute("ALTER TABLE spans ADD COLUMN tenant_id TEXT")
             if "drift_signals" in existing_tables:
                 drift_columns = {
                     row[1] for row in self._conn.execute("PRAGMA table_info(drift_signals)")
@@ -771,6 +949,75 @@ class SQLiteStorage:
                 if "run_id" not in drift_columns:
                     self._conn.execute("ALTER TABLE drift_signals ADD COLUMN run_id TEXT")
             self._conn.executescript(_SCHEMA)
+            if "verified_revision" not in {
+                row[1] for row in self._conn.execute(
+                    "PRAGMA table_info(deterministic_analysis_runs)"
+                )
+            }:
+                self._conn.execute(
+                    "ALTER TABLE deterministic_analysis_runs ADD COLUMN verified_revision INTEGER"
+                )
+            # A terminal insert or successful recheck selects the current
+            # attempt in the same atomic statement as its stored record.
+            for operation, name in (
+                ("INSERT", "insert"),
+                ("UPDATE OF verified_revision", "verify"),
+            ):
+                self._conn.execute(
+                    f"""CREATE TRIGGER IF NOT EXISTS verdict_analysis_{name}_current
+                    AFTER {operation} ON deterministic_analysis_runs BEGIN
+                      INSERT INTO deterministic_analysis_current
+                        (tenant_id,scope_key,analyzer_version,analysis_id)
+                      VALUES (NEW.tenant_id,NEW.scope_key,NEW.analyzer_version,NEW.analysis_id)
+                      ON CONFLICT(tenant_id,scope_key,analyzer_version) DO UPDATE
+                      SET analysis_id=excluded.analysis_id;
+                    END"""  # nosec B608 -- operation and name are fixed above
+                )
+            # One revision per tenant advances with the evidence transaction,
+            # including same-ID rewrites and retention deletes. Child changes
+            # are written in the same transaction as the parent run UPSERT.
+            for table in ("traces", "agent_runs"):
+                for operation in ("INSERT", "UPDATE", "DELETE"):
+                    row = "OLD" if operation == "DELETE" else "NEW"
+                    tenant = (
+                        f"COALESCE(NULLIF({row}.tenant_id,''),'__verdict_local__')"
+                        if table == "traces" else f"{row}.tenant_id"
+                    )
+                    self._conn.execute(
+                        f"""CREATE TRIGGER IF NOT EXISTS verdict_{table}_{operation.lower()}_revision
+                        AFTER {operation} ON {table} BEGIN
+                          INSERT INTO evidence_revisions(tenant_id,revision)
+                          VALUES ({tenant},1)
+                          ON CONFLICT(tenant_id) DO UPDATE
+                          SET revision=evidence_revisions.revision+1;
+                        END"""  # nosec B608 -- table, operation, and row are fixed above
+                    )
+                self._conn.execute(
+                    f"""CREATE TRIGGER IF NOT EXISTS verdict_{table}_tenant_immutable
+                    BEFORE UPDATE OF tenant_id ON {table}
+                    WHEN OLD.tenant_id IS NOT NEW.tenant_id BEGIN
+                      SELECT RAISE(ABORT, 'evidence tenant identity is immutable');
+                    END"""  # nosec B608 -- table is fixed above
+                )
+            source_columns = {
+                row[1] for row in self._conn.execute("PRAGMA table_info(import_sources)")
+            }
+            for column, ddl in (
+                ("local_full_bytes", "INTEGER"),
+                ("local_full_sha256", "TEXT"),
+                ("local_prefix_bytes", "INTEGER"),
+                ("local_prefix_sha256", "TEXT"),
+                ("local_partial_line", "INTEGER"),
+                ("local_source_turn_count", "INTEGER"),
+                ("local_source_event_count", "INTEGER"),
+                ("local_v1_turn_count", "INTEGER"),
+                ("local_v1_event_count", "INTEGER"),
+                ("local_projection_complete", "INTEGER"),
+                ("local_min_turn_at", "TEXT"),
+                ("local_max_turn_at", "TEXT"),
+            ):
+                if column not in source_columns:
+                    self._conn.execute(f"ALTER TABLE import_sources ADD COLUMN {column} {ddl}")
             agent_turn_columns = {
                 row[1] for row in self._conn.execute("PRAGMA table_info(agent_turns)")
             }
@@ -833,11 +1080,18 @@ class SQLiteStorage:
                 ("expected_dimensions_json", "TEXT"),
                 ("status", "TEXT DEFAULT 'completed'"),
                 ("error", "TEXT"),
+                ("local_recent_evidence_fingerprint", "TEXT"),
             ]:
                 try:
                     self._conn.execute(f"ALTER TABLE judgments ADD COLUMN {col} {ddl}")
                 except sqlite3.OperationalError:
                     pass
+            self._conn.execute(
+                "CREATE VIEW IF NOT EXISTS current_judgments AS "
+                "SELECT j.* FROM judgments j LEFT JOIN local_recent_trace_evidence r "
+                "ON r.trace_id=j.trace_id WHERE r.trace_id IS NULL OR "
+                "j.local_recent_evidence_fingerprint=r.evidence_fingerprint"
+            )
             for col, ddl in [
                 ("tenant_id", "TEXT"),
                 ("correct_examples", "INTEGER NOT NULL DEFAULT 0"),
@@ -1226,7 +1480,7 @@ class SQLiteStorage:
             # re-written row (notably cluster_id, assigned later by the intent
             # clusterer). COALESCE(excluded.cluster_id, traces.cluster_id) keeps
             # an already-assigned cluster_id when a later write carries NULL.
-            self._conn.execute(
+            written = self._conn.execute(
                 """INSERT INTO traces (
                     trace_id, parent_span_id, started_at, ended_at, provider, operation,
                     request_model, response_model, input_tokens, output_tokens,
@@ -1259,7 +1513,9 @@ class SQLiteStorage:
                         excluded.parent_span_id, traces.parent_span_id
                     ),
                     cluster_id        = COALESCE(excluded.cluster_id, traces.cluster_id),
-                    cost_usd          = excluded.cost_usd""",
+                    cost_usd          = excluded.cost_usd
+                WHERE COALESCE(NULLIF(traces.tenant_id,''),'__verdict_local__') =
+                      COALESCE(NULLIF(excluded.tenant_id,''),'__verdict_local__')""",
                 {
                     "trace_id": trace.trace_id,
                     "parent_span_id": trace.parent_span_id,
@@ -1295,6 +1551,8 @@ class SQLiteStorage:
                     "environment": trace.environment,
                 },
             )
+            if written.rowcount != 1:
+                raise ValueError("trace identity belongs to another tenant")
 
     def _row_to_trace(self, row: sqlite3.Row) -> Trace:
         return Trace(
@@ -1338,17 +1596,112 @@ class SQLiteStorage:
         sanitized, capture_traces, linked_trace_ids = prepare_agent_capture(bundle, traces)
         self._store_agent_capture(sanitized, capture_traces, linked_trace_ids, None)
 
+    def list_local_scan_attempts(
+        self, tenant_id: str, source_kind: str, source_scope: str,
+    ) -> dict[str, str]:
+        """One bounded root query for fair ordering; keys are hashed locators."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT source_locator_hash,started_at FROM local_source_scan_attempts "
+                "WHERE tenant_id=? AND source_kind=? AND source_scope=?",
+                (tenant_id, source_kind, source_scope),
+            ).fetchall()
+        return {row["source_locator_hash"]: row["started_at"] for row in rows}
+
+    def local_scan_attempt_summary(self, tenant_id: str) -> list[tuple[str | None, int, str]]:
+        """Return grouped latest per-file outcomes without paths or locator hashes."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT outcome_code,COUNT(*) AS n,MAX(started_at) AS latest "
+                "FROM local_source_scan_attempts WHERE tenant_id=? GROUP BY outcome_code",
+                (tenant_id,),
+            ).fetchall()
+        return [(row["outcome_code"], int(row["n"]), row["latest"]) for row in rows]
+
+    def claim_local_scan_attempt(
+        self, tenant_id: str, source_kind: str, source_scope: str,
+        locator_hash: str, started_at: str, observed_size: int,
+        observed_mtime_ns: int,
+    ) -> int:
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                self._conn.execute(
+                    "INSERT INTO local_source_scan_attempts "
+                    "(tenant_id,source_kind,source_scope,source_locator_hash,generation,"
+                    "started_at,observed_size,observed_mtime_ns) "
+                    "VALUES (?,?,?,?,1,?,?,?) ON CONFLICT "
+                    "(tenant_id,source_kind,source_scope,source_locator_hash) "
+                    "DO UPDATE SET generation=generation+1,started_at=excluded.started_at,"
+                    "finished_at=NULL,outcome_code=NULL,"
+                    "observed_size=excluded.observed_size,"
+                    "observed_mtime_ns=excluded.observed_mtime_ns,"
+                    "accepted_revision=NULL,projection_complete=NULL,source_line_complete=NULL",
+                    (tenant_id, source_kind, source_scope, locator_hash, started_at,
+                     observed_size, observed_mtime_ns),
+                )
+                row = self._conn.execute(
+                    "SELECT generation FROM local_source_scan_attempts WHERE "
+                    "tenant_id=? AND source_kind=? AND source_scope=? AND source_locator_hash=?",
+                    (tenant_id, source_kind, source_scope, locator_hash),
+                ).fetchone()
+                self._conn.execute("COMMIT")
+                return int(row["generation"])
+            except BaseException:
+                self._conn.execute("ROLLBACK")
+                raise
+
+    def finish_local_scan_attempt(
+        self, tenant_id: str, source_kind: str, source_scope: str,
+        locator_hash: str, generation: int, finished_at: str,
+        outcome_code: str, accepted_revision: str | None,
+        projection_complete: bool, source_line_complete: bool,
+    ) -> bool:
+        with self._lock:
+            updated = self._conn.execute(
+                "UPDATE local_source_scan_attempts SET finished_at=?,outcome_code=?,"
+                "accepted_revision=?,projection_complete=?,source_line_complete=? "
+                "WHERE tenant_id=? AND source_kind=? AND source_scope=? "
+                "AND source_locator_hash=? AND generation=?",
+                (finished_at, outcome_code, accepted_revision,
+                 int(projection_complete), int(source_line_complete),
+                 tenant_id, source_kind, source_scope, locator_hash, generation),
+            )
+        return updated.rowcount == 1
+
     def _replace_local_agent_capture(
         self,
         bundle: AgentRunBundle,
         traces: tuple[Trace, ...],
-        legacy_text_upgrade: _LegacyLocalTextUpgrade,
+        legacy_text_upgrade: _LegacyLocalTextUpgrade | None,
+        *,
+        source_revision: LocalSourceRevision | None = None,
+        source_path: Path | None = None,
+        recent_window_json: str | None = None,
+        recent_facts: tuple[LocalRecentFact, ...] = (),
+        historical_facts: tuple[LocalRecentFact, ...] = (),
+        full_projection: LocalFullProjection | None = None,
+        recent_traces: tuple[Trace, ...] = (),
     ) -> None:
         sanitized, capture_traces, linked_trace_ids = prepare_agent_capture(bundle, traces)
-        upgrade = _prepare_legacy_local_text_upgrade(
-            sanitized, capture_traces, legacy_text_upgrade
+        prepared_recent, recent_ids = _prepare_linked_traces(
+            tuple(fact.event for fact in (*recent_facts, *historical_facts,
+                                          *(full_projection.facts if full_projection else ()))),
+            recent_traces,
         )
-        self._store_agent_capture(sanitized, capture_traces, linked_trace_ids, upgrade)
+        if linked_trace_ids & recent_ids:
+            raise ValueError("local recent fact duplicates a prefix Trace")
+        upgrade = (
+            _prepare_legacy_local_text_upgrade(sanitized, capture_traces, legacy_text_upgrade)
+            if legacy_text_upgrade is not None else None
+        )
+        self._store_agent_capture(
+            sanitized, capture_traces + prepared_recent, linked_trace_ids | recent_ids, upgrade,
+            local_revision=source_revision, local_path=source_path,
+            recent_window_json=recent_window_json,
+            recent_facts=recent_facts, historical_facts=historical_facts,
+            full_projection=full_projection,
+        )
 
     def append_agent_capture(
         self,
@@ -1364,10 +1717,85 @@ class SQLiteStorage:
         capture_traces: tuple[Trace, ...],
         linked_trace_ids: frozenset[str],
         text_compatibility: _LegacyLocalTextUpgrade | None,
+        *,
+        local_revision: LocalSourceRevision | None = None,
+        local_path: Path | None = None,
+        recent_window_json: str | None = None,
+        recent_facts: tuple[LocalRecentFact, ...] = (),
+        historical_facts: tuple[LocalRecentFact, ...] = (),
+        full_projection: LocalFullProjection | None = None,
     ) -> None:
+        window = (validate_recent_window_json(
+            recent_window_json, run_id=capture.run.run_id, revision=local_revision,
+        ) if local_revision is not None else None)
+        if recent_window_json is not None and window is None:
+            raise ValueError("local source revision is required for recent window")
+        validate_recent_facts(
+            recent_facts, window, frozenset(event.event_id for event in capture.events),
+        )
+        validate_historical_facts(
+            recent_facts, historical_facts,
+            frozenset(event.event_id for event in capture.events),
+        )
+        validate_full_projection(full_projection, capture, recent_facts,
+                                 historical_facts, local_revision)
+        all_recent_facts = (*recent_facts, *historical_facts,
+                            *(full_projection.facts if full_projection else ()))
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
             try:
+                if local_revision is not None:
+                    if local_path is None or not isinstance(capture, AgentRunBundle):
+                        raise ValueError("local source path is required")
+                    source_row = self._conn.execute(
+                        "SELECT * FROM import_sources WHERE tenant_id=? AND source_session_id=?",
+                        (capture.run.tenant_id, capture.session.source_session_id),
+                    ).fetchone()
+                    prior = revision_from_row(source_row)
+                    rewritten = verify_source_revision(local_path, local_revision, prior)
+                    retained = self._conn.execute(
+                        "SELECT event_id FROM local_recent_event_facts "
+                        "WHERE tenant_id=? AND run_id=?",
+                        (capture.run.tenant_id, capture.run.run_id),
+                    ).fetchall()
+                    require_all_retained_facts(
+                        {row["event_id"] for row in retained},
+                        recent_facts, historical_facts,
+                    )
+                    if source_row is not None and (prior is None or rewritten):
+                        previous = self._read_normalized_bundles(
+                            capture.run.tenant_id, (capture.run.run_id,),
+                        )
+                        verify_retained_local_evidence(
+                            previous[0] if previous else None, capture,
+                            require_recorded_content=rewritten,
+                            legacy_turn_previews=(
+                                text_compatibility.turn_previews
+                                if text_compatibility is not None else None
+                            ),
+                        )
+                    self._conn.execute(
+                        "DELETE FROM agent_events WHERE tenant_id=? AND run_id=? "
+                        "AND provenance='verdict:partial_source_line'",
+                        (capture.run.tenant_id, capture.run.run_id),
+                    )
+                    current_limits = {
+                        event.event_id for event in capture.events
+                        if event.provenance == "verdict:capture_limit"
+                    }
+                    prior_limits = self._conn.execute(
+                        "SELECT event_id FROM agent_events WHERE tenant_id=? AND run_id=? "
+                        "AND provenance='verdict:capture_limit'",
+                        (capture.run.tenant_id, capture.run.run_id),
+                    ).fetchall()
+                    for prior_limit in prior_limits:
+                        if prior_limit["event_id"] not in current_limits:
+                            self._conn.execute(
+                                "DELETE FROM agent_events WHERE tenant_id=? AND run_id=? "
+                                "AND event_id=?",
+                                (capture.run.tenant_id, capture.run.run_id,
+                                 prior_limit["event_id"]),
+                            )
                 prepared_traces = []
                 message_updates: set[str] = set()
                 for trace in capture_traces:
@@ -1402,6 +1830,20 @@ class SQLiteStorage:
                                 trace.trace_id,
                             ),
                         )
+                recent_trace_ids = {
+                    fact.event.trace_id for fact in all_recent_facts
+                    if fact.event.trace_id is not None
+                }
+                for trace in prepared_traces:
+                    if trace.trace_id in recent_trace_ids:
+                        self._conn.execute(
+                            "INSERT INTO local_recent_trace_evidence "
+                            "(trace_id,tenant_id,evidence_fingerprint) VALUES (?,?,?) "
+                            "ON CONFLICT(trace_id) DO UPDATE SET "
+                            "evidence_fingerprint=excluded.evidence_fingerprint",
+                            (trace.trace_id, capture.run.tenant_id,
+                             trace_evidence_fingerprint(trace)),
+                        )
                 linked_ids = tuple(sorted(linked_trace_ids))
                 if linked_ids:
                     placeholders = ",".join("?" for _ in linked_ids)
@@ -1415,6 +1857,112 @@ class SQLiteStorage:
                     self._write_normalized_bundle(capture)
                 else:
                     self._write_normalized_bundle(capture, text_compatibility)
+                if local_revision is not None:
+                    self._conn.execute(
+                        "DELETE FROM local_tail_turn_facts WHERE tenant_id=? AND run_id=?",
+                        (capture.run.tenant_id, capture.run.run_id),
+                    )
+                    if full_projection is not None:
+                        self._conn.executemany(
+                            "INSERT INTO local_tail_turn_facts "
+                            "(tenant_id,run_id,turn_id,sequence,started_at,payload_json) "
+                            "VALUES (?,?,?,?,?,?)",
+                            [(capture.run.tenant_id, capture.run.run_id, turn.turn_id,
+                              turn.sequence, _iso(turn.started_at), tail_turn_json(turn))
+                             for turn in full_projection.tail_turns],
+                        )
+                    for fact in all_recent_facts:
+                        prior_fact = self._conn.execute(
+                            "SELECT * FROM local_recent_event_facts WHERE tenant_id=? "
+                            "AND run_id=? AND event_id=?",
+                            (capture.run.tenant_id, capture.run.run_id, fact.event.event_id),
+                        ).fetchone()
+                        if prior_fact is not None and (
+                            prior_fact["source_ordinal"] != fact.source_ordinal
+                            or prior_fact["turn_sequence"] != fact.turn_sequence
+                        ):
+                            raise ValueError("local recent fact source identity changed")
+                        old_event = (
+                            agent_event_from_row(dict(prior_fact)) if prior_fact is not None
+                            else None
+                        )
+                        reject_lost_model_usage(old_event, fact.event)
+                        event = merge_agent_event(old_event, fact.event)
+                        first_seen = (
+                            prior_fact["first_seen_revision"] if prior_fact is not None
+                            else local_revision.full_sha256
+                        )
+                        self._conn.execute(
+                            "INSERT INTO local_recent_event_facts "
+                            "(tenant_id,run_id,event_id,turn_id,source_ordinal,turn_sequence,"
+                            "sequence,occurred_at,event_type,status,provenance,attributes_json,"
+                            "privacy_classification,omission_reason,trace_id,first_seen_revision) "
+                            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+                            "ON CONFLICT(tenant_id,run_id,event_id) DO UPDATE SET "
+                            "status=excluded.status,attributes_json=excluded.attributes_json,"
+                            "privacy_classification=excluded.privacy_classification,"
+                            "omission_reason=excluded.omission_reason,trace_id=excluded.trace_id",
+                            (capture.run.tenant_id, capture.run.run_id, event.event_id,
+                             event.turn_id, fact.source_ordinal, fact.turn_sequence,
+                             event.sequence, _iso(event.occurred_at), event.event_type.value,
+                             event.status.value, event.provenance,
+                             json.dumps(event.attributes, ensure_ascii=False),
+                             event.privacy_classification.value, event.omission_reason,
+                             event.trace_id, first_seen),
+                        )
+                    self._conn.execute(
+                        "UPDATE import_sources SET local_full_bytes=?,local_full_sha256=?,"
+                        "local_prefix_bytes=?,local_prefix_sha256=?,local_partial_line=?,"
+                        "local_source_turn_count=?,local_source_event_count=?,"
+                        "local_v1_turn_count=?,local_v1_event_count=?,"
+                        "local_projection_complete=?,"
+                        "local_min_turn_at=?,local_max_turn_at=? "
+                        "WHERE tenant_id=? AND source_session_id=?",
+                        (local_revision.full_bytes, local_revision.full_sha256,
+                         local_revision.complete_prefix_bytes,
+                         local_revision.complete_prefix_sha256,
+                         int(local_revision.partial_final_line),
+                         local_revision.source_turn_count, local_revision.source_event_count,
+                         local_revision.v1_turn_count, local_revision.v1_event_count,
+                         int(full_projection is not None),
+                         local_revision.min_turn_at, local_revision.max_turn_at,
+                         capture.run.tenant_id,
+                         capture.session.source_session_id),
+                    )
+                    if window is not None:
+                        old_window = self._conn.execute(
+                            "SELECT sample_json FROM local_recent_events "
+                            "WHERE tenant_id=? AND run_id=?",
+                            (capture.run.tenant_id, capture.run.run_id),
+                        ).fetchone()
+                        if not (old_window is not None and same_recent_window(
+                            json.loads(old_window["sample_json"]), window,
+                        )):
+                            self._conn.execute(
+                            "INSERT INTO local_recent_events "
+                            "(tenant_id,run_id,source_prefix_bytes,source_prefix_sha256,"
+                            "captured_at,sample_json) VALUES (?,?,?,?,?,?) "
+                            "ON CONFLICT(tenant_id,run_id) DO UPDATE SET "
+                            "source_prefix_bytes=excluded.source_prefix_bytes,"
+                            "source_prefix_sha256=excluded.source_prefix_sha256,"
+                            "captured_at=excluded.captured_at,sample_json=excluded.sample_json",
+                            (capture.run.tenant_id, capture.run.run_id,
+                             local_revision.full_bytes, local_revision.full_sha256,
+                             window["capturedAt"], recent_window_json),
+                            )
+                    else:
+                        old_window = self._conn.execute(
+                            "SELECT sample_json FROM local_recent_events "
+                            "WHERE tenant_id=? AND run_id=?",
+                            (capture.run.tenant_id, capture.run.run_id),
+                        ).fetchone()
+                        if (old_window is not None and
+                                json.loads(old_window["sample_json"]).get("schema")
+                                == "local-recent-window-v2"):
+                            self._conn.execute(
+                                "DELETE FROM local_recent_events WHERE tenant_id=? AND run_id=?",
+                                (capture.run.tenant_id, capture.run.run_id),
+                            )
                 self._conn.commit()
             except sqlite3.IntegrityError as exc:
                 self._conn.rollback()
@@ -1425,6 +1973,76 @@ class SQLiteStorage:
 
     def replace_agent_run_bundle(self, bundle: AgentRunBundle) -> None:
         self.replace_agent_capture(bundle)
+
+    def save_recent_local_events(
+        self, tenant_id: str, run_id: str, sample_json: str,
+        source_prefix_bytes: int, source_prefix_sha256: str,
+        prefix_digest: Callable[[int], str],
+    ) -> bool:
+        """Preserve the legacy inspection writer without replacing atomic V2 windows."""
+        if (not 0 <= source_prefix_bytes <= 2**63 - 1
+                or len(source_prefix_sha256) != 64
+                or len(sample_json.encode("utf-8")) > 1048576):
+            raise ValueError("recent_sample_limit")
+        candidate = json.loads(sample_json)
+        if not isinstance(candidate, dict) or candidate.get("schema") != "local-recent-events-v1":
+            raise ValueError("recent_sample_superseded")
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                if prefix_digest(source_prefix_bytes) != source_prefix_sha256:
+                    raise ValueError("recent_sample_source_changed")
+                prior = self._conn.execute(
+                    "SELECT source_prefix_bytes,source_prefix_sha256,sample_json "
+                    "FROM local_recent_events WHERE tenant_id=? AND run_id=?",
+                    (tenant_id, run_id),
+                ).fetchone()
+                if prior is not None:
+                    if json.loads(prior["sample_json"]).get("schema") == "local-recent-window-v2":
+                        raise ValueError("recent_sample_superseded")
+                    old_bytes = prior["source_prefix_bytes"]
+                    if (source_prefix_bytes < old_bytes
+                            or prefix_digest(old_bytes) != prior["source_prefix_sha256"]
+                            or (source_prefix_bytes == old_bytes
+                                and source_prefix_sha256 != prior["source_prefix_sha256"])):
+                        raise ValueError("recent_sample_source_conflict")
+                    if source_prefix_bytes == old_bytes:
+                        self._conn.commit()
+                        return False
+                self._conn.execute(
+                    "INSERT INTO local_recent_events "
+                    "(tenant_id,run_id,source_prefix_bytes,source_prefix_sha256,captured_at,sample_json) "
+                    "VALUES (?,?,?,?,?,?) ON CONFLICT(tenant_id,run_id) DO UPDATE SET "
+                    "source_prefix_bytes=excluded.source_prefix_bytes,"
+                    "source_prefix_sha256=excluded.source_prefix_sha256,"
+                    "captured_at=excluded.captured_at,sample_json=excluded.sample_json",
+                    (tenant_id, run_id, source_prefix_bytes, source_prefix_sha256,
+                     json.loads(sample_json)["capturedAt"], sample_json),
+                )
+                self._conn.commit()
+                return True
+            except BaseException:
+                self._conn.rollback()
+                raise
+
+    def get_recent_local_events(self, tenant_id: str, run_id: str) -> dict | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT sample_json FROM local_recent_events WHERE tenant_id=? AND run_id=?",
+                (tenant_id, run_id),
+            ).fetchone()
+        return json.loads(row["sample_json"]) if row is not None else None
+
+    def list_local_recent_fact_positions(
+        self, tenant_id: str, run_id: str,
+    ) -> tuple[tuple[int, int, int, str], ...]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT source_ordinal,turn_sequence,sequence,event_id "
+                "FROM local_recent_event_facts WHERE tenant_id=? AND run_id=? "
+                "ORDER BY source_ordinal", (tenant_id, run_id),
+            ).fetchall()
+        return tuple((row[0], row[1], row[2], row[3]) for row in rows)
 
     def list_agent_turn_evaluation_candidates(
         self, tenant_id: str, evaluator_fingerprint: str, *, limit: int = 100,
@@ -1444,9 +2062,13 @@ class SQLiteStorage:
                 rows = self._conn.execute(
                 "SELECT t.*, j.evidence_fingerprint AS judgment_evidence,"
                 "j.status AS judgment_status,j.result_json AS judgment_json FROM agent_turns t "
+                "JOIN agent_runs r ON r.tenant_id=t.tenant_id AND r.run_id=t.run_id "
+                "JOIN import_sources s ON s.tenant_id=r.tenant_id "
+                "AND s.source_session_id=r.source_session_id "
                 "LEFT JOIN agent_turn_judgments j ON j.tenant_id=t.tenant_id "
                 "AND j.run_id=t.run_id AND j.turn_id=t.turn_id "
                 "AND j.evaluator_fingerprint=? WHERE t.tenant_id=? "
+                "AND (" + _EVALUABLE_LOCAL_TURN + ") "
                 + cursor_clause + " ORDER BY t.started_at DESC,t.run_id DESC,t.turn_id DESC LIMIT ?",
                 params,
                 ).fetchall()
@@ -1488,7 +2110,12 @@ class SQLiteStorage:
             self._conn.execute("BEGIN IMMEDIATE")
             try:
                 row = self._conn.execute(
-                    "SELECT * FROM agent_turns WHERE tenant_id=? AND run_id=? AND turn_id=?",
+                    "SELECT t.* FROM agent_turns t "
+                    "JOIN agent_runs r ON r.tenant_id=t.tenant_id AND r.run_id=t.run_id "
+                    "JOIN import_sources s ON s.tenant_id=r.tenant_id "
+                    "AND s.source_session_id=r.source_session_id "
+                    "WHERE t.tenant_id=? AND t.run_id=? AND t.turn_id=? AND ("
+                    + _EVALUABLE_LOCAL_TURN + ")",
                     (judgment.tenant_id, judgment.run_id, judgment.turn_id),
                 ).fetchone()
                 previous = self._conn.execute(
@@ -1545,9 +2172,13 @@ class SQLiteStorage:
                 row = self._conn.execute(
                     "SELECT t.*,j.evidence_fingerprint AS judgment_evidence,"
                     "j.status AS judgment_status,j.result_json AS judgment_json FROM agent_turns t "
+                    "JOIN agent_runs r ON r.tenant_id=t.tenant_id AND r.run_id=t.run_id "
+                    "JOIN import_sources s ON s.tenant_id=r.tenant_id "
+                    "AND s.source_session_id=r.source_session_id "
                     "LEFT JOIN agent_turn_judgments j ON j.tenant_id=t.tenant_id "
                     "AND j.run_id=t.run_id AND j.turn_id=t.turn_id "
-                    "AND j.evaluator_fingerprint=? WHERE t.tenant_id=? AND t.run_id=? AND t.turn_id=?",
+                    "AND j.evaluator_fingerprint=? WHERE t.tenant_id=? AND t.run_id=? AND t.turn_id=? "
+                    "AND (" + _EVALUABLE_LOCAL_TURN + ")",
                     (evaluator_fingerprint, tenant_id, run_id, turn_id),
                 ).fetchone()
                 if row is None:
@@ -1604,11 +2235,32 @@ class SQLiteStorage:
         tenant_id: str,
         run_id: str,
     ) -> AgentRunBundle | None:
+        bundle, _revision = self.get_agent_capture_snapshot(tenant_id, run_id)
+        return bundle
+
+    def get_agent_capture_snapshot(
+        self, tenant_id: str, run_id: str,
+    ) -> tuple[AgentRunBundle | None, LocalSourceRevision | None]:
+        """Read local coverage and normalized evidence from one SQLite snapshot."""
         _validate_agent_bundle_query(tenant_id, 1)
         _validate_agent_bundle_run_id(run_id)
         with self._lock:
-            bundles = self._read_normalized_bundles(tenant_id, (run_id,))
-        return bundles[0] if bundles else None
+            self._conn.execute("SAVEPOINT verdict_agent_capture_snapshot")
+            try:
+                bundles = self._read_normalized_bundles(tenant_id, (run_id,))
+                row = self._conn.execute(
+                    "SELECT s.* FROM import_sources s JOIN agent_runs r "
+                    "ON r.tenant_id=s.tenant_id AND r.source_session_id=s.source_session_id "
+                    "WHERE r.tenant_id=? AND r.run_id=?",
+                    (tenant_id, run_id),
+                ).fetchone()
+                revision = revision_from_row(row)
+                self._conn.execute("RELEASE SAVEPOINT verdict_agent_capture_snapshot")
+            except BaseException:
+                self._conn.execute("ROLLBACK TO SAVEPOINT verdict_agent_capture_snapshot")
+                self._conn.execute("RELEASE SAVEPOINT verdict_agent_capture_snapshot")
+                raise
+        return (bundles[0] if bundles else None), revision
 
     def list_agent_run_bundles(
         self,
@@ -1906,8 +2558,8 @@ class SQLiteStorage:
             self._conn.execute(
                 """INSERT INTO deterministic_analysis_runs (
                        analysis_id,tenant_id,scope_key,cutoff,completed_at,status,
-                       analyzer_version,input_fingerprint,payload_json
-                   ) VALUES (?,?,?,?,?,?,?,?,?)""",
+                       analyzer_version,input_fingerprint,verified_revision,payload_json
+                   ) VALUES (?,?,?,?,?,?,?,?,?,?)""",
                 (
                     run.analysis_id,
                     run.tenant_id,
@@ -1917,9 +2569,45 @@ class SQLiteStorage:
                     run.status.value,
                     run.analyzer_version,
                     run.input_fingerprint,
+                    run.verified_revision,
                     payload,
                 ),
             )
+
+    def get_evidence_revision(self, tenant_id: str) -> int:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT revision FROM evidence_revisions WHERE tenant_id=?", (tenant_id,)
+            ).fetchone()
+        return int(row["revision"]) if row is not None else 0
+
+    def get_deterministic_analysis_run(self, analysis_id: str) -> DeterministicAnalysisRun | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT payload_json,verified_revision FROM deterministic_analysis_runs "
+                "WHERE analysis_id=?", (analysis_id,),
+            ).fetchone()
+        return _analysis_row(row) if row is not None else None
+
+    def verify_deterministic_analysis_run(
+        self, analysis_id: str, *, revision: int | None,
+    ) -> DeterministicAnalysisRun:
+        if revision is not None and (type(revision) is not int or revision < 0):
+            raise ValueError("invalid evidence revision")
+        with self._lock:
+            self._conn.execute(
+                "UPDATE deterministic_analysis_runs SET verified_revision="
+                "CASE WHEN ? IS NULL THEN verified_revision "
+                "ELSE MAX(COALESCE(verified_revision, -1), ?) END WHERE analysis_id=?",
+                (revision, revision, analysis_id),
+            )
+            row = self._conn.execute(
+                "SELECT payload_json,verified_revision FROM deterministic_analysis_runs "
+                "WHERE analysis_id=?", (analysis_id,),
+            ).fetchone()
+        if row is None:
+            raise ValueError("analysis identity does not exist")
+        return _analysis_row(row)
 
     def get_latest_deterministic_analysis_run(
         self,
@@ -1929,21 +2617,37 @@ class SQLiteStorage:
         analyzer_version: str | None = None,
     ) -> DeterministicAnalysisRun | None:
         with self._lock:
+            pointer = self._conn.execute(
+                """SELECT r.payload_json,r.verified_revision
+                   FROM deterministic_analysis_current c
+                   JOIN deterministic_analysis_runs r ON r.analysis_id=c.analysis_id
+                   WHERE c.tenant_id=? AND c.scope_key=? AND c.analyzer_version=?""",
+                (tenant_id, scope_key, analyzer_version),
+            ).fetchone() if analyzer_version is not None else self._conn.execute(
+                """SELECT r.payload_json,r.verified_revision
+                   FROM deterministic_analysis_current c
+                   JOIN deterministic_analysis_runs r ON r.analysis_id=c.analysis_id
+                   WHERE c.tenant_id=? AND c.scope_key=?
+                   ORDER BY r.completed_at DESC,r.analysis_id DESC LIMIT 1""",
+                (tenant_id, scope_key),
+            ).fetchone()
+            if pointer is not None:
+                return _analysis_row(pointer)
             if analyzer_version is None:
                 row = self._conn.execute(
-                    """SELECT payload_json FROM deterministic_analysis_runs
+                    """SELECT payload_json,verified_revision FROM deterministic_analysis_runs
                        WHERE tenant_id=? AND scope_key=?
-                       ORDER BY completed_at DESC, analysis_id DESC LIMIT 1""",
+                       ORDER BY completed_at DESC,analysis_id DESC LIMIT 1""",
                     (tenant_id, scope_key),
                 ).fetchone()
             else:
                 row = self._conn.execute(
-                    """SELECT payload_json FROM deterministic_analysis_runs
+                    """SELECT payload_json,verified_revision FROM deterministic_analysis_runs
                        WHERE tenant_id=? AND scope_key=? AND analyzer_version=?
-                       ORDER BY completed_at DESC, analysis_id DESC LIMIT 1""",
+                       ORDER BY completed_at DESC,analysis_id DESC LIMIT 1""",
                     (tenant_id, scope_key, analyzer_version),
                 ).fetchone()
-        return analysis_run_from_json(row["payload_json"]) if row is not None else None
+        return _analysis_row(row) if row is not None else None
 
     def save_notification_delivery_attempt(
         self,
@@ -2021,6 +2725,316 @@ class SQLiteStorage:
                 (tenant_id, limit),
             ).fetchall()
         return [notification_attempt_from_json(row["payload_json"]) for row in rows]
+
+    @staticmethod
+    def _delivery_queue_item(row: sqlite3.Row) -> DeliveryQueueItem:
+        intent = intent_from_json(row["payload_json"])
+        intent = replace(intent, destination_fingerprint=row["destination_fingerprint"])
+        return DeliveryQueueItem(
+            intent=intent,
+            status=row["status"],
+            attempt_count=row["attempt_count"],
+            next_due_at=datetime.fromisoformat(row["next_due_at"]) if row["next_due_at"] else None,
+            next_probe_at=datetime.fromisoformat(row["next_probe_at"]) if row["next_probe_at"] else None,
+            last_error_code=row["last_error_code"],
+            superseded_by_id=row["superseded_by_id"],
+        )
+
+    def _insert_delivery_intent(self, intent: NotificationIntent) -> None:
+        payload = intent_to_json(intent)
+        row = self._conn.execute(
+            "SELECT payload_json FROM notification_delivery_queue WHERE intent_id=?",
+            (intent.intent_id,),
+        ).fetchone()
+        if row is not None:
+            prior = intent_from_json(row["payload_json"])
+            if replace(
+                intent, created_at=prior.created_at,
+                destination_fingerprint=prior.destination_fingerprint,
+            ) != prior:
+                raise ValueError("notification intent identity has different content")
+            return
+        self._conn.execute(
+            """INSERT INTO notification_delivery_queue (
+                   intent_id,tenant_id,source_kind,source_id,created_at,status,
+                   destination_fingerprint,next_due_at,next_probe_at,payload_json
+               ) VALUES (?,?,?,?,?,?,?,?,?,?)""",
+            (
+                intent.intent_id, intent.tenant_id, intent.source_kind, intent.source_id,
+                _iso(intent.created_at),
+                "pending" if intent.destination_fingerprint else "unbound",
+                intent.destination_fingerprint,
+                _iso(intent.created_at) if intent.destination_fingerprint else None,
+                None if intent.destination_fingerprint else _iso(intent.created_at),
+                payload,
+            ),
+        )
+
+    def save_worker_analysis_run(
+        self, run: DeterministicAnalysisRun, intents: list[NotificationIntent],
+    ) -> None:
+        if any(intent.tenant_id != run.tenant_id or intent.source_kind != "analysis"
+               for intent in intents):
+            raise ValueError("analysis intent source mismatch")
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                self.save_deterministic_analysis_run(run)
+                for intent in intents:
+                    self._insert_delivery_intent(intent)
+                self._conn.execute("COMMIT")
+            except BaseException:
+                self._conn.execute("ROLLBACK")
+                raise
+
+    def verify_worker_analysis_run(
+        self, analysis_id: str, *, revision: int | None,
+        intents: list[NotificationIntent],
+    ) -> DeterministicAnalysisRun:
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                run = self.verify_deterministic_analysis_run(analysis_id, revision=revision)
+                if any(intent.tenant_id != run.tenant_id or intent.source_kind != "analysis"
+                       for intent in intents):
+                    raise ValueError("analysis intent source mismatch")
+                for intent in intents:
+                    self._insert_delivery_intent(intent)
+                self._conn.execute("COMMIT")
+                return run
+            except BaseException:
+                self._conn.execute("ROLLBACK")
+                raise
+
+    def list_due_delivery_intents(
+        self, tenant_id: str, *, now: datetime, limit: int = 100,
+    ) -> list[DeliveryQueueItem]:
+        _validate_agent_bundle_query(tenant_id, limit)
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT * FROM notification_delivery_queue
+                   WHERE tenant_id=? AND status IN ('pending','failed')
+                     AND destination_fingerprint IS NOT NULL AND next_due_at<=?
+                   ORDER BY next_due_at,intent_id LIMIT ?""",
+                (tenant_id, _iso(now), limit),
+            ).fetchall()
+        return [self._delivery_queue_item(row) for row in rows]
+
+    def list_unbound_delivery_intents(
+        self, tenant_id: str, *, now: datetime, limit: int = 100,
+    ) -> list[DeliveryQueueItem]:
+        _validate_agent_bundle_query(tenant_id, limit)
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT * FROM notification_delivery_queue
+                   WHERE tenant_id=? AND status='unbound' AND next_probe_at<=?
+                   ORDER BY next_probe_at,intent_id LIMIT ?""",
+                (tenant_id, _iso(now), limit),
+            ).fetchall()
+        return [self._delivery_queue_item(row) for row in rows]
+
+    def get_delivery_intent(self, tenant_id: str, intent_id: str) -> DeliveryQueueItem | None:
+        _validate_agent_bundle_query(tenant_id, 1)
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM notification_delivery_queue WHERE tenant_id=? AND intent_id=?",
+                (tenant_id, intent_id),
+            ).fetchone()
+        return self._delivery_queue_item(row) if row else None
+
+    def list_delivery_intents_for_tenant(
+        self, tenant_id: str, *, limit: int = 100,
+        after: tuple[datetime, str] | None = None,
+        actionable_only: bool = False,
+    ) -> list[DeliveryQueueItem]:
+        _validate_agent_bundle_query(tenant_id, limit)
+        params: list[object] = [tenant_id, int(actionable_only)]
+        cursor_clause = ""
+        if after is not None:
+            created_at, intent_id = validate_delivery_cursor(after)
+            cursor_clause = "AND (created_at < ? OR (created_at = ? AND intent_id < ?))"
+            stamp = created_at.isoformat()
+            params.extend((stamp, stamp, intent_id))
+        params.append(limit)
+        with self._lock:
+            rows = self._conn.execute(
+                f"""SELECT * FROM notification_delivery_queue WHERE tenant_id=?
+                     AND (?=0 OR status IN ('pending','unbound','failed','blocked','exhausted'))
+                   {cursor_clause}
+                   ORDER BY created_at DESC,intent_id DESC LIMIT ?""",
+                params,
+            ).fetchall()
+        return [self._delivery_queue_item(row) for row in rows]
+
+    def delivery_queue_counts(self, tenant_id: str) -> dict[str, int]:
+        _validate_agent_bundle_query(tenant_id, 1)
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT status,COUNT(*) AS total FROM notification_delivery_queue
+                   WHERE tenant_id=? GROUP BY status""",
+                (tenant_id,),
+            ).fetchall()
+        return {row["status"]: row["total"] for row in rows}
+
+    def probe_delivery_intent(
+        self, tenant_id: str, intent_id: str, *, now: datetime,
+        fingerprint: str | None, next_probe_at: datetime | None,
+    ) -> bool:
+        if fingerprint is None and next_probe_at is None:
+            raise ValueError("unbound intent requires a later probe")
+        if fingerprint is not None:
+            validate_delivery_query(intent_id, fingerprint, 1)
+        with self._lock:
+            changed = self._conn.execute(
+                """UPDATE notification_delivery_queue SET
+                   status=CASE WHEN ? IS NULL THEN 'unbound' ELSE 'pending' END,
+                   destination_fingerprint=?,next_due_at=?,next_probe_at=?
+                   WHERE tenant_id=? AND intent_id=? AND status='unbound'""",
+                (fingerprint, fingerprint, _iso(now) if fingerprint else None,
+                 _iso(next_probe_at) if next_probe_at else None, tenant_id, intent_id),
+            ).rowcount
+        return changed == 1
+
+    def block_delivery_intent(self, tenant_id: str, intent_id: str) -> bool:
+        with self._lock:
+            changed = self._conn.execute(
+                """UPDATE notification_delivery_queue SET status='blocked',
+                   next_due_at=NULL,next_probe_at=NULL
+                   WHERE tenant_id=? AND intent_id=?
+                     AND status IN ('pending','failed','unbound')""",
+                (tenant_id, intent_id),
+            ).rowcount
+        return changed == 1
+
+    def mark_delivery_intent_previously_delivered(
+        self, tenant_id: str, intent_id: str, *, expected_count: int,
+    ) -> bool:
+        """Close a queue row when a beta-era attempt already reached this endpoint."""
+        with self._lock:
+            changed = self._conn.execute(
+                """UPDATE notification_delivery_queue SET status='delivered',next_due_at=NULL,
+                   last_error_code=NULL WHERE tenant_id=? AND intent_id=?
+                     AND status IN ('pending','failed') AND attempt_count=?
+                     AND EXISTS (SELECT 1 FROM notification_delivery_attempts AS prior
+                                 WHERE prior.tenant_id=notification_delivery_queue.tenant_id
+                                   AND prior.notification_id=json_extract(
+                                       notification_delivery_queue.payload_json,'$.notification_id')
+                                   AND prior.destination_fingerprint=
+                                       notification_delivery_queue.destination_fingerprint
+                                   AND prior.outcome='delivered')""",
+                (tenant_id, intent_id, expected_count),
+            ).rowcount
+        return changed == 1
+
+    def finish_delivery_intent_attempt(
+        self, tenant_id: str, intent_id: str, attempt: NotificationDeliveryAttempt,
+        *, expected_count: int, next_due_at: datetime | None, max_attempts: int = 8,
+    ) -> bool:
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                row = self._conn.execute(
+                    """SELECT payload_json,destination_fingerprint,attempt_count,status
+                       FROM notification_delivery_queue WHERE tenant_id=? AND intent_id=?""",
+                    (tenant_id, intent_id),
+                ).fetchone()
+                if row is None or row["status"] not in {"pending", "failed"} \
+                        or row["attempt_count"] != expected_count:
+                    self._conn.execute("ROLLBACK")
+                    return False
+                intent = intent_from_json(row["payload_json"])
+                if (attempt.tenant_id != tenant_id or attempt.notification_id != intent.notification_id
+                        or attempt.destination_fingerprint != row["destination_fingerprint"]):
+                    raise ValueError("delivery attempt does not match intent")
+                self.save_notification_delivery_attempt(attempt)
+                count = expected_count + 1
+                status = (
+                    "delivered" if attempt.outcome is DeliveryOutcome.DELIVERED else
+                    "exhausted" if count >= max_attempts else "failed"
+                )
+                self._conn.execute(
+                    """UPDATE notification_delivery_queue SET
+                       status=?,attempt_count=?,next_due_at=?,last_error_code=?
+                       WHERE tenant_id=? AND intent_id=?""",
+                    (status, count, _iso(next_due_at) if status == "failed" and next_due_at else None,
+                     attempt.error_code, tenant_id, intent_id),
+                )
+                self._conn.execute("COMMIT")
+                return True
+            except BaseException:
+                self._conn.execute("ROLLBACK")
+                raise
+
+    def replay_delivery_intent(
+        self, tenant_id: str, intent_id: str, *, now: datetime, expected_count: int,
+    ) -> bool:
+        with self._lock:
+            changed = self._conn.execute(
+                """UPDATE notification_delivery_queue SET status='failed',next_due_at=?
+                   WHERE tenant_id=? AND intent_id=? AND status='exhausted'
+                     AND attempt_count=?""",
+                (_iso(now), tenant_id, intent_id, expected_count),
+            ).rowcount
+        return changed == 1
+
+    def rebind_delivery_intent(
+        self, tenant_id: str, old_intent_id: str, *,
+        expected_status: str, expected_count: int,
+        new_intent: NotificationIntent,
+    ) -> bool:
+        if new_intent.tenant_id != tenant_id or new_intent.rebind_from_id != old_intent_id:
+            raise ValueError("rebind source mismatch")
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                old = self._conn.execute(
+                    """SELECT * FROM notification_delivery_queue
+                       WHERE tenant_id=? AND intent_id=?""",
+                    (tenant_id, old_intent_id),
+                ).fetchone()
+                if old is None or old["status"] != expected_status \
+                        or old["attempt_count"] != expected_count \
+                        or old["status"] not in {"pending", "failed", "blocked", "exhausted"}:
+                    self._conn.execute("ROLLBACK")
+                    return False
+                prior = self._delivery_queue_item(old).intent
+                if (new_intent.notification_id != prior.notification_id
+                        or new_intent.source_kind != prior.source_kind
+                        or new_intent.source_id != prior.source_id
+                        or new_intent.notification != prior.notification
+                        or (new_intent.alert_revision == prior.alert_revision
+                            and new_intent.destination_fingerprint == prior.destination_fingerprint)):
+                    raise ValueError("rebind must preserve the notification and change destination")
+                alert = self._conn.execute(
+                    """SELECT revision,state,payload_json FROM product_control_documents
+                       WHERE tenant_id=? AND kind='alert' AND document_id='default'
+                       ORDER BY revision DESC LIMIT 1""",
+                    (tenant_id,),
+                ).fetchone()
+                if alert is None or alert["revision"] != new_intent.alert_revision \
+                        or alert["state"] != "active":
+                    self._conn.execute("ROLLBACK")
+                    return False
+                config = json.loads(alert["payload_json"])
+                if config.get("destination") != new_intent.destination \
+                        or (new_intent.destination == "webhook" and config.get(
+                            "webhookUrlEnvVar") != new_intent.webhook_url_env_var) \
+                        or config.get("drift" if prior.notification.get("kind") == "drift"
+                                      else "findings") is not True:
+                    self._conn.execute("ROLLBACK")
+                    return False
+                self._insert_delivery_intent(new_intent)
+                self._conn.execute(
+                    """UPDATE notification_delivery_queue SET status='superseded',
+                       next_due_at=NULL,next_probe_at=NULL,superseded_by_id=?
+                       WHERE tenant_id=? AND intent_id=?""",
+                    (new_intent.intent_id, tenant_id, old_intent_id),
+                )
+                self._conn.execute("COMMIT")
+                return True
+            except BaseException:
+                self._conn.execute("ROLLBACK")
+                raise
 
     def save_monitor_policy(self, policy: MonitorPolicy) -> None:
         validate_monitor_analysis_unit(policy)
@@ -2178,9 +3192,36 @@ class SQLiteStorage:
         *,
         expected_state: str,
     ) -> None:
+        self._save_monitor_successor(
+            policy_id, expected_snapshot_id, manifest, comparison,
+            expected_state=expected_state, delivery_intent=None,
+        )
+
+    def save_worker_monitor_successor(
+        self, policy_id: str, expected_snapshot_id: str,
+        manifest: CohortManifest, comparison: MonitorComparison, *,
+        expected_state: str, delivery_intent: NotificationIntent,
+    ) -> None:
+        self._save_monitor_successor(
+            policy_id, expected_snapshot_id, manifest, comparison,
+            expected_state=expected_state, delivery_intent=delivery_intent,
+        )
+
+    def _save_monitor_successor(
+        self, policy_id: str, expected_snapshot_id: str,
+        manifest: CohortManifest, comparison: MonitorComparison, *,
+        expected_state: str, delivery_intent: NotificationIntent | None,
+    ) -> None:
         if expected_state not in {"active", "candidate"}:
             raise ValueError("monitor expected state is invalid")
         monitor_snapshot_to_json(manifest, comparison)
+        if delivery_intent is not None and (
+            delivery_intent.source_kind != "monitor"
+            or delivery_intent.source_id != manifest.snapshot_id
+            or comparison.status.value not in {"alert", "reference_stale"}
+            or delivery_intent.notification.get("status") != comparison.status.value
+        ):
+            raise ValueError("monitor intent source mismatch")
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
             try:
@@ -2198,6 +3239,40 @@ class SQLiteStorage:
                 if head is None or head["snapshot_id"] != expected_snapshot_id:
                     raise MonitorStateConflict("monitor snapshot changed")
                 self.save_monitor_snapshot(policy_id, manifest, comparison)
+                if delivery_intent is not None:
+                    self._insert_delivery_intent(delivery_intent)
+                self._conn.execute("COMMIT")
+            except BaseException:
+                self._conn.execute("ROLLBACK")
+                raise
+
+    def attach_worker_monitor_intent(
+        self, policy_id: str, manifest: CohortManifest,
+        comparison: MonitorComparison, intent: NotificationIntent,
+    ) -> None:
+        if intent.source_kind != "monitor" or intent.source_id != manifest.snapshot_id \
+                or intent.notification.get("status") != comparison.status.value:
+            raise ValueError("monitor intent source mismatch")
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                policy = self._conn.execute(
+                    "SELECT state,scope_key FROM monitor_policies WHERE policy_id=?",
+                    (policy_id,),
+                ).fetchone()
+                head = self._conn.execute(
+                    """SELECT snapshot_id,payload_json FROM monitor_snapshots
+                       WHERE policy_id=? ORDER BY rowid DESC LIMIT 1""",
+                    (policy_id,),
+                ).fetchone()
+                if policy is None or policy["state"] != "active" or head is None \
+                        or head["snapshot_id"] != manifest.snapshot_id \
+                        or monitor_snapshot_from_json(head["payload_json"]) != (manifest, comparison) \
+                        or comparison.status.value not in {"alert", "reference_stale"}:
+                    raise MonitorStateConflict("winning monitor alert changed")
+                if policy["scope_key"] != f"{intent.tenant_id}:application:trace":
+                    raise ValueError("monitor intent tenant mismatch")
+                self._insert_delivery_intent(intent)
                 self._conn.execute("COMMIT")
             except BaseException:
                 self._conn.execute("ROLLBACK")
@@ -2249,6 +3324,13 @@ class SQLiteStorage:
                 "SELECT 1 FROM traces WHERE trace_id = ? LIMIT 1", (trace_id,)
             ).fetchone()
         return row is not None
+
+    def trace_owner(self, trace_id: str) -> str | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT tenant_id FROM traces WHERE trace_id = ?", (trace_id,)
+            ).fetchone()
+        return (row["tenant_id"] or "__verdict_local__") if row is not None else None
 
     def list_traces(
         self,
@@ -2658,12 +3740,15 @@ class SQLiteStorage:
                     judgment_id, trace_id, rubric_name, rubric_version, created_at,
                     judge_models_json, dimensions_json, position_swap_consistent,
                     evaluator_provider, evaluator_config_json,
-                    evaluator_fingerprint, expected_dimensions_json, status, error
+                    evaluator_fingerprint, expected_dimensions_json, status, error,
+                    local_recent_evidence_fingerprint
                 ) VALUES (
                     :judgment_id, :trace_id, :rubric_name, :rubric_version, :created_at,
                     :judge_models_json, :dimensions_json, :position_swap_consistent,
                     :evaluator_provider, :evaluator_config_json,
-                    :evaluator_fingerprint, :expected_dimensions_json, :status, :error
+                    :evaluator_fingerprint, :expected_dimensions_json, :status, :error,
+                    (SELECT evidence_fingerprint FROM local_recent_trace_evidence
+                     WHERE trace_id=:trace_id)
                 )""",
                 {
                     "judgment_id": judgment.judgment_id,
@@ -2737,7 +3822,7 @@ class SQLiteStorage:
         params.append(limit)
         with self._lock:
             cur = self._conn.execute(
-                f"""SELECT j.* FROM judgments j
+                f"""SELECT j.* FROM current_judgments j
                     JOIN traces t ON j.trace_id = t.trace_id
                     WHERE t.cluster_id = ?{clause}
                     ORDER BY j.created_at DESC LIMIT ?""",
@@ -2756,7 +3841,7 @@ class SQLiteStorage:
             raise ValueError("invalid trace judgment query")
         with self._lock:
             rows = self._conn.execute(
-                "SELECT * FROM judgments WHERE trace_id=? "
+                "SELECT * FROM current_judgments WHERE trace_id=? "
                 "ORDER BY created_at DESC, judgment_id DESC LIMIT ?",
                 (trace_id, limit),
             ).fetchall()
@@ -2778,7 +3863,7 @@ class SQLiteStorage:
                            ORDER BY CASE WHEN j.status='completed' THEN 1 ELSE 0 END DESC,
                              j.created_at DESC,j.judgment_id DESC
                        ) AS evaluator_rank
-                       FROM judgments j JOIN traces t ON t.trace_id=j.trace_id
+                       FROM current_judgments j JOIN traces t ON t.trace_id=j.trace_id
                        WHERE {_trace_tenant_clause(tenant_id, "t.tenant_id")}
                          AND j.evaluator_fingerprint=?
                    ) latest
@@ -2795,7 +3880,7 @@ class SQLiteStorage:
     ) -> bool:
         with self._lock:
             row = self._conn.execute(
-                "SELECT 1 FROM judgments WHERE trace_id=? "
+                "SELECT 1 FROM current_judgments WHERE trace_id=? "
                 "AND evaluator_fingerprint=? AND status=? LIMIT 1",
                 (trace_id, evaluator_fingerprint, JudgmentStatus.COMPLETED.value),
             ).fetchone()
@@ -3139,18 +4224,30 @@ class SQLiteStorage:
     def insert_span(self, span: SpanRecord) -> None:
         sanitize_span(span)
         with self._lock:
-            self._conn.execute(
-                """INSERT OR REPLACE INTO spans (
-                    span_id, name, trace_id, parent_name, started_at,
+            written = self._conn.execute(
+                """INSERT INTO spans (
+                    span_id, name, trace_id, tenant_id, parent_name, started_at,
                     ended_at, duration_ms, attributes_json, error
                 ) VALUES (
-                    :span_id, :name, :trace_id, :parent_name, :started_at,
+                    :span_id, :name, :trace_id, :tenant_id, :parent_name, :started_at,
                     :ended_at, :duration_ms, :attributes_json, :error
-                )""",
+                ) ON CONFLICT(span_id) DO UPDATE SET
+                    name = excluded.name,
+                    trace_id = excluded.trace_id,
+                    tenant_id = excluded.tenant_id,
+                    parent_name = excluded.parent_name,
+                    started_at = excluded.started_at,
+                    ended_at = excluded.ended_at,
+                    duration_ms = excluded.duration_ms,
+                    attributes_json = excluded.attributes_json,
+                    error = excluded.error
+                WHERE COALESCE(NULLIF(spans.tenant_id,''),'__verdict_local__') =
+                      COALESCE(NULLIF(excluded.tenant_id,''),'__verdict_local__')""",
                 {
                     "span_id": span.span_id,
                     "name": span.name,
                     "trace_id": span.trace_id,
+                    "tenant_id": span.tenant_id,
                     "parent_name": span.parent_name,
                     "started_at": _iso(span.started_at),
                     "ended_at": _iso(span.ended_at),
@@ -3159,12 +4256,15 @@ class SQLiteStorage:
                     "error": span.error,
                 },
             )
+            if written.rowcount != 1:
+                raise ValueError("span identity belongs to another tenant")
 
     def _row_to_span(self, row: sqlite3.Row) -> SpanRecord:
         return SpanRecord(
             span_id=row["span_id"],
             name=row["name"] or "",
             trace_id=row["trace_id"],
+            tenant_id=row["tenant_id"],
             parent_name=row["parent_name"],
             started_at=_parse_iso(row["started_at"]) or datetime.now(timezone.utc),
             ended_at=_parse_iso(row["ended_at"]),
@@ -3173,12 +4273,19 @@ class SQLiteStorage:
             error=row["error"],
         )
 
-    def list_spans(self, *, trace_id: str | None = None, limit: int = 100) -> list[SpanRecord]:
+    def list_spans(self, *, trace_id: str | None = None, limit: int = 100,
+                   tenant_id: str | None = None, span_id: str | None = None) -> list[SpanRecord]:
         clauses = []
         params: list[object] = []
         if trace_id is not None:
             clauses.append("trace_id = ?")
             params.append(trace_id)
+        if tenant_id is not None:
+            clauses.append("tenant_id = ?")
+            params.append(tenant_id)
+        if span_id is not None:
+            clauses.append("span_id = ?")
+            params.append(span_id)
         where = "WHERE " + " AND ".join(clauses) if clauses else ""
         params.append(limit)
         with self._lock:
@@ -3504,7 +4611,7 @@ class SQLiteStorage:
     ) -> list[Judgment]:
         with self._lock:
             rows = self._conn.execute(
-                """SELECT j.* FROM judgments j JOIN trace_cluster_assignments a
+                """SELECT j.* FROM current_judgments j JOIN trace_cluster_assignments a
                   ON a.trace_id=j.trace_id WHERE a.tenant_id=? AND a.version_id=?
                   AND a.status='assigned' AND a.cluster_id=?
                   ORDER BY j.created_at DESC LIMIT ?""",

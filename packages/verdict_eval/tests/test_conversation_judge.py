@@ -29,6 +29,33 @@ def _config(target="conversation"):
                        "dimensions": [{"name": "helpful", "description": "Addresses the request."}]}}
 
 
+def test_historical_escaped_conversation_is_not_planned_or_sent():
+    store = InMemoryStorage()
+    row = _row()
+    store.save_conversation(row)
+    key = ("alpha", row["id"])
+    payload, retention = store._conversations[key]
+    historical = json.loads(payload)
+    historical["messages"][0]["content"] = (
+        r'Observed: {"misc":"\u0073k-proj-AAAAAAAAAAAAAAAAAAAAAAAA"}'
+    )
+    store._conversations[key] = (json.dumps(historical), retention)
+    config = _config()
+    preview = preview_evaluation(store, tenant_id="alpha", config=config)
+    assert preview["plannedCalls"] == 0
+    assert preview["notEvaluableReasons"] == {"redacted_evidence": 1}
+
+    calls = []
+    provider = FakeProvider(lambda request: calls.append(request) or "{}")
+    provider.name = "openai"
+    result = execute_evaluation(store, tenant_id="alpha", config={
+        **config, "plannedTargets": preview["plannedTargets"],
+        "planFingerprint": preview["planFingerprint"],
+    }, confirm_external_egress=True, provider=provider)
+    assert result["completed"] == 0
+    assert calls == []
+
+
 def test_preview_excludes_ungradable_row_and_judges_valid_one():
     store = InMemoryStorage()
     store.save_conversation(_row(messages=[{"role": "user", "content": "No reply."}]))

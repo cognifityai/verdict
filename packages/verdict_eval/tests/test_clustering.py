@@ -87,6 +87,17 @@ def test_selector_uses_only_latest_supported_user_message() -> None:
     assert selected.reason is None
 
 
+def test_selector_never_passes_historical_encoded_secret_to_embedder() -> None:
+    trace = Trace(trace_id="historical", raw_messages=[{
+        "role": "user",
+        "content": r'Observed: {"misc":"\u0073k-proj-AAAAAAAAAAAAAAAAAAAAAAAA"}',
+    }])
+    selected = select_cluster_input(trace)
+    assert selected.text is not None
+    assert "\\u0073k-proj" not in selected.text
+    assert "sk-proj" not in selected.text
+
+
 def test_selector_rejects_malformed_latest_user_message_without_fallback() -> None:
     trace = Trace(
         trace_id="trace-1",

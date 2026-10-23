@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import secrets
+import sqlite3
 from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any
@@ -11,7 +12,7 @@ from typing import Any
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
-from verdict.dashboard.setup_routes import SetupRoutes
+from verdict.dashboard.setup_routes import SetupRoutes, _is_postgres, _sqlite_path
 from verdict.monitor_inputs import (
     LOCAL_TENANT,
     LOCAL_TRACE_SCOPE,
@@ -40,6 +41,10 @@ TENANT = LOCAL_TENANT
 SCOPE = LOCAL_TRACE_SCOPE
 
 _BOUNDED_MONITOR_ERRORS = {
+    "historical reference is not ready for activation": (
+        "The historical reference needs enough eligible calls before activation. "
+        "Capture more calls or adjust the reviewed reference floor, then preview again."
+    ),
     "monitor snapshot exceeds the 4 MiB storage contract": (
         "Monitor snapshots are limited to 4 MiB. Reduce the cohort size, "
         "number of groups, or evaluator dimensions."
@@ -337,6 +342,26 @@ class MonitorRoutes:
 
     def read_state(self, tenant_id: str | None = None) -> dict[str, object]:
         """Return the one durable read model used by every monitor surface."""
+        if not _is_postgres(self.setup.storage_url):
+            # A historical trace-only file has no monitor state. Avoid opening
+            # the writable initializer merely to report that fact: it can
+            # partially migrate the old schema while answering a GET request.
+            path = _sqlite_path(self.setup.storage_url)
+            has_policies = None
+            if path.exists():
+                with sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True) as connection:
+                    has_policies = connection.execute(
+                        "SELECT 1 FROM sqlite_master "
+                        "WHERE type='table' AND name='monitor_policies'"
+                    ).fetchone()
+            if has_policies is None:
+                return {
+                    "state": "not_configured",
+                    "active": None,
+                    "candidate": None,
+                    "agentEvaluators": [],
+                    "agentEvaluatorDiscoveryTruncated": False,
+                }
         writable = self.setup.writable_storage()
         try:
             agent_evaluators, evaluator_discovery_truncated = self.agent_evaluators(
@@ -451,7 +476,8 @@ class MonitorRoutes:
                     raise ValueError("invalid activation")
                 writable = self.setup.writable_storage()
                 stored = writable.get_monitor_policy(policy_id)
-                if stored is None or stored[1] != "candidate":
+                if (stored is None or stored[1] != "candidate"
+                        or stored[0].scope_key != self.scope):
                     raise ValueError("unknown policy")
                 historical = writable.get_initial_monitor_snapshot(policy_id)
                 if monitor_requires_rebootstrap(
@@ -463,6 +489,14 @@ class MonitorRoutes:
                     )
                 if historical is None:
                     raise ValueError("candidate has no snapshot")
+                reference = historical[0].reference_summary
+                if (len(historical[0].reference_unit_ids) < stored[0].minimum_reference
+                        or reference is None
+                        or not any(
+                            metric.true_count + metric.false_count >= stored[0].minimum_reference
+                            for metric in reference.metrics
+                        )):
+                    raise ValueError("historical reference is not ready for activation")
                 latest = writable.get_latest_monitor_snapshot(policy_id)
                 if latest is None:
                     raise ValueError("candidate has no snapshot")

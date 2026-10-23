@@ -12,14 +12,17 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections import deque
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
 from verdict.capture import AgentCaptureService
 from verdict.evidence import (
+    AGENT_RUN_READ_MAX_TURNS,
     AgentEvent,
     AgentEventType,
     AgentRun,
@@ -31,11 +34,13 @@ from verdict.evidence import (
     SourceSession,
     stable_evidence_id,
 )
+from verdict.local_recent_facts import LocalFullProjection, LocalRecentFact, tail_turn_json
+from verdict.local_source_revision import LocalSourceRevision
 from verdict.normalized_evidence import _LegacyLocalTextUpgrade
 from verdict.redaction import redact, redact_structure
 from verdict.schema import Operation, Trace
 from verdict.storage.base import Storage
-from verdict.telemetry.model import ImportContext, ImportSummary
+from verdict.telemetry.model import ImportContext, ImportSummary, MappingResult
 from verdict.telemetry.runner import ImportRunError, import_into_storage
 from verdict.telemetry.sources.codex import (
     codex_diagnostic_path,
@@ -51,9 +56,37 @@ _COMMAND_TOOLS = frozenset({"bash", "shell", "exec_command", "run_command"})
 _MAX_CONTENT_CHARS = 1_000
 _MAX_TURN_CONTENT_BYTES = 65_536
 _MAX_FILES = 100_000
+_MAX_SCAN_FILES = 1_000
+_MAX_SCAN_RAW_BYTES = 128 * 1024 * 1024
+_MAX_SCAN_PROJECTED_ROWS = 100_000
+_MAX_SCAN_SANITIZED_BYTES = 256 * 1024 * 1024
 _MAX_EVENTS = 250_000
+_MAX_PARSED_EVENTS = 100_000
 _MAX_STORED_EVENTS = 1_500
+_MAX_RECENT_EVENTS = 50
 _MAX_LINE_BYTES = 16 * 1024 * 1024
+_MAX_LOCAL_FILE_BYTES = 128 * 1024 * 1024
+_MAX_FULL_RAW_BYTES = 32 * 1024 * 1024
+_MAX_FULL_RECORDS = 5_000
+_MAX_FULL_PROJECTED_ROWS = 5_000
+_MAX_FULL_SANITIZED_BYTES = 64 * 1024 * 1024
+_LOCAL_FAILURE_REASONS = frozenset({
+    "history_line_too_large", "history_event_limit", "malformed_jsonl",
+    "history_file_too_large",
+    "malformed_record", "history_file_limit", "missing_session_id",
+    "invalid_logical_session_id", "invalid_parent_session_id",
+    "unsupported_history", "missing_child_agent_id", "recent_sample_limit",
+    "local_source_conflict", "local_source_changed", "no_root_turns",
+    "local_turn_limit", "local_source_revision_unavailable",
+})
+
+
+def _local_failure_reason(exc: OSError | ValueError) -> str:
+    """Persist only a known category, never captured source or exception text."""
+    if isinstance(exc, OSError):
+        return "source_io_error"
+    reason = str(exc)
+    return reason if reason in _LOCAL_FAILURE_REASONS else "invalid_local_source"
 
 
 @dataclass
@@ -61,6 +94,11 @@ class LocalCaptureSummary:
     files: int = 0
     stored: int = 0
     skipped: int = 0
+    deferred: int = 0
+    scan_incomplete: bool = False
+    event_limited_runs: int = 0
+    recent_sample_errors: int = 0
+    recent_sample_error_reasons: dict[str, int] = field(default_factory=dict)
     skip_reasons: dict[str, int] = field(default_factory=dict)
     codex_model_calls: ImportSummary | None = None
     codex_model_call_error: str | None = None
@@ -76,14 +114,22 @@ class LocalCaptureSummary:
             "skipped": self.skipped,
             "skip_reasons": dict(sorted(self.skip_reasons.items())),
         }
+        if self.scan_incomplete:
+            result["deferred"] = self.deferred
+            result["scan_incomplete"] = True
+        if self.event_limited_runs:
+            result["event_limited_runs"] = self.event_limited_runs
+        if self.recent_sample_errors:
+            result["recent_sample_errors"] = self.recent_sample_errors
+            result["recent_sample_error_reasons"] = dict(sorted(self.recent_sample_error_reasons.items()))
         if self.codex_model_calls is not None:
             calls = self.codex_model_calls
             result["codex_model_calls"] = {
                 "status": (
                     "complete"
-                    if self.codex_model_call_error is None
+                    if self.codex_model_call_error is None and not calls.skipped
                     else "partial"
-                    if calls.stored
+                    if calls.stored or calls.skip_reasons.get("prior_usage_retained")
                     else "unavailable"
                 ),
                 "seen": calls.seen,
@@ -109,6 +155,11 @@ class _RawEvent:
 
 
 @dataclass
+class _EventBudget:
+    count: int = 0
+
+
+@dataclass
 class _RawTurn:
     source_id: str
     started_at: datetime
@@ -130,6 +181,7 @@ class _RawTurn:
     claude_usage_by_response_id: dict[str, dict[str, int]] = field(default_factory=dict)
     claude_invalid_response_ids: set[str] = field(default_factory=set)
     events: list[_RawEvent] = field(default_factory=list)
+    event_budget: _EventBudget = field(default_factory=_EventBudget)
 
 
 @dataclass(frozen=True)
@@ -139,6 +191,10 @@ class _ParsedHistory:
     turns: list[_RawTurn]
     parent_session_id: str | None = None
     logical_session_id: str | None = None
+    source_prefix_bytes: int = 0
+    source_prefix_sha256: str = ""
+    source_record_count: int = 0
+    source_revision: LocalSourceRevision | None = None
 
 
 @dataclass(frozen=True)
@@ -485,14 +541,24 @@ def _finalize_claude_usage(turn: _RawTurn) -> None:
     turn.token_usage_basis = "claude_provider_response_sum"
 
 
-def _records(path: Path) -> tuple[list[dict[str, object]], int]:
+def _records(path: Path) -> tuple[list[dict[str, object]], LocalSourceRevision]:
     records: list[dict[str, object]] = []
     omitted_partial_lines = 0
+    prefix_digest = hashlib.sha256()
+    prefix_bytes = 0
+    full_digest = hashlib.sha256()
+    full_bytes = 0
     with path.open("rb") as handle:
         while raw := handle.readline(_MAX_LINE_BYTES + 1):
             if len(raw) > _MAX_LINE_BYTES:
                 raise ValueError("history_line_too_large")
+            if full_bytes + len(raw) > _MAX_LOCAL_FILE_BYTES:
+                raise ValueError("history_file_too_large")
+            full_digest.update(raw)
+            full_bytes += len(raw)
             if not raw.strip():
+                prefix_digest.update(raw)
+                prefix_bytes += len(raw)
                 continue
             if len(records) >= _MAX_EVENTS:
                 raise ValueError("history_event_limit")
@@ -510,7 +576,12 @@ def _records(path: Path) -> tuple[list[dict[str, object]], int]:
             if mapped is None:
                 raise ValueError("malformed_record")
             records.append(mapped)
-    return records, omitted_partial_lines
+            prefix_digest.update(raw)
+            prefix_bytes += len(raw)
+    return records, LocalSourceRevision(
+        full_bytes, full_digest.hexdigest(), prefix_bytes,
+        prefix_digest.hexdigest(), bool(omitted_partial_lines),
+    )
 
 
 def _iter_paths(root: Path):
@@ -628,6 +699,9 @@ def _event(
     response_text: str = "",
     legacy_response_text: str = "",
 ) -> None:
+    if turn.event_budget.count >= _MAX_PARSED_EVENTS:
+        raise ValueError("history_event_limit")
+    turn.event_budget.count += 1
     if occurred_at is None:
         turn.events.append(
             _RawEvent(
@@ -651,33 +725,15 @@ def _event(
     )
 
 
-def _record_partial_source_line(
-    turns: list[_RawTurn], omitted_partial_lines: int
-) -> None:
-    if not omitted_partial_lines or not turns:
-        return
-    target = turns[-1]
-    _event(
-        target,
-        target.ended_at or target.started_at,
-        AgentEventType.CONTEXT,
-        "verdict:partial_source_line",
-        {
-            "name": "source_lines_omitted",
-            "source": str(omitted_partial_lines),
-            "available": False,
-        },
-    )
-
-
 def _parse_codex(path: Path, *, home: Path | None) -> _ParsedHistory:
-    records, omitted_partial_lines = _records(path)
+    records, revision = _records(path)
     session_id = ""
     parent_session_id: str | None = None
     logical_session_id: str | None = None
     version = ""
     active: _RawTurn | None = None
     turns: list[_RawTurn] = []
+    event_budget = _EventBudget()
     calls: dict[str, tuple[str, str]] = {}
     for row in records:
         payload = _mapping(row.get("payload"))
@@ -714,7 +770,7 @@ def _parse_codex(path: Path, *, home: Path | None) -> _ParsedHistory:
             if not isinstance(turn_id, str) or not turn_id or occurred_at is None:
                 active = None
                 continue
-            active = _RawTurn(turn_id, occurred_at)
+            active = _RawTurn(turn_id, occurred_at, event_budget=event_budget)
             calls = {}
         elif active is None:
             continue
@@ -851,19 +907,21 @@ def _parse_codex(path: Path, *, home: Path | None) -> _ParsedHistory:
             previous_turn_total=previous_turn_total,
             has_previous_turn=turn_index > 0,
         )
-    _record_partial_source_line(turns, omitted_partial_lines)
     return _ParsedHistory(
-        session_id, version, turns, parent_session_id, logical_session_id
+        session_id, version, turns, parent_session_id, logical_session_id,
+        revision.complete_prefix_bytes, revision.complete_prefix_sha256,
+        len(records), revision,
     )
 
 
 def _parse_claude(path: Path, *, home: Path | None) -> _ParsedHistory:
-    records, omitted_partial_lines = _records(path)
+    records, revision = _records(path)
     session_id = ""
     parent_session_id: str | None = None
     version = ""
     active: _RawTurn | None = None
     turns: list[_RawTurn] = []
+    event_budget = _EventBudget()
     model_events: dict[str, _RawEvent] = {}
     tool_names: dict[str, str] = {}
     seen_tool_calls: set[str] = set()
@@ -910,6 +968,7 @@ def _parse_claude(path: Path, *, home: Path | None) -> _ParsedHistory:
                 request=prompt.value,
                 legacy_request=prompt.legacy_value,
                 request_truncated=prompt.truncated,
+                event_budget=event_budget,
             )
             model_events = {}
             tool_names = {}
@@ -1032,9 +1091,10 @@ def _parse_claude(path: Path, *, home: Path | None) -> _ParsedHistory:
         raise ValueError("unsupported_history")
     for turn in turns:
         _finalize_claude_usage(turn)
-    _record_partial_source_line(turns, omitted_partial_lines)
     return _ParsedHistory(
-        session_id, version, turns, parent_session_id, parent_session_id or session_id
+        session_id, version, turns, parent_session_id, parent_session_id or session_id,
+        revision.complete_prefix_bytes, revision.complete_prefix_sha256,
+        len(records), revision,
     )
 
 
@@ -1057,6 +1117,325 @@ def _turn_source_identity(bundle: AgentRunBundle, raw: _RawTurn) -> str:
     )
 
 
+def _local_event(
+    raw_event: _RawEvent,
+    *,
+    source_kind: str,
+    source_scope: str,
+    source_turn_id: str,
+    turn_id: str,
+    event_sequence: int,
+    capture_content: bool,
+    home: Path | None,
+    content_omission_reason: str,
+    link_trace: bool = True,
+) -> AgentEvent:
+    metadata = dict(raw_event.attributes)
+    content: dict[str, Any] = {}
+    if raw_event.has_content:
+        for key in ("arguments", "result", "command", "stdout", "stderr", "output", "text"):
+            if key in metadata:
+                content[key] = metadata.pop(key)
+    attributes, privacy, omission = _content_attributes(
+        metadata, content, capture_content=capture_content, home=home,
+        omission_reason=content_omission_reason,
+    )
+    attributes = {key: redact_structure(value) for key, value in attributes.items()}
+    event_id = stable_evidence_id(
+        "event", source_kind, source_scope,
+        f"{source_turn_id}:{event_sequence}:{raw_event.provenance}",
+    )
+    trace_id = (
+        stable_evidence_id("trace", source_kind, source_scope, event_id)
+        if link_trace and raw_event.event_type is AgentEventType.MODEL_CALL
+        and raw_event.provider_response_id else None
+    )
+    try:
+        return AgentEvent(
+            event_id=event_id, turn_id=turn_id, sequence=event_sequence,
+            occurred_at=raw_event.occurred_at, event_type=raw_event.event_type,
+            status=raw_event.status, provenance=raw_event.provenance,
+            attributes=attributes, privacy_classification=privacy,
+            omission_reason=omission, trace_id=trace_id,
+        )
+    except ValueError:
+        if not capture_content or not raw_event.has_content:
+            raise
+        return AgentEvent(
+            event_id=event_id, turn_id=turn_id, sequence=event_sequence,
+            occurred_at=raw_event.occurred_at, event_type=raw_event.event_type,
+            status=raw_event.status, provenance=raw_event.provenance,
+            attributes={key: redact_structure(value) for key, value in metadata.items()},
+            privacy_classification=PrivacyClassification.OMITTED,
+            omission_reason="content_exceeded_evidence_contract", trace_id=trace_id,
+        )
+
+
+def _recent_sample(
+    bundle: AgentRunBundle,
+    raw_turns: list[_RawTurn],
+    *,
+    source_kind: str,
+    source_scope: str,
+    capture_content: bool,
+    home: Path | None,
+    source_record_count: int,
+    source_revision: str,
+    partial_final_line: bool = False,
+) -> tuple[dict[str, object] | None, tuple[LocalRecentFact, ...]]:
+    total = sum(len(turn.events) for turn in raw_turns)
+    if total < _MAX_STORED_EVENTS and len(raw_turns) <= AGENT_RUN_READ_MAX_TURNS:
+        return None, ()
+    first_turn = max(0, len(raw_turns) - 100)
+    tail: deque[tuple[int, _RawTurn, int, _RawEvent, int]] = deque(
+        maxlen=_MAX_RECENT_EVENTS,
+    )
+    ordinal = 0
+    for turn_sequence, raw_turn in enumerate(raw_turns):
+        for event_sequence, raw_event in enumerate(raw_turn.events):
+            if turn_sequence >= first_turn:
+                tail.append((turn_sequence, raw_turn, event_sequence, raw_event, ordinal))
+            ordinal += 1
+    recent_events = []
+    recent_facts: deque[LocalRecentFact] = deque()
+    for turn_sequence, raw_turn, event_sequence, raw_event, source_ordinal in tail:
+        source_turn_id = _turn_source_identity(bundle, raw_turn)
+        turn_id = stable_evidence_id("turn", source_kind, source_scope, source_turn_id)
+        event = _local_event(
+            raw_event, source_kind=source_kind, source_scope=source_scope,
+            source_turn_id=source_turn_id, turn_id=turn_id,
+            event_sequence=event_sequence, capture_content=capture_content,
+            home=home, content_omission_reason="content_capture_disabled",
+            link_trace=True,
+        )
+        recent_facts.append(LocalRecentFact(source_ordinal, turn_sequence, event))
+        recent_events.append({
+            "sourceOrdinal": source_ordinal,
+            "eventId": event.event_id,
+            "turnId": event.turn_id,
+            "turnSequence": turn_sequence,
+            "eventSequence": event.sequence,
+        })
+    def projection() -> dict[str, object]:
+        selected_counts: dict[int, int] = {}
+        for item in recent_events:
+            sequence = int(item["turnSequence"])
+            selected_counts[sequence] = selected_counts.get(sequence, 0) + 1
+        turns = []
+        for sequence in range(first_turn, len(raw_turns)):
+            raw = raw_turns[sequence]
+            turn_id = stable_evidence_id(
+                "turn", source_kind, source_scope, _turn_source_identity(bundle, raw),
+            )
+            complete = (
+                raw.ended_at is not None
+                and raw.status in {ExecutionStatus.COMPLETED, ExecutionStatus.FAILED,
+                                   ExecutionStatus.TIMED_OUT, ExecutionStatus.CANCELLED}
+                and not (sequence == len(raw_turns) - 1 and partial_final_line)
+            )
+            selected = selected_counts.get(sequence, 0)
+            fully_selected = complete and selected == len(raw.events)
+            turns.append({
+                "turnId": turn_id, "sourceSequence": sequence,
+                "startedAt": raw.started_at.isoformat(),
+                "endedAt": raw.ended_at.isoformat() if raw.ended_at else None,
+                "status": raw.status.value,
+                "totalTokens": raw.token_usage.get("total_tokens"),
+                "sourceEventCount": len(raw.events),
+                "selectedEventCount": selected,
+                "eligibleForFindings": fully_selected,
+            })
+        first = recent_events[0]["sourceOrdinal"] if recent_events else None
+        last = recent_events[-1]["sourceOrdinal"] if recent_events else None
+        prefix_events = sum(
+            event.provenance not in {"verdict:capture_limit", "verdict:partial_source_line"}
+            for event in bundle.events
+        )
+        selected_after_prefix = sum(
+            item["sourceOrdinal"] >= prefix_events for item in recent_events
+        )
+        return {
+        "schema": "local-recent-window-v2",
+        "durableFacts": True,
+        "runId": bundle.run.run_id,
+        "sourceKind": source_kind,
+        "partial": True,
+        "capturedAt": datetime.now(timezone.utc).isoformat(),
+        "sourceRecordCount": source_record_count,
+        "sourceRevision": source_revision,
+        "sourceTurnCount": len(raw_turns),
+        "sourceEventCount": total,
+        "canonicalPrefixEvents": prefix_events,
+        "firstOrdinal": first,
+        "lastOrdinal": last,
+        "omittedMiddleEvents": max(0, total - prefix_events - selected_after_prefix),
+        "turns": turns,
+        "events": recent_events,
+        "findings": [],
+        }
+
+    result = projection()
+    while len(json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode()) > 1_048_576:
+        if recent_events:
+            recent_events.pop(0)
+            recent_facts.popleft()
+        elif first_turn < len(raw_turns) - 1:
+            first_turn += 1
+        else:
+            raise ValueError("recent_sample_limit")
+        result = projection()
+    return result, tuple(recent_facts)
+
+
+def _reverified_recent_facts(
+    storage: Storage, bundle: AgentRunBundle, raw_turns: list[_RawTurn],
+    *, source_kind: str, source_scope: str, capture_content: bool,
+    home: Path | None, selected_ids: set[str], prefix_ids: set[str],
+) -> tuple[LocalRecentFact, ...]:
+    """Reproject retained facts that moved outside the bounded current window."""
+    positions = storage.list_local_recent_fact_positions(
+        bundle.run.tenant_id, bundle.run.run_id,
+    )
+    starts = []
+    total = 0
+    for turn in raw_turns:
+        starts.append(total)
+        total += len(turn.events)
+    historical = []
+    for source_ordinal, turn_sequence, event_sequence, event_id in positions:
+        if event_id in selected_ids:
+            continue
+        if (event_id in prefix_ids or turn_sequence >= len(raw_turns)
+                or event_sequence >= len(raw_turns[turn_sequence].events)
+                or source_ordinal != starts[turn_sequence] + event_sequence):
+            raise ValueError("local_source_conflict")
+        raw_turn = raw_turns[turn_sequence]
+        source_turn_id = _turn_source_identity(bundle, raw_turn)
+        turn_id = stable_evidence_id(
+            "turn", source_kind, source_scope, source_turn_id,
+        )
+        event = _local_event(
+            raw_turn.events[event_sequence], source_kind=source_kind,
+            source_scope=source_scope, source_turn_id=source_turn_id,
+            turn_id=turn_id, event_sequence=event_sequence,
+            capture_content=capture_content, home=home,
+            content_omission_reason="content_capture_disabled", link_trace=True,
+        )
+        if event.event_id != event_id:
+            raise ValueError("local_source_conflict")
+        historical.append(LocalRecentFact(source_ordinal, turn_sequence, event))
+    return tuple(historical)
+
+
+def _project_turn(
+    raw: _RawTurn, sequence: int, *, run_id: str,
+    parent_run_id: str | None, source_kind: str, source_scope: str,
+    capture_content: bool,
+) -> tuple[AgentTurn, str]:
+    source_turn_id = f"{run_id}:{raw.source_id}" if parent_run_id else raw.source_id
+    turn_id = stable_evidence_id("turn", source_kind, source_scope, source_turn_id)
+    request = _redacted_turn_text(
+        raw.request, truncated=raw.request_truncated,
+    ) if capture_content else _BoundedText("")
+    response = _redacted_turn_text(
+        raw.response, truncated=raw.response_truncated,
+    ) if capture_content else _BoundedText("")
+    return AgentTurn(
+        turn_id=turn_id, run_id=run_id, sequence=sequence,
+        started_at=raw.started_at, ended_at=raw.ended_at, status=raw.status,
+        user_request_redacted=request.value or None,
+        final_response_redacted=response.value or None,
+        request_state=(EvidenceState.PRESENT if capture_content and raw.request
+                       else EvidenceState.MISSING if capture_content
+                       else EvidenceState.NOT_CAPTURED),
+        response_state=(EvidenceState.PRESENT if capture_content and raw.response
+                        else EvidenceState.MISSING if capture_content
+                        else EvidenceState.NOT_CAPTURED),
+        input_tokens=raw.token_usage.get("input_tokens"),
+        cached_input_tokens=raw.token_usage.get("cached_input_tokens"),
+        cache_write_input_tokens=raw.token_usage.get("cache_write_input_tokens"),
+        output_tokens=raw.token_usage.get("output_tokens"),
+        reasoning_output_tokens=raw.token_usage.get("reasoning_output_tokens"),
+        total_tokens=raw.token_usage.get("total_tokens"),
+        token_usage_basis=raw.token_usage_basis or None,
+        request_truncated=request.truncated if request.value else False,
+        response_truncated=response.truncated if response.value else False,
+    ), source_turn_id
+
+
+def _projection_json_size(value: object) -> int:
+    def encode(item: object) -> str:
+        if isinstance(item, datetime):
+            return item.astimezone(timezone.utc).isoformat()
+        if isinstance(item, Enum):
+            return str(item.value)
+        raise TypeError("unsupported local projection value")
+
+    return len(json.dumps(asdict(value), default=encode, ensure_ascii=False,
+                          separators=(",", ":"), allow_nan=False).encode("utf-8"))
+
+
+def _try_full_projection(
+    bundle: AgentRunBundle, raw_turns: list[_RawTurn], *, source_kind: str,
+    source_scope: str, capture_content: bool, home: Path | None,
+    source_revision: LocalSourceRevision, source_record_count: int,
+    selected: tuple[LocalRecentFact, ...], historical: tuple[LocalRecentFact, ...],
+) -> tuple[LocalFullProjection | None, int]:
+    """Admit only bounded, fully parsed source facts beyond the stable prefix."""
+    total_events = sum(len(turn.events) for turn in raw_turns)
+    if (source_revision.partial_final_line
+            or source_revision.full_bytes > _MAX_FULL_RAW_BYTES
+            or source_record_count > _MAX_FULL_RECORDS
+            or len(raw_turns) > _MAX_FULL_PROJECTED_ROWS
+            or total_events > _MAX_FULL_PROJECTED_ROWS):
+        return None, 0
+    existing = {event.event_id for event in bundle.events}
+    existing.update(fact.event.event_id for fact in (*selected, *historical))
+    tail = []
+    payload_bytes = sum(len(tail_turn_json(turn).encode("utf-8"))
+                        for turn in bundle.turns)
+    payload_bytes += sum(_projection_json_size(event) for event in bundle.events)
+    payload_bytes += sum(_projection_json_size(fact.event)
+                         for fact in (*selected, *historical))
+    if payload_bytes > _MAX_FULL_SANITIZED_BYTES:
+        return None, 0
+    for sequence, raw in enumerate(raw_turns[len(bundle.turns):], start=len(bundle.turns)):
+        turn, _ = _project_turn(
+            raw, sequence, run_id=bundle.run.run_id,
+            parent_run_id=bundle.run.parent_run_id,
+            source_kind=source_kind, source_scope=source_scope,
+            capture_content=capture_content,
+        )
+        tail.append(turn)
+        payload_bytes += len(tail_turn_json(turn).encode("utf-8"))
+        if payload_bytes > _MAX_FULL_SANITIZED_BYTES:
+            return None, 0
+    facts = []
+    source_ordinal = 0
+    for sequence, raw in enumerate(raw_turns):
+        source_turn_id = _turn_source_identity(bundle, raw)
+        turn_id = stable_evidence_id("turn", source_kind, source_scope, source_turn_id)
+        for event_sequence, raw_event in enumerate(raw.events):
+            event_id = stable_evidence_id(
+                "event", source_kind, source_scope,
+                f"{source_turn_id}:{event_sequence}:{raw_event.provenance}",
+            )
+            if event_id not in existing:
+                event = _local_event(
+                    raw_event, source_kind=source_kind, source_scope=source_scope,
+                    source_turn_id=source_turn_id, turn_id=turn_id,
+                    event_sequence=event_sequence, capture_content=capture_content,
+                    home=home, content_omission_reason="content_capture_disabled",
+                    link_trace=True,
+                )
+                facts.append(LocalRecentFact(source_ordinal, sequence, event))
+                payload_bytes += _projection_json_size(event)
+                if payload_bytes > _MAX_FULL_SANITIZED_BYTES:
+                    return None, 0
+            source_ordinal += 1
+    return LocalFullProjection(tuple(facts), tuple(tail)), payload_bytes
+
+
 def _bundle(
     *,
     source_kind: str,
@@ -1074,6 +1453,8 @@ def _bundle(
 ) -> AgentRunBundle:
     if not raw_turns:
         raise ValueError("no_root_turns")
+    if len(raw_turns) > AGENT_RUN_READ_MAX_TURNS:
+        raise ValueError("local_turn_limit")
     source_session_id = stable_evidence_id("session", source_kind, source_scope, session_id)
     run_id = stable_evidence_id("run", source_kind, source_scope, session_id)
     logical_run_session_id = stable_evidence_id(
@@ -1115,118 +1496,25 @@ def _bundle(
     events: list[AgentEvent] = []
     remaining_events = stored_event_count
     for turn_sequence, raw in enumerate(raw_turns):
-        source_turn_id = (
-            f"{run_id}:{raw.source_id}" if parent_run_id is not None else raw.source_id
+        turn, source_turn_id = _project_turn(
+            raw, turn_sequence, run_id=run_id, parent_run_id=parent_run_id,
+            source_kind=source_kind, source_scope=source_scope,
+            capture_content=capture_content,
         )
-        turn_id = stable_evidence_id("turn", source_kind, source_scope, source_turn_id)
-        request = _redacted_turn_text(
-            raw.request, truncated=raw.request_truncated
-        ) if capture_content else _BoundedText("")
-        response = _redacted_turn_text(
-            raw.response, truncated=raw.response_truncated
-        ) if capture_content else _BoundedText("")
-        turns.append(
-            AgentTurn(
-                turn_id=turn_id,
-                run_id=run_id,
-                sequence=turn_sequence,
-                started_at=raw.started_at,
-                ended_at=raw.ended_at,
-                status=raw.status,
-                user_request_redacted=request.value or None,
-                final_response_redacted=response.value or None,
-                request_state=(
-                    EvidenceState.PRESENT
-                    if capture_content and raw.request
-                    else EvidenceState.MISSING
-                    if capture_content
-                    else EvidenceState.NOT_CAPTURED
-                ),
-                response_state=(
-                    EvidenceState.PRESENT
-                    if capture_content and raw.response
-                    else EvidenceState.MISSING
-                    if capture_content
-                    else EvidenceState.NOT_CAPTURED
-                ),
-                input_tokens=raw.token_usage.get("input_tokens"),
-                cached_input_tokens=raw.token_usage.get("cached_input_tokens"),
-                cache_write_input_tokens=raw.token_usage.get("cache_write_input_tokens"),
-                output_tokens=raw.token_usage.get("output_tokens"),
-                reasoning_output_tokens=raw.token_usage.get("reasoning_output_tokens"),
-                total_tokens=raw.token_usage.get("total_tokens"),
-                token_usage_basis=raw.token_usage_basis or None,
-                request_truncated=request.truncated if request.value else False,
-                response_truncated=response.truncated if response.value else False,
-            )
-        )
+        turns.append(turn)
+        turn_id = turn.turn_id
         selected_events = raw.events[:remaining_events]
         remaining_events -= len(selected_events)
         for event_sequence, raw_event in enumerate(selected_events):
-            metadata = dict(raw_event.attributes)
-            content: dict[str, Any] = {}
-            if raw_event.has_content:
-                for key in ("arguments", "result", "command", "stdout", "stderr", "output", "text"):
-                    if key in metadata:
-                        content[key] = metadata.pop(key)
-            attributes, privacy, omission = _content_attributes(
-                metadata,
-                content,
-                capture_content=capture_content,
-                home=home,
-                omission_reason=content_omission_reason,
-            )
-            attributes = {
-                key: redact_structure(value)
-                for key, value in attributes.items()
-            }
-            event_id = stable_evidence_id(
-                "event",
-                source_kind,
-                source_scope,
-                f"{source_turn_id}:{event_sequence}:{raw_event.provenance}",
-            )
-            try:
-                trace_id = (
-                    stable_evidence_id("trace", source_kind, source_scope, event_id)
-                    if raw_event.event_type is AgentEventType.MODEL_CALL
-                    and raw_event.provider_response_id
-                    else None
-                )
-                event = AgentEvent(
-                    event_id=event_id,
-                    turn_id=turn_id,
-                    sequence=event_sequence,
-                    occurred_at=raw_event.occurred_at,
-                    event_type=raw_event.event_type,
-                    status=raw_event.status,
-                    provenance=raw_event.provenance,
-                    attributes=attributes,
-                    privacy_classification=privacy,
-                    omission_reason=omission,
-                    trace_id=trace_id,
-                )
-            except ValueError:
-                if not capture_content or not raw_event.has_content:
-                    raise
-                event = AgentEvent(
-                    event_id=event_id,
-                    turn_id=turn_id,
-                    sequence=event_sequence,
-                    occurred_at=raw_event.occurred_at,
-                    event_type=raw_event.event_type,
-                    status=raw_event.status,
-                    provenance=raw_event.provenance,
-                    attributes={
-                        key: redact_structure(value)
-                        for key, value in metadata.items()
-                    },
-                    privacy_classification=PrivacyClassification.OMITTED,
-                    omission_reason="content_exceeded_evidence_contract",
-                    trace_id=trace_id,
-                )
-            events.append(event)
-        if omitted_event_count and remaining_events == 0 and len(events) == stored_event_count:
+            events.append(_local_event(
+                raw_event, source_kind=source_kind, source_scope=source_scope,
+                source_turn_id=source_turn_id, turn_id=turn_id,
+                event_sequence=event_sequence, capture_content=capture_content,
+                home=home, content_omission_reason=content_omission_reason,
+            ))
+        # The limit belongs to the turn containing the first omitted raw event,
+        # even when an earlier turn ends exactly at the stored-event boundary.
+        if omitted_event_count and len(selected_events) < len(raw.events):
             events.append(
                 AgentEvent(
                     event_id=stable_evidence_id(
@@ -1257,6 +1545,8 @@ def _linked_traces(
     *,
     source_kind: str,
     source_scope: str,
+    recent_events: tuple[AgentEvent, ...] = (),
+    capture_content: bool = True,
 ) -> list[Trace]:
     """Project only explicit provider model-call boundaries into Trace rows."""
     raw_by_event_id: dict[str, tuple[_RawTurn, _RawEvent]] = {}
@@ -1272,21 +1562,27 @@ def _linked_traces(
             raw_by_event_id[event_id] = (raw_turn, raw_event)
     turns = {turn.turn_id: turn for turn in bundle.turns}
     traces: list[Trace] = []
-    for event in bundle.events:
+    for event in (*bundle.events, *recent_events):
         if event.event_type is not AgentEventType.MODEL_CALL or event.trace_id is None:
             continue
         raw_pair = raw_by_event_id.get(event.event_id)
         turn = turns.get(event.turn_id)
-        if raw_pair is None or turn is None:
+        if raw_pair is None:
             continue
         raw_turn, raw_event = raw_pair
-        content_present = turn.request_state is EvidenceState.PRESENT
+        content_present = (
+            turn.request_state is EvidenceState.PRESENT if turn is not None
+            else capture_content and bool(raw_turn.request)
+        )
         attributes = event.attributes
         request_model = str(attributes.get("request_model") or "")
         response_model = str(attributes.get("response_model") or "")
         input_tokens = attributes.get("input_tokens")
         output_tokens = attributes.get("output_tokens")
-        request = raw_turn.request if content_present and raw_turn.request else None
+        request = (
+            _redacted_turn_text(raw_turn.request, truncated=raw_turn.request_truncated).value
+            if content_present and raw_turn.request else None
+        )
         response = (
             raw_event.response_text
             if content_present and raw_event.response_text else None
@@ -1422,19 +1718,56 @@ def capture_local_agents(
         progress(0, total)
     capture_service = AgentCaptureService(storage)
     codex_usage_by_thread: dict[str, list[tuple[float, int, int, int | None]]] = {}
+    accepted_codex_sessions: set[str] = set()
+    scan_work = []
     for source_kind, root, parser in sources:
         if root is None:
             continue
         source_scope = hashlib.sha256(str(root.resolve()).encode()).hexdigest()
+        attempts = storage.list_local_scan_attempts(tenant_id, source_kind, source_scope)
+        for path in listed[source_kind]:
+            locator_hash = hashlib.sha256(str(path.resolve()).encode()).hexdigest()
+            scan_work.append((attempts.get(locator_hash, ""), locator_hash,
+                              source_kind, path, parser, source_scope))
+    scan_work.sort(key=lambda row: (row[0], row[1]))
+    scanned_raw_bytes = 0
+    scanned_projected_rows = 0
+    scanned_sanitized_bytes = 0
+    for _attempted_at, locator_hash, source_kind, path, parser, source_scope in scan_work:
+        if (summary.files >= _MAX_SCAN_FILES
+                or scanned_raw_bytes >= _MAX_SCAN_RAW_BYTES
+                or scanned_projected_rows >= _MAX_SCAN_PROJECTED_ROWS
+                or scanned_sanitized_bytes >= _MAX_SCAN_SANITIZED_BYTES):
+            break
+        summary.files += 1
         try:
-            for path in listed[source_kind]:
-                summary.files += 1
-                try:
+            stat = path.stat()
+            observed_size, observed_mtime_ns = stat.st_size, stat.st_mtime_ns
+        except OSError:
+            observed_size, observed_mtime_ns = 0, 0
+        measured_bytes = observed_size
+        measured_rows = 0
+        measured_payload_bytes = 0
+        started_at = datetime.now(timezone.utc).isoformat()
+        generation = storage.claim_local_scan_attempt(
+            tenant_id, source_kind, source_scope, locator_hash,
+            started_at, observed_size, observed_mtime_ns,
+        )
+        accepted_revision = None
+        source_line_complete = False
+        projection_complete = False
+        outcome_code = "failed"
+        try:
                     parsed = parser(path, home=home)
+                    if parsed.source_revision is not None:
+                        measured_bytes = parsed.source_revision.full_bytes
                     if source_kind == "codex":
                         codex_usage_by_thread.setdefault(parsed.session_id, []).extend(
                             _codex_model_usage(parsed)
                         )
+                    if parsed.source_revision is None:
+                        raise ValueError("local_source_revision_unavailable")
+                    prefix_turns = parsed.turns[:AGENT_RUN_READ_MAX_TURNS]
                     bundle = _bundle(
                         source_kind=source_kind,
                         source_scope=source_scope,
@@ -1443,36 +1776,153 @@ def capture_local_agents(
                         parent_session_id=parsed.parent_session_id,
                         logical_session_id=parsed.logical_session_id,
                         version=parsed.version,
-                        raw_turns=parsed.turns,
+                        raw_turns=prefix_turns,
                         tenant_id=tenant_id,
                         capture_content=capture_content,
                         home=home,
                     )
+                    source_revision = replace(
+                        parsed.source_revision,
+                        source_turn_count=len(parsed.turns),
+                        source_event_count=sum(len(turn.events) for turn in parsed.turns),
+                        v1_turn_count=len(bundle.turns),
+                        v1_event_count=sum(
+                            event.provenance not in {
+                                "verdict:capture_limit", "verdict:partial_source_line",
+                            } for event in bundle.events
+                        ),
+                        min_turn_at=min(turn.started_at for turn in parsed.turns).isoformat(),
+                        max_turn_at=max(
+                            max(turn.started_at, turn.ended_at or turn.started_at)
+                            for turn in parsed.turns
+                        ).isoformat(),
+                    )
+                    recent_window, recent_facts = _recent_sample(
+                        bundle, parsed.turns, source_kind=source_kind,
+                        source_scope=source_scope, capture_content=capture_content,
+                        home=home, source_record_count=parsed.source_record_count,
+                        source_revision=source_revision.full_sha256,
+                        partial_final_line=source_revision.partial_final_line,
+                    )
+                    prefix_event_ids = {event.event_id for event in bundle.events}
+                    new_recent_facts = tuple(
+                        fact for fact in recent_facts
+                        if fact.event.event_id not in prefix_event_ids
+                    )
+                    historical_facts = _reverified_recent_facts(
+                        storage, bundle, parsed.turns, source_kind=source_kind,
+                        source_scope=source_scope, capture_content=capture_content,
+                        home=home,
+                        selected_ids={fact.event.event_id for fact in new_recent_facts},
+                        prefix_ids=prefix_event_ids,
+                    )
+                    full_projection, projection_bytes = _try_full_projection(
+                        bundle, parsed.turns, source_kind=source_kind,
+                        source_scope=source_scope, capture_content=capture_content,
+                        home=home, source_revision=source_revision,
+                        source_record_count=parsed.source_record_count,
+                        selected=new_recent_facts, historical=historical_facts,
+                    )
                     traces = _linked_traces(
                         bundle, parsed.turns, source_kind=source_kind,
                         source_scope=source_scope,
+                        recent_events=tuple(
+                            fact.event for fact in (*new_recent_facts, *historical_facts,
+                                                    *(full_projection.facts
+                                                      if full_projection else ()))
+                        ),
+                        capture_content=capture_content,
                     )
+                    if (full_projection is not None and projection_bytes
+                            + sum(_projection_json_size(trace) for trace in traces)
+                            > _MAX_FULL_SANITIZED_BYTES):
+                        full_projection = None
+                        traces = _linked_traces(
+                            bundle, parsed.turns, source_kind=source_kind,
+                            source_scope=source_scope,
+                            recent_events=tuple(
+                                fact.event for fact in (*new_recent_facts, *historical_facts)
+                            ), capture_content=capture_content,
+                        )
+                    recent_trace_ids = {
+                        fact.event.trace_id for fact in (*new_recent_facts, *historical_facts,
+                                                        *(full_projection.facts
+                                                          if full_projection else ()))
+                        if fact.event.trace_id is not None
+                    }
+                    prefix_traces = [
+                        trace for trace in traces if trace.trace_id not in recent_trace_ids
+                    ]
+                    recent_traces = tuple(
+                        trace for trace in traces if trace.trace_id in recent_trace_ids
+                    )
+                    stored_facts = (*new_recent_facts, *historical_facts,
+                                    *(full_projection.facts if full_projection else ()))
+                    stored_tail = full_projection.tail_turns if full_projection else ()
+                    measured_rows = (len(bundle.turns) + len(bundle.events)
+                                     + len(stored_facts) + len(stored_tail) + len(traces))
+                    measured_payload_bytes = sum(
+                        _projection_json_size(item)
+                        for item in (*bundle.turns, *bundle.events, *stored_tail,
+                                     *(fact.event for fact in stored_facts), *traces)
+                    )
+                    if recent_window is not None:
+                        measured_payload_bytes += len(json.dumps(
+                            recent_window, ensure_ascii=False,
+                            separators=(",", ":"),
+                        ).encode("utf-8"))
                     capture_service._capture_local_history(
                         bundle,
-                        traces=traces,
+                        traces=prefix_traces,
+                        recent_traces=recent_traces,
+                        source_revision=source_revision,
+                        source_path=path,
+                        recent_window_json=(
+                            json.dumps(recent_window, ensure_ascii=False, separators=(",", ":"))
+                            if recent_window is not None else None
+                        ),
+                        recent_facts=new_recent_facts,
+                        historical_facts=historical_facts,
+                        full_projection=full_projection,
                         legacy_text_upgrade=_capture_text_compatibility(
                             bundle,
-                            parsed.turns,
-                            traces,
+                            prefix_turns,
+                            prefix_traces,
                             source_kind=source_kind,
                             source_scope=source_scope,
                             capture_content=capture_content,
                         ),
                     )
-                except (OSError, ValueError) as exc:
-                    summary.add_skip(str(exc) or type(exc).__name__)
-                    continue
-                finally:
-                    if progress is not None:
-                        progress(summary.files, total)
-                summary.stored += 1
-        except ValueError as exc:
-            summary.add_skip(str(exc))
+                    if source_kind == "codex":
+                        accepted_codex_sessions.add(
+                            hashlib.sha256(parsed.session_id.encode()).hexdigest()
+                        )
+                    accepted_revision = source_revision.full_sha256
+                    source_line_complete = not source_revision.partial_final_line
+                    projection_complete = full_projection is not None
+                    outcome_code = ("complete_projection" if projection_complete
+                                    else "partial_projection")
+                    if any(event.provenance == "verdict:capture_limit" for event in bundle.events):
+                        summary.event_limited_runs += 1
+        except (OSError, ValueError) as exc:
+            reason = _local_failure_reason(exc)
+            summary.add_skip(reason)
+            outcome_code = f"failed_{reason}"
+        else:
+            summary.stored += 1
+        finally:
+            scanned_raw_bytes += measured_bytes
+            scanned_projected_rows += measured_rows
+            scanned_sanitized_bytes += measured_payload_bytes
+            storage.finish_local_scan_attempt(
+                tenant_id, source_kind, source_scope, locator_hash, generation,
+                datetime.now(timezone.utc).isoformat(), outcome_code,
+                accepted_revision, projection_complete, source_line_complete,
+            )
+            if progress is not None:
+                progress(summary.files, total)
+    summary.deferred = len(scan_work) - summary.files
+    summary.scan_incomplete = summary.deferred > 0
     if codex_root is not None and (diagnostic_path := codex_diagnostic_path(codex_root)):
         try:
             context = ImportContext(
@@ -1480,17 +1930,28 @@ def capture_local_agents(
                 source_scope=hashlib.sha256(str(codex_root.resolve()).encode()).hexdigest(),
                 tenant_id=tenant_id,
             )
-            summary.codex_model_calls = import_into_storage(
-                iter_codex_diagnostic_calls(
+            def diagnostic_results():
+                for result in iter_codex_diagnostic_calls(
                     diagnostic_path,
                     context=context,
                     token_usage_by_thread={
                         thread_id: sorted(set(usage), key=lambda item: item[0])
                         for thread_id, usage in codex_usage_by_thread.items()
                     },
-                ),
-                storage,
-            )
+                ):
+                    trace = result.trace
+                    if trace is not None and trace.session_id not in accepted_codex_sessions:
+                        existing = storage.get_trace(trace.trace_id)
+                        if (existing is not None and existing.tenant_id == tenant_id
+                                and (existing.input_tokens is not None
+                                     or existing.output_tokens is not None
+                                     or "verdict.cached_input_tokens" in existing.tags)):
+                            # A rejected or deferred source cannot overwrite an older match.
+                            yield MappingResult.skipped("prior_usage_retained")
+                            continue
+                    yield result
+
+            summary.codex_model_calls = import_into_storage(diagnostic_results(), storage)
         except ImportRunError as exc:
             summary.codex_model_calls = exc.summary
             summary.codex_model_call_error = f"{exc.stage}_error"

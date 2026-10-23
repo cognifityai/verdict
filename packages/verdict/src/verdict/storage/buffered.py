@@ -405,12 +405,29 @@ class BufferedStorage:
         self,
         bundle: AgentRunBundle,
         traces: tuple[Trace, ...],
-        legacy_text_upgrade: _LegacyLocalTextUpgrade,
+        legacy_text_upgrade: _LegacyLocalTextUpgrade | None,
+        *,
+        source_revision=None,
+        source_path=None,
+        recent_window_json=None,
+        recent_facts=(),
+        historical_facts=(),
+        full_projection=None,
+        recent_traces=(),
     ) -> None:
         replace_local = getattr(self._inner, "_replace_local_agent_capture", None)
         if callable(replace_local):
-            self._maintenance(replace_local, bundle, traces, legacy_text_upgrade)
+            self._maintenance(
+                replace_local, bundle, traces, legacy_text_upgrade,
+                source_revision=source_revision, source_path=source_path,
+                recent_window_json=recent_window_json,
+                recent_facts=recent_facts, historical_facts=historical_facts,
+                full_projection=full_projection,
+                recent_traces=recent_traces,
+            )
             return
+        if source_revision is not None:
+            raise ValueError("local_source_revision_unsupported")
         self._maintenance(self._inner.replace_agent_capture, bundle, traces)
 
     def append_agent_capture(
@@ -440,12 +457,46 @@ class BufferedStorage:
     def get_trace(self, trace_id: str) -> Trace | None:
         return self._read(self._inner.get_trace, trace_id)
 
+    def trace_owner(self, trace_id: str) -> str | None:
+        lookup = getattr(self._inner, "trace_owner", None)
+        if callable(lookup):
+            return self._read(lookup, trace_id)
+        trace = self._read(self._inner.get_trace, trace_id)
+        return (trace.tenant_id or "__verdict_local__") if trace is not None else None
+
     def get_agent_run_bundle(
         self,
         tenant_id: str,
         run_id: str,
     ) -> AgentRunBundle | None:
         return self._read(self._inner.get_agent_run_bundle, tenant_id, run_id)
+
+    def get_agent_capture_snapshot(self, tenant_id: str, run_id: str):
+        lookup = getattr(self._inner, "get_agent_capture_snapshot", None)
+        if not callable(lookup):
+            return self._read(self._inner.get_agent_run_bundle, tenant_id, run_id), None
+        return self._read(lookup, tenant_id, run_id)
+
+    def get_recent_local_events(self, tenant_id: str, run_id: str):
+        lookup = getattr(self._inner, "get_recent_local_events", None)
+        return self._read(lookup, tenant_id, run_id) if callable(lookup) else None
+
+    def list_local_scan_attempts(self, tenant_id: str, source_kind: str,
+                                 source_scope: str) -> dict[str, str]:
+        return self._read(
+            self._inner.list_local_scan_attempts, tenant_id, source_kind, source_scope,
+        )
+
+    def claim_local_scan_attempt(self, *args) -> int:
+        return self._maintenance(self._inner.claim_local_scan_attempt, *args)
+
+    def finish_local_scan_attempt(self, *args) -> bool:
+        return self._maintenance(self._inner.finish_local_scan_attempt, *args)
+
+    def list_local_recent_fact_positions(self, tenant_id: str, run_id: str):
+        return self._read(
+            self._inner.list_local_recent_fact_positions, tenant_id, run_id,
+        )
 
     def list_agent_run_bundles(
         self,
@@ -664,8 +715,10 @@ class BufferedStorage:
             limit=limit,
         )
 
-    def list_spans(self, *, trace_id: str | None = None, limit: int = 100) -> list[SpanRecord]:
-        return self._read(self._inner.list_spans, trace_id=trace_id, limit=limit)
+    def list_spans(self, *, trace_id: str | None = None, limit: int = 100,
+                   tenant_id: str | None = None, span_id: str | None = None) -> list[SpanRecord]:
+        return self._read(self._inner.list_spans, trace_id=trace_id, limit=limit,
+                          tenant_id=tenant_id, span_id=span_id)
 
     def load_cluster_registry(self, version: str) -> str | None:
         return self._read(self._inner.load_cluster_registry, version)

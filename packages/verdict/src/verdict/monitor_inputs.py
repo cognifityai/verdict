@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import timedelta
 
 from verdict.cluster_runtime import (
     cluster_model_path_for_version,
     cluster_registry_service,
 )
+from verdict.delivery_queue import NotificationIntent
 from verdict.monitoring import (
     MAX_MONITOR_GROUPS,
+    CohortManifest,
+    MonitorComparison,
     MonitorPolicy,
     MonitorRebootstrapRequired,
     MonitorStateConflict,
@@ -179,6 +183,9 @@ def advance_monitor(
     *,
     tenant_id: str,
     expected_state: str = "active",
+    delivery_intent_factory: Callable[
+        [CohortManifest, MonitorComparison], NotificationIntent | None
+    ] | None = None,
 ):
     """Advance one active policy through the canonical persisted lifecycle."""
     if expected_state not in {"active", "candidate"}:
@@ -195,14 +202,21 @@ def advance_monitor(
     units = load_monitor_units(storage, policy, tenant_id=tenant_id)
     manifest = plan_prospective_manifest(previous[0], units, policy)
     comparison = compare_manifest(units, manifest, policy)
+    delivery_intent = (
+        delivery_intent_factory(manifest, comparison)
+        if delivery_intent_factory is not None else None
+    )
     try:
-        storage.save_monitor_successor(
-            policy.policy_id,
-            previous[0].snapshot_id,
-            manifest,
-            comparison,
-            expected_state=expected_state,
-        )
+        if delivery_intent is not None:
+            storage.save_worker_monitor_successor(
+                policy.policy_id, previous[0].snapshot_id, manifest, comparison,
+                expected_state=expected_state, delivery_intent=delivery_intent,
+            )
+        else:
+            storage.save_monitor_successor(
+                policy.policy_id, previous[0].snapshot_id, manifest, comparison,
+                expected_state=expected_state,
+            )
     except MonitorStateConflict:
         stored = storage.get_monitor_policy(policy.policy_id)
         if stored is None or stored[1] != expected_state:
@@ -216,5 +230,11 @@ def advance_monitor(
         winner = storage.get_latest_monitor_snapshot(policy.policy_id)
         if winner is None or winner[0].snapshot_id == previous[0].snapshot_id:
             raise
+        if delivery_intent_factory is not None:
+            winner_intent = delivery_intent_factory(*winner)
+            if winner_intent is not None:
+                storage.attach_worker_monitor_intent(
+                    policy.policy_id, winner[0], winner[1], winner_intent,
+                )
         return winner
     return manifest, comparison

@@ -35,10 +35,17 @@ and does not contact the collector. It reports pending bytes, segment states,
 last append, last receipt, and the last bounded error. Missing remote health is
 not interpreted as zero backlog or successful delivery.
 
-The first collector accepts only full Agent records, including linked LLM
-Traces. A mixed segment can therefore deliver its Agent records, but the source
-segment is retained when standalone Trace or Span records are rejected. Those
-records continue to use direct or manual file import.
+The unreleased source collector accepts Agent, standalone Trace, and Span
+records. The published `0.1.0b2` collector accepts only Agent records; its
+completed rejection receipts remain immutable. The shipper skips `.rejected`
+segments; they remain available for reviewed manual import or an explicit
+new-delivery procedure after upgrading.
+For a standalone Span with an explicit Trace link, a transient storage lookup
+failure leaves the collector receipt pending and the source segment in place
+for retry. A confirmed missing or foreign Trace is recorded as an unlinked Span.
+Built-in stores check only the Trace's tenant identity for this decision; they
+do not load its captured prompt or response. Custom stores without that narrow
+lookup continue to use their published `get_trace` method.
 
 ## Compatibility
 

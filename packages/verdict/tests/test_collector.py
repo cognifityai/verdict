@@ -11,7 +11,12 @@ from uuid import uuid4
 import pytest
 from fastapi.testclient import TestClient
 from verdict import collector as collector_module
-from verdict.agent_transport import FileCaptureSink
+from verdict.agent_transport import (
+    FileCaptureSink,
+    StorageCaptureSink,
+    _span_from_payload,
+    _span_to_payload,
+)
 from verdict.collector import (
     MAX_BATCH_BYTES,
     MAX_BATCH_RECORDS,
@@ -41,10 +46,51 @@ from verdict.evidence import (
     SourceSession,
 )
 from verdict.schema import SpanRecord, Trace
+from verdict.shipper import SegmentShipper, ShippingError, read_shipping_status
+from verdict.storage.buffered import BufferedStorage
 from verdict.storage.memory import InMemoryStorage
+from verdict.storage.sqlite import SQLiteStorage
 
 TENANT = "collector-tenant"
 SECRET = "collector-test-secret-32-characters"
+
+
+def test_span_capture_accepts_published_payload_without_tenant_identity():
+    now = datetime(2026, 10, 18, tzinfo=timezone.utc)
+    span = SpanRecord(span_id="legacy-span", name="step", trace_id="trace", started_at=now)
+    published = _span_to_payload(span)
+    published.pop("tenant_id")
+    assert _span_from_payload(published).tenant_id is None
+    assert _span_from_payload(_span_to_payload(SpanRecord(
+        span_id="owned-span", started_at=now, tenant_id="tenant-a"))).tenant_id == "tenant-a"
+
+
+def test_collector_accepts_published_span_wire_without_tenant_identity():
+    service, storage, _receipts = _service()
+    now = datetime(2026, 10, 18, tzinfo=timezone.utc)
+    legacy = _span_to_payload(SpanRecord(
+        span_id="published-span", name="synthetic", started_at=now,
+    ))
+    legacy.pop("tenant_id")
+    body = json.dumps({
+        "schema": "verdict-capture-v1", "kind": "span", "record": legacy,
+    }).encode() + b"\n"
+
+    response = _decode(service.ingest("published-span-batch", "host-1", body))
+
+    assert response["accepted"] == 1
+    assert storage.list_spans(tenant_id=TENANT, span_id="published-span")[0].tenant_id == TENANT
+
+
+def test_span_capture_retracts_foreign_tenant_trace_link():
+    now = datetime(2026, 10, 18, tzinfo=timezone.utc)
+    storage = InMemoryStorage()
+    storage.insert_trace(Trace(trace_id="trace-a", tenant_id="tenant-a", started_at=now))
+    sink = StorageCaptureSink(storage)
+    forged = sink.capture_span(SpanRecord(span_id="forged", trace_id="trace-a",
+                                          tenant_id="tenant-b", started_at=now))
+    assert forged.trace_id is None
+    assert forged.attributes["verdict.link_status"] == "tenant_mismatch"
 
 
 class _MemoryReceiptStore:
@@ -308,17 +354,323 @@ def test_poison_records_are_terminal_without_blocking_valid_siblings(
 
     response = _decode(service.ingest("batch-mixed", "host-1", body))
 
-    assert response["accepted"] == 1
-    assert response["rejected"] == 4
+    assert response["accepted"] == 3
+    assert response["rejected"] == 2
     assert [item["error"] for item in response["results"]] == [
         "invalid_record",
         None,
         "unsupported_record_kind",
-        "unsupported_record_kind",
-        "unsupported_record_kind",
+        None,
+        None,
     ]
     assert len(storage.list_agent_run_bundles(TENANT)) == 1
-    assert storage.get_trace("standalone") is None
+    assert storage.get_trace("standalone").tenant_id == TENANT
+    assert storage.list_spans(tenant_id=TENANT, span_id="span-1")[0].tenant_id == TENANT
+
+
+def test_standalone_span_cannot_replace_a_foreign_tenant_span(tmp_path: Path) -> None:
+    service, storage, _receipts = _service()
+    now = datetime(2026, 9, 8, 12, tzinfo=timezone.utc)
+    storage.insert_span(SpanRecord(
+        span_id="span-1", name="foreign", tenant_id="tenant-b", started_at=now,
+    ))
+
+    response = _decode(service.ingest("batch-foreign-span", "host-1", _standalone_records(tmp_path)))
+
+    assert response["accepted"] == 1
+    assert response["rejected"] == 1
+    assert response["results"][1]["error"] == "evidence_conflict"
+    assert storage.list_spans(span_id="span-1")[0].name == "foreign"
+    assert storage.list_spans(span_id="span-1")[0].tenant_id == "tenant-b"
+
+
+def test_standalone_trace_cannot_replace_a_foreign_tenant_trace(tmp_path: Path) -> None:
+    service, storage, _receipts = _service()
+    now = datetime(2026, 9, 8, 12, tzinfo=timezone.utc)
+    storage.insert_trace(Trace(
+        trace_id="standalone", tenant_id="tenant-b", provider="foreign",
+        started_at=now,
+    ))
+
+    response = _decode(service.ingest("batch-foreign-trace", "host-1", _standalone_records(tmp_path)))
+
+    assert response["accepted"] == 1
+    assert response["rejected"] == 1
+    assert response["results"][0]["error"] == "evidence_conflict"
+    assert storage.get_trace("standalone").provider == "foreign"
+    assert storage.get_trace("standalone").tenant_id == "tenant-b"
+
+
+def test_standalone_records_scope_untrusted_owners_and_keep_receipt_on_retry(tmp_path: Path) -> None:
+    service, storage, _receipts = _service()
+    now = datetime(2026, 9, 8, 12, tzinfo=timezone.utc)
+    spool = tmp_path / "owned-standalone"
+    sink = FileCaptureSink(spool, redaction_mode="redact", redaction_secret=None)
+    sink.capture_trace(Trace(
+        trace_id="owned-trace", tenant_id="forged-tenant", provider="synthetic",
+        started_at=now,
+    ))
+    sink.capture_span(SpanRecord(
+        span_id="owned-span", trace_id="owned-trace", tenant_id="forged-tenant",
+        name="synthetic", started_at=now,
+    ))
+    sink.close()
+    [segment] = spool.glob("verdict-agent-*.jsonl")
+    body = segment.read_bytes()
+
+    first = service.ingest("batch-standalone", "host-1", body)
+    assert service.ingest("batch-standalone", "host-1", body) == first
+    assert _decode(first)["accepted"] == 2
+    assert storage.get_trace("owned-trace").tenant_id == TENANT
+    [span] = storage.list_spans(tenant_id=TENANT, span_id="owned-span")
+    assert span.trace_id == "owned-trace"
+    assert span.tenant_id == TENANT
+    assert storage.list_spans(tenant_id="forged-tenant", span_id="owned-span") == []
+
+
+def test_standalone_span_retracts_foreign_trace_link(tmp_path: Path) -> None:
+    service, storage, _receipts = _service()
+    now = datetime(2026, 9, 8, 12, tzinfo=timezone.utc)
+    storage.insert_trace(Trace(
+        trace_id="foreign-trace", tenant_id="foreign", started_at=now,
+    ))
+    spool = tmp_path / "foreign-link"
+    sink = FileCaptureSink(spool, redaction_mode="redact", redaction_secret=None)
+    sink.capture_span(SpanRecord(
+        span_id="unlinked-span", trace_id="foreign-trace", started_at=now,
+    ))
+    sink.close()
+    [segment] = spool.glob("verdict-agent-*.jsonl")
+
+    ack = _decode(service.ingest("batch-foreign-link", "host-1", segment.read_bytes()))
+
+    assert ack["accepted"] == 1
+    [span] = storage.list_spans(tenant_id=TENANT, span_id="unlinked-span")
+    assert span.trace_id is None
+    assert span.attributes["verdict.link_status"] == "tenant_mismatch"
+
+
+@pytest.mark.parametrize("lookup_error", [OSError, ValueError])
+def test_transient_explicit_trace_lookup_keeps_receipt_and_segment_retryable(
+    tmp_path: Path, lookup_error: type[Exception],
+) -> None:
+    class FailingLookupOnce(InMemoryStorage):
+        fail_lookup = True
+
+        def trace_owner(self, trace_id: str):
+            if self.fail_lookup:
+                self.fail_lookup = False
+                raise lookup_error("synthetic transient trace lookup failure")
+            return super().trace_owner(trace_id)
+
+    now = datetime(2026, 10, 18, tzinfo=timezone.utc)
+    storage = FailingLookupOnce()
+    storage.insert_trace(Trace(trace_id="linked-trace", tenant_id=TENANT, started_at=now))
+    service, _storage, receipts = _service(storage)
+    spool = tmp_path / "retry-spool"
+    producer = FileCaptureSink(spool, redaction_mode="redact", redaction_secret=None)
+    producer.capture_span(SpanRecord(
+        span_id="linked-span", trace_id="linked-trace", name="work", started_at=now,
+    ))
+    producer.close()
+    [segment] = spool.glob("verdict-agent-*.jsonl")
+    app = create_collector_app(service, api_key=SECRET)
+
+    with TestClient(app) as client:
+        class LocalSender:
+            destination_fingerprint = "a" * 64
+
+            def __init__(self) -> None:
+                self.batch_id: str | None = None
+                self.statuses: list[int] = []
+
+            def send(self, *, batch_id: str, producer_id: str, body: bytes) -> bytes:
+                self.batch_id = batch_id
+                response = client.post("/v1/ingest", content=body, headers={
+                    "Authorization": f"Bearer {SECRET}",
+                    "Content-Type": "application/x-ndjson",
+                    "X-Verdict-Batch-ID": batch_id,
+                    "X-Verdict-Producer-ID": producer_id,
+                })
+                self.statuses.append(response.status_code)
+                if response.status_code != 200:
+                    raise ShippingError(
+                        f"collector_http_{response.status_code}",
+                        retryable=response.status_code >= 500,
+                    )
+                return response.content
+
+        sender = LocalSender()
+        shipper = SegmentShipper(spool, sender, max_attempts=1)
+        with pytest.raises(ShippingError, match="collector_http_503"):
+            shipper.ship_once()
+        assert sender.statuses == [503]
+        assert segment.exists()
+        assert storage.list_spans(tenant_id=TENANT, span_id="linked-span") == []
+        assert receipts.get(TENANT, sender.batch_id).state == "pending"  # type: ignore[arg-type,union-attr]
+        assert read_shipping_status(spool).pending_bytes > 0
+
+        delivered = shipper.ship_once()
+
+    assert sender.statuses == [503, 200]
+    assert delivered.accepted_records == 1
+    assert delivered.deleted_segments == 1
+    assert not segment.exists()
+    [span] = storage.list_spans(tenant_id=TENANT, span_id="linked-span")
+    assert span.trace_id == "linked-trace"
+    assert receipts.get(TENANT, sender.batch_id).state == "completed"  # type: ignore[arg-type,union-attr]
+
+
+def test_mixed_span_batch_retries_prior_record_without_losing_explicit_link(
+    tmp_path: Path,
+) -> None:
+    class FailingLookupOnce(InMemoryStorage):
+        fail_lookup = True
+
+        def trace_owner(self, trace_id: str):
+            if self.fail_lookup:
+                self.fail_lookup = False
+                raise OSError("synthetic lookup outage")
+            return super().trace_owner(trace_id)
+
+    now = datetime(2026, 10, 18, tzinfo=timezone.utc)
+    storage = FailingLookupOnce()
+    storage.insert_trace(Trace(trace_id="existing", tenant_id=TENANT, started_at=now))
+    service, _storage, receipts = _service(storage)
+    producer = FileCaptureSink(
+        tmp_path / "mixed-spool", redaction_mode="redact", redaction_secret=None,
+    )
+    producer.capture_span(SpanRecord(span_id="independent", name="first", started_at=now))
+    producer.capture_span(SpanRecord(
+        span_id="dependent", trace_id="existing", name="second", started_at=now,
+    ))
+    producer.close()
+    [segment] = (tmp_path / "mixed-spool").glob("verdict-agent-*.jsonl")
+    body = segment.read_bytes()
+
+    with pytest.raises(RuntimeError, match="trace lookup unavailable"):
+        service.ingest("batch-mixed-link", "host-1", body)
+    assert receipts.get(TENANT, "batch-mixed-link").state == "pending"  # type: ignore[union-attr]
+    assert len(storage.list_spans(tenant_id=TENANT, span_id="independent")) == 1
+    assert storage.list_spans(tenant_id=TENANT, span_id="dependent") == []
+
+    acknowledgement = _decode(service.ingest("batch-mixed-link", "host-1", body))
+    assert acknowledgement["accepted"] == 2
+    assert len(storage.list_spans(tenant_id=TENANT, span_id="independent")) == 1
+    [linked] = storage.list_spans(tenant_id=TENANT, span_id="dependent")
+    assert linked.trace_id == "existing"
+
+
+def test_missing_explicit_trace_is_confirmed_unlinked_without_lookup_error() -> None:
+    storage = InMemoryStorage()
+    sink = StorageCaptureSink(storage)
+    now = datetime(2026, 10, 18, tzinfo=timezone.utc)
+    unlinked = sink.capture_span(SpanRecord(
+        span_id="missing-link", trace_id="absent", tenant_id=TENANT,
+        started_at=now,
+    ))
+    independent = sink.capture_span(SpanRecord(
+        span_id="independent", tenant_id=TENANT, started_at=now,
+    ))
+    assert unlinked.trace_id is None
+    assert unlinked.attributes["verdict.link_status"] == "trace_not_found"
+    assert independent.trace_id is None
+    assert "verdict.link_status" not in independent.attributes
+
+
+@pytest.mark.parametrize("adapter", ["memory", "sqlite"])
+def test_builtin_span_link_lookup_does_not_hydrate_trace_content(
+    tmp_path: Path, adapter: str,
+) -> None:
+    class NoHydrationMemory(InMemoryStorage):
+        def get_trace(self, trace_id: str):
+            raise AssertionError("full Trace hydration is forbidden for link checks")
+
+    class NoHydrationSQLite(SQLiteStorage):
+        def get_trace(self, trace_id: str):
+            raise AssertionError("full Trace hydration is forbidden for link checks")
+
+    storage = (
+        NoHydrationMemory() if adapter == "memory"
+        else NoHydrationSQLite(str(tmp_path / "narrow-link.db"))
+    )
+    now = datetime(2026, 10, 18, tzinfo=timezone.utc)
+    storage.insert_trace(Trace(
+        trace_id="large-linked-trace", tenant_id=TENANT, started_at=now,
+        prompt_redacted="synthetic large prompt " * 10_000,
+    ))
+    selected_queries: list[str] = []
+    if adapter == "sqlite":
+        storage._conn.set_trace_callback(selected_queries.append)
+    try:
+        recorded = StorageCaptureSink(storage).capture_span(SpanRecord(
+            span_id="narrow-span", trace_id="large-linked-trace",
+            tenant_id=TENANT, started_at=now,
+        ))
+        assert recorded.trace_id == "large-linked-trace"
+        assert storage.list_spans(tenant_id=TENANT, span_id="narrow-span")[0].trace_id == recorded.trace_id
+        if adapter == "sqlite":
+            assert any("SELECT tenant_id FROM traces WHERE trace_id" in sql for sql in selected_queries)
+            assert not any("SELECT * FROM traces" in sql for sql in selected_queries)
+    finally:
+        storage.close()
+
+
+def test_span_link_lookup_keeps_published_custom_storage_fallback() -> None:
+    class PublishedStorageShape:
+        def __init__(self) -> None:
+            self.inner = InMemoryStorage()
+            self.lookups = 0
+
+        def get_trace(self, trace_id: str):
+            self.lookups += 1
+            return self.inner.get_trace(trace_id)
+
+        def insert_span(self, span: SpanRecord) -> None:
+            self.inner.insert_span(span)
+
+    storage = PublishedStorageShape()
+    now = datetime(2026, 10, 18, tzinfo=timezone.utc)
+    storage.inner.insert_trace(Trace(trace_id="custom-link", tenant_id=TENANT, started_at=now))
+    recorded = StorageCaptureSink(storage).capture_span(SpanRecord(  # type: ignore[arg-type]
+        span_id="custom-span", trace_id="custom-link", tenant_id=TENANT, started_at=now,
+    ))
+    assert recorded.trace_id == "custom-link"
+    assert storage.lookups == 1
+    assert storage.inner.list_spans(tenant_id=TENANT, span_id="custom-span")[0].trace_id == "custom-link"
+
+
+def test_buffered_span_link_lookup_flushes_queued_trace_before_validation() -> None:
+    inner = InMemoryStorage()
+    buffered = BufferedStorage(inner, flush_interval=10.0, batch_size=100)
+    now = datetime(2026, 10, 18, tzinfo=timezone.utc)
+    try:
+        buffered.insert_trace(Trace(trace_id="queued-trace", tenant_id=TENANT, started_at=now))
+        recorded = StorageCaptureSink(buffered).capture_span(SpanRecord(
+            span_id="queued-span", trace_id="queued-trace", tenant_id=TENANT,
+            started_at=now,
+        ))
+        buffered.flush()
+        assert recorded.trace_id == "queued-trace"
+        assert inner.list_spans(tenant_id=TENANT, span_id="queued-span")[0].trace_id == "queued-trace"
+    finally:
+        buffered.close()
+
+
+def test_standalone_wire_content_is_redacted_again_at_collector(tmp_path: Path) -> None:
+    service, storage, _receipts = _service()
+    canary = "standalone-collector-secret-canary"
+    records = [json.loads(line) for line in _standalone_records(tmp_path).splitlines()]
+    records[0]["record"]["tags"] = {"nested": {"password": canary}}
+    records[1]["record"]["attributes"] = {"nested": {"password": canary}}
+    body = b"".join(json.dumps(item).encode() + b"\n" for item in records)
+
+    response = _decode(service.ingest("batch-standalone-canary", "host-1", body))
+
+    assert response["accepted"] == 2
+    assert canary not in json.dumps(storage.get_trace("standalone").tags)
+    [span] = storage.list_spans(tenant_id=TENANT, span_id="span-1")
+    assert canary not in json.dumps(span.attributes)
 
 
 def test_deep_json_is_a_terminal_invalid_record_without_blocking_its_sibling(

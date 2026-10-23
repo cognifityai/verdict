@@ -24,7 +24,7 @@ from verdict.storage import SQLiteStorage
 from verdict_eval.providers import CompletionResponse
 
 
-def _seed(path, *, tenant="local", total=900, source_kind="codex", model=None):
+def _seed(path, *, tenant="local", total=900, source_kind="synthetic-codex", model=None):
     now = datetime.now(timezone.utc).replace(hour=12, minute=0, second=0, microsecond=0)
     day = now.date().isoformat()
     storage = SQLiteStorage(str(path))

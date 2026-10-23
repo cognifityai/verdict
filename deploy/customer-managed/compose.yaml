@@ -1,0 +1,48 @@
+# Local, single-host deployment profile. Supply private PostgreSQL and TLS ingress.
+services:
+  dashboard:
+    image: ${VERDICT_IMAGE:?Set VERDICT_IMAGE to the locally built wheel image}
+    pull_policy: never
+    restart: unless-stopped
+    stop_grace_period: 2m
+    environment:
+      VERDICT_STORAGE: ${VERDICT_STORAGE:?Set the protected PostgreSQL URL}
+      VERDICT_USER: ${VERDICT_USER:?Set the dashboard user}
+      VERDICT_PASS: ${VERDICT_PASS:?Set the dashboard password}
+      VERDICT_ALLOWED_HOSTS: ${VERDICT_ALLOWED_HOSTS:?Set allowed dashboard hosts}
+    command: ["verdict-dashboard", "--host", "0.0.0.0", "--port", "8080", "--tenant-id", "${VERDICT_TENANT_ID:?Set the routing tenant}"]
+    ports:
+      - "127.0.0.1:${VERDICT_DASHBOARD_PORT:-8765}:8080"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; assert urllib.request.urlopen('http://127.0.0.1:8080/api/health', timeout=2).status == 200"]
+      interval: 5s
+      timeout: 3s
+      retries: 6
+      start_period: 20s
+
+  collector:
+    image: ${VERDICT_IMAGE:?Set VERDICT_IMAGE to the locally built wheel image}
+    pull_policy: never
+    restart: unless-stopped
+    stop_grace_period: 2m
+    environment:
+      VERDICT_STORAGE: ${VERDICT_STORAGE:?Set the protected PostgreSQL URL}
+      VERDICT_COLLECTOR_API_KEY: ${VERDICT_COLLECTOR_API_KEY:?Set the collector key}
+    command: ["verdict-collector", "--host", "0.0.0.0", "--port", "8081", "--tenant-id", "${VERDICT_TENANT_ID:?Set the routing tenant}"]
+    ports:
+      - "127.0.0.1:${VERDICT_COLLECTOR_PORT:-8766}:8081"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; assert urllib.request.urlopen('http://127.0.0.1:8081/healthz', timeout=2).status == 200"]
+      interval: 5s
+      timeout: 3s
+      retries: 6
+      start_period: 20s
+
+  worker:
+    image: ${VERDICT_IMAGE:?Set VERDICT_IMAGE to the locally built wheel image}
+    pull_policy: never
+    restart: unless-stopped
+    stop_grace_period: 2m
+    environment:
+      VERDICT_STORAGE: ${VERDICT_STORAGE:?Set the protected PostgreSQL URL}
+    command: ["verdict-service", "--tenant-id", "${VERDICT_TENANT_ID:?Set the routing tenant}"]

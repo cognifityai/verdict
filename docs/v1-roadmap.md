@@ -43,14 +43,14 @@ the same normalized evidence APIs used by local history capture.
 Application hosts can write bounded, redacted, process-owned JSONL files and
 later replay them idempotently through canonical storage. This is a local
 transport. A separately deployable authenticated collector now provides
-idempotent remote ingestion for full Agent records into PostgreSQL. A bounded
+idempotent remote ingestion for Agent, standalone Trace, and Span records into
+PostgreSQL in the current source. A bounded
 host shipper uploads complete segment prefixes, retries exact batches, records
 acknowledged offsets, and deletes only sealed fully accepted segments.
 
 Planned agent-level work includes centralized producer-backlog health,
 receipt-triggered analysis, maintained framework adapters, run-level
-cohort comparisons, application-specific outcome calibration, and an automated
-delivery path for standalone Trace and Span records.
+cohort comparisons, and application-specific outcome calibration.
 
 ### Plan-Adherence Scoring
 
@@ -88,8 +88,8 @@ Areas under consideration:
 
 - Centralized host-backlog and dropped-record health plus a durable
   receipt-to-analysis cursor
-- Tenant-safe remote ingestion for standalone Trace and Span
-  records; the current authenticated collector accepts full Agent records
+- Customer acceptance of the standalone Trace/Span collector path under TLS,
+  load, and process supervision
 - OpenTelemetry and OpenInference-compatible export paths
 - Additional source contracts through maintained OSS packages when they reduce
   format-specific maintenance
@@ -133,8 +133,8 @@ Areas under consideration:
 - Direct PostgreSQL capture still connects from each instrumented process
   through a process-local driver pool. The separate authenticated collector
   and host shipper remove database credentials from file-transport Agent
-  producers. Remote standalone Trace and Span ingestion is not yet
-  included.
+  producers. The current source also accepts standalone Trace
+  and Span records; customer deployment validation remains open.
 
 ## Prioritized Product Follow-ups
 
@@ -151,7 +151,7 @@ and an approved design before implementation.
    provider rate-limit handling, cancellation, deterministic output, and load
    tests. This reduces wall time, not token spend.
 4. **Remote ingestion expansion (large effort, high production-deployment
-   value):** add remote standalone Trace/Span support, OTLP mapping,
+   value):** add OTLP mapping,
    centralized producer health, receipt-triggered analysis, and separate
    schema-migration credentials around the current Agent collector. Keep direct
    SQLite/PostgreSQL storage as the simple local and embedded option.

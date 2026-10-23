@@ -14,7 +14,7 @@ from verdict.conversation_assessments import (
     validate_assessment,
     validate_rubric,
 )
-from verdict.conversations import _json
+from verdict.conversations import _json, validate_conversation
 
 from verdict_eval import judge_output
 from verdict_eval.judge_output import (
@@ -78,6 +78,9 @@ def preview_evaluation(storage, *, tenant_id: str, config: dict) -> dict:
     reasons: dict[str, int] = {}
     eligible = already = failed = 0
     for row in rows:
+        if not _stored_evidence_safe(row):
+            reasons["redacted_evidence"] = reasons.get("redacted_evidence", 0) + 1
+            continue
         targets, reason = evaluation_targets(row, rubric)
         if reason:
             reasons[reason] = reasons.get(reason, 0) + 1
@@ -118,6 +121,15 @@ def preview_evaluation(storage, *, tenant_id: str, config: dict) -> dict:
         "planFingerprint": _digest([tenant_id, fingerprint, maximum, scan_limit, after, planned]),
         "nextCursor": next_cursor,
     }
+
+
+def _stored_evidence_safe(row: dict) -> bool:
+    try:
+        return validate_conversation(row) == {
+            key: value for key, value in row.items() if key != "retention_at"
+        }
+    except (ValueError, TypeError, KeyError):
+        return False
 
 
 def _result_fields(rubric: dict, output: dict[str, object]) -> tuple[dict, list[dict]]:
@@ -220,6 +232,8 @@ def _system_prompt(rubric: dict) -> str:
 
 
 def _assess(row: dict, rubric: dict, identity: dict, target: int | None, provider) -> dict:
+    if not _stored_evidence_safe(row):
+        raise ValueError("stored conversation evidence requires redaction")
     envelope = {
         "tenant_id": row["tenant_id"], "conversation_id": row["id"],
         "revision": row["revision"], "target_position": target,
@@ -275,7 +289,7 @@ def execute_evaluation(
     completed = errors = stale = 0
     for item in preview["plannedTargets"]:
         row = storage.get_conversation(tenant_id, item["conversationId"])
-        if row is None or row["revision"] != item["revision"]:
+        if row is None or row["revision"] != item["revision"] or not _stored_evidence_safe(row):
             stale += 1
             continue
         result = _assess(row, preview["rubric"], preview["evaluator"], item["targetPosition"], provider)

@@ -16,6 +16,7 @@ import verdict
 from _postgres_test_safety import isolated_test_dsn, validate_test_dsn
 from fastapi.testclient import TestClient
 from test_collector import TENANT, _agent_record
+from verdict.agent_transport import StorageCaptureSink
 from verdict.collector import (
     CollectorService,
     PostgresReceiptStore,
@@ -27,7 +28,7 @@ from verdict.collector import (
 from verdict.dashboard.app import create_app as create_dashboard_app
 from verdict.evidence import ExecutionStatus
 from verdict.instrumentors.base import apply_routing_context, safe_persist_trace
-from verdict.schema import Trace
+from verdict.schema import SpanRecord, Trace
 from verdict.shipper import HttpCollectorClient, SegmentShipper
 from verdict.storage.postgres import PostgresStorage
 
@@ -83,6 +84,39 @@ def _live_server(app):
         server.should_exit = True
         worker.join(timeout=10)
         assert not worker.is_alive()
+
+
+def test_live_postgres_span_owner_lookup_uses_narrow_tenant_read(monkeypatch) -> None:
+    with _collector_pair() as (_dsn, storage, _receipts):
+        now = datetime(2026, 10, 18, tzinfo=timezone.utc)
+        storage.insert_trace(Trace(
+            trace_id="large-owner", tenant_id=TENANT, started_at=now,
+            prompt_redacted="synthetic large prompt " * 10_000,
+        ))
+        storage.insert_trace(Trace(trace_id="foreign-owner", tenant_id="foreign", started_at=now))
+        storage.insert_trace(Trace(trace_id="legacy-owner", started_at=now))
+
+        def forbidden_hydration(_trace_id: str):
+            raise AssertionError("full Trace hydration is forbidden for link checks")
+
+        monkeypatch.setattr(storage, "get_trace", forbidden_hydration)
+        assert storage.trace_owner("large-owner") == TENANT
+        assert storage.trace_owner("legacy-owner") == "__verdict_local__"
+        assert storage.trace_owner("absent-owner") is None
+
+        sink = StorageCaptureSink(storage)
+        linked = sink.capture_span(SpanRecord(
+            span_id="pg-linked", trace_id="large-owner", tenant_id=TENANT,
+            started_at=now,
+        ))
+        foreign = sink.capture_span(SpanRecord(
+            span_id="pg-foreign", trace_id="foreign-owner", tenant_id=TENANT,
+            started_at=now,
+        ))
+        assert linked.trace_id == "large-owner"
+        assert foreign.trace_id is None
+        assert foreign.attributes["verdict.link_status"] == "tenant_mismatch"
+        assert storage.list_spans(tenant_id=TENANT, span_id="pg-linked")[0].trace_id == "large-owner"
 
 
 def test_live_postgres_replay_is_byte_identical_after_receipt_restart(

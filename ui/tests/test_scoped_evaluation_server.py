@@ -73,6 +73,21 @@ def _bundle(tenant="local"):
     )
 
 
+def test_scoped_run_preview_omits_internal_check_identity(tmp_path):
+    storage = SQLiteStorage(str(tmp_path / "check-identity-scoped.db"))
+    bundle = _bundle()
+    digest = hashlib.sha256(b"synthetic-check").hexdigest()
+    event = AgentEvent("test-check", "turn-a", 3, bundle.events[-1].occurred_at,
+                       AgentEventType.TEST_RESULT, ExecutionStatus.FAILED,
+                       "synthetic", {"failed": 1, "check_id_hash": digest})
+    storage.replace_agent_run_bundle(replace(bundle, events=(*bundle.events, event)))
+    preview = preview_scoped(storage, tenant="local", config=_config())
+    assert preview["plannedCalls"] == 1
+    assert digest not in str(preview["evidencePreview"])
+    assert "check_id_hash" not in str(preview["evidencePreview"])
+    storage.close()
+
+
 class MockProvider:
     name = "anthropic"
 
@@ -373,6 +388,56 @@ def test_explicit_empty_tool_arguments_remain_eligible(tmp_path):
     storage.replace_agent_run_bundle(replace(bundle, events=(bundle.events[0], call, bundle.events[2])))
     preview = preview_scoped(storage, tenant="local", config=_config("tool_action"))
     assert preview["coverage"] == "complete"
+    assert preview["plannedCalls"] == 1
+    storage.close()
+
+
+def test_prior_turn_capture_limit_blocks_later_tool_action_judge(tmp_path):
+    path = tmp_path / "limited-tool-action.db"
+    storage = SQLiteStorage(str(path))
+    bundle = _bundle()
+    earlier = replace(bundle.turns[0], turn_id="earlier", sequence=0)
+    later = replace(bundle.turns[0], sequence=1)
+    marker = AgentEvent(
+        "limit", "earlier", 0, earlier.started_at, AgentEventType.CONTEXT,
+        ExecutionStatus.UNKNOWN, "verdict:capture_limit",
+        {"name": "source_events_omitted"}, PrivacyClassification.METADATA,
+    )
+    storage.replace_agent_run_bundle(replace(
+        bundle, turns=(earlier, later), events=(marker, *bundle.events),
+    ))
+    config = _config("tool_action")
+    preview = preview_scoped(storage, tenant="local", config=config)
+    assert preview["plannedCalls"] == 0
+    assert preview["unavailableReason"] == "source_capture_partial"
+    assert preview["evidencePreview"]["query"] == ""
+    assert preview["evidencePreview"]["response"] == ""
+    provider = MockProvider()
+    with pytest.raises(ValueError):
+        execute_scoped(
+            storage, storage_url=f"sqlite:///{path}", tenant="local",
+            config={**config, "planFingerprint": preview["planFingerprint"]},
+            confirm_external_egress=True, provider=provider,
+        )
+    assert provider.calls == 0
+    storage.close()
+
+
+def test_capture_limit_after_action_does_not_suppress_earlier_complete_action(tmp_path):
+    path = tmp_path / "later-limit.db"
+    storage = SQLiteStorage(str(path))
+    bundle = _bundle()
+    later = replace(bundle.turns[0], turn_id="later", sequence=1)
+    marker = AgentEvent(
+        "limit", "later", 0, bundle.turns[0].started_at,
+        AgentEventType.CONTEXT, ExecutionStatus.UNKNOWN,
+        "verdict:capture_limit", {"name": "source_events_omitted"},
+        PrivacyClassification.METADATA,
+    )
+    storage.replace_agent_run_bundle(replace(
+        bundle, turns=(bundle.turns[0], later), events=(*bundle.events, marker),
+    ))
+    preview = preview_scoped(storage, tenant="local", config=_config("tool_action"))
     assert preview["plannedCalls"] == 1
     storage.close()
 
@@ -921,3 +986,98 @@ def test_scheduled_api_requires_explicit_approval_and_can_cancel(tmp_path):
     assert blocked_generic.status_code == 400
     assert cancelled.status_code == 200
     assert cancelled.json()["state"] == "cancelled"
+
+
+@pytest.mark.parametrize("mode,expected_calls", [("guided", 0), ("opt_in", 1), ("legacy", 1)])
+def test_manual_guided_cycle_respects_approved_evaluation_choice(tmp_path, monkeypatch, mode, expected_calls):
+    path = tmp_path / f"manual-{mode}.db"
+    url = f"sqlite:///{path}"
+    storage = SQLiteStorage(str(path))
+    storage.replace_agent_run_bundle(_bundle())
+    preview = preview_scoped(storage, tenant="local", config=_config())
+    job = schedule_scoped_once(storage, storage_url=url, tenant="local",
+                               config={**_config(), "planFingerprint": preview["planFingerprint"]},
+                               max_estimated_usd=1, confirm_persistent_egress=True)
+    storage.close()
+    provider = MockProvider()
+    original = scoped_evaluation.run_scheduled_once
+    monkeypatch.setattr(scoped_evaluation, "run_scheduled_once",
+                        lambda storage_url, *, tenant: original(storage_url, tenant=tenant, provider=provider))
+    payload = {"analyzeOnly": True}
+    if mode != "legacy":
+        payload["includeApprovedEvaluations"] = mode == "opt_in"
+
+    async def scenario():
+        transport = httpx.ASGITransport(app=create_app(storage=url, tenant_id="local"))
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            return await client.post("/api/control/actions/run-schedule", json=payload,
+                                     headers={"X-Verdict-Setup": token})
+
+    result = asyncio.run(scenario())
+    assert result.status_code == 200
+    assert result.json()["analysis"]["status"] == "completed"
+    assert provider.calls == expected_calls
+    assert ControlStore(url).history("local", "scheduled_evaluation", job["jobId"])[0]["state"] == (
+        "pending" if expected_calls == 0 else "spent"
+    )
+
+
+@pytest.mark.parametrize("bad_value", [0, None, "false"])
+def test_manual_cycle_rejects_malformed_judge_choice_without_consuming_approval(tmp_path, monkeypatch, bad_value):
+    path = tmp_path / "invalid-manual.db"
+    url = f"sqlite:///{path}"
+    storage = SQLiteStorage(str(path))
+    storage.replace_agent_run_bundle(_bundle())
+    preview = preview_scoped(storage, tenant="local", config=_config())
+    job = schedule_scoped_once(storage, storage_url=url, tenant="local",
+                               config={**_config(), "planFingerprint": preview["planFingerprint"]},
+                               max_estimated_usd=1, confirm_persistent_egress=True)
+    storage.close()
+    provider = MockProvider()
+    original = scoped_evaluation.run_scheduled_once
+    monkeypatch.setattr(scoped_evaluation, "run_scheduled_once",
+                        lambda storage_url, *, tenant: original(storage_url, tenant=tenant, provider=provider))
+
+    async def scenario():
+        transport = httpx.ASGITransport(app=create_app(storage=url, tenant_id="local"))
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            return await client.post("/api/control/actions/run-schedule",
+                                     json={"analyzeOnly": True, "includeApprovedEvaluations": bad_value},
+                                     headers={"X-Verdict-Setup": token})
+
+    result = asyncio.run(scenario())
+    assert result.status_code == 400
+    assert provider.calls == 0
+    assert ControlStore(url).history("local", "scheduled_evaluation", job["jobId"])[0]["state"] == "pending"
+
+
+@pytest.mark.parametrize("mode,expected_calls", [("guided", 0), ("opt_in", 1), ("legacy", 1)])
+def test_worker_cycle_respects_saved_approved_evaluation_choice(tmp_path, monkeypatch, mode, expected_calls):
+    from verdict.service import TENANT, _schedule, run_cycle
+
+    path = tmp_path / f"worker-{mode}.db"
+    url = f"sqlite:///{path}"
+    storage = SQLiteStorage(str(path))
+    storage.replace_agent_run_bundle(_bundle(TENANT))
+    preview = preview_scoped(storage, tenant=TENANT, config=_config())
+    job = schedule_scoped_once(storage, storage_url=url, tenant=TENANT,
+                               config={**_config(), "planFingerprint": preview["planFingerprint"]},
+                               max_estimated_usd=1, confirm_persistent_egress=True)
+    storage.close()
+    payload = {"analyzeOnly": True, "intervalHours": 24}
+    if mode != "legacy":
+        payload["includeApprovedEvaluations"] = mode == "opt_in"
+    ControlStore(url).append(TENANT, kind="schedule", document_id="daily",
+                             state="active", payload=payload, expected_revision=None)
+    provider = MockProvider()
+    original = scoped_evaluation.run_scheduled_once
+    monkeypatch.setattr(scoped_evaluation, "run_scheduled_once",
+                        lambda storage_url, *, tenant: original(storage_url, tenant=tenant, provider=provider))
+    result = run_cycle(url, _schedule(url))
+    assert result["analysis"]["status"] == "completed"
+    assert provider.calls == expected_calls
+    assert ControlStore(url).history(TENANT, "scheduled_evaluation", job["jobId"])[0]["state"] == (
+        "pending" if expected_calls == 0 else "spent"
+    )

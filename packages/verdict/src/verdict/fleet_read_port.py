@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Protocol
 
 VERDICT_FLEET_READ_SCHEMA_VERSION = "verdict.trace-window-read.v1"
+VERDICT_FLEET_READ_SCHEMA_VERSION_V2 = "verdict.trace-window-read.v2"
 
 _ERROR_CODES = frozenset(
     {
@@ -26,6 +27,9 @@ _ERROR_CODES = frozenset(
     }
 )
 _REQUEST_STATUSES = frozenset({"in_progress", "succeeded", "failed"})
+_REQUEST_STATUSES_V2 = frozenset({
+    "in_progress", "error_recorded", "ended_no_error_recorded",
+})
 _AGENT_LINK_STATES = frozenset({"exact", "not_found"})
 _TENANT_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", re.ASCII)
 _MAX_IDENTIFIER_BYTES = 256
@@ -131,7 +135,9 @@ class TraceContributionReadV1:
         _validate_trace_contribution(self, normalize=True)
 
 
-def _validate_trace_contribution(value: TraceContributionReadV1, *, normalize: bool) -> None:
+def _validate_trace_contribution(
+    value: TraceContributionReadV1, *, normalize: bool, version: int = 1,
+) -> None:
     _tenant(value.tenant_id)
     _text(value.trace_id, maximum=_MAX_IDENTIFIER_BYTES, field_name="trace_id")
     started_at = _utc(value.started_at, field_name="started_at")
@@ -140,13 +146,16 @@ def _validate_trace_contribution(value: TraceContributionReadV1, *, normalize: b
         object.__setattr__(value, "started_at", started_at)
         object.__setattr__(value, "ended_at", ended_at)
 
-    if not isinstance(value.request_status, str) or value.request_status not in _REQUEST_STATUSES:
+    statuses = _REQUEST_STATUSES if version == 1 else _REQUEST_STATUSES_V2
+    if not isinstance(value.request_status, str) or value.request_status not in statuses:
         raise ValueError("request_status is unsupported")
     if value.request_status == "in_progress":
         if ended_at is not None:
             raise ValueError("in_progress requires ended_at to be null")
-    elif ended_at is None:
+    elif ended_at is None and version == 1:
         raise ValueError("terminal request status requires ended_at")
+    elif ended_at is None and value.request_status != "error_recorded":
+        raise ValueError("ended_no_error_recorded requires ended_at")
     if ended_at is not None and not started_at <= ended_at <= started_at + timedelta(hours=24):
         raise ValueError("ended_at must be within 24 hours of started_at")
 
@@ -196,6 +205,14 @@ def _validate_trace_contribution(value: TraceContributionReadV1, *, normalize: b
 
 
 @dataclass(frozen=True)
+class TraceContributionReadV2(TraceContributionReadV1):
+    """Same bounded trace fields with evidence-state request status."""
+
+    def __post_init__(self) -> None:
+        _validate_trace_contribution(self, normalize=True, version=2)
+
+
+@dataclass(frozen=True)
 class TraceWindowReadV1:
     schema_version: str
     tenant_id: str
@@ -210,8 +227,12 @@ class TraceWindowReadV1:
         _validate_trace_window(self, normalize=True)
 
 
-def _validate_trace_window(value: TraceWindowReadV1, *, normalize: bool) -> None:
-    if value.schema_version != VERDICT_FLEET_READ_SCHEMA_VERSION:
+def _validate_trace_window(
+    value: TraceWindowReadV1, *, normalize: bool, version: int = 1,
+) -> None:
+    expected = (VERDICT_FLEET_READ_SCHEMA_VERSION if version == 1
+                else VERDICT_FLEET_READ_SCHEMA_VERSION_V2)
+    if value.schema_version != expected:
         raise ValueError("schema_version is unsupported")
     tenant_id = _tenant(value.tenant_id)
     window_start = _utc(value.window_start, field_name="window_start")
@@ -229,16 +250,17 @@ def _validate_trace_window(value: TraceWindowReadV1, *, normalize: bool) -> None
         raise ValueError("read_completed_at cannot precede read_started_at")
 
     item_count = _bounded_integer(value.item_count, maximum=_MAX_ITEMS, field_name="item_count")
+    item_type = TraceContributionReadV1 if version == 1 else TraceContributionReadV2
     if type(value.items) is not tuple or any(
-        type(item) is not TraceContributionReadV1 for item in value.items
+        type(item) is not item_type for item in value.items
     ):
-        raise ValueError("items must contain exact TraceContributionReadV1 values")
+        raise ValueError(f"items must contain exact {item_type.__name__} values")
     if item_count != len(value.items):
         raise ValueError("item_count must equal the number of items")
 
     previous_key: tuple[datetime, str] | None = None
     for item in value.items:
-        _validate_trace_contribution(item, normalize=normalize)
+        _validate_trace_contribution(item, normalize=normalize, version=version)
         if item.tenant_id != tenant_id:
             raise ValueError("item tenant must match the result tenant")
         if not window_start <= item.started_at < window_end:
@@ -247,6 +269,16 @@ def _validate_trace_window(value: TraceWindowReadV1, *, normalize: bool) -> None
         if previous_key is not None and item_key <= previous_key:
             raise ValueError("items must be unique and strictly ordered")
         previous_key = item_key
+
+
+@dataclass(frozen=True)
+class TraceWindowReadV2(TraceWindowReadV1):
+    """Versioned response with explicit Trace evidence states."""
+
+    items: tuple[TraceContributionReadV2, ...]
+
+    def __post_init__(self) -> None:
+        _validate_trace_window(self, normalize=True, version=2)
 
 
 class VerdictFleetReadPortV1(Protocol):
@@ -286,6 +318,26 @@ class PostgresVerdictFleetReadPortV1:
         self._adapter.close()
 
 
+class VerdictFleetReadPortV2(Protocol):
+    """Read one bounded tenant-scoped window with evidence-state outcomes."""
+
+    def read_trace_window(
+        self, *, tenant_id: str, window_start: datetime, window_end: datetime,
+    ) -> TraceWindowReadV2: ...
+
+
+class PostgresVerdictFleetReadPortV2(PostgresVerdictFleetReadPortV1):
+    """V2 adapter over the same scoped PostgreSQL reader."""
+
+    def read_trace_window(
+        self, *, tenant_id: str, window_start: datetime, window_end: datetime,
+    ) -> TraceWindowReadV2:
+        return self._adapter.read_trace_window(
+            tenant_id=tenant_id, window_start=window_start,
+            window_end=window_end, version=2,
+        )
+
+
 def _rfc3339(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat(timespec="auto").replace("+00:00", "Z")
 
@@ -317,11 +369,25 @@ def _contribution_payload(value: TraceContributionReadV1) -> dict[str, object]:
 def trace_window_read_to_json(value: TraceWindowReadV1) -> str:
     """Serialize an exact Fleet ReadPort V1 result to bounded canonical JSON."""
 
+    return _trace_window_read_to_json(value, version=1)
+
+
+def trace_window_read_v2_to_json(value: TraceWindowReadV2) -> str:
+    """Serialize an exact Fleet ReadPort V2 result to bounded canonical JSON."""
+
+    return _trace_window_read_to_json(value, version=2)
+
+
+def _trace_window_read_to_json(
+    value: TraceWindowReadV1 | TraceWindowReadV2, *, version: int,
+) -> str:
+
     invalid_read_model = False
     try:
-        if type(value) is not TraceWindowReadV1:
-            raise ValueError("value must be an exact TraceWindowReadV1")
-        _validate_trace_window(value, normalize=False)
+        expected_type = TraceWindowReadV1 if version == 1 else TraceWindowReadV2
+        if type(value) is not expected_type:
+            raise ValueError("value must be an exact versioned TraceWindowRead")
+        _validate_trace_window(value, normalize=False, version=version)
         payload = {
             "schema_version": value.schema_version,
             "tenant_id": value.tenant_id,
@@ -383,12 +449,18 @@ def main(argv: list[str] | None = None) -> int:
 
 __all__ = [
     "VERDICT_FLEET_READ_SCHEMA_VERSION",
+    "VERDICT_FLEET_READ_SCHEMA_VERSION_V2",
     "PostgresVerdictFleetReadPortV1",
+    "PostgresVerdictFleetReadPortV2",
     "TraceContributionReadV1",
+    "TraceContributionReadV2",
     "TraceWindowReadV1",
+    "TraceWindowReadV2",
     "VerdictFleetReadError",
     "VerdictFleetReadPortV1",
+    "VerdictFleetReadPortV2",
     "trace_window_read_to_json",
+    "trace_window_read_v2_to_json",
 ]
 
 

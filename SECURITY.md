@@ -35,6 +35,23 @@ A few things that are by design rather than vulnerabilities:
 - **Local SQLite databases and generated reports may contain sensitive trace
   data.** Treat those files, and any exposed dashboard, as sensitive and keep
   them out of source control and off untrusted networks.
-- The **dashboard** (`ui/`) is a local, single-user tool. Binding it to a
+- **Container images contain no captured database by design.** Supply
+  `VERDICT_STORAGE` at runtime from a customer-managed store; do not put a
+  SQLite file, trace export, or provider key in the build context. The image's
+  default SQLite schema is empty and its filesystem is not a durable store.
+- **Dashboard navigation identifiers remain exact.** Run, turn, event, and
+  linked trace IDs in dashboard API responses and URLs may contain source
+  supplied text. Treat API responses, URLs, browser history, and access logs
+  as sensitive even though display content is redacted.
+- The **dashboard** (`ui/`) serves one configured tenant and is intended for
+  localhost or a trusted network. Binding it to a
   non-localhost host without the `VERDICT_USER`/`VERDICT_PASS` basic-auth
-  environment variables is unsupported (the server warns when you do).
+  environment variables and an explicit `VERDICT_ALLOWED_HOSTS` allowlist is
+  refused by the CLI. With credentials configured, Basic Auth covers every
+  dashboard API route except the public `/api/health` endpoint; a setup
+  capability alone does not bypass it, including when the dashboard is mounted
+  under a host application path. Terminate TLS at a trusted ingress.
+- A dashboard instance is configured for one tenant. Monitor policies can be
+  activated only in that instance's tenant scope. Sharing a database across
+  instances does not turn the dashboard into a hosted multi-tenant service;
+  each instance still needs its own access boundary.

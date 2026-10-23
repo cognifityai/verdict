@@ -17,11 +17,11 @@ from verdict.dashboard.evaluator_lab import _destination
 from verdict.dashboard.scoped_evaluation import _LOCK, _cross_process_scoped_guard
 from verdict.dashboard.setup_routes import SetupRoutes
 from verdict.pricing import compute_cost_usd
-from verdict.redaction import redact, redact_structure
+from verdict.redaction import redact_structure
 
 _MODELS = {"anthropic": "claude-haiku-4-5", "openai": "gpt-4.1-mini"}
 _KEYS = {"anthropic": "ANTHROPIC_API_KEY", "openai": "OPENAI_API_KEY"}
-_PROMPT_VERSION = "day-usage-explanation-v1"
+_PROMPT_VERSION = "day-usage-explanation-v2"
 _SYSTEM = (
     "Explain measured token use in plain language. Use only the supplied metrics. "
     "Identify the largest recorded contributors and compare with the prior-day median "
@@ -66,6 +66,8 @@ def _context(report: dict[str, Any]) -> dict[str, Any]:
         "knownTurns": explanation["tokenKnownTurns"], "turns": explanation["turns"],
         "windowComplete": explanation["windowComplete"],
         "modelEvidenceComplete": explanation["modelEvidenceComplete"],
+        "sourcePartial": explanation["sourcePartial"],
+        "referenceSourcePartial": explanation["referenceSourcePartial"],
         "comparison": explanation["comparison"],
         "components": {key: selected.get(key) for key in (
             "inputTokens", "outputTokens", "cachedInputTokens",
@@ -106,7 +108,11 @@ def preview_day_explanation(storage_url: str, *, tenant: str, config: dict[str, 
         {"role": "user", "content": "Why did this UTC day use this many reported tokens?\n" +
          json.dumps(context, sort_keys=True, ensure_ascii=False)},
     ]
-    planned = int(context["knownTurns"] > 0 and context["reportedTokens"] is not None)
+    planned = int(
+        context["knownTurns"] > 0 and context["reportedTokens"] is not None
+        and context["windowComplete"] and context["modelEvidenceComplete"]
+        and not context["sourcePartial"]
+    )
     fingerprint = hashlib.sha256(_canonical([
         tenant, _PROMPT_VERSION, provider, model, binding, messages,
     ])).hexdigest()
@@ -164,7 +170,7 @@ def run_day_explanation(
             ))
             if response.finish_reason not in (None, "stop", "end_turn"):
                 raise ValueError("incomplete provider response")
-            answer = redact(response.text)
+            answer = redact_structure(response.text)
             if not isinstance(answer, str) or not answer.strip() or len(answer) > 3_000:
                 raise ValueError("unusable provider response")
             if preview_day_explanation(storage_url, tenant=tenant, config=config)["planFingerprint"] != document_id:

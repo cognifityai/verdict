@@ -5,6 +5,7 @@ import {
 
 import { useOperations } from "./Operations.jsx";
 import { assignmentExplanation, normalizeRegistryPayload } from "./registry-data.js";
+import { EvidenceExplain } from "./EvidenceExplain.jsx";
 
 const COLOR = {
   bg: "#0b0e0d", panel: "#111615", panel2: "#151b19", border: "#2b3532",
@@ -184,8 +185,8 @@ function ReadinessEstimate({ readiness }) {
   return <span style={{ color: COLOR.amber }}>Needs {readiness.remainingBaseline} baseline / {readiness.remainingCurrent} current conversations · {estimate}</span>;
 }
 
-export function RegistryView({ data, operations, onRun, onVersion, onPage, onRefresh }) {
-  const [strategy, setStrategy] = useState("semantic");
+export function RegistryView({ data, operations, onRun, onVersion, onPage, onRefresh, traceCount = 0, onMonitor = null, onSetup = null, configUrl = null }) {
+  const [strategy, setStrategy] = useState("explicit");
   const [targetWorkload, setTargetWorkload] = useState("");
   const [modelPath, setModelPath] = useState("");
   const [renameCluster, setRenameCluster] = useState("");
@@ -196,13 +197,18 @@ export function RegistryView({ data, operations, onRun, onVersion, onPage, onRef
       <Panel className="p-6">
         <div className="flex items-start gap-3"><AlertTriangle size={18} style={{ color: COLOR.amber }} />
           <div><div className="font-semibold">Versioned registry unavailable</div>
-            <div className="text-sm mt-1" style={{ color: COLOR.sub }}>This store predates the cluster workspace or has not installed its additive cluster tables. Legacy trace clusters remain visible in Overview and Trace explorer.</div></div>
+            <div className="text-sm mt-1" style={{ color: COLOR.sub }}>This store predates the versioned cluster tables or has not installed them. Captured model calls remain available in Investigation; versioned cluster controls require an upgraded store.</div></div>
         </div>
       </Panel>
     );
   }
   if (data.status === "empty") {
-    return <Panel className="p-6"><div className="font-semibold">Create clusters from historical traces</div><div className="text-sm mt-1 mb-4" style={{ color: COLOR.sub }}>Start with semantic clusters when prompt evidence is available. Review the resulting examples before using them for monitoring.</div><FitPreviewForm operations={operations} running={operations?.running} strategy={strategy} setStrategy={setStrategy} targetWorkload={targetWorkload} setTargetWorkload={setTargetWorkload} modelPath={modelPath} setModelPath={setModelPath} onRun={onRun} /></Panel>;
+    return <Panel className="p-6"><div className="font-semibold">Group the evidence you have</div>
+      {traceCount === 0 ? <><div className="text-sm mt-2" style={{ color: COLOR.sub }}>No genuine model calls are captured. Recorded agent names and sources remain available in Groups and Investigation; trace clustering needs model-call evidence.</div>{onSetup && <button type="button" onClick={onSetup} className="underline text-sm mt-3" style={{ color: COLOR.green }}>Set up model-call capture</button>}</>
+        : <><div className="text-sm mt-2" style={{ color: COLOR.sub }}>{traceCount.toLocaleString()} captured model calls. Start with all calls or provider/model groups in Model drift setup. A custom intent registry is optional and needs reviewed examples before activation.</div>
+          {onMonitor && <button type="button" onClick={onMonitor} className="underline text-sm mt-3" style={{ color: COLOR.green }}>Review provider/model monitoring</button>}
+          <details className="mt-5"><summary className="cursor-pointer text-sm">Create a reviewed intent registry</summary><div className="mt-3 text-xs" style={{ color: COLOR.sub }}>Captured intent labels work without embeddings. Semantic fitting needs usable prompt evidence and an approved local model; inspect coverage, outliers, and representatives before activation.</div><FitPreviewForm operations={operations} running={operations?.running} strategy={strategy} setStrategy={setStrategy} targetWorkload={targetWorkload} setTargetWorkload={setTargetWorkload} modelPath={modelPath} setModelPath={setModelPath} onRun={onRun} /></details></>}
+    </Panel>;
   }
 
   const selected = data.selectedVersion;
@@ -313,6 +319,12 @@ export function RegistryView({ data, operations, onRun, onVersion, onPage, onRef
             <input aria-label="Cluster display name" value={renameName} onChange={(event) => setRenameName(event.target.value)} maxLength={80} className="px-2 py-2 border text-xs min-w-48" style={{ color: COLOR.text, background: COLOR.panel, borderColor: COLOR.border }} />
             <ActionButton disabled={!operations?.available || !renameTarget || !renameName} running={running === "cluster_rename"} onClick={() => onRun("cluster_rename", { cluster_id: renameCluster, display_name: renameName })}>Rename cluster</ActionButton>
           </div>
+          {renameTarget && configUrl && <EvidenceExplain key={`${selected.versionId}:${renameCluster}`}
+            root={configUrl.replace(/\/api\/config$/, "")} scope="cluster"
+            versionId={selected.versionId} clusterId={renameCluster}
+            draftKind="cluster_description" draftActionLabel="Use proposed label in rename form"
+            onApplyDraft={(draft) => setRenameName(draft.displayName)} />}
+          {renameTarget && <p className="text-xs mt-2" style={{ color: COLOR.sub }}>AI suggestions use bounded representatives when available. Inspect cluster members before renaming or activating.</p>}
         </div>
       </Panel>
 
@@ -338,15 +350,134 @@ export function RegistryView({ data, operations, onRun, onVersion, onPage, onRef
   );
 }
 
-export function Registry({ url, operationsUrl, configUrl }) {
+function RecordedExecutionSummary({ execution, onOpenRun }) {
+  if (!execution?.scope?.sampledRuns) return null;
+  const labels = { completed: "completed", failed: "failed", timed_out: "timed out",
+    cancelled: "cancelled", unfinalized: "unfinalized" };
+  return <section className="border p-5 mb-3" style={{ borderColor: COLOR.border, background: COLOR.panel, borderRadius: 12 }}>
+    <h2 className="text-lg font-semibold">Recorded execution status</h2>
+    <p className="text-sm mt-2" style={{ color: COLOR.sub }}>Latest {execution.scope.sampledRuns.toLocaleString()} captured Agent Runs by start time. An unfinalized run has no recorded end or terminal status. These counts describe capture, not task success or a statistical alert.</p>
+    {execution.scope.truncated && <p className="text-xs mt-2" style={{ color: COLOR.amber }}>Showing the latest {execution.scope.sampledRuns.toLocaleString()} runs; older runs are omitted.</p>}
+    <p className="text-sm mt-3" style={{ color: COLOR.sub }}>{Object.entries(labels).map(([key, label]) => `${execution.totals[key] || 0} ${label}`).join(" · ")}</p>
+    <div className="grid lg:grid-cols-2 gap-3 mt-3">{execution.groups.map((group) => <div key={[group.sourceKind, group.serviceName, group.environment, group.agentName].join("/")} className="border p-3 text-sm" style={{ borderColor: COLOR.border }}>
+      <strong>{[group.sourceKind, group.serviceName || "service not recorded", group.environment || "environment not recorded", group.agentName || "agent not recorded"].join(" / ")}</strong>
+      <p className="mt-1" style={{ color: COLOR.sub }}>{Object.entries(labels).map(([key, label]) => `${group.counts[key] || 0} ${label}`).join(" · ")}</p>
+      <div className="flex flex-wrap gap-3 mt-2">{Object.entries(labels).flatMap(([key, label]) => (group.examples[key] || []).map((runId, index) => <button key={`${key}:${runId}`} type="button" className="underline text-xs" style={{ color: COLOR.accent }} onClick={() => onOpenRun?.(runId)}>Inspect {label} run {index + 1}</button>))}</div>
+    </div>)}</div>
+    {execution.groupsTruncated && <p className="text-xs mt-3" style={{ color: COLOR.amber }}>Only the 20 largest recorded agent groups are shown.</p>}
+  </section>;
+}
+
+export function RunOutcomeSummary({ data, onOpenRun, onRuns }) {
+  if (data.status === "migration_required") return <section className="border p-5" style={{ borderColor: COLOR.border, background: COLOR.panel, borderRadius: 12 }}><h2 className="text-lg font-semibold">Recorded tool-result coverage by run</h2><p className="text-sm mt-2" style={{ color: COLOR.amber }}>This store needs a writable Verdict storage upgrade before tool-result coverage can load. No outcome counts are shown.</p></section>;
+  const execution = RecordedExecutionSummary({ execution: data.execution, onOpenRun });
+  if (data.status === "event_limit") return <>{execution}<section className="border p-5" style={{ borderColor: COLOR.border, background: COLOR.panel, borderRadius: 12 }}><h2 className="text-lg font-semibold">Recorded tool-result coverage by run</h2><p className="text-sm mt-2" style={{ color: COLOR.amber }}>The bounded preview reached its relevant-event limit. No outcome counts are shown for this sample.</p></section></>;
+  if (data.status === "no_terminal_runs") {
+    const sampledRuns = data.execution?.scope?.sampledRuns || 0;
+    const exampleRun = data.execution?.groups?.find((group) => group.examples?.unfinalized?.length)
+      ?.examples.unfinalized[0];
+    return <section className="border p-5" style={{ borderColor: COLOR.border, background: COLOR.panel, borderRadius: 12 }}>
+      <h2 className="text-lg font-semibold">Run outcome coverage</h2>
+      {sampledRuns ? <>
+        <p className="text-sm mt-2" style={{ color: COLOR.sub }}>{sampledRuns.toLocaleString()} recent recorded runs have no terminal status with an end time. These histories can still be inspected. For agents you control, record a terminal status and end time to compare run outcomes.</p>
+        {data.execution.scope.truncated && <p className="text-xs mt-2" style={{ color: COLOR.amber }}>This is the latest {sampledRuns.toLocaleString()} runs; older runs are omitted.</p>}
+        <div className="flex flex-wrap gap-4 mt-3">
+          {onRuns && <button type="button" onClick={onRuns} className="text-sm underline" style={{ color: COLOR.accent }}>Browse recorded runs →</button>}
+          {exampleRun && onOpenRun && <button type="button" onClick={() => onOpenRun(exampleRun)} className="text-sm underline" style={{ color: COLOR.accent }}>Inspect example run →</button>}
+        </div>
+      </> : <p className="text-sm mt-2" style={{ color: COLOR.sub }}>No Agent Runs have been captured yet. Capture a run to inspect its recorded actions.</p>}
+    </section>;
+  }
+  const totals = data.totals;
+  return <>{execution}<section className="border p-5" style={{ borderColor: COLOR.border, background: COLOR.panel, borderRadius: 12 }}>
+    <h2 className="text-lg font-semibold">Recorded tool-result coverage by run</h2>
+    <p className="text-sm mt-2" style={{ color: COLOR.sub }}>Recorded tool actions and capture gaps across the latest {data.scope.sampledTerminalRuns.toLocaleString()} terminal runs. Run-status and test failures appear in Monitoring. This is descriptive evidence, not task success or a statistical alert.</p>
+    {data.scope.truncated && <p className="text-xs mt-2" style={{ color: COLOR.amber }}>Showing the latest {data.scope.sampledTerminalRuns.toLocaleString()} terminal runs; older runs are omitted.</p>}
+    <div className="grid sm:grid-cols-3 gap-3 mt-4">
+      <div className="p-3" style={{ background: COLOR.redBg }}><strong>{totals.recordedFailure.toLocaleString()} recorded tool-result failures</strong><p className="text-xs mt-1" style={{ color: COLOR.sub }}>Explicit failed or timed-out tool results</p></div>
+      <div className="p-3" style={{ background: COLOR.panel2 }}><strong>{totals.observedWithoutFailure.toLocaleString()} observed without recorded failure</strong><p className="text-xs mt-1" style={{ color: COLOR.sub }}>A completed result with no unclear evidence. When calls are recorded, each has a matching result.</p></div>
+      <div className="p-3" style={{ background: COLOR.amberBg }}><strong>{totals.unclear.toLocaleString()} unclear</strong><p className="text-xs mt-1" style={{ color: COLOR.sub }}>Missing, unmatched, unknown, cancelled, or partially captured tool outcomes</p></div>
+    </div>
+    {totals.conflicts > 0 && <p className="text-xs mt-3" style={{ color: COLOR.amber }}>{totals.conflicts.toLocaleString()} result status and error flag conflict{totals.conflicts === 1 ? "" : "s"}; the explicit failure signal takes precedence.</p>}
+    <div className="grid lg:grid-cols-2 gap-3 mt-4">{data.groups.map((group) => <div key={[group.sourceKind, group.serviceName, group.environment, group.agentName].join("/")} className="border p-3 text-sm" style={{ borderColor: COLOR.border }}>
+      <strong>{[group.sourceKind, group.serviceName || "service not recorded", group.environment || "environment not recorded", group.agentName || "agent not recorded"].join(" / ")}</strong>
+      <p className="mt-1" style={{ color: COLOR.sub }}>{group.recordedFailure} recorded tool failures · {group.observedWithoutFailure} observed without recorded failure · {group.unclear} unclear / {group.terminalRuns} terminal runs</p>
+      {group.comparison && <div className="mt-2 text-xs" style={{ color: COLOR.sub }}>
+        <div>Earlier {group.comparison.earlier.terminalRuns} runs: {group.comparison.earlier.recordedFailure} recorded tool failure{group.comparison.earlier.recordedFailure === 1 ? "" : "s"}, {group.comparison.earlier.unclear} unclear, {group.comparison.earlier.observedWithoutFailure} observed without recorded failure.</div>
+        <div>Newer {group.comparison.newer.terminalRuns} runs: {group.comparison.newer.recordedFailure} recorded tool failure{group.comparison.newer.recordedFailure === 1 ? "" : "s"}, {group.comparison.newer.unclear} unclear, {group.comparison.newer.observedWithoutFailure} observed without recorded failure.</div>
+        <p>Descriptive split only, ordered by recorded run end time. This is not a saved monitor or a statistical alert.</p>
+      </div>}
+      <div className="flex flex-wrap gap-3 mt-2">{group.examples.recordedFailure.map((runId, index) => <button key={runId} type="button" className="underline text-xs" style={{ color: COLOR.red }} onClick={() => onOpenRun?.(runId)}>Inspect recorded failure {index + 1}</button>)}{group.examples.observedWithoutFailure.map((runId, index) => <button key={runId} type="button" className="underline text-xs" style={{ color: COLOR.blue }} onClick={() => onOpenRun?.(runId)}>Inspect observed run {index + 1}</button>)}{group.examples.unclear.map((runId, index) => <button key={runId} type="button" className="underline text-xs" style={{ color: COLOR.amber }} onClick={() => onOpenRun?.(runId)}>Inspect unclear run {index + 1}</button>)}</div>
+    </div>)}</div>
+    {data.groupsTruncated && <p className="text-xs mt-3" style={{ color: COLOR.amber }}>Only the 20 largest recorded agent groups are shown.</p>}
+  </section></>;
+}
+
+export function RunOutcomePreview({ configUrl, onOpenRun, onRuns }) {
+  const [state, setState] = useState({ data: null, error: false });
+  const [refreshKey, setRefreshKey] = useState(0);
+  const endpoint = configUrl?.replace(/\/api\/config$/, "/api/agent-run-outcomes");
+  useEffect(() => {
+    if (!endpoint) return undefined;
+    let active = true;
+    fetch(endpoint, { credentials: "same-origin", cache: "no-store" })
+      .then((response) => response.ok ? response.json() : Promise.reject(new Error("unavailable")))
+      .then((data) => { if (active) setState({ data, error: false }); })
+      .catch(() => { if (active) setState({ data: null, error: true }); });
+    return () => { active = false; };
+  }, [endpoint, refreshKey]);
+  if (!endpoint) return null;
+  const refresh = () => { setState({ data: null, error: false }); setRefreshKey((key) => key + 1); };
+  return <div className="space-y-2">
+    <button type="button" className="text-xs underline" style={{ color: COLOR.accent }} onClick={refresh}>{state.error ? "Retry run outcomes" : "Refresh run outcomes"}</button>
+    {state.error ? <div role="status" className="border p-4 text-sm" style={{ borderColor: COLOR.border, color: COLOR.amber }}>Run outcome coverage could not be loaded.</div>
+      : !state.data ? <div role="status" className="border p-4 text-sm" style={{ borderColor: COLOR.border, color: COLOR.sub }}>Loading recorded run outcomes…</div>
+        : <RunOutcomeSummary data={state.data} onOpenRun={onOpenRun} onRuns={onRuns} />}
+  </div>;
+}
+
+export function Registry({ url, operationsUrl, configUrl, traceCount = 0, sourceGroups = [], sourceGroupsTruncated = false,
+  agentGroups = [], agentGroupsTruncated = false, modelRows = [], modelRowsAvailable = 0,
+  onMonitor = null, onSetup = null, onRuns = null, onPlan = null, onOpenRun = null,
+  onSourceGroup = null, onAgentGroup = null }) {
   const state = useRegistry(url, operationsUrl, configUrl);
-  if (!state.data && state.loading) return <div className="p-8 text-sm" style={{ color: COLOR.sub }}>Loading cluster registry…</div>;
+  const sourceTotal = sourceGroups.reduce((sum, group) => sum + Number(group.runs || 0), 0);
+  const registry = <RegistryView data={state.data} operations={state.operations} onRun={state.run}
+    traceCount={traceCount} onMonitor={onMonitor} onSetup={onSetup} configUrl={configUrl}
+    onVersion={(version) => state.load(version, 0)} onPage={(offset) => state.load(state.version, offset)}
+    onRefresh={() => state.load(state.version, state.offset)} />;
   return (
-    <div>
+    <div className="space-y-5">
+      <div className="verdict-groups-grid">
+        <section className="border p-5" style={{ borderColor: COLOR.border, background: COLOR.panel, borderRadius: 12 }}>
+          <div className="flex flex-wrap items-center justify-between gap-2"><h2 className="text-lg font-semibold">Agent history: ready-made groups</h2><Pill color={COLOR.green} background={COLOR.greenBg}>OBSERVED SOURCE DATA</Pill></div>
+          <p className="text-sm mt-2" style={{ color: COLOR.sub }}>These groups use recorded source labels. They are not inferred intent clusters.</p>
+          {sourceGroups.length ? <>
+            <div className="flex h-3 overflow-hidden mt-5 rounded-full" aria-hidden="true">{sourceGroups.map((group, index) => <span key={group.sourceKind} style={{ width: `${100 * Number(group.runs || 0) / Math.max(1, sourceTotal)}%`, background: index % 2 ? "#75aaf5" : COLOR.accent }} />)}</div>
+            <div className="mt-4 space-y-2">{sourceGroups.map((group, index) => <button type="button" key={group.sourceKind} onClick={() => onSourceGroup?.(group.sourceKind)} className="flex items-center gap-3 text-sm text-left w-full p-2 rounded hover:bg-[#1b2b24] focus-visible:outline" aria-label={`Inspect ${group.sourceKind} runs`}><span className="h-2 w-2 rounded-full" style={{ background: index % 2 ? "#75aaf5" : COLOR.accent }} /><strong>{group.sourceKind}</strong><span style={{ color: COLOR.sub }}>{Number(group.runs || 0).toLocaleString()} recorded run{Number(group.runs || 0) === 1 ? "" : "s"}</span><span className="ml-auto" style={{ color: COLOR.accent }}>→</span></button>)}</div>
+            {sourceGroupsTruncated && <p className="text-xs mt-3" style={{ color: COLOR.amber }}>Only the first source groups are shown. Browse captured runs for more.</p>}
+            {agentGroups.length > 0 && <div className="border-t mt-5 pt-4" style={{ borderColor: COLOR.border }}><h3 className="font-semibold">By recorded agent name</h3><div className="grid sm:grid-cols-2 gap-2 mt-3">{agentGroups.map((group) => <button type="button" key={group.agentName} onClick={() => onAgentGroup?.(group.agentName)} className="text-sm text-left p-2 rounded hover:bg-[#1b2b24] focus-visible:outline" aria-label={`Inspect ${group.agentName} runs`}><strong>{group.agentName}</strong><span className="ml-2" style={{ color: COLOR.sub }}>{Number(group.runs || 0).toLocaleString()} run{Number(group.runs || 0) === 1 ? "" : "s"}</span><span className="ml-2" style={{ color: COLOR.accent }}>→</span></button>)}</div>{agentGroupsTruncated && <p className="text-xs mt-2" style={{ color: COLOR.amber }}>Showing the 16 most frequent agent names.</p>}</div>}
+            {onRuns && <button type="button" onClick={onRuns} className="text-sm underline mt-5" style={{ color: COLOR.accent }}>Browse all recorded runs →</button>}
+          </> : <p className="text-sm mt-5" style={{ color: COLOR.sub }}>No agent runs have been captured yet. Source groups appear after capture.</p>}
+        </section>
+        <aside className="border p-5" style={{ borderColor: COLOR.border, background: "#211e18", borderRadius: 12 }}>
+          <h2 className="text-lg font-semibold">When to use clusters</h2>
+          <p className="text-sm mt-3" style={{ color: COLOR.sub }}>{traceCount ? "Start with the captured provider and model fields. Fit semantic intent clusters only when a specific behavior needs its own watch and usable prompt evidence is available." : "Agent history alone does not provide genuine provider-call traces. Source groups work now; semantic intent fitting needs eligible model-call evidence."}</p>
+          {onPlan && <button type="button" onClick={onPlan} className="text-sm underline mt-5" style={{ color: COLOR.accent }}>Review recommended checks →</button>}
+        </aside>
+      </div>
+      <RunOutcomePreview configUrl={configUrl} onOpenRun={onOpenRun} onRuns={onRuns} />
+      {traceCount > 0 && <section className="border p-5" style={{ borderColor: COLOR.border, background: COLOR.panel, borderRadius: 12 }}>
+        <h2 className="text-lg font-semibold">Captured provider and model groups</h2>
+        <p className="text-sm mt-2" style={{ color: COLOR.sub }}>These are recorded model calls in the reporting period. A group is not a drift alert; preview its eligible reference and current cohorts first.</p>
+        {modelRows.length ? <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3 mt-4">{modelRows.map((row) => <div key={`${row.provider}/${row.model}`} className="border p-3 text-sm" style={{ borderColor: COLOR.border }}><strong className="break-all">{row.provider} / {row.model === "<synthetic>" ? "Synthetic model marker" : row.model || "Model not recorded"}</strong><div style={{ color: COLOR.sub }}>{Number(row.calls || 0).toLocaleString()} captured calls</div><div style={{ color: COLOR.sub }}>{Number(row.failedCalls || 0).toLocaleString()} calls with recorded provider errors</div><div style={{ color: COLOR.sub }}>{Number(row.tokenKnownCalls || 0).toLocaleString()} of {Number(row.calls || 0).toLocaleString()} calls with token totals</div></div>)}</div> : <p className="text-sm mt-4" style={{ color: COLOR.sub }}>No provider/model rows in the selected reporting period.</p>}
+        {modelRowsAvailable > modelRows.length && <p className="text-xs mt-3" style={{ color: COLOR.amber }}>Showing {modelRows.length} of {modelRowsAvailable} model groups.</p>}
+        {onMonitor && <button type="button" onClick={onMonitor} className="text-sm underline mt-4" style={{ color: COLOR.accent }}>Review model-call comparison →</button>}
+      </section>}
       {(state.error || state.operations.error) && <div role="alert" className="p-3 mb-4 border text-sm flex gap-2" style={{ borderColor: COLOR.red, background: COLOR.redBg }}><AlertTriangle size={16} style={{ color: COLOR.red }} />{state.error || state.operations.error}</div>}
-      <RegistryView data={state.data} operations={state.operations} onRun={state.run}
-        onVersion={(version) => state.load(version, 0)} onPage={(offset) => state.load(state.version, offset)}
-        onRefresh={() => state.load(state.version, state.offset)} />
+      {!state.data && state.loading ? <div className="p-5 text-sm" style={{ color: COLOR.sub }}>Loading optional cluster registry…</div>
+        : state.data?.status === "empty" ? <details className="border p-5" style={{ borderColor: COLOR.border, background: COLOR.panel, borderRadius: 12 }}><summary className="cursor-pointer font-semibold">Optional intent cluster registry</summary><div className="mt-4">{registry}</div></details>
+          : registry}
     </div>
   );
 }

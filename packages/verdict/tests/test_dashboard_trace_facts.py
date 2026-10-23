@@ -1,4 +1,33 @@
-from verdict.trace_facts import deterministic_trace_facts, trace_judge_evidence_digest
+from verdict.trace_facts import (
+    deterministic_trace_facts,
+    trace_evidence_state,
+    trace_judge_evidence_digest,
+)
+
+
+def test_trace_evidence_state_never_infers_provider_success():
+    assert trace_evidence_state(error="timeout", ended_at=None) == "error_recorded"
+    assert trace_evidence_state(error="", ended_at=None) == "error_recorded"
+    assert trace_evidence_state(error=None, ended_at="2026-10-19T00:00:00Z") == "ended_no_error_recorded"
+    assert trace_evidence_state(error=None, ended_at=None) == "unfinished"
+
+
+def test_unfinished_trace_with_partial_response_is_not_judge_eligible():
+    facts = deterministic_trace_facts(
+        error=None, ended_at=None, prompt="question", response="partial answer",
+    )
+    assert facts["response_present"] is True
+    assert facts["judge_eligible"] is False
+    assert facts["not_evaluable_reason"] == "trace_unfinished"
+    completed = deterministic_trace_facts(
+        error=None, ended_at="2026-10-19T00:00:00Z",
+        prompt="question", response="partial answer",
+    )
+    assert completed["judge_eligible"] is True
+    failed = deterministic_trace_facts(
+        error="", ended_at=None, prompt="question", response="partial answer",
+    )
+    assert failed["not_evaluable_reason"] == "provider_call_failed"
 
 
 def test_deterministic_trace_facts_reports_captured_response_structure():
@@ -9,7 +38,7 @@ def test_deterministic_trace_facts_reports_captured_response_structure():
     )
 
     assert facts == {
-        "provider_outcome": "succeeded",
+        "provider_outcome": "no_error_recorded",
         "prompt_present": True,
         "response_present": True,
         "judge_eligible": True,
@@ -25,7 +54,7 @@ def test_deterministic_trace_facts_reports_captured_response_structure():
 def test_deterministic_trace_facts_preserves_missing_evidence_as_unavailable():
     facts = deterministic_trace_facts(error=None, prompt="prompt", response="   ")
 
-    assert facts["provider_outcome"] == "succeeded"
+    assert facts["provider_outcome"] == "no_error_recorded"
     assert facts["response_present"] is False
     assert facts["judge_eligible"] is False
     assert facts["not_evaluable_reason"] == "response_not_captured"
