@@ -110,12 +110,13 @@ summary and rescan after fixing the source; previously stored runs remain the
 last committed snapshots, not proof that the latest file was imported.
 One local capture invocation processes at most 1,000 discovered history files;
 additional files are reported as deferred and make the scan incomplete. The
-next invocation favors files not attempted recently. A deferred file is not
-evidence of a clean run, even when earlier analysis completed.
+first invocation tries newer unattempted files first. Later invocations favor
+files not attempted recently, so older files can still be reached. A deferred
+file is not evidence of a clean run, even when earlier analysis completed.
 The scan also stops after a processed file crosses 128 MiB of source bytes,
 100,000 projected rows, or 256 MiB of serialized sanitized payload. These
 are file-boundary soft caps and do not bound one large file's work.
-A single local history file above 128 MiB is rejected with
+A single local history file above 128 MiB is rejected before parsing with
 `history_file_too_large`; an earlier accepted revision remains stored and the
 latest capture reports incomplete.
 Parsing rejects a file after 100,000 projected events, including multiple

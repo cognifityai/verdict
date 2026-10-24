@@ -18,6 +18,8 @@ import httpx
 import pytest
 import verdict
 from _postgres_test_safety import isolated_test_dsn, validate_test_dsn
+
+pytest.importorskip("psycopg")
 from psycopg.conninfo import conninfo_to_dict
 from verdict.agent_transport import FileCaptureSink
 from verdict.schema import SpanRecord, Trace

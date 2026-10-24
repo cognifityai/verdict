@@ -843,6 +843,65 @@ def test_monitor_preview_activation_and_prospective_run(tmp_path):
     assert completed.json()["approvedHistoricalSnapshot"] == preview.json()["snapshot"]
 
 
+def test_active_monitor_counts_empty_string_provider_errors(tmp_path):
+    database = tmp_path / "empty-error.db"
+    _insert_traces(database, 20)
+
+    async def activate():
+        app = create_app(storage=f"sqlite:///{database}")
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver",
+        ) as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            headers = {"X-Verdict-Setup": token}
+            preview = await client.post("/api/monitor/preview", headers=headers, json={
+                "windowMode": "count", "referenceRatio": 0.5,
+                "minimumReference": 10, "minimumCurrent": 2,
+                "prospectiveTarget": 2,
+            })
+            assert preview.status_code == 200
+            response = await client.post("/api/monitor/activate", headers=headers, json={
+                "policyId": preview.json()["policy"]["policy_id"],
+                "expectedActivePolicyId": None,
+            })
+            assert response.status_code == 200
+            return datetime.fromisoformat(
+                response.json()["snapshot"]["manifest"]["prospective_start_at"]
+            )
+
+    prospective_start = asyncio.run(activate())
+    storage = SQLiteStorage(str(database))
+    try:
+        for index in range(2):
+            started = prospective_start + timedelta(seconds=index + 1)
+            storage.insert_trace(Trace(
+                trace_id=f"empty-error-{index}", tenant_id="__verdict_local__",
+                started_at=started, ended_at=started + timedelta(seconds=1),
+                provider="openai", request_model="model",
+                prompt_redacted="request", response_redacted="partial",
+                error="",
+            ))
+    finally:
+        storage.close()
+
+    async def run():
+        app = create_app(storage=f"sqlite:///{database}")
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver",
+        ) as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            return await client.post("/api/monitor/run", headers={"X-Verdict-Setup": token})
+
+    response = asyncio.run(run())
+    assert response.status_code == 200
+    manifest = response.json()["snapshot"]["manifest"]
+    assert manifest["current_unit_ids"] == ["empty-error-0", "empty-error-1"]
+    [provider_errors] = [metric for metric in manifest["current_summary"]["metrics"]
+                         if metric["metric"] == "provider_error"]
+    assert provider_errors["true_count"] == 2
+    assert provider_errors["false_count"] == 0
+
+
 def test_monitor_activation_starts_empty_after_explicit_historical_preview(tmp_path):
     database = tmp_path / "explicit-activation.db"
     _insert_traces(database, 20)

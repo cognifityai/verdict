@@ -150,7 +150,7 @@ jobs:
 
   postgres:
     name: PostgreSQL adapter round trip
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     services:
       postgres:
         image: postgres:16
@@ -182,7 +182,7 @@ jobs:
       - name: Install Postgres test dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y postgresql-client
+          sudo apt-get install -y postgresql-client-16
           python -m pip install --disable-pip-version-check \
             httpx pytest "psycopg[binary,pool]"
           python -m pip install --disable-pip-version-check \

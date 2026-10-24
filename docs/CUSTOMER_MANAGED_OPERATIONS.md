@@ -170,12 +170,13 @@ TLS termination at a trusted ingress; see
    individual source revision is current.
    A local scan processes at most 1,000 discovered history files per
    invocation. Deferred files are reported in the capture summary and make
-   the cycle incomplete; the next invocation favors files not attempted
-   recently. This cap bounds file count, not the work of one very large file.
+   the cycle incomplete. The first invocation tries newer unattempted files
+   first; later invocations favor files not attempted recently. This cap bounds
+   file count, not the work of one very large file.
    Aggregate soft caps of 128 MiB processed source bytes, 100,000 projected
    rows, and 256 MiB serialized sanitized payload stop dispatching after the
    file that crosses a cap; they do not bound one file's work.
-   One local history file above 128 MiB is rejected with
+   One local history file above 128 MiB is rejected before parsing with
    `history_file_too_large`, retaining its prior accepted revision and marking
    the latest capture incomplete.
    A file that expands beyond 100,000 parsed events is rejected with

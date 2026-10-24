@@ -1727,13 +1727,17 @@ def capture_local_agents(
         attempts = storage.list_local_scan_attempts(tenant_id, source_kind, source_scope)
         for path in listed[source_kind]:
             locator_hash = hashlib.sha256(str(path.resolve()).encode()).hexdigest()
-            scan_work.append((attempts.get(locator_hash, ""), locator_hash,
+            try:
+                sort_mtime_ns = path.stat().st_mtime_ns
+            except OSError:
+                sort_mtime_ns = 0
+            scan_work.append((attempts.get(locator_hash, ""), -sort_mtime_ns, locator_hash,
                               source_kind, path, parser, source_scope))
-    scan_work.sort(key=lambda row: (row[0], row[1]))
+    scan_work.sort(key=lambda row: (row[0], row[1], row[2]))
     scanned_raw_bytes = 0
     scanned_projected_rows = 0
     scanned_sanitized_bytes = 0
-    for _attempted_at, locator_hash, source_kind, path, parser, source_scope in scan_work:
+    for _attempted_at, _sort_mtime, locator_hash, source_kind, path, parser, source_scope in scan_work:
         if (summary.files >= _MAX_SCAN_FILES
                 or scanned_raw_bytes >= _MAX_SCAN_RAW_BYTES
                 or scanned_projected_rows >= _MAX_SCAN_PROJECTED_ROWS
@@ -1758,6 +1762,9 @@ def capture_local_agents(
         projection_complete = False
         outcome_code = "failed"
         try:
+                    if observed_size > _MAX_LOCAL_FILE_BYTES:
+                        measured_bytes = 0
+                        raise ValueError("history_file_too_large")
                     parsed = parser(path, home=home)
                     if parsed.source_revision is not None:
                         measured_bytes = parsed.source_revision.full_bytes

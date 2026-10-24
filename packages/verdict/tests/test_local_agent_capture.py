@@ -6,6 +6,7 @@ import sqlite3
 from contextlib import ExitStack
 from dataclasses import replace
 from datetime import datetime
+from hashlib import sha256
 from pathlib import Path
 
 import pytest
@@ -5134,6 +5135,55 @@ def test_bounded_scan_reaches_unattempted_file_after_failed_first_attempt(
         assert first.skipped + second.skipped == 1
         assert second.scan_incomplete is True and second.deferred == 1
         assert len(storage.list_agent_run_bundles("local")) == 1
+    finally:
+        storage.close()
+
+
+def test_first_bounded_scan_tries_recent_unattempted_history_first(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    import verdict.telemetry.local_agents as local_agents
+
+    root = tmp_path / "codex"
+    root.mkdir()
+    candidates = [root / "first.jsonl", root / "second.jsonl"]
+    older, newer = sorted(candidates, key=lambda path: sha256(str(path.resolve()).encode()).hexdigest())
+    older.write_bytes(b"{malformed}\n")
+    _write_jsonl(newer, _codex_records())
+    os.utime(older, ns=(1_000_000_000, 1_000_000_000))
+    os.utime(newer, ns=(2_000_000_000, 2_000_000_000))
+    monkeypatch.setattr(local_agents, "_MAX_SCAN_FILES", 1)
+    storage = SQLiteStorage(str(tmp_path / "verdict.db"))
+    try:
+        first = capture_local_agents(storage, tenant_id="local", codex_root=root)
+        assert first.stored == 1 and first.skipped == 0 and first.deferred == 1
+        second = capture_local_agents(storage, tenant_id="local", codex_root=root)
+        assert second.skipped == 1 and second.deferred == 1
+    finally:
+        storage.close()
+
+
+def test_oversized_history_does_not_exhaust_scan_budget_before_read(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    import verdict.telemetry.local_agents as local_agents
+
+    root = tmp_path / "codex"
+    root.mkdir()
+    oversized = root / "oversized.jsonl"
+    oversized.write_bytes(b"x" * 4097)
+    valid = root / "valid.jsonl"
+    _write_jsonl(valid, _codex_records())
+    os.utime(oversized, ns=(2_000_000_000, 2_000_000_000))
+    os.utime(valid, ns=(1_000_000_000, 1_000_000_000))
+    monkeypatch.setattr(local_agents, "_MAX_LOCAL_FILE_BYTES", 4096)
+    monkeypatch.setattr(local_agents, "_MAX_SCAN_RAW_BYTES", 1)
+    storage = SQLiteStorage(str(tmp_path / "verdict.db"))
+    try:
+        first = capture_local_agents(storage, tenant_id="local", codex_root=root)
+        assert first.files == 2 and first.stored == 1 and first.skipped == 1
+        assert first.skip_reasons == {"history_file_too_large": 1}
+        assert first.deferred == 0
     finally:
         storage.close()
 
