@@ -59,7 +59,7 @@ All three commands above come from the installed distributions. A Git checkout
 is needed only for contributor tests and the research calibration scripts later
 in this guide.
 
-## 3. Easiest first win — local Claude Code or Codex
+## 3. Import local Claude Code or Codex history
 
 ```bash
 verdict
