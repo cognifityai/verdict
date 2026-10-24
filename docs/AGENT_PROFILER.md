@@ -1,6 +1,6 @@
 # Agent Profiler: local workflow and evidence contracts
 
-This guide describes the unreleased workflow in an editable source checkout. The published `0.1.0b2` beta has the core capture, evaluation, and monitoring APIs, but not the guided Home or selected-evidence AI explanation described here.
+This guide describes the guided workflow in the current beta. It is available from the published packages and an editable source checkout.
 
 Verdict combines source-reported usage, typed agent actions, optional selected-scope evaluation, and fixed-case experiments. The same run report accepts imported Claude Code/Codex histories and application agents recorded through `verdict.agent_run(...)`. Capability differences come from the source evidence: Claude messages with an explicit provider response boundary can create linked model-call `Trace` records, and Codex completion diagnostics can create metadata-only model-call traces. Other turns may have no trace. Provider auto-instrumentation does not automatically provide application task outcomes.
 

@@ -8,9 +8,7 @@ Verdict connects an agent's runs, turns, tools, tests, and application-reported 
 
 Verdict is local-first. A Python application can write to SQLite or PostgreSQL, or spool bounded records for a separate local service to import. Claude Code and Codex history imports are additional ways to explore agent activity; they are not the scope of the product.
 
-The published `0.1.0b2` beta provides application-agent capture, investigation, provider-call evaluation, and monitoring. This source checkout also contains an unreleased guided Home, setup flow, worker status, source and agent groups, and optional selected-evidence AI explanations. Use this checkout to review those additions; the pinned PyPI packages below do not contain them yet.
-
-The dashboard workflows described below use this source checkout. Install it in editable mode to try the guided UI; the pinned PyPI install demonstrates the released core features.
+The current beta includes guided Home and setup, worker status, source and agent groups, and optional explanations of selected evidence. The same workflows are available from the released packages and this source checkout.
 
 ## What you can do
 
@@ -25,17 +23,17 @@ The [Agent Profiler guide](docs/AGENT_PROFILER.md) explains the investigation wo
 
 ## Instrument an application agent
 
-With Python 3.10-3.12, install the synchronized beta packages in an isolated environment:
+With Python 3.10-3.12, install the current beta packages in an isolated environment:
 
 ```bash
 python -m venv .venv
 .venv/bin/python -m pip install \
-  'cognifity-verdict[anthropic,openai,google,dashboard]==0.1.0b2' \
-  'cognifity-verdict-eval==0.1.0b2' \
-  'cognifity-verdict-inspect==0.1.0b2'
+  'cognifity-verdict[anthropic,openai,google,dashboard]' \
+  'cognifity-verdict-eval' \
+  'cognifity-verdict-inspect'
 ```
 
-To review the guided workflow in this source checkout, install the packages in editable mode in the same isolated environment using the commands in [Contributing](CONTRIBUTING.md#development-setup), then start `verdict-dashboard` from that environment.
+For contributor development, install the packages in editable mode using [Contributing](CONTRIBUTING.md#development-setup).
 
 Call `verdict.init()` once at application startup, then record the work your application can actually observe:
 
@@ -62,7 +60,7 @@ Start the local dashboard against the same store:
 .venv/bin/verdict-dashboard --storage sqlite:///./verdict.db --host 127.0.0.1
 ```
 
-With this source checkout installed in editable mode, open **Home** for a source-aware next step, recorded issues, and token usage. **Suggested setup** previews local checks; **Monitoring** shows worker and issue status; **Investigation** opens linked run and event evidence; **Groups** starts with recorded source and agent names, bounded read-only execution-status and tool-outcome previews, then provider and model fields with recorded provider-error counts and token coverage; **Model drift setup** previews genuine provider-call cohorts. The execution preview distinguishes finalized statuses from runs without a recorded end or terminal status. The separate tool-outcome preview distinguishes explicit failures, observed runs without recorded failure, and unclear or partially captured outcomes. For a complete bounded terminal-run sample, it also shows earlier/newer counts within each recorded agent group; these previews are not statistical alerts or proof of task success. A placeholder model marker is labeled as such rather than presented as a provider model. **Evaluate** and **Report** remain available in the sidebar. No provider key is needed to capture and analyze local evidence. A [fully synthetic demo](docs/AGENT_PROFILER.md#synthetic-local-demo) exercises that path.
+Open **Home** for a source-aware next step, recorded issues, and token usage. **Suggested setup** previews local checks; **Monitoring** shows worker and issue status; **Investigation** opens linked run and event evidence; **Groups** starts with recorded source and agent names, bounded read-only execution-status and tool-outcome previews, then provider and model fields with recorded provider-error counts and token coverage; **Model drift setup** previews genuine provider-call cohorts. The execution preview distinguishes finalized statuses from runs without a recorded end or terminal status. The separate tool-outcome preview distinguishes explicit failures, observed runs without recorded failure, and unclear or partially captured outcomes. For a complete bounded terminal-run sample, it also shows earlier/newer counts within each recorded agent group; these previews are not statistical alerts or proof of task success. A placeholder model marker is labeled as such rather than presented as a provider model. **Evaluate** and **Report** remain available in the sidebar. No provider key is needed to capture and analyze local evidence. A [fully synthetic demo](docs/AGENT_PROFILER.md#synthetic-local-demo) exercises that path.
 
 ## Monitor behavior over time
 
@@ -75,7 +73,7 @@ The statistical monitor currently supports **model-call traces only**. Agent-ses
 
 The recurring worker checks for plan changes while running. **Pause future checks** keeps its heartbeat but stops new cycles; a cycle already selected can finish. Resume requires a fresh local check. A one-shot worker rereads the saved plan under the cycle lock and rejects a pause or changed revision before capture. A transient cycle failure is recorded and the continuous worker keeps polling at the stored cooldown. The next-check time is a worker eligibility time for the current plan revision, not proof that the check ran. A legacy plan without an explicit judge choice defaults to no paid judging when reviewed for resume.
 
-In this source checkout, a selected day, session, run, turn, tool event, model call, or newly tenant-owned span can request an optional AI explanation when the captured evidence is complete enough. Verdict first shows the bounded redacted context, destination, and static price estimate; incomplete or oversized evidence makes no provider call. One explicit approval is required before egress. Suggested setup and Model drift setup can also request a constrained draft based on aggregate source eligibility. Applying an agent-run draft fills the local check interval; a model-call draft leads to a reviewed comparison. With enough genuine calls, an optional cohort draft can fill the comparison form after Verdict checks its historical sample floors; the user still previews actual cohorts. A selected call or turn can draft an editable rubric criterion, and a reviewed cluster can suggest a label. Running, saving, and activating remain separate decisions. These answers are suggestions, not verified outcomes.
+A selected day, session, run, turn, tool event, model call, or newly tenant-owned span can request an optional AI explanation when the captured evidence is complete enough. Verdict first shows the bounded redacted context, destination, and static price estimate; incomplete or oversized evidence makes no provider call. One explicit approval is required before egress. Suggested setup and Model drift setup can also request a constrained draft based on aggregate source eligibility. Applying an agent-run draft fills the local check interval; a model-call draft leads to a reviewed comparison. With enough genuine calls, an optional cohort draft can fill the comparison form after Verdict checks its historical sample floors; the user still previews actual cohorts. A selected call or turn can draft an editable rubric criterion, and a reviewed cluster can suggest a label. Running, saving, and activating remain separate decisions. These answers are suggestions, not verified outcomes.
 
 ## Bring in existing evidence
 

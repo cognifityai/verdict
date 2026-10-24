@@ -1,12 +1,6 @@
 # Tester Onboarding
 
-Goal: get from installation to a first local report on your own approved agent
-or LLM application evidence. The published `0.1.0b2` packages support core capture,
-usage, evaluation, and monitoring. The guided Home, worker status, and optional
-selected-evidence AI explanations in the [Agent Profiler guide](AGENT_PROFILER.md)
-are unreleased source-checkout changes. Usage, run reports,
-Turn analysis, and deterministic suggestions are key-free.
-An external judge requires your own provider key and explicit evidence approval.
+Goal: get from installation to a first local report on your own approved agent or LLM application evidence. The current beta includes guided Home, worker status, and optional selected-evidence AI explanations. Usage, run reports, Turn analysis, and deterministic suggestions are key-free. An external judge requires your own provider key and explicit evidence approval.
 
 ## 0. Prerequisites
 
@@ -18,10 +12,7 @@ An external judge requires your own provider key and explicit evidence approval.
 
 ## 1. Install
 
-The commands below install the synchronized published `0.1.0b2` packages for
-agent profiling, provider-call capture, and monitoring. Review the guided
-workflow in this source checkout using the editable packages described in
-[Development Setup](../CONTRIBUTING.md#development-setup).
+The commands below install the current published packages for agent profiling, provider-call capture, and monitoring.
 
 The synchronized beta distributions are `cognifity-verdict`,
 `cognifity-verdict-eval`, and `cognifity-verdict-inspect`. Do not install the
@@ -33,14 +24,13 @@ uv venv --python 3.12 && source .venv/bin/activate     # or your own 3.10+ venv
 
 # Include the provider extras you want to test live. Google capture needs `google`.
 python -m pip install \
-  "cognifity-verdict[anthropic,openai,google,dashboard]==0.1.0b2" \
-  "cognifity-verdict-eval[semantic]==0.1.0b2" \
-  "cognifity-verdict-inspect==0.1.0b2"
+  "cognifity-verdict[anthropic,openai,google,dashboard]" \
+  "cognifity-verdict-eval[semantic]" \
+  "cognifity-verdict-inspect"
 verdict-dashboard --storage sqlite:///./verdict.db --host 127.0.0.1
 ```
 
-For a pilot on the public beta, use the pinned commands and provider
-coverage matrix in [`RELEASE_PROFILE.md`](RELEASE_PROFILE.md).
+For a pilot on the public beta, use the provider coverage matrix in [`RELEASE_PROFILE.md`](RELEASE_PROFILE.md).
 
 You do **not** need a separate `pip install scipy scikit-learn` — `verdict_eval`
 lists them as hard dependencies, so the line above brings them in.
@@ -48,10 +38,10 @@ lists them as hard dependencies, so the line above brings them in.
 Minimal alternative without the local semantic model:
 
 ```bash
-python -m pip install "cognifity-verdict-eval==0.1.0b2"  # lexical hash fallback
+python -m pip install "cognifity-verdict-eval"  # lexical hash fallback
 ```
 
-Already on an earlier synchronized release? Back up the selected SQLite or
+Already on an earlier synchronized release? Add `--upgrade` to the install command above. Back up the selected SQLite or
 PostgreSQL store and dependency lockfile, then follow the exact
 [beta release profile](RELEASE_PROFILE.md). The additive migrations preserve
 existing trace and evaluation tables.
@@ -494,7 +484,7 @@ source uses OTLP protobuf. JSON files and hosted API readers do not require that
 extra:
 
 ```bash
-python -m pip install "cognifity-verdict[telemetry]==0.1.0b2"
+python -m pip install "cognifity-verdict[telemetry]"
 
 verdict-import file ./traces.ndjson --format auto \
   --storage sqlite:///./verdict.db --tenant-id my-team
@@ -709,7 +699,7 @@ stored time is rejected, but a direct database change can make a row sort
 outside the requested window before comparison sees it.
 For extremely wide numeric rubric bounds, individual scores remain visible
 when the aggregate cannot be represented as a finite number.
-This workflow is included in the synchronized `0.1.0b2` core and eval builds.
+This workflow is included in the current synchronized core and eval builds.
 
 ## 5. Instrument your own app (the five-line pattern)
 
@@ -761,12 +751,12 @@ a linear `@`-anchored scanner to keep malformed and long inputs bounded. It
 remains best effort, not a compliance control, and opaque metadata such as
 tenant/session/cluster IDs must be non-sensitive. Set `capture_content=False`
 when the approved customer boundary is metadata-only; error categories remain
-available, but provider and manual-span exception messages are omitted. The `0.1.0b2` release profile also keeps
+available, but provider and manual-span exception messages are omitted. The current release profile also keeps
 `buffered_writes=False`; buffered mode requires an explicit `shutdown()`
 imported from `verdict.client` before process exit.
 
 Use only the provider methods listed in the
-[`release profile`](RELEASE_PROFILE.md). Release `0.1.0b2` includes the
+[`release profile`](RELEASE_PROFILE.md). The current beta includes the
 Anthropic `messages.stream(...)` helper plus OpenAI `responses.create(...)`,
 `responses.parse(...)`, and `responses.stream(...)` for new or existing
 responses, in addition to the earlier Chat/Google paths. OpenAI's
@@ -822,7 +812,7 @@ estimate. Needs a provider key (the judge makes calls).
 An older event with malformed stored attributes does not stop a scheduled notice scan. Verdict still reports a separately recorded failure or timeout status and continues to later events; a completed event with unknown attributes is not counted as a failure. Deterministic analysis of that malformed evidence can still fail, and readiness marks the cycle failed rather than implying the whole check succeeded.
 
 
-For this source checkout, start with the dashboard's **Home** or **Monitoring** after capture. Home leads to reviewed setup when no recurring plan exists; historical finding counts remain inspectable in the issue panel. Once a plan is configured, a current analysis leads from Home to those linked finding cards even when no post-activation recurring notice exists; older findings do not become new alerts. Monitoring also links saved deterministic findings to affected runs before recurring checks are configured. It labels saved-analysis coverage and freshness separately from post-activation recurring notices, and offers a direct local refresh when the saved analysis is stale. The suggested plan runs deterministic analysis once before a recurring schedule is saved, and a failed selected check does not unlock saving. A new guided plan disables consumption of pending approved judge jobs by default; enabling that advanced option can send bounded evidence to the selected provider and incur its separately approved cost. Existing schedules without this option retain their earlier judge behavior until reviewed. Open recurring notices are paged separately from acknowledged and dismissed history. Explicit event failures link to exact run events; terminal `failed` or `timed_out` Agent Run statuses link to the run without claiming task failure or drift. An authorized operator can attach exact IDs of a later explicitly positive event to an event notice as recheck evidence; the UI links both events and keeps review state separate. For SDK command and test events, an optional matching application-supplied `check_id` is shown as check identity on a linked later pass; it does not prove the same inputs, task, or recovery. Without that ID, the relationship remains unknown. Earlier imported failures remain in saved analysis findings. A run investigation leads with a positively recorded tool failure or timeout before advice about call/result records that cannot be paired one-to-one; both link to the affected evidence. Neither advice establishes cause or later recovery. Other recorded failures without a specific recommendation offer an evidence-linked recheck. The inbox works without an LLM key or external notification destination. A saved schedule still needs a running `verdict-service` worker for future cycles. Readiness reports heartbeat, worker-only next eligibility time, and latest cycle outcome separately; a started cycle without a finish is unknown, while a manual success does not prove a recurring worker ran. Pause stops later worker cycles without stopping its heartbeat; a cycle already selected may finish. Resume requires a fresh local check, and a legacy plan without an explicit judge choice defaults to no paid judging when reviewed for resume. The one-shot worker rejects a saved revision that changed or paused before its cycle lock was acquired. A transient cycle or initial heartbeat error does not terminate the continuous worker; cycle failures record a cooldown, and presence is shown only after a successful heartbeat write.
+After capture, start with the dashboard's **Home** or **Monitoring**. Home leads to reviewed setup when no recurring plan exists; historical finding counts remain inspectable in the issue panel. Once a plan is configured, a current analysis leads from Home to those linked finding cards even when no post-activation recurring notice exists; older findings do not become new alerts. Monitoring also links saved deterministic findings to affected runs before recurring checks are configured. It labels saved-analysis coverage and freshness separately from post-activation recurring notices, and offers a direct local refresh when the saved analysis is stale. The suggested plan runs deterministic analysis once before a recurring schedule is saved, and a failed selected check does not unlock saving. A new guided plan disables consumption of pending approved judge jobs by default; enabling that advanced option can send bounded evidence to the selected provider and incur its separately approved cost. Existing schedules without this option retain their earlier judge behavior until reviewed. Open recurring notices are paged separately from acknowledged and dismissed history. Explicit event failures link to exact run events; terminal `failed` or `timed_out` Agent Run statuses link to the run without claiming task failure or drift. An authorized operator can attach exact IDs of a later explicitly positive event to an event notice as recheck evidence; the UI links both events and keeps review state separate. For SDK command and test events, an optional matching application-supplied `check_id` is shown as check identity on a linked later pass; it does not prove the same inputs, task, or recovery. Without that ID, the relationship remains unknown. Earlier imported failures remain in saved analysis findings. A run investigation leads with a positively recorded tool failure or timeout before advice about call/result records that cannot be paired one-to-one; both link to the affected evidence. Neither advice establishes cause or later recovery. Other recorded failures without a specific recommendation offer an evidence-linked recheck. The inbox works without an LLM key or external notification destination. A saved schedule still needs a running `verdict-service` worker for future cycles. Readiness reports heartbeat, worker-only next eligibility time, and latest cycle outcome separately; a started cycle without a finish is unknown, while a manual success does not prove a recurring worker ran. Pause stops later worker cycles without stopping its heartbeat; a cycle already selected may finish. Resume requires a fresh local check, and a legacy plan without an explicit judge choice defaults to no paid judging when reviewed for resume. The one-shot worker rejects a saved revision that changed or paused before its cycle lock was acquired. A transient cycle or initial heartbeat error does not terminate the continuous worker; cycle failures record a cooldown, and presence is shown only after a successful heartbeat write.
 
 New suggested plans leave local history directory fields blank. **Run once and review** analyzes already captured evidence unless you enter a Claude Code or Codex directory to import or rescan. Source labels on stored runs do not establish a directory on the dashboard machine. Existing saved paths are preserved; common directories appear only as input placeholders.
 
@@ -995,7 +985,7 @@ become part of the workload it evaluates. The flag is off by default.
 This flag is unavailable for Jev because its Choice API is not captured by the
 supported provider instrumentors.
 
-For PostgreSQL, install `cognifity-verdict[dashboard,postgres]==0.1.0b2` and pass
+For PostgreSQL, install `cognifity-verdict[dashboard,postgres]` and pass
 the same protected storage URL used by the SDK. Evidence tables use Verdict's
 normal additive schema initialization. The dashboard control plane lazily
 creates its append-only configuration table on first use.

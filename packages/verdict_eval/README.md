@@ -83,7 +83,7 @@ provider call. Semantic clustering sanitizes selected historical user text
 before embedding.
 This does not execute a custom scoring formula or establish agreement with
 human labels. See the repository's example rubric and onboarding guide.
-This conversation unit is included in the synchronized `0.1.0b2` core and eval builds.
+This conversation unit is included in the synchronized core and eval builds.
 
 ## Jev judge
 
