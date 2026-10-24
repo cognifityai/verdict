@@ -21,6 +21,26 @@ The current beta includes guided Home and setup, worker status, source and agent
 
 The [Agent Profiler guide](docs/AGENT_PROFILER.md) explains the investigation workflow and its evidence limits. The [onboarding guide](docs/ONBOARDING.md) covers capture, imports, evaluation, and monitor setup.
 
+## Try your local Claude Code or Codex history
+
+On macOS or Linux with Python 3.12 (3.10 and 3.11 also work), start with the
+dashboard package:
+
+```bash
+python3.12 -m venv .venv
+.venv/bin/python -m pip install --upgrade 'cognifity-verdict[dashboard]'
+.venv/bin/verdict
+```
+
+In the local setup page, choose **Claude Code / Codex**, check the detected
+history directories, select **Preview sources**, then **Approve and capture**.
+Verdict reads those files without replaying agent commands. After capture,
+**Home** shows recorded usage and any issues; **Investigation → Agent runs** opens
+individual sessions. To import newer history later, use **Settings → Data
+Sources → Manage data sources**. This import and the key-free views need no
+provider API key. See the [local-history guide](docs/ONBOARDING.md#3-import-local-claude-code-or-codex-history)
+for coverage, privacy choices, and optional evaluation.
+
 ## Instrument an application agent
 
 With Python 3.10-3.12, install the current beta packages in an isolated environment:
