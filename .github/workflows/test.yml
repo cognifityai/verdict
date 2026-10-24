@@ -262,13 +262,14 @@ jobs:
           /tmp/verdict-wheel-venv/bin/python -m pip install --disable-pip-version-check dist/core/*.whl
           /tmp/verdict-wheel-venv/bin/python -m pip install --disable-pip-version-check dist/eval/*.whl
           /tmp/verdict-wheel-venv/bin/python -m pip install --disable-pip-version-check dist/inspect/*.whl
+          core_wheel=$(find dist/core -maxdepth 1 -name '*.whl' -print -quit)
           /tmp/verdict-wheel-venv/bin/python -m pip install --disable-pip-version-check \
-            "dist/core/cognifity_verdict-0.1.0b2-py3-none-any.whl[dashboard,postgres,telemetry]"
+            "${core_wheel}[dashboard,postgres,telemetry]"
           /tmp/verdict-wheel-venv/bin/python -m pip install --disable-pip-version-check httpx
           /tmp/verdict-wheel-venv/bin/python -m pip check
           cd /tmp
           /tmp/verdict-wheel-venv/bin/python -c \
-            "import verdict, verdict_eval, verdict_inspect; assert {verdict.__version__, verdict_eval.__version__, verdict_inspect.__version__} == {'0.1.0b2'}"
+            "import verdict, verdict_eval, verdict_inspect; assert {verdict.__version__, verdict_eval.__version__, verdict_inspect.__version__} == {'0.1.0b3'}"
           /tmp/verdict-wheel-venv/bin/python -c \
             "from verdict_eval.conversation_judge import preview_evaluation; from verdict.conversation_assessments import validate_rubric; from verdict.dashboard.evaluator_lab import evaluator_environment; assert evaluator_environment()['conversationEvalAvailable']"
           /tmp/verdict-wheel-venv/bin/python -c \
@@ -405,12 +406,13 @@ jobs:
           /tmp/verdict-sdist-venv/bin/python -m pip install --disable-pip-version-check dist/core/*.tar.gz
           /tmp/verdict-sdist-venv/bin/python -m pip install --disable-pip-version-check dist/eval/*.tar.gz
           /tmp/verdict-sdist-venv/bin/python -m pip install --disable-pip-version-check dist/inspect/*.tar.gz
+          core_sdist=$(find dist/core -maxdepth 1 -name '*.tar.gz' -print -quit)
           /tmp/verdict-sdist-venv/bin/python -m pip install --disable-pip-version-check \
-            "dist/core/cognifity_verdict-0.1.0b2.tar.gz[dashboard,postgres,telemetry]"
+            "${core_sdist}[dashboard,postgres,telemetry]"
           /tmp/verdict-sdist-venv/bin/python -m pip check
           cd /tmp
           /tmp/verdict-sdist-venv/bin/python -c \
-            "import verdict, verdict_eval, verdict_inspect; assert {verdict.__version__, verdict_eval.__version__, verdict_inspect.__version__} == {'0.1.0b2'}"
+            "import verdict, verdict_eval, verdict_inspect; assert {verdict.__version__, verdict_eval.__version__, verdict_inspect.__version__} == {'0.1.0b3'}"
           /tmp/verdict-sdist-venv/bin/python -c \
             "from importlib import metadata, util; import verdict_eval; removed=set('ProbeRunner ProbeSuite Probe ProbeExpectation ProbeResult ProbeRun default_suite load_suite_yaml'.split()); assert util.find_spec('verdict_eval.probes') is None; assert removed.isdisjoint(verdict_eval.__all__); assert all(not hasattr(verdict_eval, name) for name in removed); assert not any(req.lower().startswith('pyyaml') for req in metadata.requires('cognifity-verdict-eval') or ())"
           /tmp/verdict-sdist-venv/bin/verdict-inspect --help
@@ -491,7 +493,7 @@ jobs:
               verdict.__version__,
               verdict_eval.__version__,
               verdict_inspect.__version__,
-          } == {"0.1.0b2"}
+          } == {"0.1.0b3"}
           removed = set(
               "ProbeRunner ProbeSuite Probe ProbeExpectation ProbeResult "
               "ProbeRun default_suite load_suite_yaml".split()

@@ -1,6 +1,6 @@
 [project]
 name = "verdict-workspace"
-version = "0.1.0b2"
+version = "0.1.0b3"
 description = "Verdict — local-first agent profiling and reliability (workspace root, not published)"
 readme = "README.md"
 requires-python = ">=3.10"

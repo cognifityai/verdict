@@ -1,10 +1,6 @@
 # Customer-managed single-tenant operations
 
-This guide describes deployment of the current repository source. Build its
-wheel for the three-process profile below; the published `0.1.0b2` beta may
-not contain these changes. This guide does not establish an availability
-target. Use the [published release profile](RELEASE_PROFILE.md) for that
-package.
+This guide describes the customer-managed deployment of the current beta. This guide does not establish an availability target. Use the [release profile](RELEASE_PROFILE.md) for its supported package surface.
 
 ## One store, one routing ID, one recurring worker
 
@@ -91,7 +87,7 @@ the wheel built from this checkout.
 uv build packages/verdict --wheel --out-dir build/customer-managed
 # Use the exact wheel path printed by the build; keep just one wheel in this ignored directory.
 docker build -f deploy/customer-managed/Dockerfile \
-  --build-arg VERDICT_WHEEL=build/customer-managed/cognifity_verdict-0.1.0b2-py3-none-any.whl \
+  --build-arg VERDICT_WHEEL=build/customer-managed/cognifity_verdict-0.1.0b3-py3-none-any.whl \
   -t verdict-local:review .
 ```
 

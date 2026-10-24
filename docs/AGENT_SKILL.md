@@ -13,7 +13,7 @@ source checkout is required.
 
 ## Before the session
 
-1. Install or refresh the `0.1.0b2` skill using a native skill installer or the
+1. Install or refresh the `0.1.0b3` skill using a native skill installer or the
    tagged archive below. An older copied skill does not update itself.
 2. Create a reversible branch in the customer application.
 3. Use a non-production environment first.
@@ -29,26 +29,26 @@ skill parent directory and extract the tagged skill from the release archive:
 
 ```bash
 mkdir -p /absolute/path/to/cognifity-skills
-mkdir /absolute/path/to/cognifity-skills/verdict-instrument-app-0.1.0b2
-curl -fsSL https://github.com/cognifityai/verdict/archive/refs/tags/v0.1.0b2.tar.gz \
+mkdir /absolute/path/to/cognifity-skills/verdict-instrument-app-0.1.0b3
+curl -fsSL https://github.com/cognifityai/verdict/archive/refs/tags/v0.1.0b3.tar.gz \
   | tar -xz \
-      -C /absolute/path/to/cognifity-skills/verdict-instrument-app-0.1.0b2 \
+      -C /absolute/path/to/cognifity-skills/verdict-instrument-app-0.1.0b3 \
       --strip-components=3 \
-      verdict-0.1.0b2/skills/verdict-instrument-app
+      verdict-0.1.0b3/skills/verdict-instrument-app
 ```
 
 This creates
-`/absolute/path/to/cognifity-skills/verdict-instrument-app-0.1.0b2/SKILL.md`.
+`/absolute/path/to/cognifity-skills/verdict-instrument-app-0.1.0b3/SKILL.md`.
 The second `mkdir` deliberately fails if that version already exists, preventing
 two copies from being merged. The archive URL becomes valid only after
-`v0.1.0b2` is published.
+`v0.1.0b3` is published.
 
 ## Point the customer's agent at the skill
 
 Give the agent this prompt, replacing both absolute paths:
 
 ```text
-Read /absolute/path/to/cognifity-skills/verdict-instrument-app-0.1.0b2/SKILL.md completely
+Read /absolute/path/to/cognifity-skills/verdict-instrument-app-0.1.0b3/SKILL.md completely
 and follow it as the governing workflow. Work in
 /absolute/path/to/customer/application.
 
@@ -74,7 +74,7 @@ checkout. The direct-file prompt above remains the cross-host fallback.
 ## What happens when the skill runs again
 
 The read-only environment inspector distinguishes an absent install,
-synchronized `0.1.0a5`–`0.1.0b1` upgrade, current `0.1.0b2`, mixed-package
+earlier synchronized-version upgrade, current `0.1.0b3`, mixed-package
 repair, and collision with the unrelated `verdict` distribution. It reports whether the
 active `VERDICT_STORAGE` backend is SQLite or PostgreSQL without printing the
 URL.
@@ -139,7 +139,7 @@ separate review of the configured destination and execution path.
 
 ## Release-specific boundary
 
-The skill targets Verdict `0.1.0b2`; its capture-method evidence is the
-bounded `0.1.0b2` [release profile](RELEASE_PROFILE.md). Re-inspect
+The skill targets Verdict `0.1.0b3`; its capture-method evidence is the
+bounded `0.1.0b3` [release profile](RELEASE_PROFILE.md). Re-inspect
 all commands and provider entry points before using the skill with a later
 release.

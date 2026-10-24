@@ -6,6 +6,8 @@ the product is refined.
 
 ## [Unreleased]
 
+## [0.1.0b3] - 2026-10-24
+
 ### Added
 
 - Guided Home, setup, investigation, groups, and issue notices connect captured
@@ -22,6 +24,7 @@ the product is refined.
 
 ### Changed
 
+- Public install commands now resolve the newest published Verdict packages without an explicit version. Package dependency constraints still synchronize core, eval, and Inspect.
 - Local history capture records per-file attempts and incomplete coverage.
   One invocation admits at most 1,000 files and stops after a file crosses
   128 MiB of source bytes, 100,000 projected rows, or 256 MiB of sanitized
@@ -941,7 +944,8 @@ the product is refined.
   retain content must explicitly select metadata-only capture. Redaction remains
   best-effort rather than a compliance control.
 
-[Unreleased]: https://github.com/cognifityai/verdict/compare/v0.1.0b2...HEAD
+[Unreleased]: https://github.com/cognifityai/verdict/compare/v0.1.0b3...HEAD
+[0.1.0b3]: https://github.com/cognifityai/verdict/compare/v0.1.0b2...v0.1.0b3
 [0.1.0b2]: https://github.com/cognifityai/verdict/compare/v0.1.0b1...v0.1.0b2
 [0.1.0b1]: https://github.com/cognifityai/verdict/compare/v0.1.0a23...v0.1.0b1
 [0.1.0a23]: https://github.com/cognifityai/verdict/compare/v0.1.0a22...v0.1.0a23

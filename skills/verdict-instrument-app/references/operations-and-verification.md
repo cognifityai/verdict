@@ -7,7 +7,7 @@ test is insufficient evidence of trace collection or a rendered regression.
 
 Record the interpreter and installed distributions. Confirm the imported `verdict`
 module belongs to `cognifity-verdict`, not the unrelated package named `verdict`.
-Pin the synchronized `0.1.0b2` distributions and verify the installed pipeline
+Install the synchronized current-release distributions without version pins and verify the installed pipeline
 and dashboard commands.
 
 ## Trace capture gate
