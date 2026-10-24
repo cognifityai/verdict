@@ -27,7 +27,9 @@ pip install -e packages/verdict_inspect
 pip install pytest pytest-asyncio ruff
 ```
 
-Run the key-free checks:
+While editing, run the tests for the changed package or workflow. Run the full
+suite once for the final pull request candidate, along with the key-free smoke
+check:
 
 ```bash
 python scripts/smoke_test.py

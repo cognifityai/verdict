@@ -86,7 +86,7 @@ jobs:
 
       - name: Full pytest suite
         if: matrix.python-version == '3.12'
-        run: python -m pytest -v --tb=short
+        run: python -m pytest -q --tb=short
 
       - name: Minimum and intermediate Python compatibility
         if: matrix.python-version != '3.12'

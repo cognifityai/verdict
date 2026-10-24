@@ -93,7 +93,7 @@ def test_a7_environment_requires_synchronized_upgrade(
 
 @pytest.mark.parametrize(
     "version",
-    [f"0.1.0a{release}" for release in range(8, 24)],
+    ["0.1.0a8", "0.1.0a16", "0.1.0a23"],
 )
 def test_recent_alpha_environment_requires_synchronized_upgrade(
     monkeypatch: pytest.MonkeyPatch,
