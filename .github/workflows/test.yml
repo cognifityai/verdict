@@ -69,7 +69,7 @@ jobs:
       - name: Install dependencies
         run: |
           uv pip install --system \
-            wrapt httpx \
+            wrapt httpx "psycopg[binary,pool]" \
             numpy scipy scikit-learn \
             "pytest>=8" "pytest-asyncio>=0.23" "ruff>=0.5" \
             -r ui/requirements.txt
@@ -81,10 +81,20 @@ jobs:
         run: python scripts/smoke_test.py
 
       - name: Ruff
+        if: matrix.python-version == '3.12'
         run: ruff check packages scripts ui
 
-      - name: pytest
+      - name: Full pytest suite
+        if: matrix.python-version == '3.12'
         run: python -m pytest -v --tb=short
+
+      - name: Minimum and intermediate Python compatibility
+        if: matrix.python-version != '3.12'
+        run: >-
+          python -m pytest -q --tb=short
+          packages/verdict/tests/test_agent_sdk.py
+          packages/verdict/tests/test_storage.py
+          packages/verdict_eval/tests/test_providers.py
 
   anthropic-compat:
     name: Anthropic declared minimum SDK
