@@ -1,4 +1,4 @@
-"""PostgreSQL implementation for the opt-in Fleet ReadPort V1 boundary."""
+"""PostgreSQL implementation for the opt-in versioned Fleet ReadPort boundary."""
 
 from __future__ import annotations
 
@@ -13,11 +13,15 @@ from typing import Any
 
 from verdict.fleet_read_port import (
     VERDICT_FLEET_READ_SCHEMA_VERSION,
+    VERDICT_FLEET_READ_SCHEMA_VERSION_V2,
     TraceContributionReadV1,
+    TraceContributionReadV2,
     TraceWindowReadV1,
+    TraceWindowReadV2,
     VerdictFleetReadError,
     _tenant,
     trace_window_read_to_json,
+    trace_window_read_v2_to_json,
 )
 
 _SCOPE_TABLE = "verdict_fleet_reader_scope_v1"
@@ -924,7 +928,9 @@ def _scaled_integer(value: object, *, scale: Decimal, maximum: int) -> int | Non
     return rounded
 
 
-def _row_to_contribution(row: tuple[Any, ...], tenant_id: str) -> TraceContributionReadV1:
+def _row_to_contribution(
+    row: tuple[Any, ...], tenant_id: str, *, version: int = 1,
+) -> TraceContributionReadV1 | TraceContributionReadV2:
     if len(row) != 19:
         raise ValueError("fleet row shape is invalid")
     (
@@ -955,11 +961,16 @@ def _row_to_contribution(row: tuple[Any, ...], tenant_id: str) -> TraceContribut
     if isinstance(link_count, bool) or not isinstance(link_count, int) or link_count not in {0, 1}:
         raise ValueError("fleet agent link count is invalid")
     link_state = "exact" if link_count == 1 else "not_found"
-    if ended_at is None:
-        status = "in_progress"
+    if version == 1:
+        if (ended_at is not None and not error_present) or (ended_at is None and error_present):
+            raise VerdictFleetReadError("unsupported_version")
+        status = "failed" if error_present else "in_progress"
+        item_type = TraceContributionReadV1
     else:
-        status = "failed" if error_present else "succeeded"
-    return TraceContributionReadV1(
+        status = ("error_recorded" if error_present else
+                  "in_progress" if ended_at is None else "ended_no_error_recorded")
+        item_type = TraceContributionReadV2
+    return item_type(
         tenant_id=row_tenant,
         trace_id=trace_id,
         started_at=started_at,
@@ -1105,14 +1116,20 @@ class FleetPostgresAdapter:
         tenant_id: str,
         window_start: datetime,
         window_end: datetime,
-    ) -> TraceWindowReadV1:
+        version: int = 1,
+    ) -> TraceWindowReadV1 | TraceWindowReadV2:
         read_started_at = datetime.now(timezone.utc)
         started = time.monotonic()
         deadline = started + _READ_DEADLINE_SECONDS
         try:
+            if version not in {1, 2}:
+                raise ValueError("unsupported fleet read version")
             tenant = _tenant(tenant_id)
-            validated_query = TraceWindowReadV1(
-                schema_version=VERDICT_FLEET_READ_SCHEMA_VERSION,
+            result_type = TraceWindowReadV1 if version == 1 else TraceWindowReadV2
+            schema_version = (VERDICT_FLEET_READ_SCHEMA_VERSION if version == 1
+                              else VERDICT_FLEET_READ_SCHEMA_VERSION_V2)
+            validated_query = result_type(
+                schema_version=schema_version,
                 tenant_id=tenant,
                 window_start=window_start,
                 window_end=window_end,
@@ -1142,11 +1159,14 @@ class FleetPostgresAdapter:
                     cursor.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
                     cursor.execute(f"SET LOCAL statement_timeout='{_STATEMENT_TIMEOUT_MS}ms'")
                     cursor.execute(
-                        f"""SELECT t.tenant_id,t.trace_id,t.started_at,t.ended_at,
-                                   t.error_present,t.provider,t.request_model,t.response_model,
-                                   t.service_name,t.environment,t.input_tokens,t.output_tokens,
-                                   t.latency_ms,t.cost_usd,t.parent_span_id,
-                                   a.link_count,a.agent_event_id,a.agent_turn_id,a.agent_run_id
+                        f"""SELECT t.tenant_id,left(t.trace_id,257),t.started_at,t.ended_at,
+                                   t.error_present,left(t.provider,129),
+                                   left(t.request_model,257),left(t.response_model,257),
+                                   left(t.service_name,129),left(t.environment,129),
+                                   t.input_tokens,t.output_tokens,t.latency_ms,t.cost_usd,
+                                   left(t.parent_span_id,257),a.link_count,
+                                   left(a.agent_event_id,257),left(a.agent_turn_id,257),
+                                   left(a.agent_run_id,257)
                             FROM {_TRACE_VIEW} t
                             LEFT JOIN {_AGENT_VIEW} a
                               ON a.tenant_id=t.tenant_id AND a.trace_id=t.trace_id
@@ -1169,10 +1189,10 @@ class FleetPostgresAdapter:
             raise VerdictFleetReadError("window_too_dense")
         invalid_model = False
         try:
-            items = tuple(_row_to_contribution(row, tenant) for row in rows)
+            items = tuple(_row_to_contribution(row, tenant, version=version) for row in rows)
             completed_at = datetime.now(timezone.utc)
-            result = TraceWindowReadV1(
-                schema_version=VERDICT_FLEET_READ_SCHEMA_VERSION,
+            result = result_type(
+                schema_version=schema_version,
                 tenant_id=tenant,
                 window_start=start_utc,
                 window_end=end_utc,
@@ -1181,7 +1201,10 @@ class FleetPostgresAdapter:
                 item_count=len(items),
                 items=items,
             )
-            trace_window_read_to_json(result)
+            if version == 1:
+                trace_window_read_to_json(result)
+            else:
+                trace_window_read_v2_to_json(result)
         except VerdictFleetReadError:
             raise
         except Exception:

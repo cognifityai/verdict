@@ -23,12 +23,19 @@ Concurrent processing has one transaction-scoped receipt owner. Malformed or
 conflicting records receive terminal per-record results, while infrastructure
 failures produce no acknowledgement and remain retryable.
 
-The collector accepts full `agent` records. These records contain the run,
-turn, typed events, and any genuinely linked model-call Trace. Standalone
-`trace`, `span`, and `signal` records are rejected at this boundary because
-their existing storage identities do not yet provide the tenant-scoped,
-non-regressing merge contract required for untrusted network retries. Their
-existing direct and local-file import paths are unchanged.
+The collector accepts full `agent` records, standalone `trace` records, and
+manual `span` records. Agent records contain the run, turn, typed events, and
+any genuinely linked model-call Trace. Every accepted record is assigned the
+collector's configured tenant. Trace IDs already belong to a tenant in
+storage; Span IDs reject a write from another tenant. A Span's explicit Trace
+link is removed when that Trace is missing or belongs to another tenant.
+Retired `signal` records remain rejected. Existing direct and local-file import
+paths are unchanged. This expansion is in the current source;
+the published `0.1.0b2` collector accepts only Agent records.
+Exact batch retries return the same stored receipt. Different batches that
+reuse one same-tenant Trace or Span ID retain the existing direct-storage
+update semantics; producers must use unique IDs, and arbitrary out-of-order
+updates are not guaranteed to converge.
 
 The collector is not mounted into the dashboard. Its request size, record
 count, identifier size, acknowledgement size, connection pools, database waits,
@@ -38,15 +45,14 @@ environment configuration.
 
 ## Compatibility
 
-The only new persistence is the additive PostgreSQL `collector_receipts`
-table. Canonical Agent and Trace evidence continues through the existing
-storage transaction boundary. SQLite, direct SDK capture, local file import,
+The collector continues using the PostgreSQL `collector_receipts` table and
+canonical storage boundaries. Completed rejection receipts from older
+collectors remain immutable. SQLite, direct SDK capture, local file import,
 Claude/Codex capture, telemetry import, evaluation, clustering, monitoring, and
-dashboard reads are unchanged.
+dashboard reads retain their existing interfaces.
 
 ## Consequences
 
-Many SDK Agent producers can send retry-safe evidence to a central PostgreSQL
-deployment without database credentials. ADR-012 provides file checkpointing
-and acknowledged segment deletion. Remote standalone-record delivery and
-ingestion-triggered analysis remain separate capabilities.
+SDK producers can send Agent and standalone records to central PostgreSQL
+without database credentials. ADR-012 provides file checkpointing and
+acknowledged segment deletion. Ingestion-triggered analysis remains separate.

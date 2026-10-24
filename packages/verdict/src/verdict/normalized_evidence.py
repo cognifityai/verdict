@@ -27,7 +27,7 @@ from verdict.evidence import (
 )
 from verdict.redaction import (
     RedactionMode,
-    redact,
+    redact_structure,
     sanitize_agent_capture_batch,
     sanitize_agent_event_attributes,
     sanitize_agent_run_bundle,
@@ -58,7 +58,7 @@ def _sanitize_compatibility_preview(value: str | None) -> str | None:
             raise ValueError("legacy local preview must be bounded text")
     except UnicodeError as exc:
         raise ValueError("legacy local preview must be bounded text") from exc
-    return redact(value)
+    return redact_structure(value)
 
 
 def _prepare_legacy_local_text_upgrade(

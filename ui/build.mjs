@@ -18,7 +18,6 @@ const shared = {
 await Promise.all([
   build({ ...shared, entryPoints: ["entries/landing.jsx"], outfile: "assets/landing.js" }),
   build({ ...shared, entryPoints: ["entries/dashboard.jsx"], outfile: `${dashboardAssets}/dashboard.js` }),
-  build({ ...shared, entryPoints: ["entries/all-in-one.jsx"], outfile: "assets/all-in-one.js" }),
 ]);
 
 const tailwind = process.platform === "win32"

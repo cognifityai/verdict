@@ -14,7 +14,7 @@ from typing import Protocol
 import numpy as np
 from scipy.cluster.hierarchy import cut_tree, linkage
 from sklearn.metrics import silhouette_score
-from verdict.redaction import redact
+from verdict.redaction import redact, redact_structure
 from verdict.schema import Trace
 
 
@@ -205,7 +205,7 @@ def select_cluster_input(trace: Trace) -> InputSelection:
         if len(normalized) > 4_096:
             return InputSelection(None, "text_too_long")
         try:
-            selected = redact(normalized, mode="redact")
+            selected = redact_structure(normalized)
         except Exception:
             return InputSelection(None, "redaction_error")
         if not isinstance(selected, str):

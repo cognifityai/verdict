@@ -8,8 +8,9 @@ features are especially useful.
 
 - Search existing issues and pull requests before opening a duplicate.
 - Open an issue before beginning a large feature or architectural change.
-- Keep changes within Verdict's current individual-LLM-call scope. Agent-run
-  graphs, tool-sequence analysis, and task-success evaluation are roadmap work.
+- Keep changes focused on the documented application-agent and model-call workflows.
+  Agent-run relationships require explicit recorded links; a captured final answer
+  alone does not establish task success.
 - Report security vulnerabilities privately as described in
   [SECURITY.md](SECURITY.md).
 
@@ -26,7 +27,9 @@ pip install -e packages/verdict_inspect
 pip install pytest pytest-asyncio ruff
 ```
 
-Run the key-free checks:
+While editing, run the tests for the changed package or workflow. Run the full
+suite once for the final pull request candidate, along with the key-free smoke
+check:
 
 ```bash
 python scripts/smoke_test.py

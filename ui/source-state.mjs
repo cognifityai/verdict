@@ -1,7 +1,5 @@
-export function initialDashboardTab(meta = {}) {
-  if (Number(meta.totalAgentRuns) > 0) return "overview";
-  if (Number(meta.totalTraces) > 0) return "overview";
-  return "settings";
+export function initialDashboardTab() {
+  return "overview";
 }
 
 export function configuredStorePresentation(meta = {}) {
@@ -60,6 +58,9 @@ export function observedSourcePresentation(meta = {}) {
 }
 
 export function setupFailureMessage(failure, origin) {
+  if (failure?.message === "capture_incomplete") {
+    return "Local history capture is incomplete. Review the deferred or skipped files below, then rescan.";
+  }
   if (failure instanceof TypeError) {
     return `Cannot reach the Verdict server at ${origin}. Restart that server and reload this page.`;
   }

@@ -271,9 +271,9 @@ class AgentTurnJudgment:
         self.evaluator_provider = redact(self.evaluator_provider) or ""
         self.rubric_version = redact(self.rubric_version) or ""
         self.judge_models = [redact(model) or "" for model in self.judge_models]
-        self.error = redact(self.error)
+        self.error = redact_structure(self.error)
         for dimension in self.dimensions:
-            dimension.reasoning = redact(dimension.reasoning) or ""
+            dimension.reasoning = redact_structure(dimension.reasoning) or ""
             dimension.judge_model = redact(dimension.judge_model) or ""
         if len(agent_turn_judgment_to_json(self).encode("utf-8")) > _MAX_RESULT_BYTES:
             raise ValueError("Agent Turn judgment exceeds size limit")

@@ -172,6 +172,18 @@ def _hashed_field(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
+def _check_id_hash(value: str) -> str:
+    if not isinstance(value, str) or not value.strip() or "\x00" in value:
+        raise ValueError("check_id must be non-empty bounded text")
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeError as exc:
+        raise ValueError("check_id must be valid UTF-8") from exc
+    if len(encoded) > 256:
+        raise ValueError("check_id must be non-empty bounded text")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def _terminal_status(error: BaseException | None) -> ExecutionStatus:
     if error is None:
         return ExecutionStatus.COMPLETED
@@ -404,7 +416,7 @@ class _TurnState:
         event = self._event(
             AgentEventType.MODEL_CALL,
             attributes,
-            status=(ExecutionStatus.FAILED if trace.error else ExecutionStatus.COMPLETED),
+            status=(ExecutionStatus.FAILED if trace.error is not None else ExecutionStatus.COMPLETED),
             occurred_at=trace.started_at,
             trace_id=trace.trace_id,
         )
@@ -630,6 +642,7 @@ class TurnContext:
         cwd: str | None = None,
         stdout: str | None = None,
         stderr: str | None = None,
+        check_id: str | None = None,
     ) -> None:
         attributes: dict[str, object] = {"command": command, "exit_code": exit_code}
         if cwd is not None:
@@ -638,6 +651,8 @@ class TurnContext:
             attributes["stdout"] = stdout
         if stderr is not None:
             attributes["stderr"] = stderr
+        if check_id is not None:
+            attributes["check_id_hash"] = _check_id_hash(check_id)
         self._record(
             AgentEventType.COMMAND,
             attributes,
@@ -653,6 +668,7 @@ class TurnContext:
         failed: int = 0,
         skipped: int = 0,
         output: str | None = None,
+        check_id: str | None = None,
     ) -> None:
         attributes: dict[str, object] = {
             "command": command,
@@ -663,6 +679,8 @@ class TurnContext:
         }
         if output is not None:
             attributes["output"] = output
+        if check_id is not None:
+            attributes["check_id_hash"] = _check_id_hash(check_id)
         self._record(
             AgentEventType.TEST_RESULT,
             attributes,

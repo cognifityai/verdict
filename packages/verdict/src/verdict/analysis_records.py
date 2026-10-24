@@ -74,6 +74,7 @@ class DeterministicAnalysisRun:
     analyzer_version: str
     input_fingerprint: str
     result: dict[str, Any]
+    verified_revision: int | None = None
 
     def __post_init__(self) -> None:
         _digest("analysis_id", self.analysis_id)
@@ -87,6 +88,12 @@ class DeterministicAnalysisRun:
             raise ValueError("status must be an AnalysisRunStatus")
         _bounded_text("analyzer_version", self.analyzer_version, 128)
         _digest("input_fingerprint", self.input_fingerprint)
+        if self.verified_revision is not None and (
+            isinstance(self.verified_revision, bool)
+            or not isinstance(self.verified_revision, int)
+            or self.verified_revision < 0
+        ):
+            raise ValueError("verified_revision must be a non-negative integer")
         object.__setattr__(self, "result", _safe_mapping("result", self.result))
 
 
@@ -132,6 +139,9 @@ class NotificationDeliveryAttempt:
 
 def analysis_run_to_json(run: DeterministicAnalysisRun) -> str:
     raw = asdict(run)
+    # The immutable result and its latest verified evidence revision live in
+    # separate columns; rechecking identical evidence never rewrites the result.
+    raw.pop("verified_revision")
     raw["cutoff"] = run.cutoff.astimezone(timezone.utc).isoformat()
     raw["completed_at"] = run.completed_at.astimezone(timezone.utc).isoformat()
     raw["status"] = run.status.value

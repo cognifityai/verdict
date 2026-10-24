@@ -3,17 +3,378 @@ import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
-from threading import Barrier
+from threading import Barrier, Event
 
 import httpx
 import pytest
 import verdict.service as verdict_service
+from verdict.analysis_records import AnalysisRunStatus, DeterministicAnalysisRun
 from verdict.dashboard.app import create_app
 from verdict.dashboard.control_plane import ControlStore
+from verdict.delivery_queue import create_intent
 from verdict.evidence import AgentRun, AgentRunBundle, ExecutionStatus, SourceSession
 from verdict.monitoring import MonitorPolicy, monitor_policy_to_json
 from verdict.schema import DriftSignal, Trace
+from verdict.service import poll_cycle, worker_presence
 from verdict.storage import SQLiteStorage
+
+
+def test_delivery_rebind_requires_review_and_preserves_source_identity(tmp_path):
+    url = f"sqlite:///{tmp_path / 'delivery-review.db'}"
+    tenant = "__verdict_local__"
+    first = ControlStore(url).append(
+        tenant, kind="alert", document_id="default", state="active",
+        payload={"destination": "webhook", "webhookUrlEnvVar": "VERDICT_REBIND_TEST",
+                 "findings": True, "drift": False}, expected_revision=None,
+    )
+    when = datetime.now(timezone.utc)
+    notification = {"kind": "finding", "code": "synthetic_failure", "severity": "error"}
+    old_intent = create_intent(
+        first, tenant_id=tenant, source_kind="analysis", source_id="synthetic",
+        notification=notification, webhook_url="https://example.test/first",
+        created_at=when,
+    )
+    run = DeterministicAnalysisRun(
+        analysis_id=sha256(b"delivery-review").hexdigest(),
+        tenant_id=tenant, scope_key="agent-and-trace", cutoff=when,
+        completed_at=when, status=AnalysisRunStatus.COMPLETED,
+        analyzer_version="test-v1", input_fingerprint=sha256(b"synthetic-input").hexdigest(),
+        result={"findings": [notification]},
+    )
+    storage = SQLiteStorage(str(tmp_path / "delivery-review.db"))
+    try:
+        storage.save_worker_analysis_run(run, [old_intent])
+    finally:
+        storage.close()
+    ControlStore(url).append(
+        tenant, kind="alert", document_id="default", state="active",
+        payload={"destination": "local_log", "findings": True, "drift": False},
+        expected_revision=1,
+    )
+    app = create_app(storage=url)
+
+    async def scenario():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            unauth = await client.get(
+                f"/api/control/delivery/{old_intent.intent_id}/rebind-preview",
+            )
+            headers = {"X-Verdict-Setup": token}
+            before = await client.get("/api/control", headers=headers)
+            readiness = await client.get("/api/readiness")
+            preview = await client.get(
+                f"/api/control/delivery/{old_intent.intent_id}/rebind-preview",
+                headers=headers,
+            )
+            info = preview.json()
+            stale = await client.post(
+                f"/api/control/delivery/{old_intent.intent_id}/rebind",
+                headers=headers,
+                json={"expectedOldStatus": "pending", "expectedAttemptCount": 0,
+                      "expectedAlertRevision": 1,
+                      "expectedNewFingerprint": info["newDestinationFingerprint"]},
+            )
+            confirmed = await client.post(
+                f"/api/control/delivery/{old_intent.intent_id}/rebind",
+                headers=headers,
+                json={"expectedOldStatus": "pending", "expectedAttemptCount": 0,
+                      "expectedAlertRevision": 2,
+                      "expectedNewFingerprint": info["newDestinationFingerprint"]},
+            )
+            repeated = await client.post(
+                f"/api/control/delivery/{old_intent.intent_id}/rebind",
+                headers=headers,
+                json={"expectedOldStatus": "pending", "expectedAttemptCount": 0,
+                      "expectedAlertRevision": 2,
+                      "expectedNewFingerprint": info["newDestinationFingerprint"]},
+            )
+            return unauth, before, readiness, preview, stale, confirmed, repeated
+
+    unauth, before, readiness, preview, stale, confirmed, repeated = asyncio.run(scenario())
+    assert unauth.status_code == 403
+    assert before.json()["deliveryQueueCounts"] == {"pending": 1}
+    assert readiness.json()["deliveryQueue"] == {"pending": 1}
+    assert preview.status_code == 200
+    assert preview.json()["notificationId"] == old_intent.notification_id
+    assert preview.json()["currentAlertRevision"] == 2
+    assert stale.status_code == 409
+    assert confirmed.status_code == 200
+    assert repeated.status_code == 409
+    storage = SQLiteStorage(str(tmp_path / "delivery-review.db"))
+    try:
+        old = storage.get_delivery_intent(tenant, old_intent.intent_id)
+        new = storage.get_delivery_intent(tenant, confirmed.json()["intentId"])
+        assert storage.get_delivery_intent("foreign", old_intent.intent_id) is None
+    finally:
+        storage.close()
+    assert old.status == "superseded" and old.superseded_by_id == new.intent.intent_id
+    assert new.status == "pending" and new.intent.notification_id == old_intent.notification_id
+
+
+def test_alert_disable_cannot_commit_between_queue_validation_and_send(
+    tmp_path, monkeypatch,
+):
+    url = f"sqlite:///{tmp_path / 'alert-disable-race.db'}"
+    tenant = "__verdict_local__"
+    alert = ControlStore(url).append(
+        tenant, kind="alert", document_id="default", state="active",
+        payload={"destination": "webhook", "webhookUrlEnvVar": "VERDICT_RACE_ENDPOINT",
+                 "findings": True, "drift": False}, expected_revision=None,
+    )
+    monkeypatch.setenv("VERDICT_RACE_ENDPOINT", "https://example.test/receiver")
+    now = datetime.now(timezone.utc)
+    finding = {"kind": "finding", "code": "synthetic"}
+    intent = create_intent(
+        alert, tenant_id=tenant, source_kind="analysis", source_id="synthetic",
+        notification=finding, webhook_url="https://example.test/receiver", created_at=now,
+    )
+    run = DeterministicAnalysisRun(
+        analysis_id=sha256(b"alert-disable-race").hexdigest(), tenant_id=tenant,
+        scope_key="agent-and-trace", cutoff=now, completed_at=now,
+        status=AnalysisRunStatus.COMPLETED, analyzer_version="test-v1",
+        input_fingerprint=sha256(b"input").hexdigest(), result={"findings": [finding]},
+    )
+    storage = SQLiteStorage(str(tmp_path / "alert-disable-race.db"))
+    try:
+        storage.save_worker_analysis_run(run, [intent])
+    finally:
+        storage.close()
+    validated, release = Event(), Event()
+    original = verdict_service._intent_destination_matches
+
+    def pause_after_validation(*args):
+        answer = original(*args)
+        validated.set()
+        assert release.wait(5)
+        return answer
+
+    class Accepted:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+    sent = []
+    monkeypatch.setattr(verdict_service, "_intent_destination_matches", pause_after_validation)
+    monkeypatch.setattr(verdict_service, "_open_webhook", lambda request, **_kw: (
+        sent.append(request), Accepted(),
+    )[1])
+
+    async def disable():
+        transport = httpx.ASGITransport(app=create_app(storage=url))
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            return await client.post(
+                "/api/control/alert/default", headers={"X-Verdict-Setup": token},
+                json={"state": "disabled", "payload": alert["payload"],
+                      "expectedRevision": 1},
+            )
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(poll_cycle, url, now=now + timedelta(seconds=1))
+        assert validated.wait(5)
+        try:
+            response = asyncio.run(disable())
+            assert response.status_code == 409
+        finally:
+            release.set()
+        future.result(timeout=5)
+    assert len(sent) == 1
+    assert ControlStore(url).list_current(tenant)[0]["state"] == "active"
+
+
+def test_actionable_delivery_queue_is_reachable_beyond_recent_successes(tmp_path):
+    url = f"sqlite:///{tmp_path / 'delivery-pages.db'}"
+    tenant = "__verdict_local__"
+    when = datetime.now(timezone.utc) - timedelta(days=2)
+    alert = ControlStore(url).append(
+        tenant, kind="alert", document_id="default", state="active",
+        payload={"destination": "local_log", "findings": True, "drift": False},
+        expected_revision=None,
+    )
+    intents = [create_intent(
+        alert, tenant_id=tenant, source_kind="analysis", source_id=f"item-{index}",
+        notification={"kind": "finding", "code": f"synthetic-{index}"},
+        webhook_url=None, created_at=when + timedelta(minutes=index),
+    ) for index in range(203)]
+    storage = SQLiteStorage(str(tmp_path / "delivery-pages.db"))
+    try:
+        storage.save_worker_analysis_run(DeterministicAnalysisRun(
+            analysis_id=sha256(b"delivery-pages").hexdigest(), tenant_id=tenant,
+            scope_key="agent-and-trace", cutoff=when, completed_at=when,
+            status=AnalysisRunStatus.COMPLETED, analyzer_version="test-v1",
+            input_fingerprint=sha256(b"input").hexdigest(), result={},
+        ), intents)
+        storage._conn.execute(
+            "UPDATE notification_delivery_queue SET status='delivered',next_due_at=NULL "
+            "WHERE source_id LIKE 'item-%' AND CAST(substr(source_id,6) AS INTEGER)>=102"
+        )
+        storage._conn.execute(
+            "UPDATE notification_delivery_queue SET status='blocked',next_due_at=NULL "
+            "WHERE source_id='item-0'"
+        )
+    finally:
+        storage.close()
+
+    async def scenario():
+        transport = httpx.ASGITransport(app=create_app(storage=url))
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            first = await client.get("/api/control")
+            anchor = first.json()["deliveryQueue"][-1]
+            second = await client.get("/api/control/delivery", params={
+                "afterCreatedAt": anchor["createdAt"],
+                "afterIntentId": anchor["intentId"],
+            })
+            return first, second
+
+    first, second = asyncio.run(scenario())
+    assert first.status_code == second.status_code == 200
+    assert first.json()["deliveryQueueCounts"]["blocked"] == 1
+    assert intents[0].intent_id in {item["intentId"] for item in second.json()["deliveryQueue"]}
+    first_ids = {item["intentId"] for item in first.json()["deliveryQueue"]}
+    second_ids = {item["intentId"] for item in second.json()["deliveryQueue"]}
+    assert len(first_ids) == 100 and len(second_ids) == 2
+    assert not first_ids.intersection(second_ids)
+
+
+def test_delivery_page_keeps_alerts_reachable_across_delivery_and_retry_transition(tmp_path):
+    url = f"sqlite:///{tmp_path / 'delivery-changing.db'}"
+    tenant = "__verdict_local__"
+    when = datetime.now(timezone.utc) - timedelta(days=2)
+    alert = ControlStore(url).append(
+        tenant, kind="alert", document_id="default", state="active",
+        payload={"destination": "local_log", "findings": True, "drift": False},
+        expected_revision=None,
+    )
+    intents = [create_intent(
+        alert, tenant_id=tenant, source_kind="analysis", source_id=f"item-{index}",
+        notification={"kind": "finding", "code": f"synthetic-{index}"},
+        webhook_url=None, created_at=when + timedelta(minutes=index),
+    ) for index in range(102)]
+    storage = SQLiteStorage(str(tmp_path / "delivery-changing.db"))
+    try:
+        storage.save_worker_analysis_run(DeterministicAnalysisRun(
+            analysis_id=sha256(b"delivery-changing").hexdigest(), tenant_id=tenant,
+            scope_key="agent-and-trace", cutoff=when, completed_at=when,
+            status=AnalysisRunStatus.COMPLETED, analyzer_version="test-v1",
+            input_fingerprint=sha256(b"input").hexdigest(), result={},
+        ), intents)
+    finally:
+        storage.close()
+
+    async def scenario():
+        transport = httpx.ASGITransport(app=create_app(storage=url))
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            first = await client.get("/api/control")
+            rows = first.json()["deliveryQueue"]
+            storage = SQLiteStorage(str(tmp_path / "delivery-changing.db"))
+            try:
+                storage._conn.execute(
+                    "UPDATE notification_delivery_queue SET status='delivered',next_due_at=NULL "
+                    "WHERE intent_id=?", (rows[0]["intentId"],),
+                )
+                storage._conn.execute(
+                    "UPDATE notification_delivery_queue SET status='failed' WHERE intent_id=?",
+                    (intents[1].intent_id,),
+                )
+            finally:
+                storage.close()
+            anchor = rows[-1]
+            second = await client.get("/api/control/delivery", params={
+                "afterCreatedAt": anchor["createdAt"],
+                "afterIntentId": anchor["intentId"],
+            })
+            return first, second
+
+    first, second = asyncio.run(scenario())
+    assert first.status_code == second.status_code == 200
+    first_ids = {item["intentId"] for item in first.json()["deliveryQueue"]}
+    second_ids = {item["intentId"] for item in second.json()["deliveryQueue"]}
+    assert len(second_ids) == 2
+    assert second_ids.isdisjoint(first_ids)
+    assert second_ids == {item.intent_id for item in intents} - first_ids
+    assert second.json()["hasMore"] is False
+
+
+@pytest.mark.parametrize("params", [
+    {"afterCreatedAt": "2026-10-18T00:00:00+00:00"},
+    {"afterCreatedAt": "2026-10-18T00:00:00", "afterIntentId": "a" * 64},
+    {"afterCreatedAt": "2026-10-18T00:00:00+00:00", "afterIntentId": "bad"},
+])
+def test_delivery_page_rejects_incomplete_or_invalid_cursor(tmp_path, params):
+    async def scenario():
+        transport = httpx.ASGITransport(app=create_app(
+            storage=f"sqlite:///{tmp_path / 'invalid-cursor.db'}",
+        ))
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            return await client.get("/api/control/delivery", params=params)
+
+    response = asyncio.run(scenario())
+    assert response.status_code == 400
+    assert response.json() == {"error": "invalid delivery cursor"}
+
+
+def test_readiness_reports_saved_schedule_without_claiming_a_running_worker(tmp_path):
+    url = f"sqlite:///{tmp_path / 'readiness.db'}"
+    ControlStore(url).append(
+        "__verdict_local__", kind="schedule", document_id="daily", state="active",
+        payload={"intervalHours": 24, "analyzeOnly": True}, expected_revision=None,
+    )
+
+    async def scenario():
+        transport = httpx.ASGITransport(app=create_app(storage=url))
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            return await client.get("/api/readiness")
+
+    response = asyncio.run(scenario())
+    assert response.status_code == 200
+    assert response.json()["documents"] == [{
+        "kind": "schedule", "documentId": "daily", "state": "active", "revision": 1,
+    }]
+    assert response.json()["worker"]["status"] == "unverified"
+    assert response.json()["lastCycle"]["state"] == "never_run"
+    assert response.json()["nextDue"] is None
+
+    with worker_presence(url):
+        assert poll_cycle(url)["analysis"]["status"] == "completed"
+        live_response = asyncio.run(scenario())
+        assert live_response.json()["worker"]["status"] == "recent"
+        assert live_response.json()["nextDue"]["scheduleRevision"] == 1
+        assert datetime.fromisoformat(live_response.json()["nextDue"]["nextDueAt"]) > datetime.now(timezone.utc)
+
+
+def test_readiness_requires_basic_auth_when_dashboard_is_protected(tmp_path, monkeypatch):
+    import base64
+
+    url = f"sqlite:///{tmp_path / 'protected-readiness.db'}"
+    ControlStore(url).append(
+        "__verdict_local__", kind="schedule", document_id="daily", state="active",
+        payload={"intervalHours": 24, "analyzeOnly": True}, expected_revision=None,
+    )
+    monkeypatch.setenv("VERDICT_USER", "reviewer")
+    monkeypatch.setenv("VERDICT_PASS", "secret")
+    app = create_app(storage=url)
+
+    async def scenario():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            credentials = base64.b64encode(b"reviewer:secret").decode()
+            return (
+                await client.get("/api/readiness"),
+                await client.get("/api/readiness", headers={"Authorization": "Basic invalid"}),
+                await client.get("/api/readiness", headers={"Authorization": f"Basic {credentials}"}),
+                await client.get("/api/health"),
+            )
+
+    missing, invalid, authenticated, health = asyncio.run(scenario())
+    assert missing.status_code == invalid.status_code == 401
+    assert authenticated.status_code == 200
+    assert authenticated.json()["documents"][0]["kind"] == "schedule"
+    assert health.status_code == 200
 
 
 def test_run_schedule_reports_non_posix_sqlite_lock_limit(tmp_path, monkeypatch):
@@ -34,6 +395,57 @@ def test_run_schedule_reports_non_posix_sqlite_lock_limit(tmp_path, monkeypatch)
     assert response.status_code == 501
     assert "SQLite" in response.json()["error"]
     assert "POSIX" in response.json()["error"]
+
+
+def test_manual_cycle_exposes_analysis_failure_as_unverified_result(tmp_path, monkeypatch):
+    import verdict.dashboard.app as dashboard_app
+
+    url = f"sqlite:///{tmp_path / 'analysis-failure.db'}"
+    monkeypatch.setattr(dashboard_app, "build_agent_insights_bundle",
+                        lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("synthetic builder failure")))
+
+    async def request():
+        transport = httpx.ASGITransport(app=create_app(storage=url))
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            return await client.post("/api/control/actions/run-schedule",
+                                     json={"analyzeOnly": True, "includeApprovedEvaluations": False},
+                                     headers={"X-Verdict-Setup": token})
+
+    response = asyncio.run(request())
+    assert response.status_code == 200
+    assert response.json()["analysis"]["status"] == "error"
+    assert asyncio.run(_read_cycle_status(url))["state"] == "failed"
+
+
+def test_manual_cycle_persists_incomplete_local_capture_status(tmp_path):
+    source = tmp_path / "codex"
+    source.mkdir()
+    (source / "broken.jsonl").write_bytes(b"{malformed}\n")
+    url = f"sqlite:///{tmp_path / 'manual-capture.db'}"
+
+    async def request():
+        transport = httpx.ASGITransport(app=create_app(storage=url))
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            return await client.post(
+                "/api/control/actions/run-schedule",
+                json={"codexRoot": str(source), "runMonitor": False,
+                      "includeApprovedEvaluations": False},
+                headers={"X-Verdict-Setup": token},
+            )
+
+    response = asyncio.run(request())
+    assert response.status_code == 200
+    assert response.json()["capture"]["skip_reasons"] == {"malformed_jsonl": 1}
+    assert response.json()["cycleFailureCode"] == "capture_incomplete"
+    assert asyncio.run(_read_cycle_status(url))["failureCode"] == "capture_incomplete"
+
+
+async def _read_cycle_status(url):
+    transport = httpx.ASGITransport(app=create_app(storage=url))
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        return (await client.get("/api/readiness")).json()["lastCycle"]
 
 
 def test_control_documents_are_versioned_conflict_checked_and_rollbackable(tmp_path):

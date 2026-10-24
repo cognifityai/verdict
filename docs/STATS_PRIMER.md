@@ -1,6 +1,8 @@
 # The Stats Behind Verdict — A Primer for Engineers
 
-A plain-language explanation of every statistical method Verdict uses — what it is, why it was chosen over the alternatives, and how to interpret its output. Written for engineers who are strong at code but didn't take graduate statistics: it starts from intuition and builds up, with worked examples.
+A plain-language explanation of current Monitor statistics, judge calibration,
+and related historical drift diagnostics. The sections below distinguish the
+current alert path from older fixed-window methods and general examples.
 
 You should be able to read this in 30-40 minutes and come away understanding
 the statistics behind Monitor, semantic drift, and judge calibration.
@@ -14,7 +16,7 @@ the statistics behind Monitor, semantic drift, and judge calibration.
 3. [The significance test: Fisher's exact & Mann-Whitney U — does this group differ from that group?](#3-the-significance-test-fishers-exact-binary-and-mann-whitney-u-continuous)
 4. [p-values — and what they actually mean](#4-p-values--and-what-they-actually-mean)
 5. [Effect sizes — "yes, but how much?"](#5-effect-sizes--yes-but-how-much)
-6. [Cliff's δ — the right effect size for us](#6-cliffs-δ--the-right-effect-size-for-us)
+6. [Cliff's delta — a historical effect size](#6-cliffs-delta--a-historical-effect-size)
 7. [Cohen's d — kept for legacy reasons](#7-cohens-d--kept-for-legacy-reasons)
 8. [Wasserstein distance — Earth Mover's Distance](#8-wasserstein-distance--earth-movers-distance)
 9. [Population Stability Index — PSI](#9-population-stability-index--psi)
@@ -28,13 +30,17 @@ the statistics behind Monitor, semantic drift, and judge calibration.
 
 ## 1. The fundamental question we keep asking
 
-Everything Verdict does is some version of one question:
+Statistical monitoring answers one question:
 
 > *"Did something change?"*
 
-And by "change," we usually mean: *"is the quality of LLM responses today actually different from the quality yesterday, or am I just seeing random noise?"*
+Here, "change" means a measured difference between eligible reference and
+current evidence. Verdict also profiles individual runs and investigates
+recorded failures without making a statistical drift claim.
 
-There's no magic involved. You collect a sample of yesterday's responses, you collect a sample of today's responses, and then you compare them. The hard part is the comparing: when you only have a sample, not the whole universe, how do you know whether the differences you see are real or just random fluctuation?
+The comparison uses a reference cohort and a later eligible cohort. The hard
+part is deciding whether an observed difference is compatible with sampling
+variation, after accounting for evidence coverage and repeated comparisons.
 
 That's the question statistics answers. The rest of this primer is just the specific tools that answer different versions of it.
 
@@ -48,24 +54,28 @@ Before we can ask "did it change," we need a way to talk about "it."
 
 - 90% PASS, 10% FAIL → "this model is usually good on this task"
 - 50% PASS, 50% FAIL → "this model is unreliable on this task"
-- 100% PASS, 0% FAIL → "this model is perfect on this task" (suspicious)
+- 100% observed PASS, 0% observed FAIL → no failure in this sample; the
+  underlying failure rate remains uncertain
 
 The distribution captures the underlying tendency of the system. A response is a single sample from that distribution.
 
 **The catch**: you never see the true distribution. You only see samples. Maybe the model is *truly* 80% PASS, but the 17 responses you sampled yesterday happened to be 15 PASS and 2 FAIL (88%). Today you sample 18 responses and get 11 PASS, 7 FAIL (61%). Did the underlying distribution change? Or did you just get unlucky today?
 
-That's what every statistical test we use is designed to answer.
+Statistical tests help evaluate that question when the compared units and
+coverage satisfy the method's assumptions.
 
 ### The two-distribution comparison
 
-Concretely, our drift detector always has:
+The current Monitor comparison has:
 
-- **Baseline window** — the historical samples (e.g. 17 judgments from yesterday)
-- **Current window** — the recent samples (e.g. 18 judgments from today)
+- **Reference window** — the frozen earlier eligible samples
+- **Current window** — the later prospective eligible samples
 
 We ask: "are these two windows samples from the same underlying distribution, or different ones?"
 
-That's what a two-sample test answers — Fisher's exact for binary PASS/FAIL data, Mann-Whitney U for continuous metrics.
+Current Monitor uses Fisher's exact test for eligible binary metrics. The
+Mann-Whitney discussion below describes a continuous-score method used by
+older fixed-window analysis, not a current Monitor alert path.
 
 **Monitor implementation note:** Monitor freezes either count-based or explicit
 event-time membership using the captured trace's event time, then collects
@@ -99,16 +109,20 @@ that view.
 
 ## 3. The significance test: Fisher's exact (binary) and Mann-Whitney U (continuous)
 
-The most common way to compare two samples is the **t-test**, which assumes the underlying distributions are roughly normal (bell-curve shaped). Our PASS/FAIL data is **not** normal at all — it's binary (0 or 1) — so a t-test is technically inappropriate.
+The familiar **t-test** compares means. Monitor's current metrics are binary
+(0 or 1), so it instead uses an exact 2×2 test for two rates.
 
 We pick the significance test by data type:
 
-- **Binary PASS/FAIL dimensions (the common case)** → **Fisher's exact test**. Comparing two pass rates is really comparing two proportions, and the question "did the pass rate change?" is a 2×2 table: (pass vs fail) × (current vs baseline). Fisher's exact computes the probability of seeing a split this lopsided (or more) if the true rate were unchanged — *exactly*, with no large-sample approximation. That makes it the textbook test for this comparison and well-behaved at the small per-window sample sizes drift detection often runs at.
-- **Ordinal / continuous scores** → **Mann-Whitney U** (below). If you ever score on a scale rather than PASS/FAIL, this is the right non-parametric tool.
+- **Binary PASS/FAIL dimensions (the common case)** → **Fisher's exact test**. Comparing two pass rates uses a 2×2 table: (pass vs fail) × (current vs reference). Fisher's exact computes a null p-value without a large-sample approximation for that table. The inferential reading still needs appropriate, independent sampling units and the declared comparison design.
+- **Ordinal / continuous scores in older fixed-window analysis** → **Mann-Whitney U** (below). Current Monitor does not activate alerts from this path.
 
-The rest of this section explains Mann-Whitney U, which is the more general of the two; Fisher's exact is the specialization we use when the scores are binary.
+The rest of this section explains the rank-based historical diagnostic.
+Fisher's exact test is a separate test for the current binary 2×2 tables.
 
-**Mann-Whitney U** (also called the Wilcoxon rank-sum test) is the *non-parametric* alternative to the t-test. It makes no assumption about the shape of the underlying distribution. It works on the order of the values, not their specific magnitudes.
+**Mann-Whitney U** (also called the Wilcoxon rank-sum test) compares ranks
+without a normal-distribution requirement. It still requires an appropriate
+sampling design and independent units for a usual inferential interpretation.
 
 ### How it works, intuitively
 
@@ -138,10 +152,14 @@ You don't need to compute U by hand. `scipy.stats.mannwhitneyu` does it. What yo
 
 ### Why these two tests, and not a t-test
 
-- Our data is binary PASS/FAIL → not normal → t-test invalid.
+- Current Monitor metrics are binary PASS/FAIL or other Boolean observations,
+  so a 2×2 test matches the recorded outcomes directly.
 - For binary outcomes, Mann-Whitney degrades into a heavily-tied rank test that's only a weaker proxy for a two-proportion comparison — so we use **Fisher's exact test**, which answers exactly that question without approximation. Verdict's dependency-free implementation computes the two-sided p-value from the 2×2 (pass/fail × current/baseline) table and is differentially checked against SciPy.
-- For ordinal/continuous scores there are no such ties, and Mann-Whitney is exactly the right non-parametric two-sample test — the one LMSys's Chatbot Arena, Arena-Hard-Auto, and most modern LLM eval work reach for.
-- Either way we stay non-parametric and pair the test with **Cliff's δ** as the effect size (next section).
+- For ordinal/continuous scores, Mann-Whitney compares ranks, but ties and
+  dependence still need attention. It is included here to explain historical
+  diagnostics, not the current Monitor decision.
+- Current Monitor pairs Fisher's test with the **absolute difference in binary
+  rates**. Cliff's δ below explains a historical effect-size measure.
 
 ---
 
@@ -155,17 +173,20 @@ The p-value answers a *specific* question:
 
 A p-value of 0.005 means: "If there were no real difference, there's only a 0.5% chance we'd see this pattern. So either we got incredibly unlucky, or there's actually a difference."
 
-By convention, when p < 0.05 (5%), we say "the result is statistically significant" and conclude there's probably a real difference.
+By convention, p < 0.05 is sometimes called statistically significant. That
+does not by itself establish a real or operationally important change.
 
 ### The intuition pump
 
 Flip a coin 100 times. You get 60 heads. Is the coin biased?
 
 - Under "the coin is fair" (the *null hypothesis*), the chance of getting 60+ heads in 100 flips is about 2.8%.
-- That's small. So we reject "the coin is fair" and conclude it's probably biased.
+- That is evidence against a fair coin under this one-sided example, not proof
+  of bias from one experiment.
 - The 2.8% is the p-value.
 
-If you got 52 heads instead, the p-value would be about 0.69 — totally consistent with a fair coin, you can't reject it.
+If you got 52 heads instead, the one-sided p-value is about 0.382. That result
+does not reject the fair-coin null at a 0.05 threshold.
 
 ### What p-value is NOT
 
@@ -180,17 +201,22 @@ This is the difference between P(data | null) and P(null | data). Different thin
 
 The "p < 0.05 = significant" cutoff comes from R. A. Fisher's 1925 textbook. It's a convention, not a law of nature. More-conservative thresholds (p < 0.01, p < 0.001) are appropriate for higher-stakes decisions.
 
-In Verdict, we default to **p < 0.01** for emitting drift alerts because we'd rather be slow to alarm than spammy.
+`MonitorPolicy` defaults to a nominal `p_threshold` of **0.05** and a minimum
+absolute rate difference of **0.10**. A prospective comparison uses a smaller
+threshold from quadratic alpha spending across repeated looks. The nominal
+threshold applies to a historical preview, which is not an alert decision.
 
 ### What our drift detector does with p-values
 
-For each (cluster, dimension) pair, we run the significance test (Fisher's exact for binary PASS/FAIL, Mann-Whitney U for continuous) and get a p-value. We then:
+For each eligible Monitor group and binary metric, the current path computes
+a two-sided Fisher p-value. It then:
 
 1. Adjust the p-value for multiple comparisons (see §10 below)
-2. Compare against our threshold (e.g., 0.01)
-3. If it passes AND the effect size is large enough (see §5–7), emit a drift signal
+2. Compare with the threshold for that look
+3. Require at least the policy's minimum absolute rate difference before an alert
 
-p-value alone isn't enough — it only tells you "this isn't noise." It doesn't tell you HOW MUCH things changed. That's what effect sizes are for.
+A p-value alone does not tell you how much changed. That is what an effect size
+reports; neither measure repairs missing or dependent evidence.
 
 ---
 
@@ -204,14 +230,15 @@ That's where **effect size** comes in. An effect size answers:
 
 > *"How big is the difference, in practical terms?"*
 
-p-value says: "is it noise?" → yes/no.
+p-value says: "how surprising is this evidence under the null?" → a probability, not a yes/no diagnosis.
 Effect size says: "how big is the signal?" → magnitude.
 
 You need BOTH. p-value without effect size lets trivial differences trigger alarms. Effect size without p-value lets random fluctuations look meaningful.
 
-Verdict's drift detector requires:
-- **BH-adjusted p < 0.01** AND
-- **|Cliff's δ| > 0.147** (the "small effect" threshold)
+Current Monitor's default policy requires:
+- **BH-adjusted p ≤ the threshold for that look** (nominally 0.05 before
+  prospective alpha spending), and
+- **absolute current-minus-reference rate ≥ 0.10**.
 
 Both gates have to pass for a signal to fire.
 
@@ -219,9 +246,11 @@ There are many different effect sizes — Cohen's d, Cliff's δ, Glass's Δ, Hed
 
 ---
 
-## 6. Cliff's δ — the right effect size for us
+## 6. Cliff's delta — a historical effect size
 
-**Cliff's δ** (Cliff, 1996) is a non-parametric effect size. It pairs correctly with Mann-Whitney U because both make no assumption about the underlying distribution.
+**Cliff's δ** (Cliff, 1996) is a rank-based effect size. It can accompany
+Mann-Whitney U without a normal-distribution assumption, but neither statistic
+removes the need for an appropriate sampling design.
 
 ### The definition
 
@@ -261,14 +290,15 @@ That's a "medium-large" effect by Romano et al. 2006 thresholds:
 That is a medium-to-large effect size, which matches the intuitive "this pass
 rate dropped materially" reading.
 
-### Why Cliff's δ is right for us
+### How the historical pipeline interpreted Cliff's delta
 
 - **Pairs with Mann-Whitney U.** Both are non-parametric. Same family.
 - **Bounded in [−1, +1].** Easy to interpret. Easy to threshold.
 - **Robust to outliers and weird distributions.** Doesn't break on binary data.
 - **Directly interpretable.** "The probability your post-regression response is worse than a pre-regression response is 39 percentage points higher than the reverse."
 
-This is what the current drift detector uses for effect-size gating.
+The older fixed-window drift pipeline used Cliff's δ for effect-size gating.
+Current Monitor uses a binary rate difference.
 
 ---
 
@@ -300,7 +330,8 @@ interpretable rate difference for binary metrics.
 
 ### When Cohen's d would be appropriate
 
-For continuous quality scores (e.g., a judge that returns a 0-100 number rather than PASS/FAIL), Cohen's d would be fine. The standard deviation makes sense for continuous data. We'll likely add continuous-score judges in v1, and at that point Cohen's d becomes valid alongside Cliff's δ.
+For a future continuous-score method, a standardized mean difference might be
+useful if its sampling assumptions hold. This is not a current Monitor path.
 
 ---
 
@@ -320,15 +351,16 @@ For two distributions of binary 0/1 data:
 In the binary example above, the Wasserstein distance is exactly the amount of
 mass that shifted from PASS to FAIL.
 
-### Why we use it alongside Mann-Whitney
+### Why older fixed-window analysis reported it alongside Mann-Whitney
 
-- **More sensitive to small persistent shifts** than Mann-Whitney, especially on continuous data.
-- **Directly interpretable.** "About 39% of mass moved from 1 to 0."
+- **Directly interpretable.** In the example above, 30% of probability mass
+  moves from 1 to 0.
 - **Symmetric and metric.** It's a real distance function in mathematical terms; satisfies triangle inequality.
 - **Common in ML monitoring.** Useful as a secondary distance-based view of
   distribution movement.
 
-We compute it via `scipy.stats.wasserstein_distance` (a few lines of code, no new dependency).
+Older fixed-window analysis computed this diagnostic. It does not activate a
+current Monitor alert.
 
 ### Limits
 
@@ -340,7 +372,9 @@ We compute it via `scipy.stats.wasserstein_distance` (a few lines of code, no ne
 
 ## 9. Population Stability Index — PSI
 
-PSI is the third drift signal we compute. It's standard in credit risk modeling and increasingly common in ML observability. It tells you how much a categorical or binned distribution has shifted.
+PSI is a distribution-shift diagnostic in older fixed-window analysis. It
+compares categorical or binned distributions; it is not a current Monitor
+alert gate.
 
 ### The formula
 
@@ -352,15 +386,14 @@ Then sum across all bins. The result is PSI.
 
 ### Interpretation
 
-Industry-standard thresholds:
+Common heuristic ranges, not statistical significance tests:
 
-- **PSI < 0.1**: no significant population change
-- **0.1 ≤ PSI < 0.25**: moderate population change — investigate
-- **PSI ≥ 0.25**: significant population change — investigate immediately
+- **PSI < 0.1**: a small diagnostic value under this convention
+- **0.1 ≤ PSI < 0.25**: a moderate diagnostic value to inspect
+- **PSI ≥ 0.25**: a larger diagnostic value to inspect
 
 ### Why we use it
 
-- Industry-standard. Auditors and ML platform teams expect to see PSI numbers.
 - Captures distributional shift on binned data.
 - Easy to compute and interpret.
 
@@ -372,7 +405,7 @@ still detects a shift from an all-PASS baseline to a mixed current window. If
 both windows contain the same single constant value, PSI is correctly zero. For
 continuous data it uses baseline-driven linear edges; a constant continuous
 baseline remains a limitation, so read PSI alongside Wasserstein and the
-primary Fisher/Cliff gates rather than as an independent alert.
+older fixed-window tests rather than as an independent alert.
 
 ---
 
@@ -380,33 +413,45 @@ primary Fisher/Cliff gates rather than as an independent alert.
 
 Here's a subtle problem that bites every statistics-naïve product.
 
-**The problem.** If you run 100 statistical tests at p < 0.05, you'd expect ~5 to come up "significant" purely by chance. So if your dashboard runs 50 (cluster × dimension) tests every hour, you'd expect ~2.5 false-positive drift alerts per hour even when literally nothing has changed.
+**The problem.** With 100 valid null p-values at a per-test threshold of 0.05,
+the expected number of raw false rejections is five. Repeating comparisons
+creates additional opportunities for false rejections. That arithmetic is an
+illustration of uncorrected tests, **not** a forecast of Verdict alerts:
+Monitor also applies within-look adjustment, prospective alpha spending,
+minimum effect size, and evidence-eligibility gates.
 
 This is the **multiple comparisons problem**.
 
-### The Bonferroni approach (too conservative)
+### The Bonferroni approach
 
-The classic fix: divide your significance threshold by the number of tests. If you're running 100 tests and want overall false-positive rate < 5%, require each individual test to pass at p < 0.0005 (= 0.05/100). This is **Bonferroni correction**.
+The classic fix: divide the family threshold by the number of tests. With 100
+valid null p-values and family-wise error target 5%, require each p-value to
+pass 0.0005 (= 0.05/100). This is **Bonferroni correction**: it bounds the
+probability of at least one false rejection in that declared family.
 
-Problem: Bonferroni is extremely conservative. With 100 tests, it nearly eliminates your ability to detect anything real. Most real drift signals will get missed.
+That stricter threshold can reduce power when many hypotheses are tested.
 
-### The Benjamini-Hochberg approach (the standard)
+### The Benjamini-Hochberg approach
 
-**Benjamini-Hochberg** (1995) controls a different quantity: **False Discovery Rate (FDR)**. Instead of guaranteeing "almost no false positives" (Bonferroni), it controls "what fraction of the alerts we emit will be false positives" — typically targeted at 5% or 1%.
+**Benjamini-Hochberg** (1995) targets a different quantity: the **expected
+false-discovery proportion** among rejected hypotheses in one declared family,
+under its p-value and dependence assumptions. A chosen level does not
+guarantee that the realized fraction of alerts is below that level in any
+particular comparison, nor does one application cover repeated future looks.
 
 The procedure:
 
 1. Rank all your p-values from smallest to largest.
 2. For each p-value at rank k out of N, compute its adjusted threshold: `(k/N) × α`.
-3. The smallest p-value needs to be very small; the largest only needs to be below α.
+3. The rank threshold grows with k; no rank is decided in isolation.
 4. Find the largest k where p_k ≤ (k/N) × α. Everything at rank ≤ k is "significant."
 
-### Why BH is the modern standard
+### Why use BH for a declared family
 
 - Much less conservative than Bonferroni.
-- Controls a meaningful quantity (proportion of false positives in your "discoveries").
-- Used in essentially every modern eval/ML paper.
-- 13 lines of Python to implement.
+- Targets expected false-discovery proportion for the declared family under
+  the method's assumptions.
+- Can retain more power than Bonferroni when many signals are present.
 
 ### Our application
 
@@ -423,12 +468,15 @@ alerted in this run?" Today the production judge emits binary PASS/FAIL scores,
 so its scored drift path uses Fisher's exact throughout and the mixed-test
 distinction is normally inactive.
 
-For a customer with 50 intent clusters × 5 dimensions = 250 tests:
-- Smallest p-value needs to be < 0.0002 to pass BH at α=0.05
-- Median needs to be < 0.01
-- Largest only needs to be < 0.05
+For 50 eligible groups × 5 metrics = 250 tests at a **single-look** level of
+0.05, the rank-one cutoff is 0.0002, the rank-125 cutoff is 0.025, and the
+rank-250 cutoff is 0.05. These are comparison thresholds, not separate
+requirements for each p-value: BH finds the largest passing rank, then rejects
+all hypotheses up to that rank. A prospective look normally has a smaller
+spent level than the nominal 0.05.
 
-That keeps us honest. Without BH correction, customers would mute our alerts within a day.
+Repeated prospective looks also need the separate alpha-spending rule described
+above; a within-look BH adjustment alone does not cover repeated monitoring.
 
 ---
 
@@ -471,15 +519,17 @@ The key change: instead of P_e = Σ p_a_c × p_b_c (product of marginals, which 
 
 ### Operational interpretation
 
-Verdict currently uses the same operational thresholds for AC1:
+The `verify_rubric_alignment.py` workflow classifies **pooled AC1 confidence
+intervals**, not the point estimate alone:
 
-- AC1 ≥ 0.80: strong
-- AC1 0.60–0.80: acceptable
-- AC1 0.40–0.60: preliminary
-- AC1 < 0.40: unreliable
+- 95% CI lower bound ≥ 0.60: `STRONG`.
+- Otherwise, 95% CI lower bound ≥ 0.40: `USABLE for drift`.
+- Otherwise, 95% CI upper bound < 0.40: `WEAK`.
+- Otherwise: `INCONCLUSIVE`; collect more labels.
 
-Verdict reports AC1 beside raw agreement and confidence intervals so the point
-estimate is never read without its sample uncertainty.
+It reports AC1 beside raw agreement and 95% bootstrap intervals. The
+dashboard's separate evaluator-health example-agreement gate uses a Wilson
+interval and a different default threshold; it is not an AC1 cutoff.
 
 ---
 
@@ -500,6 +550,12 @@ For each binary metric in an eligible Monitor group:
 6. alert only when both the adjusted p-value and minimum absolute rate-change
    thresholds pass.
 
+The `response_empty` metric means the **captured response text** is blank after
+trimming whitespace. Calls with no captured response field are excluded from
+that metric. A successful tool-only completion can have blank text, so a
+significant change in this rate is labeled a text-pattern change, not proof of
+a quality regression or task failure.
+
 For every metric cell, the frozen cohort summary also retains the first five
 true and first five false unit identities in cohort order. The summaries are the
 single stored owner of those identities. For an alert, the dashboard selects
@@ -515,25 +571,29 @@ coverage do not become no-alert results. This is implemented in
 
 ### Flavor 2: "Is our judge any good?"
 
-For customer-labeled PASS/FAIL examples:
+Verdict has two distinct checks on human-labeled examples:
 
-1. Run the configured binary rubric judge.
-2. Keep `UNCLEAR` and execution errors outside the comparable denominator.
-3. Report raw exact-match agreement with a Wilson interval.
-4. Report **Gwet's AC1** as the chance-corrected agreement measure.
-5. Use a bootstrap confidence interval rather than trusting the point estimate.
-
-This is `scripts/verify_rubric_alignment.py` and the dashboard calibration flow.
+- `scripts/verify_rubric_alignment.py` compares human and judge PASS/FAIL
+  labels, excludes noncomparable outcomes, and reports raw agreement plus
+  **Gwet's AC1 with a 95% bootstrap interval**. Its pooled verdict uses the
+  AC1 interval bounds described in §12; raw agreement has no Wilson interval
+  in this script.
+- The dashboard sentinel workflow reports exact **whole-example agreement**,
+  per-label agreement, and a **Wilson interval for whole-example agreement**.
+  It requires enough completed examples and no judge errors before declaring
+  health; the default threshold applies to the Wilson lower bound. This
+  workflow does not calculate AC1.
 
 ### The cross-cutting concept
 
-Notice that every pipeline does the same three things in different ways:
+These are different questions with different denominators and gates:
 
-1. **Compare two distributions** (Fisher/Mann-Whitney, Cliff's δ, Wasserstein)
-2. **Quantify disagreement** between labels (raw agreement and AC1)
-3. **Correct for chance / multiple testing** (BH adjustment, chance-corrected agreement)
-
-That's basically all of frequentist statistics in three sentences.
+1. **Current Monitor:** compare eligible binary rates with Fisher, BH within
+   a look, prospective alpha spending, and a minimum absolute rate difference.
+2. **Judge calibration:** compare human and judge labels with agreement and
+   uncertainty measures.
+3. **Historical diagnostics:** interpret older continuous and distributional
+   measures without treating them as current Monitor alert gates.
 
 ---
 
@@ -542,14 +602,15 @@ That's basically all of frequentist statistics in three sentences.
 | You want to know | Use | Output |
 |---|---|---|
 | Did two pass rates (binary) differ? | Fisher's exact test | p-value |
-| Did two samples (continuous) come from the same distribution? | Mann-Whitney U | p-value |
-| How big is the difference (non-parametric)? | Cliff's δ | -1 to +1 |
-| How big is the difference (assumes normal)? | Cohen's d | -∞ to +∞ |
-| How much mass shifted from one distribution to the other? | Wasserstein distance | ≥ 0 |
-| Is the distributional shift industry-significant? | PSI | < 0.1 stable, ≥ 0.25 shifted |
+| How big is the current binary rate change? | Current-minus-reference rate | −1 to +1; current Monitor uses its absolute value |
+| Did two samples (continuous) differ in older analysis? | Mann-Whitney U | p-value; not a current Monitor alert |
+| How big was a historical rank-based difference? | Cliff's δ | −1 to +1; not a current Monitor alert gate |
+| What standardized mean difference did older analysis report? | Cohen's d | Not a current Monitor alert gate |
+| How much mass shifted in older analysis? | Wasserstein distance | ≥ 0; diagnostic |
+| Did binned proportions shift in older analysis? | PSI | Heuristic diagnostic, not a p-value |
 | I ran many tests — am I just getting false positives? | Benjamini-Hochberg correction | adjusted p-values |
 | Did judge evaluability deteriorate? | Deterministic UNCLEAR-rate gate | ≥15-point increase with total-n floor |
-| Do two raters agree after chance correction? | Gwet's AC1 | -1 to +1; ≥ 0.6 acceptable |
+| Do two raters agree after chance correction? | Gwet's AC1 | −1 to +1; the rubric-alignment workflow classifies its 95% CI bounds |
 
 The most important point: **p-value and effect size answer different questions and you need both**. p-value alone lets trivial differences trigger alarms with enough data. Effect size alone lets random fluctuations look meaningful. Use them together.
 

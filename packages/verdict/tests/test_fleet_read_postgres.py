@@ -1,4 +1,4 @@
-"""Live PostgreSQL tests for the opt-in Fleet ReadPort V1 boundary."""
+"""Live PostgreSQL tests for the opt-in Fleet ReadPort boundary."""
 
 from __future__ import annotations
 
@@ -17,8 +17,9 @@ import pytest
 from _postgres_test_safety import isolated_test_dsn, validate_test_dsn
 from verdict.fleet_read_port import (
     PostgresVerdictFleetReadPortV1,
+    PostgresVerdictFleetReadPortV2,
     VerdictFleetReadError,
-    trace_window_read_to_json,
+    trace_window_read_v2_to_json,
 )
 from verdict.storage.postgres import PostgresStorage
 
@@ -275,13 +276,13 @@ def test_live_fleet_prepare_read_isolation_and_disable() -> None:
             ("verdict_fleet_traces_v1", "SELECT", "NO"),
         ]
 
-        reader = PostgresVerdictFleetReadPortV1(reader_dsn, tenant_id=tenant_id)
+        reader = PostgresVerdictFleetReadPortV2(reader_dsn, tenant_id=tenant_id)
         result = reader.read_trace_window(
             tenant_id=tenant_id,
             window_start=now,
             window_end=now + timedelta(minutes=15),
         )
-        encoded = trace_window_read_to_json(result)
+        encoded = trace_window_read_v2_to_json(result)
 
         assert result.item_count == 1
         assert result.items[0].trace_id == "trace-a"
@@ -601,23 +602,74 @@ def test_live_read_derives_status_and_not_found_without_error_text() -> None:
             reader_role=role,
             tenant_id=tenant_id,
         )
-        reader = PostgresVerdictFleetReadPortV1(reader_dsn, tenant_id=tenant_id)
+        reader = PostgresVerdictFleetReadPortV2(reader_dsn, tenant_id=tenant_id)
+        legacy = PostgresVerdictFleetReadPortV1(reader_dsn, tenant_id=tenant_id)
         try:
             result = reader.read_trace_window(
                 tenant_id=tenant_id,
                 window_start=now,
                 window_end=now + timedelta(minutes=15),
             )
+            legacy_result = legacy.read_trace_window(
+                tenant_id=tenant_id, window_start=now,
+                window_end=now + timedelta(minutes=15),
+            )
         finally:
             reader.close()
+            legacy.close()
 
         assert [(item.trace_id, item.request_status) for item in result.items] == [
-            ("failed", "failed"),
+            ("failed", "error_recorded"),
             ("in-progress", "in_progress"),
+        ]
+        assert [(item.trace_id, item.request_status) for item in legacy_result.items] == [
+            ("failed", "failed"), ("in-progress", "in_progress"),
         ]
         assert all(item.agent_link_state == "not_found" for item in result.items)
         assert all(item.agent_event_id is None for item in result.items)
-        assert "private-error-canary" not in trace_window_read_to_json(result)
+        assert "private-error-canary" not in trace_window_read_v2_to_json(result)
+
+
+def test_v1_fails_closed_and_v2_partitions_no_error_empty_error_and_early_error() -> None:
+    from verdict._fleet_postgres import configure_fleet
+
+    now = datetime(2026, 9, 14, 12, tzinfo=timezone.utc)
+    with _fleet_database() as (owner_dsn, reader_dsn, role, _schema, tenant_id):
+        for trace_id, ended_at, error in (
+            ("ended", now + timedelta(seconds=1), None),
+            ("empty-error", now + timedelta(seconds=1), ""),
+            ("error-no-end", None, "timeout-canary"),
+            ("unfinished", None, None),
+        ):
+            _insert_trace_and_agent_link(
+                owner_dsn, tenant_id=tenant_id, trace_id=trace_id,
+                include_agent_link=False, ended_at=ended_at, error=error,
+            )
+        configure_fleet(owner_dsn, action="prepare", reader_role=role, tenant_id=tenant_id)
+        v1 = PostgresVerdictFleetReadPortV1(reader_dsn, tenant_id=tenant_id)
+        v2 = PostgresVerdictFleetReadPortV2(reader_dsn, tenant_id=tenant_id)
+        try:
+            with pytest.raises(VerdictFleetReadError, match="unsupported_version"):
+                v1.read_trace_window(
+                    tenant_id=tenant_id, window_start=now,
+                    window_end=now + timedelta(minutes=15),
+                )
+            result = v2.read_trace_window(
+                tenant_id=tenant_id, window_start=now,
+                window_end=now + timedelta(minutes=15),
+            )
+        finally:
+            v1.close()
+            v2.close()
+        assert [(item.trace_id, item.request_status) for item in result.items] == [
+            ("empty-error", "error_recorded"),
+            ("ended", "ended_no_error_recorded"),
+            ("error-no-end", "error_recorded"),
+            ("unfinished", "in_progress"),
+        ]
+        encoded = trace_window_read_v2_to_json(result)
+        assert "timeout-canary" not in encoded
+        assert "succeeded" not in encoded
 
 
 def test_live_read_rejects_malformed_numeric_source_row() -> None:
@@ -638,7 +690,7 @@ def test_live_read_rejects_malformed_numeric_source_row() -> None:
             reader_role=role,
             tenant_id=tenant_id,
         )
-        reader = PostgresVerdictFleetReadPortV1(reader_dsn, tenant_id=tenant_id)
+        reader = PostgresVerdictFleetReadPortV2(reader_dsn, tenant_id=tenant_id)
         try:
             with pytest.raises(VerdictFleetReadError) as raised:
                 reader.read_trace_window(
@@ -674,7 +726,7 @@ def test_live_read_rejects_dense_window_without_truncating() -> None:
             reader_role=role,
             tenant_id=tenant_id,
         )
-        reader = PostgresVerdictFleetReadPortV1(reader_dsn, tenant_id=tenant_id)
+        reader = PostgresVerdictFleetReadPortV2(reader_dsn, tenant_id=tenant_id)
         try:
             with pytest.raises(VerdictFleetReadError, match="window_too_dense"):
                 reader.read_trace_window(
@@ -710,7 +762,7 @@ def test_live_read_rejects_serialized_response_over_two_mib() -> None:
             reader_role=role,
             tenant_id=tenant_id,
         )
-        reader = PostgresVerdictFleetReadPortV1(reader_dsn, tenant_id=tenant_id)
+        reader = PostgresVerdictFleetReadPortV2(reader_dsn, tenant_id=tenant_id)
         try:
             with pytest.raises(VerdictFleetReadError, match="response_limit_exceeded"):
                 reader.read_trace_window(
@@ -720,6 +772,41 @@ def test_live_read_rejects_serialized_response_over_two_mib() -> None:
                 )
         finally:
             reader.close()
+
+
+@pytest.mark.parametrize("reader_type", [PostgresVerdictFleetReadPortV1, PostgresVerdictFleetReadPortV2])
+def test_live_read_bounds_projected_text_before_client_materialization(monkeypatch, reader_type) -> None:
+    import psycopg
+    import verdict._fleet_postgres as fleet_postgres
+    from verdict._fleet_postgres import configure_fleet
+
+    now = datetime(2026, 9, 14, 12, tzinfo=timezone.utc)
+    with _fleet_database() as (owner_dsn, reader_dsn, role, _schema, tenant_id):
+        with psycopg.connect(owner_dsn, autocommit=True) as owner:
+            owner.execute(
+                "INSERT INTO traces(trace_id,tenant_id,started_at,ended_at,error,provider,request_model) "
+                "VALUES ('oversize',%s,%s,%s,'',%s,%s)",
+                (tenant_id, now, now + timedelta(seconds=1), "p" * 500_000, "m" * 500_000),
+            )
+        configure_fleet(owner_dsn, action="prepare", reader_role=role, tenant_id=tenant_id)
+        projected: list[tuple[int, int]] = []
+        actual = fleet_postgres._row_to_contribution
+
+        def observe(row, tenant, *, version=1):
+            projected.append((len(row[5]), len(row[6])))
+            return actual(row, tenant, version=version)
+
+        monkeypatch.setattr(fleet_postgres, "_row_to_contribution", observe)
+        reader = reader_type(reader_dsn, tenant_id=tenant_id)
+        try:
+            with pytest.raises(VerdictFleetReadError, match="invalid_read_model"):
+                reader.read_trace_window(
+                    tenant_id=tenant_id, window_start=now,
+                    window_end=now + timedelta(minutes=15),
+                )
+        finally:
+            reader.close()
+        assert projected == [(129, 257)]
 
 
 def test_live_close_bounds_active_read_and_discards_its_late_result() -> None:
@@ -740,7 +827,7 @@ def test_live_close_bounds_active_read_and_discards_its_late_result() -> None:
             reader_role=role,
             tenant_id=tenant_id,
         )
-        reader = PostgresVerdictFleetReadPortV1(reader_dsn, tenant_id=tenant_id)
+        reader = PostgresVerdictFleetReadPortV2(reader_dsn, tenant_id=tenant_id)
         blocker = psycopg.connect(owner_dsn)
         blocker.execute("LOCK TABLE traces IN ACCESS EXCLUSIVE MODE")
         with ThreadPoolExecutor(max_workers=1) as executor:
@@ -823,7 +910,7 @@ def test_live_read_rejects_ambiguous_reverse_agent_link() -> None:
                 (tenant_id, now),
             )
 
-        reader = PostgresVerdictFleetReadPortV1(reader_dsn, tenant_id=tenant_id)
+        reader = PostgresVerdictFleetReadPortV2(reader_dsn, tenant_id=tenant_id)
         try:
             with pytest.raises(VerdictFleetReadError, match="invalid_read_model"):
                 reader.read_trace_window(

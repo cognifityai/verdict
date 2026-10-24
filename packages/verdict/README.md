@@ -16,9 +16,11 @@ python -m pip install "cognifity-verdict[dashboard]==0.1.0b2"
 verdict
 ```
 
-The `0.1.0b2` wheel includes the Agent Profiler workflow described below. The
-dashboard opens a local setup page; no Verdict source checkout is required for
-normal capture or investigation.
+The published `0.1.0b2` wheel includes the original Agent Profiler capture
+and investigation workflow. The guided Home, retained recent-fact behavior,
+worker status, and selected-evidence explanations described below are in this
+unreleased source checkout; they are not available from that PyPI wheel. The
+published dashboard opens a local setup page without a source checkout.
 
 The initial setup page can connect an existing application store, approve and
 rescan local Claude Code/Codex histories,
@@ -31,7 +33,57 @@ the complete provider-call record used for evaluation and drift. Events may
 retain bounded scalar summaries but never copy prompt, response, or raw-message
 content. Run timelines are read in bounded pages instead of from one growing
 serialized row.
-Bounded redacted content retention is on by default; metadata-only capture is
+When a local history reaches 1,500 source events, the canonical run retains
+its bounded prefix and a capture-limit marker. Investigation can also show a
+separate, dated window of up to 100 recent turns and 50 redacted events;
+the marker starts at the first Turn with an omitted event, so earlier fully
+captured Turns remain eligible for judging. The recent window indexes up to
+50 selected events. Bounded, fully parsed files within the local full-capture
+budget also retain other non-prefix events and tail turns. Investigation's
+**Browse recorded events** pages those events after checking the committed
+revision, turn ownership, and exact event count; this proves recorded-event
+coverage for that captured revision, not task success or source-absent actions.
+**Analyze recorded run** applies deterministic run checks to those retained
+typed events and turns after the same proof and links findings to an exact
+recorded-event page. It shows one evidence-linked suggested next step when an
+existing deterministic rule supports one; a suggestion is not a verified fix.
+The on-demand Turn analysis API can inspect a retained tail Turn after this
+proof, within its event limit. A saved Insights analysis also includes verified
+retained turns and events for admitted sources within a 5,000 additional-row
+scan budget; sources beyond that analysis budget stay labeled partial. The
+ordinary run detail remains a bounded canonical-prefix view. Day
+recorded-issue totals can use all retained typed events after
+the same proof and bounded scan. Files above the full-capture admission budget
+that remain within the parser limits retain selected recent facts only.
+Explicit recorded failures can create durable issue notices
+after monitoring is activated, and linked model calls retain their Trace for
+supported call-level evaluation. The partial bounded view supplies no whole-run
+issue or no-alert denominator and does not make an incomplete Turn eligible for
+Turn judging. A window whose source revision no longer
+matches the committed import is withheld until a successful refresh.
+Investigation provides first-seen-revision exact links for retained recent
+events, including after the window moves. The saved window keeps event references;
+Investigation loads their retained details in one read snapshot. An older exact
+link to an event still in the window opens it there. Rescans reverify retained facts and
+linked Traces before accepting a new source revision. Insights labels observed
+historical-prefix findings and excludes unverified or analysis-budget-limited
+histories from whole-run outcome counts. Selecting an Insights issue beyond the
+quick-view prefix opens the deterministic recorded-run report and its exact
+retained event when available; this navigation makes no AI judge call. The
+recorded report appears first, while bounded prefix findings stay available
+under **Historical prefix details** with prefix-labeled counts. A report's
+evidence action opens the selected recorded event in view.
+Local imports above 1,000 turns retain a bounded historical prefix and an
+atomic recent window. The V1 whole-run read rejects that partial prefix;
+earlier fully captured turns remain selectable. A live file with an unfinished final JSONL line retains its
+complete records, while source coverage and optional AI previews mark the
+affected run/last turn partial. A later completed append clears that transient
+coverage. Agent Turn judge previews and writes exclude the affected last turn;
+any earlier score is hidden while its source is partial. Earlier complete turns
+remain eligible. A fresh saved analysis incorporates the source revision.
+Conflicting or truncated rescans leave the earlier canonical run
+intact and report `local_source_conflict`.
+Bounded redacted content capture is on by default; metadata-only capture is
 an explicit SDK/programmatic override, not a shortcut in local setup. After capture, the same page becomes
 **Data sources**, reports the evidence sources observed in the current store, and requires
 fresh in-process path approval for manual edits or rescans. Agent Run and LLM
@@ -76,6 +128,9 @@ verdict-monitor run --storage sqlite:///./verdict.db
 verdict-service --storage sqlite:///./verdict.db --once
 ```
 
+For a configured single-tenant dashboard, give `verdict-service` the same
+`--tenant-id`; otherwise both commands use `__verdict_local__`.
+
 Instrumented applications can add the execution structure surrounding those
 LLM calls without creating a second content record:
 
@@ -108,6 +163,15 @@ commands, tests, artifacts, retries, handoffs, feedback, and outcomes. Sync and
 async context managers share the same API contract. With content capture on, a
 turn whose caller does not provide an output records missing response evidence;
 metadata-only capture records that content as not captured.
+For a command or test that may be rerun, pass the same non-secret opaque
+`check_id` to `turn.record_command(...)` or `turn.record_test(...)` on each
+attempt. Verdict stores a SHA-256 digest of the exact ID bytes, even with
+content capture disabled. When an operator attaches a later passing event to
+a failure notice, Monitoring identifies a matching application-supplied check
+ID. This identifies the reported check, not the same inputs, task, or a
+recovered application. IDs are case-sensitive, limited to 256 UTF-8 bytes,
+and should not contain secrets or personal data: an unsalted digest of a
+guessable value is not confidential.
 `ToolOrigin` records only an explicitly observed outer dispatch boundary:
 `MCP`, `PROVIDER_HOSTED`, or `APPLICATION`. Omit it when unknown. Verdict never
 infers origin from a tool name, and the label cannot prove which protocols a
@@ -178,9 +242,9 @@ VERDICT_DATABASE_URL="$VERDICT_OWNER_DATABASE_URL" \
 The private integration uses its dedicated reader URL:
 
 ```python
-from verdict.fleet_read_port import PostgresVerdictFleetReadPortV1
+from verdict.fleet_read_port import PostgresVerdictFleetReadPortV2
 
-fleet = PostgresVerdictFleetReadPortV1(
+fleet = PostgresVerdictFleetReadPortV2(
     verdict_reader_url,
     tenant_id=authorized_tenant_id,
 )
@@ -191,6 +255,15 @@ window = fleet.read_trace_window(
 )
 fleet.close()
 ```
+
+V2 reports `error_recorded`, `in_progress`, or
+`ended_no_error_recorded`; none asserts successful response or task outcome.
+The published V1 DTO remains importable, but its live reader now returns
+`unsupported_version` for a window containing ended calls with no recorded
+error or error records without an end time. Select V2 for mixed real traffic.
+Both versions use the same bounded views and role grants.
+The reader projects bounded text before fetching rows; overlong source fields
+fail closed instead of transferring unbounded content to the reader process.
 
 Disable only that role/tenant mapping with the same command using `disable` in
 place of `prepare`. The shared views and index remain inert for another mapped
@@ -213,11 +286,14 @@ verdict-import agent-file ./verdict-capture --storage sqlite:///./verdict.db
 The same file transport carries provider Traces, Agent evidence, and manual
 spans. Use one spool directory per producer process. Manual import
 reads complete records from active, sealed, or rejected segments. For central
-PostgreSQL Agent ingestion, `verdict-collector` provides authenticated bounded
+PostgreSQL capture, `verdict-collector` provides authenticated bounded
 batches and durable idempotent acknowledgements, while `verdict-shipper`
 uploads complete segment prefixes and deletes only sealed, fully accepted
-segments. Collector-rejected segments remain locally recoverable. Standalone
-Trace and Span records still require direct or manual file import.
+segments. The collector in this source tree accepts Agent, standalone Trace,
+and Span records; collector-rejected segments remain locally recoverable. A
+previously completed rejection receipt is immutable, and the shipper skips
+quarantined `.rejected` segments. Recover those records through reviewed manual
+import or an explicit new-delivery procedure after upgrading the collector.
 Use `verdict-shipper --spool-directory ./verdict-capture --status --json` to
 inspect local backlog without the collector or its key. Completed appends bypass
 Python userspace buffering but are not `fsync`-ed. If an Agent evidence stream
@@ -225,7 +301,7 @@ fails, later provider calls fall back to standalone Trace records. Quota or
 write failures increment the process-local `capture.dropped_records` metric and
 produce a bounded warning.
 
-The Monitor UI previews an immutable count-based (older 80% / newer 20% by
+The dashboard's **Model drift setup** previews an immutable count-based (older 80% / newer 20% by
 default) or explicit-date policy before activation. One genuine model-call
 Trace is the only analysis unit supported by the persisted prospective alert
 lifecycle. Each metric has its own
@@ -255,6 +331,13 @@ groups are reported rather than pooled into a comparison. `verdict-monitor` is
 a one-shot idempotent runner. It and `verdict-service` use the same stored
 evaluator, dimensions, grouping version, and trace selection as the dashboard.
 `verdict-service` executes the dashboard's saved schedule once or continuously.
+The continuous worker polls for plan revisions every 30 seconds, preserves a
+worker-only next due time, and waits while the plan is paused. A transient
+cycle failure records its outcome and cooldown while the worker keeps polling.
+The one-shot worker rejects a saved plan changed or paused before its lock was
+acquired, without starting capture or judge work. `--once` exits
+nonzero when its recorded cycle fails. Pausing prevents later cycles but does
+not cancel a cycle already selected by the worker.
 The approved baseline membership and normalized metric counts are immutable.
 Grouped monitors are limited to 250 distinct groups. Older stored monitors
 without frozen cohort facts, without evaluator-finalization state when an
@@ -278,22 +361,43 @@ newest 1,000 stored Turn-result slots, exposes at most 100 identities, and marks
 the response when older slots were not inspected.
 
 The dashboard reads key-free findings from immutable analysis snapshots rather
-than recomputing them on every page load. It reports provider outcome,
+than recomputing them on every page load. It reports recorded provider errors,
 evaluation status, finding severity, and drift comparison independently.
 `not evaluated` and `judge error` are explicit Trace states. A prospective
 monitor distinguishes traffic collection from a full cohort awaiting selected
 evaluator results.
-The dashboard shows four primary tasks: Overview, Investigate, Evaluate, and
-Monitor. Select a UTC day in Overview and use **Explain this day** for its
-measured token contributors and a bounded recent-day comparison. **Ask AI why**
+The unreleased source dashboard has six primary destinations: Home, Suggested
+setup, Monitoring, Investigation, Groups, and Model drift setup. Groups includes
+separate bounded, read-only previews of captured run execution statuses and
+reported tool outcomes for terminal production runs. Missing run completion
+and unclear tool coverage remain explicit; neither preview makes an alert claim.
+Malformed or non-object result attributes remain unclear; an explicit failed
+or timed-out status still appears as recorded failure.
+Settings shows committed alert delivery, bounded worker retries, and an
+explicit review before an old alert is sent to a changed destination. The
+queue shows problem counts, puts problems first among loaded items, and pages
+through older alerts (including older problems); the worker
+attempts at most two sends per drain so a slow destination does not hold the
+analysis lock for an entire backlog.
+Select a UTC day in Home and use **Explain this day** for its
+measured token contributors and a bounded recent-day comparison. An incomplete
+final local-history line or an older local import without a verified source
+checkpoint on the selected or a reference day withholds that comparison while
+preserving recorded token sums. Red markers on the agent-turn chart show dates with deterministic recorded issue events; the selected date links example events to their exact run evidence. An explicitly timed-out tool, command, or test execution counts as a recorded issue. Event dates and turn-token dates use different recorded timestamps. An incomplete stored-event scan withholds its count; when local event history is incomplete or unverified, captured issue examples remain linked but their observed count is only a lower bound for the displayed day. An event-only cap does not itself block token comparisons when all Turns and token totals were captured; missing Turns can block days intersecting their verified parsed Turn interval, while an unverified source can affect the displayed window. **Ask AI why**
 previews aggregate-only context and the destination before one approved call;
 the answer does not establish waste or verified savings. Report and Settings
-are available from the header. Report summarizes application calls excluding
+are available from the sidebar. Report summarizes application calls excluding
 Verdict-owned judge and paired-replay work over the last 30 UTC calendar days
 by default, with 7-day, 90-day, and all-time
 choices. Its chart shows up to 31 active dates in the selected period, plus the
 top 20 service/environment rows and top 20 models. Latency coverage uses every
 known value in the period; p50/p95 use the newest 10,000 known latencies.
+The report and Reliability analysis distinguish recorded provider errors,
+calls that ended without a recorded error, and unfinished calls. An absent
+error is not proof of a successful response. Saved analysis from an older
+analyzer version needs a fresh local run before these counts are current.
+Older beta report payloads remain readable, but their error count is shown as
+unavailable because that format could miss an empty-string recorded error.
 Configured `service_name` and `environment`
 values are persisted on new instrumented traces; historical and default-client
 traces without an explicit service identity appear as **Unattributed**. HTML,
@@ -380,7 +484,7 @@ not-evaluable, PASS/FAIL, UNCLEAR, judge-error, and ungraded-eligible coverage
 separately. The PASS rate uses only
 PASS and FAIL grades; changing a transcript or label invalidates its old grade.
 This comparison does not create a prospective alert or discover semantic
-clusters. Investigate → Compare additionally accepts one source-declared pair-ID
+clusters. Investigation → Compare additionally accepts one source-declared pair-ID
 label and variant label for two versions of the same evaluation input. It
 compares only exact current whole-conversation binary or bounded numeric grades
 from one evaluator inside one UTC end-time window; duplicates and missing
@@ -401,7 +505,10 @@ Evaluator Lab can separately judge native completed Agent Turns whose redacted
 request and final output are present and untruncated. This does not relabel a
 provider tool-call Trace as an answer or change Trace judgment coverage.
 Turn previews are tenant-scoped 100-candidate keyset pages with explicit
-egress approval. A bounded Turn/evaluator result slot is current only for the
+egress approval. Local histories without a committed source checkpoint, or
+with an incomplete tail on the selected last turn, do not enter those pages.
+The same applies to turns at or after an event capture-limit marker.
+A bounded Turn/evaluator result slot is current only for the
 exact redacted evidence fingerprint; later Turn extensions require reevaluation.
 Before each provider call, execution rechecks that Turn under a cross-process
 judge guard. A concurrent request skips a busy Turn and reports `inProgress`;
@@ -450,7 +557,12 @@ existing stored trace with
 `trace_context(trace_id)` or `set_context(trace_id=...)`. An unknown explicit
 trace ID is recorded as an unlinked span with a link-status attribute rather
 than as an orphan; spans with no provider call or explicit context remain
-standalone.
+standalone. Newly captured spans carry the configured tenant identity (or the
+local tenant when none is configured). The dashboard lists a span under a call
+only when both identities match. Existing spans without a tenant identity are
+preserved in storage but are not exposed through selected-call span inspection
+or optional AI explanation. Older span capture records remain importable with
+ownerless status.
 
 When trusted application code needs the ID before one model request, use the
 separate one-call reservation:
@@ -550,9 +662,11 @@ databases to use UTF-8 encoding. Legacy SQL_ASCII databases are not supported.
 Dashboard analytics are read-only; the setup/import and Monitor controls are
 explicit storage mutations. The app can also be mounted with
 `verdict.dashboard.create_app()` behind an existing
-FastAPI application's authentication. Trace Explorer pages through every
+FastAPI application's authentication. Investigation → Model calls pages through every
 non-judge application trace in deterministic 30-row pages with complete store
-totals. Provider/content-state filters apply to the current page. Judge
+totals. An exact selected trace outside the current page opens as separate
+detail without displacing a page row. Provider/content-state filters apply to
+the current page. Judge
 telemetry remains in aggregate cost and store totals but does not displace
 application traces from this view. A `Historical
 metadata-only trace` means content was not captured when that specific trace was
@@ -607,7 +721,7 @@ and the same path to `/api/config`; it does not discover, import, or start the
 private package. Omitting the argument leaves the route, control, and config
 field absent. The older `operations_url` Settings adapter above is unchanged.
 
-The dashboard's **Monitor → Segments** workspace is a bounded view of the Task 5
+The dashboard's **Groups** workspace is a bounded view of the Task 5
 tenant/version registry. It shows active and preview versions, stable display
 names, frozen algorithm/selector/model configuration, representative redacted
 prompts, bounded provider/model distributions, membership explanations,
@@ -624,8 +738,8 @@ registry reads, plus its in-process mutations. A mounted host can
 instead set `request.state.verdict_registry_tenant`; that authorization-owned
 value wins; browser query input is ignored. Mounted mutation buttons use the
 same-origin Operations adapter. Semantic and hybrid fallback retain their experimental
-disclosure. When a mounted host supplies that authorized tenant, Overview,
-Trace Explorer, and cluster pass-rate charts project assignments
+disclosure. When a mounted host supplies that authorized tenant, Home,
+Investigation → Model calls, and cluster pass-rate charts project assignments
 and stable labels from the same active registry. Standalone and legacy stores
 without an active registry for the selected tenant continue to use
 `Trace.cluster_id`.

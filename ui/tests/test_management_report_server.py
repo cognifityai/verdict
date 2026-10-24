@@ -1,9 +1,12 @@
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 import pytest
 import verdict.dashboard.app as dashboard_app
 from verdict.client import VerdictClient
 from verdict.dashboard.app import build_bundle, create_app
+from verdict.monitor_inputs import load_monitor_units
+from verdict.monitoring import MonitorPolicy
 from verdict.schema import DimensionScore, Judgment, Trace, Verdict
 from verdict.storage import SQLiteStorage
 
@@ -41,6 +44,44 @@ def _trace(
     )
 
 
+def test_monitor_eligible_calls_and_daily_tokens_exclude_internal_and_partial_records(tmp_path):
+    path = tmp_path / "eligible.db"
+    storage = SQLiteStorage(str(path))
+    now = datetime(2026, 10, 17, tzinfo=timezone.utc)
+    complete = replace(_trace("complete", now), tenant_id="customer-a", input_tokens=100, output_tokens=25)
+    partial = replace(_trace("partial", now), tenant_id="customer-a", input_tokens=900, output_tokens=None)
+    unfinished = replace(_trace("unfinished", now), tenant_id="customer-a", ended_at=None)
+    judge = replace(_trace("judge", now, workload="judge"), tenant_id="customer-a")
+    replay = replace(_trace("replay", now, workload="paired_replay"), tenant_id="customer-a")
+    foreign = replace(_trace("foreign", now), tenant_id="customer-b")
+    for trace in (complete, partial, unfinished, judge, replay, foreign):
+        storage.insert_trace(trace)
+    storage.close()
+
+    bundle = build_bundle(path, registry_tenant="customer-a")
+    assert bundle["meta"]["totalTraces"] == 5
+    assert bundle["meta"]["monitorEligibleCalls"] == 2
+    assert bundle["managementReport"]["timeline"]["rows"] == [{
+        "date": "2026-10-17", "calls": 3, "totalTokens": 250, "tokenKnownCalls": 2,
+    }]
+
+
+def test_local_eligible_count_matches_monitor_scope_for_empty_tenant_legacy_traces(tmp_path):
+    path = tmp_path / "empty-tenant.db"
+    storage = SQLiteStorage(str(path))
+    now = datetime(2026, 10, 17, tzinfo=timezone.utc)
+    storage.insert_trace(replace(_trace("legacy-empty", now), tenant_id=""))
+    storage.insert_trace(replace(_trace("local", now), tenant_id="__verdict_local__"))
+    storage.insert_trace(replace(_trace("null", now), tenant_id=None))
+    storage.insert_trace(replace(_trace("foreign", now), tenant_id="other"))
+    local = build_bundle(path, registry_tenant="__verdict_local__")
+    assert local["meta"]["totalTraces"] == 3
+    units = load_monitor_units(storage, MonitorPolicy("synthetic", "__verdict_local__:application:trace"),
+                               tenant_id="__verdict_local__")
+    assert local["meta"]["monitorEligibleCalls"] == len(units) == 2
+    storage.close()
+
+
 def test_management_report_aggregates_daily_application_evidence(tmp_path):
     path = tmp_path / "verdict.db"
     storage = SQLiteStorage(str(path))
@@ -72,14 +113,14 @@ def test_management_report_aggregates_daily_application_evidence(tmp_path):
 
     report = build_bundle(path)["managementReport"]
 
-    assert report["schema"] == "management-report-v1"
+    assert report["schema"] == "management-report-v2"
     assert report["scope"] == {
         "firstCapturedAt": "2026-09-08T00:00:00+00:00",
         "latestCapturedAt": "2026-09-10T00:03:00+00:00",
         "calls": 28,
-        "successfulCalls": 27,
-        "failedCalls": 1,
-        "successRatePct": 96.4,
+        "errorRecordedCalls": 1,
+        "endedNoErrorRecordedCalls": 27,
+        "unfinishedCalls": 0,
         "inputTokens": 2800,
         "outputTokens": 700,
         "totalTokens": 3500,
@@ -149,6 +190,49 @@ def test_management_report_excludes_paired_replay_workload(tmp_path):
     assert {sample["trace_id"] for sample in bundle["samples"]} == {
         "application",
         "paired-replay",
+    }
+
+
+def test_report_trace_states_partition_scoped_calls_without_inferring_success(tmp_path):
+    path = tmp_path / "trace-states.db"
+    storage = SQLiteStorage(str(path))
+    now = datetime(2026, 10, 19, tzinfo=timezone.utc)
+    variants = (
+        ("text", {"response_redacted": "ok"}),
+        ("metadata", {"response_redacted": None}),
+        ("tool-only", {"response_redacted": None, "finish_reason": "tool_use"}),
+        ("unfinished", {"ended_at": None, "response_redacted": None}),
+        ("errored", {"ended_at": None, "error": "timeout"}),
+        ("empty-error", {"error": ""}),
+    )
+    for trace_id, changes in variants:
+        storage.insert_trace(replace(
+            _trace(trace_id, now), tenant_id="customer-a", **changes,
+        ))
+    storage.insert_trace(replace(_trace("judge", now, workload="judge"), tenant_id="customer-a"))
+    storage.insert_trace(replace(_trace("foreign", now), tenant_id="customer-b"))
+    storage.close()
+
+    bundle = build_bundle(path, registry_tenant="customer-a")
+    report = bundle["managementReport"]
+    assert report["schema"] == "management-report-v2"
+    for metric in (report["scope"], report["applications"]["rows"][0],
+                   report["models"]["rows"][0]):
+        assert (metric["calls"], metric["errorRecordedCalls"],
+                metric["endedNoErrorRecordedCalls"], metric["unfinishedCalls"]) == (6, 2, 3, 1)
+        assert sum(metric[key] for key in (
+            "errorRecordedCalls", "endedNoErrorRecordedCalls", "unfinishedCalls",
+        )) == metric["calls"]
+        assert "successRatePct" not in metric
+        assert "successfulCalls" not in metric
+    assert {row["trace_id"]: row["traceState"] for row in bundle["samples"]
+            if row["trace_id"] in {item[0] for item in variants}} == {
+        "text": "ended_no_error_recorded",
+        "metadata": "ended_no_error_recorded",
+        "tool-only": "ended_no_error_recorded",
+        "unfinished": "unfinished",
+        "errored": "error_recorded",
+        "empty-error": "error_recorded",
     }
 
 
@@ -234,9 +318,9 @@ def test_management_report_bounds_dates_and_uses_effective_response_model(tmp_pa
             "provider": "openai",
             "model": "effective-model",
             "calls": 35,
-            "successfulCalls": 35,
-            "failedCalls": 0,
-            "successRatePct": 100.0,
+            "errorRecordedCalls": 0,
+            "endedNoErrorRecordedCalls": 35,
+            "unfinishedCalls": 0,
             "inputTokens": 3500,
             "outputTokens": 875,
             "totalTokens": 4375,

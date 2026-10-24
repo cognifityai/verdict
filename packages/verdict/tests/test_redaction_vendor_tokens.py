@@ -52,7 +52,13 @@ def _fragments(token: str) -> tuple[str, ...]:
     return (token, token[-16:])
 
 
-@pytest.mark.parametrize("name", sorted(VENDOR_TOKENS))
+# The format-specific tests below exercise every vendor prefix. Exercise each
+# surrounding context with representative token shapes instead of a full
+# format-by-context cross product through the same replacement path.
+@pytest.mark.parametrize(
+    "name",
+    ["stripe_secret_live", "gitlab_routable_pat", "slack_user", "langsmith"],
+)
 @pytest.mark.parametrize(
     "template",
     [

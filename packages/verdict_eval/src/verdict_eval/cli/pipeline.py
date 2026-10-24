@@ -31,6 +31,14 @@ import os
 from dataclasses import replace
 from datetime import datetime, timezone
 
+from verdict.redaction import redact_structure
+
+
+def _safe_stored_trace(trace) -> bool:
+    return all(redact_structure(value) == value for value in (
+        trace.prompt_redacted, trace.response_redacted,
+    ) if value is not None)
+
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser()
@@ -314,7 +322,8 @@ def _run(args) -> int:
     judgeable = [
         t
         for t in completed
-        if (t.prompt_redacted or "").strip() and (t.response_redacted or "").strip()
+        if ((t.prompt_redacted or "").strip() and (t.response_redacted or "").strip()
+            and _safe_stored_trace(t))
     ]
     if not judgeable:
         print(
@@ -327,7 +336,7 @@ def _run(args) -> int:
     missing_content = len(completed) - len(judgeable)
     if missing_content:
         print(
-            f"  WARN: skipping {missing_content} completed trace(s) without both "
+            f"  WARN: skipping {missing_content} completed trace(s) without safe, "
             "captured prompt and response content."
         )
 
@@ -666,20 +675,27 @@ def _run(args) -> int:
     print(f"Judging {len(to_judge)} traces (sampling={args.sampling})...")
     judged = 0
     judge_errors = 0
+    skipped_changed = 0
     for t in to_judge:
+        current = storage.get_trace(t.trace_id)
+        if (current is None or current.tenant_id != t.tenant_id or
+            current.prompt_redacted != t.prompt_redacted or
+            current.response_redacted != t.response_redacted or
+            not _safe_stored_trace(current)):
+            skipped_changed += 1
+            continue
         try:
             j = judge.judge(
-                query=t.prompt_redacted or "",
-                response=t.response_redacted or "",
+                query=current.prompt_redacted or "",
+                response=current.response_redacted or "",
                 trace_id=t.trace_id,
             )
             storage.insert_judgment(j)
             judged += 1
         except Exception as e:
-            from verdict.redaction import redact
             from verdict.schema import Judgment, JudgmentStatus
 
-            safe_error = redact(str(e)) or "judge error"
+            safe_error = redact_structure(str(e)) or "judge error"
             storage.insert_judgment(
                 Judgment(
                     trace_id=t.trace_id,
@@ -691,6 +707,8 @@ def _run(args) -> int:
             judge_errors += 1
             print(f"  WARN: judge failed for {t.trace_id}: {safe_error}")
     print(f"  Persisted {judged} completed judgment(s) and {judge_errors} error record(s).")
+    if skipped_changed:
+        print(f"  Skipped {skipped_changed} trace(s) whose stored evidence changed before judging.")
 
     print("Drift monitoring is configured and run from the Monitor workspace.")
     print("\nDone. Inspect persisted judgments in the Verdict dashboard or storage API.")

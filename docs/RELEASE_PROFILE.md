@@ -27,7 +27,10 @@ For a container deployment, use the versioned image
 `ghcr.io/cognifityai/verdict:0.1.0b2` after the release workflow succeeds.
 It provides the dashboard and the matching eval package. Run PostgreSQL
 separately, keep its port private, and supply the storage URL and dashboard
-credentials through the deployment's secret mechanism.
+credentials through the deployment's secret mechanism. Builds from the current
+Dockerfile initialize only an empty SQLite schema; captured databases are never
+copied into the image. The image's default SQLite path is ephemeral and is for
+local demonstration, not a customer data store.
 
 ## 2. Use a released provider entry point
 

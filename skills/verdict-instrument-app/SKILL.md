@@ -229,7 +229,10 @@ for drift, retention, dashboard, and rollback verification.
 
 Discover and recommend analysis, retention cleanup, and health checks separately.
 Verdict can save an opt-in analysis schedule in **Monitor > Schedule** and run it
-with `verdict-service --storage <approved-store> --once`. For a separately
+with `VERDICT_STORAGE` in the supervised process environment and
+`verdict-service --tenant-id <routing-id> --once`, using the same non-sensitive
+routing ID as the dashboard (or omitting the option only when both use the
+default). Keep credentialed storage URLs out of command arguments. For a separately
 configured pipeline or retention job, reuse the customer's existing cron,
 systemd, GitHub Actions, Kubernetes, or cloud scheduler. Use a non-overlap lock.
 Base frequency on eligible trace volume,

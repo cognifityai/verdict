@@ -78,7 +78,7 @@ from verdict.schema import (
     datetime_to_utc_us,
 )
 from verdict.storage import BufferedStorage, InMemoryStorage
-from verdict.storage.postgres import PostgresStorage
+from verdict.storage.postgres import _SCHEMA_REVISION, PostgresStorage
 from verdict.telemetry.local_agents import capture_local_agents
 from verdict.trace import span
 from verdict_eval.cluster_registry import ClusterRegistryService
@@ -278,6 +278,169 @@ def test_live_postgres_current_analysis_is_reused_after_rollback_version():
     assert current == first
 
 
+def test_live_postgres_latest_attempt_precedes_older_verified_record():
+    with isolated_test_dsn(DSN) as scoped_dsn:
+        storage = PostgresStorage(scoped_dsn, min_pool=1, max_pool=1)
+        tenant = f"analysis-order-{uuid4().hex}"
+        now = datetime.now(timezone.utc)
+        verified = DeterministicAnalysisRun(
+            analysis_id="a" * 64, tenant_id=tenant, scope_key="agent-and-trace",
+            cutoff=now, completed_at=now, status=AnalysisRunStatus.COMPLETED,
+            analyzer_version="agent-insights-v3", input_fingerprint="b" * 64,
+            result={"sourceActivity": []}, verified_revision=0,
+        )
+        later = now + timedelta(hours=1)
+        unverified = DeterministicAnalysisRun(
+            analysis_id="c" * 64, tenant_id=tenant, scope_key="agent-and-trace",
+            cutoff=later, completed_at=later, status=AnalysisRunStatus.COMPLETED,
+            analyzer_version="agent-insights-v3", input_fingerprint="d" * 64,
+            result={"sourceActivity": []},
+        )
+        storage.save_deterministic_analysis_run(verified)
+        storage.save_deterministic_analysis_run(unverified)
+        try:
+            latest = storage.get_latest_deterministic_analysis_run(
+                tenant, "agent-and-trace", analyzer_version="agent-insights-v3",
+            )
+            assert latest.analysis_id == unverified.analysis_id
+        finally:
+            storage.close()
+
+
+def test_live_postgres_analysis_pointer_and_recheck_roll_back_together():
+    import psycopg
+
+    with isolated_test_dsn(DSN) as scoped_dsn:
+        storage = PostgresStorage(scoped_dsn, min_pool=1, max_pool=1)
+        tenant = f"analysis-atomic-{uuid4().hex}"
+        now = datetime.now(timezone.utc)
+        first = DeterministicAnalysisRun(
+            analysis_id="a" * 64, tenant_id=tenant, scope_key="agent-and-trace",
+            cutoff=now, completed_at=now, status=AnalysisRunStatus.COMPLETED,
+            analyzer_version="agent-insights-v3", input_fingerprint="b" * 64,
+            result={"sourceActivity": []},
+        )
+        second = replace(first, analysis_id="c" * 64, input_fingerprint="d" * 64)
+        storage.save_deterministic_analysis_run(first)
+        storage.save_deterministic_analysis_run(second)
+        storage._exec("""CREATE FUNCTION block_analysis_pointer() RETURNS trigger
+            LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'synthetic pointer write failure'; END $$""", ())
+        storage._exec("""CREATE TRIGGER block_analysis_pointer
+            BEFORE UPDATE ON deterministic_analysis_current
+            FOR EACH ROW EXECUTE FUNCTION block_analysis_pointer()""", ())
+        try:
+            with pytest.raises(psycopg.Error, match="synthetic pointer"):
+                storage.verify_deterministic_analysis_run(first.analysis_id, revision=3)
+            assert storage.get_deterministic_analysis_run(first.analysis_id).verified_revision is None
+            assert storage.get_latest_deterministic_analysis_run(
+                tenant, "agent-and-trace", analyzer_version="agent-insights-v3",
+            ).analysis_id == second.analysis_id
+        finally:
+            storage.close()
+
+
+def test_live_postgres_trace_identity_cannot_cross_tenants():
+    import psycopg
+
+    with isolated_test_dsn(DSN) as scoped_dsn:
+        storage = PostgresStorage(scoped_dsn, min_pool=1, max_pool=1)
+        trace = Trace(
+            trace_id=f"shared-{uuid4().hex}", tenant_id="tenant-a",
+            started_at=datetime(2026, 10, 17, tzinfo=timezone.utc),
+            prompt_redacted="synthetic A", response_redacted="synthetic reply",
+        )
+        storage.insert_trace(trace)
+        before = storage.get_evidence_revision("tenant-a")
+        try:
+            with pytest.raises(ValueError, match="tenant"):
+                storage.insert_trace(replace(trace, tenant_id="tenant-b",
+                                             response_redacted="synthetic B"))
+            with pytest.raises(psycopg.Error, match="tenant"):
+                storage._exec(
+                    "UPDATE traces SET tenant_id=%s WHERE trace_id=%s",
+                    ("tenant-b", trace.trace_id),
+                )
+            assert storage.get_trace(trace.trace_id).tenant_id == "tenant-a"
+            assert storage.get_trace(trace.trace_id).response_redacted == "synthetic reply"
+            assert storage.get_evidence_revision("tenant-a") == before
+            assert storage.get_evidence_revision("tenant-b") == 0
+            source = SourceSession(
+                f"source-{uuid4().hex}", "tenant-a", "synthetic",
+                "a" * 64, trace.started_at, trace.started_at,
+            )
+            run = AgentRun(
+                f"run-{uuid4().hex}", source.source_session_id, "tenant-a",
+                trace.started_at, ExecutionStatus.UNKNOWN,
+            )
+            storage.replace_agent_run_bundle(AgentRunBundle(source, run, (), ()))
+            run_revision = storage.get_evidence_revision("tenant-a")
+            with pytest.raises(psycopg.Error, match="tenant"):
+                storage._exec(
+                    "UPDATE agent_runs SET tenant_id=%s WHERE tenant_id=%s AND run_id=%s",
+                    ("tenant-b", "tenant-a", run.run_id),
+                )
+            assert storage.get_evidence_revision("tenant-a") == run_revision
+            assert storage.get_evidence_revision("tenant-b") == 0
+        finally:
+            storage.close()
+
+
+def test_live_postgres_span_identity_cannot_cross_tenants():
+    with isolated_test_dsn(DSN) as scoped_dsn:
+        storage = PostgresStorage(scoped_dsn, min_pool=1, max_pool=2)
+        try:
+            span_id = f"owned-span-{uuid4().hex}"
+            storage.insert_span(SpanRecord(
+                span_id=span_id, name="original", tenant_id="tenant-a",
+            ))
+            with pytest.raises(ValueError, match="tenant"):
+                storage.insert_span(SpanRecord(
+                    span_id=span_id, name="forged", tenant_id="tenant-b",
+                ))
+            [persisted] = storage.list_spans(span_id=span_id)
+            assert persisted.tenant_id == "tenant-a"
+            assert persisted.name == "original"
+            storage.insert_span(SpanRecord(
+                span_id=span_id, name="same-tenant", tenant_id="tenant-a", error="updated",
+            ))
+            assert storage.list_spans(span_id=span_id)[0].error == "updated"
+        finally:
+            storage.close()
+
+
+def test_live_postgres_concurrent_span_owners_cannot_replace_each_other():
+    with isolated_test_dsn(DSN) as scoped_dsn:
+        first = PostgresStorage(scoped_dsn, min_pool=1, max_pool=2)
+        second = PostgresStorage(scoped_dsn, min_pool=1, max_pool=2)
+        span_id = f"racing-span-{uuid4().hex}"
+        barrier = threading.Barrier(2)
+
+        def write(storage: PostgresStorage, tenant: str) -> str:
+            barrier.wait(timeout=5)
+            try:
+                storage.insert_span(SpanRecord(
+                    span_id=span_id, name=tenant, tenant_id=tenant,
+                ))
+            except ValueError:
+                return "conflict"
+            return tenant
+
+        try:
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                outcomes = [
+                    pool.submit(write, first, "tenant-a"),
+                    pool.submit(write, second, "tenant-b"),
+                ]
+                results = [future.result(timeout=10) for future in outcomes]
+            assert results.count("conflict") == 1
+            [stored] = first.list_spans(span_id=span_id)
+            assert stored.tenant_id in {"tenant-a", "tenant-b"}
+            assert stored.name == stored.tenant_id
+        finally:
+            first.close()
+            second.close()
+
+
 def test_live_postgres_versioned_registry_and_analysis_normalization():
     suffix = uuid4().hex
     tenant = f"registry-{suffix}"
@@ -351,16 +514,17 @@ def test_live_postgres_versioned_registry_and_analysis_normalization():
             limit=2,
             missing_version_id=version_id,
         ) == []
-        storage.insert_trace(
-            Trace(
-                trace_id=trace_id,
-                tenant_id=f"other-{tenant}",
-                started_at=now + timedelta(days=1),
-                ended_at=now + timedelta(days=1),
-                raw_messages=[{"role": "user", "content": "shipping"}],
-                tags={"verdict.workload": "judge", "verdict.intent_key": "shipping"},
+        with pytest.raises(ValueError, match="another tenant"):
+            storage.insert_trace(
+                Trace(
+                    trace_id=trace_id,
+                    tenant_id=f"other-{tenant}",
+                    started_at=now + timedelta(days=1),
+                    ended_at=now + timedelta(days=1),
+                    raw_messages=[{"role": "user", "content": "shipping"}],
+                    tags={"verdict.workload": "judge", "verdict.intent_key": "shipping"},
+                )
             )
-        )
         preserved = storage.get_trace(trace_id)
         assert preserved is not None
         assert preserved.tenant_id == tenant
@@ -529,6 +693,62 @@ def test_live_postgres_serializes_concurrent_fresh_schema_initialization():
 
         with ThreadPoolExecutor(max_workers=6) as executor:
             list(executor.map(initialize, range(6)))
+
+
+def test_live_postgres_current_schema_startup_does_not_lock_active_evidence_writers():
+    import psycopg
+    from psycopg.conninfo import conninfo_to_dict, make_conninfo
+
+    with isolated_test_dsn(DSN) as scoped_dsn:
+        initialized = PostgresStorage(scoped_dsn)
+        initialized.close()
+        options = conninfo_to_dict(scoped_dsn)["options"]
+        bounded_dsn = make_conninfo(
+            scoped_dsn, options=f"{options} -clock_timeout=500ms",
+        )
+        with psycopg.connect(scoped_dsn, autocommit=True) as writer:
+            with writer.transaction():
+                writer.execute("LOCK TABLE agent_turns IN ROW EXCLUSIVE MODE")
+                reopened = PostgresStorage(bounded_dsn)
+                reopened.close()
+
+
+def test_live_postgres_schema_marker_cannot_resolve_from_fallback_search_path():
+    import psycopg
+    from psycopg import sql
+    from psycopg.conninfo import conninfo_to_dict, make_conninfo
+
+    with isolated_test_dsn(DSN) as marked_dsn:
+        marked_schema = conninfo_to_dict(marked_dsn)["options"].split("=", 1)[1]
+        marked = PostgresStorage(marked_dsn)
+        marked.close()
+        empty_schema = f"verdict_test_{uuid4().hex}"
+        with psycopg.connect(DSN, autocommit=True) as admin:
+            admin.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(empty_schema)))
+        try:
+            target_dsn = make_conninfo(
+                DSN, options=f"-csearch_path={empty_schema},{marked_schema}",
+            )
+            with psycopg.connect(target_dsn) as connection:
+                assert connection.execute("SELECT current_schema()").fetchone()[0] == empty_schema
+                assert connection.execute(
+                    "SELECT to_regclass('verdict_schema_migrations')",
+                ).fetchone()[0] is not None
+            target = PostgresStorage(target_dsn)
+            target.close()
+            with psycopg.connect(DSN) as admin:
+                assert admin.execute(
+                    "SELECT COUNT(*) FROM pg_class c JOIN pg_namespace n "
+                    "ON n.oid=c.relnamespace "
+                    "WHERE n.nspname=%s "
+                    "AND c.relname IN ('verdict_schema_migrations','agent_runs')",
+                    (empty_schema,),
+                ).fetchone()[0] == 2
+        finally:
+            with psycopg.connect(DSN, autocommit=True) as admin:
+                admin.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(
+                    sql.Identifier(empty_schema),
+                ))
 
 
 def test_live_postgres_adds_turn_usage_columns_to_existing_schema():
@@ -1339,7 +1559,8 @@ def test_live_postgres_detects_orphan_from_an_earlier_normalized_writer():
             )
             connection.execute(
                 "DELETE FROM verdict_schema_migrations "
-                "WHERE name='block_legacy_agent_evidence_writes_v1'"
+                "WHERE name IN ('block_legacy_agent_evidence_writes_v1', %s)",
+                (_SCHEMA_REVISION,),
             )
             connection.execute(
                 """INSERT INTO agent_run_bundles (
@@ -1604,6 +1825,12 @@ def test_live_postgres_backfills_monitor_write_order_on_upgrade():
         storage.save_monitor_snapshot(policy.policy_id, successor, successor_result)
         storage._exec(
             "ALTER TABLE monitor_snapshots DROP COLUMN write_sequence CASCADE", (),
+        )
+        # This fixture represents a published schema before the current
+        # source revision was applied, not corruption of a marked current one.
+        storage._exec(
+            "DELETE FROM verdict_schema_migrations WHERE name=%s",
+            (_SCHEMA_REVISION,),
         )
         storage.close()
 
@@ -2008,6 +2235,7 @@ def test_live_postgres_round_trip_and_mutation_contracts():
             span_id=f"{prefix}-span",
             name="retrieval",
             parent_name="request",
+            tenant_id=trace.tenant_id,
             attributes={"k": 3},
         )
         storage.insert_span(span)
@@ -2016,6 +2244,8 @@ def test_live_postgres_round_trip_and_mutation_contracts():
         [persisted_span] = storage.list_spans(trace_id=trace_id)
         assert persisted_span.parent_name == "request"
         assert persisted_span.attributes == {"k": 3}
+        assert persisted_span.tenant_id == trace.tenant_id
+        assert storage.list_spans(trace_id=trace_id, tenant_id="different") == []
 
         judgment = Judgment(
             judgment_id=f"{prefix}-judgment",

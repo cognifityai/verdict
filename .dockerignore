@@ -1,30 +1,14 @@
-# Keep the published-package dashboard build context small.
-.git
-.github
-.venv
-**/__pycache__
-*.pyc
-.pytest_cache
-.ruff_cache
-.mypy_cache
-.DS_Store
-.env
-.env.*
-packages
-docs
-scripts
-examples
-experiment_logs
-research
-docker-compose.yml
-# Local databases are never copied unless explicitly placed at
-# docker-db/verdict.db.
+# The packaged dashboard image installs a published wheel and copies no
+# repository source. Send only these build instructions to the Docker daemon.
+*
+!Dockerfile
+!.dockerignore
+!build/
+!build/customer-managed/
+!build/customer-managed/*.whl
+
+# Final denies guard against future context allowlist changes.
 *.db
 *.db-*
-!docker-db/verdict.db
-!docker-db/verdict.db-*
-
-# Final deny rules: never add local secret fallbacks or direnv state to a build
-# context even if the context allowlist grows.
 *.[Ee][Nn][Vv]*
 .[Dd][Ii][Rr][Ee][Nn][Vv]/

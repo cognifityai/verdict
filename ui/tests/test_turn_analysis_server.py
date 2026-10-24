@@ -23,7 +23,7 @@ from verdict.storage import SQLiteStorage
 def _bundle(tenant: str, *, run_id: str = "run", events=()) -> AgentRunBundle:
     now = datetime(2026, 10, 8, tzinfo=timezone.utc)
     return AgentRunBundle(
-        SourceSession(f"source-{tenant}", tenant, "codex", "a" * 64, now, now),
+        SourceSession(f"source-{tenant}", tenant, "synthetic-test-agent", "a" * 64, now, now),
         AgentRun(run_id, f"source-{tenant}", tenant, now, ExecutionStatus.UNKNOWN),
         (AgentTurn("turn", run_id, 0, now, ExecutionStatus.COMPLETED, now,
                    "Fix the parser", "Done", EvidenceState.PRESENT, EvidenceState.PRESENT),),
@@ -115,6 +115,54 @@ def test_turn_analysis_reports_partial_capture_and_empty_evidence(tmp_path):
     empty = _get(path, "/api/runs/empty/turns/turn/analysis", "local").json()
     assert empty["actions"] == [] and empty["reviewSignals"] == []
     assert empty["eventCoverage"]["complete"] is True
+
+
+def test_turn_after_a_source_capture_limit_does_not_claim_complete_evidence(tmp_path):
+    path = tmp_path / "later-turn-limit.db"
+    now = datetime(2026, 10, 8, tzinfo=timezone.utc)
+    storage = SQLiteStorage(str(path))
+    storage.replace_agent_run_bundle(AgentRunBundle(
+        SourceSession("source-local", "local", "synthetic-test-agent", "a" * 64, now, now),
+        AgentRun("run", "source-local", "local", now, ExecutionStatus.UNKNOWN),
+        tuple(AgentTurn(name, "run", index, now, ExecutionStatus.COMPLETED, now)
+              for index, name in enumerate(("before", "marker", "later"))),
+        (
+            AgentEvent("early", "before", 0, now, AgentEventType.COMMAND,
+                       ExecutionStatus.COMPLETED, "synthetic", {"exit_code": 0},
+                       PrivacyClassification.METADATA),
+            AgentEvent("limit", "marker", 0, now, AgentEventType.CONTEXT,
+                       ExecutionStatus.UNKNOWN, "verdict:capture_limit",
+                       {"name": "source_events_omitted", "source": "3", "available": False},
+                       PrivacyClassification.METADATA),
+        ),
+    ))
+    storage.replace_agent_run_bundle(AgentRunBundle(
+        SourceSession("source-other", "other", "synthetic-test-agent", "b" * 64, now, now),
+        AgentRun("clean", "source-other", "other", now, ExecutionStatus.UNKNOWN),
+        (AgentTurn("other", "clean", 0, now, ExecutionStatus.COMPLETED, now),),
+        (AgentEvent("foreign-limit", "other", 0, now, AgentEventType.CONTEXT,
+                    ExecutionStatus.UNKNOWN, "verdict:capture_limit",
+                    {"name": "source_events_omitted", "source": "1", "available": False},
+                    PrivacyClassification.METADATA),),
+    ))
+    storage.replace_agent_run_bundle(AgentRunBundle(
+        SourceSession("source-clean", "local", "synthetic-test-agent", "c" * 64, now, now),
+        AgentRun("clean", "source-clean", "local", now, ExecutionStatus.UNKNOWN),
+        (AgentTurn("local-clean", "clean", 0, now, ExecutionStatus.COMPLETED, now),),
+        (),
+    ))
+    storage.close()
+
+    before = _get(path, "/api/runs/run/turns/before/analysis", "local").json()
+    later = _get(path, "/api/runs/run/turns/later/analysis", "local").json()
+    clean = _get(path, "/api/runs/clean/turns/local-clean/analysis", "local").json()
+    assert before["eventCoverage"]["complete"] is True
+    assert before["eventCoverage"]["sourcePartial"] is False
+    assert later["eventCoverage"]["available"] == 0
+    assert later["eventCoverage"]["sourcePartial"] is True
+    assert later["eventCoverage"]["complete"] is False
+    assert clean["eventCoverage"]["sourcePartial"] is False
+    assert clean["eventCoverage"]["complete"] is True
 
 
 def test_turn_analysis_does_not_link_ambiguous_calls_or_claim_capture_complete():

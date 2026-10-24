@@ -27,9 +27,14 @@ from verdict.dashboard.evaluator_lab import (
 )
 from verdict.dashboard.setup_routes import SetupRoutes
 from verdict.dashboard.storage_url import is_postgres_storage
-from verdict.evidence import AgentEventType, EvidenceState, event_order_key
+from verdict.evidence import (
+    AgentEventType,
+    EvidenceState,
+    disclosed_event_attributes,
+    event_order_key,
+)
 from verdict.pricing import compute_cost_usd
-from verdict.redaction import _PLACEHOLDER, redact, redact_structure
+from verdict.redaction import _PLACEHOLDER, redact_structure
 from verdict.storage.sqlite import sqlite_path
 
 _MAX_TURNS = 20
@@ -173,7 +178,8 @@ def session_projection_from_report(
 
 
 def _projection(storage, tenant: str, config: dict[str, Any],
-                storage_url: str | None = None, *, bundle=None) -> dict[str, Any]:
+                storage_url: str | None = None, *, bundle=None,
+                local_revision=None) -> dict[str, Any]:
     scope = config.get("scope")
     if scope == "session":
         if storage_url is None:
@@ -187,9 +193,15 @@ def _projection(storage, tenant: str, config: dict[str, Any],
              or len(event_id.encode()) > 256)) or
             (scope == "run" and event_id is not None)):
         raise ValueError("invalid scoped evaluation selection")
-    bundle = bundle if bundle is not None else storage.get_agent_run_bundle(tenant, run_id)
+    if bundle is None:
+        snapshot = getattr(storage, "get_agent_capture_snapshot", None)
+        if callable(snapshot):
+            bundle, local_revision = snapshot(tenant, run_id)
+        else:
+            bundle = storage.get_agent_run_bundle(tenant, run_id)
     if bundle is None:
         raise KeyError(run_id)
+    from verdict.local_source_revision import local_scope_partial
     turns = sorted(bundle.turns, key=lambda turn: (turn.sequence, turn.turn_id))
     events = sorted(bundle.events, key=event_order_key)
     producers = {event.producer_id for event in events if event.producer_id}
@@ -201,7 +213,11 @@ def _projection(storage, tenant: str, config: dict[str, Any],
             reason = "evidence_limit"
         elif len(producers) > 1:
             reason = "event_order_uncertain"
-        elif any(event.provenance == "verdict:capture_limit" for event in events):
+        elif (any(event.provenance == "verdict:capture_limit" for event in events)
+              or local_scope_partial(
+                  bundle.session.source_kind, local_revision,
+                  max((turn.sequence for turn in turns), default=-1), None,
+              )):
             reason = "source_capture_partial"
         elif any(turn.request_state is not EvidenceState.PRESENT or
                  turn.response_state is not EvidenceState.PRESENT or
@@ -223,7 +239,8 @@ def _projection(storage, tenant: str, config: dict[str, Any],
         ] + [
             (event.occurred_at, 0, event_order_key(event),
              {"reference": f"[event:{event.event_id}]", "type": event.event_type.value,
-              "status": event.status.value, "attributes": event.attributes})
+              "status": event.status.value,
+              "attributes": disclosed_event_attributes(event.attributes)})
             for event in events
         ]
         timeline = [item for _, _, _, item in sorted(timed, key=lambda row: row[:3])]
@@ -252,7 +269,15 @@ def _projection(storage, tenant: str, config: dict[str, Any],
                      if event.event_type is AgentEventType.INSTRUCTION
                      and event.attributes.get("name") in {"tool_contract", "available_tools"}][-1:]
         reason = None
-        if (len({event.producer_id for event in turn_events if event.producer_id}) > 1
+        turn_sequences = {item.turn_id: item.sequence for item in turns}
+        if (any(turn_sequences.get(event.turn_id, -1) <= turn.sequence
+                for event in events if event.provenance == "verdict:capture_limit")
+                or local_scope_partial(
+                    bundle.session.source_kind, local_revision,
+                    max((item.sequence for item in turns), default=-1), turn.sequence,
+                )):
+            reason = "source_capture_partial"
+        elif (len({event.producer_id for event in turn_events if event.producer_id}) > 1
                 or not isinstance(call_id, str) or not call_id or not _usable_tool_content(call_id)
                 or len(matching_calls) != 1 or len(results) != 1
                 or not _usable_tool_content(call.attributes.get("tool_name"))
@@ -269,17 +294,17 @@ def _projection(storage, tenant: str, config: dict[str, Any],
         elif ("arguments" not in call.attributes
               or not _usable_tool_content(call.attributes["arguments"])):
             reason = "tool_arguments_unavailable"
-        elif any(event.provenance == "verdict:capture_limit" for event in turn_events):
-            reason = "source_capture_partial"
         query = _CITATION_REQUEST + "Task and available tool contract:\n" + json.dumps({
             "task": turn.user_request_redacted,
             "contract": [{"reference": f"[event:{item.event_id}]", "text": item.attributes.get("text")}
                          for item in contracts],
         }, ensure_ascii=False)
         response = "Actual tool action and recorded result:\n" + json.dumps({
-            "call": {"reference": f"[event:{call.event_id}]", "attributes": call.attributes},
+            "call": {"reference": f"[event:{call.event_id}]",
+                     "attributes": disclosed_event_attributes(call.attributes)},
             "results": [{"reference": f"[event:{item.event_id}]", "status": item.status.value,
-                         "attributes": item.attributes} for item in results],
+                         "attributes": disclosed_event_attributes(item.attributes)}
+                        for item in results],
         }, ensure_ascii=False)
         refs = [f"turn:{turn.turn_id}", f"event:{call.event_id}"] + [
             f"event:{item.event_id}" for item in (*contracts, *results)
@@ -395,7 +420,7 @@ def _execute_scoped_locked(storage, *, storage_url: str, tenant: str,
                 raise ValueError("judge cited evidence outside the selected scope")
             dimensions.append({
                 "name": score.name, "verdict": score.verdict.value,
-                "explanation": (redact(score.reasoning) or "")[:2_000],
+                "explanation": (redact_structure(score.reasoning) or "")[:2_000],
                 "evidenceReferences": cited,
                 "citationStatus": "linked" if cited else "uncited_opinion",
             })

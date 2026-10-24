@@ -161,6 +161,7 @@ def _persist_span(sp: Span) -> None:
             duration_ms=sp.duration_ms,
             attributes=dict(sp.attributes),
             error=sp.error,
+            tenant_id=client.tenant_id or "__verdict_local__",
         )
         record.error = sanitize_error_text(
             record.error,

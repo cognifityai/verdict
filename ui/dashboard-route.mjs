@@ -2,7 +2,7 @@ const SECTIONS = {
   overview: new Set(["summary", "reliability", "performance", "behavior"]),
   explore: new Set(["runs", "calls", "compare"]),
   evaluate: new Set(["results", "lab", "cases", "inspect", "review"]),
-  monitor: new Set(["status", "history", "segments", "schedule"]),
+  monitor: new Set(["plan", "status", "history", "segments", "schedule"]),
   report: new Set(["management"]),
   settings: new Set(["sources", "alerts", "integrations", "privacy"]),
 };
@@ -36,6 +36,13 @@ function bounded(value, maximum) {
 function selectionId(value) {
   return typeof value === "string" && !value.includes("\0")
     ? bounded(value, 256) : null;
+}
+
+function utcDate(value) {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
+  const parsed = new Date(`${value}T00:00:00Z`);
+  return Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== value
+    ? null : value;
 }
 
 function exactSelectionParams(params, allowed) {
@@ -120,9 +127,19 @@ export function parseDashboardRoute(hash, fallbackTab = "overview") {
     .map((value) => bounded(value, 256)).filter(Boolean))].slice(0, 50);
   const selected = bounded(params.get("selected"), 256);
   const selectedRunId = selected && runIds.includes(selected) ? selected : runIds[0] || null;
+  const recentRevision = params.get("recent_rev");
+  const recentTurnId = selectionId(params.get("recent_turn"));
+  const recentEventId = selectionId(params.get("recent_event"));
+  const recentReference = tab === "explore" && section === "runs" && selectedRunId
+    && /^[0-9a-f]{64}$/.test(recentRevision || "") && recentTurnId && recentEventId;
   const requestedJudgeStatus = params.get("judge");
   const traceJudgeStatus = ["all", "judged", "not_judged", "judge_error", "pass", "fail", "unclear"]
     .includes(requestedJudgeStatus) ? requestedJudgeStatus : "all";
+  const traceDate = tab === "explore" && section === "calls" ? utcDate(params.get("date")) : null;
+  const sourceKind = tab === "explore" && section === "runs" && runIds.length === 0
+    ? selectionId(params.get("source")) : null;
+  const agentName = tab === "explore" && section === "runs" && runIds.length === 0
+    ? selectionId(params.get("agent")) : null;
   return {
     tab,
     section,
@@ -133,9 +150,16 @@ export function parseDashboardRoute(hash, fallbackTab = "overview") {
     runIdsTruncated: params.get("truncated") === "1",
     traceJudgeStatus,
     traceId: bounded(params.get("trace"), 256),
+    ...(traceDate ? { traceDate } : {}),
     evaluatorId: retiredDriftRoute ? null : bounded(params.get("evaluator"), 64),
     eventId: tab === "explore" && section === "runs" && selectedRunId
       ? selectionId(params.get("event_id")) : null,
+    ...(recentReference ? { recentRevision, recentTurnId, recentEventId } : {}),
+    ...(tab === "explore" && section === "runs" && selectedRunId
+      && selectionId(params.get("notice"))
+      ? { noticeId: selectionId(params.get("notice")) } : {}),
+    ...(sourceKind ? { sourceKind } : {}),
+    ...(agentName ? { agentName } : {}),
   };
 }
 
@@ -167,8 +191,26 @@ export function serializeDashboardRoute(route) {
   if (tab === "explore" && section === "runs" && runIds.includes(route?.selectedRunId)) {
     const eventId = selectionId(route?.eventId);
     if (eventId) params.set("event_id", eventId);
+    const noticeId = selectionId(route?.noticeId);
+    if (noticeId) params.set("notice", noticeId);
+    const recentRevision = route?.recentRevision;
+    const recentTurnId = selectionId(route?.recentTurnId);
+    const recentEventId = selectionId(route?.recentEventId);
+    if (/^[0-9a-f]{64}$/.test(recentRevision || "") && recentTurnId && recentEventId) {
+      params.set("recent_rev", recentRevision);
+      params.set("recent_turn", recentTurnId);
+      params.set("recent_event", recentEventId);
+    }
+  }
+  if (tab === "explore" && section === "runs" && runIds.length === 0) {
+    const sourceKind = selectionId(route?.sourceKind);
+    const agentName = selectionId(route?.agentName);
+    if (sourceKind) params.set("source", sourceKind);
+    if (agentName) params.set("agent", agentName);
   }
   if (tab === "explore" && section === "calls") {
+    const traceDate = utcDate(route?.traceDate);
+    if (traceDate) params.set("date", traceDate);
     if (["judged", "not_judged", "judge_error", "pass", "fail", "unclear"].includes(route?.traceJudgeStatus)) {
       params.set("judge", route.traceJudgeStatus);
     }

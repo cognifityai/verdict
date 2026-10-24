@@ -8,8 +8,8 @@ import {
 function metric(calls, failedCalls, inputTokens, outputTokens,
   costUsd, costKnownCalls, averageLatencyMs, latencyKnownCalls) {
   return {
-    calls, successfulCalls: calls - failedCalls, failedCalls,
-    successRatePct: Math.round(1000 * (calls - failedCalls) / calls) / 10,
+    calls, errorRecordedCalls: failedCalls,
+    endedNoErrorRecordedCalls: calls - failedCalls, unfinishedCalls: 0,
     inputTokens, outputTokens, totalTokens: inputTokens + outputTokens,
     tokenKnownCalls: calls, costUsd, costKnownCalls, averageLatencyMs, latencyKnownCalls,
     cachedInputTokens: Math.round(inputTokens * 0.8),
@@ -21,15 +21,15 @@ function metric(calls, failedCalls, inputTokens, outputTokens,
 function bundle() {
   return {
     managementReport: {
-      schema: "management-report-v1",
+      schema: "management-report-v2",
       period: { days: 30, startDate: "2026-08-13", endDate: "2026-09-11" },
       scope: {
         firstCapturedAt: "2026-09-08T00:00:00Z",
         latestCapturedAt: "2026-09-10T00:03:00Z",
         calls: 28,
-        successfulCalls: 27,
-        failedCalls: 1,
-        successRatePct: 96.4,
+        errorRecordedCalls: 1,
+        endedNoErrorRecordedCalls: 27,
+        unfinishedCalls: 0,
         inputTokens: 2800,
         outputTokens: 700,
         totalTokens: 3500,
@@ -112,7 +112,8 @@ test("report presents one consistent application-only executive summary", () => 
     { date: "2026-09-08", calls: 24 },
     { date: "2026-09-10", calls: 4 },
   ]);
-  assert.equal(report.summary.success, "96.4% · 27 of 28 calls");
+  assert.equal(report.summary.providerErrors, "1 of 28 calls");
+  assert.equal(report.summary.unfinished, "0 of 28 calls");
   assert.equal(report.summary.cost, "$0.0280 · partial (27 of 28 calls priced)");
   assert.equal(report.summary.inputBreakdown,
     "560 uncached input · 2,240 cached input · 28 calls with breakdown");
@@ -124,10 +125,59 @@ test("report presents one consistent application-only executive summary", () => 
   }
   assert.equal(report.applications.rows.length, 2);
   assert.equal(report.models.rows[1].provider, "custom-provider");
-  assert.match(report.attention.join(" "), /1 failed application call/);
+  assert.match(report.attention.join(" "), /1 application call has a recorded provider error/);
   assert.match(report.attention.join(" "), /Select one evaluator/);
   assert.doesNotMatch(report.attention.join(" "), /legacy|fixed-window/i);
   assert.equal(report.quality.legacyChange, undefined);
+});
+
+test("published v1 report never reuses its inferred success as a completion claim", () => {
+  const input = bundle();
+  input.managementReport.schema = "management-report-v1";
+  Object.assign(input.managementReport.scope, {
+    successfulCalls: 27, failedCalls: 1, successRatePct: 96.4,
+  });
+  const report = buildManagementReport(input);
+  assert.equal(report.summary.providerErrors, "Unavailable in older report");
+  assert.equal(report.summary.completionUnknown, 28);
+  assert.equal(report.summary.unfinished, "Unavailable");
+  assert.doesNotMatch(managementReportHtml(report), /Success rate|96\.4%/);
+  assert.doesNotMatch(managementReportCsv(report), /successful_requests|success_rate_pct/);
+  assert.doesNotMatch(managementReportHtml(report), /1 of 28 calls/);
+  assert.doesNotMatch(managementReportCsv(report), /,1,27,/);
+});
+
+test("published v1 zero failedCalls does not assert zero recorded provider errors", () => {
+  const input = bundle();
+  input.managementReport.schema = "management-report-v1";
+  Object.assign(input.managementReport.scope, {
+    successfulCalls: 28, failedCalls: 0, successRatePct: 100,
+  });
+  const report = buildManagementReport(input);
+  assert.equal(report.summary.providerErrors, "Unavailable in older report");
+  assert.equal(report.summary.completionUnknown, 28);
+  assert.doesNotMatch(managementReportHtml(report), /0 of 28 calls/);
+  assert.doesNotMatch(managementReportHtml(report), />0<\/td>/);
+  assert.match(managementReportCsv(report), /recorded_provider_errors/);
+});
+
+test("report marks a completed analysis stale after captured evidence changes", () => {
+  const input = bundle();
+  input.coverage.deterministicAnalysis = {
+    status: "completed", complete: true, needsRefresh: true,
+  };
+  const report = buildManagementReport(input);
+  const exportedHtml = managementReportHtml(report);
+
+  assert.match(report.quality.deterministicAnalysis, /refresh/i);
+  assert.match(report.attention.join(" "), /refresh.*analysis/i);
+  assert.doesNotMatch(report.quality.deterministicAnalysis, /evidence changed/i);
+  assert.match(exportedHtml, /Last deterministic analysis/);
+  assert.doesNotMatch(exportedHtml, /Deterministic analysis \(as of now\)/);
+
+  input.coverage.deterministicAnalysis.needsRefresh = false;
+  const current = buildManagementReport(input);
+  assert.equal(current.quality.deterministicAnalysis, "Complete snapshot · current evidence");
 });
 
 test("chart and exports retain dates while excluding sensitive trace fields", () => {
@@ -177,7 +227,7 @@ test("exports keep unavailable token evidence distinct from observed zero", () =
   const exportedHtml = managementReportHtml(report);
 
   assert.match(csv, /"billing-worker"[^\r\n]*,"","","","0",/);
-  assert.match(exportedHtml, /<b>custom-model-v1<\/b><small>custom-provider<\/small><\/td><td>4<\/td><td>75%<\/td><td>Unavailable<\/td>/);
+  assert.match(exportedHtml, /<b>custom-model-v1<\/b><small>custom-provider<\/small><\/td><td>4<\/td><td>1<\/td><td>Unavailable<\/td>/);
 });
 
 test("missing or malformed input breakdown remains unavailable", () => {

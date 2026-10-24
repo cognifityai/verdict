@@ -1060,6 +1060,23 @@ def redact_structure(
     if _depth > _MAX_NESTING_DEPTH:
         return _REDACTED
     if isinstance(value, str):
+        if value.lstrip().startswith(("{", "[")):
+            try:
+                parsed = json.loads(value)
+            except (json.JSONDecodeError, RecursionError):
+                pass
+            else:
+                if isinstance(parsed, (dict, list)):
+                    sanitized = redact_structure(
+                        parsed, mode=mode, secret=secret, _depth=_depth + 1,
+                        _seen=_seen, _shared=None, _max_nodes=_max_nodes,
+                        _max_characters=_max_characters,
+                    )
+                    if not isinstance(sanitized, (dict, list)):
+                        return _REDACTED
+                    return json.dumps(sanitized, separators=(",", ":"))
+        if _JSON_UNICODE_KEY_ESCAPE.search(value):
+            return _REDACTED
         return redact(value, mode=mode, secret=secret)
     if value is None or isinstance(value, (bool, int)):
         return value
@@ -1077,36 +1094,14 @@ def redact_structure(
             for key, child in value.items():
                 if not isinstance(key, str):
                     return _REDACTED
+                if _JSON_UNICODE_KEY_ESCAPE.search(key):
+                    continue
                 sanitized_key = redact(key, mode=mode, secret=secret) or _REDACTED
                 if _is_sensitive_key(key):
                     entries.append(
                         (sanitized_key, key, _secret_value(child, mode, secret))
                     )
                     continue
-                if key == "arguments" and isinstance(child, str):
-                    try:
-                        parsed_arguments = json.loads(child)
-                    except (TypeError, json.JSONDecodeError):
-                        parsed_arguments = None
-                    if isinstance(parsed_arguments, (dict, list)):
-                        sanitized_arguments = redact_structure(
-                            parsed_arguments,
-                            mode=mode,
-                            secret=secret,
-                            _depth=_depth + 1,
-                            _seen=seen,
-                            _shared=None,
-                            _max_nodes=_max_nodes,
-                            _max_characters=_max_characters,
-                        )
-                        entries.append(
-                            (
-                                sanitized_key,
-                                key,
-                                json.dumps(sanitized_arguments, separators=(",", ":")),
-                            )
-                        )
-                        continue
                 entries.append(
                     (
                         sanitized_key,
@@ -1255,9 +1250,9 @@ def sanitize_trace(
     adapters call it again in default redact mode so manually constructed traces
     cannot bypass the boundary. Redaction placeholders and hashes are idempotent.
     """
-    trace.prompt_redacted = redact(trace.prompt_redacted, mode=mode, secret=secret)
-    trace.response_redacted = redact(trace.response_redacted, mode=mode, secret=secret)
-    trace.error = redact(trace.error, mode=mode, secret=secret)
+    trace.prompt_redacted = redact_structure(trace.prompt_redacted, mode=mode, secret=secret)
+    trace.response_redacted = redact_structure(trace.response_redacted, mode=mode, secret=secret)
+    trace.error = redact_structure(trace.error, mode=mode, secret=secret)
     for field_name in ("service_name", "environment"):
         value = getattr(trace, field_name, "")
         try:
@@ -1267,7 +1262,7 @@ def sanitize_trace(
         setattr(
             trace,
             field_name,
-            (redact(value, mode=mode, secret=secret) or "") if valid else "",
+            (redact_structure(value, mode=mode, secret=secret) or "") if valid else "",
         )
     if trace.raw_messages is not None:
         trace.raw_messages = redact_messages(trace.raw_messages, mode=mode, secret=secret)
@@ -1289,9 +1284,9 @@ def sanitize_judgment(
     secret: str | None = None,
 ) -> Judgment:
     """Redact content-bearing judge output without changing evaluator identity."""
-    judgment.error = redact(judgment.error, mode=mode, secret=secret)
+    judgment.error = redact_structure(judgment.error, mode=mode, secret=secret)
     for dimension in judgment.dimensions:
-        dimension.reasoning = redact(dimension.reasoning, mode=mode, secret=secret) or ""
+        dimension.reasoning = redact_structure(dimension.reasoning, mode=mode, secret=secret) or ""
     return judgment
 
 
@@ -1301,9 +1296,9 @@ def sanitize_span(
     secret: str | None = None,
 ) -> SpanRecord:
     """Redact manual-span names, nested attributes, and errors in place."""
-    span.name = redact(span.name, mode=mode, secret=secret) or ""
-    span.parent_name = redact(span.parent_name, mode=mode, secret=secret)
-    span.error = redact(span.error, mode=mode, secret=secret)
+    span.name = redact_structure(span.name, mode=mode, secret=secret) or ""
+    span.parent_name = redact_structure(span.parent_name, mode=mode, secret=secret)
+    span.error = redact_structure(span.error, mode=mode, secret=secret)
     sanitized_attributes = redact_structure(span.attributes, mode=mode, secret=secret)
     # See sanitize_trace: preserve the marker instead of wiping every sibling
     # attribute and leaving no evidence that anything was dropped.
@@ -1324,16 +1319,16 @@ def _sanitize_agent_capture(
 
     run = replace(
         capture.run,
-        agent_name=redact(capture.run.agent_name, mode=mode, secret=secret) or "",
-        agent_version=redact(capture.run.agent_version, mode=mode, secret=secret) or "",
-        service_name=redact(capture.run.service_name, mode=mode, secret=secret) or "",
-        environment=redact(capture.run.environment, mode=mode, secret=secret) or "",
+        agent_name=redact_structure(capture.run.agent_name, mode=mode, secret=secret) or "",
+        agent_version=redact_structure(capture.run.agent_version, mode=mode, secret=secret) or "",
+        service_name=redact_structure(capture.run.service_name, mode=mode, secret=secret) or "",
+        environment=redact_structure(capture.run.environment, mode=mode, secret=secret) or "",
     )
     turns = tuple(
         replace(
             turn,
-            user_request_redacted=redact(turn.user_request_redacted, mode=mode, secret=secret),
-            final_response_redacted=redact(turn.final_response_redacted, mode=mode, secret=secret),
+            user_request_redacted=redact_structure(turn.user_request_redacted, mode=mode, secret=secret),
+            final_response_redacted=redact_structure(turn.final_response_redacted, mode=mode, secret=secret),
         )
         for turn in capture.turns
     )

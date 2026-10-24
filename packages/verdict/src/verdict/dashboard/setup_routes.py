@@ -23,7 +23,7 @@ from verdict.dashboard.control_plane import normalize_source_root
 from verdict.dashboard.storage_url import is_postgres_storage
 from verdict.storage.sqlite import sqlite_path
 from verdict.telemetry.files import SUPPORTED_FORMATS, iter_telemetry_file
-from verdict.telemetry.local_agents import capture_local_agents
+from verdict.telemetry.local_agents import _LOCAL_FAILURE_REASONS, capture_local_agents
 from verdict.telemetry.model import ImportContext
 from verdict.telemetry.runner import ImportRunError, import_into_storage
 from verdict.telemetry.sources.codex import codex_diagnostic_path
@@ -99,6 +99,7 @@ class SetupRoutes:
         self._previewed_local_roots: set[tuple[str | None, str | None]] = set()
         self._previewed_imports: set[tuple[str, str]] = set()
         self._capture_job: CaptureJob | None = None
+        self._last_imported_capture_summary: dict[str, Any] | None = None
         self._capture_start_lock = threading.Lock()
 
     def authorized(self, request: Request) -> bool:
@@ -290,16 +291,70 @@ class SetupRoutes:
             """The current job, or 404 when the caller asks for a job that is no longer current."""
             if not self.request_matches_tenant(request):
                 return JSONResponse({"error": "setup unavailable"}, status_code=403)
-            current = self._capture_job
+            with self._capture_start_lock:
+                current = self._capture_job
+                last_imported = self._last_imported_capture_summary
+                current_payload = None if current is None else current.as_dict()
+            payload = {"job": current_payload}
+            if last_imported is not None:
+                payload["lastImportedSummary"] = last_imported
+            if current_payload is None or current_payload["state"] in {"completed", "failed"}:
+                attempts = setup_capture_attempts(request)
+                if isinstance(attempts, dict) and attempts["trackedFiles"]:
+                    payload["attempts"] = attempts
             if job is not None and (current is None or current.job_id != job):
                 return JSONResponse(
-                    {"error": "capture job is no longer current", "job": None if current is None else current.as_dict()},
+                    {"error": "capture job is no longer current", **payload},
                     status_code=404,
                 )
-            return {"job": None if current is None else current.as_dict()}
+            return payload
 
         setup_capture_status.__annotations__["request"] = Request
         app.get("/api/setup/capture/status")(setup_capture_status)
+
+        def setup_capture_attempts(request):
+            """Show durable latest attempt counts after a dashboard restart."""
+            if not self.request_matches_tenant(request):
+                return JSONResponse({"error": "setup unavailable"}, status_code=403)
+            try:
+                storage = self.writable_storage()
+                try:
+                    rows = storage.local_scan_attempt_summary(self.tenant_id)
+                finally:
+                    storage.close()
+            except Exception:
+                _log.exception("failed to read local capture attempts")
+                return JSONResponse({"error": "capture attempts unavailable"}, status_code=503)
+            result = {
+                "trackedFiles": 0, "completeFiles": 0, "partialFiles": 0,
+                "failedFiles": 0, "unfinishedFiles": 0,
+                "lastAttemptAt": None, "failureReasons": {},
+            }
+            for code, count, started in rows:
+                result["trackedFiles"] += count
+                if result["lastAttemptAt"] is None or started > result["lastAttemptAt"]:
+                    result["lastAttemptAt"] = started
+                if code == "complete_projection":
+                    result["completeFiles"] += count
+                elif code == "partial_projection":
+                    result["partialFiles"] += count
+                elif code is None:
+                    result["unfinishedFiles"] += count
+                else:
+                    result["failedFiles"] += count
+                    reason = code[7:] if code.startswith("failed_") else "invalid_local_source"
+                    if reason not in _LOCAL_FAILURE_REASONS | {
+                        "source_io_error", "invalid_local_source",
+                    }:
+                        reason = "invalid_local_source"
+                    result["failureReasons"][reason] = (
+                        result["failureReasons"].get(reason, 0) + count
+                    )
+            result["failureReasons"] = dict(sorted(result["failureReasons"].items()))
+            return result
+
+        setup_capture_attempts.__annotations__["request"] = Request
+        app.get("/api/setup/capture/attempts")(setup_capture_attempts)
 
         setup_capture.__annotations__["request"] = Request
         app.post("/api/setup/capture")(setup_capture)
@@ -424,9 +479,11 @@ class SetupRoutes:
                 )
             finally:
                 writable.close()
-            with job.lock:
-                job.summary = summary.as_dict()
-                job.state = "analyzing"
+            with self._capture_start_lock:
+                with job.lock:
+                    job.summary = summary.as_dict()
+                    self._last_imported_capture_summary = job.summary
+                    job.state = "analyzing"
             analysis = self._run_analysis()["analysisState"]
             with job.lock:
                 job.analysis = analysis
@@ -434,6 +491,14 @@ class SetupRoutes:
                 # error status rather than by raising; that is still a failed job.
                 if analysis.get("status") == "error":
                     job.error = "analysis_failed"
+                    job.state = "failed"
+                elif (
+                    summary.scan_incomplete or summary.skipped
+                    or summary.recent_sample_errors or summary.codex_model_call_error
+                    or (summary.codex_model_calls is not None
+                        and summary.codex_model_calls.skipped)
+                ):
+                    job.error = "capture_incomplete"
                     job.state = "failed"
                 else:
                     job.state = "completed"

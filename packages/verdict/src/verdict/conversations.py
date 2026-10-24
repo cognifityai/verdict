@@ -7,7 +7,7 @@ import json
 import re
 from datetime import timezone
 
-from verdict.redaction import redact
+from verdict.redaction import redact, redact_structure
 from verdict.telemetry.model import ImportContext, safe_routing_id
 from verdict.telemetry.normalize import first, parse_datetime
 
@@ -40,7 +40,7 @@ def _time(value: object) -> str | None:
 def _text(value: object) -> str:
     if not isinstance(value, str) or not value.strip() or "\x00" in value:
         raise ValueError("invalid conversation text")
-    result = redact(value)
+    result = redact_structure(value)
     if result is None or len(result.encode("utf-8")) > MAX_CONTENT_BYTES:
         raise ValueError("conversation text exceeds limit")
     return result

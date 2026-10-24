@@ -59,6 +59,49 @@ def _trace(**overrides):
     return Trace(**base)
 
 
+def test_span_identity_cannot_be_reassigned_to_another_tenant(storage):
+    span = SpanRecord(span_id="tenant-owned-span", name="original", tenant_id="tenant-a")
+    storage.insert_span(span)
+    with pytest.raises(ValueError, match="tenant"):
+        storage.insert_span(SpanRecord(
+            span_id=span.span_id, name="forged", tenant_id="tenant-b",
+        ))
+    persisted = storage.list_spans(span_id=span.span_id)
+    assert len(persisted) == 1
+    assert persisted[0].tenant_id == "tenant-a"
+    assert persisted[0].name == "original"
+    storage.insert_span(SpanRecord(
+        span_id=span.span_id, name="same-tenant-update", tenant_id="tenant-a",
+        error="updated",
+    ))
+    assert storage.list_spans(span_id=span.span_id)[0].error == "updated"
+
+
+def test_trace_identity_cannot_be_reassigned_to_another_tenant(storage):
+    trace = _trace(trace_id="tenant-owned-trace", tenant_id="tenant-a")
+    storage.insert_trace(trace)
+    with pytest.raises(ValueError, match="tenant"):
+        storage.insert_trace(_trace(
+            trace_id=trace.trace_id, tenant_id="tenant-b",
+            response_redacted="forged",
+        ))
+    persisted = storage.get_trace(trace.trace_id)
+    assert persisted.tenant_id == "tenant-a"
+    assert persisted.response_redacted is None
+
+
+def test_legacy_local_span_identity_cannot_be_claimed_by_remote_tenant(storage):
+    span = SpanRecord(span_id="legacy-local-span", name="original")
+    storage.insert_span(span)
+    with pytest.raises(ValueError, match="tenant"):
+        storage.insert_span(SpanRecord(
+            span_id=span.span_id, name="forged", tenant_id="remote-tenant",
+        ))
+    [persisted] = storage.list_spans(span_id=span.span_id)
+    assert persisted.tenant_id is None
+    assert persisted.name == "original"
+
+
 def test_all_storage_adapters_match_protocol_parameter_kinds_and_defaults():
     adapters = (InMemoryStorage, SQLiteStorage, PostgresStorage, BufferedStorage)
     for method_name, protocol_method in inspect.getmembers(
@@ -249,6 +292,7 @@ def test_sqlite_migrates_legacy_spans_without_parent_name(tmp_path):
     storage = SQLiteStorage(str(path))
     try:
         legacy = storage.list_spans()[0]
+        assert legacy.tenant_id is None
         storage.insert_span(SpanRecord(span_id="new", name="child", parent_name="root"))
         records = {record.span_id: record for record in storage.list_spans()}
     finally:
@@ -256,6 +300,15 @@ def test_sqlite_migrates_legacy_spans_without_parent_name(tmp_path):
 
     assert legacy.parent_name is None
     assert records["new"].parent_name == "root"
+
+
+def test_span_tenant_filter_excludes_legacy_and_foreign_links(storage):
+    for span_id, tenant in (("owned", "tenant-a"), ("foreign", "tenant-b"),
+                            ("legacy", None)):
+        storage.insert_span(SpanRecord(span_id=span_id, trace_id="shared-trace",
+                                       tenant_id=tenant))
+    assert [span.span_id for span in storage.list_spans(trace_id="shared-trace",
+                                                       tenant_id="tenant-a")] == ["owned"]
 
 
 def test_storage_sanitizes_every_content_bearing_trace_field(storage):
@@ -923,7 +976,7 @@ def test_reinsert_preserves_capture_inputs_and_their_analysis_projection(storage
             ended_at=started + timedelta(days=1),
             raw_messages=[{"role": "user", "content": "shipping"}],
             tags={"verdict.workload": "judge", "verdict.intent_key": "shipping"},
-            tenant_id="tenant-b",
+            tenant_id="tenant-a",
             output_tokens=999,
         )
     )

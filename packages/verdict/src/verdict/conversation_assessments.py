@@ -7,7 +7,7 @@ import math
 import re
 
 from verdict.conversations import _CLOSED, _json, _time, validate_conversation_query
-from verdict.redaction import redact
+from verdict.redaction import redact, redact_structure
 
 MAX_RUBRIC_BYTES = 128_000
 MAX_ASSESSMENT_BYTES = 64_000
@@ -27,7 +27,7 @@ def _name(value: object) -> str:
 def _text(value: object, maximum: int, *, empty: bool = False) -> str:
     if not isinstance(value, str) or "\x00" in value or (not empty and not value.strip()):
         raise ValueError("invalid assessment text")
-    safe = redact(value)
+    safe = redact_structure(value)
     if safe is None or len(safe.encode("utf-8")) > maximum:
         raise ValueError("assessment text exceeds limit")
     return safe
@@ -243,7 +243,7 @@ def validate_assessment(value: object, conversation: dict) -> dict:
             position, quote = item.get("message_position"), item.get("quote")
             if quote is not None:
                 if (type(position) is not int or not 0 <= position < len(allowed_messages)
-                        or not isinstance(quote, str) or not quote or redact(quote) != quote
+                        or not isinstance(quote, str) or not quote or redact_structure(quote) != quote
                         or quote not in allowed_messages[position]["content"]):
                     raise ValueError("finding quote absent from exact evidence")
             elif position is not None:

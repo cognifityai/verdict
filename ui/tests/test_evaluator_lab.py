@@ -21,6 +21,7 @@ from verdict.agent_judgment import (
 )
 from verdict.dashboard.evaluator_lab import (
     _IdentityOnlyProvider,
+    _provider,
     evaluator_environment,
     execute_calibration,
     execute_evaluation,
@@ -84,6 +85,24 @@ class CountingProvider:
         )
 
 
+@pytest.mark.parametrize("name,key,adapter", [
+    ("anthropic", "ANTHROPIC_API_KEY", "AnthropicAdapter"),
+    ("openai", "OPENAI_API_KEY", "OpenAIAdapter"),
+    ("google", "GOOGLE_API_KEY", "GoogleAdapter"),
+])
+def test_direct_evaluator_factory_disables_both_retry_layers(monkeypatch, name, key, adapter):
+    import verdict_eval.providers as providers
+
+    options = []
+    monkeypatch.setenv(key, "synthetic-test-key")
+    monkeypatch.setattr(providers, adapter, lambda **kwargs: options.append(kwargs))
+    _provider(name)
+    expected = {"max_retries": 1}
+    if name != "google":
+        expected["sdk_max_retries"] = 0
+    assert options == [expected]
+
+
 def _trace(trace_id, *, prompt="question", response="answer"):
     return Trace(
         trace_id=trace_id,
@@ -97,6 +116,31 @@ def _trace(trace_id, *, prompt="question", response="answer"):
         tenant_id="local",
         cluster_id="all",
     )
+
+
+@pytest.mark.parametrize("unit", ["trace", "agent_turn"])
+def test_historical_escaped_evidence_is_not_planned_for_external_judge(tmp_path, unit):
+    storage = SQLiteStorage(str(tmp_path / "historical-eval.db"))
+    encoded = r'Observed: {"misc":"\u0073k-proj-AAAAAAAAAAAAAAAAAAAAAAAA"}'
+    try:
+        if unit == "trace":
+            storage.insert_trace(_trace("old-trace"))
+            storage._conn.execute(
+                "UPDATE traces SET prompt_redacted=? WHERE trace_id=?", (encoded, "old-trace"),
+            )
+            config = {**_config(), "traceId": "old-trace"}
+        else:
+            storage.replace_agent_run_bundle(_agent_turn_bundle())
+            storage._conn.execute(
+                "UPDATE agent_turns SET user_request_redacted=? WHERE turn_id=?",
+                (encoded, "turn-1"),
+            )
+            config = {**_config(), "unit": "agent_turn", "runId": "run-1", "turnId": "turn-1"}
+        preview = preview_evaluation(storage, tenant_id="local", config=config)
+        assert preview["plannedCalls"] == 0
+        assert preview["notEvaluableReasons"] == {"redacted_evidence": 1}
+    finally:
+        storage.close()
 
 
 def _agent_turn_bundle(*, tenant="local"):
@@ -357,6 +401,40 @@ def test_selected_trace_preview_exposes_exact_evidence_and_is_tenant_scoped():
     assert storage.list_judgments_for_trace("provider-tool-call") == []
 
 
+def test_unfinished_trace_cannot_reach_judge_and_completion_invalidates_preview():
+    storage = InMemoryStorage()
+    partial = replace(_trace("partial-trace", response="partial answer"), ended_at=None)
+    storage.insert_trace(partial)
+    config = {**_config(), "traceId": "partial-trace"}
+    provider = CountingProvider()
+
+    unfinished = preview_evaluation(storage, tenant_id="local", config=config)
+    assert unfinished["plannedCalls"] == 0
+    assert unfinished["notEvaluableReasons"] == {"trace_unfinished": 1}
+    assert unfinished["estimatedMaximumCostUsd"] == 0
+
+    completed = replace(partial, ended_at=datetime(2026, 8, 31, tzinfo=timezone.utc))
+    storage.insert_trace(completed)
+    preview = preview_evaluation(storage, tenant_id="local", config=config)
+    assert preview["plannedCalls"] == 1
+    approved = {**config, "planFingerprint": preview["planFingerprint"],
+                "plannedTraces": preview["plannedTraces"]}
+    storage.insert_trace(partial)
+    with pytest.raises(ValueError, match="no longer current"):
+        execute_evaluation(storage, tenant_id="local", config=approved,
+                           confirm_external_egress=True, provider=provider)
+    assert provider.calls == 0
+
+    storage.insert_trace(completed)
+    fresh = preview_evaluation(storage, tenant_id="local", config=config)
+    approved = {**config, "planFingerprint": fresh["planFingerprint"],
+                "plannedTraces": fresh["plannedTraces"]}
+    result = execute_evaluation(storage, tenant_id="local", config=approved,
+                                confirm_external_egress=True, provider=provider)
+    assert result["completed"] == 1
+    assert provider.calls == 1
+
+
 @pytest.mark.parametrize("unit", ["trace", "agent_turn"])
 @pytest.mark.parametrize("judge_provider", ["anthropic", "openai"])
 def test_selected_approval_rejects_changed_destination_before_provider_call(
@@ -557,7 +635,9 @@ def test_tool_preview_batches_bounded_sqlite_event_reads(tmp_path):
                                      config={**_config(), "maxCalls": 100, "unit": "agent_turn",
                                              "toolEvidence": "counts_v1"})
         assert preview["plannedCalls"] == 100
-        assert len(queries) <= 1
+        # One bounded candidate query checks capture-limit coverage; the
+        # second batches tool counts for all selected turns.
+        assert len(queries) <= 2
     finally:
         storage._conn.set_trace_callback(None)
         storage.close()

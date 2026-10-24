@@ -1,4 +1,4 @@
-"""Authenticated, bounded remote ingestion for full Agent capture records."""
+"""Authenticated, bounded remote ingestion for SDK capture records."""
 
 from __future__ import annotations
 
@@ -94,17 +94,26 @@ class CollectorService:
                 except (RecursionError, ValueError):
                     error = "invalid_record"
                 else:
-                    if record is None or record.kind != "agent":
+                    if record is None:
                         error = "unsupported_record_kind"
                     else:
-                        assert record.batch is not None
                         try:
-                            batch, traces = _scope_agent_record(
-                                record.batch,
-                                record.traces,
-                                self._tenant_id,
-                            )
-                            self._sink.capture_agent(batch, traces)
+                            if record.kind == "agent":
+                                assert record.batch is not None
+                                batch, traces = _scope_agent_record(
+                                    record.batch, record.traces, self._tenant_id,
+                                )
+                                self._sink.capture_agent(batch, traces)
+                            elif record.kind == "trace":
+                                assert record.trace is not None
+                                self._sink.capture_trace(replace(
+                                    record.trace, tenant_id=self._tenant_id,
+                                ))
+                            else:
+                                assert record.span is not None
+                                self._sink.capture_span(replace(
+                                    record.span, tenant_id=self._tenant_id,
+                                ))
                         except ValueError:
                             error = "evidence_conflict"
             _enforce_deadline(deadline)

@@ -23,6 +23,111 @@ from verdict.schema import (
 from verdict.storage import SQLiteStorage
 
 
+def test_trace_explorer_date_filters_before_paging_and_preserves_utc_boundary(tmp_path, monkeypatch):
+    monkeypatch.setattr(server_module, "_now_utc", lambda: datetime(2026, 10, 18, tzinfo=timezone.utc))
+    path = tmp_path / "date-filter.db"
+    storage = SQLiteStorage(str(path))
+    for index in range(31):
+        storage.insert_trace(Trace(
+            trace_id=f"older-{index:02d}", provider="unlisted-provider",
+            request_model="model", prompt_redacted="prompt", response_redacted="reply",
+            started_at=datetime(2026, 10, 7, 23, 59, tzinfo=timezone.utc),
+            input_tokens=1, output_tokens=2,
+        ))
+    storage.insert_trace(Trace(
+        trace_id="newer", provider="unlisted-provider", request_model="model",
+        prompt_redacted="prompt", response_redacted="reply",
+        started_at=datetime(2026, 10, 8, 0, 1, tzinfo=timezone.utc),
+        input_tokens=5, output_tokens=6,
+    ))
+    for workload in ("judge", "paired_replay"):
+        storage.insert_trace(Trace(
+            trace_id=f"excluded-{workload}", provider="unlisted-provider",
+            request_model="model", tags={"verdict.workload": workload},
+            started_at=datetime(2026, 10, 7, 12, tzinfo=timezone.utc),
+            input_tokens=100, output_tokens=100,
+        ))
+    first = build_bundle(path, trace_date="2026-10-07")
+    assert first["truncation"]["resources"]["traceSamples"]["available"] == 31
+    assert len(first["samples"]) == 30
+    assert all(sample["started_at"].startswith("2026-10-07") for sample in first["samples"])
+    second = build_bundle(path, trace_date="2026-10-07", trace_offset=30)
+    assert len(second["samples"]) == 1
+    assert second["samples"][0]["started_at"].startswith("2026-10-07")
+    assert [sample["trace_id"] for sample in build_bundle(path, trace_date="2026-10-08")["samples"]] == ["newer"]
+    reopened_with_default_period = build_bundle(path, trace_date="2026-10-07", report_days=7)
+    assert reopened_with_default_period["truncation"]["resources"]["traceSamples"]["available"] == 31
+    assert len(reopened_with_default_period["samples"]) == 30
+    with pytest.raises(ValueError):
+        build_bundle(path, trace_date="2026-02-30")
+
+    import httpx
+
+    async def request_dates():
+        transport = httpx.ASGITransport(app=create_app(storage=f"sqlite:///{path}"))
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            return await asyncio.gather(
+                client.get("/api/data?trace_date=2026-10-07&trace_offset=30&report_days=0"),
+                client.get("/api/data?trace_date=2026-02-30"),
+            )
+
+    page, invalid = asyncio.run(request_dates())
+    assert page.status_code == 200
+    assert [sample["trace_id"] for sample in page.json()["samples"]] == ["older-00"]
+    assert page.json()["truncation"]["resources"]["traceSamples"]["available"] == 31
+    assert invalid.status_code == 422
+
+    selected = build_bundle(
+        path, trace_date="2026-10-07", trace_id="older-00",
+        trace_offset=0, report_days=7,
+    )
+    assert selected["selectedTrace"]["trace_id"] == "older-00"
+    assert [sample["trace_id"] for sample in selected["samples"]] == [
+        f"older-{index:02d}" for index in range(30, 0, -1)
+    ]
+    assert [sample["trace_id"] for sample in first["samples"]] == [
+        f"older-{index:02d}" for index in range(30, 0, -1)
+    ]
+    outside_date = build_bundle(
+        path, trace_date="2026-10-08", trace_id="older-00",
+    )
+    assert outside_date["selectedTrace"] is None
+    assert [sample["trace_id"] for sample in outside_date["samples"]] == ["newer"]
+    storage.insert_trace(Trace(
+        trace_id="foreign-tenant-call", tenant_id="foreign-test",
+        provider="unlisted-provider", request_model="model",
+        started_at=datetime(2026, 10, 7, 12, tzinfo=timezone.utc),
+        input_tokens=100, output_tokens=100,
+    ))
+    foreign = build_bundle(
+        path, registry_tenant="__verdict_local__", trace_date="2026-10-07",
+        trace_id="foreign-tenant-call",
+    )
+    assert foreign["selectedTrace"] is None
+    assert foreign["samples"] == first["samples"]
+
+
+def test_explicit_synthetic_dashboard_provenance_is_exposed_without_changing_store(tmp_path):
+    import httpx
+
+    path = tmp_path / "mixed-demo.db"
+    SQLiteStorage(str(path))
+
+    async def request_data(synthetic_demo):
+        transport = httpx.ASGITransport(app=create_app(
+            storage=f"sqlite:///{path}", synthetic_demo=synthetic_demo,
+        ))
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            return await client.get("/api/data")
+
+    marked = asyncio.run(request_data(True))
+    ordinary = asyncio.run(request_data(False))
+    assert marked.status_code == ordinary.status_code == 200
+    assert marked.json()["meta"]["dataProvenance"] == "synthetic"
+    assert ordinary.json()["meta"]["dataProvenance"] == "unspecified"
+    assert marked.json()["meta"]["totalAgentRuns"] == ordinary.json()["meta"]["totalAgentRuns"]
+
+
 def _persist_drift_snapshot(storage, *signals, run_id=None, analysis_time=None):
     assert signals
     fingerprints = {signal.evaluator_fingerprint for signal in signals}
@@ -337,10 +442,12 @@ def test_dashboard_api_paginates_application_traces_with_deterministic_ties(tmp_
         f"trace-{index:03d}" for index in range(4, -1, -1)
     ]
     assert len(off_page.json()["samples"]) == 30
-    assert off_page.json()["samples"][-1]["trace_id"] == "trace-000"
+    assert off_page.json()["samples"][-1]["trace_id"] == "trace-035"
+    assert off_page.json()["selectedTrace"]["trace_id"] == "trace-000"
     assert [sample["trace_id"] for sample in unknown.json()["samples"]] == [
         f"trace-{index:03d}" for index in range(64, 34, -1)
     ]
+    assert unknown.json()["selectedTrace"] is None
     assert all(
         page.json()["truncation"]["resources"]["traceSamples"]["available"] == 65
         for page in (first, second, third, off_page, unknown)
@@ -360,6 +467,40 @@ def test_dashboard_api_paginates_application_traces_with_deterministic_ties(tmp_
     }
     with pytest.raises(ValueError, match="non-negative integer"):
         build_bundle(path, trace_offset=0.5)
+
+
+def test_trace_sample_identity_survives_redaction_for_exact_off_page_navigation(tmp_path):
+    import httpx
+
+    path = tmp_path / "trace-identity.db"
+    storage = SQLiteStorage(str(path))
+    trace_id = "synthetic@example.com"
+    started = datetime(2026, 10, 18, tzinfo=timezone.utc)
+    storage.insert_trace(Trace(
+        trace_id=trace_id, provider="synthetic-provider", started_at=started,
+        prompt_redacted="Contact synthetic@example.com for a token",
+    ))
+    for index in range(30):
+        storage.insert_trace(Trace(
+            trace_id=f"later-{index:02d}", provider="synthetic-provider",
+            started_at=started + timedelta(seconds=index + 1),
+        ))
+    storage.close()
+
+    async def request_selection():
+        transport = httpx.ASGITransport(app=create_app(storage=f"sqlite:///{path}"))
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            return (
+                await client.get("/api/data", params={"trace_offset": 30}),
+                await client.get("/api/data", params={"trace_id": trace_id}),
+            )
+
+    page, selected = asyncio.run(request_selection())
+    assert page.status_code == selected.status_code == 200
+    [sample] = page.json()["samples"]
+    assert sample["trace_id"] == trace_id
+    assert "synthetic@example.com" not in sample["prompt_redacted"]
+    assert selected.json()["selectedTrace"]["trace_id"] == trace_id
 
 
 def test_bundle_keeps_agent_judge_and_unclassified_cost_provenance_separate(tmp_path):
@@ -939,6 +1080,22 @@ def test_dashboard_cli_passes_the_selected_tenant_to_the_app(
     assert status == 0
     assert captured["app"].state.verdict_tenant_id == "customer-a"
     assert captured["kwargs"]["port"] == 8123
+
+
+def test_dashboard_cli_marks_only_explicit_synthetic_demo(tmp_path, monkeypatch):
+    captured = []
+
+    def app_factory(**kwargs):
+        captured.append(kwargs)
+        return object()
+
+    monkeypatch.setattr(server_module, "create_app", app_factory)
+    monkeypatch.setattr("uvicorn.run", lambda *_args, **_kwargs: None)
+    store = f"sqlite:///{tmp_path / 'demo.db'}"
+
+    assert server_module.main(["--storage", store, "--synthetic-demo"]) == 0
+    assert server_module.main(["--storage", store]) == 0
+    assert [call["synthetic_demo"] for call in captured] == [True, False]
 
 
 @pytest.mark.parametrize("tenant_id", ["customer name", "a" * 129])
@@ -1638,6 +1795,7 @@ def test_bundle_excludes_unclear_from_every_pass_rate_denominator(tmp_path):
         trace = Trace(
             trace_id=f"trace-{index}",
             started_at=started,
+            ended_at=started,
             provider="openai",
             request_model="gpt-4o-mini",
             cluster_id="refund",
@@ -1677,7 +1835,7 @@ def test_bundle_excludes_unclear_from_every_pass_rate_denominator(tmp_path):
         "missing": 0, "error": 0, "evaluable": 2,
     }
     sample_by_id = {sample["trace_id"]: sample for sample in bundle["samples"]}
-    assert sample_by_id["trace-0"]["providerStatus"] == "provider_succeeded"
+    assert sample_by_id["trace-0"]["providerStatus"] == "no_error_recorded"
     assert sample_by_id["trace-0"]["judgeStatus"] == "unclear"
     assert sample_by_id["trace-1"]["judgment"]["summary"]["status"] == "fail"
     assert sample_by_id["trace-1"]["judgeStatus"] == "fail"
@@ -1690,7 +1848,7 @@ def test_bundle_excludes_unclear_from_every_pass_rate_denominator(tmp_path):
         "trace-2", "trace-1", "trace-0",
     ]
     assert exact["samples"][-1]["deterministicFacts"] == {
-        "providerOutcome": "succeeded",
+        "providerOutcome": "no_error_recorded",
         "promptPresent": True,
         "responsePresent": True,
         "judgeEligible": True,
@@ -2078,6 +2236,7 @@ def test_bundle_handles_historical_database_without_judgments_table(tmp_path):
         connection.close()
 
     bundle = build_bundle(path)
+    assert bundle["meta"]["monitorEligibleCalls"] == 0
 
     assert bundle["meta"]["totalTraces"] == 1
     assert bundle["evaluation"]["status"] == "empty"
@@ -2195,12 +2354,14 @@ def test_time_series_size_is_bounded_by_observed_bins_not_elapsed_wall_time(tmp_
 
 
 def test_dashboard_reads_pre_cluster_schema_without_503_or_mutating_it(tmp_path):
+    import httpx
+
     path = tmp_path / "legacy-dashboard.db"
     connection = sqlite3.connect(path)
     connection.executescript(
         """
         CREATE TABLE traces (
-            trace_id TEXT PRIMARY KEY, started_at TEXT NOT NULL, ended_at TEXT,
+            trace_id TEXT PRIMARY KEY, started_at TEXT NOT NULL,
             provider TEXT, operation TEXT, request_model TEXT, response_model TEXT,
             input_tokens INTEGER, output_tokens INTEGER, temperature REAL,
             max_tokens INTEGER, finish_reason TEXT, error TEXT, latency_ms REAL,
@@ -2223,6 +2384,21 @@ def test_dashboard_reads_pre_cluster_schema_without_503_or_mutating_it(tmp_path)
     assert bundle["meta"]["totalTraces"] == 1
     assert bundle["clusters"] == []
     assert bundle["samples"][0]["cluster_id"] is None
+    assert path.read_bytes() == before
+
+    async def request_historical_data():
+        transport = httpx.ASGITransport(app=create_app(storage=f"sqlite:///{path}"))
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            data = await client.get("/api/data?trace_id=legacy&report_days=0")
+            monitor = await client.get("/api/monitor")
+            return data, monitor
+
+    data, monitor = asyncio.run(request_historical_data())
+    assert data.status_code == 200
+    assert [sample["trace_id"] for sample in data.json()["samples"]] == ["legacy"]
+    assert data.json()["monitor"]["state"] == "not_configured"
+    assert monitor.status_code == 200
+    assert monitor.json()["state"] == "not_configured"
     assert path.read_bytes() == before
 
 
@@ -2328,6 +2504,79 @@ def test_basic_auth_gates_dashboard_shells_and_data_but_not_health(monkeypatch):
     assert authenticated.status_code == 200
 
 
+def test_basic_auth_covers_every_dashboard_api_route_even_with_setup_capability(
+    tmp_path, monkeypatch,
+):
+    import re
+
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setenv("VERDICT_USER", "reviewer")
+    monkeypatch.setenv("VERDICT_PASS", "synthetic-password")
+    app = create_app(storage=str(tmp_path / "empty.db"))
+    client = TestClient(app)
+    authenticated = ("reviewer", "synthetic-password")
+    token_response = client.get("/api/setup/token", auth=authenticated)
+    assert token_response.status_code == 200
+    setup_token = token_response.json()["setupToken"]
+
+    for route in app.routes:
+        path = getattr(route, "path", "")
+        if not path.startswith("/api/") or path == "/api/health":
+            continue
+        concrete_path = re.sub(r"\{[^/]+\}", "synthetic", path)
+        response = client.get(concrete_path, headers={"X-Verdict-Setup": setup_token})
+        assert response.status_code == 401, path
+
+    assert client.get("/api/health").status_code == 200
+
+
+@pytest.mark.parametrize("prefix", ["/verdict", "/nested/verdict"])
+def test_basic_auth_covers_dashboard_mounted_under_a_host_prefix(
+    tmp_path, monkeypatch, prefix,
+):
+    import re
+
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setenv("VERDICT_USER", "reviewer")
+    monkeypatch.setenv("VERDICT_PASS", "synthetic-password")
+    dashboard = create_app(
+        storage=str(tmp_path / "mounted.db"), operations_page_url="/operations",
+    )
+    operations = FastAPI()
+
+    @operations.get("/live")
+    def operations_page():
+        return {"page": "operations"}
+
+    dashboard.mount("/operations", operations)
+    host = FastAPI()
+    host.mount(prefix, dashboard)
+    client = TestClient(host)
+    auth = ("reviewer", "synthetic-password")
+
+    for path in (f"{prefix}/", f"{prefix}/dashboard", f"{prefix}/operations/live"):
+        assert client.get(path).status_code == 401, path
+    for route in dashboard.routes:
+        path = getattr(route, "path", "")
+        if not path.startswith("/api/") or path == "/api/health":
+            continue
+        concrete_path = re.sub(r"\{[^/]+\}", "synthetic", path)
+        assert client.get(f"{prefix}{concrete_path}").status_code == 401, path
+
+    token_response = client.get(f"{prefix}/api/setup/token", auth=auth)
+    assert token_response.status_code == 200
+    setup_token = token_response.json()["setupToken"]
+    assert client.get(
+        f"{prefix}/api/explain/spans/synthetic",
+        headers={"X-Verdict-Setup": setup_token},
+    ).status_code == 401
+    assert client.get(f"{prefix}/api/health").status_code == 200
+    assert client.get(f"{prefix}/operations/live", auth=auth).status_code == 200
+
+
 def test_basic_auth_compares_both_credentials_without_username_short_circuit(monkeypatch):
     import base64
     import secrets
@@ -2371,6 +2620,10 @@ def test_missing_sqlite_store_reports_a_first_run_state_without_the_path(tmp_pat
     assert response.status_code == 503
     assert response.json() == {"error": "data unavailable", "state": "store_not_created"}
     assert str(tmp_path) not in response.text
+    assert not missing.exists()
+    monitor = client.get("/api/monitor")
+    assert monitor.status_code == 200
+    assert monitor.json()["state"] == "not_configured"
     assert not missing.exists()
 
 

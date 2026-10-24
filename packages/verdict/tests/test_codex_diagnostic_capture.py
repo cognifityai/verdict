@@ -1,15 +1,27 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
+from dataclasses import replace
 from pathlib import Path
 
+import pytest
+import verdict.telemetry.local_agents as local_agents
 import verdict.telemetry.sources.codex as codex_source
-from verdict.dashboard.app import build_bundle
+from _postgres_test_safety import isolated_test_dsn, validate_test_dsn
+from fastapi.testclient import TestClient
+from verdict.dashboard.app import build_bundle, create_app
 from verdict.service import run_cycle
+from verdict.storage.postgres import PostgresStorage
 from verdict.storage.sqlite import SQLiteStorage
 from verdict.telemetry.cli import main
 from verdict.telemetry.local_agents import capture_local_agents
+
+DSN, POSTGRES_SKIP_REASON = validate_test_dsn(
+    os.environ.get("VERDICT_TEST_POSTGRES_DSN"),
+    allow_any_database=os.environ.get("VERDICT_TEST_POSTGRES_ALLOW_ANY_DB") == "1",
+)
 
 
 def _codex_log_body(
@@ -252,6 +264,207 @@ def test_codex_completed_model_responses_reach_management_report(tmp_path: Path)
     assert report["applications"]["rows"][0]["name"] == "codex"
 
 
+def test_rejected_codex_history_revision_preserves_accepted_diagnostic_usage(
+    tmp_path: Path,
+) -> None:
+    codex_root, diagnostic_path = _codex_home(tmp_path)
+    database = tmp_path / "verdict.db"
+    storage = SQLiteStorage(str(database))
+    try:
+        first = capture_local_agents(
+            storage, tenant_id="tenant-a", codex_root=codex_root,
+            capture_content=False,
+        )
+        assert first.stored == 2
+        before = {
+            trace.trace_id: (trace.input_tokens, trace.output_tokens)
+            for trace in storage.list_traces(tenant_id="tenant-a")
+        }
+        assert sorted(before.values()) == [(10, 2), (20, 3), (30, 4)]
+
+        source = codex_root / "thread-a.jsonl"
+        accepted_bytes = source.read_bytes()
+        assert b'"input_tokens": 20' in accepted_bytes
+        source.write_bytes(accepted_bytes.replace(
+            b'"input_tokens": 20', b'"input_tokens": 90', 1,
+        ))
+        with sqlite3.connect(diagnostic_path) as connection:
+            _insert_log(
+                connection, timestamp=1_788_000_003,
+                body=_codex_log_body(thread_id="thread-a", turn_id="turn-a"),
+            )
+
+        second = capture_local_agents(
+            storage, tenant_id="tenant-a", codex_root=codex_root,
+            capture_content=False,
+        )
+        assert second.skip_reasons == {"local_source_conflict": 1}
+        after = {
+            trace.trace_id: (trace.input_tokens, trace.output_tokens)
+            for trace in storage.list_traces(tenant_id="tenant-a")
+        }
+        assert all(after[trace_id] == usage for trace_id, usage in before.items())
+        assert len(after) == 4
+        assert sorted(usage for usage in after.values() if usage[0] is not None) == [
+            (10, 2), (20, 3), (30, 4),
+        ]
+        assert sum(usage == (None, None) for usage in after.values()) == 1
+        report = build_bundle(database, registry_tenant="tenant-a", report_days=0)[
+            "managementReport"
+        ]
+        assert report["scope"]["calls"] == 4
+        assert report["scope"]["tokenKnownCalls"] == 3
+        assert report["scope"]["totalTokens"] == 69
+    finally:
+        storage.close()
+    with TestClient(create_app(storage=database, tenant_id="tenant-a")) as client:
+        response = client.get("/api/data", params={"report_days": 0})
+        assert response.status_code == 200
+        scope = response.json()["managementReport"]["scope"]
+        assert (scope["calls"], scope["tokenKnownCalls"], scope["totalTokens"]) == (
+            4, 3, 69,
+        )
+
+
+def test_deferred_codex_history_preserves_usage_and_imports_diagnostic_only_call(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    codex_root, diagnostic_path = _codex_home(tmp_path)
+    storage = SQLiteStorage(str(tmp_path / "verdict.db"))
+    try:
+        assert capture_local_agents(
+            storage, tenant_id="tenant-a", codex_root=codex_root,
+            capture_content=False,
+        ).stored == 2
+        before = {
+            trace.trace_id: (trace.input_tokens, trace.output_tokens)
+            for trace in storage.list_traces(tenant_id="tenant-a")
+        }
+        with sqlite3.connect(diagnostic_path) as connection:
+            _insert_log(
+                connection, timestamp=1_788_000_004,
+                body=_codex_log_body(thread_id="diagnostic-only", turn_id="turn-c"),
+            )
+        monkeypatch.setattr(local_agents, "_MAX_SCAN_FILES", 1)
+        second = capture_local_agents(
+            storage, tenant_id="tenant-a", codex_root=codex_root,
+            capture_content=False,
+        )
+        assert second.scan_incomplete is True and second.deferred == 1
+        after = {
+            trace.trace_id: (trace.input_tokens, trace.output_tokens)
+            for trace in storage.list_traces(tenant_id="tenant-a")
+        }
+        assert all(after[trace_id] == usage for trace_id, usage in before.items())
+        assert len(after) == 4
+        assert sum(usage == (None, None) for usage in after.values()) == 1
+    finally:
+        storage.close()
+
+
+def test_rejected_codex_rescan_does_not_overwrite_newer_trace_update(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    codex_root, _ = _codex_home(tmp_path)
+    storage = SQLiteStorage(str(tmp_path / "verdict.db"))
+    try:
+        assert capture_local_agents(
+            storage, tenant_id="tenant-a", codex_root=codex_root,
+            capture_content=False,
+        ).stored == 2
+        source = codex_root / "thread-a.jsonl"
+        source.write_bytes(source.read_bytes().replace(
+            b'"input_tokens": 20', b'"input_tokens": 90', 1,
+        ))
+        original_get = storage.get_trace
+        raced = []
+
+        def concurrent_update(trace_id):
+            existing = original_get(trace_id)
+            if existing is not None and existing.input_tokens == 20 and not raced:
+                storage.insert_trace(replace(existing, input_tokens=77, output_tokens=8))
+                raced.append(trace_id)
+            return existing
+
+        monkeypatch.setattr(storage, "get_trace", concurrent_update)
+        second = capture_local_agents(
+            storage, tenant_id="tenant-a", codex_root=codex_root,
+            capture_content=False,
+        )
+        assert second.skip_reasons == {"local_source_conflict": 1}
+        assert len(raced) == 1
+        updated = original_get(raced[0])
+        assert (updated.input_tokens, updated.output_tokens) == (77, 8)
+    finally:
+        storage.close()
+
+
+def test_diagnostic_rescan_preserves_prior_usage_after_history_file_disappears(
+    tmp_path: Path,
+) -> None:
+    codex_root, _ = _codex_home(tmp_path)
+    storage = SQLiteStorage(str(tmp_path / "verdict.db"))
+    try:
+        assert capture_local_agents(
+            storage, tenant_id="tenant-a", codex_root=codex_root,
+            capture_content=False,
+        ).stored == 2
+        before = {
+            trace.trace_id: (trace.input_tokens, trace.output_tokens)
+            for trace in storage.list_traces(tenant_id="tenant-a")
+        }
+        for source in codex_root.glob("*.jsonl"):
+            source.unlink()
+        second = capture_local_agents(
+            storage, tenant_id="tenant-a", codex_root=codex_root,
+            capture_content=False,
+        )
+        assert second.files == 0 and second.skipped == 0
+        assert second.codex_model_calls is not None
+        assert second.codex_model_calls.skip_reasons == {"prior_usage_retained": 3}
+        assert second.as_dict()["codex_model_calls"]["status"] == "partial"
+        assert {
+            trace.trace_id: (trace.input_tokens, trace.output_tokens)
+            for trace in storage.list_traces(tenant_id="tenant-a")
+        } == before
+    finally:
+        storage.close()
+
+
+@pytest.mark.skipif(DSN is None, reason=POSTGRES_SKIP_REASON)
+def test_postgres_rejected_codex_revision_does_not_rewrite_prior_call_usage(
+    tmp_path: Path,
+) -> None:
+    assert DSN is not None
+    codex_root, _ = _codex_home(tmp_path)
+    with isolated_test_dsn(DSN) as scoped_dsn:
+        storage = PostgresStorage(scoped_dsn, min_pool=1, max_pool=2)
+        try:
+            assert capture_local_agents(
+                storage, tenant_id="tenant-a", codex_root=codex_root,
+                capture_content=False,
+            ).stored == 2
+            before = {
+                trace.trace_id: (trace.input_tokens, trace.output_tokens)
+                for trace in storage.list_traces(tenant_id="tenant-a")
+            }
+            source = codex_root / "thread-a.jsonl"
+            source.write_bytes(source.read_bytes().replace(
+                b'"input_tokens": 20', b'"input_tokens": 90', 1,
+            ))
+            second = capture_local_agents(
+                storage, tenant_id="tenant-a", codex_root=codex_root,
+                capture_content=False,
+            )
+            assert second.skip_reasons == {"local_source_conflict": 1}
+            assert {
+                trace.trace_id: (trace.input_tokens, trace.output_tokens)
+                for trace in storage.list_traces(tenant_id="tenant-a")
+            } == before
+        finally:
+            storage.close()
+
+
 def test_codex_call_tokens_remain_unavailable_when_usage_match_is_ambiguous(
     tmp_path: Path,
 ) -> None:
@@ -354,7 +567,7 @@ def test_codex_call_tokens_do_not_depend_on_replacing_an_existing_agent_run(
         storage.close()
 
     assert summary.skipped == 1
-    assert summary.skip_reasons == {"turn request cannot be replaced": 1}
+    assert summary.skip_reasons == {"local_source_conflict": 1}
     assert new_trace.input_tokens == 10
     assert new_trace.output_tokens == 2
 
@@ -518,7 +731,7 @@ def test_codex_diagnostic_limit_keeps_the_newest_calls(tmp_path: Path, monkeypat
         storage.close()
 
     assert summary.as_dict()["codex_model_calls"] == {
-        "status": "complete",
+        "status": "partial",
         "seen": 3,
         "stored": 2,
         "skipped": 1,
@@ -581,3 +794,24 @@ def test_scheduled_local_capture_imports_new_codex_calls(tmp_path: Path) -> None
         assert len(storage.list_traces(tenant_id="__verdict_local__")) == 4
     finally:
         storage.close()
+
+
+def test_worker_rescan_rejects_history_change_without_erasing_call_tokens(
+    tmp_path: Path,
+) -> None:
+    codex_root, _ = _codex_home(tmp_path)
+    database = tmp_path / "verdict.db"
+    storage_url = f"sqlite:///{database}"
+    first = run_cycle(storage_url, {"codexRoot": str(codex_root), "runMonitor": False})
+    assert first["capture"]["stored"] == 2
+    before = build_bundle(database, report_days=0)["managementReport"]["scope"]
+    assert (before["tokenKnownCalls"], before["totalTokens"]) == (3, 69)
+
+    source = codex_root / "thread-a.jsonl"
+    source.write_bytes(source.read_bytes().replace(
+        b'"input_tokens": 20', b'"input_tokens": 90', 1,
+    ))
+    second = run_cycle(storage_url, {"codexRoot": str(codex_root), "runMonitor": False})
+    assert second["capture"]["skip_reasons"] == {"local_source_conflict": 1}
+    after = build_bundle(database, report_days=0)["managementReport"]["scope"]
+    assert (after["tokenKnownCalls"], after["totalTokens"]) == (3, 69)

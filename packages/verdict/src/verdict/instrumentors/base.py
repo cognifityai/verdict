@@ -100,6 +100,8 @@ def apply_routing_context(client: VerdictClient, trace: Trace) -> None:
 
 def persist_trace(client: VerdictClient, trace: Trace) -> None:
     """Persist a provider trace; parent_span_id already carries correlation."""
+    if trace.tenant_id is None and client.tenant_id is not None:
+        trace.tenant_id = client.tenant_id
     # Provider response fields are filled after Trace.__post_init__, so repeat
     # the schema guard at the final synchronous persistence boundary.
     trace.normalize_scalars()

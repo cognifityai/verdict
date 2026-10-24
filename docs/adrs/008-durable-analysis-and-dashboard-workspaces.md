@@ -56,19 +56,22 @@ present those states without treating missing evidence as success or failure.
 
 ## Dashboard workspaces
 
-- Overview presents the persisted monitor result, findings, evidence coverage,
-  and supporting Reliability, Performance, and Behavior views without
-  manufacturing a combined run verdict.
+- Home presents captured evidence, source-aware next action, issue links, usage,
+  and monitoring status without manufacturing a combined run verdict. Existing
+  Reliability, Performance, and Behavior deep links retain their detail views.
 - Findings link to their affected Agent Runs, traces, and bounded evidence.
-- Trace Explorer presents provider execution separately from evaluation states:
+- Investigation → Model calls presents provider execution separately from evaluation states:
   not evaluated, judge error, pass, fail, and unclear.
 - Agent Runs show source outcome, evidence coverage, deterministic findings,
   and selected-evaluator coverage separately.
-- Four primary tasks separate concerns: Overview, Investigate, Evaluate, and
-  Monitor. Report and Settings are header utilities. Report summarizes application calls separately
-  from evaluator traffic and emits aggregate-only management exports. Monitor
-  contains current cohort status, historical comparisons, optional segments,
-  schedules.
+- Six direct destinations separate concerns: Home, Suggested setup,
+  Monitoring, Investigation, Groups, and Model drift setup. Evaluate, Report,
+  and Settings remain available from the sidebar. Report summarizes application
+  calls separately from evaluator traffic and emits aggregate-only management
+  exports. Monitoring owns recurring issue and worker status; Model drift setup
+  owns historical comparison and prospective policy activation. Groups starts
+  with recorded source, agent, provider, and model fields; intent clusters are
+  optional. Existing route hashes remain valid.
 - Fixed-window evaluation signals created by earlier releases remain readable
   through the Python storage API. They are excluded from `/api/data` and the
   UI because their rows have no tenant owner. The current pipeline does not

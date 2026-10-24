@@ -6,9 +6,45 @@ from collections.abc import Iterable, Mapping
 
 from verdict.dashboard.query import QuerySession
 from verdict.evidence import AgentRunBundle
+from verdict.local_source_revision import LocalSourceRevision, revision_from_row
 from verdict.normalized_evidence import bundle_from_normalized_rows
 
 _TABLES = ("import_sources", "agent_runs", "agent_turns", "agent_events")
+
+
+def local_revisions(
+    session: QuerySession, tenant_id: str, run_ids: tuple[str, ...],
+) -> dict[str, LocalSourceRevision | None]:
+    """Read source coverage in the same dashboard transaction as run evidence."""
+    if not run_ids or "local_full_bytes" not in session.columns("import_sources"):
+        return {}
+    placeholders = ",".join("?" for _ in run_ids)
+    rows = session.execute(
+        "SELECT r.run_id,s.local_full_bytes,s.local_full_sha256,"
+        "s.local_prefix_bytes,s.local_prefix_sha256,s.local_partial_line,"
+        "s.local_source_turn_count,s.local_source_event_count,"
+        "s.local_v1_turn_count,s.local_v1_event_count,"
+        "s.local_min_turn_at,s.local_max_turn_at "
+        "FROM agent_runs r JOIN import_sources s ON "
+        "s.tenant_id=r.tenant_id AND s.source_session_id=r.source_session_id "
+        "WHERE r.tenant_id=? AND r.run_id IN (" + placeholders + ")",  # nosec B608
+        (tenant_id, *run_ids),
+    )
+    return {str(row["run_id"]): revision_from_row(row) for row in rows}
+
+
+def first_capture_limit_sequence(
+    session: QuerySession, tenant_id: str, run_id: str,
+) -> int | None:
+    """Return where the first omitted source-event range begins for a run."""
+    row = session.execute(
+        "SELECT MIN(t.sequence) AS sequence FROM agent_events e "
+        "JOIN agent_turns t ON t.tenant_id=e.tenant_id AND t.run_id=e.run_id "
+        "AND t.turn_id=e.turn_id WHERE e.tenant_id=? AND e.run_id=? "
+        "AND e.provenance='verdict:capture_limit'",
+        (tenant_id, run_id),
+    ).fetchone()
+    return int(row["sequence"]) if row is not None and row["sequence"] is not None else None
 
 
 def session_run_ids(
@@ -33,19 +69,42 @@ def available(session: QuerySession) -> bool:
     return all(session.table_exists(table) for table in _TABLES)
 
 
-def count_runs(session: QuerySession, tenant_id: str) -> int:
+def _run_group_filter(source_kind: str | None, agent_name: str | None) -> tuple[str, tuple[str, ...]]:
+    conditions = []
+    values = []
+    if source_kind is not None:
+        conditions.append(" AND s.source_kind=?")
+        values.append(source_kind)
+    if agent_name is not None:
+        conditions.append(" AND COALESCE(NULLIF(TRIM(r.agent_name),''),'Unnamed agent')=?")
+        values.append(agent_name)
+    return "".join(conditions), tuple(values)
+
+
+def count_runs(session: QuerySession, tenant_id: str, *, source_kind: str | None = None,
+               agent_name: str | None = None) -> int:
     if not available(session):
         return 0
-    row = session.execute(
-        "SELECT COUNT(*) AS count FROM agent_runs WHERE tenant_id=?",
-        (tenant_id,),
-    ).fetchone()
+    if source_kind is None and agent_name is None:
+        row = session.execute(
+            "SELECT COUNT(*) AS count FROM agent_runs WHERE tenant_id=?",
+            (tenant_id,),
+        ).fetchone()
+    else:
+        extra, values = _run_group_filter(source_kind, agent_name)
+        row = session.execute(
+            """SELECT COUNT(*) AS count FROM agent_runs r JOIN import_sources s
+               ON s.tenant_id=r.tenant_id AND s.source_session_id=r.source_session_id
+               WHERE r.tenant_id=?""" + extra,
+            (tenant_id, *values),
+        ).fetchone()
     return int(row["count"] if row else 0)
 
 
 def list_run_rows(
     session: QuerySession, tenant_id: str, *, limit: int, offset: int = 0,
-    run_ids: tuple[str, ...] | None = None,
+    run_ids: tuple[str, ...] | None = None, source_kind: str | None = None,
+    agent_name: str | None = None,
 ) -> list[dict]:
     """Read page metadata and child counts without loading event content."""
     where = "r.tenant_id=?"
@@ -55,6 +114,9 @@ def list_run_rows(
         where += f" AND r.run_id IN ({placeholders})"  # nosec B608
         params += run_ids
     else:
+        extra, values = _run_group_filter(source_kind, agent_name)
+        where += extra
+        params += values
         params += (limit, offset)
     pagination = "" if run_ids is not None else " LIMIT ? OFFSET ?"
     rows = session.execute(
@@ -208,6 +270,24 @@ def iter_bundles(
             return
 
 
+def iter_capture_snapshots(
+    session: QuerySession, tenant_id: str, *, limit: int, page_size: int = 100,
+) -> Iterable[tuple[AgentRunBundle, LocalSourceRevision | None]]:
+    """Stream bounded bundles with coverage from each matching query page."""
+    for offset in range(0, limit, page_size):
+        page = load_bundles(
+            session, tenant_id, limit=min(page_size, limit - offset),
+            oldest_first=True, offset=offset,
+        )
+        revisions = local_revisions(
+            session, tenant_id, tuple(bundle.run.run_id for bundle in page),
+        )
+        for bundle in page:
+            yield bundle, revisions.get(bundle.run.run_id)
+        if len(page) < page_size:
+            return
+
+
 def load_run_page(
     session: QuerySession,
     tenant_id: str,
@@ -286,7 +366,10 @@ def source_metadata(session: QuerySession, tenant_id: str) -> dict[str, object]:
             "available": 0,
             "sources": [],
             "sourcesTruncated": False,
+            "agents": [],
+            "agentsTruncated": False,
             "lastCapturedAt": None,
+            "lastStoredAt": None,
         }
     available_runs = count_runs(session, tenant_id)
     rows = session.execute(
@@ -299,6 +382,16 @@ def source_metadata(session: QuerySession, tenant_id: str) -> dict[str, object]:
         (tenant_id,),
     )
     sources = [{"sourceKind": row["source_kind"], "runs": int(row["count"])} for row in rows]
+    agent_rows = list(session.execute(
+        """SELECT COALESCE(NULLIF(TRIM(agent_name),''),'Unnamed agent') AS agent_name,
+                  COUNT(*) AS count
+           FROM agent_runs WHERE tenant_id=?
+           GROUP BY COALESCE(NULLIF(TRIM(agent_name),''),'Unnamed agent')
+           ORDER BY count DESC,agent_name LIMIT 17""",
+        (tenant_id,),
+    )) if "agent_name" in session.columns("agent_runs") else []
+    agents = [{"agentName": row["agent_name"], "runs": int(row["count"])}
+              for row in agent_rows[:16]]
     source_count = session.execute(
         """SELECT COUNT(DISTINCT s.source_kind) AS count
            FROM agent_runs r JOIN import_sources s
@@ -308,15 +401,23 @@ def source_metadata(session: QuerySession, tenant_id: str) -> dict[str, object]:
         (tenant_id,),
     ).fetchone()
     latest = session.execute(
-        "SELECT MAX(started_at) AS newest_started_at FROM agent_runs WHERE tenant_id=?",
+        "SELECT MAX(started_at) AS newest_started_at"
+        + (",MAX(updated_at) AS newest_stored_at" if "updated_at" in session.columns("agent_runs")
+           else "") + " FROM agent_runs WHERE tenant_id=?",
         (tenant_id,),
     ).fetchone()
     newest = latest["newest_started_at"] if latest else None
+    stored = latest.get("newest_stored_at") if latest else None
     if hasattr(newest, "isoformat"):
         newest = newest.isoformat()
+    if hasattr(stored, "isoformat"):
+        stored = stored.isoformat()
     return {
         "available": available_runs,
         "sources": sources,
         "sourcesTruncated": int(source_count["count"] if source_count else 0) > len(sources),
+        "agents": agents,
+        "agentsTruncated": len(agent_rows) > len(agents),
         "lastCapturedAt": newest,
+        "lastStoredAt": stored,
     }

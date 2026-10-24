@@ -140,6 +140,10 @@ class Storage(Protocol):
 
     def replace_agent_run_bundle(self, bundle: AgentRunBundle) -> None: ...
 
+    def list_local_recent_fact_positions(
+        self, tenant_id: str, run_id: str,
+    ) -> tuple[tuple[int, int, int, str], ...]: ...
+
     def list_agent_turn_evaluation_candidates(
         self, tenant_id: str, evaluator_fingerprint: str, *, limit: int = 100,
         before: tuple[datetime, str, str] | None = None,
@@ -373,6 +377,8 @@ class Storage(Protocol):
         *,
         trace_id: str | None = None,
         limit: int = 100,
+        tenant_id: str | None = None,
+        span_id: str | None = None,
     ) -> list[SpanRecord]: ...
 
     def close(self) -> None: ...

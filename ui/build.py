@@ -27,7 +27,6 @@ DASHBOARD = (
 
 PAGES = {
     "landing.html": ("Verdict - Agent Profiler and Reliability", "landing.js"),
-    "VerdictUI.html": ("Verdict - Agent Profiler and Reliability", "all-in-one.js"),
 }
 
 
@@ -62,7 +61,7 @@ def main() -> None:
     (DASHBOARD / "dashboard.html").write_text(
         page("Verdict - Dashboard", "dashboard.js", DASHBOARD)
     )
-    print("Wrote landing.html, VerdictUI.html, and packaged dashboard.html")
+    print("Wrote landing.html and packaged dashboard.html")
 
 
 if __name__ == "__main__":

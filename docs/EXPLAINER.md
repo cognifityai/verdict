@@ -23,6 +23,11 @@ application-declared run, turn, tool, command, test, retry, feedback, and outcom
 structure around them. The provider `Trace` owns LLM content; the linked event
 does not duplicate it. When the application explicitly records a boolean-false
 business outcome, Agent Insights surfaces that failure without a judge call.
+Optional AI explanations use bounded, redacted selected evidence. Masked fields
+are omitted from the AI preview; if they contain the selected failure's only
+recorded diagnostic, no call is offered. A completed execution status cannot
+establish the cause of a failure or prove task success; inspect the linked
+recorded event and result.
 
 ## What Verdict Does
 
@@ -81,6 +86,12 @@ business outcome, Agent Insights surfaces that failure without a judge call.
    and `hybrid` fallback remain experimental opt-in features.
 4. **Evaluate**: the separately invoked batch pipeline or Evaluator Lab selects
    traces and scores them with a configured judge and rubric.
+   Existing stored content that would change under the current redactor is
+   excluded from judge planning; execution checks again before provider egress.
+   These older records need recapture or a separately reviewed migration before
+   they can be judged. Direct OpenAI and Anthropic Evaluator Lab calls make one
+   Verdict attempt with SDK retries disabled. Google uses one Verdict attempt;
+   its SDK retry behavior is not controlled here.
    Evaluator Lab additionally offers a distinct Agent Turn unit: a completed,
    untruncated redacted request and final output are scored without fabricating
    a provider Trace or changing the Trace-based pipeline. Turn results have
@@ -103,7 +114,7 @@ business outcome, Agent Insights surfaces that failure without a judge call.
    from different identities are never pooled by the runner or dashboard. Long
    Evaluator Lab runs display activity and elapsed time while completed results
    are stored.
-5. **Monitor**: preview count-based or explicit event-time reference/current
+5. **Model drift setup**: preview count-based or explicit event-time reference/current
    cohorts of genuine model-call Traces, then optionally activate the reviewed
    policy. Trace is the only unit supported by the prospective alert lifecycle. Activation opens an
    empty prospective bucket at a stored event-time boundary, so older imported
@@ -120,7 +131,10 @@ business outcome, Agent Insights surfaces that failure without a judge call.
    Print/Save PDF output. Verdict evaluator calls stay outside utilization.
    Verdict-owned paired-replay calls stay outside utilization as well.
 
-For a visual overview, see `docs/architecture-current.svg`.
+For a visual overview of this source checkout's evidence flow, see
+[`architecture-current.svg`](architecture-current.svg). The file shipper and
+collector path for standalone tenant-owned Trace/Span records is unreleased;
+the published beta supports the Agent record path.
 
 ## What You Can Try Today
 
@@ -204,10 +218,11 @@ a retained trace.
 - Telemetry import is an explicit content-transfer path: supported source
   prompt/response fields are copied when present, bounded and redacted at the
   storage boundary. Treat the destination database as sensitive.
-- Supported message top-level fields are allowlisted. Their nested JSON strings,
-  including tool arguments/results and metadata, are sanitized before Trace
-  assignment and again at storage; judge reasoning, manual-span attributes, and
-  dashboard output receive the same boundary treatment. Unsupported objects fail
+- Supported message top-level fields are allowlisted. Serialized JSON object and
+  array strings in captured content, including tool arguments/results and
+  metadata, are parsed and sanitized before storage; text containing unresolved
+  Unicode escape sequences is masked. Judge reasoning, manual-span content,
+  and dashboard output receive the same boundary treatment. Unsupported objects fail
   closed. Redaction is still best-effort pattern matching, not a compliance
   guarantee: names, addresses, dates of birth, many international identifiers,
   and arbitrary opaque metadata can remain. Use non-sensitive identifiers and
@@ -219,6 +234,8 @@ a retained trace.
 - Structural checks and local embedding inference keep trace content local. A
   provider-backed judge sends the sampled prompt/response content to the
   configured provider under that provider's data-handling terms.
+  Historical content that fails the current redaction check is not sent to a
+  judge; semantic clustering sanitizes its selected user text before embedding.
 - Local SQLite files and generated reports may contain sensitive trace data.
   Keep them out of source control.
 - Before using Verdict with production data, review `SECURITY.md`, your
@@ -258,8 +275,10 @@ code or starting a collector. When omitted, the page route, navigation entry,
 and config field do not exist. This is independent of the legacy
 `operations_url` Settings adapter.
 When `VERDICT_USER` and `VERDICT_PASS` are both set, HTTP Basic authentication
-gates the dashboard shells at `/` and `/dashboard` plus `/api/data`, while
-`/api/health` remains public. Chart series contain observed bins only. The response keeps full-store
+gates the dashboard shells at `/` and `/dashboard` and every `/api/*` route
+except public `/api/health`; a setup capability is not a substitute for that
+login. The same gate applies when the dashboard is mounted below a host path.
+Chart series contain observed bins only. The response keeps full-store
 totals while bounding presentation data to the latest 100 chart points, 8
 providers, 20 usable intent clusters, 12 dimensions, 20 evaluator identities,
 20 models per displayed provider and one 30-row page of

@@ -2,14 +2,25 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
+from contextlib import ExitStack
 from dataclasses import replace
+from datetime import datetime
+from hashlib import sha256
 from pathlib import Path
 
 import pytest
 import verdict.evidence as evidence_contract
 from verdict import AgentEventType, EvidenceState, ExecutionStatus, PrivacyClassification
+from verdict.agent_judgment import AgentTurnJudgment, turn_evidence_fingerprint
 from verdict.capture import AgentCaptureService
-from verdict.dashboard.app import build_agent_run_detail
+from verdict.dashboard.app import (
+    build_agent_run_detail,
+    build_agent_runs_bundle,
+    build_agent_turn_analysis,
+)
+from verdict.evidence import AgentEvent
+from verdict.schema import JudgmentStatus
 from verdict.storage import BufferedStorage, InMemoryStorage, SQLiteStorage
 from verdict.telemetry.cli import main
 from verdict.telemetry.local_agents import capture_local_agents
@@ -18,6 +29,69 @@ from verdict.telemetry.local_agents import capture_local_agents
 def _write_jsonl(path: Path, records: list[dict[str, object]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("".join(json.dumps(record) + "\n" for record in records))
+
+
+def test_legacy_source_revision_without_counts_cannot_prove_whole_run_coverage() -> None:
+    from verdict.local_source_revision import LocalSourceRevision, local_scope_partial
+
+    revision = LocalSourceRevision(
+        full_bytes=12, full_sha256="a" * 64,
+        complete_prefix_bytes=12, complete_prefix_sha256="a" * 64,
+        partial_final_line=False,
+    )
+    assert local_scope_partial("codex", revision, 0, None) is True
+    assert local_scope_partial("claude-code", revision, 0, 0) is True
+
+
+def test_recent_trace_fingerprint_uses_instant_not_display_timezone() -> None:
+    from datetime import timedelta, timezone
+
+    from verdict.local_recent_facts import trace_evidence_fingerprint
+    from verdict.schema import Operation, Trace
+
+    observed = datetime.fromisoformat("2026-08-30T11:00:02+00:00")
+    trace = Trace(
+        trace_id="synthetic-timezone-trace", started_at=observed,
+        ended_at=observed, provider="synthetic", operation=Operation.CHAT,
+        request_model="synthetic-model", response_model="synthetic-model",
+    )
+    local_zone = timezone(timedelta(hours=-7))
+    same_instant = replace(
+        trace, started_at=observed.astimezone(local_zone),
+        ended_at=observed.astimezone(local_zone),
+    )
+    assert trace_evidence_fingerprint(trace) == trace_evidence_fingerprint(same_instant)
+
+
+def _assert_legacy_writer_cannot_replace_atomic_window(storage, path: Path, tenant: str, run_id: str) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+    from hashlib import sha256
+    from threading import Barrier
+
+    original = path.read_bytes()
+    old_sample = storage.get_recent_local_events(tenant, run_id)
+    path.write_bytes(original + b"\n")
+    advanced = path.read_bytes()
+    new_sample = {**old_sample, "sourceRevision": sha256(advanced).hexdigest()}
+    barrier = Barrier(2)
+
+    def save(sample, source):
+        barrier.wait()
+        try:
+            return storage.save_recent_local_events(
+                tenant, run_id, json.dumps(sample, separators=(",", ":")),
+                len(source), sha256(source).hexdigest(),
+                lambda size: sha256(path.read_bytes()[:size]).hexdigest(),
+            )
+        except ValueError as exc:
+            return str(exc)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        old = executor.submit(save, old_sample, original)
+        new = executor.submit(save, new_sample, advanced)
+        assert new.result() == "recent_sample_superseded"
+        assert old.result() == "recent_sample_superseded"
+    assert storage.get_recent_local_events(tenant, run_id) == old_sample
 
 
 def _codex_records(secret: str = "private payload") -> list[dict[str, object]]:
@@ -2104,21 +2178,1247 @@ def test_local_cli_rejects_an_invalid_import_tenant(
 
 
 def test_large_session_is_bounded_and_marks_omitted_events(tmp_path: Path) -> None:
+    import asyncio
+
+    import httpx
+    from verdict.dashboard.app import create_app
+
     root = tmp_path / "codex"
     records = _codex_records()
+    records[4]["payload"]["arguments"] = json.dumps({
+        "cmd": "echo ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+        "password": {"nested": "opaque-nested-result-canary"},
+    })
     records[4:4] = [records[4]] * 1_600
     _write_jsonl(root / "large.jsonl", records)
+    (root / "large.jsonl").write_bytes(b"\n" + (root / "large.jsonl").read_bytes())
     storage = SQLiteStorage(str(tmp_path / "verdict.db"))
 
     summary = capture_local_agents(storage, tenant_id="local", codex_root=root)
 
     assert summary.stored == 1
+    assert summary.as_dict()["event_limited_runs"] == 1
     bundle = storage.list_agent_run_bundles("local")[0]
     assert len(bundle.events) == 1_500
     marker = bundle.events[-1]
     assert marker.provenance == "verdict:capture_limit"
     assert marker.attributes["name"] == "source_events_omitted"
     assert int(marker.attributes["source"]) > 0
+    recent = storage.get_recent_local_events("local", bundle.run.run_id)
+    assert recent is not None
+    assert recent["partial"] is True
+    assert recent["sourceEventCount"] > len(bundle.events)
+    assert recent["firstOrdinal"] == recent["sourceEventCount"] - 50
+    assert len(recent["events"]) == 50
+    assert recent["events"][-1]["sourceOrdinal"] == recent["sourceEventCount"] - 1
+    assert recent["events"][-1]["eventId"] not in {event.event_id for event in bundle.events}
+    assert "ghp_" not in json.dumps(recent)
+    assert "opaque-nested-result-canary" not in json.dumps(recent)
+
+    async def request_sample(tenant):
+        app = create_app(storage=str(tmp_path / "verdict.db"), tenant_id=tenant)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            return await client.get(f"/api/runs/{bundle.run.run_id}/recent-local-events")
+
+    own = asyncio.run(request_sample("local"))
+    foreign = asyncio.run(request_sample("foreign"))
+    assert own.status_code == 200
+    assert own.json()["events"][-1]["sourceOrdinal"] == recent["sourceEventCount"] - 1
+    assert "ghp_" not in own.text
+    assert "opaque-nested-result-canary" not in own.text
+    assert foreign.status_code == 404
+
+    path = root / "large.jsonl"
+    original_length = path.stat().st_size
+    with path.open("a") as handle:
+        for row in (
+            {"timestamp": "2026-08-30T10:02:00Z", "type": "event_msg",
+             "payload": {"type": "task_started", "turn_id": "turn-b"}},
+            {"timestamp": "2026-08-30T10:02:01Z", "type": "response_item",
+             "payload": {"type": "function_call", "name": "exec_command",
+                         "call_id": "later-call", "arguments": json.dumps({"cmd": "true"})}},
+            {"timestamp": "2026-08-30T10:02:01Z", "type": "response_item",
+             "payload": {"type": "function_call_output", "call_id": "later-call",
+                         "output": json.dumps({"exit_code": 1, "output": "failed"})}},
+            {"timestamp": "2026-08-30T10:02:02Z", "type": "event_msg",
+             "payload": {"type": "task_complete", "turn_id": "turn-b",
+                         "last_agent_message": "done"}},
+        ):
+            handle.write(json.dumps(row) + "\n")
+    advanced = capture_local_agents(storage, tenant_id="local", codex_root=root)
+    assert advanced.recent_sample_errors == 0
+    newer = storage.get_recent_local_events("local", bundle.run.run_id)
+    assert newer["sourceEventCount"] > recent["sourceEventCount"]
+    assert newer["events"][-1]["turnSequence"] == 1
+    from verdict.dashboard.app import build_recent_local_sample
+    hydrated = build_recent_local_sample(
+        str(tmp_path / "verdict.db"), tenant="local", run_id=bundle.run.run_id,
+    )
+    assert {finding["code"] for finding in hydrated["findings"]} >= {
+        "tool_error", "command_failed",
+    }
+    assert newer["turns"][-1]["eligibleForFindings"] is True
+    assert len(storage.get_agent_run_bundle("local", bundle.run.run_id).events) == 1_500
+    assert capture_local_agents(storage, tenant_id="local", codex_root=root).recent_sample_errors == 0
+    assert storage.get_recent_local_events("local", bundle.run.run_id) == newer
+
+    _assert_legacy_writer_cannot_replace_atomic_window(storage, path, "local", bundle.run.run_id)
+    newer = storage.get_recent_local_events("local", bundle.run.run_id)
+    retained_bundle, retained_revision = storage.get_agent_capture_snapshot(
+        "local", bundle.run.run_id,
+    )
+
+    advanced_bytes = path.read_bytes()
+    path.write_bytes(advanced_bytes[:original_length])
+    shortened = capture_local_agents(storage, tenant_id="local", codex_root=root)
+    assert shortened.stored == 0
+    assert shortened.skip_reasons == {"local_source_conflict": 1}
+    assert shortened.recent_sample_errors == 0
+    assert storage.get_recent_local_events("local", bundle.run.run_id) == newer
+    assert storage.get_agent_capture_snapshot("local", bundle.run.run_id) == (
+        retained_bundle, retained_revision,
+    )
+    path.write_bytes(advanced_bytes)
+    path.write_bytes(path.read_bytes().replace(b"/Users/example/project", b"/Users/example/projecT", 1))
+    conflicting = capture_local_agents(storage, tenant_id="local", codex_root=root)
+    assert conflicting.stored == 0
+    assert conflicting.skip_reasons == {"local_source_conflict": 1}
+    assert conflicting.recent_sample_errors == 0
+    assert storage.get_recent_local_events("local", bundle.run.run_id) == newer
+    assert storage.get_agent_capture_snapshot("local", bundle.run.run_id) == (
+        retained_bundle, retained_revision,
+    )
+
+
+@pytest.mark.parametrize("backend", ["sqlite", "postgres"])
+def test_high_event_tail_failure_reaches_durable_monitor_without_v1_inflation(
+    tmp_path: Path, backend: str, monkeypatch,
+) -> None:
+    import asyncio
+    from datetime import timedelta, timezone
+
+    import httpx
+    import verdict.telemetry.local_agents as local_agents
+    from verdict.dashboard.app import build_recent_local_sample, create_app
+    from verdict.dashboard.control_plane import ControlStore
+    from verdict.dashboard.issue_notices import IssueNotices
+
+    root = tmp_path / "codex"
+    rows = _codex_records("synthetic-canary")
+    rows[4:4] = [rows[4]] * 1_600
+    rows.extend([
+        {"timestamp": "2026-08-30T10:02:00Z", "type": "event_msg",
+         "payload": {"type": "task_started", "turn_id": "late-turn"}},
+        {"timestamp": "2026-08-30T10:02:01Z", "type": "response_item",
+         "payload": {"type": "function_call", "name": "exec_command",
+                     "call_id": "late-call", "arguments": json.dumps({"cmd": "false"})}},
+        {"timestamp": "2026-08-30T10:02:02Z", "type": "response_item",
+         "payload": {"type": "function_call_output", "call_id": "late-call",
+                     "output": json.dumps({"exit_code": 1, "output": "failed"})}},
+        {"timestamp": "2026-08-30T10:02:03Z", "type": "event_msg",
+         "payload": {"type": "task_complete", "turn_id": "late-turn"}},
+    ])
+    # Keep the event day within the API's 30-day window, including near UTC midnight.
+    now = datetime.now(timezone.utc)
+    base = now - timedelta(minutes=5)
+    for row in rows:
+        original = datetime.fromisoformat(str(row["timestamp"]).replace("Z", "+00:00"))
+        row["timestamp"] = (base + (original - datetime.fromisoformat(
+            "2026-08-30T10:00:00+00:00"
+        ))).isoformat()
+    # Exercise the selected-recent fallback, where issue coverage stays partial.
+    monkeypatch.setattr(local_agents, "_MAX_FULL_PROJECTED_ROWS", 1_000)
+    _write_jsonl(root / "large.jsonl", rows)
+    with ExitStack() as stack:
+        if backend == "postgres":
+            from _postgres_test_safety import isolated_test_dsn, validate_test_dsn
+            from verdict.storage.postgres import PostgresStorage
+
+            dsn, reason = validate_test_dsn(
+                os.environ.get("VERDICT_TEST_POSTGRES_DSN"), allow_any_database=False,
+            )
+            if dsn is None:
+                pytest.skip(reason)
+            url = stack.enter_context(isolated_test_dsn(dsn))
+            storage = PostgresStorage(url)
+        else:
+            db = tmp_path / "verdict.db"
+            url = f"sqlite:///{db}"
+            storage = SQLiteStorage(str(db))
+        stack.callback(storage.close)
+        control = ControlStore(url)
+        control.append("local", kind="schedule", document_id="daily",
+                       state="active", payload={"analyzeOnly": True},
+                       expected_revision=None)
+        with control._connect() as connection:
+            connection.execute(
+                "UPDATE product_control_documents SET created_at="
+                + ("%s" if control.postgres else "?")
+                + " WHERE tenant_id='local' AND kind='schedule' AND document_id='daily'",
+                ((now - timedelta(minutes=10)) if control.postgres
+                 else (now - timedelta(minutes=10)).isoformat(),),
+            )
+            connection.commit()
+
+        assert capture_local_agents(storage, tenant_id="local", codex_root=root).stored == 1
+        [bundle] = storage.list_agent_run_bundles("local")
+        v1_ids = {event.event_id for event in bundle.events}
+        assert len(bundle.events) == 1_500
+        window = storage.get_recent_local_events("local", bundle.run.run_id)
+        hydrated = build_recent_local_sample(url, tenant="local", run_id=bundle.run.run_id)
+        [late] = [finding for finding in hydrated["findings"]
+                  if finding["code"] == "command_failed"]
+        assert late["eventId"] not in v1_ids
+        [linked] = [event for event in hydrated["events"]
+                    if event["eventId"] == late["eventId"]]
+        assert linked["firstSeenRevision"] == window["sourceRevision"]
+
+        notices = IssueNotices(url)
+        assert notices.scan("local") >= 1
+        assert any(item["eventId"] == late["eventId"] and
+                   item["checkCode"] == "command_failed" and
+                   item["recentRevision"] == linked["firstSeenRevision"] and
+                   item["recentTurnId"] == linked["turnId"]
+                   for item in notices.list("local"))
+
+        async def issue_day():
+            app = create_app(storage=url, tenant_id="local")
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                         base_url="http://testserver") as client:
+                return await client.get("/api/usage", params={
+                    "day": linked["occurredAt"][:10],
+                })
+
+        issue_response = asyncio.run(issue_day())
+        assert issue_response.status_code == 200, issue_response.text
+        issue_report = issue_response.json()
+        issue_day_row = next(day for day in issue_report["days"]
+                             if day["day"] == linked["occurredAt"][:10])
+        assert issue_day_row["recordedIssueEvents"] >= 1
+        selected_issues = issue_report["selectedDayIssues"]
+        assert selected_issues["complete"] is False
+        assert selected_issues["count"] is None
+        assert selected_issues["observedCount"] >= 1
+        assert any(item["eventId"] == late["eventId"] and
+                   item["recentRevision"] == linked["firstSeenRevision"] and
+                   item["recentTurnId"] == linked["turnId"]
+                   for item in selected_issues["events"])
+        async def foreign_issue_day():
+            app = create_app(storage=url, tenant_id="foreign")
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                         base_url="http://testserver") as client:
+                return await client.get("/api/usage", params={
+                    "day": linked["occurredAt"][:10],
+                })
+
+        foreign_response = asyncio.run(foreign_issue_day())
+        assert foreign_response.status_code == 200
+        assert foreign_response.json()["selectedDayIssues"]["events"] == []
+        assert foreign_response.json()["selectedDayIssues"]["count"] == 0
+
+        import verdict.dashboard.usage as usage_module
+        with monkeypatch.context() as bounded:
+            bounded.setattr(usage_module, "MAX_ISSUE_EVENTS", 1)
+            truncated = asyncio.run(issue_day())
+        assert truncated.status_code == 200
+        assert truncated.json()["selectedDayIssues"]["complete"] is False
+        assert truncated.json()["selectedDayIssues"]["events"] == []
+        assert capture_local_agents(storage, tenant_id="local", codex_root=root).stored == 1
+        assert notices.scan("local") == 0
+        assert len(storage.get_agent_run_bundle("local", bundle.run.run_id).events) == 1_500
+        with (root / "large.jsonl").open("a") as handle:
+            handle.write(json.dumps({
+                "timestamp": (base + timedelta(minutes=10)).isoformat(),
+                "type": "event_msg",
+                "payload": {"type": "task_started", "turn_id": "newer-turn"},
+            }) + "\n")
+            for index in range(60):
+                handle.write(json.dumps({
+                    "timestamp": (base + timedelta(minutes=10, seconds=index)).isoformat(),
+                    "type": "response_item",
+                    "payload": {"type": "function_call", "name": "exec_command",
+                                "call_id": f"newer-{index}",
+                                "arguments": json.dumps({"cmd": "true"})},
+                }) + "\n")
+        assert capture_local_agents(storage, tenant_id="local", codex_root=root).stored == 1
+        moved = build_recent_local_sample(url, tenant="local", run_id=bundle.run.run_id)
+        assert late["eventId"] not in {event["eventId"] for event in moved["events"]}
+
+        async def old_link():
+            app = create_app(storage=url, tenant_id="local")
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                         base_url="http://testserver") as client:
+                return await client.get(
+                    f"/api/runs/{bundle.run.run_id}/recent-local-events",
+                    params={"revision": linked["firstSeenRevision"],
+                            "turn_id": linked["turnId"], "event_id": linked["eventId"]},
+                )
+
+        historical = asyncio.run(old_link())
+        assert historical.status_code == 200
+        assert historical.json()["historicalFocusedEvent"] is True
+        assert historical.json()["focusedEvent"]["eventId"] == late["eventId"]
+
+        # A malformed older fact must not leak a different tenant's Trace ID
+        # through either the current window or an exact historical link.
+        from verdict.schema import Trace
+
+        owned_trace = "owned@example.test"
+        storage.insert_trace(Trace(trace_id=owned_trace, tenant_id="local"))
+        storage.insert_trace(Trace(trace_id="foreign-trace-synthetic", tenant_id="foreign"))
+        foreign_event = moved["events"][0]["eventId"]
+        owned_event = moved["events"][1]["eventId"]
+        if backend == "postgres":
+            with storage._pool.connection() as connection:
+                for trace_id, event_id in (
+                    ("foreign-trace-synthetic", foreign_event),
+                    (owned_trace, owned_event),
+                    ("foreign-trace-synthetic", late["eventId"]),
+                ):
+                    connection.execute(
+                        "UPDATE local_recent_event_facts SET trace_id=%s "
+                        "WHERE tenant_id=%s AND run_id=%s AND event_id=%s",
+                        (trace_id, "local", bundle.run.run_id, event_id),
+                    )
+                connection.execute(
+                    "UPDATE local_recent_event_facts SET attributes_json=%s "
+                    "WHERE tenant_id=%s AND run_id=%s AND event_id=%s",
+                    (json.dumps({"note": "context@example.test"}),
+                     "local", bundle.run.run_id, owned_event),
+                )
+        else:
+            for trace_id, event_id in (
+                ("foreign-trace-synthetic", foreign_event),
+                (owned_trace, owned_event),
+                ("foreign-trace-synthetic", late["eventId"]),
+            ):
+                storage._conn.execute(
+                    "UPDATE local_recent_event_facts SET trace_id=? "
+                    "WHERE tenant_id=? AND run_id=? AND event_id=?",
+                    (trace_id, "local", bundle.run.run_id, event_id),
+                )
+            storage._conn.execute(
+                "UPDATE local_recent_event_facts SET attributes_json=? "
+                "WHERE tenant_id=? AND run_id=? AND event_id=?",
+                (json.dumps({"note": "context@example.test"}),
+                 "local", bundle.run.run_id, owned_event),
+            )
+
+        async def recent_response():
+            app = create_app(storage=url, tenant_id="local")
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                         base_url="http://testserver") as client:
+                return await client.get(f"/api/runs/{bundle.run.run_id}/recent-local-events")
+
+        current_response = asyncio.run(recent_response())
+        assert current_response.status_code == 200
+        linked_events = {item["eventId"]: item for item in current_response.json()["events"]}
+        assert linked_events[foreign_event]["traceId"] is None
+        assert linked_events[owned_event]["traceId"] == owned_trace
+        assert linked_events[owned_event]["attributes"]["note"] == "<EMAIL>"
+        async def current_link():
+            event = moved["events"][0]
+            app = create_app(storage=url, tenant_id="local")
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                         base_url="http://testserver") as client:
+                return await client.get(
+                    f"/api/runs/{bundle.run.run_id}/recent-local-events",
+                    params={"revision": event.get("firstSeenRevision") or moved["sourceRevision"],
+                            "turn_id": event["turnId"], "event_id": foreign_event},
+                )
+
+        current_link_response = asyncio.run(current_link())
+        assert current_link_response.status_code == 200
+        assert current_link_response.json()["focusedEvent"]["traceId"] is None
+        historical_response = asyncio.run(old_link())
+        assert historical_response.status_code == 200
+        assert historical_response.json()["focusedEvent"]["traceId"] is None
+        assert "foreign-trace-synthetic" not in current_response.text + historical_response.text
+
+        if backend == "postgres":
+            with storage._pool.connection() as connection:
+                connection.execute(
+                    "UPDATE local_recent_event_facts SET trace_id=%s "
+                    "WHERE tenant_id=%s AND run_id=%s AND event_id=%s",
+                    (owned_trace, "local", bundle.run.run_id, late["eventId"]),
+                )
+        else:
+            storage._conn.execute(
+                "UPDATE local_recent_event_facts SET trace_id=? "
+                "WHERE tenant_id=? AND run_id=? AND event_id=?",
+                (owned_trace, "local", bundle.run.run_id, late["eventId"]),
+            )
+        assert asyncio.run(old_link()).json()["focusedEvent"]["traceId"] == owned_trace
+
+        # Inspection-only beta windows can carry malformed saved structural
+        # links. They share the same tenant boundary and 50-event read budget.
+        legacy = {**storage.get_recent_local_events("local", bundle.run.run_id),
+                  "schema": "local-recent-events-v1",
+                  "events": [{**moved["events"][0], "traceId": ["foreign-trace-synthetic"]},
+                             {**moved["events"][1], "traceId": owned_trace}]}
+
+        def replace_saved_window(sample):
+            payload = json.dumps(sample, separators=(",", ":"))
+            if backend == "postgres":
+                with storage._pool.connection() as connection:
+                    connection.execute(
+                        "UPDATE local_recent_events SET sample_json=%s "
+                        "WHERE tenant_id=%s AND run_id=%s",
+                        (payload, "local", bundle.run.run_id),
+                    )
+            else:
+                storage._conn.execute(
+                    "UPDATE local_recent_events SET sample_json=? "
+                    "WHERE tenant_id=? AND run_id=?",
+                    (payload, "local", bundle.run.run_id),
+                )
+
+        replace_saved_window(legacy)
+        legacy_response = asyncio.run(recent_response())
+        assert legacy_response.status_code == 200
+        assert legacy_response.json()["events"][0]["traceId"] is None
+        assert legacy_response.json()["events"][1]["traceId"] == owned_trace
+        replace_saved_window({**legacy, "events": legacy["events"] * 51})
+        with pytest.raises(ValueError, match="bounded recent local events"):
+            build_recent_local_sample(url, tenant="local", run_id=bundle.run.run_id)
+
+
+@pytest.fixture(params=["sqlite", "postgres", "memory", "buffered"])
+def recent_fact_storage(request, tmp_path: Path):
+    with ExitStack() as stack:
+        if request.param == "postgres":
+            from _postgres_test_safety import isolated_test_dsn, validate_test_dsn
+            from verdict.storage.postgres import PostgresStorage
+
+            dsn, reason = validate_test_dsn(
+                os.environ.get("VERDICT_TEST_POSTGRES_DSN"), allow_any_database=False,
+            )
+            if dsn is None:
+                pytest.skip(reason)
+            storage = PostgresStorage(stack.enter_context(isolated_test_dsn(dsn)))
+        elif request.param == "memory":
+            storage = InMemoryStorage()
+        elif request.param == "buffered":
+            storage = BufferedStorage(InMemoryStorage())
+        else:
+            storage = SQLiteStorage(str(tmp_path / "verdict.db"))
+        stack.callback(storage.close)
+        yield storage
+
+
+def test_claude_recent_model_call_enriches_same_fact_and_trace_on_append(
+    tmp_path: Path, recent_fact_storage,
+) -> None:
+    from verdict.schema import Judgment
+
+    root = tmp_path / "claude"
+    path = root / "session.jsonl"
+    session = "synthetic-late-claude"
+    rows = [
+        {"timestamp": "2026-08-30T11:00:00Z", "type": "user", "uuid": "user-1",
+         "sessionId": session, "message": {"content": "inspect synthetic run"}},
+        {"timestamp": "2026-08-30T11:00:01Z", "type": "user",
+         "sourceToolAssistantUUID": "synthetic-tools", "sessionId": session,
+         "message": {"content": [
+             {"type": "tool_result", "tool_use_id": f"tool-{index}",
+              "is_error": False, "content": "ok"}
+             for index in range(1_600)
+         ]}},
+        {"timestamp": "2026-08-30T11:00:02Z", "type": "assistant",
+         "uuid": "late-assistant", "sessionId": session,
+         "message": {"id": "late-msg", "model": "claude-sonnet-4-5",
+                     "stop_reason": "tool_use", "usage": {"input_tokens": 12},
+                     "content": []}},
+    ]
+    _write_jsonl(path, rows)
+    storage = recent_fact_storage
+    assert capture_local_agents(storage, tenant_id="local", claude_root=root).stored == 1
+    [bundle] = storage.list_agent_run_bundles("local")
+    first = storage.get_recent_local_events("local", bundle.run.run_id)
+    model = first["events"][-1]
+    [initial_trace] = storage.list_traces(tenant_id="local", limit=2_000)
+    assert model["eventId"] not in {event.event_id for event in bundle.events}
+    assert initial_trace.input_tokens == 12
+    assert initial_trace.output_tokens is None
+    old_judgment = Judgment(trace_id=initial_trace.trace_id,
+                            evaluator_fingerprint="a" * 64)
+    storage.insert_judgment(old_judgment)
+    assert storage.list_judgments_for_trace(initial_trace.trace_id)[0].judgment_id == (
+        old_judgment.judgment_id
+    )
+
+    rows.append({
+        "timestamp": "2026-08-30T11:00:03Z", "type": "assistant",
+        "uuid": "late-assistant-text", "sessionId": session,
+        "message": {"id": "late-msg", "model": "claude-sonnet-4-5",
+                    "stop_reason": "end_turn",
+                    "usage": {"input_tokens": 12, "output_tokens": 3},
+                    "content": [{"type": "text", "text": "synthetic answer"}]},
+    })
+    _write_jsonl(path, rows)
+    assert capture_local_agents(storage, tenant_id="local", claude_root=root).stored == 1
+    second = storage.get_recent_local_events("local", bundle.run.run_id)
+    updated = second["events"][-1]
+    assert updated["eventId"] == model["eventId"]
+    [trace] = [trace for trace in storage.list_traces(tenant_id="local", limit=2_000)
+               if trace.trace_id == initial_trace.trace_id]
+    assert trace.input_tokens == 12
+    assert trace.output_tokens == 3
+    assert trace.response_redacted == "synthetic answer"
+    assert storage.list_judgments_for_trace(trace.trace_id) == []
+    if isinstance(storage, SQLiteStorage):
+        assert storage._conn.execute(
+            "SELECT 1 FROM judgments WHERE judgment_id=?",
+            (old_judgment.judgment_id,),
+        ).fetchone() is not None
+    current_judgment = Judgment(trace_id=trace.trace_id,
+                                evaluator_fingerprint="a" * 64)
+    storage.insert_judgment(current_judgment)
+    assert [item.judgment_id for item in storage.list_judgments_for_trace(
+        trace.trace_id
+    )] == [current_judgment.judgment_id]
+    retained = storage.get_agent_capture_snapshot("local", bundle.run.run_id)
+    rows.append({
+        "timestamp": "2026-08-30T11:00:04Z", "type": "assistant",
+        "uuid": "late-assistant-conflict", "sessionId": session,
+        "message": {"id": "late-msg", "model": "claude-sonnet-4-5",
+                    "stop_reason": "end_turn",
+                    "usage": {"input_tokens": 13, "output_tokens": 3},
+                    "content": []},
+    })
+    _write_jsonl(path, rows)
+    conflicting = capture_local_agents(storage, tenant_id="local", claude_root=root)
+    assert conflicting.stored == 0
+    assert conflicting.skip_reasons == {"local_source_conflict": 1}
+    assert storage.get_agent_capture_snapshot("local", bundle.run.run_id) == retained
+
+
+def test_claude_model_fact_enrichment_after_window_moves(
+    tmp_path: Path, recent_fact_storage,
+) -> None:
+    from verdict.schema import Judgment
+
+    root = tmp_path / "claude"
+    path = root / "session.jsonl"
+    session = "synthetic-moved-model"
+    rows = [
+        {"timestamp": "2026-08-30T11:00:00Z", "type": "user", "uuid": "user-1",
+         "sessionId": session, "message": {"content": "inspect synthetic run"}},
+        {"timestamp": "2026-08-30T11:00:01Z", "type": "user",
+         "sourceToolAssistantUUID": "synthetic-tools", "sessionId": session,
+         "message": {"content": [
+             {"type": "tool_result", "tool_use_id": f"tool-{index}",
+              "is_error": False, "content": "ok"}
+             for index in range(1_600)
+         ]}},
+        {"timestamp": "2026-08-30T11:00:02Z", "type": "assistant",
+         "uuid": "model", "sessionId": session,
+         "message": {"id": "model-message", "model": "claude-sonnet-4-5",
+                     "stop_reason": "tool_use", "usage": {"input_tokens": 12},
+                     "content": []}},
+    ]
+    _write_jsonl(path, rows)
+    storage = recent_fact_storage
+    assert capture_local_agents(storage, tenant_id="local", claude_root=root).stored == 1
+    [bundle] = storage.list_agent_run_bundles("local")
+    model = storage.get_recent_local_events("local", bundle.run.run_id)["events"][-1]
+    [initial_trace] = storage.list_traces(tenant_id="local", limit=2_000)
+    old_judgment = Judgment(trace_id=initial_trace.trace_id, evaluator_fingerprint="a" * 64)
+    storage.insert_judgment(old_judgment)
+    for index in range(60):
+        rows.append({
+            "timestamp": "2026-08-30T11:00:03Z", "type": "user",
+            "sourceToolAssistantUUID": f"synthetic-later-{index}",
+            "sessionId": session,
+            "message": {"content": [{"type": "tool_result",
+                                    "tool_use_id": f"later-{index}",
+                                    "is_error": False, "content": "ok"}]},
+        })
+    _write_jsonl(path, rows)
+    assert capture_local_agents(storage, tenant_id="local", claude_root=root).stored == 1
+    assert model["eventId"] not in {event["eventId"] for event in
+                                    storage.get_recent_local_events("local", bundle.run.run_id)["events"]}
+    assert storage.list_judgments_for_trace(initial_trace.trace_id)[0].judgment_id == (
+        old_judgment.judgment_id
+    )
+    rows.append({
+        "timestamp": "2026-08-30T11:00:04Z", "type": "assistant",
+        "uuid": "model-complete", "sessionId": session,
+        "message": {"id": "model-message", "model": "claude-sonnet-4-5",
+                    "stop_reason": "end_turn",
+                    "usage": {"input_tokens": 12, "output_tokens": 3},
+                    "content": [{"type": "text", "text": "synthetic answer"}]},
+    })
+    _write_jsonl(path, rows)
+    assert capture_local_agents(storage, tenant_id="local", claude_root=root).stored == 1
+    [trace] = [trace for trace in storage.list_traces(tenant_id="local", limit=2_000)
+               if trace.trace_id == initial_trace.trace_id]
+    assert trace.output_tokens == 3
+    assert trace.response_redacted == "synthetic answer"
+    assert storage.list_judgments_for_trace(trace.trace_id) == []
+    current_judgment = Judgment(trace_id=trace.trace_id, evaluator_fingerprint="a" * 64)
+    storage.insert_judgment(current_judgment)
+    assert [item.judgment_id for item in storage.list_judgments_for_trace(
+        trace.trace_id
+    )] == [current_judgment.judgment_id]
+    prior = storage.get_agent_capture_snapshot("local", bundle.run.run_id)
+    rows.append({
+        "timestamp": "2026-08-30T11:00:05Z", "type": "assistant",
+        "uuid": "model-conflict", "sessionId": session,
+        "message": {"id": "model-message", "model": "claude-sonnet-4-5",
+                    "stop_reason": "end_turn",
+                    "usage": {"input_tokens": 13, "output_tokens": 3},
+                    "content": []},
+    })
+    _write_jsonl(path, rows)
+    conflict = capture_local_agents(storage, tenant_id="local", claude_root=root)
+    assert conflict.stored == 0
+    assert conflict.skip_reasons == {"local_source_conflict": 1}
+    assert storage.get_agent_capture_snapshot("local", bundle.run.run_id) == prior
+
+
+def test_rescan_rejects_stale_retained_fact_locator_read(
+    tmp_path: Path, recent_fact_storage, monkeypatch,
+) -> None:
+    root = tmp_path / "codex"
+    path = root / "session.jsonl"
+    rows = _codex_records("synthetic-stale-locators")
+    rows[4:4] = [rows[4]] * 1_600
+    _write_jsonl(path, rows)
+    storage = recent_fact_storage
+    assert capture_local_agents(storage, tenant_id="local", codex_root=root).stored == 1
+    [bundle] = storage.list_agent_run_bundles("local")
+    prior = storage.get_agent_capture_snapshot("local", bundle.run.run_id)
+    prior_window = storage.get_recent_local_events("local", bundle.run.run_id)
+    assert storage.list_local_recent_fact_positions("local", bundle.run.run_id)
+    rows.append({
+        "timestamp": "2026-08-30T10:10:00Z", "type": "event_msg",
+        "payload": {"type": "task_started", "turn_id": "later-turn"},
+    })
+    for index in range(60):
+        rows.append({
+            "timestamp": "2026-08-30T10:10:00Z", "type": "response_item",
+            "payload": {"type": "function_call", "name": "synthetic_tool",
+                        "call_id": f"later-{index}", "arguments": "{}"},
+        })
+    _write_jsonl(path, rows)
+    monkeypatch.setattr(storage, "list_local_recent_fact_positions",
+                        lambda _tenant, _run: ())
+    summary = capture_local_agents(storage, tenant_id="local", codex_root=root)
+    assert summary.stored == 0
+    assert summary.skip_reasons == {"local_source_conflict": 1}
+    assert storage.get_agent_capture_snapshot("local", bundle.run.run_id) == prior
+    assert storage.get_recent_local_events("local", bundle.run.run_id) == prior_window
+
+
+def test_recent_sample_ignores_untrusted_duplicate_attributes(
+    tmp_path: Path,
+) -> None:
+    from verdict.dashboard.app import build_recent_local_sample
+
+    root = tmp_path / "codex"
+    rows = _codex_records("synthetic-canary")
+    rows[4:4] = [rows[4]] * 1_600
+    _write_jsonl(root / "large.jsonl", rows)
+    db = tmp_path / "verdict.db"
+    storage = SQLiteStorage(str(db))
+    assert capture_local_agents(storage, tenant_id="local", codex_root=root).stored == 1
+    [bundle] = storage.list_agent_run_bundles("local")
+    sample = storage.get_recent_local_events("local", bundle.run.run_id)
+    assert sample["durableFacts"] is True
+    sample["events"][-1]["attributes"] = {"tool_name": "forged"}
+    storage._conn.execute(
+        "UPDATE local_recent_events SET sample_json=? WHERE tenant_id=? AND run_id=?",
+        (json.dumps(sample), "local", bundle.run.run_id),
+    )
+    storage._conn.commit()
+
+    hydrated = build_recent_local_sample(str(db), tenant="local", run_id=bundle.run.run_id)
+    assert hydrated["events"][-1]["attributes"] != {"tool_name": "forged"}
+
+
+@pytest.mark.parametrize("field,value", [
+    ("eventId", "forged"), ("sourceOrdinal", 0),
+])
+def test_recent_sample_rejects_forged_locator(
+    tmp_path: Path, field: str, value: object,
+) -> None:
+    from verdict.dashboard.app import build_recent_local_sample
+
+    root = tmp_path / "codex"
+    rows = _codex_records("synthetic-canary")
+    rows[4:4] = [rows[4]] * 1_600
+    _write_jsonl(root / "large.jsonl", rows)
+    db = tmp_path / "verdict.db"
+    storage = SQLiteStorage(str(db))
+    assert capture_local_agents(storage, tenant_id="local", codex_root=root).stored == 1
+    [bundle] = storage.list_agent_run_bundles("local")
+    sample = storage.get_recent_local_events("local", bundle.run.run_id)
+    sample["events"][-1][field] = value
+    storage._conn.execute(
+        "UPDATE local_recent_events SET sample_json=? WHERE tenant_id=? AND run_id=?",
+        (json.dumps(sample), "local", bundle.run.run_id),
+    )
+    storage._conn.commit()
+    with pytest.raises(ValueError, match=r"durable recent local|retained fact"):
+        build_recent_local_sample(str(db), tenant="local", run_id=bundle.run.run_id)
+
+
+@pytest.mark.parametrize("backend", ["sqlite", "postgres"])
+def test_recent_sample_survives_content_capture_mode_change(
+    tmp_path: Path, backend: str,
+) -> None:
+    from _postgres_test_safety import isolated_test_dsn, validate_test_dsn
+    from verdict.dashboard.app import build_recent_local_sample
+    from verdict.storage.postgres import PostgresStorage
+
+    root = tmp_path / "codex"
+    rows = _codex_records("synthetic-canary")
+    rows[4:4] = [rows[4]] * 1_600
+    _write_jsonl(root / "large.jsonl", rows)
+    with ExitStack() as stack:
+        if backend == "postgres":
+            dsn, reason = validate_test_dsn(
+                os.environ.get("VERDICT_TEST_POSTGRES_DSN"), allow_any_database=False,
+            )
+            if dsn is None:
+                pytest.skip(reason)
+            url = stack.enter_context(isolated_test_dsn(dsn))
+            storage = PostgresStorage(url)
+        else:
+            db = tmp_path / "verdict.db"
+            url = str(db)
+            storage = SQLiteStorage(url)
+        stack.callback(storage.close)
+        assert capture_local_agents(
+            storage, tenant_id="local", codex_root=root, capture_content=True,
+        ).stored == 1
+        [bundle] = storage.list_agent_run_bundles("local")
+        for capture_content in (False, True):
+            assert capture_local_agents(
+                storage, tenant_id="local", codex_root=root,
+                capture_content=capture_content,
+            ).stored == 1
+            sample = build_recent_local_sample(
+                url, tenant="local", run_id=bundle.run.run_id,
+            )
+            assert len(sample["events"]) == 50
+            assert all(isinstance(event["attributes"], dict)
+                       for event in sample["events"])
+
+
+@pytest.mark.parametrize("buffered", [False, True])
+def test_memory_adapters_keep_recent_facts_with_source_revision(
+    tmp_path: Path, buffered: bool,
+) -> None:
+    root = tmp_path / "codex"
+    rows = _codex_records("synthetic-canary")
+    rows[4:4] = [rows[4]] * 1_600
+    _write_jsonl(root / "large.jsonl", rows)
+    inner = InMemoryStorage()
+    storage = BufferedStorage(inner) if buffered else inner
+    try:
+        assert capture_local_agents(storage, tenant_id="local", codex_root=root).stored == 1
+        [bundle] = storage.list_agent_run_bundles("local")
+        sample = storage.get_recent_local_events("local", bundle.run.run_id)
+        assert sample["durableFacts"] is True
+        retained_ids = {item[0].event.event_id for item in inner._local_recent_facts.values()}
+        assert retained_ids.issuperset({
+            event["eventId"] for event in sample["events"]
+            if event["sourceOrdinal"] >= sample["canonicalPrefixEvents"]
+        })
+        assert len(retained_ids) + sample["canonicalPrefixEvents"] == sample["sourceEventCount"]
+        assert ("local", bundle.run.run_id) in inner._local_projection_complete
+        first = storage.get_agent_capture_snapshot("local", bundle.run.run_id)
+        assert capture_local_agents(storage, tenant_id="local", codex_root=root).stored == 1
+        assert storage.get_agent_capture_snapshot("local", bundle.run.run_id) == first
+    finally:
+        storage.close()
+
+
+def _zero_event_codex_history(turn_count: int, session_id: str) -> list[dict]:
+    records = [{"timestamp": "2026-08-30T10:00:00Z", "type": "session_meta",
+                "payload": {"id": session_id}}]
+    for index in range(turn_count):
+        records.extend([
+            {"timestamp": "2026-08-30T10:00:00Z", "type": "event_msg",
+             "payload": {"type": "task_started", "turn_id": f"turn-{index}"}},
+            {"timestamp": "2026-08-30T10:00:01Z", "type": "event_msg",
+             "payload": {"type": "task_complete", "turn_id": f"turn-{index}"}},
+        ])
+    return records
+
+
+def test_recent_window_recomputes_forged_stored_findings(tmp_path: Path) -> None:
+    import asyncio
+
+    import httpx
+    from verdict.dashboard.app import build_recent_local_sample, create_app
+
+    root = tmp_path / "codex"
+    _write_jsonl(root / "history.jsonl", _zero_event_codex_history(1_001, "forged"))
+    db = tmp_path / "verdict.db"
+    storage = SQLiteStorage(str(db))
+    assert capture_local_agents(storage, tenant_id="local", codex_root=root).stored == 1
+    [bundle] = storage.list_agent_run_bundles("local")
+    sample = storage.get_recent_local_events("local", bundle.run.run_id)
+    assert sample["findings"] == []
+    sample["findings"] = [{"code": "business_outcome_failed",
+                           "eventId": "forged", "turnId": "forged"}]
+    storage._conn.execute(
+        "UPDATE local_recent_events SET sample_json=? WHERE tenant_id=? AND run_id=?",
+        (json.dumps(sample), "local", bundle.run.run_id),
+    )
+    storage._conn.commit()
+    assert build_recent_local_sample(str(db), tenant="local", run_id=bundle.run.run_id)[
+        "findings"] == []
+    storage._conn.execute(
+        "UPDATE local_recent_events SET sample_json=? WHERE tenant_id=? AND run_id=?",
+        ("{malformed", "local", bundle.run.run_id),
+    )
+    storage._conn.commit()
+
+    async def read_corrupt():
+        app = create_app(storage=f"sqlite:///{db}", tenant_id="local")
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                     base_url="http://testserver") as client:
+            return await client.get(f"/api/runs/{bundle.run.run_id}/recent-local-events")
+
+    assert asyncio.run(read_corrupt()).status_code == 503
+
+    storage._conn.execute(
+        "UPDATE local_recent_events SET sample_json=? WHERE tenant_id=? AND run_id=?",
+        ("[" * 10_000 + "0" + "]" * 10_000, "local", bundle.run.run_id),
+    )
+    storage._conn.commit()
+    assert asyncio.run(read_corrupt()).status_code == 503
+
+
+def test_recent_window_counts_omitted_events_when_last_turns_have_none(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "codex"
+    source = _zero_event_codex_history(1_700, "sparse-events")
+    records = [source[0]]
+    for index in range(1_700):
+        records.append(source[1 + index * 2])
+        if index < 1_590:
+            records.append({
+                "timestamp": "2026-08-30T10:00:00Z", "type": "response_item",
+                "payload": {"type": "function_call_output", "call_id": f"call-{index}",
+                            "output": json.dumps({"exit_code": 1})},
+            })
+        records.append(source[2 + index * 2])
+    _write_jsonl(root / "history.jsonl", records)
+    storage = SQLiteStorage(str(tmp_path / "verdict.db"))
+    assert capture_local_agents(storage, tenant_id="local", codex_root=root).stored == 1
+    [bundle] = storage.list_agent_run_bundles("local")
+    sample = storage.get_recent_local_events("local", bundle.run.run_id)
+    assert sample["sourceEventCount"] > sample["canonicalPrefixEvents"]
+    assert sample["events"] == []
+    assert sample["firstOrdinal"] is None and sample["lastOrdinal"] is None
+    assert sample["omittedMiddleEvents"] == (
+        sample["sourceEventCount"] - sample["canonicalPrefixEvents"]
+    )
+
+
+@pytest.mark.parametrize("backend", ["memory", "sqlite", "postgres"])
+def test_recent_window_survives_rewrite_of_partially_captured_source(
+    tmp_path: Path, backend: str,
+) -> None:
+    from verdict.storage.memory import InMemoryStorage
+
+    root = tmp_path / "codex"
+    path = root / "history.jsonl"
+    records = _zero_event_codex_history(1_001, f"rewrite-{backend}")
+    _write_jsonl(path, records)
+    with ExitStack() as stack:
+        if backend == "postgres":
+            from _postgres_test_safety import isolated_test_dsn, validate_test_dsn
+            from verdict.storage.postgres import PostgresStorage
+
+            dsn, reason = validate_test_dsn(
+                os.environ.get("VERDICT_TEST_POSTGRES_DSN"), allow_any_database=False,
+            )
+            if dsn is None:
+                pytest.skip(reason)
+            storage = PostgresStorage(stack.enter_context(isolated_test_dsn(dsn)))
+        elif backend == "memory":
+            storage = InMemoryStorage()
+        else:
+            storage = SQLiteStorage(str(tmp_path / "verdict.db"))
+        stack.callback(storage.close)
+        assert capture_local_agents(storage, tenant_id="local", codex_root=root).stored == 1
+        [bundle] = storage.list_agent_run_bundles("local")
+        old = storage.get_recent_local_events("local", bundle.run.run_id)
+        assert old["schema"] == "local-recent-window-v2"
+        path.write_bytes(b"".join(json.dumps(item).encode() + b"\n"
+                                  for item in records[:-2]) + b" " * 512 + b"\n")
+        rejected = capture_local_agents(storage, tenant_id="local", codex_root=root)
+        assert rejected.stored == 0
+        assert rejected.skip_reasons == {"local_source_conflict": 1}
+        assert storage.get_recent_local_events("local", bundle.run.run_id) == old
+
+
+@pytest.mark.parametrize("incomplete_tail", [False, True])
+def test_usage_distinguishes_admitted_turn_from_unparsed_tail(
+    tmp_path: Path, incomplete_tail: bool,
+) -> None:
+    from verdict.dashboard.app import build_agent_usage_bundle
+
+    root = tmp_path / "codex"
+    path = root / "large.jsonl"
+    records = _zero_event_codex_history(1_001, f"large-{incomplete_tail}")
+    if incomplete_tail:
+        _write_jsonl(path, records)
+        with path.open("a") as handle:
+            handle.write('{"timestamp":"2026-10-13T10:00:00Z","type":"event_msg"')
+    else:
+        records[-2]["timestamp"] = "2026-10-13T10:00:00Z"
+        records[-1]["timestamp"] = "2026-08-30T10:00:01Z"
+        _write_jsonl(path, records)
+    current = json.loads(json.dumps(_codex_records()))
+    encoded = json.dumps(current).replace("2026-08-30", "2026-10-13")
+    encoded = encoded.replace("codex-session-1", "current-day")
+    _write_jsonl(root / "current.jsonl", json.loads(encoded))
+    db = tmp_path / "verdict.db"
+    storage = SQLiteStorage(str(db))
+    assert capture_local_agents(storage, tenant_id="local", codex_root=root).stored == 2
+    report = build_agent_usage_bundle(
+        f"sqlite:///{db}", tenant="local", day="2026-10-13",
+        now=datetime.fromisoformat("2026-10-14T12:00:00+00:00"),
+    )
+    assert report["dayExplanation"]["totalTokens"] == 24
+    assert report["dayExplanation"]["sourcePartial"] is incomplete_tail
+    assert report["dayExplanation"]["comparison"] is None
+
+
+def test_large_local_recent_sample_is_tenant_scoped_on_postgres(tmp_path: Path) -> None:
+    import asyncio
+
+    import httpx
+    from _postgres_test_safety import isolated_test_dsn, validate_test_dsn
+    from verdict.dashboard.app import create_app
+    from verdict.storage.postgres import PostgresStorage
+
+    dsn, reason = validate_test_dsn(os.environ.get("VERDICT_TEST_POSTGRES_DSN"),
+                                    allow_any_database=False)
+    if dsn is None:
+        pytest.skip(reason)
+    root = tmp_path / "codex"
+    records = _codex_records()
+    records[4:4] = [records[4]] * 1_600
+    _write_jsonl(root / "large.jsonl", records)
+    with isolated_test_dsn(dsn) as isolated:
+        storage = PostgresStorage(isolated)
+        try:
+            summary = capture_local_agents(storage, tenant_id="local", codex_root=root)
+            assert summary.recent_sample_errors == 0
+            [bundle] = storage.list_agent_run_bundles("local")
+            sample = storage.get_recent_local_events("local", bundle.run.run_id)
+            assert sample["partial"] is True and len(sample["events"]) == 50
+            assert storage.get_recent_local_events("foreign", bundle.run.run_id) is None
+
+            selected = sample["events"][0]
+
+            async def request(tenant, exact=False):
+                transport = httpx.ASGITransport(app=create_app(storage=isolated, tenant_id=tenant))
+                async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+                    return await client.get(
+                        f"/api/runs/{bundle.run.run_id}/recent-local-events",
+                        params=({"revision": sample["sourceRevision"],
+                                 "turn_id": selected["turnId"], "event_id": selected["eventId"]}
+                                if exact else None),
+                    )
+
+            own = asyncio.run(request("local"))
+            assert own.status_code == 200
+            assert asyncio.run(request("foreign")).status_code == 404
+            exact = asyncio.run(request("local", exact=True))
+            assert exact.status_code == 200
+            assert exact.json()["focusedEvent"] == own.json()["events"][0]
+            assert asyncio.run(request("foreign", exact=True)).status_code == 404
+            _assert_legacy_writer_cannot_replace_atomic_window(
+                storage, root / "large.jsonl", "local", bundle.run.run_id,
+            )
+        finally:
+            storage.close()
+
+
+def test_large_claude_history_has_redacted_recent_inspection_sample(tmp_path: Path) -> None:
+    root = tmp_path / "claude"
+    records = _claude_records()
+    records[4]["message"]["content"][0]["content"] = (
+        "user@example.com ghp_abcdefghijklmnopqrstuvwxyz0123456789"
+    )
+    records[4:4] = [records[4]] * 1_600
+    _write_jsonl(root / "session.jsonl", records)
+    storage = SQLiteStorage(str(tmp_path / "verdict.db"))
+
+    summary = capture_local_agents(storage, tenant_id="local", claude_root=root)
+
+    assert summary.stored == 1 and summary.recent_sample_errors == 0
+    [bundle] = storage.list_agent_run_bundles("local")
+    sample = storage.get_recent_local_events("local", bundle.run.run_id)
+    assert sample["sourceKind"] == "claude-code"
+    assert sample["sourceEventCount"] > 1_500
+    assert len(sample["events"]) == 50
+    assert sample["events"][-1]["eventId"] not in {event.event_id for event in bundle.events}
+    assert "user@example.com" not in json.dumps(sample)
+    assert "ghp_" not in json.dumps(sample)
+    assert storage.get_recent_local_events("foreign", bundle.run.run_id) is None
+
+
+def test_recent_window_failure_rolls_back_capture_and_checkpoint(
+    tmp_path: Path,
+) -> None:
+    import asyncio
+
+    import httpx
+    from verdict.dashboard.app import build_recent_local_sample, create_app
+
+    root = tmp_path / "codex"
+    records = _codex_records()
+    records[4:4] = [records[4]] * 1_600
+    path = root / "large.jsonl"
+    _write_jsonl(path, records)
+    storage = SQLiteStorage(str(tmp_path / "verdict.db"))
+    assert capture_local_agents(storage, tenant_id="local", codex_root=root).recent_sample_errors == 0
+    [bundle] = storage.list_agent_run_bundles("local")
+    previous = storage.get_recent_local_events("local", bundle.run.run_id)
+    with path.open("a") as handle:
+        handle.write(json.dumps({
+            "timestamp": "2026-08-30T10:03:00Z", "type": "event_msg",
+            "payload": {"type": "task_complete", "turn_id": "turn-a"},
+        }) + "\n")
+
+    # The window is part of the same SQLite transaction as the source checkpoint.
+    # Abort its upsert to prove neither the new checkpoint nor V1 evidence advances.
+    storage._conn.execute(
+        "CREATE TRIGGER reject_recent_window BEFORE UPDATE ON local_recent_events "
+        "BEGIN SELECT RAISE(ABORT, 'synthetic recent window failure'); END"
+    )
+    summary = capture_local_agents(storage, tenant_id="local", codex_root=root)
+    assert summary.stored == 0
+    assert summary.skipped == 1
+    assert storage.get_recent_local_events("local", bundle.run.run_id) == previous
+    current = build_recent_local_sample(
+        str(tmp_path / "verdict.db"), tenant="local", run_id=bundle.run.run_id,
+    )
+    assert current["sourceRevision"] == previous["sourceRevision"]
+
+    async def read_current_sample():
+        app = create_app(storage=f"sqlite:///{tmp_path / 'verdict.db'}", tenant_id="local")
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                     base_url="http://testserver") as client:
+            return await client.get(f"/api/runs/{bundle.run.run_id}/recent-local-events")
+
+    assert asyncio.run(read_current_sample()).status_code == 200
+
+
+def test_postgres_recent_window_failure_rolls_back_capture_and_checkpoint(tmp_path: Path) -> None:
+    from verdict.dashboard.app import build_recent_local_sample
+    from verdict.storage.postgres import PostgresStorage
+
+    from packages.verdict.tests._postgres_test_safety import isolated_test_dsn, validate_test_dsn
+
+    dsn, reason = validate_test_dsn(
+        os.environ.get("VERDICT_TEST_POSTGRES_DSN"), allow_any_database=False,
+    )
+    if dsn is None:
+        pytest.skip(reason)
+    root = tmp_path / "codex"
+    records = _codex_records()
+    records[4:4] = [records[4]] * 1_600
+    path = root / "large.jsonl"
+    _write_jsonl(path, records)
+    with isolated_test_dsn(dsn) as isolated:
+        storage = PostgresStorage(isolated)
+        try:
+            assert capture_local_agents(storage, tenant_id="local", codex_root=root).stored == 1
+            [bundle] = storage.list_agent_run_bundles("local")
+            previous = storage.get_recent_local_events("local", bundle.run.run_id)
+            with path.open("a") as handle:
+                handle.write(json.dumps({
+                    "timestamp": "2026-08-30T10:04:00Z", "type": "event_msg",
+                    "payload": {"type": "task_complete", "turn_id": "turn-a"},
+                }) + "\n")
+            with storage._pool.connection() as conn:
+                conn.execute(
+                    "CREATE FUNCTION reject_recent_window() RETURNS trigger LANGUAGE plpgsql "
+                    "AS $$ BEGIN RAISE EXCEPTION 'synthetic recent window failure'; END $$"
+                )
+                conn.execute(
+                    "CREATE TRIGGER reject_recent_window BEFORE UPDATE ON local_recent_events "
+                    "FOR EACH ROW EXECUTE FUNCTION reject_recent_window()"
+                )
+            with pytest.raises(Exception, match="synthetic recent window failure"):
+                capture_local_agents(storage, tenant_id="local", codex_root=root)
+            assert storage.get_recent_local_events("local", bundle.run.run_id) == previous
+            assert build_recent_local_sample(
+                isolated, tenant="local", run_id=bundle.run.run_id,
+            )["sourceRevision"] == previous["sourceRevision"]
+        finally:
+            storage.close()
+
+
+def test_recent_window_revision_reference_rejects_stale_evidence(tmp_path: Path) -> None:
+    import asyncio
+
+    import httpx
+    from verdict.dashboard.app import create_app
+
+    root = tmp_path / "codex"
+    records = _codex_records()
+    records[4:4] = [records[4]] * 1_600
+    path = root / "large.jsonl"
+    _write_jsonl(path, records)
+    storage = SQLiteStorage(str(tmp_path / "verdict.db"))
+    assert capture_local_agents(storage, tenant_id="local", codex_root=root).stored == 1
+    [bundle] = storage.list_agent_run_bundles("local")
+    first = storage.get_recent_local_events("local", bundle.run.run_id)
+    assert first is not None
+    with path.open("a") as handle:
+        handle.write(json.dumps({
+            "timestamp": "2026-08-30T10:04:00Z", "type": "event_msg",
+            "payload": {"type": "task_complete", "turn_id": "turn-a"},
+        }) + "\n")
+    assert capture_local_agents(storage, tenant_id="local", codex_root=root).stored == 1
+
+    async def read_revisions():
+        app = create_app(storage=f"sqlite:///{tmp_path / 'verdict.db'}", tenant_id="local")
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                     base_url="http://testserver") as client:
+            url = f"/api/runs/{bundle.run.run_id}/recent-local-events"
+            stale = await client.get(url, params={"revision": first["sourceRevision"]})
+            current = await client.get(url)
+            current_window = current.json()
+            selected = current_window["events"][0]
+            exact = await client.get(url, params={
+                "revision": current_window["sourceRevision"],
+                "turn_id": selected["turnId"], "event_id": selected["eventId"],
+            })
+            stale_exact = await client.get(url, params={
+                "revision": first["sourceRevision"],
+                "turn_id": selected["turnId"], "event_id": selected["eventId"],
+            })
+            missing = await client.get(url, params={
+                "revision": current_window["sourceRevision"],
+                "turn_id": selected["turnId"], "event_id": "absent",
+            })
+            unqualified = await client.get(url, params={
+                "turn_id": selected["turnId"], "event_id": selected["eventId"],
+            })
+            return stale, current, exact, stale_exact, missing, unqualified, selected
+
+    stale, current, exact, stale_exact, missing, unqualified, selected = asyncio.run(
+        read_revisions())
+    assert stale.status_code == 409
+    assert stale.json() == {"error": "stale_revision"}
+    assert current.status_code == 200
+    assert current.json()["sourceRevision"] != first["sourceRevision"]
+    assert selected["firstSeenRevision"] == first["sourceRevision"]
+    assert exact.status_code == 409
+    assert exact.json() == {"error": "stale_revision"}
+    assert stale_exact.status_code == 200
+    assert stale_exact.json()["historicalFocusedEvent"] is False
+    assert stale_exact.json()["focusedEvent"] == selected
+    assert missing.status_code == 404
+    assert unqualified.status_code == 400
+
+
+def test_recent_window_withholds_findings_from_incomplete_source_turn(tmp_path: Path) -> None:
+    root = tmp_path / "codex"
+    records = _codex_records()
+    records[4:4] = [records[4]] * 1_600
+    records.extend([
+        {"timestamp": "2026-08-30T10:04:00Z", "type": "event_msg",
+         "payload": {"type": "task_started", "turn_id": "later"}},
+        {"timestamp": "2026-08-30T10:04:01Z", "type": "response_item",
+         "payload": {"type": "function_call_output", "call_id": "later-call",
+                     "output": json.dumps({"exit_code": 1, "output": "failed"})}},
+        {"timestamp": "2026-08-30T10:04:02Z", "type": "event_msg",
+         "payload": {"type": "task_complete", "turn_id": "later"}},
+    ])
+    path = root / "partial.jsonl"
+    _write_jsonl(path, records)
+    with path.open("a") as handle:
+        handle.write('{"timestamp":')
+    storage = SQLiteStorage(str(tmp_path / "verdict.db"))
+    assert capture_local_agents(storage, tenant_id="local", codex_root=root).stored == 1
+    [bundle] = storage.list_agent_run_bundles("local")
+    from verdict.dashboard.app import build_recent_local_sample
+    window = build_recent_local_sample(
+        str(tmp_path / "verdict.db"), tenant="local", run_id=bundle.run.run_id,
+    )
+    assert window is not None
+    assert window["turns"][-1]["eligibleForFindings"] is False
+    assert window["findings"] == []
+    assert any(item["status"] == "failed" for item in window["events"])
+
+
+@pytest.mark.parametrize("backend", ["sqlite", "postgres"])
+def test_competing_local_rescans_keep_latest_checkpoint_and_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str,
+) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+    from hashlib import sha256
+    from threading import Event, current_thread
+
+    import verdict.telemetry.local_agents as local_agents
+
+    root = tmp_path / "codex"
+    records = _codex_records()
+    records[4:4] = [records[4]] * 1_600
+    path = root / "large.jsonl"
+    _write_jsonl(path, records)
+    if backend == "postgres":
+        from verdict.storage.postgres import PostgresStorage
+
+        from packages.verdict.tests._postgres_test_safety import (
+            isolated_test_dsn,
+            validate_test_dsn,
+        )
+
+        dsn, reason = validate_test_dsn(
+            os.environ.get("VERDICT_TEST_POSTGRES_DSN"), allow_any_database=False,
+        )
+        if dsn is None:
+            pytest.skip(reason)
+    with ExitStack() as stack:
+        storage = (PostgresStorage(stack.enter_context(isolated_test_dsn(dsn)))
+                   if backend == "postgres" else SQLiteStorage(str(tmp_path / "verdict.db")))
+        stack.callback(storage.close)
+        parsed_old = Event()
+        release_old = Event()
+        parse = local_agents._parse_codex
+
+        def pause_old(source, *, home):
+            result = parse(source, home=home)
+            if current_thread().name.startswith("older-import"):
+                parsed_old.set()
+                assert release_old.wait(5), "newer import did not finish"
+            return result
+
+        monkeypatch.setattr(local_agents, "_parse_codex", pause_old)
+        with ThreadPoolExecutor(max_workers=1, thread_name_prefix="older-import") as pool:
+            older = pool.submit(capture_local_agents, storage, tenant_id="local", codex_root=root)
+            assert parsed_old.wait(5), "older import did not parse"
+            with path.open("a") as handle:
+                handle.write(json.dumps({
+                    "timestamp": "2026-08-30T10:04:00Z", "type": "event_msg",
+                    "payload": {"type": "task_complete", "turn_id": "turn-a"},
+                }) + "\n")
+            newer = capture_local_agents(storage, tenant_id="local", codex_root=root)
+            release_old.set()
+            older_result = older.result(timeout=5)
+        assert newer.stored == 1
+        assert older_result.stored == 0 and older_result.skipped == 1
+        [bundle] = storage.list_agent_run_bundles("local")
+        window = storage.get_recent_local_events("local", bundle.run.run_id)
+        assert window is not None
+        assert window["sourceRevision"] == sha256(path.read_bytes()).hexdigest()
 
 
 def test_oversized_tool_content_omits_only_content_not_the_session(tmp_path: Path) -> None:
@@ -2164,7 +3464,7 @@ def test_normalized_capture_is_not_limited_by_legacy_bundle_serialization(
         evidence_contract.agent_run_bundle_to_json(bundle)
 
 
-def test_live_partial_final_line_preserves_complete_records_and_marks_omission(
+def test_live_partial_final_line_preserves_complete_records_and_marks_coverage(
     tmp_path: Path,
 ) -> None:
     root = tmp_path / "codex"
@@ -2178,13 +3478,1996 @@ def test_live_partial_final_line_preserves_complete_records_and_marks_omission(
 
     assert summary.stored == 1
     [bundle] = storage.list_agent_run_bundles("local")
-    assert any(
-        event.provenance == "verdict:partial_source_line"
-        and event.attributes["name"] == "source_lines_omitted"
-        for event in bundle.events
+    captured, revision = storage.get_agent_capture_snapshot("local", bundle.run.run_id)
+    assert captured is not None and captured.events
+    assert revision is not None and revision.partial_final_line
+    assert all(event.provenance != "verdict:partial_source_line" for event in captured.events)
+
+
+def test_json_format_finding_waits_for_complete_local_final_line(tmp_path: Path) -> None:
+    from verdict.analysis import AnalysisPolicy, analyze_agent_run
+
+    root = tmp_path / "codex"
+    path = root / "live.jsonl"
+    _write_jsonl(path, _codex_records())
+    with path.open("a") as handle:
+        handle.write('{"timestamp":"2026-08-30T10:02:00Z","type":"event_msg"')
+    storage = SQLiteStorage(str(tmp_path / "verdict.db"))
+    policy = AnalysisPolicy(expected_response_format="json")
+    assert capture_local_agents(storage, tenant_id="local", codex_root=root).stored == 1
+    [bundle] = storage.list_agent_run_bundles("local")
+    captured, revision = storage.get_agent_capture_snapshot("local", bundle.run.run_id)
+    assert captured is not None and revision is not None and revision.partial_final_line
+    assert "response_schema_invalid" not in {
+        item.code for item in analyze_agent_run(captured, policy, local_revision=revision).findings
+    }
+    with path.open("a") as handle:
+        handle.write(',"payload":{"type":"unknown"}}\n')
+    assert capture_local_agents(storage, tenant_id="local", codex_root=root).stored == 1
+    captured, revision = storage.get_agent_capture_snapshot("local", bundle.run.run_id)
+    assert captured is not None and revision is not None and not revision.partial_final_line
+    assert "response_schema_invalid" in {
+        item.code for item in analyze_agent_run(captured, policy, local_revision=revision).findings
+    }
+
+
+def test_partial_tail_beyond_v1_does_not_hide_complete_prefix_json_failure(
+    tmp_path: Path,
+) -> None:
+    from verdict.analysis import AnalysisPolicy, analyze_agent_run
+
+    root = tmp_path / "codex"
+    path = root / "large.jsonl"
+    source = _zero_event_codex_history(1_001, "prefix-format")
+    source.insert(1 + 999 * 2 + 1, {
+        "timestamp": "2026-08-30T10:00:00Z", "type": "event_msg",
+        "payload": {"type": "agent_message", "phase": "final_answer", "message": "not json"},
+    })
+    _write_jsonl(path, source)
+    with path.open("a") as handle:
+        handle.write('{"timestamp":"2026-08-30T10:02:00Z","type":"event_msg"')
+    storage = SQLiteStorage(str(tmp_path / "verdict.db"))
+    assert capture_local_agents(storage, tenant_id="local", codex_root=root).stored == 1
+    [bundle] = storage.list_agent_run_bundles("local")
+    captured, revision = storage.get_agent_capture_snapshot("local", bundle.run.run_id)
+    assert captured is not None and revision is not None
+    assert revision.source_turn_count == 1_001 and revision.partial_final_line
+    assert "response_schema_invalid" in {
+        item.code for item in analyze_agent_run(
+            captured, AnalysisPolicy(expected_response_format="json"),
+            local_revision=revision,
+        ).findings
+    }
+
+
+def test_partial_local_line_marks_run_recommendations_and_last_turn_incomplete(
+    tmp_path: Path,
+) -> None:
+    import asyncio
+
+    import httpx
+    from verdict.dashboard.app import create_app
+
+    root = tmp_path / "codex"
+    path = root / "live.jsonl"
+    records = [record for record in _codex_records() if
+               record.get("payload", {}).get("type") != "function_call_output"]
+    _write_jsonl(path, records)
+    with path.open("a") as handle:
+        handle.write('{"timestamp":"2026-08-30T10:02:00Z","type":"event_msg"')
+    db = tmp_path / "verdict.db"
+    storage = SQLiteStorage(str(db))
+    try:
+        assert capture_local_agents(storage, tenant_id="local", codex_root=root).stored == 1
+        [bundle] = storage.list_agent_run_bundles("local")
+        run_id = bundle.run.run_id
+        turn_id = bundle.turns[-1].turn_id
+    finally:
+        storage.close()
+    runs = build_agent_runs_bundle(str(db), tenant="local", run_id=run_id)["runs"]
+    assert len(runs) == 1
+    assert not any(item["code"] == "review_missing_tool_outcomes"
+                   for item in runs[0]["recommendations"])
+    turn = build_agent_turn_analysis(str(db), tenant="local", run_id=run_id,
+                                     turn_id=turn_id)
+    assert turn["eventCoverage"]["complete"] is False
+    assert turn["eventCoverage"]["sourcePartial"] is True
+
+    async def request_app():
+        transport = httpx.ASGITransport(app=create_app(storage=f"sqlite:///{db}",
+                                                   tenant_id="local"))
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            return await asyncio.gather(
+                client.get(f"/api/runs/{run_id}/turns/{turn_id}/analysis"),
+                client.post("/api/evaluators/preview", headers={"X-Verdict-Setup": token},
+                            json={
+                                "unit": "agent_turn", "runId": run_id, "turnId": turn_id,
+                                "provider": "anthropic", "model": "claude-haiku-4-5",
+                                "maxCalls": 1, "maxOutputTokens": 256,
+                                "rubric": {"name": "poc", "version": "1", "dimensions": [
+                                    {"name": "relevance", "description": "Answers the question."},
+                                ]},
+                            }),
+            )
+
+    turn_response, preview_response = asyncio.run(request_app())
+    assert turn_response.status_code == 200
+    assert turn_response.json()["eventCoverage"]["sourcePartial"] is True
+    assert preview_response.status_code == 200
+    assert preview_response.json()["plannedCalls"] == 0
+
+
+@pytest.mark.parametrize("storage_kind", ["memory", "sqlite"])
+def test_incomplete_local_tail_excludes_last_turn_from_judge_candidates(
+    tmp_path: Path, storage_kind: str,
+) -> None:
+    from verdict.dashboard.evaluator_lab import preview_evaluation
+    root = tmp_path / "codex"
+    path = root / "source.jsonl"
+    _write_jsonl(path, _codex_records())
+    with path.open("a") as handle:
+        handle.write('{"timestamp":"2026-08-30T10:02:00Z","type":"event_msg"')
+    storage = (InMemoryStorage() if storage_kind == "memory" else
+               SQLiteStorage(str(tmp_path / "verdict.db")))
+    try:
+        assert capture_local_agents(storage, tenant_id="local", codex_root=root).stored == 1
+        [bundle] = storage.list_agent_run_bundles("local")
+        last = bundle.turns[-1]
+        assert storage.get_agent_capture_snapshot("local", bundle.run.run_id)[1].partial_final_line
+        assert storage.get_agent_turn_evaluation_candidate(
+            "local", bundle.run.run_id, last.turn_id, "a" * 64,
+        ) is None
+        assert storage.list_agent_turn_evaluation_candidates("local", "a" * 64)[0] == []
+        preview = preview_evaluation(storage, tenant_id="local", config={
+            "unit": "agent_turn", "runId": bundle.run.run_id, "turnId": last.turn_id,
+            "provider": "anthropic", "model": "claude-haiku-4-5", "maxCalls": 1,
+            "maxOutputTokens": 256,
+            "rubric": {"name": "poc", "version": "1", "dimensions": [
+                {"name": "relevance", "description": "Answers the question."},
+            ]},
+        })
+        assert preview["plannedCalls"] == 0
+        assert storage.save_agent_turn_judgment_if_current(AgentTurnJudgment(
+            tenant_id="local", run_id=bundle.run.run_id, turn_id=last.turn_id,
+            evaluator_fingerprint="a" * 64,
+            evidence_fingerprint=turn_evidence_fingerprint(last),
+            evaluator_provider="anthropic", evaluator_config={}, judge_models=["test"],
+            expected_dimensions=["relevance"], rubric_name="test", rubric_version="1",
+            status=JudgmentStatus.ERROR, error="synthetic",
+        )) == "stale"
+    finally:
+        storage.close()
+
+
+@pytest.mark.parametrize("storage_kind", ["memory", "sqlite"])
+def test_incomplete_tail_keeps_earlier_complete_turn_judge_eligible(
+    tmp_path: Path, storage_kind: str,
+) -> None:
+    root = tmp_path / "codex"
+    path = root / "source.jsonl"
+    _write_jsonl(path, [*_codex_records(),
+        {"timestamp": "2026-08-30T10:02:00Z", "type": "event_msg",
+         "payload": {"type": "task_started", "turn_id": "turn-b"}},
+        {"timestamp": "2026-08-30T10:02:01Z", "type": "event_msg",
+         "payload": {"type": "user_message", "message": "Second task"}},
+        {"timestamp": "2026-08-30T10:02:02Z", "type": "event_msg",
+         "payload": {"type": "agent_message", "phase": "final_answer", "message": "Done"}},
+        {"timestamp": "2026-08-30T10:02:03Z", "type": "event_msg",
+         "payload": {"type": "task_complete", "turn_id": "turn-b",
+                     "last_agent_message": "Done"}},
+    ])
+    with path.open("a") as handle:
+        handle.write('{"timestamp":"2026-08-30T10:02:04Z","type":"event_msg"')
+    storage = (InMemoryStorage() if storage_kind == "memory" else
+               SQLiteStorage(str(tmp_path / "verdict.db")))
+    try:
+        assert capture_local_agents(storage, tenant_id="local", codex_root=root).stored == 1
+        [bundle] = storage.list_agent_run_bundles("local")
+        assert len(bundle.turns) == 2
+        first, last = sorted(bundle.turns, key=lambda turn: turn.sequence)
+        assert storage.get_agent_turn_evaluation_candidate(
+            "local", bundle.run.run_id, first.turn_id, "a" * 64,
+        ) is not None
+        assert storage.get_agent_turn_evaluation_candidate(
+            "local", bundle.run.run_id, last.turn_id, "a" * 64,
+        ) is None
+        rows, _ = storage.list_agent_turn_evaluation_candidates("local", "a" * 64)
+        assert [row[0].turn_id for row in rows] == [first.turn_id]
+    finally:
+        storage.close()
+
+
+@pytest.mark.parametrize("storage_kind", ["memory", "sqlite"])
+def test_capture_limit_turn_cannot_enter_native_turn_judge(
+    tmp_path: Path, storage_kind: str,
+) -> None:
+    root = tmp_path / "codex"
+    records = _codex_records()
+    records[4:4] = [records[4]] * 1_600
+    _write_jsonl(root / "large.jsonl", records)
+    storage = (InMemoryStorage() if storage_kind == "memory" else
+               SQLiteStorage(str(tmp_path / "verdict.db")))
+    try:
+        summary = capture_local_agents(storage, tenant_id="local", codex_root=root)
+        assert summary.stored == 1 and summary.event_limited_runs == 1
+        [bundle] = storage.list_agent_run_bundles("local")
+        turn = bundle.turns[0]
+        assert any(event.provenance == "verdict:capture_limit" for event in bundle.events)
+        assert storage.get_agent_turn_evaluation_candidate(
+            "local", bundle.run.run_id, turn.turn_id, "a" * 64,
+        ) is None
+        assert storage.list_agent_turn_evaluation_candidates("local", "a" * 64)[0] == []
+        assert storage.save_agent_turn_judgment_if_current(AgentTurnJudgment(
+            tenant_id="local", run_id=bundle.run.run_id, turn_id=turn.turn_id,
+            evaluator_fingerprint="a" * 64,
+            evidence_fingerprint=turn_evidence_fingerprint(turn),
+            evaluator_provider="anthropic", evaluator_config={}, judge_models=["test"],
+            expected_dimensions=["relevance"], rubric_name="test", rubric_version="1",
+            status=JudgmentStatus.ERROR, error="synthetic",
+        )) == "stale"
+    finally:
+        storage.close()
+
+
+@pytest.mark.parametrize("storage_kind", ["memory", "sqlite", "postgres"])
+def test_capture_limit_marker_belongs_to_first_turn_with_omitted_event(
+    tmp_path: Path, storage_kind: str,
+) -> None:
+    root = tmp_path / "codex"
+    records = _codex_records()
+    records[4:4] = [records[4]] * 746  # Two events per command call.
+    unknown_result = {
+        "timestamp": "2026-08-30T10:01:06Z", "type": "response_item",
+        "payload": {"type": "function_call_output", "call_id": "unknown", "output": "ok"},
+    }
+    records.insert(-1, unknown_result)  # One event: first turn has exactly 1,499.
+    records += [
+        {"timestamp": "2026-08-30T10:02:00Z", "type": "event_msg",
+         "payload": {"type": "task_started", "turn_id": "turn-b"}},
+        {**unknown_result, "timestamp": "2026-08-30T10:02:01Z"},
+        {"timestamp": "2026-08-30T10:02:02Z", "type": "event_msg",
+         "payload": {"type": "task_complete", "turn_id": "turn-b"}},
+    ]
+    _write_jsonl(root / "boundary.jsonl", records)
+    with ExitStack() as stack:
+        if storage_kind == "postgres":
+            from _postgres_test_safety import isolated_test_dsn, validate_test_dsn
+            from verdict.storage.postgres import PostgresStorage
+
+            dsn, reason = validate_test_dsn(
+                os.environ.get("VERDICT_TEST_POSTGRES_DSN"), allow_any_database=False,
+            )
+            if dsn is None:
+                pytest.skip(reason)
+            storage = PostgresStorage(stack.enter_context(isolated_test_dsn(dsn)))
+        else:
+            storage = (InMemoryStorage() if storage_kind == "memory" else
+                       SQLiteStorage(str(tmp_path / "verdict.db")))
+        stack.callback(storage.close)
+        assert capture_local_agents(storage, tenant_id="local", codex_root=root).stored == 1
+        [bundle] = storage.list_agent_run_bundles("local")
+        first, second = sorted(bundle.turns, key=lambda turn: turn.sequence)
+        marker = [event for event in bundle.events
+                  if event.provenance == "verdict:capture_limit"]
+        assert len(marker) == 1
+        assert marker[0].turn_id == second.turn_id
+        assert marker[0].sequence == 0
+        assert storage.get_agent_turn_evaluation_candidate(
+            "local", bundle.run.run_id, first.turn_id, "a" * 64,
+        ) is not None
+        assert storage.get_agent_turn_evaluation_candidate(
+            "local", bundle.run.run_id, second.turn_id, "a" * 64,
+        ) is None
+        if storage_kind == "sqlite":
+            database = str(tmp_path / "verdict.db")
+            first_analysis = build_agent_turn_analysis(
+                database, tenant="local", run_id=bundle.run.run_id,
+                turn_id=first.turn_id,
+            )
+            second_analysis = build_agent_turn_analysis(
+                database, tenant="local", run_id=bundle.run.run_id,
+                turn_id=second.turn_id,
+            )
+            assert first_analysis["eventCoverage"]["sourcePartial"] is False
+            assert second_analysis["eventCoverage"]["sourcePartial"] is True
+
+
+def test_local_source_checkpoint_changes_published_insights_identity(
+    tmp_path: Path,
+) -> None:
+    from verdict.dashboard.analysis_service import run_analysis
+    from verdict.dashboard.app import build_agent_insights_bundle
+
+    root = tmp_path / "codex"
+    path = root / "source.jsonl"
+    _write_jsonl(path, _codex_records())
+    db = tmp_path / "verdict.db"
+    url = f"sqlite:///{db}"
+    storage = SQLiteStorage(str(db))
+    try:
+        assert capture_local_agents(storage, tenant_id="local", codex_root=root).stored == 1
+    finally:
+        storage.close()
+    build = lambda: build_agent_insights_bundle(  # noqa: E731 - same builder for both cycles
+        url, tenant="local", _include_input_fingerprint=True,
     )
+    initial = run_analysis(url, tenant="local", build=build)
+    prior_fingerprint = build()["_analysisInputFingerprint"]
+    source_stat = path.stat()
+    with path.open("a") as handle:
+        handle.write('{"timestamp":"2026-08-30T10:02:00Z","type":"event_msg"')
+    os.utime(path, ns=(source_stat.st_atime_ns, source_stat.st_mtime_ns))
+    storage = SQLiteStorage(str(db))
+    try:
+        assert capture_local_agents(storage, tenant_id="local", codex_root=root).stored == 1
+    finally:
+        storage.close()
+    changed = build()
+    assert changed["_analysisInputFingerprint"] != prior_fingerprint
+    assert any(item["code"] == "source_capture_partial"
+               for item in changed.get("findings", [])) or "source_capture_partial" in str(changed)
+    published = run_analysis(url, tenant="local", build=build)
+    assert published["analysisState"]["analysisId"] != initial["analysisState"]["analysisId"]
 
 
+def test_legacy_coverage_bootstrap_changes_insights_fingerprint_without_source_edit(
+    tmp_path: Path,
+) -> None:
+    from verdict.dashboard.app import build_agent_insights_bundle
+
+    root = tmp_path / "codex"
+    _write_jsonl(root / "source.jsonl", _codex_records())
+    db = tmp_path / "verdict.db"
+    storage = SQLiteStorage(str(db))
+    assert capture_local_agents(storage, tenant_id="local", codex_root=root).stored == 1
+    storage._conn.execute(
+        "UPDATE import_sources SET local_source_turn_count=NULL,"
+        "local_source_event_count=NULL,local_v1_turn_count=NULL,"
+        "local_v1_event_count=NULL WHERE tenant_id=?",
+        ("local",),
+    )
+    storage._conn.commit()
+    before = build_agent_insights_bundle(
+        str(db), tenant="local", _include_input_fingerprint=True,
+    )
+    assert before["scope"]["partialRuns"] == 1
+    assert capture_local_agents(storage, tenant_id="local", codex_root=root).stored == 1
+    after = build_agent_insights_bundle(
+        str(db), tenant="local", _include_input_fingerprint=True,
+    )
+    assert after["scope"]["partialRuns"] == 0
+    assert after["_analysisInputFingerprint"] != before["_analysisInputFingerprint"]
+
+
+@pytest.mark.parametrize("partial_day_index", [2, 3])
+@pytest.mark.parametrize("backend", ["sqlite", "postgres"])
+def test_incomplete_local_day_withholds_token_comparison_until_rescan(
+    tmp_path: Path, partial_day_index: int, backend: str,
+) -> None:
+    import asyncio
+
+    import httpx
+    from verdict.dashboard.app import build_agent_usage_bundle, create_app
+    from verdict.dashboard.day_explanation import _context
+
+    root = tmp_path / "codex"
+    partial_path = None
+    for index in range(4):
+        encoded = json.dumps(_codex_records())
+        encoded = encoded.replace("2026-08-30", f"2026-10-{10 + index:02d}")
+        encoded = encoded.replace("codex-session-1", f"codex-session-{index}")
+        encoded = encoded.replace("turn-a", f"turn-{index}")
+        path = root / f"day-{index}.jsonl"
+        _write_jsonl(path, json.loads(encoded))
+        if index == partial_day_index:
+            partial_path = path
+    assert partial_path is not None
+    with partial_path.open("a") as handle:
+        handle.write('{"timestamp":"2026-10-13T10:02:00Z","type":"event_msg"')
+    with ExitStack() as stack:
+        if backend == "postgres":
+            from _postgres_test_safety import isolated_test_dsn, validate_test_dsn
+            from verdict.storage.postgres import PostgresStorage
+
+            dsn, reason = validate_test_dsn(
+                os.environ.get("VERDICT_TEST_POSTGRES_DSN"), allow_any_database=False,
+            )
+            if dsn is None:
+                pytest.skip(reason)
+            storage_url = stack.enter_context(isolated_test_dsn(dsn))
+            storage = PostgresStorage(storage_url)
+        else:
+            db = tmp_path / "verdict.db"
+            storage_url = f"sqlite:///{db}"
+            storage = SQLiteStorage(str(db))
+        stack.callback(storage.close)
+        assert capture_local_agents(storage, tenant_id="local", codex_root=root).stored == 4
+        report = build_agent_usage_bundle(
+            storage_url, tenant="local", day="2026-10-13",
+            now=datetime.fromisoformat("2026-10-14T12:00:00+00:00"),
+        )
+        assert report["dayExplanation"]["totalTokens"] == 24
+        assert report["dayExplanation"]["comparison"] is None
+        assert report["dayExplanation"]["sourcePartial"] is True
+        assert report["dayExplanation"]["referenceSourcePartial"] is True
+        assert _context(report)["sourcePartial"] is True
+
+        async def read_usage():
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(
+                    app=create_app(storage=storage_url, tenant_id="local")),
+                base_url="http://testserver",
+            ) as client:
+                return await client.get("/api/usage?day=2026-10-13")
+
+        response = asyncio.run(read_usage())
+        assert response.status_code == 200
+        assert response.json()["dayExplanation"]["comparison"] is None
+        with partial_path.open("a") as handle:
+            handle.write('}\n')
+        assert capture_local_agents(storage, tenant_id="local", codex_root=root).stored == 4
+        completed = build_agent_usage_bundle(
+            storage_url, tenant="local", day="2026-10-13",
+            now=datetime.fromisoformat("2026-10-14T12:00:00+00:00"),
+        )
+        assert completed["dayExplanation"]["comparison"] is not None
+        assert completed["dayExplanation"]["sourcePartial"] is False
+
+
+def test_prior_turn_evaluation_is_hidden_when_local_tail_becomes_partial(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "codex"
+    path = root / "source.jsonl"
+    _write_jsonl(path, _codex_records())
+    db = tmp_path / "verdict.db"
+    storage = SQLiteStorage(str(db))
+    try:
+        assert capture_local_agents(storage, tenant_id="local", codex_root=root).stored == 1
+        [bundle] = storage.list_agent_run_bundles("local")
+        turn = bundle.turns[0]
+        assert storage.save_agent_turn_judgment_if_current(AgentTurnJudgment(
+            tenant_id="local", run_id=bundle.run.run_id, turn_id=turn.turn_id,
+            evaluator_fingerprint="a" * 64,
+            evidence_fingerprint=turn_evidence_fingerprint(turn),
+            evaluator_provider="anthropic", evaluator_config={}, judge_models=["test"],
+            expected_dimensions=["relevance"], rubric_name="test", rubric_version="1",
+            status=JudgmentStatus.ERROR, error="synthetic",
+        )) == "saved"
+        before = build_agent_run_detail(str(db), tenant="local", run_id=bundle.run.run_id)
+        assert before["turns"][0]["evaluation"] is not None
+        with path.open("a") as handle:
+            handle.write('{"timestamp":"2026-08-30T10:02:00Z","type":"event_msg"')
+        summary = capture_local_agents(storage, tenant_id="local", codex_root=root)
+        assert summary.stored == 1
+        after = build_agent_run_detail(str(db), tenant="local", run_id=bundle.run.run_id)
+        assert after["turns"][0]["evaluation"] is None
+    finally:
+        storage.close()
+
+
+def test_historical_turn_score_is_hidden_when_capture_limit_omits_events(
+    tmp_path: Path,
+) -> None:
+    from verdict.agent_judgment import agent_turn_judgment_to_json
+
+    root = tmp_path / "codex"
+    records = _codex_records()
+    records[4:4] = [records[4]] * 1_600
+    _write_jsonl(root / "large.jsonl", records)
+    db = tmp_path / "verdict.db"
+    storage = SQLiteStorage(str(db))
+    try:
+        assert capture_local_agents(storage, tenant_id="local", codex_root=root).event_limited_runs == 1
+        [bundle] = storage.list_agent_run_bundles("local")
+        turn = bundle.turns[0]
+        historical = AgentTurnJudgment(
+            tenant_id="local", run_id=bundle.run.run_id, turn_id=turn.turn_id,
+            evaluator_fingerprint="a" * 64,
+            evidence_fingerprint=turn_evidence_fingerprint(turn),
+            evaluator_provider="anthropic", evaluator_config={}, judge_models=["test"],
+            expected_dimensions=["relevance"], rubric_name="test", rubric_version="1",
+            status=JudgmentStatus.ERROR, error="historical",
+        )
+        storage._conn.execute(
+            "INSERT INTO agent_turn_judgments "
+            "(tenant_id,run_id,turn_id,evaluator_fingerprint,evidence_fingerprint,"
+            "status,evaluated_at,result_json) VALUES (?,?,?,?,?,?,?,?)",
+            ("local", bundle.run.run_id, turn.turn_id, "a" * 64,
+             historical.evidence_fingerprint, historical.status.value,
+             historical.evaluated_at.isoformat(), agent_turn_judgment_to_json(historical)),
+        )
+        storage._conn.commit()
+        detail = build_agent_run_detail(str(db), tenant="local", run_id=bundle.run.run_id)
+        assert detail["turns"][0]["evaluation"] is None
+    finally:
+        storage.close()
+
+
+@pytest.mark.parametrize("source_kind", ["codex", "claude"])
+def test_completed_local_line_clears_transient_partial_marker_on_rescan(
+    tmp_path: Path, source_kind: str,
+) -> None:
+    root = tmp_path / source_kind
+    path = root / "live.jsonl"
+    records = _codex_records() if source_kind == "codex" else _claude_records()
+    _write_jsonl(path, records)
+    completed_line = (
+        {"timestamp": "2026-08-30T10:02:00Z", "type": "event_msg",
+         "payload": {"type": "task_started", "turn_id": "turn-b"}}
+        if source_kind == "codex" else
+        {"timestamp": "2026-08-30T11:02:00Z", "type": "user", "uuid": "user-2",
+         "sessionId": "claude-session-1", "message": {"content": "synthetic next request"}}
+    )
+    serialized = json.dumps(completed_line) + "\n"
+    with path.open("a") as handle:
+        handle.write(serialized[:30])
+    storage = SQLiteStorage(str(tmp_path / "verdict.db"))
+    kwargs = {f"{source_kind}_root" if source_kind == "codex" else "claude_root": root}
+
+    capture_local_agents(storage, tenant_id="local", **kwargs)
+    with path.open("a") as handle:
+        handle.write(serialized[30:])
+    assert capture_local_agents(storage, tenant_id="local", **kwargs).stored == 1
+    [bundle] = storage.list_agent_run_bundles("local")
+    assert not any(event.provenance == "verdict:partial_source_line" for event in bundle.events)
+
+
+@pytest.mark.parametrize("storage_kind", ["memory", "buffered", "sqlite"])
+def test_legacy_partial_marker_does_not_claim_completed_event_sequence(
+    tmp_path: Path, storage_kind: str,
+) -> None:
+    root = tmp_path / "codex"
+    path = root / "live.jsonl"
+    _write_jsonl(path, [*_codex_records(), {
+        "timestamp": "2026-08-30T10:02:00Z", "type": "event_msg",
+        "payload": {"type": "task_started", "turn_id": "turn-b"},
+    }])
+    seed = SQLiteStorage(str(tmp_path / "seed.db"))
+    try:
+        assert capture_local_agents(seed, tenant_id="local", codex_root=root).stored == 1
+        [bundle] = seed.list_agent_run_bundles("local")
+        traces = tuple(seed.list_traces(tenant_id="local"))
+    finally:
+        seed.close()
+    last = max(bundle.turns, key=lambda turn: turn.sequence)
+    assert not any(event.turn_id == last.turn_id for event in bundle.events)
+    marker = AgentEvent(
+        event_id="legacy-partial-marker", turn_id=last.turn_id, sequence=0,
+        occurred_at=last.started_at, event_type=AgentEventType.CONTEXT,
+        status=ExecutionStatus.UNKNOWN,
+        provenance="verdict:partial_source_line",
+        attributes={"name": "partial_source_line"},
+    )
+    if storage_kind == "memory":
+        storage = InMemoryStorage()
+    elif storage_kind == "buffered":
+        storage = BufferedStorage(InMemoryStorage())
+    else:
+        storage = SQLiteStorage(str(tmp_path / "upgrade.db"))
+    try:
+        AgentCaptureService(storage).capture(replace(bundle, events=(*bundle.events, marker)),
+                                             traces=traces)
+        with path.open("a") as handle:
+            handle.write(json.dumps({
+                "timestamp": "2026-08-30T10:02:01Z", "type": "response_item",
+                "payload": {"type": "function_call", "name": "exec_command",
+                            "call_id": "call-2", "arguments": "{}"},
+            }) + "\n")
+        summary = capture_local_agents(storage, tenant_id="local", codex_root=root)
+        assert summary.stored == 1
+        [current] = storage.list_agent_run_bundles("local")
+        assert all(event.event_id != marker.event_id for event in current.events)
+        assert any(event.turn_id == last.turn_id and event.event_type is AgentEventType.TOOL_CALL
+                   for event in current.events)
+    finally:
+        storage.close()
+
+
+def test_incomplete_local_line_blocks_selected_ai_until_completed_append(
+    tmp_path: Path,
+) -> None:
+    from verdict.dashboard.evidence_explanation import preview_explanation
+    from verdict.dashboard.scoped_evaluation import preview_scoped
+
+    root = tmp_path / "codex"
+    path = root / "live.jsonl"
+    _write_jsonl(path, _codex_records())
+    next_line = json.dumps({
+        "timestamp": "2026-08-30T10:02:00Z", "type": "event_msg",
+        "payload": {"type": "task_started", "turn_id": "turn-b"},
+    }) + "\n"
+    with path.open("a") as handle:
+        handle.write(next_line[:35])
+    storage_path = tmp_path / "verdict.db"
+    storage = SQLiteStorage(str(storage_path))
+    assert capture_local_agents(storage, tenant_id="local", codex_root=root).stored == 1
+    [bundle] = storage.list_agent_run_bundles("local")
+    call = next(event for event in bundle.events
+                if event.event_type is AgentEventType.TOOL_CALL)
+    config = {"scope": "event", "runId": bundle.run.run_id,
+              "eventId": call.event_id, "provider": "anthropic", "focus": "failure"}
+    first = preview_explanation(
+        storage, storage_url=f"sqlite:///{storage_path}", tenant="local", config=config,
+    )
+    assert first["plannedCalls"] == 0
+    assert first["evidencePreview"]["reason"] == "source_capture_partial"
+    session_preview = preview_scoped(
+        storage, tenant="local",
+        storage_url=f"sqlite:///{storage_path}",
+        config={
+            "scope": "session", "sessionId": bundle.run.session_id,
+            "sourceKind": "codex", "provider": "anthropic",
+            "model": "claude-haiku-4-5", "maxOutputTokens": 256,
+            "rubric": {"name": "task_review", "version": "1", "dimensions": [{
+                "name": "completion", "description": "Review the recorded task evidence.",
+            }]},
+        },
+    )
+    assert session_preview["plannedCalls"] == 0
+    assert session_preview["unavailableReason"] == "source_capture_partial"
+
+    with path.open("a") as handle:
+        handle.write(next_line[35:])
+    assert capture_local_agents(storage, tenant_id="local", codex_root=root).stored == 1
+    second = preview_explanation(
+        storage, storage_url=f"sqlite:///{storage_path}", tenant="local", config=config,
+    )
+    assert second["plannedCalls"] == 1
+    storage.close()
+
+
+@pytest.mark.parametrize("storage_kind", ["sqlite", "memory"])
+def test_local_revision_rejects_source_change_without_mutating_committed_capture(
+    tmp_path: Path, storage_kind: str,
+) -> None:
+    root = tmp_path / "codex"
+    path = root / "source.jsonl"
+    _write_jsonl(path, _codex_records())
+    storage = (SQLiteStorage(str(tmp_path / "verdict.db"))
+               if storage_kind == "sqlite" else InMemoryStorage())
+    try:
+        assert capture_local_agents(storage, tenant_id="local", codex_root=root).stored == 1
+        [bundle] = storage.list_agent_run_bundles("local")
+        committed = storage.get_agent_capture_snapshot("local", bundle.run.run_id)
+        original = path.read_bytes()
+
+        path.write_bytes(original[:-1])
+        truncated = capture_local_agents(storage, tenant_id="local", codex_root=root)
+        assert truncated.stored == 0
+        assert truncated.skip_reasons == {"local_source_conflict": 1}
+        assert storage.get_agent_capture_snapshot("local", bundle.run.run_id) == committed
+
+        path.write_bytes(original.replace(b"/Users/example/project", b"/Users/example/projecT", 1))
+        changed = capture_local_agents(storage, tenant_id="local", codex_root=root)
+        assert changed.stored == 0
+        assert changed.skip_reasons == {"local_source_conflict": 1}
+        assert storage.get_agent_capture_snapshot("local", bundle.run.run_id) == committed
+    finally:
+        storage.close()
+
+
+def test_local_revision_rejects_source_change_between_parse_and_commit(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    root = tmp_path / "codex"
+    path = root / "source.jsonl"
+    _write_jsonl(path, _codex_records())
+    storage = SQLiteStorage(str(tmp_path / "verdict.db"))
+    try:
+        assert capture_local_agents(storage, tenant_id="local", codex_root=root).stored == 1
+        [bundle] = storage.list_agent_run_bundles("local")
+        committed = storage.get_agent_capture_snapshot("local", bundle.run.run_id)
+        with path.open("ab") as handle:
+            handle.write(b"\n")
+        original_store = storage._replace_local_agent_capture
+
+        def changed_after_parse(*args, **kwargs):
+            with path.open("ab") as handle:
+                handle.write(b"\n")
+            return original_store(*args, **kwargs)
+
+        monkeypatch.setattr(storage, "_replace_local_agent_capture", changed_after_parse)
+        stale = capture_local_agents(storage, tenant_id="local", codex_root=root)
+        assert stale.stored == 0
+        assert stale.skip_reasons == {"local_source_changed": 1}
+        assert storage.get_agent_capture_snapshot("local", bundle.run.run_id) == committed
+        monkeypatch.setattr(storage, "_replace_local_agent_capture", original_store)
+        assert capture_local_agents(storage, tenant_id="local", codex_root=root).stored == 1
+    finally:
+        storage.close()
+
+
+def test_local_rewrite_cannot_prove_prior_event_content_with_capture_disabled(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "codex"
+    path = root / "source.jsonl"
+    records = _codex_records()
+    records[3]["payload"] = {"type": "item_completed", "item": {"type": "unknown"}}
+    records[6]["payload"] = {"type": "unknown"}
+    records[-1]["payload"]["last_agent_message"] = ""
+    _write_jsonl(path, records)
+    storage = SQLiteStorage(str(tmp_path / "verdict.db"))
+    try:
+        assert capture_local_agents(storage, tenant_id="local", codex_root=root).stored == 1
+        [bundle] = storage.list_agent_run_bundles("local")
+        assert all(turn.user_request_redacted is None and
+                   turn.final_response_redacted is None for turn in bundle.turns)
+        assert any(event.privacy_classification is PrivacyClassification.REDACTED
+                   for event in bundle.events)
+        committed = storage.get_agent_capture_snapshot("local", bundle.run.run_id)
+        path.write_bytes(b"\n" + path.read_bytes())
+        changed = capture_local_agents(
+            storage, tenant_id="local", codex_root=root, capture_content=False,
+        )
+        assert changed.stored == 0
+        assert changed.skip_reasons == {"local_source_conflict": 1}
+        assert storage.get_agent_capture_snapshot("local", bundle.run.run_id) == committed
+    finally:
+        storage.close()
+
+
+def test_postgres_local_partial_checkpoint_clears_on_completed_append(
+    tmp_path: Path,
+) -> None:
+    from _postgres_test_safety import isolated_test_dsn, validate_test_dsn
+    from verdict.storage.postgres import PostgresStorage
+
+    dsn, reason = validate_test_dsn(
+        os.environ.get("VERDICT_TEST_POSTGRES_DSN"), allow_any_database=False,
+    )
+    if dsn is None:
+        pytest.skip(reason)
+    root = tmp_path / "codex"
+    path = root / "source.jsonl"
+    _write_jsonl(path, _codex_records())
+    final_line = json.dumps({
+        "timestamp": "2026-08-30T10:02:00Z", "type": "event_msg",
+        "payload": {"type": "task_started", "turn_id": "next-turn"},
+    }) + "\n"
+    with path.open("a") as handle:
+        handle.write(final_line[:25])
+    with isolated_test_dsn(dsn) as isolated:
+        storage = PostgresStorage(isolated)
+        try:
+            assert capture_local_agents(storage, tenant_id="local", codex_root=root).stored == 1
+            [bundle] = storage.list_agent_run_bundles("local")
+            prior, revision = storage.get_agent_capture_snapshot(
+                "local", bundle.run.run_id,
+            )
+            assert revision is not None and revision.partial_final_line
+            assert prior is not None
+            with path.open("a") as handle:
+                handle.write(final_line[25:])
+            assert capture_local_agents(storage, tenant_id="local", codex_root=root).stored == 1
+            current, revision = storage.get_agent_capture_snapshot(
+                "local", bundle.run.run_id,
+            )
+            assert revision is not None and not revision.partial_final_line
+            assert current is not None and len(current.turns) == len(prior.turns) + 1
+            assert all(event.provenance != "verdict:partial_source_line"
+                       for event in current.events)
+        finally:
+            storage.close()
+
+
+def test_postgres_partial_local_tail_excludes_judge_candidate_and_write(
+    tmp_path: Path,
+) -> None:
+    from _postgres_test_safety import isolated_test_dsn, validate_test_dsn
+    from verdict.storage.postgres import PostgresStorage
+
+    dsn, reason = validate_test_dsn(
+        os.environ.get("VERDICT_TEST_POSTGRES_DSN"), allow_any_database=False,
+    )
+    if dsn is None:
+        pytest.skip(reason)
+    root = tmp_path / "codex"
+    path = root / "source.jsonl"
+    _write_jsonl(path, _codex_records())
+    with path.open("a") as handle:
+        handle.write('{"timestamp":"2026-08-30T10:02:00Z","type":"event_msg"')
+    with isolated_test_dsn(dsn) as isolated:
+        storage = PostgresStorage(isolated)
+        try:
+            assert capture_local_agents(storage, tenant_id="local", codex_root=root).stored == 1
+            [bundle] = storage.list_agent_run_bundles("local")
+            turn = bundle.turns[-1]
+            assert storage.get_agent_turn_evaluation_candidate(
+                "local", bundle.run.run_id, turn.turn_id, "a" * 64,
+            ) is None
+            assert storage.list_agent_turn_evaluation_candidates("local", "a" * 64)[0] == []
+            assert storage.save_agent_turn_judgment_if_current(AgentTurnJudgment(
+                tenant_id="local", run_id=bundle.run.run_id, turn_id=turn.turn_id,
+                evaluator_fingerprint="a" * 64,
+                evidence_fingerprint=turn_evidence_fingerprint(turn),
+                evaluator_provider="anthropic", evaluator_config={}, judge_models=["test"],
+                expected_dimensions=["relevance"], rubric_name="test", rubric_version="1",
+                status=JudgmentStatus.ERROR, error="synthetic",
+            )) == "stale"
+
+            limit_root = tmp_path / "codex-limit"
+            records = _codex_records()
+            records[4:4] = [records[4]] * 1_600
+            _write_jsonl(limit_root / "large.jsonl", records)
+            assert capture_local_agents(
+                storage, tenant_id="local", codex_root=limit_root,
+            ).event_limited_runs == 1
+            limited = next(bundle for bundle in storage.list_agent_run_bundles("local")
+                           if any(event.provenance == "verdict:capture_limit"
+                                  for event in bundle.events))
+            limited_turn = limited.turns[0]
+            assert storage.get_agent_turn_evaluation_candidate(
+                "local", limited.run.run_id, limited_turn.turn_id, "a" * 64,
+            ) is None
+            assert storage.save_agent_turn_judgment_if_current(AgentTurnJudgment(
+                tenant_id="local", run_id=limited.run.run_id, turn_id=limited_turn.turn_id,
+                evaluator_fingerprint="a" * 64,
+                evidence_fingerprint=turn_evidence_fingerprint(limited_turn),
+                evaluator_provider="anthropic", evaluator_config={}, judge_models=["test"],
+                expected_dimensions=["relevance"], rubric_name="test", rubric_version="1",
+                status=JudgmentStatus.ERROR, error="synthetic",
+            )) == "stale"
+        finally:
+            storage.close()
+
+
+@pytest.mark.parametrize("turn_count", [1_000, 1_001])
+def test_large_local_import_does_not_store_a_run_unreadable_by_v1_port(
+    tmp_path: Path, turn_count: int,
+) -> None:
+    from verdict.read_port import StorageVerdictReadPort
+
+    root = tmp_path / "codex"
+    path = root / "many-turns.jsonl"
+    records: list[dict[str, object]] = [{
+        "timestamp": "2026-08-30T10:00:00Z", "type": "session_meta",
+        "payload": {"id": "synthetic-many-turns"},
+    }]
+    for index in range(turn_count):
+        for event_type in ("task_started", "task_complete"):
+            records.append({
+                "timestamp": "2026-08-30T10:00:00Z", "type": "event_msg",
+                "payload": {"type": event_type, "turn_id": f"turn-{index}"},
+            })
+    _write_jsonl(path, records)
+    storage = SQLiteStorage(str(tmp_path / "verdict.db"))
+
+    summary = capture_local_agents(storage, tenant_id="local", codex_root=root)
+
+    if turn_count == 1_000:
+        assert summary.stored == 1
+        [bundle] = storage.list_agent_run_bundles("local")
+        assert StorageVerdictReadPort(storage).get_agent_run(
+            tenant_id="local", run_id=bundle.run.run_id,
+        ) is not None
+    else:
+        from verdict.dashboard.app import build_agent_insights_bundle, build_agent_runs_bundle
+        from verdict.read_port import VerdictReadError
+
+        assert summary.stored == 1
+        [bundle] = storage.list_agent_run_bundles("local")
+        assert len(bundle.turns) == 1_000
+        with pytest.raises(VerdictReadError, match="invalid_read_model"):
+            StorageVerdictReadPort(storage).get_agent_run(
+                tenant_id="local", run_id=bundle.run.run_id,
+            )
+        sample = storage.get_recent_local_events("local", bundle.run.run_id)
+        assert sample is not None and sample["sourceTurnCount"] == 1_001
+        if sample["sourceEventCount"] == 0:
+            assert sample["firstOrdinal"] is None
+            assert sample["lastOrdinal"] is None
+        [dashboard_run] = build_agent_runs_bundle(
+            str(tmp_path / "verdict.db"), tenant="local", run_id=bundle.run.run_id,
+        )["runs"]
+        assert dashboard_run["sourcePartial"] is True
+        insights = build_agent_insights_bundle(str(tmp_path / "verdict.db"), tenant="local")
+        assert insights["scope"]["partialRuns"] == 0
+        assert insights["scope"]["complete"] is True
+        assert insights["reliability"]["runOutcomes"] == {"unknown": 1}
+        assert insights["sourceActivity"][0]["partialRuns"] == 0
+        assert insights["sourceActivity"][0]["turns"] == 1_001
+
+
+def test_admitted_local_history_retains_every_nonprefix_event(tmp_path: Path) -> None:
+    """The source transaction must own middle events, not only the tail 50."""
+    root = tmp_path / "codex"
+    records = _codex_records()
+    records[4:4] = [records[4]] * 1_600
+    _write_jsonl(root / "many-events.jsonl", records)
+    storage = SQLiteStorage(str(tmp_path / "verdict.db"))
+    try:
+        assert capture_local_agents(storage, tenant_id="local", codex_root=root).stored == 1
+        [source] = storage._conn.execute(
+            "SELECT local_source_event_count,local_v1_event_count FROM import_sources"
+        ).fetchall()
+        [run] = storage.list_agent_run_bundles("local")
+        [nonprefix_count] = storage._conn.execute(
+            "SELECT count(*) FROM local_recent_event_facts WHERE tenant_id=? AND run_id=?",
+            ("local", run.run.run_id),
+        ).fetchone()
+        assert source["local_source_event_count"] > source["local_v1_event_count"] + 50
+        assert nonprefix_count == (
+            source["local_source_event_count"] - source["local_v1_event_count"]
+        )
+    finally:
+        storage.close()
+
+
+def test_admitted_history_event_page_reaches_middle_and_rejects_stale_revision(
+    tmp_path: Path,
+) -> None:
+    import asyncio
+
+    import httpx
+    from verdict.dashboard.app import create_app
+
+    root = tmp_path / "codex"
+    records = _codex_records("synthetic-page")
+    records[4:4] = [records[4]] * 1_600
+    _write_jsonl(root / "large.jsonl", records)
+    db = tmp_path / "verdict.db"
+    storage = SQLiteStorage(str(db))
+    try:
+        assert capture_local_agents(storage, tenant_id="local", codex_root=root).stored == 1
+        [bundle] = storage.list_agent_run_bundles("local")
+        revision = storage.get_recent_local_events("local", bundle.run.run_id)[
+            "sourceRevision"
+        ]
+        [middle_cursor_id] = storage._conn.execute(
+            "SELECT event_id FROM local_recent_event_facts WHERE tenant_id=? "
+            "AND run_id=? AND source_ordinal=1499",
+            ("local", bundle.run.run_id),
+        ).fetchone()
+    finally:
+        storage.close()
+
+    async def read():
+        app = create_app(storage=f"sqlite:///{db}", tenant_id="local")
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        ) as client:
+            page = await client.get(f"/api/runs/{bundle.run.run_id}/local-events",
+                                    params={"revision": revision, "limit": 100})
+            if page.status_code != 200:
+                return page, None, None, None
+            cursor = page.json()["nextCursor"]
+            middle = await client.get(f"/api/runs/{bundle.run.run_id}/local-events",
+                                      params={"revision": revision, "limit": 100,
+                                              "after_ordinal": 1499,
+                                              "after_event_id": middle_cursor_id})
+            stale = await client.get(f"/api/runs/{bundle.run.run_id}/local-events",
+                                     params={"revision": "0" * 64, "limit": 100,
+                                             "after_ordinal": cursor["sourceOrdinal"],
+                                             "after_event_id": cursor["eventId"]})
+            forged = await client.get(f"/api/runs/{bundle.run.run_id}/local-events",
+                                      params={"revision": revision, "limit": 100,
+                                              "after_ordinal": 1499,
+                                              "after_event_id": "event_" + "0" * 32})
+            return page, middle, stale, forged
+
+    page, middle, stale, forged = asyncio.run(read())
+    assert page.status_code == 200
+    assert page.json()["coverage"] == "complete_recorded"
+    assert len(page.json()["events"]) == 100
+    assert middle.status_code == 200
+    assert middle.json()["events"][0]["sourceOrdinal"] > 1499
+    assert stale.status_code == 409
+    assert forged.status_code == 409
+
+    async def foreign_read():
+        app = create_app(storage=f"sqlite:///{db}", tenant_id="foreign")
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        ) as client:
+            return await client.get(f"/api/runs/{bundle.run.run_id}/local-events",
+                                    params={"revision": revision})
+
+    assert asyncio.run(foreign_read()).status_code == 404
+    with sqlite3.connect(db) as connection:
+        connection.execute(
+            "DELETE FROM local_recent_event_facts WHERE tenant_id=? AND run_id=? "
+            "AND source_ordinal=1499", ("local", bundle.run.run_id),
+        )
+    broken, _, _, _ = asyncio.run(read())
+    assert broken.status_code == 503
+
+
+def test_live_postgres_full_local_event_page_is_tenant_scoped(tmp_path: Path) -> None:
+    import asyncio
+
+    import httpx
+    from _postgres_test_safety import isolated_test_dsn, validate_test_dsn
+    from verdict.dashboard.app import create_app
+    from verdict.storage import PostgresStorage
+
+    dsn, reason = validate_test_dsn(os.environ.get("VERDICT_TEST_POSTGRES_DSN"),
+                                    allow_any_database=False)
+    if dsn is None:
+        pytest.skip(reason)
+    root = tmp_path / "codex"
+    records = _codex_records("synthetic-pg-page")
+    records[4:4] = [records[4]] * 1_600
+    _write_jsonl(root / "large.jsonl", records)
+    with isolated_test_dsn(dsn) as isolated:
+        storage = PostgresStorage(isolated)
+        try:
+            assert capture_local_agents(storage, tenant_id="local", codex_root=root).stored == 1
+            [bundle] = storage.list_agent_run_bundles("local")
+            revision = storage.get_recent_local_events("local", bundle.run.run_id)[
+                "sourceRevision"
+            ]
+        finally:
+            storage.close()
+
+        async def read(tenant):
+            app = create_app(storage=isolated, tenant_id=tenant)
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+            ) as client:
+                return await client.get(f"/api/runs/{bundle.run.run_id}/local-events",
+                                        params={"revision": revision, "limit": 100})
+
+        local = asyncio.run(read("local"))
+        foreign = asyncio.run(read("foreign"))
+        assert local.status_code == 200
+        assert local.json()["coverage"] == "complete_recorded"
+        assert local.json()["sourceEventCount"] > 1_500
+        assert foreign.status_code == 404
+
+
+def test_claude_fanout_within_admission_keeps_complete_recorded_events(
+    tmp_path: Path,
+) -> None:
+    from verdict.dashboard.app import build_full_local_event_page
+
+    root = tmp_path / "claude"
+    records = _claude_records()[:1]
+    records.append({
+        "timestamp": "2026-08-30T11:00:01Z", "type": "assistant",
+        "uuid": "assistant-many", "sessionId": "claude-session-1",
+        "message": {
+            "id": "msg-many", "model": "claude-sonnet-4-5",
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 12, "output_tokens": 3},
+            "content": [
+                {"type": "tool_use", "id": f"tool-{index}", "name": "Bash",
+                 "input": {"command": "true"}}
+                for index in range(800)
+            ],
+        },
+    })
+    _write_jsonl(root / "many.jsonl", records)
+    db = tmp_path / "verdict.db"
+    storage = SQLiteStorage(str(db))
+    try:
+        assert capture_local_agents(storage, tenant_id="local", claude_root=root).stored == 1
+        [bundle] = storage.list_agent_run_bundles("local")
+        [source] = storage._conn.execute(
+            "SELECT local_source_event_count,local_projection_complete,local_full_sha256 "
+            "FROM import_sources"
+        ).fetchall()
+        assert source[0] > 1_500 and source[1] == 1
+        page = build_full_local_event_page(
+            f"sqlite:///{db}", tenant="local", run_id=bundle.run.run_id,
+            revision=source[2], limit=100,
+        )
+        assert page["coverage"] == "complete_recorded"
+        assert page["sourceEventCount"] == source[0]
+    finally:
+        storage.close()
+
+
+def test_full_local_page_checks_tail_turn_payload_identity(tmp_path: Path) -> None:
+    import asyncio
+
+    import httpx
+    from verdict.dashboard.app import create_app
+
+    root = tmp_path / "codex"
+    _write_jsonl(root / "many-turns.jsonl",
+                 _zero_event_codex_history(1_001, "synthetic-tail-integrity"))
+    db = tmp_path / "verdict.db"
+    storage = SQLiteStorage(str(db))
+    try:
+        assert capture_local_agents(storage, tenant_id="local", codex_root=root).stored == 1
+        [bundle] = storage.list_agent_run_bundles("local")
+        revision = storage.get_recent_local_events("local", bundle.run.run_id)[
+            "sourceRevision"
+        ]
+    finally:
+        storage.close()
+
+    async def read():
+        app = create_app(storage=f"sqlite:///{db}", tenant_id="local")
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        ) as client:
+            return await client.get(f"/api/runs/{bundle.run.run_id}/local-events",
+                                    params={"revision": revision})
+
+    assert asyncio.run(read()).json()["coverage"] == "complete_recorded"
+    with sqlite3.connect(db) as connection:
+        [payload] = connection.execute(
+            "SELECT payload_json FROM local_tail_turn_facts"
+        ).fetchone()
+        changed = json.loads(payload)
+        changed["run_id"] = "foreign-run"
+        connection.execute(
+            "UPDATE local_tail_turn_facts SET payload_json=?", (json.dumps(changed),)
+        )
+    assert asyncio.run(read()).status_code == 503
+
+
+def test_admitted_1001st_turn_is_retained_without_event_marker(tmp_path: Path) -> None:
+    """Turn coverage cannot be inferred from a V1 event-limit marker."""
+    root = tmp_path / "codex"
+    records: list[dict[str, object]] = [{
+        "timestamp": "2026-08-30T10:00:00Z", "type": "session_meta",
+        "payload": {"id": "synthetic-tail-turn"},
+    }]
+    for index in range(1_001):
+        records.extend({
+            "timestamp": "2026-08-30T10:00:00Z", "type": "event_msg",
+            "payload": {"type": kind, "turn_id": f"turn-{index}"},
+        } for kind in ("task_started", "task_complete"))
+    _write_jsonl(root / "many-turns.jsonl", records)
+    storage = SQLiteStorage(str(tmp_path / "verdict.db"))
+    try:
+        assert capture_local_agents(storage, tenant_id="local", codex_root=root).stored == 1
+        [run] = storage.list_agent_run_bundles("local")
+        assert len(run.turns) == 1_000
+        assert all(event.provenance != "verdict:capture_limit" for event in run.events)
+        [tail_turn_count] = storage._conn.execute(
+            "SELECT count(*) FROM local_tail_turn_facts WHERE tenant_id=? AND run_id=?",
+            ("local", run.run.run_id),
+        ).fetchone()
+        assert tail_turn_count == 1
+    finally:
+        storage.close()
+
+
+def test_admitted_tail_turn_tokens_appear_in_day_usage(tmp_path: Path) -> None:
+    from verdict.dashboard.app import build_agent_usage_bundle
+
+    root = tmp_path / "codex"
+    records = _zero_event_codex_history(1_001, "synthetic-tail-usage")
+    records.insert(-1, {
+        "timestamp": "2026-08-30T10:00:01Z", "type": "event_msg",
+        "payload": {"type": "token_count", "info": {
+            "last_token_usage": {"input_tokens": 20, "output_tokens": 4,
+                                 "total_tokens": 24},
+            "total_token_usage": {"input_tokens": 20, "output_tokens": 4,
+                                  "total_tokens": 24},
+        }},
+    })
+    records.insert(-1, {
+        "timestamp": "2026-08-30T10:00:01Z", "type": "event_msg",
+        "payload": {"type": "token_count", "info": {
+            "last_token_usage": {"input_tokens": 20, "output_tokens": 4,
+                                 "total_tokens": 24},
+            "total_token_usage": {"input_tokens": 40, "output_tokens": 8,
+                                  "total_tokens": 48},
+        }},
+    })
+    _write_jsonl(root / "many-turns.jsonl", records)
+    url = f"sqlite:///{tmp_path / 'verdict.db'}"
+    storage = SQLiteStorage(str(tmp_path / "verdict.db"))
+    try:
+        assert capture_local_agents(storage, tenant_id="local", codex_root=root).stored == 1
+        [attempt_complete] = storage._conn.execute(
+            "SELECT projection_complete FROM local_source_scan_attempts"
+        ).fetchone()
+        assert attempt_complete == 1
+        report = build_agent_usage_bundle(
+            url, tenant="local", day="2026-08-30",
+            now=datetime.fromisoformat("2026-08-31T12:00:00+00:00"),
+        )
+        day = next(item for item in report["days"] if item["day"] == "2026-08-30")
+        assert day["turns"] == 1_001
+        assert day["totalTokens"] == 24
+        assert day["sourcePartial"] is False
+        assert report["window"]["modelEvidenceComplete"] is False
+        [tail] = storage._conn.execute(
+            "SELECT payload_json FROM local_tail_turn_facts"
+        ).fetchone()
+        altered = json.loads(tail)
+        altered["started_at"] = "2026-08-30T10:00:02+00:00"
+        storage._conn.execute(
+            "UPDATE local_tail_turn_facts SET payload_json=?",
+            (json.dumps(altered),),
+        )
+        damaged = build_agent_usage_bundle(
+            url, tenant="local", day="2026-08-30",
+            now=datetime.fromisoformat("2026-08-31T12:00:00+00:00"),
+        )
+        assert next(item for item in damaged["days"] if item["day"] == "2026-08-30")[
+            "sourcePartial"
+        ] is True
+    finally:
+        storage.close()
+
+
+def test_admitted_middle_failure_counts_in_complete_issue_day(tmp_path: Path) -> None:
+    import asyncio
+
+    import httpx
+    from verdict.dashboard.app import build_agent_usage_bundle, create_app
+
+    root = tmp_path / "codex"
+    records = _codex_records("synthetic-middle-issue")
+    repeated_call = records[4]
+    records[4:4] = [repeated_call] * 1_600
+    records.insert(1550, {
+        "timestamp": "2026-08-30T10:01:04Z", "type": "response_item",
+        "payload": {"type": "function_call_output", "call_id": "call-1",
+                    "output": '{"exit_code":1,"output":"synthetic middle failure"}'},
+    })
+    _write_jsonl(root / "large.jsonl", records)
+    db = tmp_path / "verdict.db"
+    storage = SQLiteStorage(str(db))
+    try:
+        assert capture_local_agents(storage, tenant_id="local", codex_root=root).stored == 1
+        [bundle] = storage.list_agent_run_bundles("local")
+        sample = storage.get_recent_local_events("local", bundle.run.run_id)
+        prefix_ids = {event.event_id for event in bundle.events}
+        recent_ids = {event["eventId"] for event in sample["events"]}
+        middle_failures = list(storage._conn.execute(
+            "SELECT event_id FROM local_recent_event_facts WHERE provenance="
+            "'codex:response_item_output'"
+        ))
+        assert any(row[0] not in prefix_ids | recent_ids for row in middle_failures)
+        report = build_agent_usage_bundle(
+            f"sqlite:///{db}", tenant="local", day="2026-08-30",
+            now=datetime.fromisoformat("2026-08-31T12:00:00+00:00"),
+        )
+        assert report["selectedDayIssues"]["complete"] is True
+        assert report["selectedDayIssues"]["count"] >= 2
+        async def read(tenant):
+            app = create_app(storage=f"sqlite:///{db}", tenant_id=tenant)
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+            ) as client:
+                return await client.get(f"/api/runs/{bundle.run.run_id}/recorded-analysis")
+
+        own = asyncio.run(read("local"))
+        assert own.status_code == 200
+        assert own.json()["coverage"] == "complete_recorded"
+        assert own.json()["metrics"]["tool_calls"] >= 1_600
+        assert any(item["code"] == "review_repeated_tool_failures"
+                   and item["status"] == "suggested"
+                   for item in own.json()["recommendations"])
+        [command_finding] = [finding for finding in own.json()["findings"]
+                             if finding["code"] == "command_failed"]
+        assert command_finding["evidenceEventIds"]
+        async def evidence_page():
+            app = create_app(storage=f"sqlite:///{db}", tenant_id="local")
+            cursor = command_finding["firstEvidenceCursor"] or {}
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+            ) as client:
+                return await client.get(
+                    f"/api/runs/{bundle.run.run_id}/local-events",
+                    params={"revision": own.json()["sourceRevision"], "limit": 100,
+                            **({"after_ordinal": cursor["sourceOrdinal"],
+                                "after_event_id": cursor["eventId"]} if cursor else {})},
+                )
+        page = asyncio.run(evidence_page())
+        assert page.status_code == 200
+        assert page.json()["events"][0]["eventId"] == command_finding["evidenceEventIds"][0]
+        assert asyncio.run(read("foreign")).status_code == 404
+    finally:
+        storage.close()
+
+
+def test_admitted_middle_failure_reaches_activated_issue_monitor(tmp_path: Path) -> None:
+    import asyncio
+    from datetime import timedelta, timezone
+
+    import httpx
+    import verdict.dashboard.app as dashboard_app
+    from verdict.dashboard.app import build_agent_insights_bundle, create_app
+    from verdict.dashboard.control_plane import ControlStore
+    from verdict.dashboard.issue_notices import IssueNotices
+    from verdict.service import run_cycle
+
+    root = tmp_path / "codex"
+    path = tmp_path / "verdict.db"
+    url = f"sqlite:///{path}"
+    storage = SQLiteStorage(str(path))
+    try:
+        ControlStore(url).append(
+            "local", kind="schedule", document_id="daily", state="active",
+            payload={"analyzeOnly": True}, expected_revision=None,
+        )
+        original = datetime.fromisoformat("2026-08-30T10:00:00+00:00")
+        shifted = datetime.now(timezone.utc) + timedelta(minutes=1)
+        records = _codex_records("synthetic-monitor-middle")
+        records[4:4] = [records[4]] * 1_600
+        for record in records:
+            when = datetime.fromisoformat(str(record["timestamp"]).replace("Z", "+00:00"))
+            record["timestamp"] = (shifted + (when - original)).isoformat()
+        records.insert(1550, {
+            "timestamp": (shifted + timedelta(minutes=1, seconds=4)).isoformat(),
+            "type": "response_item",
+            "payload": {"type": "function_call_output", "call_id": "call-1",
+                        "output": '{"exit_code":1,"output":"synthetic middle failure"}'},
+        })
+        _write_jsonl(root / "large.jsonl", records)
+        assert capture_local_agents(storage, tenant_id="local", codex_root=root).stored == 1
+        [bundle] = storage.list_agent_run_bundles("local")
+        sample = storage.get_recent_local_events("local", bundle.run.run_id)
+        seen_ids = ({event.event_id for event in bundle.events}
+                    | {event["eventId"] for event in sample["events"]})
+        middle_ids = {row[0] for row in storage._conn.execute(
+            "SELECT event_id FROM local_recent_event_facts "
+            "WHERE tenant_id='local' AND provenance='codex:response_item_output'"
+        )} - seen_ids
+        assert middle_ids
+
+        monitor = IssueNotices(url)
+        assert monitor.scan("local") >= 1
+        notices = monitor.list("local")
+        assert any(item["eventId"] in middle_ids for item in notices)
+        assert monitor.scan("local") == 0
+        assert monitor.list("foreign") == []
+        insights = build_agent_insights_bundle(url, tenant="local")
+        assert insights["reliability"]["commandFailures"] == 2
+        assert insights["sourceActivity"][0]["partialRuns"] == 0
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(dashboard_app, "MAX_INSIGHT_LOCAL_EXPANSION_ROWS", 100)
+            limited = build_agent_insights_bundle(url, tenant="local")
+        assert limited["sourceActivity"][0]["partialRuns"] == 1
+        assert limited["reliability"]["commandFailures"] == 0
+        cycle = run_cycle(
+            url, {"analyzeOnly": True, "includeApprovedEvaluations": False},
+            tenant_id="local",
+        )
+        assert cycle["analysis"]["status"] == "completed"
+        assert cycle["newIssues"] == 0
+        repeated = run_cycle(
+            url, {"analyzeOnly": True, "includeApprovedEvaluations": False},
+            tenant_id="local",
+        )
+        assert repeated["analysis"]["analysisId"] == cycle["analysis"]["analysisId"]
+        assert repeated["newIssues"] == 0
+
+        async def read_insights(tenant):
+            app = create_app(storage=url, tenant_id=tenant)
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+            ) as client:
+                return await client.get("/api/insights")
+
+        own = asyncio.run(read_insights("local"))
+        assert own.status_code == 200
+        assert own.json()["reliability"]["commandFailures"] == 2
+        assert asyncio.run(read_insights("foreign")).json()["reliability"][
+            "commandFailures"
+        ] == 0
+        storage._conn.execute(
+            "UPDATE local_recent_event_facts SET attributes_json='[]' "
+            "WHERE tenant_id=? AND run_id=? AND event_id=?",
+            ("local", bundle.run.run_id, next(iter(middle_ids))),
+        )
+        with pytest.raises(RuntimeError, match="invalid local full run"):
+            build_agent_insights_bundle(url, tenant="local")
+    finally:
+        storage.close()
+
+
+def test_admitted_tail_turn_can_be_analyzed_from_recorded_events(tmp_path: Path) -> None:
+    import asyncio
+
+    import httpx
+    from verdict.dashboard.app import build_agent_turn_analysis, create_app
+
+    root = tmp_path / "codex"
+    records = _zero_event_codex_history(1_001, "synthetic-tail-analysis")
+    records.insert(-1, {
+        "timestamp": "2026-08-30T10:00:01Z", "type": "response_item",
+        "payload": {"type": "function_call", "name": "exec_command",
+                    "call_id": "tail-call", "arguments": '{"cmd":"false"}'},
+    })
+    records.insert(-1, {
+        "timestamp": "2026-08-30T10:00:01Z", "type": "response_item",
+        "payload": {"type": "function_call_output", "call_id": "tail-call",
+                    "output": '{"exit_code":1,"output":"synthetic failure"}'},
+    })
+    _write_jsonl(root / "many-turns.jsonl", records)
+    db = tmp_path / "verdict.db"
+    storage = SQLiteStorage(str(db))
+    try:
+        assert capture_local_agents(storage, tenant_id="local", codex_root=root).stored == 1
+        [bundle] = storage.list_agent_run_bundles("local")
+        assert storage._conn.execute(
+            "SELECT local_projection_complete FROM import_sources"
+        ).fetchone()[0] == 1
+        tail_id = storage._conn.execute(
+            "SELECT turn_id FROM local_tail_turn_facts"
+        ).fetchone()[0]
+        report = build_agent_turn_analysis(
+            f"sqlite:///{db}", tenant="local", run_id=bundle.run.run_id,
+            turn_id=tail_id,
+        )
+        assert report["eventCoverage"]["complete"] is True
+        assert any(item["code"] == "tool_error" for item in report["reviewSignals"])
+        async def read(tenant):
+            app = create_app(storage=f"sqlite:///{db}", tenant_id=tenant)
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+            ) as client:
+                return await client.get(
+                    f"/api/runs/{bundle.run.run_id}/turns/{tail_id}/analysis"
+                )
+
+        assert asyncio.run(read("local")).json()["eventCoverage"]["complete"] is True
+        assert asyncio.run(read("foreign")).status_code == 404
+        async def run_report():
+            app = create_app(storage=f"sqlite:///{db}", tenant_id="local")
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+            ) as client:
+                return await client.get(
+                    f"/api/runs/{bundle.run.run_id}/recorded-analysis"
+                )
+
+        full_report = asyncio.run(run_report())
+        assert full_report.status_code == 200
+        assert full_report.json()["recordedTurns"] == 1_001
+        storage._conn.execute(
+            "DELETE FROM local_recent_event_facts WHERE tenant_id=? AND run_id=? "
+            "AND turn_id=?", ("local", bundle.run.run_id, tail_id),
+        )
+        assert asyncio.run(read("local")).status_code == 503
+        assert asyncio.run(run_report()).status_code == 503
+    finally:
+        storage.close()
+
+
+def test_live_postgres_admitted_tail_turn_analysis(tmp_path: Path) -> None:
+    import asyncio
+
+    import httpx
+    import psycopg
+    from _postgres_test_safety import isolated_test_dsn, validate_test_dsn
+    from verdict.dashboard.app import build_agent_insights_bundle, create_app
+    from verdict.storage import PostgresStorage
+
+    dsn, reason = validate_test_dsn(os.environ.get("VERDICT_TEST_POSTGRES_DSN"),
+                                    allow_any_database=False)
+    if dsn is None:
+        pytest.skip(reason)
+    root = tmp_path / "codex"
+    records = _zero_event_codex_history(1_001, "synthetic-pg-tail-analysis")
+    records.insert(-1, {
+        "timestamp": "2026-08-30T10:00:01Z", "type": "response_item",
+        "payload": {"type": "function_call", "name": "exec_command",
+                    "call_id": "tail-call", "arguments": '{"cmd":"false"}'},
+    })
+    records.insert(-1, {
+        "timestamp": "2026-08-30T10:00:01Z", "type": "response_item",
+        "payload": {"type": "function_call_output", "call_id": "tail-call",
+                    "output": '{"exit_code":1,"output":"synthetic failure"}'},
+    })
+    _write_jsonl(root / "many-turns.jsonl", records)
+    with isolated_test_dsn(dsn) as isolated:
+        storage = PostgresStorage(isolated)
+        try:
+            assert capture_local_agents(storage, tenant_id="local", codex_root=root).stored == 1
+            [bundle] = storage.list_agent_run_bundles("local")
+            with psycopg.connect(isolated) as connection:
+                tail_id = connection.execute(
+                    "SELECT turn_id FROM local_tail_turn_facts"
+                ).fetchone()[0]
+        finally:
+            storage.close()
+
+        async def read(tenant):
+            app = create_app(storage=isolated, tenant_id=tenant)
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+            ) as client:
+                return await client.get(
+                    f"/api/runs/{bundle.run.run_id}/turns/{tail_id}/analysis"
+                )
+
+        local = asyncio.run(read("local"))
+        assert local.status_code == 200
+        assert local.json()["eventCoverage"]["complete"] is True
+        assert any(item["code"] == "tool_error" for item in local.json()["reviewSignals"])
+        assert asyncio.run(read("foreign")).status_code == 404
+        async def run_report(tenant):
+            app = create_app(storage=isolated, tenant_id=tenant)
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+            ) as client:
+                return await client.get(
+                    f"/api/runs/{bundle.run.run_id}/recorded-analysis"
+                )
+
+        own_report = asyncio.run(run_report("local"))
+        assert own_report.status_code == 200
+        assert own_report.json()["recordedTurns"] == 1_001
+        assert asyncio.run(run_report("foreign")).status_code == 404
+        insights = build_agent_insights_bundle(isolated, tenant="local")
+        assert insights["sourceActivity"][0]["turns"] == 1_001
+        assert insights["sourceActivity"][0]["partialRuns"] == 0
+        assert insights["reliability"]["commandFailures"] == 1
+
+
+def test_full_projection_budget_fallback_preserves_old_facts_and_clears_tail_turns(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    import verdict.telemetry.local_agents as local_agents
+    from verdict.dashboard.app import build_agent_usage_bundle
+
+    root = tmp_path / "codex"
+    _write_jsonl(root / "many-turns.jsonl",
+                 _zero_event_codex_history(1_001, "synthetic-fallback"))
+    storage = SQLiteStorage(str(tmp_path / "verdict.db"))
+    try:
+        assert capture_local_agents(storage, tenant_id="local", codex_root=root).stored == 1
+        [before] = storage.list_agent_run_bundles("local")
+        [complete] = storage._conn.execute(
+            "SELECT local_projection_complete FROM import_sources"
+        ).fetchone()
+        assert complete == 1
+        monkeypatch.setattr(local_agents, "_MAX_FULL_PROJECTED_ROWS", 1_000)
+        assert capture_local_agents(storage, tenant_id="local", codex_root=root).stored == 1
+        [partial] = storage._conn.execute(
+            "SELECT local_projection_complete FROM import_sources"
+        ).fetchone()
+        [attempt_partial] = storage._conn.execute(
+            "SELECT projection_complete FROM local_source_scan_attempts"
+        ).fetchone()
+        [tail_count] = storage._conn.execute(
+            "SELECT count(*) FROM local_tail_turn_facts"
+        ).fetchone()
+        assert partial == 0 and attempt_partial == 0 and tail_count == 0
+        assert storage.list_agent_run_bundles("local") == [before]
+        usage = build_agent_usage_bundle(
+            f"sqlite:///{tmp_path / 'verdict.db'}", tenant="local",
+            day="2026-08-30", now=datetime.fromisoformat("2026-08-31T12:00:00+00:00"),
+        )
+        assert next(day for day in usage["days"] if day["day"] == "2026-08-30")[
+            "sourcePartial"
+        ] is True
+    finally:
+        storage.close()
+
+
+def test_source_over_measured_full_admission_limit_stays_partial(tmp_path: Path) -> None:
+    root = tmp_path / "codex"
+    records = _codex_records("synthetic-over-admission")
+    records[4:4] = [records[4]] * 5_001
+    _write_jsonl(root / "large.jsonl", records)
+    storage = SQLiteStorage(str(tmp_path / "verdict.db"))
+    try:
+        assert capture_local_agents(storage, tenant_id="local", codex_root=root).stored == 1
+        [mode] = storage._conn.execute(
+            "SELECT local_projection_complete FROM import_sources"
+        ).fetchone()
+        [facts] = storage._conn.execute(
+            "SELECT count(*) FROM local_recent_event_facts"
+        ).fetchone()
+        assert mode == 0
+        assert facts <= 50
+    finally:
+        storage.close()
+
+
+def test_local_file_byte_guard_preserves_prior_revision(tmp_path: Path, monkeypatch) -> None:
+    import verdict.telemetry.local_agents as local_agents
+
+    root = tmp_path / "codex"
+    path = root / "session.jsonl"
+    _write_jsonl(path, _codex_records())
+    storage = SQLiteStorage(str(tmp_path / "verdict.db"))
+    try:
+        assert capture_local_agents(storage, tenant_id="local", codex_root=root).stored == 1
+        [before] = storage.list_agent_run_bundles("local")
+        monkeypatch.setattr(local_agents, "_MAX_LOCAL_FILE_BYTES", 1)
+        result = capture_local_agents(storage, tenant_id="local", codex_root=root)
+        assert result.skip_reasons == {"history_file_too_large": 1}
+        assert storage.list_agent_run_bundles("local") == [before]
+    finally:
+        storage.close()
+
+
+def test_claude_event_fanout_guard_preserves_prior_revision(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    import verdict.telemetry.local_agents as local_agents
+
+    root = tmp_path / "claude"
+    path = root / "session.jsonl"
+    _write_jsonl(path, _claude_records())
+    storage = SQLiteStorage(str(tmp_path / "verdict.db"))
+    try:
+        assert capture_local_agents(storage, tenant_id="local", claude_root=root).stored == 1
+        [before] = storage.list_agent_run_bundles("local")
+        records = _claude_records()[:1]
+        records.append({
+            "timestamp": "2026-08-30T11:00:01Z", "type": "assistant",
+            "uuid": "assistant-many", "sessionId": "claude-session-1",
+            "message": {
+                "id": "msg-many", "model": "claude-sonnet-4-5",
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 12, "output_tokens": 3},
+                "content": [
+                    {"type": "tool_use", "id": f"tool-{index}", "name": "Bash",
+                     "input": {"command": "true"}}
+                    for index in range(20)
+                ],
+            },
+        })
+        _write_jsonl(path, records)
+        monkeypatch.setattr(local_agents, "_MAX_PARSED_EVENTS", 10)
+        result = capture_local_agents(storage, tenant_id="local", claude_root=root)
+        assert result.skip_reasons == {"history_event_limit": 1}
+        assert storage.list_agent_run_bundles("local") == [before]
+    finally:
+        storage.close()
+
+
+def test_bounded_scan_reaches_unattempted_file_after_failed_first_attempt(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """A bad first file must not starve later files under a scan limit."""
+    import verdict.telemetry.local_agents as local_agents
+
+    root = tmp_path / "codex"
+    root.mkdir()
+    (root / "a-broken.jsonl").write_bytes(b"{malformed}\n")
+    _write_jsonl(root / "b-valid.jsonl", _codex_records())
+    monkeypatch.setattr(local_agents, "_MAX_SCAN_FILES", 1)
+    storage = SQLiteStorage(str(tmp_path / "verdict.db"))
+    try:
+        first = capture_local_agents(storage, tenant_id="local", codex_root=root)
+        assert first.files == 1 and first.stored + first.skipped == 1
+        assert first.scan_incomplete is True and first.deferred == 1
+        second = capture_local_agents(storage, tenant_id="local", codex_root=root)
+        assert second.files == 1 and second.stored + second.skipped == 1
+        assert first.stored + second.stored == 1
+        assert first.skipped + second.skipped == 1
+        assert second.scan_incomplete is True and second.deferred == 1
+        assert len(storage.list_agent_run_bundles("local")) == 1
+    finally:
+        storage.close()
+
+
+def test_first_bounded_scan_tries_recent_unattempted_history_first(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    import verdict.telemetry.local_agents as local_agents
+
+    root = tmp_path / "codex"
+    root.mkdir()
+    candidates = [root / "first.jsonl", root / "second.jsonl"]
+    older, newer = sorted(candidates, key=lambda path: sha256(str(path.resolve()).encode()).hexdigest())
+    older.write_bytes(b"{malformed}\n")
+    _write_jsonl(newer, _codex_records())
+    os.utime(older, ns=(1_000_000_000, 1_000_000_000))
+    os.utime(newer, ns=(2_000_000_000, 2_000_000_000))
+    monkeypatch.setattr(local_agents, "_MAX_SCAN_FILES", 1)
+    storage = SQLiteStorage(str(tmp_path / "verdict.db"))
+    try:
+        first = capture_local_agents(storage, tenant_id="local", codex_root=root)
+        assert first.stored == 1 and first.skipped == 0 and first.deferred == 1
+        second = capture_local_agents(storage, tenant_id="local", codex_root=root)
+        assert second.skipped == 1 and second.deferred == 1
+    finally:
+        storage.close()
+
+
+def test_oversized_history_does_not_exhaust_scan_budget_before_read(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    import verdict.telemetry.local_agents as local_agents
+
+    root = tmp_path / "codex"
+    root.mkdir()
+    oversized = root / "oversized.jsonl"
+    oversized.write_bytes(b"x" * 4097)
+    valid = root / "valid.jsonl"
+    _write_jsonl(valid, _codex_records())
+    os.utime(oversized, ns=(2_000_000_000, 2_000_000_000))
+    os.utime(valid, ns=(1_000_000_000, 1_000_000_000))
+    monkeypatch.setattr(local_agents, "_MAX_LOCAL_FILE_BYTES", 4096)
+    monkeypatch.setattr(local_agents, "_MAX_SCAN_RAW_BYTES", 1)
+    storage = SQLiteStorage(str(tmp_path / "verdict.db"))
+    try:
+        first = capture_local_agents(storage, tenant_id="local", codex_root=root)
+        assert first.files == 2 and first.stored == 1 and first.skipped == 1
+        assert first.skip_reasons == {"history_file_too_large": 1}
+        assert first.deferred == 0
+    finally:
+        storage.close()
+
+
+def test_scan_raw_byte_soft_cap_defers_after_one_file(tmp_path: Path, monkeypatch) -> None:
+    import verdict.telemetry.local_agents as local_agents
+
+    root = tmp_path / "codex"
+    for name in ("first", "second"):
+        records = _codex_records(name)
+        records[0]["payload"]["id"] = name
+        _write_jsonl(root / f"{name}.jsonl", records)
+    monkeypatch.setattr(local_agents, "_MAX_SCAN_RAW_BYTES", 1)
+    storage = SQLiteStorage(str(tmp_path / "verdict.db"))
+    try:
+        first = capture_local_agents(storage, tenant_id="local", codex_root=root)
+        assert first.files == first.stored == first.deferred == 1
+        assert first.scan_incomplete is True
+        second = capture_local_agents(storage, tenant_id="local", codex_root=root)
+        assert second.files == second.stored == second.deferred == 1
+        assert len(storage.list_agent_run_bundles("local")) == 2
+    finally:
+        storage.close()
+
+
+@pytest.mark.parametrize("budget_name", ["_MAX_SCAN_PROJECTED_ROWS",
+                                      "_MAX_SCAN_SANITIZED_BYTES"])
+def test_scan_projected_soft_cap_defers_after_one_file(
+    tmp_path: Path, monkeypatch, budget_name: str,
+) -> None:
+    import verdict.telemetry.local_agents as local_agents
+
+    root = tmp_path / "codex"
+    for name in ("first", "second"):
+        records = _codex_records(name)
+        records[0]["payload"]["id"] = name
+        _write_jsonl(root / f"{name}.jsonl", records)
+    monkeypatch.setattr(local_agents, budget_name, 1)
+    storage = SQLiteStorage(str(tmp_path / "verdict.db"))
+    try:
+        first = capture_local_agents(storage, tenant_id="local", codex_root=root)
+        second = capture_local_agents(storage, tenant_id="local", codex_root=root)
+        assert first.files == first.stored == first.deferred == 1
+        assert second.files == second.stored == second.deferred == 1
+        assert len(storage.list_agent_run_bundles("local")) == 2
+    finally:
+        storage.close()
+
+
+def test_live_postgres_bounded_scan_reaches_unattempted_file(tmp_path: Path, monkeypatch) -> None:
+    import verdict.telemetry.local_agents as local_agents
+    from _postgres_test_safety import isolated_test_dsn, validate_test_dsn
+    from verdict.storage import PostgresStorage
+
+    dsn, reason = validate_test_dsn(os.environ.get("VERDICT_TEST_POSTGRES_DSN"),
+                                    allow_any_database=False)
+    if dsn is None:
+        pytest.skip(reason)
+    root = tmp_path / "codex"
+    root.mkdir()
+    (root / "a-broken.jsonl").write_bytes(b"{malformed}\n")
+    _write_jsonl(root / "b-valid.jsonl", _codex_records())
+    monkeypatch.setattr(local_agents, "_MAX_SCAN_FILES", 1)
+    with isolated_test_dsn(dsn) as isolated:
+        storage = PostgresStorage(isolated)
+        try:
+            first = capture_local_agents(storage, tenant_id="local", codex_root=root)
+            second = capture_local_agents(storage, tenant_id="local", codex_root=root)
+            assert first.stored + second.stored == 1
+            assert first.skipped + second.skipped == 1
+            assert first.deferred == second.deferred == 1
+            assert len(storage.list_agent_run_bundles("local")) == 1
+        finally:
+            storage.close()
+
+
+@pytest.mark.parametrize("backend", ["memory", "sqlite", "buffered"])
+def test_old_scan_attempt_cannot_overwrite_newer_outcome(tmp_path: Path, backend: str) -> None:
+    storage = (
+        InMemoryStorage() if backend == "memory"
+        else BufferedStorage(InMemoryStorage()) if backend == "buffered"
+        else SQLiteStorage(str(tmp_path / "scan.db"))
+    )
+    identity = ("tenant", "codex", "a" * 64, "b" * 64)
+    try:
+        first = storage.claim_local_scan_attempt(
+            *identity, "2026-10-20T10:00:00+00:00", 100, 1,
+        )
+        second = storage.claim_local_scan_attempt(
+            *identity, "2026-10-20T10:01:00+00:00", 101, 2,
+        )
+        assert second == first + 1
+        assert storage.finish_local_scan_attempt(
+            *identity, second, "2026-10-20T10:02:00+00:00", "partial_projection",
+            "c" * 64, False, True,
+        )
+        assert not storage.finish_local_scan_attempt(
+            *identity, first, "2026-10-20T10:03:00+00:00", "failed",
+            None, False, False,
+        )
+        if backend == "sqlite":
+            [row] = storage._conn.execute(
+                "SELECT generation,outcome_code,accepted_revision "
+                "FROM local_source_scan_attempts"
+            ).fetchall()
+            assert tuple(row) == (second, "partial_projection", "c" * 64)
+        else:
+            inner = storage._inner if backend == "buffered" else storage
+            assert inner._local_scan_attempts[identity]["outcome_code"] == "partial_projection"
+    finally:
+        storage.close()
+
+
+def test_live_postgres_old_scan_attempt_cannot_overwrite_newer_outcome() -> None:
+    from _postgres_test_safety import isolated_test_dsn, validate_test_dsn
+    from verdict.storage import PostgresStorage
+
+    dsn, reason = validate_test_dsn(os.environ.get("VERDICT_TEST_POSTGRES_DSN"),
+                                    allow_any_database=False)
+    if dsn is None:
+        pytest.skip(reason)
+    identity = ("tenant", "codex", "a" * 64, "b" * 64)
+    with isolated_test_dsn(dsn) as isolated:
+        storage = PostgresStorage(isolated)
+        try:
+            first = storage.claim_local_scan_attempt(
+                *identity, "2026-10-20T10:00:00+00:00", 100, 1,
+            )
+            second = storage.claim_local_scan_attempt(
+                *identity, "2026-10-20T10:01:00+00:00", 101, 2,
+            )
+            assert storage.finish_local_scan_attempt(
+                *identity, second, "2026-10-20T10:02:00+00:00", "partial_projection",
+                "c" * 64, False, True,
+            )
+            assert not storage.finish_local_scan_attempt(
+                *identity, first, "2026-10-20T10:03:00+00:00", "failed",
+                None, False, False,
+            )
+            with storage._pool.connection() as conn, conn.cursor() as cur:
+                cur.execute(
+                    "SELECT generation,outcome_code,accepted_revision "
+                    "FROM local_source_scan_attempts"
+                )
+                assert cur.fetchone() == (second, "partial_projection", "c" * 64)
+        finally:
+            storage.close()
+
+
+def test_failed_rescan_keeps_last_accepted_run_and_records_failed_attempt(tmp_path: Path) -> None:
+    root = tmp_path / "codex"
+    path = root / "session.jsonl"
+    _write_jsonl(path, _codex_records())
+    storage = SQLiteStorage(str(tmp_path / "verdict.db"))
+    try:
+        assert capture_local_agents(storage, tenant_id="local", codex_root=root).stored == 1
+        [before] = storage.list_agent_run_bundles("local")
+        path.write_bytes(b"{malformed}\n")
+        result = capture_local_agents(storage, tenant_id="local", codex_root=root)
+        assert result.skipped == 1 and result.skip_reasons == {"malformed_jsonl": 1}
+        assert storage.list_agent_run_bundles("local") == [before]
+        [attempt] = storage._conn.execute(
+            "SELECT generation,outcome_code,accepted_revision FROM local_source_scan_attempts"
+        ).fetchall()
+        assert tuple(attempt) == (2, "failed_malformed_jsonl", None)
+    finally:
+        storage.close()
+
+
+def test_scan_attempt_never_persists_unrecognized_exception_text(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    import verdict.telemetry.local_agents as local_agents
+
+    root = tmp_path / "codex"
+    _write_jsonl(root / "session.jsonl", _codex_records())
+    secret = "PRIVATE_EXCEPTION_BODY_CANARY"
+
+    def reject(_path, *, home=None):
+        raise ValueError(secret)
+
+    monkeypatch.setattr(local_agents, "_parse_codex", reject)
+    storage = SQLiteStorage(str(tmp_path / "verdict.db"))
+    try:
+        summary = capture_local_agents(storage, tenant_id="local", codex_root=root)
+        assert summary.skip_reasons == {"invalid_local_source": 1}
+        [outcome] = storage._conn.execute(
+            "SELECT outcome_code FROM local_source_scan_attempts"
+        ).fetchone()
+        assert outcome == "failed_invalid_local_source"
+        assert secret not in str(summary.as_dict())
+        assert secret not in outcome
+    finally:
+        storage.close()
+
+
+def test_growing_local_source_cannot_leave_stale_v1_prefix_looking_complete(
+    tmp_path: Path,
+) -> None:
+    from verdict.read_port import StorageVerdictReadPort, VerdictReadError
+
+    root = tmp_path / "codex"
+    path = root / "growing.jsonl"
+    records: list[dict[str, object]] = [{
+        "timestamp": "2026-08-30T10:00:00Z", "type": "session_meta",
+        "payload": {"id": "synthetic-growing-source"},
+    }]
+    for index in range(1_000):
+        for event_type in ("task_started", "task_complete"):
+            records.append({
+                "timestamp": "2026-08-30T10:00:00Z", "type": "event_msg",
+                "payload": {"type": event_type, "turn_id": f"turn-{index}"},
+            })
+    _write_jsonl(path, records)
+    storage = SQLiteStorage(str(tmp_path / "verdict.db"))
+    try:
+        assert capture_local_agents(storage, tenant_id="local", codex_root=root).stored == 1
+        [original] = storage.list_agent_run_bundles("local")
+        port = StorageVerdictReadPort(storage)
+        assert port.get_agent_run(tenant_id="local", run_id=original.run.run_id) is not None
+
+        with path.open("a") as handle:
+            for event_type in ("task_started", "task_complete"):
+                handle.write(json.dumps({
+                    "timestamp": "2026-08-30T10:00:00Z", "type": "event_msg",
+                    "payload": {"type": event_type, "turn_id": "turn-1000"},
+                }) + "\n")
+        assert capture_local_agents(storage, tenant_id="local", codex_root=root).stored == 1
+        with pytest.raises(VerdictReadError) as error:
+            port.get_agent_run(tenant_id="local", run_id=original.run.run_id)
+        assert error.value.code == "invalid_read_model"
+        retained = storage.get_agent_run_bundle("local", original.run.run_id)
+        assert retained is not None and retained.turns[0].turn_id == original.turns[0].turn_id
+    finally:
+        storage.close()
+
+
+@pytest.mark.parametrize("backend", ["sqlite", "postgres"])
+def test_normalized_local_capture_accepts_aggregate_over_legacy_bundle_json_limit(
+    tmp_path: Path, backend: str,
+) -> None:
+    from verdict.read_port import StorageVerdictReadPort
+
+    root = tmp_path / "codex"
+    path = root / "long-text.jsonl"
+    records: list[dict[str, object]] = [{
+        "timestamp": "2026-08-30T10:00:00Z", "type": "session_meta",
+        "payload": {"id": "synthetic-long-text"},
+    }]
+    for index in range(80):
+        records.extend((
+            {"timestamp": "2026-08-30T10:00:00Z", "type": "event_msg",
+             "payload": {"type": "task_started", "turn_id": f"turn-{index}"}},
+            {"timestamp": "2026-08-30T10:00:01Z", "type": "event_msg",
+             "payload": {"type": "user_message", "message": "synthetic text " * 3_600}},
+            {"timestamp": "2026-08-30T10:00:02Z", "type": "event_msg",
+             "payload": {"type": "task_complete", "turn_id": f"turn-{index}"}},
+        ))
+    _write_jsonl(path, records)
+    with ExitStack() as stack:
+        if backend == "postgres":
+            from verdict.storage.postgres import PostgresStorage
+
+            from packages.verdict.tests._postgres_test_safety import (
+                isolated_test_dsn,
+                validate_test_dsn,
+            )
+
+            dsn, reason = validate_test_dsn(
+                os.environ.get("VERDICT_TEST_POSTGRES_DSN"), allow_any_database=False,
+            )
+            if dsn is None:
+                pytest.skip(reason)
+            storage = PostgresStorage(stack.enter_context(isolated_test_dsn(dsn)))
+        else:
+            storage = SQLiteStorage(str(tmp_path / "verdict.db"))
+        stack.callback(storage.close)
+        assert capture_local_agents(storage, tenant_id="local", codex_root=root).stored == 1
+        [bundle] = storage.list_agent_run_bundles("local")
+        assert sum(len((turn.user_request_redacted or "").encode())
+                   for turn in bundle.turns) > 4 * 1024 * 1024
+        assert StorageVerdictReadPort(storage).get_agent_run(
+            tenant_id="local", run_id=bundle.run.run_id,
+        ) is not None
 def test_claude_meta_and_image_only_rows_do_not_fabricate_or_drop_turns(
     tmp_path: Path,
 ) -> None:

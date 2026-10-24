@@ -31,7 +31,7 @@ dashboard's reviewed Monitor policies; importing itself does not cluster, judge,
 or calculate drift. Supported formats, limits, field mapping, privacy behavior,
 and commands are maintained in
 [`examples/telemetry/README.md`](../../examples/telemetry/README.md) and the
-[`verdict-import` documentation](../../README.md#import-telemetry-you-already-have).
+[`verdict-import` documentation](../ONBOARDING.md#4-import-telemetry-you-already-collect).
 
 ## Consequences
 

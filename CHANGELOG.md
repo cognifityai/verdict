@@ -6,6 +6,34 @@ the product is refined.
 
 ## [Unreleased]
 
+### Added
+
+- Guided Home, setup, investigation, groups, and issue notices connect captured
+  activity to exact run, turn, event, and supported call evidence. Optional
+  explanations preview bounded context and require approval before a judge call.
+- Customer-managed single-tenant deployment documentation and a Compose example
+  cover separate dashboard, worker, collector, and PostgreSQL processes.
+- Durable worker-cycle and notification-delivery status distinguish a saved
+  schedule from a completed monitoring cycle. Backup and restore of these
+  records are included in the PostgreSQL integration check.
+- Storage adds normalized local-source revisions, recent evidence, issue,
+  delivery, and worker records, plus tenant-identity constraints. SQLite and
+  PostgreSQL stores created by 0.1.0b2 remain readable after initialization.
+
+### Changed
+
+- Local history capture records per-file attempts and incomplete coverage.
+  One invocation admits at most 1,000 files and stops after a file crosses
+  128 MiB of source bytes, 100,000 projected rows, or 256 MiB of sanitized
+  payload. A file above 128 MiB is rejected before parsing and reported;
+  unattempted files are tried newest first. Repeated rescans reach deferred
+  files, but oversized files need a separate bounded import path.
+- A model call with an error field present, including an empty string, counts
+  as a provider error. Calls without a recorded end time are not sent to the
+  judge. An already-active monitor may have a baseline computed under the
+  earlier empty-string rule; review that baseline before interpreting a
+  comparison if the source can record empty-string errors.
+
 ## [0.1.0b2] - 2026-10-15
 
 ### Added

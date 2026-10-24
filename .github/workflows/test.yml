@@ -69,7 +69,7 @@ jobs:
       - name: Install dependencies
         run: |
           uv pip install --system \
-            wrapt httpx \
+            wrapt httpx "psycopg[binary,pool]" \
             numpy scipy scikit-learn \
             "pytest>=8" "pytest-asyncio>=0.23" "ruff>=0.5" \
             -r ui/requirements.txt
@@ -81,10 +81,20 @@ jobs:
         run: python scripts/smoke_test.py
 
       - name: Ruff
+        if: matrix.python-version == '3.12'
         run: ruff check packages scripts ui
 
-      - name: pytest
-        run: python -m pytest -v --tb=short
+      - name: Full pytest suite
+        if: matrix.python-version == '3.12'
+        run: python -m pytest -q --tb=short
+
+      - name: Minimum and intermediate Python compatibility
+        if: matrix.python-version != '3.12'
+        run: >-
+          python -m pytest -q --tb=short
+          packages/verdict/tests/test_agent_sdk.py
+          packages/verdict/tests/test_storage.py
+          packages/verdict_eval/tests/test_providers.py
 
   anthropic-compat:
     name: Anthropic declared minimum SDK
@@ -150,7 +160,7 @@ jobs:
 
   postgres:
     name: PostgreSQL adapter round trip
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     services:
       postgres:
         image: postgres:16
@@ -181,6 +191,8 @@ jobs:
 
       - name: Install Postgres test dependencies
         run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client-16
           python -m pip install --disable-pip-version-check \
             httpx pytest "psycopg[binary,pool]"
           python -m pip install --disable-pip-version-check \
@@ -191,7 +203,9 @@ jobs:
         run: >-
           python -m pytest -v
           packages/verdict/tests/test_postgres_integration.py
+          packages/verdict/tests/test_postgres_backup_restore.py
           packages/verdict/tests/test_telemetry_postgres.py
+          packages/verdict/tests/test_customer_topology.py
           ui/tests/test_postgres_dashboard.py
 
   release-artifacts:

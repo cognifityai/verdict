@@ -767,3 +767,8 @@ def test_corrupt_a17_bundle_aborts_migration_without_marking_it_complete(
         assert (
             connection.execute("SELECT COUNT(*) FROM verdict_schema_migrations").fetchone()[0] == 0
         )
+def test_legacy_local_preview_masks_embedded_unicode_escape_before_compatibility_write():
+    from verdict.normalized_evidence import _sanitize_compatibility_preview
+
+    text = r'Legacy: {"misc":"\u0073k-proj-FFFFFFFFFFFFFFFFFFFFFFFF"}'
+    assert _sanitize_compatibility_preview(text) == "<REDACTED>"
