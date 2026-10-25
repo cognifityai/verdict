@@ -47,7 +47,7 @@ call or bound trace, a span remains intentionally standalone (`trace_id=None`).
 **Tertiary (planned): OpenAI-compatible gateway proxy** for environments where
 running code in-process is impossible.
 
-**Not in v0: eBPF capture.** This is out of scope for the current SDK.
+**Not provided: eBPF capture.** This is out of scope for the current SDK.
 
 ## Implementation
 
@@ -65,8 +65,8 @@ imports remain dependency-free. The capture path:
 4. Provides the configuration surface (`verdict.init()`).
 5. Runs PII redaction on captured content **before it is persisted** (see "PII
    handling").
-6. Persists everything through the `Storage` port (SQLite in v0; Postgres
-   available behind the same interface).
+6. Persists everything through the `Storage` port, with SQLite and PostgreSQL
+   available behind the same interface.
 
 Streaming responses are handled by wrapping the returned iterator with a
 pass-through that yields each chunk immediately and collects a copy for
@@ -137,7 +137,8 @@ There is **no OpenTelemetry/OpenInference span emission today.** Verdict can
 receive/import those formats through ADR-006. Internally, both paths use a
 **vendor-neutral schema** (`Trace`, `Judgment`, `SpanRecord`, and
 `DriftSignal`) defined in `verdict/schema.py` and written to
-storage. Field names are our own and are stable within v0.
+storage. Field names are our own; consult the released schema and
+[release profile](../RELEASE_PROFILE.md) for the current contract.
 
 **Planned:** an optional outbound exporter that maps the internal
 schema onto OpenTelemetry GenAI semantic conventions and/or OpenInference

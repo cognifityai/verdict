@@ -44,7 +44,7 @@ verdict-inspect analyze --report ./drift_report.md ~/Downloads/chatlog.jsonl
 verdict-inspect analyze --json ~/Downloads/conversations.json | jq .
 ```
 
-## Supported formats (v0)
+## Supported formats
 
 - **ChatGPT data export** — the `conversations.json` from Settings → Data Controls → Export
 - **Claude.ai data export** — the `conversations.json` from Settings → Account → Export
@@ -52,8 +52,8 @@ verdict-inspect analyze --json ~/Downloads/conversations.json | jq .
 - **Agent-session JSONL** — type-tagged local agent session logs
 - **Auto-detect** — looks at file structure and picks a parser
 
-Planned (v1): Cursor `.cursor/chats/`, Gemini Takeout, LangChain message
-history files, Llama Index conversation logs.
+Other formats, including Cursor, Gemini Takeout, LangChain message history,
+and Llama Index conversation logs, are not currently supported.
 
 ## What you get back
 
@@ -90,5 +90,5 @@ conversation. If `ANTHROPIC_API_KEY` is set and the judge is enabled,
 `verdict-inspect` sends stride-sampled user and assistant text (up to 4,000
 characters each) to the configured Anthropic model. Anthropic credentials and
 data-handling terms apply. Pass `--no-judge` or omit the key to keep conversation
-content local and receive structural plus embedding analysis only. The v0
-inspect judge is Anthropic-only.
+content local and receive structural plus embedding analysis only. The
+current inspect judge is Anthropic-only.

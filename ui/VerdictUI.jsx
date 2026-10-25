@@ -3,10 +3,8 @@ import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell,
 } from "recharts";
 import {
-  Activity, AlertTriangle, ArrowRight, ArrowLeft, BarChart3, CheckCircle2,
-  Code2, Database, Layers, Scale, Search, Shield, Signal,
-  TrendingDown, Github, Terminal, Gauge, FlaskConical, DollarSign,
-  Filter, X, Sparkles, Eye, Network, RefreshCw, Info,
+  Activity, AlertTriangle, BarChart3, CheckCircle2, Layers, Scale, Search,
+  Shield, Signal, Terminal, Gauge, Filter, X, Sparkles, Eye, RefreshCw, Info,
 } from "lucide-react";
 import { dimensionAxisLabel, dimensionLabel } from "./dimension-labels.js";
 import { providerPresentation } from "./provider-presentation.js";
@@ -472,187 +470,6 @@ function Logo({ size = 26 }) {
         <path d="M9 10.5 L16 22 L23 10.5" stroke={C.text} strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" />
         <circle cx="16" cy="22.5" r="1.7" fill={C.text} />
       </svg>
-    </div>
-  );
-}
-
-/* ================================================================ LANDING */
-function Landing({ onEnter }) {
-  const problems = [
-    { icon: DollarSign, title: "Token use lacks a trail", body: "Daily totals rarely explain which session, turn, or model contributed. Verdict links reported usage back to recorded work." },
-    { icon: Activity, title: "Failures need context", body: "A failed tool call or test needs surrounding actions and outcomes before anyone can decide what to change." },
-    { icon: Network, title: "Changes need a repeatable check", body: "Reviewed cases let you run the same fixed checks against two explicitly configured application versions." },
-  ];
-  const steps = [
-    { icon: Activity, t: "Capture", d: "Import approved local Claude Code or Codex histories, or record application-agent runs through the Python SDK." },
-    { icon: Database, t: "Profile", d: "Follow reported tokens by day into sessions, turns, model evidence, and recorded failures. The first report needs no judge key." },
-    { icon: Layers, t: "Investigate", d: "Review a bounded session report, analyze a turn, and open the actual events behind a suggested action." },
-    { icon: Scale, t: "Evaluate", d: "Preview exact redacted evidence before approving an optional provider judge for a selected scope." },
-    { icon: FlaskConical, t: "Compare", d: "Run reviewed cases against baseline and candidate configurations with the same deterministic checks." },
-    { icon: Signal, t: "Monitor", d: "Schedule key-free analysis; use prospective statistical monitoring for genuine provider model calls when configured." },
-  ];
-  const validation = [
-    { k: "Capture", l: "Provider call tracing", d: "Instrument supported SDK calls and verify live capture with the release-check script.", icon: FlaskConical, color: C.green },
-    { k: "Judge", l: "Rubric calibration", d: "Use your own labeled traces to measure judge agreement before relying on alerts.", icon: Scale, color: C.blue },
-    { k: "Drift", l: "Statistical review", d: "Inspect changes by cluster and dimension instead of relying on one global average.", icon: Signal, color: C.accent2 },
-  ];
-  const limits = [
-    "Agent evidence is limited to what supported source histories expose",
-    "Judge calibration is workload-specific",
-    "Redaction is best-effort pattern matching",
-    "Dashboard is intended for local or trusted-network use",
-  ];
-  return (
-    <div style={{ background: C.bg, color: C.text, minHeight: "100%" }}>
-      {/* nav */}
-      <div className="sticky top-0 z-20 border-b" style={{ borderColor: C.border, background: "rgba(11,14,13,0.95)" }}>
-        <div className="max-w-6xl mx-auto px-6 h-14 flex items-center justify-between">
-          <div className="flex items-center gap-2.5">
-            <Logo />
-            <span className="font-semibold" style={{ fontSize: 16, letterSpacing: 0 }}>Verdict</span>
-            <Pill color={C.sub}>v0 · open source</Pill>
-          </div>
-          <div className="flex items-center gap-2">
-            <span className="hidden sm:inline-flex items-center gap-1.5 text-sm px-3 py-1.5" style={{ color: C.sub }}>
-              <Github size={15} /> Apache 2.0
-            </span>
-            <button onClick={onEnter} className="inline-flex items-center gap-1.5 text-sm font-medium px-3.5 py-1.5"
-              style={{ background: C.accent, color: C.bg, borderRadius: 3 }}>
-              Open dashboard <ArrowRight size={15} />
-            </button>
-          </div>
-        </div>
-      </div>
-
-      {/* hero */}
-      <div className="max-w-6xl mx-auto px-6 pt-16 pb-14">
-        <div className="max-w-3xl">
-          <Pill color={C.cyan} bg={C.blueBg}><Sparkles size={12} /> Agent profiling · reliability</Pill>
-          <h1 className="mt-5 font-semibold" style={{ fontSize: 46, lineHeight: 1.07, letterSpacing: 0 }}>
-            See where agent tokens went. <span style={{ color: C.accent2 }}>Inspect what happened next.</span>
-          </h1>
-          <p className="mt-5 text-lg" style={{ color: C.sub, lineHeight: 1.6 }}>
-            Verdict connects reported usage to sessions, turns, and recorded actions. Analyze failures locally,
-            review optional judge evidence before egress, and test application changes against fixed cases.
-          </p>
-          <div className="mt-7 flex flex-wrap items-center gap-3">
-            <button onClick={onEnter} className="inline-flex items-center gap-2 text-sm font-semibold px-5 py-2.5 rounded-md"
-              style={{ background: C.accent, color: C.bg }}>
-              Explore the dashboard <ArrowRight size={16} />
-            </button>
-            <a href="https://github.com/cognifityai/verdict" target="_blank" rel="noreferrer"
-              className="inline-flex items-center gap-2 text-sm px-4 py-2.5 rounded-md border" style={{ borderColor: C.border, color: C.sub }}>
-              <Github size={16} /> Read the source
-            </a>
-          </div>
-          <div className="mt-7 flex flex-wrap gap-x-6 gap-y-2 text-sm" style={{ color: C.faint }}>
-            <span className="flex items-center gap-1.5"><CheckCircle2 size={14} style={{ color: C.green }} /> Synthetic sample data included</span>
-            <span className="flex items-center gap-1.5"><CheckCircle2 size={14} style={{ color: C.green }} /> Key-free local analysis</span>
-            <span className="flex items-center gap-1.5"><CheckCircle2 size={14} style={{ color: C.green }} /> Live API replaces the sample when connected</span>
-          </div>
-        </div>
-      </div>
-
-      {/* problems */}
-      <Section title="Three questions to answer about agent work">
-        <div className="grid md:grid-cols-3 gap-4">
-          {problems.map((p) => (
-            <Panel key={p.title} className="p-5">
-              <div className="w-9 h-9 flex items-center justify-center mb-3" style={{ background: C.redBg, borderRadius: 3 }}>
-                <p.icon size={18} style={{ color: C.red }} />
-              </div>
-              <div className="font-semibold mb-1.5">{p.title}</div>
-              <div className="text-sm" style={{ color: C.sub, lineHeight: 1.55 }}>{p.body}</div>
-            </Panel>
-          ))}
-        </div>
-      </Section>
-
-      {/* how it works */}
-      <Section title="How it works" subtitle="Capture → profile → investigate → evaluate → compare → monitor.">
-        <div className="grid md:grid-cols-3 gap-4">
-          {steps.map((s, i) => (
-            <Panel key={s.t} className="p-5">
-              <div className="flex items-center gap-3 mb-2.5">
-                <div className="w-9 h-9 rounded-md flex items-center justify-center" style={{ background: C.raised, border: `1px solid ${C.border}` }}>
-                  <s.icon size={18} style={{ color: C.accent2 }} />
-                </div>
-                <span className="text-xs font-mono" style={{ color: C.faint }}>0{i + 1}</span>
-                <span className="font-semibold">{s.t}</span>
-              </div>
-              <div className="text-sm" style={{ color: C.sub, lineHeight: 1.55 }}>{s.d}</div>
-            </Panel>
-          ))}
-        </div>
-      </Section>
-
-      {/* validation */}
-      <Section title="Verification paths" subtitle="The repository includes scripts for each check below.">
-        <div className="grid md:grid-cols-3 gap-4">
-          {validation.map((v) => (
-            <Panel key={v.l} className="p-5" style={{ background: C.panel2 }}>
-              <v.icon size={20} style={{ color: v.color }} />
-              <div className="mt-3 font-semibold" style={{ fontSize: 26, color: v.color, letterSpacing: 0 }}>{v.k}</div>
-              <div className="text-sm font-medium mt-0.5">{v.l}</div>
-              <div className="text-sm mt-2" style={{ color: C.sub, lineHeight: 1.5 }}>{v.d}</div>
-            </Panel>
-          ))}
-        </div>
-      </Section>
-
-      {/* install */}
-      <Section title="Instrument an application agent">
-        <Panel className="overflow-hidden">
-          <div className="flex items-center gap-2 px-4 py-2.5 border-b" style={{ borderColor: C.border, background: C.panel2 }}>
-            <Terminal size={14} style={{ color: C.sub }} />
-            <span className="text-xs font-mono" style={{ color: C.sub }}>app.py</span>
-          </div>
-          <pre className="p-5 text-sm overflow-x-auto" style={{ color: C.text, lineHeight: 1.7 }}>
-<span style={{ color: C.accent2 }}>import</span> verdict{"\n"}
-verdict.<span style={{ color: C.blue }}>init</span>(service_name=<span style={{ color: C.green }}>"my-agent"</span>, storage=<span style={{ color: C.green }}>"sqlite:///./verdict.db"</span>){"\n"}
-<span style={{ color: C.accent2 }}>with</span> verdict.agent_run(name=<span style={{ color: C.green }}>"support-agent"</span>) <span style={{ color: C.accent2 }}>as</span> run:{"\n"}
-{"    "}<span style={{ color: C.accent2 }}>with</span> run.turn(user_input=<span style={{ color: C.green }}>"Look up the order"</span>) <span style={{ color: C.accent2 }}>as</span> turn:{"\n"}
-{"        "}turn.set_output(<span style={{ color: C.green }}>"The order was found."</span>)
-          </pre>
-        </Panel>
-      </Section>
-
-      {/* honest limits */}
-      <Section title="Evidence boundaries" subtitle="What each report can establish.">
-        <div className="flex flex-wrap gap-2">
-          {limits.map((l) => (
-            <span key={l} className="text-sm px-3 py-1.5 border" style={{ borderColor: C.border, color: C.sub, background: C.panel, borderRadius: 3 }}>{l}</span>
-          ))}
-        </div>
-      </Section>
-
-      {/* cta */}
-      <div className="max-w-6xl mx-auto px-6 pb-20">
-        <Panel className="p-8 text-center" style={{ background: C.panel2, color: C.text, borderColor: C.border }}>
-          <div className="font-semibold" style={{ fontSize: 26, letterSpacing: 0 }}>Explore the sample dashboard</div>
-          <div className="text-sm mt-2 max-w-xl mx-auto" style={{ color: C.sub }}>
-            Walk through synthetic sample data: an active Monitor alert, trace explorer, judge scores, and provider comparison. Connect the dashboard to a Verdict database for live data.
-          </div>
-          <button onClick={onEnter} className="mt-5 inline-flex items-center gap-2 text-sm font-semibold px-5 py-2.5 rounded-md"
-            style={{ background: C.accent, color: C.bg }}>
-            Open dashboard <ArrowRight size={16} />
-          </button>
-        </Panel>
-        <div className="text-center text-xs mt-8" style={{ color: C.faint }}>
-          A Cognifity AI project · Apache 2.0 SDK · Bundled dashboard data is synthetic
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function Section({ title, subtitle, children }) {
-  return (
-    <div className="max-w-6xl mx-auto px-6 py-9 border-t" style={{ borderColor: C.border }}>
-      <h2 className="font-semibold mb-1" style={{ fontSize: 22, letterSpacing: 0 }}>{title}</h2>
-      {subtitle && <p className="text-sm mb-5" style={{ color: C.sub }}>{subtitle}</p>}
-      {!subtitle && <div className="mb-5" />}
-      {children}
     </div>
   );
 }
@@ -1670,14 +1487,6 @@ function MiniBar({ title, data, fmt }) {
 }
 
 /* ------------------------------------------------------------------- APP */
-export function LandingRoot() {
-  return (
-    <div style={{ fontFamily: "ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif", minHeight: "100%", background: C.bg }}>
-      <Landing onEnter={() => { window.location.href = "/dashboard"; }} />
-    </div>
-  );
-}
-
 export function DashboardRoot() {
   const data = useDashboardData();
   const { operationsUrl, operationsPageUrl } = useOperationsConfig();

@@ -187,7 +187,7 @@ hard pre-I/O backing-store bound. It is restricted to the trusted same-process
 composition in this ADR. A hard database-read bound requires a separately
 justified storage primitive and does not belong in this PR.
 
-Current unreleased local-import behavior retains the first 1,000 turns as a
+The released local importer retains the first 1,000 turns as a
 stable historical prefix and records source counts in the same transaction.
 V1 refuses whole-run projection when the source exceeds that prefix; older
 complete turns remain available through their existing links. A separate

@@ -1,19 +1,19 @@
 from ui import build
 
 
-def test_tracked_dashboard_pages_match_local_asset_shells():
-    for filename, (title, script) in build.PAGES.items():
-        assert (build.HERE / filename).read_text() == build.page(title, script)
+def test_obsolete_standalone_landing_is_not_built():
+    assert not (build.HERE / "landing.html").exists()
+    assert not (build.HERE / "entries" / "landing.jsx").exists()
+    assert not (build.HERE / "assets" / "landing.js").exists()
+
+
+def test_tracked_dashboard_page_matches_local_asset_shell():
     assert (build.DASHBOARD / "dashboard.html").read_text() == build.page(
         "Verdict - Dashboard", "dashboard.js", build.DASHBOARD
     )
 
 
 def test_generated_pages_fingerprint_local_assets():
-    for filename, (_title, script) in build.PAGES.items():
-        html = (build.HERE / filename).read_text()
-        assert f'assets/{script}?v=' in html
-        assert 'assets/verdict.css?v=' in html
     packaged = (build.DASHBOARD / "dashboard.html").read_text()
     assert 'assets/dashboard.js?v=' in packaged
     assert 'assets/verdict.css?v=' in packaged
@@ -41,32 +41,20 @@ def test_setup_sdk_example_captures_agent_run_and_turn_boundaries():
     assert "Supported provider calls inside the turn link" in source
 
 
-def test_landing_source_link_is_a_real_link():
-    assert 'href="https://github.com/cognifityai/verdict"' in (
-        build.HERE / "VerdictUI.jsx"
-    ).read_text()
-
-
 def test_pages_do_not_load_runtime_code_from_public_cdns():
     forbidden = ("cdn.tailwindcss.com", "cdnjs.cloudflare.com", "unpkg.com", "text/babel")
-    for html in (
-        (build.HERE / "landing.html").read_text(),
-        (build.DASHBOARD / "dashboard.html").read_text(),
-    ):
-        assert all(value not in html for value in forbidden)
-        assert 'type="module"' in html
+    html = (build.DASHBOARD / "dashboard.html").read_text()
+    assert all(value not in html for value in forbidden)
+    assert 'type="module"' in html
 
 
 def test_compiled_assets_exist():
-    assets = build.HERE / "assets"
-    for filename in ("landing.js", "verdict.css"):
-        assert (assets / filename).is_file()
+    assert (build.HERE / "assets" / "verdict.css").is_file()
     for filename in ("dashboard.js", "verdict.css"):
         assert (build.DASHBOARD / "assets" / filename).is_file()
 
 
 def test_superseded_standalone_demo_is_not_built():
-    assert set(build.PAGES) == {"landing.html"}
     assert not (build.HERE / "VerdictUI.html").exists()
     assert not (build.HERE / "assets" / "all-in-one.js").exists()
 
@@ -77,12 +65,6 @@ def test_tailwind_scans_split_dashboard_components():
     css = (build.DASHBOARD / "assets" / "verdict.css").read_text()
     assert ".sm\\:grid-cols-2" in css
     assert ".xl\\:grid-cols-4" in css
-
-
-def test_public_landing_bundle_excludes_dashboard_sample_data():
-    landing = (build.HERE / "assets" / "landing.js").read_text()
-    assert "sample-trace-001" not in landing
-    assert "LATEST PIPELINE RUN" not in landing
 
 
 def test_publish_workflow_cannot_build_before_full_test_workflow():

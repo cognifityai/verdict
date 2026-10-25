@@ -41,7 +41,6 @@ jobs:
       - name: Verify generated dashboard assets are current
         run: |
           git diff --exit-code -- \
-            ui/landing.html \
             ui/assets \
             packages/verdict/src/verdict/dashboard/static
 
