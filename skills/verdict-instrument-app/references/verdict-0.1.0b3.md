@@ -10,7 +10,7 @@ Use the customer application's existing Python 3.10+ environment. Add only the
 provider and storage extras it needs:
 
 ```bash
-python -m pip install \
+python -m pip install --pre \
   "cognifity-verdict[anthropic,dashboard]" \
   "cognifity-verdict-eval[semantic]" \
   "cognifity-verdict-inspect"

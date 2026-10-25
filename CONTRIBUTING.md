@@ -48,9 +48,9 @@ pnpm --dir ui build
 python -m pytest -q ui/tests
 ```
 
-Include the updated `ui/landing.html`, `ui/assets/`, and packaged dashboard
-assets under `packages/verdict/src/verdict/dashboard/static/` in the same pull
-request as the source change.
+Include updated `ui/assets/` and packaged dashboard assets under
+`packages/verdict/src/verdict/dashboard/static/` in the same pull request as
+the source change.
 
 Provider instrumentation changes should also be checked with
 `scripts/live_capture_check.py` against the real SDKs they affect. That script

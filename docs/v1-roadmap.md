@@ -1,16 +1,16 @@
 # Verdict Roadmap
 
-This document describes the boundary between the current v0 implementation and
+This document describes the boundary between the released beta and
 future agent-level observability work. It is a public roadmap, not a delivery
 commitment.
 
 ## Current Scope
 
-Verdict's established path focuses on the LLM-call layer inside LLM apps and
-agents. It can capture supported provider calls or import existing telemetry,
+Verdict's established path connects application-declared agent work to genuine
+LLM calls. It can capture supported provider calls or import existing telemetry,
 store traces, evaluate responses with a rubric, cluster similar prompts, and
 inspect quality or cost changes over time. The local Claude Code/Codex adapter
-and framework-neutral application SDK also store typed, bounded source
+and framework-neutral application SDK store typed, bounded source
 sessions, runs, turns, and observable events without relabeling those records
 as provider calls. When the separate standard Codex diagnostic database is
 available, its completed sampling markers add metadata-only OpenAI traces
@@ -42,9 +42,9 @@ the same normalized evidence APIs used by local history capture.
 
 Application hosts can write bounded, redacted, process-owned JSONL files and
 later replay them idempotently through canonical storage. This is a local
-transport. A separately deployable authenticated collector now provides
-idempotent remote ingestion for Agent, standalone Trace, and Span records into
-PostgreSQL in the current source. A bounded
+transport. The released beta's separately deployable authenticated collector
+provides idempotent remote ingestion for Agent, standalone Trace, and Span
+records into PostgreSQL. A bounded
 host shipper uploads complete segment prefixes, retries exact batches, records
 acknowledged offsets, and deletes only sealed fully accepted segments.
 
@@ -96,11 +96,11 @@ Areas under consideration:
 - Optional model-provider abstraction for evaluation calls
 - Optional specialized evaluators for domains such as RAG faithfulness
 
-## Known Boundaries In v0
+## Known Boundaries In The Beta
 
-- Verdict v0 observes LLM calls and application-declared agent executions; it
+- Verdict observes LLM calls and application-declared agent executions; it
   is not a full agent runtime.
-- The local dashboard is intended for localhost or trusted-network use. Its v0
+- The local dashboard is intended for localhost or trusted-network use. Its
   JavaScript and CSS are pre-built local assets, so rendering does not require
   public CDN access. Put TLS and authentication in front of it before any
   non-local deployment.
@@ -133,7 +133,7 @@ Areas under consideration:
 - Direct PostgreSQL capture still connects from each instrumented process
   through a process-local driver pool. The separate authenticated collector
   and host shipper remove database credentials from file-transport Agent
-  producers. The current source also accepts standalone Trace
+  producers. The released collector also accepts standalone Trace
   and Span records; customer deployment validation remains open.
 
 ## Prioritized Product Follow-ups
@@ -162,7 +162,7 @@ and an approved design before implementation.
    customer labels; any generated name needs versioning and privacy controls.
 7. **Cluster fusion (large, high-risk effort):** requires offline quality
    evaluation, immutable aliases/history, migration, rollback, and continuity
-   across drift windows. v0 keeps explicit health warnings/reclustering instead.
+   across drift windows. The current beta keeps explicit health warnings/reclustering instead.
 8. **Dependency/packaging cleanup (small/medium maintenance value):** handle as
    a standalone clean-install/release-artifact change rather than mixing it into
    behavioral remediation.

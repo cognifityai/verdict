@@ -6,7 +6,7 @@ evaluator, monitor, and control-plane actions are the only mutating endpoints;
 they retain immutable source traces and append versioned product state.
 
 Run:
-    pip install "cognifity-verdict[dashboard]"
+    pip install --pre "cognifity-verdict[dashboard]"
     verdict-dashboard --storage sqlite:///./verdict.db
 
 The aggregation is shared across storage dialects so the browser sees one DTO.

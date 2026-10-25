@@ -10,6 +10,10 @@ Verdict is local-first. A Python application can write to SQLite or PostgreSQL, 
 
 The current beta includes guided Home and setup, worker status, source and agent groups, and optional explanations of selected evidence. The same workflows are available from the released packages and this source checkout.
 
+![Verdict Home with synthetic agent runs, reported token usage, recorded issues, and a suggested monitoring action](docs/assets/verdict-home-synthetic-2026-10-25.jpg)
+
+*Home in a synthetic local demo; counts and findings are illustrative.*
+
 ## What you can do
 
 | Workflow | Evidence and result |
@@ -37,7 +41,7 @@ dashboard package:
 
 ```bash
 python3.12 -m venv .venv
-.venv/bin/python -m pip install --upgrade 'cognifity-verdict[dashboard]'
+.venv/bin/python -m pip install --pre 'cognifity-verdict[dashboard]'
 .venv/bin/verdict
 ```
 
@@ -56,7 +60,7 @@ With Python 3.10-3.12, install the current beta packages in an isolated environm
 
 ```bash
 python -m venv .venv
-.venv/bin/python -m pip install \
+.venv/bin/python -m pip install --pre \
   'cognifity-verdict[anthropic,openai,google,dashboard]' \
   'cognifity-verdict-eval' \
   'cognifity-verdict-inspect'
@@ -115,16 +119,12 @@ before relying on this deployment for production monitoring.
 
 ## Monitor behavior over time
 
-Verdict has two complementary monitoring paths:
+Verdict has two monitoring paths:
 
-1. **Agent activity:** Start in **Home** or **Monitoring**. Home offers reviewed setup as the next step when there is captured activity but no recurring plan; historical issue counts alone are not treated as a new alert. Inspect linked findings from the latest deterministic analysis in the adjacent issue panel. In **Suggested setup**, review the proposed checks, run once, and save a schedule. Monitoring separates saved analysis findings from notices for explicit failed events and terminal failed or timed-out Agent Runs recorded after a plan was first activated; it also links to token usage, model-call comparison, and groups. A run-status notice reports recorded execution status, not task failure or drift. A new guided plan leaves separately approved judge jobs pending unless you explicitly opt in to provider egress and cost. The inbox links each notice to its exact run or event. An event notice can attach a later recorded pass by exact run/event IDs; that link does not establish that the same work or the overall agent recovered. Acknowledge and dismiss only record review. A saved schedule needs a separate `verdict-service` worker. The UI reports its heartbeat, latest cycle, and next eligible check. **Alert destinations** shows durable delivery status, retries, and review before sending an old alert to a changed destination. A receiver should deduplicate webhook requests by idempotency key. **Report** labels a completed deterministic analysis as needing refresh when captured evidence has changed since that analysis.
-2. **Model-call cohorts:** Start with an all-call historical preview for completed provider `Trace` records; Verdict judge and paired-replay calls are excluded. At least one reference metric within a group must meet the reviewed sample floor before activation. An activated policy collects a new prospective cohort, comparing provider errors, blank captured response text, refusal-language signals, and selected calibrated judge dimensions where available. A tool-only call can have no response text without failing. [How statistical monitoring works](docs/STATS_PRIMER.md).
+1. **Agent activity:** Home and Monitoring link recorded issues to affected runs and events. Suggested setup proposes checks that fit the captured sources. Run a local check once, review its result, and then save a recurring plan. A separately supervised `verdict-service` worker must run future cycles; Monitoring shows its heartbeat and actual cycle outcome. Saved historical findings and notices from post-activation activity are labeled separately.
+2. **Model-call changes:** Preview reference and current cohorts of eligible completed provider calls, review sample readiness, and activate a prospective policy for new traffic. Verdict judge and paired-replay calls are excluded. Provider errors and selected response signals can be checked without a judge; calibrated judge dimensions are optional. Statistical alerts apply to genuine model-call traces, while agent-session comparisons remain descriptive. See [how statistical monitoring works](docs/STATS_PRIMER.md).
 
-The statistical monitor currently supports **model-call traces only**. Agent-session comparisons are descriptive; they are not prospective statistical alerts. A new guided plan leaves local history paths blank and analyzes already captured evidence; enter a path explicitly to import or rescan it during a check. A recorded source label does not identify a directory on the current machine. Existing saved paths stay in their plans. Judge scores are optional and should be calibrated on held-out, human-labeled examples for the workload before being used as quality evidence. See [monitor setup](docs/ONBOARDING.md#7-see-findings-evaluate-deliberately-and-configure-monitoring) and the [release profile](docs/RELEASE_PROFILE.md) for the exact supported surface.
-
-The recurring worker checks for plan changes while running. **Pause future checks** keeps its heartbeat but stops new cycles; a cycle already selected can finish. Resume requires a fresh local check. A one-shot worker rereads the saved plan under the cycle lock and rejects a pause or changed revision before capture. A transient cycle failure is recorded and the continuous worker keeps polling at the stored cooldown. The next-check time is a worker eligibility time for the current plan revision, not proof that the check ran. A legacy plan without an explicit judge choice defaults to no paid judging when reviewed for resume.
-
-A selected day, session, run, turn, tool event, model call, or newly tenant-owned span can request an optional AI explanation when the captured evidence is complete enough. Verdict first shows the bounded redacted context, destination, and static price estimate; incomplete or oversized evidence makes no provider call. One explicit approval is required before egress. Suggested setup and Model drift setup can also request a constrained draft based on aggregate source eligibility. Applying an agent-run draft fills the local check interval; a model-call draft leads to a reviewed comparison. With enough genuine calls, an optional cohort draft can fill the comparison form after Verdict checks its historical sample floors; the user still previews actual cohorts. A selected call or turn can draft an editable rubric criterion, and a reviewed cluster can suggest a label. Running, saving, and activating remain separate decisions. These answers are suggestions, not verified outcomes.
+A selected day, session, run, turn, tool event, model call, or supported span can request an optional AI explanation. Verdict previews bounded redacted evidence, destination, and a static price estimate before an approved provider call. AI can also draft setup suggestions, but the user reviews the plan and Verdict validates its eligibility before activation. See [monitor setup](docs/ONBOARDING.md#7-see-findings-evaluate-deliberately-and-configure-monitoring) for scheduling, notices, delivery, and approval details.
 
 ## Bring in existing evidence
 

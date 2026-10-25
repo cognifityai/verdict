@@ -1,21 +1,23 @@
 # Verdict Explainer
 
-Verdict is a local-first agent profiler and reliability toolkit. It helps users
-see reported token activity, inspect recorded agent actions and failures, and
-test a proposed change on reviewed cases. It also captures genuine LLM calls
-for rubric evaluation and prospective monitoring.
+Verdict is a customer-managed monitoring and investigation toolkit for AI agents
+in production applications. It connects recorded agent execution to supported
+provider model calls, so teams can inspect failures and usage, test a proposed
+change on reviewed cases, and monitor new activity. Local Claude Code and Codex
+imports are additional starting points.
 
 This document is intentionally public-facing. It explains what the project does,
 what you can try today, and where to look for implementation details.
 
 ## Short Version
 
-Verdict imports Claude Code and Codex histories and can instrument the agent
-work surrounding supported Python LLM calls. It presents reported usage by
+Verdict records application-declared runs, turns, tools, tests, and outcomes
+around supported Python LLM calls. It presents reported usage by
 day/session/turn, the recorded run timeline, deterministic findings, and
 evidence-linked suggestions without a judge key. Users may preview bounded
 evidence for optional selected-scope evaluation, then test changes on fixed
-reviewed cases using a trusted local runner. See the
+reviewed cases using a trusted local runner. Local history import supplies
+another way to explore captured agent work. See the
 [Agent Profiler guide](AGENT_PROFILER.md) for the exact workflow and limits.
 
 For agents, Verdict captures supported provider calls and can also retain the
@@ -132,9 +134,10 @@ recorded event and result.
    Verdict-owned paired-replay calls stay outside utilization as well.
 
 For a visual overview of this source checkout's evidence flow, see
-[`architecture-current.svg`](architecture-current.svg). The file shipper and
-collector path for standalone tenant-owned Trace/Span records is unreleased;
-the published beta supports the Agent record path.
+[`architecture-current.svg`](architecture-current.svg). The published beta's
+file shipper and collector accept Agent records and standalone tenant-owned
+Trace and Span records. See [customer-managed operations](CUSTOMER_MANAGED_OPERATIONS.md)
+for the supported topology and deployment checks.
 
 ## What You Can Try Today
 
@@ -165,7 +168,7 @@ Verdict is useful when you need to answer questions like:
 
 ## Current Scope
 
-Verdict v0 observes LLM calls and application-declared agent executions. It is
+Verdict observes LLM calls and application-declared agent executions. It is
 not an agent runtime, task planner, tool executor, or hosted monitoring service,
 and it cannot independently verify facts the application does not record.
 
@@ -213,8 +216,9 @@ a retained trace.
 
 ## Security And Privacy Notes
 
-- Content capture is opt-in. You can capture metadata without storing prompts or
-  responses.
+- SDK content capture is on by default and bounded. Set
+  `verdict.init(capture_content=False)` to capture metadata without storing
+  prompts or responses.
 - Telemetry import is an explicit content-transfer path: supported source
   prompt/response fields are copied when present, bounded and redacted at the
   storage boundary. Treat the destination database as sensitive.

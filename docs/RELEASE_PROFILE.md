@@ -10,7 +10,7 @@ Use Python 3.10, 3.11, or 3.12 in a clean environment. Install only the
 provider, dashboard, semantic, and storage extras the pilot needs:
 
 ```bash
-python -m pip install \
+python -m pip install --pre \
   "cognifity-verdict[anthropic,openai,google,dashboard]" \
   "cognifity-verdict-eval[semantic]" \
   "cognifity-verdict-inspect"

@@ -35,8 +35,8 @@ and does not contact the collector. It reports pending bytes, segment states,
 last append, last receipt, and the last bounded error. Missing remote health is
 not interpreted as zero backlog or successful delivery.
 
-The unreleased source collector accepts Agent, standalone Trace, and Span
-records. The published `0.1.0b2` collector accepts only Agent records; its
+The current released collector accepts Agent, standalone Trace, and Span
+records. The earlier `0.1.0b2` collector accepted only Agent records; its
 completed rejection receipts remain immutable. The shipper skips `.rejected`
 segments; they remain available for reviewed manual import or an explicit
 new-delivery procedure after upgrading.

@@ -15,10 +15,7 @@ const shared = {
   target: ["es2020"],
 };
 
-await Promise.all([
-  build({ ...shared, entryPoints: ["entries/landing.jsx"], outfile: "assets/landing.js" }),
-  build({ ...shared, entryPoints: ["entries/dashboard.jsx"], outfile: `${dashboardAssets}/dashboard.js` }),
-]);
+await build({ ...shared, entryPoints: ["entries/dashboard.jsx"], outfile: `${dashboardAssets}/dashboard.js` });
 
 const tailwind = process.platform === "win32"
   ? "node_modules/.bin/tailwindcss.cmd"

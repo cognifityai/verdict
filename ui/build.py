@@ -25,11 +25,6 @@ DASHBOARD = (
     / "static"
 )
 
-PAGES = {
-    "landing.html": ("Verdict - Agent Profiler and Reliability", "landing.js"),
-}
-
-
 def asset_url(filename: str, root: Path = HERE) -> str:
     digest = hashlib.sha256((root / "assets" / filename).read_bytes()).hexdigest()[:12]
     return f"assets/{filename}?v={digest}"
@@ -56,12 +51,10 @@ def page(title: str, script: str, root: Path = HERE) -> str:
 
 
 def main() -> None:
-    for filename, (title, script) in PAGES.items():
-        (HERE / filename).write_text(page(title, script))
     (DASHBOARD / "dashboard.html").write_text(
         page("Verdict - Dashboard", "dashboard.js", DASHBOARD)
     )
-    print("Wrote landing.html and packaged dashboard.html")
+    print("Wrote packaged dashboard.html")
 
 
 if __name__ == "__main__":

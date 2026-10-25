@@ -23,7 +23,7 @@ and cannot safely coexist in one environment.
 uv venv --python 3.12 && source .venv/bin/activate     # or your own 3.10+ venv
 
 # Include the provider extras you want to test live. Google capture needs `google`.
-python -m pip install \
+python -m pip install --pre \
   "cognifity-verdict[anthropic,openai,google,dashboard]" \
   "cognifity-verdict-eval[semantic]" \
   "cognifity-verdict-inspect"
@@ -38,13 +38,8 @@ lists them as hard dependencies, so the line above brings them in.
 Minimal alternative without the local semantic model:
 
 ```bash
-python -m pip install "cognifity-verdict-eval"  # lexical hash fallback
+python -m pip install --pre "cognifity-verdict-eval"  # lexical hash fallback
 ```
-
-Already on an earlier synchronized release? Add `--upgrade` to the install command above. Back up the selected SQLite or
-PostgreSQL store and dependency lockfile, then follow the exact
-[beta release profile](RELEASE_PROFILE.md). The additive migrations preserve
-existing trace and evaluation tables.
 
 ## 2. Confirm it's healthy (30 seconds, no key)
 
@@ -484,7 +479,7 @@ source uses OTLP protobuf. JSON files and hosted API readers do not require that
 extra:
 
 ```bash
-python -m pip install "cognifity-verdict[telemetry]"
+python -m pip install --pre "cognifity-verdict[telemetry]"
 
 verdict-import file ./traces.ndjson --format auto \
   --storage sqlite:///./verdict.db --tenant-id my-team
