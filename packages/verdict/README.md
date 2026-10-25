@@ -17,7 +17,7 @@ install the newest beta without hardcoding a version:
 
 ```bash
 python3.12 -m venv .venv
-.venv/bin/python -m pip install --upgrade --pre 'cognifity-verdict[dashboard]'
+.venv/bin/python -m pip install --pre 'cognifity-verdict[dashboard]'
 .venv/bin/verdict
 ```
 
@@ -34,7 +34,7 @@ Install the extras for the provider SDKs your application actually uses. The
 example below includes all three supported provider families:
 
 ```bash
-python -m pip install --upgrade --pre \
+python -m pip install --pre \
   'cognifity-verdict[anthropic,openai,google,dashboard]'
 ```
 

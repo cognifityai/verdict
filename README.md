@@ -41,7 +41,7 @@ dashboard package:
 
 ```bash
 python3.12 -m venv .venv
-.venv/bin/python -m pip install --upgrade --pre 'cognifity-verdict[dashboard]'
+.venv/bin/python -m pip install --pre 'cognifity-verdict[dashboard]'
 .venv/bin/verdict
 ```
 
@@ -60,7 +60,7 @@ With Python 3.10-3.12, install the current beta packages in an isolated environm
 
 ```bash
 python -m venv .venv
-.venv/bin/python -m pip install --upgrade --pre \
+.venv/bin/python -m pip install --pre \
   'cognifity-verdict[anthropic,openai,google,dashboard]' \
   'cognifity-verdict-eval' \
   'cognifity-verdict-inspect'

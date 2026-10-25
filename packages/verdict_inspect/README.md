@@ -68,7 +68,7 @@ Semantic drift runs key-free. By default it tries
 `HashingEmbedder` if the dependency/model is unavailable. That fallback detects
 lexical embedding-distribution changes; it is not a semantic model, and the
 report labels it explicitly. Install the local semantic embedder with
-`pip install "cognifity-verdict-eval[semantic]"`.
+`pip install --pre "cognifity-verdict-eval[semantic]"`.
 
 Triggered and non-triggered semantic rows use the same L2-normalized detector
 statistics. Each comparison embeds its current and baseline windows once; the
