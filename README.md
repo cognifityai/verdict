@@ -47,6 +47,15 @@ python3.12 -m venv .venv
 
 In the local setup page, choose **Claude Code / Codex**, check the detected
 history directories, select **Preview sources**, then **Approve and capture**.
+The background job attempts every discovered file once and shows file progress;
+files it cannot safely parse are reported separately. The same approved roots
+can be rescanned after a source changes or an interrupted job.
+For a history file above 128 MiB and at most 1 GiB, Verdict captures a
+bounded prefix and labels the source coverage partial; later activity in that
+file remains unobserved. Files above 1 GiB are skipped with an explicit
+reason so source verification remains bounded.
+Use **Cancel capture** to stop after the current file; already imported files
+remain available, and previewing the roots again allows a safe rescan.
 Verdict reads those files without replaying agent commands. After capture,
 **Home** shows recorded usage and any issues; **Investigation → Agent runs** opens
 individual sessions. To import newer history later, use **Settings → Data

@@ -210,6 +210,13 @@ _NON_SENSITIVE_TOKEN_FIELDS = frozenset(
     }
 )
 _JSON_UNICODE_KEY_ESCAPE = re.compile(r"\\u([0-9A-Fa-f]{4})", re.IGNORECASE)
+_PEM_PRIVATE_KEY_BEGIN = re.compile(
+    r"-----BEGIN (?P<label>(?:[A-Z0-9]+ )*PRIVATE KEY)-----"
+)
+_CREDENTIAL_URL = re.compile(
+    r"(?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+.-]*://"
+    r"[^\s:@/'\"]+:[^\s@/'\"]+@[^\s'\"]+"
+)
 
 # Vendor credentials whose documented prefix is distinctive enough to redact
 # without a surrounding label. Each body has a minimum length so ordinary
@@ -234,8 +241,8 @@ _VENDOR_CREDENTIAL = (
 
 _PATTERNS = {
     "PROVIDER_KEY": re.compile(
-        r"\b(?:sk-ant-[A-Za-z0-9_-]{16,}|sk-(?:proj-)?[A-Za-z0-9_-]{20,}|"
-        rf"AKIA[A-Z0-9]{{16}}|AIza[A-Za-z0-9_-]{{30,}}|{_VENDOR_CREDENTIAL})\b"
+        r"(?<![A-Za-z0-9])(?:sk-ant-[A-Za-z0-9_-]{16,}|sk-(?:proj-)?[A-Za-z0-9_-]{20,}|"
+        rf"AKIA[A-Z0-9]{{16}}|AIza[A-Za-z0-9_-]{{30,}}|{_VENDOR_CREDENTIAL})(?![A-Za-z0-9])"
     ),
     "GITHUB_TOKEN": re.compile(
         r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b"
@@ -278,19 +285,21 @@ _PATTERNS = {
 }
 
 
-def _is_sensitive_key(key: str) -> bool:
+def _decode_unicode_escapes(value: str) -> str | None:
     for _ in range(_MAX_NESTING_DEPTH):
         decoded = _JSON_UNICODE_KEY_ESCAPE.sub(
             lambda match: chr(int(match.group(1), 16)),
-            key,
+            value,
         )
-        if decoded == key:
-            break
-        key = decoded
-    else:
-        # A recursively encoded key beyond the shared structure-depth budget is
-        # attacker-controlled ambiguity. Fail closed without rescanning it an
-        # unbounded number of times.
+        if decoded == value:
+            return value
+        value = decoded
+    return None
+
+
+def _is_sensitive_key(key: str) -> bool:
+    key = _decode_unicode_escapes(key)
+    if key is None:
         return True
     normalized = "".join(re.findall(r"[A-Za-z0-9]+", key)).lower()
     if normalized in _NON_SENSITIVE_TOKEN_FIELDS:
@@ -571,15 +580,20 @@ def _redact_secret_assignments(
     return "".join(output)
 
 
-# Patterns whose candidates are variable-length digit runs. Beside a
-# placeholder their greedy groups can re-partition into one more match per
-# scan (a grouped digit table losing one "phone number" per scan, a hex
-# fingerprint yielding one more "IPv6 address" per scan) until the fail-closed
-# cap destroys the message. For these, and only these, a placeholder edge is
-# opaque. Fixed-prefix credentials and fixed-length addresses cannot creep, so
-# they keep the boundary the placeholder replaced and a value glued to a
-# placeholder is still removed.
-_OPAQUE_EDGE_LABELS = frozenset({"PHONE", "CREDIT_CARD", "IPV6"})
+# Variable-length runs can re-partition next to their own placeholder family
+# on a later scan. Other placeholder families remain ordinary boundaries so
+# separately sensitive values glued together are both removed.
+_DECIMAL_RUN_FAMILY = frozenset({"PHONE", "CREDIT_CARD"})
+_OPAQUE_BESIDE: dict[str, frozenset[str]] = {
+    "PHONE": _DECIMAL_RUN_FAMILY,
+    "CREDIT_CARD": _DECIMAL_RUN_FAMILY,
+    "IPV6": frozenset({"IPV6"}),
+}
+_NO_OPAQUE_EDGES: frozenset[str] = frozenset()
+
+
+def _placeholder_label(placeholder: str) -> str:
+    return placeholder[1:-1].split(":", 1)[0]
 
 
 def _sub_outside_placeholders(
@@ -587,11 +601,11 @@ def _sub_outside_placeholders(
     pattern: re.Pattern[str],
     replacement: str | Callable[[re.Match[str]], str],
     *,
-    opaque_edges: bool = False,
+    opaque_beside: frozenset[str] = _NO_OPAQUE_EDGES,
 ) -> str:
     """Apply ``pattern`` to the text between placeholders.
 
-    With ``opaque_edges`` a candidate that touches a placeholder edge is kept
+    With ``opaque_beside`` a candidate that touches a matching placeholder edge is kept
     only if the pattern still matches the same span with a word character
     standing in for the placeholder; a rejected candidate is skipped whole,
     exactly as ``re.sub`` skips a candidate its callback declined. Without it,
@@ -599,24 +613,27 @@ def _sub_outside_placeholders(
     """
     output: list[str] = []
     cursor = 0
+    previous_opaque = False
     for placeholder in _PLACEHOLDER.finditer(text):
+        this_opaque = _placeholder_label(placeholder.group(0)) in opaque_beside
         output.append(
             _scan_segment(
                 text[cursor : placeholder.start()],
                 pattern,
                 replacement,
-                after_placeholder=opaque_edges and cursor > 0,
-                before_placeholder=opaque_edges,
+                after_placeholder=previous_opaque,
+                before_placeholder=this_opaque,
             )
         )
         output.append(placeholder.group(0))
         cursor = placeholder.end()
+        previous_opaque = this_opaque
     output.append(
         _scan_segment(
             text[cursor:],
             pattern,
             replacement,
-            after_placeholder=opaque_edges and cursor > 0,
+            after_placeholder=previous_opaque,
             before_placeholder=False,
         )
     )
@@ -806,10 +823,36 @@ def redact(
     return _REDACTED
 
 
+def _redact_private_keys(text: str, mode: RedactionMode, secret: str | None) -> str:
+    """Remove complete or truncated PEM private-key blocks in a linear scan."""
+    output: list[str] = []
+    cursor = 0
+    while match := _PEM_PRIVATE_KEY_BEGIN.search(text, cursor):
+        footer = f"-----END {match.group('label')}-----"
+        footer_start = text.find(footer, match.end())
+        end = len(text) if footer_start < 0 else footer_start + len(footer)
+        output.append(text[cursor:match.start()])
+        block = text[match.start():end]
+        output.append(_hash_match(block, "SECRET", secret) if mode == "hash" else "<SECRET>")
+        cursor = end
+    if not output:
+        return text
+    output.append(text[cursor:])
+    return "".join(output)
+
+
 def _redact_once(text: str, mode: RedactionMode, secret: str | None) -> str:
     """Run every scanner once, left to right, in fixed order."""
+    out = _redact_private_keys(text, mode, secret)
+    if "://" in out:
+        out = _sub_outside_placeholders(
+            out,
+            _CREDENTIAL_URL,
+            (lambda match: _hash_match(match.group(0), "URL", secret))
+            if mode == "hash" else "<URL>",
+        )
     # Email discovery is first for classification stability in URL contexts.
-    out = _redact_emails(text, mode, secret)
+    out = _redact_emails(out, mode, secret)
     out = _redact_secret_assignments(out, mode, secret)
     for label, pat in _PATTERNS.items():
         if label == "CREDIT_CARD":
@@ -818,7 +861,7 @@ def _redact_once(text: str, mode: RedactionMode, secret: str | None) -> str:
                 out,
                 pat,
                 lambda m, lbl=label: _credit_card_repl(m.group(0), lbl, mode, secret),
-                opaque_edges=True,
+                opaque_beside=_OPAQUE_BESIDE[label],
             )
         elif label == "IPV6":
             # A colon is required by every IPv6 spelling.  Avoid entering the
@@ -837,7 +880,7 @@ def _redact_once(text: str, mode: RedactionMode, secret: str | None) -> str:
                     secret,
                     following=m.string[m.end() : m.end() + 1],
                 ),
-                opaque_edges=True,
+                opaque_beside=_OPAQUE_BESIDE[label],
             )
         elif label == "BASIC_AUTH":
             out = _sub_outside_placeholders(
@@ -850,11 +893,12 @@ def _redact_once(text: str, mode: RedactionMode, secret: str | None) -> str:
                 out,
                 pat,
                 lambda m, lbl=label: _hash_match(m.group(0), lbl, secret),
-                opaque_edges=label in _OPAQUE_EDGE_LABELS,
+                opaque_beside=_OPAQUE_BESIDE.get(label, _NO_OPAQUE_EDGES),
             )
         else:  # redact
             out = _sub_outside_placeholders(
-                out, pat, f"<{label}>", opaque_edges=label in _OPAQUE_EDGE_LABELS,
+                out, pat, f"<{label}>",
+                opaque_beside=_OPAQUE_BESIDE.get(label, _NO_OPAQUE_EDGES),
             )
     return out
 
@@ -1061,9 +1105,20 @@ def redact_structure(
         return _REDACTED
     if isinstance(value, str):
         if value.lstrip().startswith(("{", "[")):
+            duplicate_key = False
+
+            def object_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+                nonlocal duplicate_key
+                result: dict[str, Any] = {}
+                for key, child in pairs:
+                    if key in result:
+                        duplicate_key = True
+                    result[key] = child
+                return result
+
             try:
-                parsed = json.loads(value)
-            except (json.JSONDecodeError, RecursionError):
+                parsed = json.loads(value, object_pairs_hook=object_pairs)
+            except (json.JSONDecodeError, RecursionError, ValueError):
                 pass
             else:
                 if isinstance(parsed, (dict, list)):
@@ -1074,14 +1129,27 @@ def redact_structure(
                     )
                     if not isinstance(sanitized, (dict, list)):
                         return _REDACTED
-                    return json.dumps(sanitized, separators=(",", ":"))
+                    if not duplicate_key and sanitized == parsed and redact(value, mode, secret) == value:
+                        return value
+                    return json.dumps(sanitized, separators=(",", ":"), ensure_ascii=False)
         if _JSON_UNICODE_KEY_ESCAPE.search(value):
-            return _REDACTED
+            decoded = _decode_unicode_escapes(value)
+            if decoded is None:
+                return _REDACTED
+            if redact(decoded, mode, secret) != decoded:
+                return _REDACTED
         return redact(value, mode=mode, secret=secret)
-    if value is None or isinstance(value, (bool, int)):
+    if value is None or isinstance(value, bool):
         return value
-    if isinstance(value, float):
-        return value if math.isfinite(value) else _REDACTED
+    if isinstance(value, (int, float)):
+        if isinstance(value, float) and not math.isfinite(value):
+            return _REDACTED
+        try:
+            rendered = str(value)
+        except ValueError:
+            return _REDACTED
+        sanitized = redact(rendered, mode=mode, secret=secret)
+        return value if sanitized == rendered else sanitized
 
     seen = _seen if _seen is not None else set()
     if isinstance(value, dict):
@@ -1095,7 +1163,11 @@ def redact_structure(
                 if not isinstance(key, str):
                     return _REDACTED
                 if _JSON_UNICODE_KEY_ESCAPE.search(key):
-                    continue
+                    decoded_key = _decode_unicode_escapes(key)
+                    if decoded_key is None:
+                        continue
+                    if _is_sensitive_key(decoded_key) or redact(decoded_key, mode, secret) != decoded_key:
+                        continue
                 sanitized_key = redact(key, mode=mode, secret=secret) or _REDACTED
                 if _is_sensitive_key(key):
                     entries.append(

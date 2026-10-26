@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 import verdict.evidence as evidence_contract
+from fastapi.testclient import TestClient
 from verdict import AgentEventType, EvidenceState, ExecutionStatus, PrivacyClassification
 from verdict.agent_judgment import AgentTurnJudgment, turn_evidence_fingerprint
 from verdict.capture import AgentCaptureService
@@ -18,6 +19,7 @@ from verdict.dashboard.app import (
     build_agent_run_detail,
     build_agent_runs_bundle,
     build_agent_turn_analysis,
+    create_app,
 )
 from verdict.evidence import AgentEvent
 from verdict.schema import JudgmentStatus
@@ -29,6 +31,297 @@ from verdict.telemetry.local_agents import capture_local_agents
 def _write_jsonl(path: Path, records: list[dict[str, object]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("".join(json.dumps(record) + "\n" for record in records))
+
+
+def test_local_capture_summary_preserves_published_positional_fields() -> None:
+    from verdict.telemetry.local_agents import LocalCaptureSummary
+
+    old = LocalCaptureSummary(1, 1, 0, 1, True)
+    assert old.as_dict()["deferred"] == 1
+    assert old.as_dict()["scan_incomplete"] is True
+
+
+@pytest.mark.parametrize("backend", ["sqlite", "postgres"])
+def test_cancel_between_files_records_durable_cancelled_attempt(
+    tmp_path: Path, backend: str,
+) -> None:
+    from verdict.telemetry.local_agents import CaptureCancelled
+
+    root = tmp_path / "codex"
+    for name in ("a", "b"):
+        records = _codex_records()
+        records[0]["payload"]["id"] = f"session-{name}"
+        _write_jsonl(root / f"{name}.jsonl", records)
+    cancelled = False
+
+    def progress(done: int, _total: int) -> None:
+        nonlocal cancelled
+        if done == 1:
+            cancelled = True
+
+    with ExitStack() as stack:
+        if backend == "postgres":
+            from _postgres_test_safety import isolated_test_dsn, validate_test_dsn
+            from verdict.storage import PostgresStorage
+
+            dsn, reason = validate_test_dsn(os.environ.get("VERDICT_TEST_POSTGRES_DSN"),
+                                            allow_any_database=False)
+            if dsn is None:
+                pytest.skip(reason)
+            storage_url = stack.enter_context(isolated_test_dsn(dsn))
+            new_storage = PostgresStorage
+        else:
+            storage_url = str(tmp_path / "verdict.db")
+            new_storage = SQLiteStorage
+        storage = new_storage(storage_url)
+        try:
+            with pytest.raises(CaptureCancelled):
+                capture_local_agents(storage, tenant_id="local", codex_root=root,
+                                     progress=progress, should_cancel=lambda: cancelled)
+        finally:
+            storage.close()
+        reopened = new_storage(storage_url)
+        try:
+            rows = reopened.local_scan_attempt_summary("local")
+            assert {code: count for code, count, _started in rows} == {
+                "complete_projection": 1, "cancelled": 1,
+            }
+            assert len(reopened.list_agent_run_bundles("local")) == 1
+        finally:
+            reopened.close()
+
+
+def test_history_beyond_verification_bound_is_explicitly_skipped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import verdict.telemetry.local_agents as local_agents
+
+    root = tmp_path / "codex"
+    path = root / "session.jsonl"
+    _write_jsonl(path, _codex_records())
+    monkeypatch.setattr(local_agents, "_MAX_LOCAL_VERIFY_BYTES",
+                        path.stat().st_size + 16, raising=False)
+    with path.open("ab") as handle:
+        handle.write(b"\n" * 32)
+    storage = SQLiteStorage(str(tmp_path / "verdict.db"))
+    try:
+        result = capture_local_agents(storage, tenant_id="local", codex_root=root)
+        assert result.skip_reasons == {"history_file_too_large": 1}
+        assert storage.list_agent_run_bundles("local") == []
+    finally:
+        storage.close()
+
+
+def test_history_at_verification_bound_is_accepted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import verdict.telemetry.local_agents as local_agents
+
+    root = tmp_path / "codex"
+    path = root / "session.jsonl"
+    _write_jsonl(path, _codex_records())
+    monkeypatch.setattr(local_agents, "_MAX_LOCAL_VERIFY_BYTES", path.stat().st_size,
+                        raising=False)
+    storage = SQLiteStorage(str(tmp_path / "verdict.db"))
+    try:
+        result = capture_local_agents(storage, tenant_id="local", codex_root=root)
+        assert result.stored == 1 and result.skipped == 0
+    finally:
+        storage.close()
+
+
+def test_history_growth_after_stat_cannot_escape_verification_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import verdict.telemetry.local_agents as local_agents
+
+    root = tmp_path / "codex"
+    path = root / "session.jsonl"
+    _write_jsonl(path, _codex_records())
+    monkeypatch.setattr(local_agents, "_MAX_LOCAL_VERIFY_BYTES",
+                        path.stat().st_size + 1, raising=False)
+    storage = SQLiteStorage(str(tmp_path / "verdict.db"))
+    claim = storage.claim_local_scan_attempt
+
+    def grow_after_claim(*args, **kwargs):
+        result = claim(*args, **kwargs)
+        with path.open("ab") as handle:
+            handle.write(b"\n\n")
+        return result
+
+    monkeypatch.setattr(storage, "claim_local_scan_attempt", grow_after_claim)
+    try:
+        result = capture_local_agents(storage, tenant_id="local", codex_root=root)
+        assert result.skip_reasons == {"history_file_too_large": 1}
+        assert storage.list_agent_run_bundles("local") == []
+    finally:
+        storage.close()
+
+
+@pytest.mark.parametrize("backend", ["sqlite", "postgres"])
+def test_over_verification_bound_retains_previous_evidence_and_continues(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str,
+) -> None:
+    import verdict.telemetry.local_agents as local_agents
+
+    root = tmp_path / "codex"
+    originals = {}
+    for name in ("a", "b"):
+        records = _codex_records()
+        records[0]["payload"]["id"] = f"session-{name}"
+        path = root / f"{name}.jsonl"
+        _write_jsonl(path, records)
+        originals[name] = path.read_bytes()
+    cap = max(len(value) for value in originals.values()) + 16
+    monkeypatch.setattr(local_agents, "_MAX_LOCAL_VERIFY_BYTES", cap)
+    with ExitStack() as stack:
+        if backend == "postgres":
+            from _postgres_test_safety import isolated_test_dsn, validate_test_dsn
+            from verdict.storage import PostgresStorage
+
+            dsn, reason = validate_test_dsn(os.environ.get("VERDICT_TEST_POSTGRES_DSN"),
+                                            allow_any_database=False)
+            if dsn is None:
+                pytest.skip(reason)
+            storage = PostgresStorage(stack.enter_context(isolated_test_dsn(dsn)))
+        else:
+            storage = SQLiteStorage(str(tmp_path / "verdict.db"))
+        stack.callback(storage.close)
+        assert capture_local_agents(storage, tenant_id="local", codex_root=root).stored == 2
+        before = {
+            bundle.run.session_id: storage.get_agent_capture_snapshot(
+                "local", bundle.run.run_id,
+            )[1]
+            for bundle in storage.list_agent_run_bundles("local")
+        }
+        with (root / "a.jsonl").open("ab") as handle:
+            handle.write(b"\n" * 32)
+        partial = capture_local_agents(storage, tenant_id="local", codex_root=root)
+        assert partial.stored == 1 and partial.skip_reasons == {"history_file_too_large": 1}
+        after = {
+            bundle.run.session_id: storage.get_agent_capture_snapshot(
+                "local", bundle.run.run_id,
+            )[1]
+            for bundle in storage.list_agent_run_bundles("local")
+        }
+        assert after == before
+        (root / "a.jsonl").write_bytes(originals["a"])
+        retried = capture_local_agents(storage, tenant_id="local", codex_root=root)
+        assert retried.stored == 2 and retried.skipped == 0
+
+
+def test_history_over_per_file_parse_limit_keeps_bounded_partial_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import verdict.telemetry.local_agents as local_agents
+
+    root = tmp_path / "codex"
+    path = root / "session.jsonl"
+    _write_jsonl(path, _codex_records())
+    parsed_bytes = path.stat().st_size
+    with path.open("ab") as handle:
+        handle.write(b"\n" * 256)
+        for row in (
+            {"timestamp": "2026-08-30T10:02:00Z", "type": "event_msg",
+             "payload": {"type": "task_started", "turn_id": "turn-b"}},
+            {"timestamp": "2026-08-30T10:02:01Z", "type": "event_msg",
+             "payload": {"type": "user_message", "message": "second synthetic turn"}},
+            {"timestamp": "2026-08-30T10:02:02Z", "type": "event_msg",
+             "payload": {"type": "task_complete", "turn_id": "turn-b",
+                         "last_agent_message": "done"}},
+        ):
+            handle.write((json.dumps(row) + "\n").encode())
+    monkeypatch.setattr(local_agents, "_MAX_LOCAL_FILE_BYTES", parsed_bytes + 16)
+    storage = SQLiteStorage(str(tmp_path / "verdict.db"))
+    try:
+        summary = capture_local_agents(storage, tenant_id="local", codex_root=root)
+        assert summary.stored == 1 and summary.skipped == 0
+        assert summary.as_dict()["partial_reasons"] == {"bounded_source_prefix": 1}
+        [bundle] = storage.list_agent_run_bundles("local")
+        _, revision = storage.get_agent_capture_snapshot("local", bundle.run.run_id)
+        assert revision is not None
+        assert revision.full_bytes == path.stat().st_size
+        assert revision.complete_prefix_bytes < revision.full_bytes
+        assert revision.partial_final_line
+        assert revision.full_sha256 == sha256(path.read_bytes()).hexdigest()
+        repeated = capture_local_agents(storage, tenant_id="local", codex_root=root)
+        assert repeated.stored == 1 and repeated.skipped == 0
+        with path.open("ab") as handle:
+            handle.write(b"\n" * 32)
+        appended = capture_local_agents(storage, tenant_id="local", codex_root=root)
+        assert appended.stored == 1 and appended.skipped == 0
+        assert len(storage.list_agent_run_bundles("local")) == 1
+        monkeypatch.setattr(local_agents, "_MAX_LOCAL_FILE_BYTES", path.stat().st_size + 1)
+        completed = capture_local_agents(storage, tenant_id="local", codex_root=root)
+        assert completed.stored == 1 and completed.skipped == 0
+        [updated] = storage.list_agent_run_bundles("local")
+        assert len(updated.turns) == 2
+        _, complete_revision = storage.get_agent_capture_snapshot("local", updated.run.run_id)
+        assert complete_revision is not None and not complete_revision.partial_final_line
+    finally:
+        storage.close()
+
+
+@pytest.mark.parametrize("source_kind", ["claude", "codex"])
+@pytest.mark.parametrize("backend", ["sqlite", "postgres"])
+def test_local_tool_result_sensitive_canaries_do_not_reach_storage_or_run_api(
+    tmp_path: Path, source_kind: str, backend: str,
+) -> None:
+    card = "4111111111111111"
+    key_body = "ZmFrZS1wZW0tYm9keQ=="
+    provider_key = "AKIAIOSFODNN7EXAMPLE"
+    output = json.dumps({
+        "card": int(card),
+        "private_key": f"-----BEGIN PRIVATE KEY-----\n{key_body}\n-----END PRIVATE KEY-----",
+        "db_url": "postgres://user:syntheticP%40ss@db.example.invalid/test",
+        "provider_key": f"key_{provider_key}_suffix",
+    })
+    root = tmp_path / source_kind
+    if source_kind == "claude":
+        records = _claude_records()
+        tool_result = next(row for row in records if row.get("sourceToolAssistantUUID"))
+        tool_result["message"]["content"][0]["content"] = output
+    else:
+        records = _codex_records()
+        tool_result = next(row for row in records if row.get("type") == "response_item"
+                           and row.get("payload", {}).get("type") == "function_call_output")
+        tool_result["payload"]["output"] = output
+    _write_jsonl(root / "session.jsonl", records)
+    with ExitStack() as stack:
+        if backend == "postgres":
+            from _postgres_test_safety import isolated_test_dsn, validate_test_dsn
+            from verdict.storage import PostgresStorage
+
+            dsn, reason = validate_test_dsn(os.environ.get("VERDICT_TEST_POSTGRES_DSN"),
+                                            allow_any_database=False)
+            if dsn is None:
+                pytest.skip(reason)
+            storage_url = stack.enter_context(isolated_test_dsn(dsn))
+            storage = PostgresStorage(storage_url)
+        else:
+            database = tmp_path / "verdict.db"
+            storage_url = str(database)
+            storage = SQLiteStorage(storage_url)
+        stack.callback(storage.close)
+        summary = capture_local_agents(storage, tenant_id="local", **{
+            "claude_root" if source_kind == "claude" else "codex_root": root,
+        })
+        assert summary.stored == 1 and summary.skipped == 0
+        [bundle] = storage.list_agent_run_bundles("local")
+        with TestClient(create_app(storage=storage_url, tenant_id="local")) as client:
+            response = client.get(f"/api/runs/{bundle.run.run_id}")
+            session = client.get("/api/session", params={
+                "source_kind": bundle.session.source_kind,
+                "session_id": bundle.run.session_id,
+            })
+        assert response.status_code == 200
+        assert session.status_code == 200
+        for canary in (card, key_body, "syntheticP", provider_key):
+            assert canary not in repr(bundle)
+            assert canary not in response.text
+            assert canary not in session.text
+            if backend == "sqlite":
+                assert canary.encode() not in database.read_bytes()
 
 
 def test_legacy_source_revision_without_counts_cannot_prove_whole_run_coverage() -> None:
@@ -5059,7 +5352,7 @@ def test_source_over_measured_full_admission_limit_stays_partial(tmp_path: Path)
         storage.close()
 
 
-def test_local_file_byte_guard_preserves_prior_revision(tmp_path: Path, monkeypatch) -> None:
+def test_prefix_without_usable_record_preserves_prior_revision(tmp_path: Path, monkeypatch) -> None:
     import verdict.telemetry.local_agents as local_agents
 
     root = tmp_path / "codex"
@@ -5071,7 +5364,7 @@ def test_local_file_byte_guard_preserves_prior_revision(tmp_path: Path, monkeypa
         [before] = storage.list_agent_run_bundles("local")
         monkeypatch.setattr(local_agents, "_MAX_LOCAL_FILE_BYTES", 1)
         result = capture_local_agents(storage, tenant_id="local", codex_root=root)
-        assert result.skip_reasons == {"history_file_too_large": 1}
+        assert result.skip_reasons == {"unsupported_history": 1}
         assert storage.list_agent_run_bundles("local") == [before]
     finally:
         storage.close()
@@ -5113,36 +5406,31 @@ def test_claude_event_fanout_guard_preserves_prior_revision(
         storage.close()
 
 
-def test_bounded_scan_reaches_unattempted_file_after_failed_first_attempt(
-    tmp_path: Path, monkeypatch,
+def test_one_scan_attempts_valid_file_after_failed_file(
+    tmp_path: Path,
 ) -> None:
-    """A bad first file must not starve later files under a scan limit."""
-    import verdict.telemetry.local_agents as local_agents
+    """One approval attempts every discovered file, even if another is malformed."""
 
     root = tmp_path / "codex"
     root.mkdir()
     (root / "a-broken.jsonl").write_bytes(b"{malformed}\n")
     _write_jsonl(root / "b-valid.jsonl", _codex_records())
-    monkeypatch.setattr(local_agents, "_MAX_SCAN_FILES", 1)
     storage = SQLiteStorage(str(tmp_path / "verdict.db"))
     try:
         first = capture_local_agents(storage, tenant_id="local", codex_root=root)
-        assert first.files == 1 and first.stored + first.skipped == 1
-        assert first.scan_incomplete is True and first.deferred == 1
+        assert first.files == 2 and first.stored == first.skipped == 1
+        assert first.scan_incomplete is False and first.deferred == 0
         second = capture_local_agents(storage, tenant_id="local", codex_root=root)
-        assert second.files == 1 and second.stored + second.skipped == 1
-        assert first.stored + second.stored == 1
-        assert first.skipped + second.skipped == 1
-        assert second.scan_incomplete is True and second.deferred == 1
+        assert second.files == 2 and second.stored == second.skipped == 1
+        assert second.scan_incomplete is False and second.deferred == 0
         assert len(storage.list_agent_run_bundles("local")) == 1
     finally:
         storage.close()
 
 
-def test_first_bounded_scan_tries_recent_unattempted_history_first(
-    tmp_path: Path, monkeypatch,
+def test_one_scan_attempts_recent_and_older_history(
+    tmp_path: Path,
 ) -> None:
-    import verdict.telemetry.local_agents as local_agents
 
     root = tmp_path / "codex"
     root.mkdir()
@@ -5152,18 +5440,17 @@ def test_first_bounded_scan_tries_recent_unattempted_history_first(
     _write_jsonl(newer, _codex_records())
     os.utime(older, ns=(1_000_000_000, 1_000_000_000))
     os.utime(newer, ns=(2_000_000_000, 2_000_000_000))
-    monkeypatch.setattr(local_agents, "_MAX_SCAN_FILES", 1)
     storage = SQLiteStorage(str(tmp_path / "verdict.db"))
     try:
         first = capture_local_agents(storage, tenant_id="local", codex_root=root)
-        assert first.stored == 1 and first.skipped == 0 and first.deferred == 1
+        assert first.stored == first.skipped == 1 and first.deferred == 0
         second = capture_local_agents(storage, tenant_id="local", codex_root=root)
-        assert second.skipped == 1 and second.deferred == 1
+        assert second.stored == second.skipped == 1 and second.deferred == 0
     finally:
         storage.close()
 
 
-def test_oversized_history_does_not_exhaust_scan_budget_before_read(
+def test_unusable_oversized_history_does_not_prevent_other_file_capture(
     tmp_path: Path, monkeypatch,
 ) -> None:
     import verdict.telemetry.local_agents as local_agents
@@ -5177,64 +5464,52 @@ def test_oversized_history_does_not_exhaust_scan_budget_before_read(
     os.utime(oversized, ns=(2_000_000_000, 2_000_000_000))
     os.utime(valid, ns=(1_000_000_000, 1_000_000_000))
     monkeypatch.setattr(local_agents, "_MAX_LOCAL_FILE_BYTES", 4096)
-    monkeypatch.setattr(local_agents, "_MAX_SCAN_RAW_BYTES", 1)
     storage = SQLiteStorage(str(tmp_path / "verdict.db"))
     try:
         first = capture_local_agents(storage, tenant_id="local", codex_root=root)
         assert first.files == 2 and first.stored == 1 and first.skipped == 1
-        assert first.skip_reasons == {"history_file_too_large": 1}
+        assert first.skip_reasons == {"unsupported_history": 1}
         assert first.deferred == 0
     finally:
         storage.close()
 
 
-def test_scan_raw_byte_soft_cap_defers_after_one_file(tmp_path: Path, monkeypatch) -> None:
-    import verdict.telemetry.local_agents as local_agents
-
+def test_one_scan_captures_multiple_files(tmp_path: Path) -> None:
     root = tmp_path / "codex"
     for name in ("first", "second"):
         records = _codex_records(name)
         records[0]["payload"]["id"] = name
         _write_jsonl(root / f"{name}.jsonl", records)
-    monkeypatch.setattr(local_agents, "_MAX_SCAN_RAW_BYTES", 1)
     storage = SQLiteStorage(str(tmp_path / "verdict.db"))
     try:
         first = capture_local_agents(storage, tenant_id="local", codex_root=root)
-        assert first.files == first.stored == first.deferred == 1
-        assert first.scan_incomplete is True
+        assert first.files == first.stored == 2 and first.deferred == 0
+        assert first.scan_incomplete is False
         second = capture_local_agents(storage, tenant_id="local", codex_root=root)
-        assert second.files == second.stored == second.deferred == 1
+        assert second.files == second.stored == 2 and second.deferred == 0
         assert len(storage.list_agent_run_bundles("local")) == 2
     finally:
         storage.close()
 
 
-@pytest.mark.parametrize("budget_name", ["_MAX_SCAN_PROJECTED_ROWS",
-                                      "_MAX_SCAN_SANITIZED_BYTES"])
-def test_scan_projected_soft_cap_defers_after_one_file(
-    tmp_path: Path, monkeypatch, budget_name: str,
-) -> None:
-    import verdict.telemetry.local_agents as local_agents
-
+def test_one_scan_counts_all_projected_rows_across_files(tmp_path: Path) -> None:
     root = tmp_path / "codex"
     for name in ("first", "second"):
         records = _codex_records(name)
         records[0]["payload"]["id"] = name
         _write_jsonl(root / f"{name}.jsonl", records)
-    monkeypatch.setattr(local_agents, budget_name, 1)
     storage = SQLiteStorage(str(tmp_path / "verdict.db"))
     try:
         first = capture_local_agents(storage, tenant_id="local", codex_root=root)
         second = capture_local_agents(storage, tenant_id="local", codex_root=root)
-        assert first.files == first.stored == first.deferred == 1
-        assert second.files == second.stored == second.deferred == 1
+        assert first.files == first.stored == 2 and first.deferred == 0
+        assert second.files == second.stored == 2 and second.deferred == 0
         assert len(storage.list_agent_run_bundles("local")) == 2
     finally:
         storage.close()
 
 
-def test_live_postgres_bounded_scan_reaches_unattempted_file(tmp_path: Path, monkeypatch) -> None:
-    import verdict.telemetry.local_agents as local_agents
+def test_live_postgres_one_scan_attempts_every_file(tmp_path: Path) -> None:
     from _postgres_test_safety import isolated_test_dsn, validate_test_dsn
     from verdict.storage import PostgresStorage
 
@@ -5246,15 +5521,14 @@ def test_live_postgres_bounded_scan_reaches_unattempted_file(tmp_path: Path, mon
     root.mkdir()
     (root / "a-broken.jsonl").write_bytes(b"{malformed}\n")
     _write_jsonl(root / "b-valid.jsonl", _codex_records())
-    monkeypatch.setattr(local_agents, "_MAX_SCAN_FILES", 1)
     with isolated_test_dsn(dsn) as isolated:
         storage = PostgresStorage(isolated)
         try:
             first = capture_local_agents(storage, tenant_id="local", codex_root=root)
             second = capture_local_agents(storage, tenant_id="local", codex_root=root)
-            assert first.stored + second.stored == 1
-            assert first.skipped + second.skipped == 1
-            assert first.deferred == second.deferred == 1
+            assert first.stored == second.stored == 1
+            assert first.skipped == second.skipped == 1
+            assert first.deferred == second.deferred == 0
             assert len(storage.list_agent_run_bundles("local")) == 1
         finally:
             storage.close()
