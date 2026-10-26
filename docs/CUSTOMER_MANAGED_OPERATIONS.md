@@ -164,21 +164,26 @@ TLS termination at a trusted ingress; see
    capture summary and source logs, then rescan. Previously captured runs are
    the last committed snapshots; this cycle status does not identify which
    individual source revision is current.
-   A local scan processes at most 1,000 discovered history files per
-   invocation. Deferred files are reported in the capture summary and make
-   the cycle incomplete. The first invocation tries newer unattempted files
-   first; later invocations favor files not attempted recently. This cap bounds
-   file count, not the work of one very large file.
-   Aggregate soft caps of 128 MiB processed source bytes, 100,000 projected
-   rows, and 256 MiB serialized sanitized payload stop dispatching after the
-   file that crosses a cap; they do not bound one file's work.
-   One local history file above 128 MiB is rejected before parsing with
-   `history_file_too_large`, retaining its prior accepted revision and marking
-   the latest capture incomplete.
+   One cycle attempts every discovered history file once and reports file
+   progress. Discovery is limited to 100,000 files per root; a limit error
+   fails the cycle before import. Each file retains its own parse and
+   projection limits. A rescan reads the source files again to detect changes.
+   Setup's **Cancel capture** stops after the current file, preserves earlier
+   committed files, and reports a terminal `cancelled` job. Preview and rescan
+   to continue. Cancellation is unavailable after analysis starts. The
+   `/api/setup/capture/attempts` response counts cancelled file attempts
+   separately from source failures.
+   A local history file above 128 MiB and at most 1 GiB is parsed only
+   through a bounded prefix. Verdict hashes the whole file for revision checks
+   and reports `bounded_source_prefix` as partial source coverage. Files above
+   1 GiB are skipped as `history_file_too_large`; earlier committed evidence
+   is retained. The unobserved tail
+   cannot support whole-session conclusions. A file with no usable prefix or
+   a record over the line bound can still be skipped with a reason.
    A file that expands beyond 100,000 parsed events is rejected with
    `history_event_limit`; this counts multiple events from one source row and
    retains the prior accepted revision.
-   Setup capture also reports incomplete when files are deferred or skipped;
+   Setup capture also reports incomplete when files are skipped;
    previously captured evidence stays available. Per-file attempt records
    retain bounded failure categories, not raw paths or exception text. The
    Data Sources page and `/api/setup/capture/attempts` show tenant-scoped

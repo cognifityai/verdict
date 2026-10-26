@@ -5316,11 +5316,14 @@ test("a completed local capture warning survives leaving and returning to Data S
   await resolveJson(requests[0], { setupToken: "setup-token" });
   await resolveJson(requests[1], { job: {
     jobId: "last-capture", state: "completed", finishedAt: "2026-10-19T21:00:00Z",
-    summary: { stored: 1, event_limited_runs: 1, recent_sample_errors: 1 }, analysis: { status: "completed" },
+    summary: { stored: 1, source_partial_files: 1,
+      partial_reasons: { bounded_source_prefix: 1 },
+      event_limited_runs: 1, recent_sample_errors: 1 }, analysis: { status: "completed" },
   } });
   const visible = textOf(render(ui.SetupWizard, hooks, props));
   assert.match(visible, /A recent local import reported\s+1\s+session\s+beyond the bounded run view/);
   assert.match(visible, /could not refresh the recent event sample for\s+1\s+session/);
+  assert.match(visible, /1\s+history file.*partial source coverage.*bounded source prefix/is);
 });
 
 test("a failed recapture does not relabel the prior limited capture as the latest job", async () => {
@@ -5348,13 +5351,14 @@ test("a failed recapture does not relabel the prior limited capture as the lates
   assert.match(textOf(render(ui.SetupWizard, hooks, props)), /capture failed/);
 });
 
-test("deferred setup capture shows partial progress and never says import finished", async () => {
+test("failed setup capture refreshes captured evidence and shows skipped files", async () => {
   const ui = await loadUiModule();
   const hooks = createEffectHooks();
   const requests = deferredFetches();
   const completed = [];
+  const refreshed = [];
   const props = { configUrl: "/api/config", agentSummary: {},
-    onComplete: (source) => completed.push(source) };
+    onComplete: (source) => completed.push(source), onRefresh: () => refreshed.push(true) };
   render(ui.SetupWizard, hooks, props);
   hooks.flushEffects();
   await resolveJson(requests[0], { setupToken: "setup-token" });
@@ -5365,13 +5369,14 @@ test("deferred setup capture shows partial progress and never says import finish
   await resolveJson(requests[2], { codex: { files: 2 } });
   await preview;
   const capture = button("Approve and capture").props.onClick();
-  await resolveJson(requests[3], { job: { jobId: "deferred", state: "failed",
-    error: "capture_incomplete", summary: { files: 1, stored: 1, deferred: 1,
-      scan_incomplete: true, skipped: 0 } } });
+  await resolveJson(requests[3], { job: { jobId: "partial", state: "failed",
+    error: "capture_incomplete", summary: { files: 2, stored: 1, skipped: 1,
+      skip_reasons: { malformed_jsonl: 1 } } } });
   await capture;
   const visible = textOf(render(ui.SetupWizard, hooks, props));
   assert.deepEqual(completed, []);
-  assert.match(visible, /1\s+history file\s+deferred/i);
+  assert.deepEqual(refreshed, [true]);
+  assert.match(visible, /1\s+skipped/i);
   assert.doesNotMatch(visible, /Import finished/);
 });
 
@@ -5405,6 +5410,39 @@ test("a remounted Data Sources view explains durable failed scan attempts", asyn
   assert.match(visible, /Latest recorded scan attempts failed for\s+1\s+history file/);
   assert.match(visible, /malformed jsonl \(1\)/);
   assert.doesNotMatch(visible, /PRIVATE_PATH_CANARY/);
+});
+
+test("a remounted Data Sources view warns about interrupted and cancelled scan attempts", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const props = { configUrl: "/api/config", agentSummary: { totalAgentRuns: 1 } };
+  render(ui.SetupWizard, hooks, props);
+  hooks.flushEffects();
+  await resolveJson(requests[0], { setupToken: "setup-token" });
+  await resolveJson(requests[1], { job: null, attempts: {
+    trackedFiles: 3, failedFiles: 0, completeFiles: 1, partialFiles: 0,
+    unfinishedFiles: 1, cancelledFiles: 1, failureReasons: {},
+  } });
+  const visible = textOf(render(ui.SetupWizard, hooks, props));
+  assert.match(visible, /1\s+interrupted.*1\s+cancelled.*rescan/is);
+});
+
+test("a remounted Data Sources view preserves the bounded-source warning", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const props = { configUrl: "/api/config", agentSummary: { totalAgentRuns: 1 } };
+  render(ui.SetupWizard, hooks, props);
+  hooks.flushEffects();
+  await resolveJson(requests[0], { setupToken: "setup-token" });
+  await resolveJson(requests[1], { job: null, attempts: {
+    trackedFiles: 1, completeFiles: 0, partialFiles: 1, failedFiles: 0,
+    unfinishedFiles: 0, cancelledFiles: 0, sourcePartialFiles: 1,
+    partialReasons: { bounded_source_prefix: 1 }, failureReasons: {},
+  } });
+  assert.match(textOf(render(ui.SetupWizard, hooks, props)),
+    /1\s+history file.*partial source coverage.*bounded source prefix/is);
 });
 
 test("a stored limited import remains visible when analysis fails after capture", async () => {
@@ -7049,6 +7087,40 @@ test("a capture job that fails is reported instead of completing the setup", asy
     const alerts = findAll(render(ui.SetupWizard, hooks, props), (node) => node.props?.role === "alert").map(textOf).join(" ");
     assert.match(alerts, /capture_failed/);
     assert.deepEqual(completed, []);
+  } finally {
+    globalThis.setTimeout = realSetTimeout;
+  }
+});
+
+test("a running setup capture can be cancelled and refreshes committed evidence", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const refreshed = [];
+  const props = { configUrl: "/api/config", agentSummary: {}, onRefresh: () => refreshed.push(true) };
+  const realSetTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = (callback) => realSetTimeout(callback, 0);
+  try {
+    render(ui.SetupWizard, hooks, props);
+    hooks.flushEffects();
+    await resolveJson(requests[0], { setupToken: "setup-token" });
+    await resolveJson(requests[1], { job: { jobId: "job-cancel", state: "running",
+      filesDone: 1, filesTotal: 2 } });
+    const cancel = findAll(render(ui.SetupWizard, hooks, props),
+      (node) => node.type === "button" && textOf(node) === "Cancel capture")[0];
+    assert.ok(cancel);
+    const cancelling = cancel.props.onClick();
+    assert.equal(requests[2].url, "/api/setup/capture/job-cancel/cancel");
+    assert.equal(requests[2].options.headers["X-Verdict-Setup"], "setup-token");
+    await resolveJson(requests[2], { job: { jobId: "job-cancel", state: "running",
+      cancelRequested: true } });
+    await cancelling;
+    await untilRequests(requests, 4, realSetTimeout);
+    await resolveJson(requests[3], { job: { jobId: "job-cancel", state: "cancelled",
+      error: "capture_cancelled", summary: { files: 2, stored: 1, skipped: 0 } } });
+    await new Promise((resolve) => realSetTimeout(resolve, 0));
+    assert.deepEqual(refreshed, [true]);
+    assert.match(textOf(render(ui.SetupWizard, hooks, props)), /capture was cancelled/i);
   } finally {
     globalThis.setTimeout = realSetTimeout;
   }

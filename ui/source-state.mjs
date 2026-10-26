@@ -58,8 +58,11 @@ export function observedSourcePresentation(meta = {}) {
 }
 
 export function setupFailureMessage(failure, origin) {
+  if (failure?.message === "capture_cancelled") {
+    return "Capture was cancelled. Files already imported remain available; preview and rescan to continue.";
+  }
   if (failure?.message === "capture_incomplete") {
-    return "Local history capture is incomplete. Review the deferred or skipped files below, then rescan.";
+    return "Local history capture is incomplete. Review the file counts and reasons below.";
   }
   if (failure instanceof TypeError) {
     return `Cannot reach the Verdict server at ${origin}. Restart that server and reload this page.`;

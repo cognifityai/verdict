@@ -34,8 +34,9 @@ class CompletionRequest:
 # ``CompletionResponse.finish_reason`` as a retryable judge error.
 REASONING_TOKEN_ALLOWANCE = 16_384
 # Name prefixes, matched on the model leaf after any ``provider/`` prefix.
+_OPENAI_REASONING_FAMILIES: tuple[str, ...] = ("gpt-5", "gpt-6", "o1", "o3", "o4")
 _REASONING_FAMILIES: tuple[str, ...] = (
-    "gpt-5", "gpt-6", "o1", "o3", "o4",  # OpenAI reasoning models
+    *_OPENAI_REASONING_FAMILIES,
     "claude-fable-5", "claude-mythos-5", "claude-opus-5", "claude-sonnet-5",  # adaptive thinking
     "gemini-2.5", "gemini-3",  # thinking on by default
 )
@@ -65,7 +66,7 @@ def output_token_ceiling(max_tokens: int, model: object = None) -> int:
 # rule is a family prefix table. A judge on one of these models runs at the
 # provider default, and the evaluator identity records that no temperature
 # was applied.
-_OPENAI_FIXED_TEMPERATURE_FAMILIES = ("gpt-5", "o1", "o3", "o4")
+_OPENAI_FIXED_TEMPERATURE_FAMILIES = _OPENAI_REASONING_FAMILIES
 
 
 def openai_temperature_supported(model: str) -> bool:

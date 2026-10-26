@@ -1191,6 +1191,35 @@ def test_rising_bad_when_high_metric_selects_clean_and_error_evidence() -> None:
     )
 
 
+def test_significant_change_obeys_minimum_effect_floor() -> None:
+    reference = tuple(
+        AnalysisUnitRecord(f"reference-{index}", NOW + timedelta(minutes=index),
+                           {"provider_error": False})
+        for index in range(100)
+    )
+    current = tuple(
+        AnalysisUnitRecord(f"current-{index}", NOW + timedelta(days=1, minutes=index),
+                           {"provider_error": index < 10})
+        for index in range(100)
+    )
+    units = (*reference, *current)
+
+    def compare_at_floor(floor: float):
+        policy = MonitorPolicy(
+            "effect-floor", "scope", reference_ratio=0.5,
+            minimum_reference=50, minimum_current=50, minimum_effect=floor,
+        )
+        manifest = plan_historical_manifest(units, policy, cutoff=NOW + timedelta(days=2))
+        return compare_manifest(units, manifest, policy).metrics[0]
+
+    below = compare_at_floor(0.11)
+    above = compare_at_floor(0.09)
+    assert below.p_adjusted <= 0.05
+    assert below.effect == pytest.approx(0.1)
+    assert below.alert is False
+    assert above.alert is True
+
+
 def test_prospective_evidence_merges_batches_and_resolved_pending_states() -> None:
     fingerprint = "a" * 64
     policy = MonitorPolicy(

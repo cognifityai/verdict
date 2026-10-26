@@ -26,6 +26,8 @@ export function SetupWizard({ configUrl, onComplete, onNavigate, onRefresh, agen
   const [result, setResult] = useState(null);
   const [latestLocalSummary, setLatestLocalSummary] = useState(null);
   const [attemptStatus, setAttemptStatus] = useState(null);
+  const [activeJobId, setActiveJobId] = useState(null);
+  const [cancelPending, setCancelPending] = useState(false);
   const captureGeneration = useRef(0);
   const [error, setError] = useState(null);
   const [claudeRoot, setClaudeRoot] = useState("~/.claude/projects");
@@ -72,6 +74,7 @@ export function SetupWizard({ configUrl, onComplete, onNavigate, onRefresh, agen
   // Local capture runs on the server in the background: the POST returns the
   // job at once and this polls its status until the job ends.
   async function followCaptureJob(job) {
+    setActiveJobId(job?.state === "running" ? job.jobId : null);
     while (job && (job.state === "running" || job.state === "analyzing")) {
       setBusyLabel(captureProgressLabel(job));
       await new Promise((resolve) => setTimeout(resolve, CAPTURE_POLL_MS));
@@ -81,12 +84,33 @@ export function SetupWizard({ configUrl, onComplete, onNavigate, onRefresh, agen
       const body = await status.json();
       if (body.attempts) setAttemptStatus(body.attempts);
       job = body.job;
+      setActiveJobId(job?.state === "running" ? job.jobId : null);
     }
+    setActiveJobId(null);
     if (job?.summary) setLatestLocalSummary(job.summary);
-    if (!job || job.state !== "completed") throw new Error(job?.error || "capture did not complete");
+    if (!job || job.state !== "completed") {
+      if (job?.state === "failed" || job?.state === "cancelled") onRefresh?.();
+      throw new Error(job?.error || "capture did not complete");
+    }
     const result = { summary: job.summary, analysis: job.analysis };
     setLatestLocalSummary(job.summary);
     setResult(result); return result;
+  }
+
+  async function cancelCapture() {
+    if (!activeJobId || !token || cancelPending) return;
+    setCancelPending(true);
+    try {
+      const response = await fetch(`${root}/api/setup/capture/${encodeURIComponent(activeJobId)}/cancel`, {
+        method: "POST", credentials: "same-origin", headers: { "X-Verdict-Setup": token },
+      });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
+      setBusyLabel("Stopping capture after the current file…");
+    } catch (failure) {
+      setError(setupFailureMessage(failure, serverOrigin));
+      setCancelPending(false);
+    }
   }
 
   async function capture(payload) {
@@ -103,7 +127,7 @@ export function SetupWizard({ configUrl, onComplete, onNavigate, onRefresh, agen
       return await followCaptureJob(body.job);
     } catch (failure) {
       setError(setupFailureMessage(failure, serverOrigin)); return null;
-    } finally { setBusy(false); setBusyLabel(null); }
+    } finally { setBusy(false); setBusyLabel(null); setActiveJobId(null); setCancelPending(false); }
   }
 
   // A capture keeps running on the server if this page is closed or reloaded.
@@ -127,7 +151,7 @@ export function SetupWizard({ configUrl, onComplete, onNavigate, onRefresh, agen
         setBusy(true); setError(null);
         try { if (await followCaptureJob(job)) onComplete("local"); }
         catch (failure) { if (active) setError(setupFailureMessage(failure, serverOrigin)); }
-        finally { if (active) { setBusy(false); setBusyLabel(null); } }
+        finally { if (active) { setBusy(false); setBusyLabel(null); setActiveJobId(null); setCancelPending(false); } }
       })
       .catch(() => {});
     return () => { active = false; };
@@ -139,21 +163,37 @@ export function SetupWizard({ configUrl, onComplete, onNavigate, onRefresh, agen
   ];
   const localKey = JSON.stringify([claudeRoot, codexRoot]);
   const importKey = JSON.stringify([filePath, fileFormat]);
-  const statusNotice = busy && busyLabel && <div role="status" aria-live="polite" className={panel} style={{ ...style, color: "#94a39d" }}>{busyLabel}</div>;
+  const statusNotice = busy && busyLabel && <div role="status" aria-live="polite" className={panel} style={{ ...style, color: "#94a39d" }}>{busyLabel}{activeJobId && <button type="button" disabled={cancelPending} onClick={cancelCapture} className="ml-4 underline">Cancel capture</button>}</div>;
   const errorNotice = error && <div role="alert" className={panel} style={{ ...style, color: "#ff6b6b" }}>{error}</div>;
   const limitedSessionCount = Number.isInteger(latestLocalSummary?.event_limited_runs) && latestLocalSummary.event_limited_runs > 0
     ? latestLocalSummary.event_limited_runs : 0;
   const recentSampleErrors = Number.isInteger(latestLocalSummary?.recent_sample_errors) && latestLocalSummary.recent_sample_errors > 0
     ? latestLocalSummary.recent_sample_errors : 0;
-  const deferredFiles = Number.isInteger(latestLocalSummary?.deferred) && latestLocalSummary.deferred > 0
-    ? latestLocalSummary.deferred : 0;
   const skippedFiles = Number.isInteger(latestLocalSummary?.skipped) && latestLocalSummary.skipped > 0
     ? latestLocalSummary.skipped : 0;
-  const incompleteNotice = (deferredFiles > 0 || skippedFiles > 0) && <div role="alert" className={panel} style={{ ...style, color: "#f2c879" }}>
-    Local history capture is incomplete: {deferredFiles} {deferredFiles === 1 ? "history file" : "history files"} deferred and {skippedFiles} skipped. Captured evidence is available, but rescan to process remaining files. A skipped file may need repair before it can be captured.
+  const recentPartialFiles = Number.isInteger(latestLocalSummary?.source_partial_files) && latestLocalSummary.source_partial_files > 0
+    ? latestLocalSummary.source_partial_files : 0;
+  const durablePartialFiles = Math.max(0, Number(attemptStatus?.sourcePartialFiles) || 0);
+  const sourcePartialFiles = Math.max(recentPartialFiles, durablePartialFiles);
+  const partialReasons = durablePartialFiles >= recentPartialFiles && durablePartialFiles > 0
+    ? attemptStatus?.partialReasons || {} : latestLocalSummary?.partial_reasons || {};
+  const partialReasonText = [
+    partialReasons.bounded_source_prefix > 0 && "bounded source prefix",
+    partialReasons.unfinished_final_record > 0 && "unfinished final record",
+  ].filter(Boolean).join(", ");
+  const sourcePartialNotice = sourcePartialFiles > 0 && <div role="alert" className={panel} style={{ ...style, color: "#f2c879" }}>
+    {sourcePartialFiles} {sourcePartialFiles === 1 ? "history file" : "history files"} had partial source coverage ({partialReasonText || "source tail unavailable"}). Captured evidence is available, but the unobserved tail cannot support a complete-session conclusion.
+  </div>;
+  const incompleteNotice = skippedFiles > 0 && <div role="alert" className={panel} style={{ ...style, color: "#f2c879" }}>
+    Local history capture is incomplete: {skippedFiles} skipped. Captured evidence is available. Check the skipped file reasons, then rescan after resolving them.
   </div>;
   const durableAttemptNotice = attemptStatus?.failedFiles > 0 && <div role="alert" className={panel} style={{ ...style, color: "#f2c879" }}>
     Latest recorded scan attempts failed for {attemptStatus.failedFiles} {attemptStatus.failedFiles === 1 ? "history file" : "history files"}. Reasons: {Object.entries(attemptStatus.failureReasons || {}).map(([reason, count]) => `${reason.replaceAll("_", " ")} (${count})`).join(", ") || "unavailable"}. Check the current source files and rescan. This status survives a dashboard restart.
+  </div>;
+  const unfinishedFiles = Math.max(0, Number(attemptStatus?.unfinishedFiles) || 0);
+  const cancelledFiles = Math.max(0, Number(attemptStatus?.cancelledFiles) || 0);
+  const interruptedAttemptNotice = (unfinishedFiles > 0 || cancelledFiles > 0) && <div role="alert" className={panel} style={{ ...style, color: "#f2c879" }}>
+    Latest recorded scan attempts include {unfinishedFiles} interrupted and {cancelledFiles} cancelled history files. Captured evidence remains available, but those files may be incomplete. Rescan to finish capturing them.
   </div>;
   const coverageNotice = limitedSessionCount > 0 && <div role="alert" className={panel} style={{ ...style, color: "#f2c879" }}>
     A recent local import reported {limitedSessionCount} {limitedSessionCount === 1 ? "session" : "sessions"} beyond the bounded run view. Open the run to inspect its recent sample and use Browse recorded events when a complete captured page is available. Selected recorded failures can become monitored issues after monitoring is activated, and linked model calls can support call-level evaluation. The bounded run view alone cannot establish a whole-run issue or no-issue result.
@@ -171,7 +211,9 @@ export function SetupWizard({ configUrl, onComplete, onNavigate, onRefresh, agen
         {statusNotice}
         {errorNotice}
         {incompleteNotice}
+        {sourcePartialNotice}
         {durableAttemptNotice}
+        {interruptedAttemptNotice}
         {coverageNotice}
         {sampleErrorNotice}
         <section className={panel} style={style}>
@@ -197,6 +239,7 @@ export function SetupWizard({ configUrl, onComplete, onNavigate, onRefresh, agen
   return (
     <div className="max-w-4xl space-y-4">
       {durableAttemptNotice}
+      {interruptedAttemptNotice}
       <section className={panel} style={style}>
         <div className="text-xs font-mono" style={{ color: "#4ee1aa" }}>{hasObservedStore ? "ADD OR RESCAN DATA" : "1 · SOURCE"}</div>
         <h2 className="text-lg font-semibold mt-1">{hasObservedStore ? "Add, import, or rescan a source" : "What do you want to analyze?"}</h2>
@@ -246,6 +289,7 @@ export function SetupWizard({ configUrl, onComplete, onNavigate, onRefresh, agen
       {statusNotice}
       {errorNotice}
       {incompleteNotice}
+      {sourcePartialNotice}
       {coverageNotice}
       {sampleErrorNotice}
       {result && <section className={panel} style={style}>

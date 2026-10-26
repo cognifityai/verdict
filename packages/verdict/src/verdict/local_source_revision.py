@@ -1,7 +1,7 @@
 """Revision facts for one committed local-history capture.
 
 The file path is intentionally never persisted. These facts describe the
-bytes observed by the importer, including an unfinished final JSONL line.
+bytes observed by the importer, including an unobserved source tail.
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ class LocalSourceRevision:
     full_sha256: str
     complete_prefix_bytes: int
     complete_prefix_sha256: str
-    partial_final_line: bool
+    partial_final_line: bool  # Stored legacy name; true for any unobserved tail.
     source_turn_count: int | None = None
     source_event_count: int | None = None
     v1_turn_count: int | None = None

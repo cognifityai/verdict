@@ -10,7 +10,7 @@ from verdict.storage import SQLiteStorage
 
 
 def _write_codex(path):
-    path.parent.mkdir(parents=True)
+    path.parent.mkdir(parents=True, exist_ok=True)
     records = [
         {"timestamp": "2026-08-30T10:00:00Z", "type": "session_meta", "payload": {
             "id": "session", "originator": "Codex Desktop", "cli_version": "1.0"}},
@@ -42,6 +42,78 @@ def _write_codex_diagnostic(path):
                 "secret=DIAGNOSTIC_BODY_CANARY",
             ),
         )
+
+
+def test_setup_capture_reports_bounded_partial_source_and_exposes_captured_run(
+    tmp_path, monkeypatch,
+):
+    import verdict.telemetry.local_agents as local_agents
+
+    root = tmp_path / "codex"
+    history = root / "session.jsonl"
+    _write_codex(history)
+    complete_bytes = history.stat().st_size
+    with history.open("ab") as handle:
+        handle.write(b"\n" * 256)
+    monkeypatch.setattr(local_agents, "_MAX_LOCAL_FILE_BYTES", complete_bytes + 16)
+    database = tmp_path / "verdict.db"
+
+    async def exercise():
+        app = create_app(storage=f"sqlite:///{database}")
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver",
+        ) as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            preview = await client.post("/api/setup/preview", headers={"X-Verdict-Setup": token},
+                                        json={"codexRoot": str(root)})
+            started, job = await _capture_and_wait(
+                client, {"X-Verdict-Setup": token}, {"codexRoot": str(root)},
+            )
+            runs = await client.get("/api/runs")
+            attempts = await client.get("/api/setup/capture/attempts")
+            return preview, started, job, runs, attempts
+
+    preview, started, job, runs, attempts = asyncio.run(exercise())
+    assert preview.status_code == 200 and started.status_code == 202
+    assert job["state"] == "completed"
+    assert job["summary"]["source_complete_files"] == 0
+    assert job["summary"]["source_partial_files"] == 1
+    assert job["summary"]["partial_reasons"] == {"bounded_source_prefix": 1}
+    assert job["summary"]["skipped"] == 0
+    assert runs.status_code == 200 and len(runs.json()["runs"]) == 1
+    assert attempts.json()["partialFiles"] == 1
+    assert attempts.json()["sourcePartialFiles"] == 1
+    assert attempts.json()["partialReasons"] == {"bounded_source_prefix": 1}
+
+
+def test_setup_capture_reports_over_verification_bound_as_skipped(tmp_path, monkeypatch):
+    import verdict.telemetry.local_agents as local_agents
+
+    root = tmp_path / "codex"
+    history = root / "session.jsonl"
+    _write_codex(history)
+    monkeypatch.setattr(local_agents, "_MAX_LOCAL_VERIFY_BYTES", history.stat().st_size - 1)
+
+    async def exercise():
+        app = create_app(storage=f"sqlite:///{tmp_path / 'verdict.db'}")
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver",
+        ) as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            headers = {"X-Verdict-Setup": token}
+            preview = await client.post("/api/setup/preview", headers=headers,
+                                        json={"codexRoot": str(root)})
+            started, job = await _capture_and_wait(client, headers, {"codexRoot": str(root)})
+            attempts = await client.get("/api/setup/capture/attempts")
+            runs = await client.get("/api/runs")
+            return preview, started, job, attempts, runs
+
+    preview, started, job, attempts, runs = asyncio.run(exercise())
+    assert preview.status_code == 200 and started.status_code == 202
+    assert job["state"] == "failed" and job["error"] == "capture_incomplete"
+    assert job["summary"]["skip_reasons"] == {"history_file_too_large": 1}
+    assert attempts.json()["failureReasons"] == {"history_file_too_large": 1}
+    assert runs.json()["summary"]["available"] == 0
 
 
 async def _capture_and_wait(client, headers, payload, *, timeout_s: float = 30.0):
@@ -127,13 +199,17 @@ def test_setup_preview_then_approved_local_capture(tmp_path):
     assert bundle.turns[0].user_request_redacted == "SECRET_CANARY request"
 
 
-def test_setup_capture_with_deferred_file_is_not_complete(tmp_path, monkeypatch):
+def test_setup_capture_attempts_all_discovered_files_in_one_approval(tmp_path, monkeypatch):
     import verdict.telemetry.local_agents as local_agents
 
     codex = tmp_path / "codex" / "sessions"
     _write_codex(codex / "first.jsonl")
-    (codex / "second.jsonl").write_bytes((codex / "first.jsonl").read_bytes())
-    monkeypatch.setattr(local_agents, "_MAX_SCAN_FILES", 1)
+    second = (codex / "first.jsonl").read_text().replace('"id": "session"', '"id": "second-session"')
+    (codex / "second.jsonl").write_text(second)
+    # The old aggregate budgets stopped after one file. They are not allowed
+    # to turn one approval into a permanently deferred backlog.
+    monkeypatch.setattr(local_agents, "_MAX_SCAN_FILES", 1, raising=False)
+    monkeypatch.setattr(local_agents, "_MAX_SCAN_RAW_BYTES", 1, raising=False)
 
     async def run():
         app = create_app(storage=f"sqlite:///{tmp_path / 'verdict.db'}")
@@ -153,11 +229,12 @@ def test_setup_capture_with_deferred_file_is_not_complete(tmp_path, monkeypatch)
     preview, started, job = asyncio.run(run())
     assert preview.status_code == 200
     assert started.status_code == 202
-    assert job["summary"]["stored"] == 1
-    assert job["summary"]["deferred"] == 1
+    assert job["summary"]["files"] == job["summary"]["stored"] == 2
+    assert job["filesDone"] == job["filesTotal"] == 2
+    assert "deferred" not in job["summary"]
     assert job["analysis"]["status"] == "completed"
-    assert job["state"] == "failed"
-    assert job["error"] == "capture_incomplete"
+    assert job["state"] == "completed"
+    assert job["error"] is None
 
 
 def test_setup_attempt_status_survives_restart_without_source_paths(tmp_path):
@@ -778,6 +855,92 @@ def test_capture_status_reports_progress_failure_and_single_flight(tmp_path, mon
     assert "secret-path" not in status.text and str(tmp_path) not in status.text
 
 
+def test_setup_capture_cancel_preserves_committed_files_and_allows_retry(tmp_path, monkeypatch):
+    import threading
+
+    import verdict.telemetry.local_agents as local_agents
+
+    codex = tmp_path / "codex" / "sessions"
+    for name in ("a", "b"):
+        path = codex / f"{name}.jsonl"
+        _write_codex(path)
+        path.write_text(path.read_text().replace('"id": "session"', f'"id": "session-{name}"'))
+    database = tmp_path / "verdict.db"
+    entered_second = threading.Event()
+    release_second = threading.Event()
+    real_parser = local_agents._parse_codex
+    parsed = 0
+
+    def pause_second(path, *, home):
+        nonlocal parsed
+        parsed += 1
+        if parsed == 2:
+            entered_second.set()
+            assert release_second.wait(10)
+        return real_parser(path, home=home)
+
+    monkeypatch.setattr(local_agents, "_parse_codex", pause_second)
+
+    async def run():
+        app = create_app(storage=f"sqlite:///{database}")
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            headers = {"X-Verdict-Setup": token}
+            payload = {"codexRoot": str(codex)}
+            await client.post("/api/setup/preview", headers=headers, json=payload)
+            started = await client.post("/api/setup/capture", headers=headers, json=payload)
+            assert started.status_code == 202
+            assert await asyncio.to_thread(entered_second.wait, 10)
+            job_id = started.json()["job"]["jobId"]
+            denied = await client.post(f"/api/setup/capture/{job_id}/cancel")
+            requested = await client.post(
+                f"/api/setup/capture/{job_id}/cancel", headers=headers,
+            )
+            repeated = await client.post(
+                f"/api/setup/capture/{job_id}/cancel", headers=headers,
+            )
+            release_second.set()
+            for _ in range(300):
+                job = (await client.get("/api/setup/capture/status")).json()["job"]
+                if job["state"] == "cancelled":
+                    break
+                await asyncio.sleep(0.02)
+            else:
+                raise AssertionError("capture did not cancel")
+            attempts = await client.get("/api/setup/capture/attempts")
+            committed = SQLiteStorage(str(database))
+            try:
+                committed_count = len(committed.list_agent_run_bundles("__verdict_local__"))
+            finally:
+                committed.close()
+            await client.post("/api/setup/preview", headers=headers, json=payload)
+            retry, complete = await _capture_and_wait(client, headers, payload)
+            late = await client.post(
+                f"/api/setup/capture/{job_id}/cancel", headers=headers,
+            )
+            return denied, requested, repeated, job, attempts, committed_count, retry, complete, late
+
+    try:
+        denied, requested, repeated, job, attempts, committed_count, retry, complete, late = asyncio.run(run())
+    finally:
+        release_second.set()
+    assert denied.status_code == 403
+    assert requested.status_code == 202 and repeated.status_code == 202
+    assert job["finishedAt"] is not None
+    assert job["filesDone"] <= job["filesTotal"] == 2
+    assert committed_count == 1
+    assert attempts.json()["cancelledFiles"] == 1
+    assert attempts.json()["failedFiles"] == 0
+    assert retry.status_code == 202 and complete["state"] == "completed"
+    assert late.status_code == 404
+    storage = SQLiteStorage(str(database))
+    try:
+        assert len(storage.list_agent_run_bundles("__verdict_local__")) == 2
+    finally:
+        storage.close()
+
+
 def test_capture_status_identifies_the_job_and_reports_analysis_errors(tmp_path, monkeypatch):
     import verdict.dashboard.setup_routes as setup_routes
 
@@ -810,3 +973,19 @@ def test_capture_status_identifies_the_job_and_reports_analysis_errors(tmp_path,
     assert job["summary"]["stored"] == 1 and job["analysis"]["status"] == "error"
     assert by_id.status_code == 200 and by_id.json()["job"]["jobId"] == job["jobId"]
     assert other.status_code == 404 and other.json()["job"]["jobId"] == job["jobId"]
+def test_capture_worker_interruption_sets_terminal_state(tmp_path, monkeypatch):
+    from verdict.dashboard import setup_routes
+
+    routes = setup_routes.SetupRoutes(f"sqlite:///{tmp_path / 'capture.db'}", "synthetic-token")
+    job = setup_routes.CaptureJob("synthetic-job", "2026-10-01T00:00:00Z")
+
+    def interrupted(_storage, **_kwargs):
+        raise SystemExit("synthetic interruption")
+
+    monkeypatch.setattr(setup_routes, "capture_local_agents", interrupted)
+    with pytest.raises(SystemExit):
+        routes._run_capture_job(job, None, None, True)
+
+    assert job.state == "failed"
+    assert job.error == "capture_failed"
+    assert job.finished_at is not None

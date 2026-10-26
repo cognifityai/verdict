@@ -7,7 +7,6 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-import verdict.telemetry.local_agents as local_agents
 import verdict.telemetry.sources.codex as codex_source
 from _postgres_test_safety import isolated_test_dsn, validate_test_dsn
 from fastapi.testclient import TestClient
@@ -326,8 +325,8 @@ def test_rejected_codex_history_revision_preserves_accepted_diagnostic_usage(
         )
 
 
-def test_deferred_codex_history_preserves_usage_and_imports_diagnostic_only_call(
-    tmp_path: Path, monkeypatch,
+def test_unchanged_codex_history_preserves_usage_and_imports_diagnostic_only_call(
+    tmp_path: Path,
 ) -> None:
     codex_root, diagnostic_path = _codex_home(tmp_path)
     storage = SQLiteStorage(str(tmp_path / "verdict.db"))
@@ -345,12 +344,11 @@ def test_deferred_codex_history_preserves_usage_and_imports_diagnostic_only_call
                 connection, timestamp=1_788_000_004,
                 body=_codex_log_body(thread_id="diagnostic-only", turn_id="turn-c"),
             )
-        monkeypatch.setattr(local_agents, "_MAX_SCAN_FILES", 1)
         second = capture_local_agents(
             storage, tenant_id="tenant-a", codex_root=codex_root,
             capture_content=False,
         )
-        assert second.scan_incomplete is True and second.deferred == 1
+        assert second.stored == 2 and second.scan_incomplete is False
         after = {
             trace.trace_id: (trace.input_tokens, trace.output_tokens)
             for trace in storage.list_traces(tenant_id="tenant-a")

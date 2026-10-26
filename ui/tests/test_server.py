@@ -2490,9 +2490,13 @@ def test_basic_auth_gates_dashboard_shells_and_data_but_not_health(monkeypatch):
                 await client.get("/api/data"),
                 await client.get("/api/registry"),
                 await client.get("/dashboard", headers={"Authorization": f"Basic {token}"}),
+                await client.get("/docs"),
+                await client.get("/redoc"),
+                await client.get("/openapi.json"),
+                await client.get("/openapi.json", headers={"Authorization": f"Basic {token}"}),
             )
 
-    landing, health, dashboard, data, registry, authenticated = asyncio.run(requests())
+    landing, health, dashboard, data, registry, authenticated, docs, redoc, schema, authorized_schema = asyncio.run(requests())
 
     assert landing.status_code == 401
     assert health.status_code == 200
@@ -2502,6 +2506,8 @@ def test_basic_auth_gates_dashboard_shells_and_data_but_not_health(monkeypatch):
     assert dashboard.headers["www-authenticate"] == 'Basic realm="Verdict"'
     assert landing.headers["www-authenticate"] == 'Basic realm="Verdict"'
     assert authenticated.status_code == 200
+    assert docs.status_code == redoc.status_code == schema.status_code == 401
+    assert authorized_schema.status_code == 200
 
 
 def test_basic_auth_covers_every_dashboard_api_route_even_with_setup_capability(

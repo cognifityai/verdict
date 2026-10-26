@@ -93,26 +93,40 @@ recent index or Codex diagnostics, the latest cycle reports
 `capture_incomplete` even if analysis succeeded. Inspect that cycle's capture
 summary and rescan after fixing the source; previously stored runs remain the
 last committed snapshots, not proof that the latest file was imported.
-One local capture invocation processes at most 1,000 discovered history files;
-additional files are reported as deferred and make the scan incomplete. The
-first invocation tries newer unattempted files first. Later invocations favor
-files not attempted recently, so older files can still be reached. A deferred
-file is not evidence of a clean run, even when earlier analysis completed.
-The scan also stops after a processed file crosses 128 MiB of source bytes,
-100,000 projected rows, or 256 MiB of serialized sanitized payload. These
-are file-boundary soft caps and do not bound one large file's work.
-A single local history file above 128 MiB is rejected before parsing with
-`history_file_too_large`; an earlier accepted revision remains stored and the
-latest capture reports incomplete.
+One approved background capture attempts every discovered history file once
+and reports file progress. Discovery is limited to 100,000 files per root;
+exceeding that limit fails the job before import. Each attempted file has its
+own parse and projection bounds. An interrupted process can be restarted and
+the same roots approved again; committed source revisions are checked on
+replacement. A rescan reads the source files again to detect changes.
+During setup, **Cancel capture** requests a stop after the current file. The
+job then reports `cancelled`, shows committed progress, and refreshes Home;
+already committed files remain available. Preview the roots and approve a
+rescan to continue. A cancelled file attempt is tracked separately from a
+source failure. Cancellation is available while files are importing, not
+during the later analysis step.
+A local history file above 128 MiB and at most 1 GiB is parsed only through
+a bounded prefix. Verdict hashes the whole file for revision checks, stores
+the observed prefix, and reports `bounded_source_prefix` as partial source
+coverage. Files above 1 GiB are skipped as `history_file_too_large`, with
+any earlier accepted evidence retained. Later activity
+in that file is unobserved; the visible run status and token totals describe
+only captured evidence. A file with no usable record in the prefix, or a
+record exceeding the line bound, can still be skipped with an explicit reason.
 Parsing rejects a file after 100,000 projected events, including multiple
 events from one Claude history row, with `history_event_limit`. An earlier
 accepted revision remains stored.
-The setup capture job also reports incomplete rather than finished when files
-are deferred or skipped; its captured evidence remains available. Each
+The setup capture job reports incomplete when files are skipped; its captured
+evidence remains available and the dashboard refreshes it. Each
 attempt keeps a bounded reason category such as `failed_malformed_jsonl` or
 `failed_local_source_conflict` without storing a path or exception body.
 Data Sources also shows counts and reason categories from the latest durable
-per-file attempts after a dashboard restart. These counts cover previously
+per-file attempts after a dashboard restart, including interrupted and
+cancelled attempts. The durable counts describe history-file attempts; a
+cancel request after the final history file has committed does not leave a
+cancelled file count, although that job may still report cancelled before a
+restart. `filesDone` counts attempted files, including a claimed file stopped
+before parsing. These counts cover previously
 tracked files for this tenant, including files from an older source root;
 preview the current roots and rescan to establish their current status.
 If a local session reaches the 1,500-event bound, the capture result counts
@@ -266,7 +280,7 @@ response, latency, and cost remain unavailable, and the traces are not
 evaluator inputs. Codex controls diagnostic and session retention
 independently, so Agent Run, model-call, and token-covered totals can differ;
 an unknown diagnostic schema is skipped and reported as unavailable.
-If a history rescan is rejected or deferred, an existing diagnostic call keeps
+If a history rescan is rejected, an existing diagnostic call keeps
 its previously stored token usage. Newly observed calls can still use a
 uniquely matched valid usage event from a parsed history file; calls without
 one remain metadata-only. A diagnostic import does not make a rejected Agent
