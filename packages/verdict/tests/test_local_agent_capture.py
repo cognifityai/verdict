@@ -270,11 +270,20 @@ def test_local_tool_result_sensitive_canaries_do_not_reach_storage_or_run_api(
     card = "4111111111111111"
     key_body = "ZmFrZS1wZW0tYm9keQ=="
     provider_key = "AKIAIOSFODNN7EXAMPLE"
+    glued_provider_key = "sk-ant-" + "A" * 24
+    glued_github_key = "ghp_" + "B" * 24
     output = json.dumps({
         "card": int(card),
         "private_key": f"-----BEGIN PRIVATE KEY-----\n{key_body}\n-----END PRIVATE KEY-----",
         "db_url": "postgres://user:syntheticP%40ss@db.example.invalid/test",
         "provider_key": f"key_{provider_key}_suffix",
+        "glued_provider": f"555-123-4567{glued_provider_key}",
+        "glued_github": f"10.0.0.1{glued_github_key}",
+        "reverse_glued_github": f"{glued_github_key}192.168.1.42",
+        "reverse_grouped_card": f"{glued_github_key}3782 822463 10005",
+        "card_with_status": "41111111 11111111 200 OK",
+        "fixed_key_card_with_status": f"{'AKIA' + 'A' * 12 + '4111'}41111111 11111111 200 OK",
+        "ordinary_status": f"{glued_github_key} 200 OK",
     })
     root = tmp_path / source_kind
     if source_kind == "claude":
@@ -285,7 +294,7 @@ def test_local_tool_result_sensitive_canaries_do_not_reach_storage_or_run_api(
         records = _codex_records()
         tool_result = next(row for row in records if row.get("type") == "response_item"
                            and row.get("payload", {}).get("type") == "function_call_output")
-        tool_result["payload"]["output"] = output
+        tool_result["payload"]["output"] = json.dumps({"exit_code": 1, "output": output})
     _write_jsonl(root / "session.jsonl", records)
     with ExitStack() as stack:
         if backend == "postgres":
@@ -316,12 +325,25 @@ def test_local_tool_result_sensitive_canaries_do_not_reach_storage_or_run_api(
             })
         assert response.status_code == 200
         assert session.status_code == 200
-        for canary in (card, key_body, "syntheticP", provider_key):
+        for canary in (card, key_body, "syntheticP", provider_key,
+                       glued_provider_key, glued_github_key):
             assert canary not in repr(bundle)
             assert canary not in response.text
             assert canary not in session.text
             if backend == "sqlite":
                 assert canary.encode() not in database.read_bytes()
+        assert ".168.1.42" not in repr(bundle)
+        assert ".168.1.42" not in response.text
+        assert ".168.1.42" not in session.text
+        assert "822463 10005" not in repr(bundle)
+        assert "822463 10005" not in response.text
+        assert "822463 10005" not in session.text
+        assert "41111111 11111111" not in repr(bundle)
+        assert "41111111 11111111" not in response.text
+        assert "41111111 11111111" not in session.text
+        assert "200 OK" in response.text
+        if backend == "sqlite":
+            assert b".168.1.42" not in database.read_bytes()
 
 
 def test_legacy_source_revision_without_counts_cannot_prove_whole_run_coverage() -> None:

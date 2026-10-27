@@ -4,6 +4,9 @@ This guide describes the guided workflow in the current beta. It is available fr
 
 Verdict combines source-reported usage, typed agent actions, optional selected-scope evaluation, and fixed-case experiments. The same run report accepts imported Claude Code/Codex histories and application agents recorded through `verdict.agent_run(...)`. Capability differences come from the source evidence: Claude messages with an explicit provider response boundary can create linked model-call `Trace` records, and Codex completion diagnostics can create metadata-only model-call traces. Other turns may have no trace. Provider auto-instrumentation does not automatically provide application task outcomes.
 
+Local-history discovery currently includes `.jsonl` files. Compressed Codex
+`.jsonl.zst` histories are not included in preview, capture, or rescan counts.
+
 Run timelines, Insights link counts, and the V1 dependent-package read model expose a model-call Trace link only when the referenced Trace exists in the same tenant. Historical tenantless Traces remain visible to the local tenant. A missing or foreign Trace link remains in stored evidence for repair but is shown as unlinked; it cannot pull in that Trace's Judgment.
 
 ## Synthetic local demo

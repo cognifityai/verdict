@@ -20,11 +20,14 @@ the product is refined.
   cancelled attempt separately from source failures. Preview and rescan to
   continue. After a restart, Data Sources also warns about interrupted or
   cancelled per-file attempts.
+  Discovery currently includes `.jsonl` histories; compressed `.jsonl.zst`
+  Codex histories are outside this capture count.
 - Best-effort redaction now covers numeric JSON values, adjacent sensitive
   values, private-key blocks, encoded URL credentials, and provider keys after
-  an underscore. Harmless JSON formatting and literal Unicode escapes are
-  preserved when no content needs redaction. Previously stored rows are not
-  rewritten.
+  an underscore. Distinctive provider and GitHub credentials directly adjacent
+  to phone or IP values are also redacted. Harmless JSON formatting and literal
+  Unicode escapes are preserved when no content needs redaction. Previously
+  stored rows are not rewritten.
 - OpenAI GPT-6 judge requests omit unsupported temperature, authenticated
   dashboards gate the interactive API documentation, and interrupted capture
   threads record a terminal failed job.

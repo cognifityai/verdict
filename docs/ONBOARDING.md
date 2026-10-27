@@ -93,12 +93,14 @@ recent index or Codex diagnostics, the latest cycle reports
 `capture_incomplete` even if analysis succeeded. Inspect that cycle's capture
 summary and rescan after fixing the source; previously stored runs remain the
 last committed snapshots, not proof that the latest file was imported.
-One approved background capture attempts every discovered history file once
-and reports file progress. Discovery is limited to 100,000 files per root;
+One approved background capture attempts every discovered `.jsonl` history
+file once and reports file progress. Discovery is limited to 100,000 files per root;
 exceeding that limit fails the job before import. Each attempted file has its
 own parse and projection bounds. An interrupted process can be restarted and
 the same roots approved again; committed source revisions are checked on
 replacement. A rescan reads the source files again to detect changes.
+Compressed `.jsonl.zst` Codex histories are not currently included in preview
+or capture, so the reported file total does not include them.
 During setup, **Cancel capture** requests a stop after the current file. The
 job then reports `cancelled`, shows committed progress, and refreshes Home;
 already committed files remain available. Preview the roots and approve a
@@ -753,7 +755,9 @@ closed at every occurrence so sanitized output cannot alias caller-owned data;
 redacted mapping-key collisions preserve every value under deterministic
 suffixed keys. Recursive Unicode key decoding uses the same nesting budget and
 fails closed beyond it. The pattern detector uses Luhn validation
-for card candidates and standard-library validation for IP candidates, so
+for complete card candidates and grouped prefixes; an ambiguous numeric
+identifier with a valid card-shaped prefix may also be removed. Standard-library
+validation applies to IP candidates, so
 trailing text that is not part of a validated IPv6 address is preserved while a
 clock value such as `12:34:56` is not classified as IPv6. Email discovery uses
 a linear `@`-anchored scanner to keep malformed and long inputs bounded. It

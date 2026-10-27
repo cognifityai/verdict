@@ -164,8 +164,9 @@ TLS termination at a trusted ingress; see
    capture summary and source logs, then rescan. Previously captured runs are
    the last committed snapshots; this cycle status does not identify which
    individual source revision is current.
-   One cycle attempts every discovered history file once and reports file
-   progress. Discovery is limited to 100,000 files per root; a limit error
+   One cycle attempts every discovered `.jsonl` history file once and reports
+   file progress. Compressed `.jsonl.zst` files are not yet discovered.
+   Discovery is limited to 100,000 files per root; a limit error
    fails the cycle before import. Each file retains its own parse and
    projection limits. A rescan reads the source files again to detect changes.
    Setup's **Cancel capture** stops after the current file, preserves earlier
