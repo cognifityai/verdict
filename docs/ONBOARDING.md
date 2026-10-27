@@ -94,26 +94,38 @@ recent index or Codex diagnostics, the latest cycle reports
 summary and rescan after fixing the source; previously stored runs remain the
 last committed snapshots, not proof that the latest file was imported.
 One approved background capture attempts every discovered `.jsonl` history
-file once and reports file progress. Discovery is limited to 100,000 files per root;
+file and Codex `.jsonl.zst` archive once and reports file progress. Discovery is
+limited to 100,000 files per root;
 exceeding that limit fails the job before import. Each attempted file has its
 own parse and projection bounds. An interrupted process can be restarted and
 the same roots approved again; committed source revisions are checked on
 replacement. A rescan reads the source files again to detect changes.
-Compressed `.jsonl.zst` Codex histories are not currently included in preview
-or capture, so the reported file total does not include them.
+Codex archives are streamed through the same preview and capture flow. If an
+active `.jsonl` file has the same path stem as an archive, only the active file
+is counted. When a captured active file becomes an archive, Verdict verifies
+that the decoded archive preserves the earlier source bytes before replacing
+the run. A corrupt or incomplete archive in the observed portion is reported
+as skipped, including an unfinished final JSONL record; an unobserved tail of
+a partial archive is not checked. Active `.jsonl` files can retain complete
+records before an unfinished final line because they may still be written.
 During setup, **Cancel capture** requests a stop after the current file. The
 job then reports `cancelled`, shows committed progress, and refreshes Home;
 already committed files remain available. Preview the roots and approve a
 rescan to continue. A cancelled file attempt is tracked separately from a
 source failure. Cancellation is available while files are importing, not
 during the later analysis step.
-A local history file above 128 MiB and at most 1 GiB is parsed only through
-a bounded prefix. Verdict hashes the whole file for revision checks, stores
+A local history file with more than 128 MiB of decoded records is parsed only
+through a bounded prefix. Verdict hashes the whole physical file for revision checks, stores
 the observed prefix, and reports `bounded_source_prefix` as partial source
-coverage. Files above 1 GiB are skipped as `history_file_too_large`, with
-any earlier accepted evidence retained. Later activity
-in that file is unobserved; the visible run status and token totals describe
-only captured evidence. A file with no usable record in the prefix, or a
+coverage. Physical files above 1 GiB, including archives, are skipped as
+`history_file_too_large`, with
+any earlier accepted evidence retained. Investigation shows a separate sample
+of up to 50 newest source records when available. It may overlap the canonical
+prefix and is inspection only; the
+run status, token totals, issue counts, monitoring, and evaluation use captured
+evidence. With content capture disabled, newest records have no text previews.
+Compressed histories expanding beyond 512 MiB cannot provide this
+sample. A file with no usable record in the prefix, or a
 record exceeding the line bound, can still be skipped with an explicit reason.
 Parsing rejects a file after 100,000 projected events, including multiple
 events from one Claude history row, with `history_event_limit`. An earlier

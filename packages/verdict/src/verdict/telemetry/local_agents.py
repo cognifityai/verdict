@@ -10,6 +10,7 @@ metadata-only traces. An agent turn or session is never promoted into a trace.
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import re
 from collections import deque
@@ -19,6 +20,8 @@ from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any
+
+import zstandard
 
 from verdict.capture import AgentCaptureService
 from verdict.evidence import (
@@ -35,7 +38,7 @@ from verdict.evidence import (
     stable_evidence_id,
 )
 from verdict.local_recent_facts import LocalFullProjection, LocalRecentFact, tail_turn_json
-from verdict.local_source_revision import LocalSourceRevision
+from verdict.local_source_revision import _MAX_ZSTD_WINDOW_BYTES, LocalSourceRevision
 from verdict.normalized_evidence import _LegacyLocalTextUpgrade
 from verdict.redaction import redact, redact_structure
 from verdict.schema import Operation, Trace
@@ -63,13 +66,15 @@ _MAX_RECENT_EVENTS = 50
 _MAX_LINE_BYTES = 16 * 1024 * 1024
 _MAX_LOCAL_FILE_BYTES = 128 * 1024 * 1024
 _MAX_LOCAL_VERIFY_BYTES = 1024 * 1024 * 1024
+_LATEST_SOURCE_BYTES = 64 * 1024
+_LATEST_DECODED_BYTES = 512 * 1024 * 1024
 _MAX_FULL_RAW_BYTES = 32 * 1024 * 1024
 _MAX_FULL_RECORDS = 5_000
 _MAX_FULL_PROJECTED_ROWS = 5_000
 _MAX_FULL_SANITIZED_BYTES = 64 * 1024 * 1024
 _LOCAL_FAILURE_REASONS = frozenset({
     "history_line_too_large", "history_event_limit", "malformed_jsonl",
-    "history_file_too_large",
+    "history_file_too_large", "invalid_compressed_history",
     "malformed_record", "history_file_limit", "missing_session_id",
     "invalid_logical_session_id", "invalid_parent_session_id",
     "unsupported_history", "missing_child_agent_id", "recent_sample_limit",
@@ -554,6 +559,8 @@ def _finalize_claude_usage(turn: _RawTurn) -> None:
 
 
 def _records(path: Path) -> tuple[list[dict[str, object]], LocalSourceRevision]:
+    if path.name.endswith(".jsonl.zst"):
+        return _compressed_records(path)
     if path.stat().st_size > _MAX_LOCAL_VERIFY_BYTES:
         raise ValueError("history_file_too_large")
     records: list[dict[str, object]] = []
@@ -610,17 +617,207 @@ def _records(path: Path) -> tuple[list[dict[str, object]], LocalSourceRevision]:
     )
 
 
-def _iter_paths(root: Path):
+class _CompressedSource:
+    """Hash and bound physical archive bytes as the decoder reads them."""
+
+    def __init__(self, handle) -> None:
+        self.handle = handle
+        self.digest = hashlib.sha256()
+        self.size = 0
+
+    def read(self, size: int = -1) -> bytes:
+        block = self.handle.read(size)
+        if self.size + len(block) > _MAX_LOCAL_VERIFY_BYTES:
+            raise ValueError("history_file_too_large")
+        self.digest.update(block)
+        self.size += len(block)
+        return block
+
+
+def _validate_zstd_frames(handle, physical_limit: int) -> None:
+    """Reject truncated or trailing invalid frames, including after a parsed prefix."""
+    handle.seek(0)
+    decompressor = zstandard.ZstdDecompressor(max_window_size=_MAX_ZSTD_WINDOW_BYTES)
+    decoder = decompressor.decompressobj()
+    saw_frame = False
+    physical_bytes = 0
+    while chunk := handle.read(512):
+        physical_bytes += len(chunk)
+        if physical_bytes > physical_limit:
+            raise ValueError("local_source_changed")
+        pending = chunk
+        while pending:
+            if decoder.eof:
+                decoder = decompressor.decompressobj()
+            decoder.decompress(pending)
+            pending = decoder.unused_data if decoder.eof else b""
+            saw_frame |= decoder.eof
+    if not saw_frame or not decoder.eof:
+        raise ValueError("invalid_compressed_history")
+
+
+def _compressed_records(path: Path) -> tuple[list[dict[str, object]], LocalSourceRevision]:
+    initial = path.stat()
+    if initial.st_size > _MAX_LOCAL_VERIFY_BYTES:
+        raise ValueError("history_file_too_large")
+    records: list[dict[str, object]] = []
+    decoded_bytes = 0
+    partial = False
+    with path.open("rb") as handle:
+        source = _CompressedSource(handle)
+        try:
+            decoder = zstandard.ZstdDecompressor(
+                max_window_size=_MAX_ZSTD_WINDOW_BYTES,
+            ).stream_reader(source, read_across_frames=True, closefd=False)
+            with decoder, io.BufferedReader(decoder) as lines:
+                while raw := lines.readline(_MAX_LINE_BYTES + 1):
+                    if len(raw) > _MAX_LINE_BYTES:
+                        raise ValueError("history_line_too_large")
+                    if decoded_bytes + len(raw) > _MAX_LOCAL_FILE_BYTES:
+                        partial = True
+                        break
+                    decoded_bytes += len(raw)
+                    if not raw.strip():
+                        continue
+                    if len(records) >= _MAX_EVENTS:
+                        raise ValueError("history_event_limit")
+                    try:
+                        row = json.loads(raw)
+                    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
+                        raise ValueError("malformed_jsonl") from exc
+                    mapped = _mapping(row)
+                    if mapped is None:
+                        raise ValueError("malformed_record")
+                    records.append(mapped)
+        except zstandard.ZstdError as exc:
+            raise ValueError("invalid_compressed_history") from exc
+        while source.read(1024 * 1024):
+            pass
+        if not partial:
+            try:
+                _validate_zstd_frames(handle, initial.st_size)
+            except zstandard.ZstdError as exc:
+                raise ValueError("invalid_compressed_history") from exc
+        if (source.size != initial.st_size
+                or path.stat().st_mtime_ns != initial.st_mtime_ns):
+            raise ValueError("local_source_changed")
+    full_hash = source.digest.hexdigest()
+    return records, LocalSourceRevision(
+        source.size, full_hash,
+        0 if partial else source.size,
+        hashlib.sha256(b"").hexdigest() if partial else full_hash,
+        partial,
+    )
+
+
+def _latest_source_sample(
+    path: Path, revision: LocalSourceRevision, *, home: Path | None,
+    capture_content: bool,
+) -> dict[str, object]:
+    """Inspect a bounded physical suffix without promoting it to recorded evidence."""
+    initial = path.stat()
+    if initial.st_size != revision.full_bytes:
+        raise ValueError("local_source_changed")
+    digest = hashlib.sha256()
+    tail = b""
+    decoded_size = 0
+    if path.name.endswith(".jsonl.zst"):
+        with path.open("rb") as handle:
+            source = _CompressedSource(handle)
+            try:
+                with zstandard.ZstdDecompressor(
+                    max_window_size=_MAX_ZSTD_WINDOW_BYTES,
+                ).stream_reader(source, read_across_frames=True, closefd=False) as decoded:
+                    while block := decoded.read(1024 * 1024):
+                        decoded_size += len(block)
+                        if decoded_size > _LATEST_DECODED_BYTES:
+                            return {"status": "unavailable_decoded_limit", "records": []}
+                        tail = (tail + block)[-_LATEST_SOURCE_BYTES:]
+            except zstandard.ZstdError as exc:
+                raise ValueError("invalid_compressed_history") from exc
+            while source.read(1024 * 1024):
+                pass
+            digest = source.digest
+    else:
+        with path.open("rb") as handle:
+            while block := handle.read(min(
+                1024 * 1024, _MAX_LOCAL_VERIFY_BYTES - decoded_size + 1,
+            )):
+                if decoded_size + len(block) > _MAX_LOCAL_VERIFY_BYTES:
+                    raise ValueError("history_file_too_large")
+                digest.update(block)
+                decoded_size += len(block)
+                tail = (tail + block)[-_LATEST_SOURCE_BYTES:]
+    current = path.stat()
+    if (current.st_size != initial.st_size or current.st_mtime_ns != initial.st_mtime_ns
+            or digest.hexdigest() != revision.full_sha256):
+        raise ValueError("local_source_changed")
+    if decoded_size > len(tail):
+        tail = tail.partition(b"\n")[2]
+    if not tail.endswith((b"\n", b"\r")):
+        tail = tail.rpartition(b"\n")[0]
+    rows = []
+    for raw in tail.splitlines()[-50:]:
+        if not raw.strip():
+            continue
+        try:
+            row = _mapping(json.loads(raw))
+        except (UnicodeDecodeError, json.JSONDecodeError, RecursionError):
+            return {"status": "unavailable_malformed_record", "records": []}
+        if row is None:
+            return {"status": "unavailable_malformed_record", "records": []}
+        payload = _mapping(row.get("payload")) or {}
+        message = _mapping(row.get("message")) or {}
+        preview = ""
+        if capture_content:
+            candidates = (
+                payload.get("message"), payload.get("output"), payload.get("arguments"),
+                message.get("content"),
+            )
+            preview = next((text.value for value in candidates
+                            if (text := _safe_text(value, home=home)).value), "")
+            if not preview and message:
+                preview = _message_text(message, home=home).value
+        outer = row.get("type")
+        kind = str(payload.get("type") or outer or "unknown") if capture_content else (
+            outer if isinstance(outer, str) and outer in {
+                "event_msg", "response_item", "turn_context", "session_meta",
+                "user", "assistant",
+            } else "unknown"
+        )
+        occurred_at = _time(row.get("timestamp"))
+        rows.append({
+            "at": occurred_at.isoformat() if occurred_at is not None else "",
+            "kind": _bounded_utf8(redact(kind) or "unknown", 80),
+            "preview": _bounded_utf8(preview, 512),
+        })
+    return {"status": "sampled" if rows else "unavailable_no_records", "records": rows}
+
+
+def iter_local_history_paths(root: Path, source_kind: str):
     if not root.is_dir() or root.is_symlink():
         return
     count = 0
-    for path in root.rglob("*.jsonl"):
-        if path.is_symlink() or not path.is_file():
-            continue
-        count += 1
-        if count > _MAX_FILES:
-            raise ValueError("history_file_limit")
-        yield path
+    patterns = ("*.jsonl", "*.jsonl.zst") if source_kind == "codex" else ("*.jsonl",)
+    for pattern in patterns:
+        for path in root.rglob(pattern):
+            if path.is_symlink() or not path.is_file():
+                continue
+            if pattern.endswith(".zst"):
+                plain = path.with_suffix("")
+                if plain.is_file() and not plain.is_symlink():
+                    continue
+            count += 1
+            if count > _MAX_FILES:
+                raise ValueError("history_file_limit")
+            yield path
+
+
+def _source_locator_hash(path: Path) -> str:
+    """The active JSONL and its later archive identify one source session."""
+    resolved = path.resolve()
+    identity = resolved.with_suffix("") if path.name.endswith(".jsonl.zst") else resolved
+    return hashlib.sha256(str(identity).encode()).hexdigest()
 
 
 def _content_attributes(
@@ -1499,7 +1696,7 @@ def _bundle(
         source_session_id=source_session_id,
         tenant_id=tenant_id,
         source_kind=source_kind,
-        source_locator_hash=hashlib.sha256(str(path.resolve()).encode()).hexdigest(),
+        source_locator_hash=_source_locator_hash(path),
         started_at=min(turn.started_at for turn in raw_turns),
         observed_at=observed_at,
     )
@@ -1739,7 +1936,7 @@ def capture_local_agents(
     listed: dict[str, list[Path]] = {}
     for source_kind, root, _parser in sources:
         if root is not None:
-            listed[source_kind] = list(_iter_paths(root) or ())
+            listed[source_kind] = list(iter_local_history_paths(root, source_kind) or ())
     total = sum(len(paths) for paths in listed.values())
     if progress is not None:
         progress(0, total)
@@ -1752,7 +1949,7 @@ def capture_local_agents(
             continue
         source_scope = hashlib.sha256(str(root.resolve()).encode()).hexdigest()
         for path in listed[source_kind]:
-            locator_hash = hashlib.sha256(str(path.resolve()).encode()).hexdigest()
+            locator_hash = _source_locator_hash(path)
             scan_work.append((locator_hash, source_kind, path, parser, source_scope))
     scan_work.sort(key=lambda row: row[0])
     for locator_hash, source_kind, path, parser, source_scope in scan_work:
@@ -1823,6 +2020,29 @@ def capture_local_agents(
                         source_revision=source_revision.full_sha256,
                         partial_final_line=source_revision.partial_final_line,
                     )
+                    if (source_revision.partial_final_line
+                            and (path.name.endswith(".jsonl.zst")
+                                 or source_revision.full_bytes > _MAX_LOCAL_FILE_BYTES)):
+                        latest = _latest_source_sample(
+                            path, source_revision, home=home,
+                            capture_content=capture_content,
+                        )
+                        if recent_window is None:
+                            recent_window = {
+                                "schema": "local-recent-window-v2", "durableFacts": False,
+                                "runId": bundle.run.run_id, "sourceKind": source_kind,
+                                "partial": True,
+                                "capturedAt": datetime.now(timezone.utc).isoformat(),
+                                "sourceRecordCount": parsed.source_record_count,
+                                "sourceRevision": source_revision.full_sha256,
+                                "sourceTurnCount": source_revision.source_turn_count,
+                                "sourceEventCount": source_revision.source_event_count,
+                                "canonicalPrefixEvents": source_revision.v1_event_count,
+                                "firstOrdinal": None, "lastOrdinal": None,
+                                "omittedMiddleEvents": 0,
+                                "turns": [], "events": [], "findings": [],
+                            }
+                        recent_window["latestSample"] = latest
                     prefix_event_ids = {event.event_id for event in bundle.events}
                     new_recent_facts = tuple(
                         fact for fact in recent_facts
@@ -1905,7 +2125,8 @@ def capture_local_agents(
                     source_line_complete = not source_revision.partial_final_line
                     if not source_line_complete:
                         source_partial_reason = ("bounded_source_prefix"
-                                  if source_revision.full_bytes > _MAX_LOCAL_FILE_BYTES
+                                  if path.name.endswith(".jsonl.zst")
+                                  or source_revision.full_bytes > _MAX_LOCAL_FILE_BYTES
                                   else "unfinished_final_record")
                         summary.source_partial_files += 1
                         summary.partial_reasons[source_partial_reason] = (

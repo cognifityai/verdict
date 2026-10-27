@@ -6,6 +6,18 @@ the product is refined.
 
 ## [Unreleased]
 
+### Added
+
+- Codex local-history preview and capture now include streamed `.jsonl.zst`
+  archives. Active `.jsonl` files take precedence over same-stem archives.
+  Compressed file size and decoded prefix bounds are enforced separately;
+  corrupt or incomplete observed archives are reported as skipped. A later
+  archive must preserve a previously captured active file's decoded bytes.
+- Oversized local histories retain their bounded canonical prefix and show a
+  separate redacted sample of up to 50 newest source records in Investigation.
+  The newest sample is inspection only and is unavailable for compressed
+  histories expanding beyond 512 MiB.
+
 ### Fixed
 
 - Local history setup now attempts every discovered file in one approved
@@ -20,8 +32,7 @@ the product is refined.
   cancelled attempt separately from source failures. Preview and rescan to
   continue. After a restart, Data Sources also warns about interrupted or
   cancelled per-file attempts.
-  Discovery currently includes `.jsonl` histories; compressed `.jsonl.zst`
-  Codex histories are outside this capture count.
+  Discovery includes `.jsonl` histories and Codex `.jsonl.zst` archives.
 - Best-effort redaction now covers numeric JSON values, adjacent sensitive
   values, private-key blocks, encoded URL credentials, and provider keys after
   an underscore. Distinctive provider and GitHub credentials directly adjacent

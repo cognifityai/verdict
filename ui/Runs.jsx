@@ -410,6 +410,8 @@ function RecentLocalEvents({ url, runId, recentReference = null, onOpenRecentEve
   }, [fullPage.status, fullPage.data]);
   const currentWindow = readySample?.schema === "local-recent-window-v2";
   const sampledEvents = Array.isArray(readySample?.events) ? readySample.events : [];
+  const latestSource = readySample?.latestSample;
+  const newestRecordsAvailable = latestSource?.status === "sampled";
   const sampledTurns = currentWindow && Array.isArray(readySample?.turns)
     ? readySample.turns : [];
   const windowFindings = currentWindow && Array.isArray(readySample?.findings)
@@ -489,6 +491,10 @@ function RecentLocalEvents({ url, runId, recentReference = null, onOpenRecentEve
     <p className="text-xs mt-1" style={{ color: color.sub }}>
       {!readySample
         ? "This source history is partial. Inspect the recent sample to determine what was retained when it is available; run-wide totals and no-issue claims remain unavailable."
+        : newestRecordsAvailable
+        ? "The canonical run contains a bounded historical prefix. Open the newest source-record sample below to inspect the latest available records. It may overlap the prefix and cannot establish full-session totals, alerts, or task outcome."
+        : latestSource
+        ? "The canonical run contains a bounded historical prefix. The newest source records are unavailable; full-session totals, alerts, and task outcome cannot be established."
         : !currentWindow
         ? "This legacy recent sample is for inspection only; it is not counted in analysis, monitoring, or evaluation."
         : readySample?.durableFacts === true
@@ -501,8 +507,22 @@ function RecentLocalEvents({ url, runId, recentReference = null, onOpenRecentEve
     {state.status === "error" && <p role="alert" style={{ color: color.amber }}>No current recent sample is available for this run. The canonical events above remain available.</p>}
     {state.status === "stale" && <p role="alert" style={{ color: color.amber }}>This exact recent-event link refers to an older source revision. Load the current window to inspect the latest captured evidence.</p>}
     {readySample && <div className="mt-3 space-y-2" style={{ maxHeight: "28rem", overflowY: "auto" }}>
-      <p>Captured {runTime(readySample.capturedAt)} · {sampledEvents.length} of {Number(readySample.sourceEventCount).toLocaleString()} source events shown across {Number(readySample.sourceRecordCount).toLocaleString()} source records · revision {String(readySample.sourceRevision).slice(0, 12)}. {readySample.omittedMiddleEvents > 0 ? `${Number(readySample.omittedMiddleEvents).toLocaleString()} source events outside the canonical prefix and this sample. Browse recorded events below when full capture is available.` : "The sample may overlap the canonical prefix."}</p>
-      {currentWindow && <div className="border p-2" style={{ borderColor: color.border }}>
+      <p>Captured {runTime(readySample.capturedAt)} · {newestRecordsAvailable ? "A bounded prefix and newest source-record sample are available; full-session counts are unknown" : latestSource ? "Bounded prefix captured; newest source records are unavailable and full-session counts are unknown" : `${sampledEvents.length} of ${Number(readySample.sourceEventCount).toLocaleString()} source events shown across ${Number(readySample.sourceRecordCount).toLocaleString()} source records`} · revision {String(readySample.sourceRevision).slice(0, 12)}. {readySample.omittedMiddleEvents > 0 && !latestSource ? `${Number(readySample.omittedMiddleEvents).toLocaleString()} source events outside the canonical prefix and this sample. Browse recorded events below when full capture is available.` : newestRecordsAvailable ? "The sample may overlap the canonical prefix." : ""}</p>
+      {latestSource && <section aria-label="Newest sampled source records" className="border p-2" style={{ borderColor: color.amber }}>
+        <h4 className="font-semibold">{newestRecordsAvailable ? "Newest sampled source records" : "Newest source records unavailable"}</h4>
+        {newestRecordsAvailable && <p className="text-xs mt-1" style={{ color: color.sub }}>Inspection only. This newest source sample may overlap the canonical prefix. It adds nothing to token totals, issue counts, alerts, or evaluation.</p>}
+        {latestSource.status === "sampled"
+          ? latestSource.records.map((record, index) => <div key={index} className="border-t py-2 text-xs" style={{ borderColor: color.border }}>
+              <strong>{record.kind}</strong> · {record.at || "time unavailable"}
+              {record.preview && <p className="whitespace-pre-wrap break-words mt-1">{record.preview}</p>}
+            </div>)
+          : <p className="text-xs mt-2" role="status">{({
+              unavailable_decoded_limit: "The archive expands beyond the 512 MiB newest-sample limit.",
+              unavailable_malformed_record: "The newest complete source records could not be read.",
+              unavailable_no_records: "No complete source records were found in the newest window.",
+            })[latestSource.status] || "The newest source records could not be sampled."}</p>}
+      </section>}
+      {currentWindow && !latestSource && <div className="border p-2" style={{ borderColor: color.border }}>
         <button type="button" className="underline" style={{ color: color.green }}
           disabled={fullPage.status === "loading"} onClick={() => loadFullPage()}>
           Browse recorded events
@@ -535,10 +555,10 @@ function RecentLocalEvents({ url, runId, recentReference = null, onOpenRecentEve
           <pre className="text-xs mt-2 whitespace-pre-wrap break-all">{JSON.stringify(historicalEvent.attributes, null, 2)}</pre>
         </details>
       </div>}
-      <p>{reportedFailures.length
+      {sampledEvents.length > 0 && <p>{reportedFailures.length
         ? `${reportedFailures.length} of the ${sampledEvents.length} sampled events report failed or timed-out status. This partial sample is not a complete issue count.`
-        : "No sampled events report failed or timed-out status. Other source events may be omitted."}</p>
-      {currentWindow && <section aria-label="Recent turn coverage" className="border p-2" style={{ borderColor: color.border }}>
+        : "No sampled events report failed or timed-out status. Other source events may be omitted."}</p>}
+      {currentWindow && !latestSource && <section aria-label="Recent turn coverage" className="border p-2" style={{ borderColor: color.border }}>
         <p>{windowFindings.length} recorded {windowFindings.length === 1 ? "issue" : "issues"} in complete selected turns. These checks cover this window only.</p>
         {windowFindings.map((finding, index) => <p key={`${finding.eventId}:${index}`} className="text-xs mt-1">
           {String(finding.code).replaceAll("_", " ")} · event {String(finding.eventId).slice(0, 12)}
@@ -614,7 +634,7 @@ function RunDetail({ url, run, detail, findingCode, prioritizeDetail = false, ot
       {detail.data && !detail.data.parentRunId && !detail.data.children?.length && otherAgentRunsVisible && <p className="border p-3 mt-4 text-xs" style={{ borderColor: color.border, color: color.sub }}>Other captured agents on this page are unlinked to this run. A handoff cannot be inferred from agent names or timestamps; record a parent run ID to connect them.</p>}
       <EvidenceExplain root={url.replace(/\/api\/runs$/, "")} scope="run" runId={run.runId} />
       {["codex", "claude-code"].includes(run.sourceKind)
-        && (run.eventCount >= 1500 || run.evidenceCoverage?.sourcePartial)
+        && (run.eventCount >= 1500 || run.sourcePartial || run.evidenceCoverage?.sourcePartial)
         && <RecentLocalEvents url={url} runId={run.runId} recentReference={recentReference} onOpenRecentEvent={onOpenRecentEvent} autoAnalyze={Boolean(findingCode && !focusedFinding && run.sourcePartial)} />}
       <PrefixShell {...(localPartial ? { "aria-label": "Historical prefix details", className: "mt-5 border p-3", style: { borderColor: color.border } } : {})}>
       {localPartial && <summary className="cursor-pointer font-semibold">Historical prefix details · {run.eventCount} events</summary>}
