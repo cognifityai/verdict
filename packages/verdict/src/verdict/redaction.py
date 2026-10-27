@@ -239,13 +239,27 @@ _VENDOR_CREDENTIAL = (
     r"|lsv2_(?:pt|sk)_[A-Za-z0-9_]{32,}"  # LangSmith
 )
 
+# A variable-length credential can absorb the first digits of a value glued
+# directly to it. The boundary is unknowable, so redact the attached atom as
+# one value rather than leaving an address or phone fragment after the token.
+_CREDENTIAL_CONTINUATION = (
+    r"(?P<lexical>[.:/%-][^\s<>\"'{}\[\],;]+)?"
+    # Longest supported grouped card has 19 digits and 18 separators. Keep
+    # the scan bounded, then validate complete candidates in the callback.
+    r"(?P<numeric_tail> \d[0-9 -]{0,37})?"
+)
+
 _PATTERNS = {
     "PROVIDER_KEY": re.compile(
-        r"(?<![A-Za-z0-9])(?:sk-ant-[A-Za-z0-9_-]{16,}|sk-(?:proj-)?[A-Za-z0-9_-]{20,}|"
-        rf"AKIA[A-Z0-9]{{16}}|AIza[A-Za-z0-9_-]{{30,}}|{_VENDOR_CREDENTIAL})(?![A-Za-z0-9])"
+        r"(?<![A-Za-z])(?P<credential>sk-ant-[A-Za-z0-9_-]{16,}|"
+        r"sk-(?:proj-)?[A-Za-z0-9_-]{20,}|"
+        rf"AKIA[A-Z0-9]{{16}}|AIza[A-Za-z0-9_-]{{30,}}|{_VENDOR_CREDENTIAL})"
+        rf"{_CREDENTIAL_CONTINUATION}"
     ),
     "GITHUB_TOKEN": re.compile(
-        r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b"
+        r"(?<![A-Za-z])(?P<credential>gh[pousr]_[A-Za-z0-9]{20,}|"
+        r"github_pat_[A-Za-z0-9_]{20,})"
+        rf"{_CREDENTIAL_CONTINUATION}"
     ),
     "BEARER_TOKEN": re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{16,}"),
     "BASIC_AUTH": re.compile(
@@ -258,10 +272,9 @@ _PATTERNS = {
     "URL": re.compile(r"https?://\S+"),
     "SSN": re.compile(r"\b\d{3}-\d{2}-\d{4}\b"),
     # CANDIDATE matcher only — a 13-19 digit run (optionally space/dash grouped)
-    # is merely *card-shaped*. We do NOT redact on the regex alone (that
-    # irreversibly clobbered order IDs, tracking numbers, etc.). A candidate is
-    # only redacted if it passes the Luhn checksum AND has a valid card length;
-    # see _redact_credit_card / _luhn_ok.
+    # is merely *card-shaped*. We do NOT redact on the regex alone. A complete
+    # candidate or grouped prefix must pass Luhn and the valid-length gate;
+    # an ambiguous grouped numeric identifier can still be removed.
     # The candidate ends on a digit so the placeholder never swallows the
     # separator after a card; the address or token that follows keeps its
     # boundary and is scanned normally.
@@ -841,6 +854,53 @@ def _redact_private_keys(text: str, mode: RedactionMode, secret: str | None) -> 
     return "".join(output)
 
 
+def _credential_repl(
+    match: re.Match[str], label: str, mode: RedactionMode, secret: str | None,
+) -> str:
+    atom = match.group("credential") + (match.group("lexical") or "")
+    tail = match.group("numeric_tail") or ""
+    # AKIA has an exact 20-character width. Its trailing digits belong to the
+    # key, not an inferred adjacent value; the ordinary scanners handle a
+    # separate phone/card after the placeholder.
+    if not tail or (atom.startswith("AKIA") and len(match.group("credential")) == 20):
+        replacement = _hash_match(atom, label, secret) if mode == "hash" else f"<{label}>"
+        return replacement + tail
+
+    # A variable-width credential can swallow the first numeric group. Find
+    # complete, validated values that extend into the bounded following tail.
+    # Prefer a card over a phone and the longest validated card when shorter
+    # prefixes also pass Luhn. Digit-ending credentials are intrinsically
+    # ambiguous; prefer removing a valid sensitive shape.
+    numeric = re.search(r"[0-9 -]{1,37}\Z", atom)
+    prefix = numeric.group(0) if numeric else ""
+    attached = prefix + tail
+    consumed = 0
+    for kind in ("CREDIT_CARD", "PHONE"):
+        for end in range(len(prefix) + 1, len(attached) + 1):
+            if not attached[end - 1].isdigit() or (end < len(attached) and attached[end].isdigit()):
+                continue
+            for start in range(end):
+                if not attached[start].isdigit():
+                    continue
+                candidate = attached[start:end]
+                if kind == "PHONE":
+                    valid = bool(_PATTERNS[kind].fullmatch(candidate))
+                else:
+                    digits = candidate.replace(" ", "").replace("-", "")
+                    valid = (bool(_PATTERNS[kind].fullmatch(candidate))
+                             and len(digits) in _VALID_CARD_LENGTHS and _luhn_ok(digits))
+                if valid:
+                    consumed = end - len(prefix)
+                    break
+            if consumed and kind == "PHONE":
+                break
+        if consumed:
+            break
+    value = atom + tail[:consumed]
+    replacement = _hash_match(value, label, secret) if mode == "hash" else f"<{label}>"
+    return replacement + tail[consumed:]
+
+
 def _redact_once(text: str, mode: RedactionMode, secret: str | None) -> str:
     """Run every scanner once, left to right, in fixed order."""
     out = _redact_private_keys(text, mode, secret)
@@ -855,8 +915,13 @@ def _redact_once(text: str, mode: RedactionMode, secret: str | None) -> str:
     out = _redact_emails(out, mode, secret)
     out = _redact_secret_assignments(out, mode, secret)
     for label, pat in _PATTERNS.items():
-        if label == "CREDIT_CARD":
-            # Gate on Luhn + valid length so non-card digit runs survive intact.
+        if label in {"PROVIDER_KEY", "GITHUB_TOKEN"}:
+            out = _sub_outside_placeholders(
+                out, pat,
+                lambda m, lbl=label: _credential_repl(m, lbl, mode, secret),
+            )
+        elif label == "CREDIT_CARD":
+            # Validate whole candidates and complete grouped prefixes with Luhn.
             out = _sub_outside_placeholders(
                 out,
                 pat,
@@ -950,17 +1015,25 @@ def _luhn_ok(digits: str) -> bool:
 
 
 def _credit_card_repl(value: str, label: str, mode: RedactionMode, secret: str | None) -> str:
-    """Replace a CREDIT_CARD *candidate* only if it's a plausible card number.
+    """Replace a complete Luhn-valid card or a grouped prefix of a candidate.
 
-    Non-Luhn or wrong-length digit runs (order IDs, tracking numbers, etc.) are
-    returned unchanged so they aren't irreversibly destroyed.
+    A later numeric group may be a status rather than part of the card. When
+    a complete grouped prefix validates, privacy takes precedence over an
+    ambiguous longer numeric identifier.
     """
-    digits = re.sub(r"\D", "", value)
-    if len(digits) not in _VALID_CARD_LENGTHS or not _luhn_ok(digits):
-        return value  # leave non-cards untouched
-    if mode == "hash":
-        return _hash_match(value, label, secret)
-    return f"<{label}>"
+    # The candidate regex greedily includes a later numeric status, which can
+    # make a complete PAN fail Luhn. Only consider prefixes ending at a group
+    # separator; never carve a card out of the middle of one digit group.
+    for end in range(len(value), 0, -1):
+        if not value[end - 1].isdigit() or (end < len(value) and value[end] not in " -"):
+            continue
+        candidate = value[:end]
+        digits = candidate.replace(" ", "").replace("-", "")
+        if len(digits) in _VALID_CARD_LENGTHS and _luhn_ok(digits):
+            replacement = (_hash_match(candidate, label, secret) if mode == "hash"
+                           else f"<{label}>")
+            return replacement + value[end:]
+    return value  # leave non-cards untouched
 
 
 def _ipv6_repl(

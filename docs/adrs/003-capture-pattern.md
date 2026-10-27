@@ -195,7 +195,8 @@ target deployment before relying on them.
   format-specific validation for other patterns. The email scanner anchors at
   each `@` and advances monotonically, avoiding pathological backtracking on
   malformed or very long input. A **Luhn checksum + valid card-length gate**
-  keeps non-card digit runs (order IDs, tracking numbers) intact, while
+  applies to complete card candidates and their grouped prefixes. A numeric
+  identifier with a valid card-shaped prefix may also be removed. In contrast,
   standard-library IPv6 validation keeps colon-delimited clock values such as
   `12:34:56` intact and separates a validated address from trailing text that
   is not part of that address.
