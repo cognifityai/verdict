@@ -1860,7 +1860,7 @@ def _capture_text_compatibility(
         return None
 
     def boundary_projection(legacy: str, incoming: str) -> str | None:
-        projected = redact(legacy) if legacy else None
+        projected = redact_structure(legacy) if legacy else None
         if (
             projected is None
             or not incoming

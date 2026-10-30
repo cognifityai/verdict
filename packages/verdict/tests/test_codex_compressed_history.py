@@ -114,8 +114,10 @@ def test_compressed_decoded_prefix_reports_partial_capture(
 
 
 @pytest.mark.parametrize("compressed", [False, True])
+@pytest.mark.parametrize("trailing_newline", [False, True])
 def test_oversized_history_exposes_newest_source_records_without_counting_them(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, compressed: bool,
+    trailing_newline: bool,
 ) -> None:
     root = tmp_path / "codex"
     path = root / ("session.jsonl.zst" if compressed else "session.jsonl")
@@ -124,6 +126,8 @@ def test_oversized_history_exposes_newest_source_records_without_counting_them(
                  "payload": {"type": "agent_message", "phase": "final_answer",
                              "message": "Newest synthetic work completed"}} for _ in range(6))
     raw = b"".join((json.dumps(row) + "\n").encode() for row in rows)
+    if not trailing_newline:
+        raw = raw[:-1]
     path.parent.mkdir()
     path.write_bytes(zstandard.ZstdCompressor().compress(raw) if compressed else raw)
     monkeypatch.setattr(local_agents, "_MAX_LOCAL_FILE_BYTES", sum(
