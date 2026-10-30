@@ -30,9 +30,10 @@ the product is refined.
   skipped solely for size. Files above 1 GiB are explicitly skipped.
   The dashboard refreshes captured evidence after a failed capture as well as
   a completed one. Setup capture can now be cancelled while importing; it
-  finishes after the current file, preserves committed files, and reports the
-  cancelled attempt separately from source failures. Preview and rescan to
-  continue. After a restart, Data Sources also warns about interrupted or
+  finishes after the current file, preserves committed files, and reports a
+  cancelled job. A file already claimed when cancellation arrives is counted
+  as a cancelled attempt, separately from source failures. Preview and rescan
+  to continue. After a restart, Data Sources also warns about interrupted or
   cancelled per-file attempts.
   Discovery includes `.jsonl` histories and Codex `.jsonl.zst` archives.
 - Best-effort redaction now covers numeric JSON values, adjacent sensitive
