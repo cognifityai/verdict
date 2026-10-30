@@ -1756,6 +1756,8 @@ def capture_local_agents(
             scan_work.append((locator_hash, source_kind, path, parser, source_scope))
     scan_work.sort(key=lambda row: row[0])
     for locator_hash, source_kind, path, parser, source_scope in scan_work:
+        if should_cancel is not None and should_cancel():
+            raise CaptureCancelled(summary)
         summary.files += 1
         try:
             stat = path.stat()

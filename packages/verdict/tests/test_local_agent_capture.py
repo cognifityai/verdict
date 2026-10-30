@@ -42,7 +42,7 @@ def test_local_capture_summary_preserves_published_positional_fields() -> None:
 
 
 @pytest.mark.parametrize("backend", ["sqlite", "postgres"])
-def test_cancel_between_files_records_durable_cancelled_attempt(
+def test_cancel_between_files_does_not_claim_the_next_file(
     tmp_path: Path, backend: str,
 ) -> None:
     from verdict.telemetry.local_agents import CaptureCancelled
@@ -75,16 +75,17 @@ def test_cancel_between_files_records_durable_cancelled_attempt(
             new_storage = SQLiteStorage
         storage = new_storage(storage_url)
         try:
-            with pytest.raises(CaptureCancelled):
+            with pytest.raises(CaptureCancelled) as stopped:
                 capture_local_agents(storage, tenant_id="local", codex_root=root,
                                      progress=progress, should_cancel=lambda: cancelled)
+            assert stopped.value.summary.files == 1
         finally:
             storage.close()
         reopened = new_storage(storage_url)
         try:
             rows = reopened.local_scan_attempt_summary("local")
             assert {code: count for code, count, _started in rows} == {
-                "complete_projection": 1, "cancelled": 1,
+                "complete_projection": 1,
             }
             assert len(reopened.list_agent_run_bundles("local")) == 1
         finally:
