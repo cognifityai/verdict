@@ -310,6 +310,36 @@ def _decode_unicode_escapes(value: str) -> str | None:
     return None
 
 
+def _contains_sensitive_encoded_layer(
+    value: str, mode: RedactionMode, secret: str | None,
+) -> bool:
+    """Check each bounded JSON-string and Unicode-escape layer before storage."""
+    current = value
+    for _ in range(_MAX_NESTING_DEPTH):
+        if current.startswith('"'):
+            try:
+                unwrapped = json.loads(current)
+            except (json.JSONDecodeError, RecursionError, ValueError):
+                pass
+            else:
+                if isinstance(unwrapped, str) and unwrapped != current:
+                    current = unwrapped
+                    if redact(current, mode, secret) != current:
+                        return True
+                    continue
+        if _JSON_UNICODE_KEY_ESCAPE.search(current):
+            decoded = _decode_unicode_escapes(current)
+            if decoded is None:
+                return True
+            if decoded != current:
+                current = decoded
+                if redact(current, mode, secret) != current:
+                    return True
+                continue
+        return False
+    return True
+
+
 def _is_sensitive_key(key: str) -> bool:
     key = _decode_unicode_escapes(key)
     if key is None:
@@ -1205,12 +1235,9 @@ def redact_structure(
                     if not duplicate_key and sanitized == parsed and redact(value, mode, secret) == value:
                         return value
                     return json.dumps(sanitized, separators=(",", ":"), ensure_ascii=False)
-        if _JSON_UNICODE_KEY_ESCAPE.search(value):
-            decoded = _decode_unicode_escapes(value)
-            if decoded is None:
-                return _REDACTED
-            if redact(decoded, mode, secret) != decoded:
-                return _REDACTED
+        if (_JSON_UNICODE_KEY_ESCAPE.search(value) or value.startswith('"')) \
+                and _contains_sensitive_encoded_layer(value, mode, secret):
+            return _REDACTED
         return redact(value, mode=mode, secret=secret)
     if value is None or isinstance(value, bool):
         return value
