@@ -34,6 +34,15 @@ def test_encoded_credentials_remain_unrecoverable(level, mode):
     clean = redact_structure(raw, mode=mode, secret='synthetic-test-key' if mode == 'hash' else None)
     assert recover(clean) != SYNTHETIC_KEY
 
+
+@pytest.mark.parametrize('mode', ['redact', 'hash'])
+def test_json_whitespace_before_encoded_string_does_not_hide_credential(mode):
+    raw = ' \n' + encoded_secret(2) + ' '
+    clean = redact_structure(
+        raw, mode=mode, secret='synthetic-test-key' if mode == 'hash' else None,
+    )
+    assert recover(clean) != SYNTHETIC_KEY
+
 @pytest.mark.parametrize('level', [2, 3, 4])
 def test_sdk_sqlite_and_run_api_do_not_expose_encoded_credentials(tmp_path, level):
     path = tmp_path / 'synthetic.db'
