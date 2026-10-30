@@ -104,8 +104,9 @@ or capture, so the reported file total does not include them.
 During setup, **Cancel capture** requests a stop after the current file. The
 job then reports `cancelled`, shows committed progress, and refreshes Home;
 already committed files remain available. Preview the roots and approve a
-rescan to continue. A cancelled file attempt is tracked separately from a
-source failure. Cancellation is available while files are importing, not
+rescan to continue. A file already claimed when cancellation arrives is tracked
+as a cancelled attempt, separately from a source failure. No next-file attempt
+is created when a stop is requested between files. Cancellation is available while files are importing, not
 during the later analysis step.
 A local history file above 128 MiB and at most 1 GiB is parsed only through
 a bounded prefix. Verdict hashes the whole file for revision checks, stores
