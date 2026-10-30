@@ -14,7 +14,8 @@ decoded archive preserves the previously captured file bytes. Archive content
 outside the parsed prefix is not normalized. Investigation offers up to 50
 redacted newest source-record previews for inspection only. The sample may
 overlap the canonical prefix and adds nothing to totals, monitoring, or
-evaluation. The newest sample is unavailable if an
+evaluation. Its preview text is sanitized before storage; a complete final
+record is included even without a trailing newline. The newest sample is unavailable if an
 archive expands beyond 512 MiB. A completed archive with an
 unfinished final JSONL record is skipped; active `.jsonl` files can retain
 complete records before an unfinished final line.

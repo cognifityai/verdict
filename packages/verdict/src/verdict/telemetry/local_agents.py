@@ -261,7 +261,7 @@ def _legacy_bounded_text(value: str) -> str:
 
 
 def _bounded_turn_text(value: str, *, source_truncated: bool = False) -> _BoundedText:
-    redacted = redact(value) or ""
+    redacted = redact_structure(value) or ""
     encoded = redacted.encode("utf-8")
     return _BoundedText(
         _bounded_utf8(redacted, _MAX_TURN_CONTENT_BYTES),
@@ -754,17 +754,20 @@ def _latest_source_sample(
         raise ValueError("local_source_changed")
     if decoded_size > len(tail):
         tail = tail.partition(b"\n")[2]
-    if not tail.endswith((b"\n", b"\r")):
-        tail = tail.rpartition(b"\n")[0]
     rows = []
-    for raw in tail.splitlines()[-50:]:
+    lines = tail.splitlines()[-50:]
+    for index, raw in enumerate(lines):
         if not raw.strip():
             continue
         try:
             row = _mapping(json.loads(raw))
         except (UnicodeDecodeError, json.JSONDecodeError, RecursionError):
+            if index == len(lines) - 1 and not tail.endswith((b"\n", b"\r")):
+                break
             return {"status": "unavailable_malformed_record", "records": []}
         if row is None:
+            if index == len(lines) - 1 and not tail.endswith((b"\n", b"\r")):
+                break
             return {"status": "unavailable_malformed_record", "records": []}
         payload = _mapping(row.get("payload")) or {}
         message = _mapping(row.get("message")) or {}
@@ -862,7 +865,7 @@ def _tool_name(payload: dict[str, object]) -> str:
 
 def _bounded_redacted_content(value: object) -> str:
     try:
-        sanitized = redact(value) if isinstance(value, str) else redact_structure(value)
+        sanitized = redact_structure(value)
         text = (
             sanitized
             if isinstance(sanitized, str)

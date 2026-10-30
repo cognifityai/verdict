@@ -16,7 +16,9 @@ the product is refined.
 - Oversized local histories retain their bounded canonical prefix and show a
   separate redacted sample of up to 50 newest source records in Investigation.
   The newest sample is inspection only and is unavailable for compressed
-  histories expanding beyond 512 MiB.
+  histories expanding beyond 512 MiB. Encoded JSON text in previews is
+  sanitized before storage; a complete final source record appears in the
+  sample even when the file has no trailing newline.
 
 ### Fixed
 

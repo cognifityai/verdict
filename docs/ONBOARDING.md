@@ -123,7 +123,9 @@ any earlier accepted evidence retained. Investigation shows a separate sample
 of up to 50 newest source records when available. It may overlap the canonical
 prefix and is inspection only; the
 run status, token totals, issue counts, monitoring, and evaluation use captured
-evidence. With content capture disabled, newest records have no text previews.
+evidence. Preview text is sanitized before storage, and a complete final
+record may appear without a trailing newline. With content capture disabled,
+newest records have no text previews.
 Compressed histories expanding beyond 512 MiB cannot provide this
 sample. A file with no usable record in the prefix, or a
 record exceeding the line bound, can still be skipped with an explicit reason.

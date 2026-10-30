@@ -58,7 +58,9 @@ file, Verdict verifies that the archive starts with the same decoded history
 before updating that run.
 Verdict parses at most 128 MiB of decoded history per file and labels a longer
 history partial. Investigation can show up to 50 newest source records as a
-redacted inspection sample. It may overlap the canonical prefix and adds
+redacted inspection sample. Previews are sanitized before storage, and a
+complete final record can appear without a trailing newline. It may overlap
+the canonical prefix and adds
 nothing to token totals, issue counts, monitoring, or evaluation. With content capture disabled, the sample
 contains only recognized record kinds and timestamps. The 1 GiB
 file limit applies to physical bytes, including compressed archives. Larger
