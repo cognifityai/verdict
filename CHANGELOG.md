@@ -26,7 +26,9 @@ the product is refined.
   values, private-key blocks, encoded URL credentials, and provider keys after
   an underscore. Distinctive provider and GitHub credentials directly adjacent
   to phone or IP values are also redacted. Harmless JSON formatting and literal
-  Unicode escapes are preserved when no content needs redaction. Previously
+  Unicode escapes are preserved when no content needs redaction. Credentials
+  recoverable through nested JSON string and Unicode-escape layers are removed
+  before persistence. Previously
   stored rows are not rewritten.
 - OpenAI GPT-6 judge requests omit unsupported temperature, authenticated
   dashboards gate the interactive API documentation, and interrupted capture

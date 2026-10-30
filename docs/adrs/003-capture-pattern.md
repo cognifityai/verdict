@@ -180,7 +180,8 @@ target deployment before relying on them.
   Every string key and value in their JSON-compatible nested structures is
   sanitized recursively, including OpenAI tool arguments and Anthropic-style
   tool inputs/results. Traversal has node and character budgets. Recursive
-  Unicode key decoding uses the same nesting budget and fails closed beyond it.
+  Unicode key decoding and serialized-string inspection use bounded nesting;
+  recognizable credentials decoded from those strings are removed before storage.
   Cycles, repeated
   container references, excessive depth/size, non-finite numbers, non-string
   object keys, and unsupported objects fail closed rather than being copied.
