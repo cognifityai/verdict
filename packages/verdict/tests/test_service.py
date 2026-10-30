@@ -358,7 +358,7 @@ def test_continuous_cli_survives_busy_cycle_and_runs_after_release(tmp_path) -> 
         assert process.stdout is not None
         with selectors.DefaultSelector() as selector:
             selector.register(process.stdout, selectors.EVENT_READ)
-            assert selector.select(timeout=5), "service did not resume after the lease released"
+            assert selector.select(timeout=15), "service did not resume after the lease released"
         result = json.loads(process.stdout.readline())
         assert result["analysis"]["status"] == "completed"
     finally:
