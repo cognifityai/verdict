@@ -206,3 +206,29 @@ def test_metadata_only_newest_preview_has_no_content(tmp_path, monkeypatch, stor
         == 1
     )
     assert all(not row["preview"] for row in read_sample()["latestSample"]["records"])
+
+
+def test_newest_record_kind_redacts_encoded_credential_before_storage(
+    tmp_path,
+    monkeypatch,
+    store,
+):
+    credential = "sk-" + "S" * 24
+    disguised = r"\u0073\u006b\u002d" + "S" * 24
+    tail = {
+        "timestamp": "2026-08-30T11:00:00Z",
+        "type": "event_msg",
+        "payload": {"type": disguised, "message": "synthetic kind"},
+    }
+    root = prepare(tmp_path, monkeypatch, True, tail)
+    storage, read_sample, _api_storage = store
+    assert (
+        local_agents.capture_local_agents(
+            storage,
+            tenant_id="local",
+            codex_root=root,
+        ).stored
+        == 1
+    )
+    kinds = [row["kind"] for row in read_sample()["latestSample"]["records"]]
+    assert all(kind.encode("ascii").decode("unicode_escape") != credential for kind in kinds)

@@ -40,7 +40,7 @@ from verdict.evidence import (
 from verdict.local_recent_facts import LocalFullProjection, LocalRecentFact, tail_turn_json
 from verdict.local_source_revision import _MAX_ZSTD_WINDOW_BYTES, LocalSourceRevision
 from verdict.normalized_evidence import _LegacyLocalTextUpgrade
-from verdict.redaction import redact, redact_structure
+from verdict.redaction import redact_structure
 from verdict.schema import Operation, Trace
 from verdict.storage.base import Storage
 from verdict.telemetry.model import ImportContext, ImportSummary, MappingResult
@@ -791,7 +791,7 @@ def _latest_source_sample(
         occurred_at = _time(row.get("timestamp"))
         rows.append({
             "at": occurred_at.isoformat() if occurred_at is not None else "",
-            "kind": _bounded_utf8(redact(kind) or "unknown", 80),
+            "kind": _bounded_utf8(redact_structure(kind) or "unknown", 80),
             "preview": _bounded_utf8(preview, 512),
         })
     return {"status": "sampled" if rows else "unavailable_no_records", "records": rows}
