@@ -316,7 +316,7 @@ def _contains_sensitive_encoded_layer(
     """Check each bounded JSON-string and Unicode-escape layer before storage."""
     current = value
     for _ in range(_MAX_NESTING_DEPTH):
-        if current.startswith('"'):
+        if current.lstrip().startswith('"'):
             try:
                 unwrapped = json.loads(current)
             except (json.JSONDecodeError, RecursionError, ValueError):
@@ -1235,7 +1235,7 @@ def redact_structure(
                     if not duplicate_key and sanitized == parsed and redact(value, mode, secret) == value:
                         return value
                     return json.dumps(sanitized, separators=(",", ":"), ensure_ascii=False)
-        if (_JSON_UNICODE_KEY_ESCAPE.search(value) or value.startswith('"')) \
+        if (_JSON_UNICODE_KEY_ESCAPE.search(value) or value.lstrip().startswith('"')) \
                 and _contains_sensitive_encoded_layer(value, mode, secret):
             return _REDACTED
         return redact(value, mode=mode, secret=secret)
