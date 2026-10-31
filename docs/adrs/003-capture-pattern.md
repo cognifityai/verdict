@@ -179,14 +179,15 @@ target deployment before relying on them.
 - Provider message persistence uses an allowlist of supported top-level fields.
   Every string key and value in their JSON-compatible nested structures is
   sanitized recursively, including OpenAI tool arguments and Anthropic-style
-  tool inputs/results. Traversal has node and character budgets. Recursive
-  Unicode key decoding and serialized-string inspection use bounded nesting;
-  recognizable credentials decoded from those strings are removed before storage.
+  tool inputs/results. Traversal has node and character budgets. Mapping keys
+  containing Unicode escapes are omitted. Serialized-string
+  inspection uses bounded nesting and removes recognizable credentials decoded
+  from values before storage while retaining nonsensitive text.
   Cycles, repeated
   container references, excessive depth/size, non-finite numbers, non-string
   object keys, and unsupported objects fail closed rather than being copied.
   Sanitized structures never retain caller-owned aliases, and mapping keys that
-  collide after redaction receive deterministic suffixes so no value is lost.
+  collide after redaction receive deterministic suffixes so retained values are preserved.
 - Judge reasoning/errors and manual-span names, errors, and nested attributes are
   sanitized at persistence as well.
 - Content is sanitized before content-size bounds. With content capture

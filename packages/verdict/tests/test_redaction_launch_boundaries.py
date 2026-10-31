@@ -48,6 +48,25 @@ def test_literal_unicode_escape_in_prose_preserves_the_sentence() -> None:
     assert redact_structure(raw) == raw
 
 
+def test_escaped_prose_keeps_nonsensitive_text_when_a_url_is_redacted() -> None:
+    raw = r"Review https://example.com/pr/1 now, caf\u00e9"
+    assert redact_structure(raw) == "Review <URL> now, café"
+    assert redact_structure(redact_structure(raw)) == redact_structure(raw)
+
+
+def test_encoded_credential_in_prose_removes_only_the_credential() -> None:
+    raw = r"Please inspect \u0073k-" + "S" * 24 + " carefully"
+    assert redact_structure(raw) == "Please inspect <PROVIDER_KEY> carefully"
+    assert redact_structure(redact_structure(raw)) == redact_structure(raw)
+
+
+def test_incomplete_json_like_prose_keeps_safe_context() -> None:
+    raw = r'{"note":"caf\u00e9","url":"https://example.com"'
+    clean = redact_structure(raw)
+    assert clean.startswith('{"note":"café","url":"<URL>')
+    assert "example.com" not in clean
+
+
 @pytest.mark.parametrize("label", ["PRIVATE KEY", "RSA PRIVATE KEY", "EC PRIVATE KEY",
                                    "OPENSSH PRIVATE KEY", "ENCRYPTED PRIVATE KEY"])
 @pytest.mark.parametrize("separator", ["\n", r"\n"])

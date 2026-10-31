@@ -265,7 +265,7 @@ def test_explanation_drops_embedded_unicode_escape_from_historical_trace(tmp_pat
     storage.close()
 
 
-def test_explanation_result_fails_closed_on_encoded_provider_key(tmp_path):
+def test_explanation_result_redacts_encoded_provider_key_and_keeps_context(tmp_path):
     class EscapedReply:
         name = "anthropic"
 
@@ -284,7 +284,7 @@ def test_explanation_result_fails_closed_on_encoded_provider_key(tmp_path):
                              config={**selection, "planFingerprint": preview["planFingerprint"],
                                      "maxEstimatedUsd": 1}, confirm_external_egress=True,
                              provider_adapter=EscapedReply())
-    assert result["answer"] == "<REDACTED>"
+    assert result["answer"] == 'Possible issue: {"misc":"<PROVIDER_KEY>"}'
     assert "sk-proj-EEEEEEEEEEEEEEEEEEEEEEEE" not in json.dumps(result)
     storage.close()
 
