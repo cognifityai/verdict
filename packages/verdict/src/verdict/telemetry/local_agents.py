@@ -37,7 +37,7 @@ from verdict.evidence import (
 from verdict.local_recent_facts import LocalFullProjection, LocalRecentFact, tail_turn_json
 from verdict.local_source_revision import LocalSourceRevision
 from verdict.normalized_evidence import _LegacyLocalTextUpgrade
-from verdict.redaction import redact, redact_structure
+from verdict.redaction import _safe_unicode, redact, redact_structure
 from verdict.schema import Operation, Trace
 from verdict.storage.base import Storage
 from verdict.telemetry.model import ImportContext, ImportSummary, MappingResult
@@ -233,7 +233,7 @@ def _time(value: object) -> datetime | None:
 
 
 def _bounded_utf8(value: str, maximum_bytes: int) -> str:
-    encoded = value.encode("utf-8")[:maximum_bytes]
+    encoded = _safe_unicode(value).encode("utf-8")[:maximum_bytes]
     return encoded.decode("utf-8", errors="ignore")
 
 
@@ -247,7 +247,7 @@ def _clean_text(value: object, *, home: Path | None) -> str:
     home_text = str(home or Path.home())
     if home_text and home_text != "/":
         cleaned = cleaned.replace(home_text, "~")
-    return cleaned.strip()
+    return _safe_unicode(cleaned.strip())
 
 
 def _legacy_bounded_text(value: str) -> str:
@@ -784,7 +784,7 @@ def _parse_codex(path: Path, *, home: Path | None) -> _ParsedHistory:
                 if parent_id == session_id:
                     raise ValueError("run cannot be its own parent")
                 parent_session_id = parent_id
-            version = str(payload.get("cli_version") or "")[:256]
+            version = _bounded_utf8(str(payload.get("cli_version") or ""), 256)
             continue
         if not session_id or payload is None:
             continue
@@ -968,7 +968,7 @@ def _parse_claude(path: Path, *, home: Path | None) -> _ParsedHistory:
                 parent_session_id = root_session_id
             else:
                 session_id = root_session_id
-            version = str(row.get("version") or "")[:256]
+            version = _bounded_utf8(str(row.get("version") or ""), 256)
         is_human = (
             row.get("type") == "user"
             and row.get("sourceToolAssistantUUID") is None
