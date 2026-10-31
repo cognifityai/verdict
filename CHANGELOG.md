@@ -29,9 +29,11 @@ the product is refined.
   to phone or IP values are also redacted. Harmless JSON formatting and literal
   Unicode escapes are preserved when no content needs redaction. Credentials
   recoverable through nested JSON string and Unicode-escape layers are removed
-  before persistence. Ambiguous escaped mapping keys are omitted, while
-  redacted prose retains its nonsensitive text. Previously stored rows are not
-  rewritten.
+  before persistence, including quoted serialized fragments within prose.
+  Valid escaped surrogate pairs retain their Unicode character; invalid
+  surrogates and NUL are made safe for UTF-8 storage. Ambiguous escaped mapping
+  keys are omitted, while redacted prose retains its nonsensitive text.
+  Previously stored rows are not rewritten.
 - OpenAI GPT-6 judge requests omit unsupported temperature, authenticated
   dashboards gate the interactive API documentation, and interrupted capture
   threads record a terminal failed job.

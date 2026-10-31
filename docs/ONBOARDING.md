@@ -755,8 +755,9 @@ excessively deep or large values fail closed. Repeated container references fail
 closed at every occurrence so sanitized output cannot alias caller-owned data;
 redacted mapping-key collisions preserve values under deterministic
 suffixed keys. Mapping keys containing Unicode escapes are omitted;
-bounded JSON-string and Unicode-escape value inspection removes recognized
-credentials hidden behind serialization layers while retaining nonsensitive
+bounded JSON-string and Unicode-escape value inspection, including quoted
+fragments in prose, removes recognized credentials hidden behind serialization
+layers while retaining nonsensitive
 prose. Unresolved excessive nesting fails closed. The pattern detector uses
 Luhn validation
 for complete card candidates and grouped prefixes; an ambiguous numeric
