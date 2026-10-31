@@ -182,9 +182,10 @@ target deployment before relying on them.
   tool inputs/results. Traversal has node and character budgets. Mapping keys
   containing Unicode escapes are omitted. Serialized-string
   inspection uses bounded nesting and removes recognizable credentials decoded
-  from values before storage while retaining nonsensitive text.
-  Cycles, repeated
-  container references, excessive depth/size, non-finite numbers, non-string
+  from values and quoted fragments before storage while retaining nonsensitive
+  text. Valid surrogate pairs are combined; NUL and invalid surrogate units
+  are replaced before UTF-8 persistence. Cycles, repeated container references,
+  excessive depth/size, non-finite numbers, non-string
   object keys, and unsupported objects fail closed rather than being copied.
   Sanitized structures never retain caller-owned aliases, and mapping keys that
   collide after redaction receive deterministic suffixes so retained values are preserved.

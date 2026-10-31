@@ -1,4 +1,5 @@
 import json
+import re
 
 import pytest
 import verdict
@@ -26,6 +27,73 @@ def recover(value):
     if isinstance(value, str):
         return value.encode('ascii').decode('unicode_escape')
     return None
+
+
+def recover_embedded(value):
+    """Try the supported quoted-string and Unicode layers in surrounding prose."""
+    pending = [value]
+    seen = set()
+    while pending:
+        current = pending.pop()
+        if not isinstance(current, str) or current in seen:
+            continue
+        seen.add(current)
+        if SYNTHETIC_KEY in current:
+            return True
+        decoded = re.sub(r"\\u([0-9a-fA-F]{4})", lambda m: chr(int(m[1], 16)), current)
+        if decoded != current:
+            pending.append(decoded)
+        for match in re.finditer(r'"(?:\\.|[^"\\])*"', current):
+            try:
+                pending.append(json.loads(match.group()))
+            except ValueError:
+                pass
+    return False
+
+
+@pytest.mark.parametrize('level', [0, 1, 2, 3])
+@pytest.mark.parametrize('mode', ['redact', 'hash'])
+def test_encoded_credential_in_serialized_prose_fragment(level, mode):
+    fragment = ''.join(f'\\u{ord(c):04x}' for c in SYNTHETIC_KEY[:3]) + SYNTHETIC_KEY[3:]
+    for _ in range(level):
+        fragment = json.dumps(fragment)
+    raw = 'Synthetic tool returned ' + fragment + '; inspect the result.'
+    clean = redact_structure(raw, mode=mode, secret='synthetic-test-key' if mode == 'hash' else None)
+    assert not recover_embedded(clean)
+    assert 'Synthetic tool returned ' in clean and '; inspect the result.' in clean
+    assert redact_structure(clean, mode=mode,
+                            secret='synthetic-test-key' if mode == 'hash' else None) == clean
+
+
+@pytest.mark.parametrize('shape', ['unclosed', 'double_bare', 'double_unclosed'])
+def test_malformed_or_bare_double_escaped_credential_is_not_recoverable(shape):
+    fragment = ''.join(f'\\u{ord(c):04x}' for c in SYNTHETIC_KEY[:3]) + SYNTHETIC_KEY[3:]
+    if shape == 'unclosed':
+        fragment = json.dumps(fragment)[:-1]
+    elif shape == 'double_bare':
+        fragment = fragment.replace('\\', '\\\\')
+    else:
+        fragment = json.dumps(json.dumps(fragment))[:-1]
+    clean = redact_structure('Begin ' + fragment + '; continue.')
+    assert not recover_embedded(clean)
+    assert redact_structure(clean) == clean
+
+
+def test_many_serialized_fragments_fail_closed_at_work_limit():
+    raw = 'prefix ' + ('"\\u0061" ' * 4097)
+    assert redact_structure(raw) == '<REDACTED>'
+
+
+def test_plain_quotes_do_not_consume_encoded_fragment_budget():
+    raw = ('"plain" ' * 4097) + r'caf\u00e9 https://example.invalid'
+    clean = redact_structure(raw)
+    assert clean.startswith('"plain" ')
+    assert clean.endswith('café <URL>')
+
+
+def test_oversize_serialized_prose_fails_closed():
+    raw = 'prefix "\\u0061" ' + 'a' * 1_000_000
+    assert redact_structure(raw) == '<REDACTED>'
 
 @pytest.mark.parametrize('level', [1, 2, 3, 4])
 @pytest.mark.parametrize('mode', ['redact', 'hash'])

@@ -210,6 +210,8 @@ _NON_SENSITIVE_TOKEN_FIELDS = frozenset(
     }
 )
 _JSON_UNICODE_KEY_ESCAPE = re.compile(r"\\u([0-9A-Fa-f]{4})", re.IGNORECASE)
+_JSON_QUOTED_FRAGMENT = re.compile(r'"(?:\\.|[^"\\])*"')
+_MAX_ENCODED_FRAGMENTS = 4096
 _PEM_PRIVATE_KEY_BEGIN = re.compile(
     r"-----BEGIN (?P<label>(?:[A-Z0-9]+ )*PRIVATE KEY)-----"
 )
@@ -298,12 +300,19 @@ _PATTERNS = {
 }
 
 
+def _safe_unicode(value: str) -> str:
+    """Return valid Unicode scalars without PostgreSQL's forbidden NUL."""
+    return (value.encode("utf-16-le", "surrogatepass")
+            .decode("utf-16-le", "replace").replace("\x00", "\ufffd"))
+
+
 def _decode_unicode_escapes(value: str) -> str | None:
     for _ in range(_MAX_NESTING_DEPTH):
         decoded = _JSON_UNICODE_KEY_ESCAPE.sub(
             lambda match: chr(int(match.group(1), 16)),
             value,
         )
+        decoded = _safe_unicode(decoded)
         if decoded == value:
             return value
         value = decoded
@@ -317,6 +326,7 @@ def _redact_encoded_text(
     current = value
     wrappers = 0
     structured = False
+    fragment_changed = False
     for _ in range(_MAX_NESTING_DEPTH):
         if current.lstrip().startswith(("{", "[")):
             try:
@@ -334,9 +344,69 @@ def _redact_encoded_text(
                 pass
             else:
                 if isinstance(unwrapped, str) and unwrapped != current:
-                    current = unwrapped
+                    current = _safe_unicode(unwrapped)
                     wrappers += 1
                     continue
+        if '"' in current and "\\" in current:
+            pieces: list[str] = []
+            cursor = 0
+            fragments = 0
+            changed = False
+            for match in _JSON_QUOTED_FRAGMENT.finditer(current):
+                pieces.append(current[cursor:match.start()])
+                original = match.group(0)
+                if "\\" not in original:
+                    pieces.append(original)
+                    cursor = match.end()
+                    continue
+                fragments += 1
+                if fragments > _MAX_ENCODED_FRAGMENTS:
+                    return _REDACTED
+                try:
+                    decoded_fragment = json.loads(original)
+                except (json.JSONDecodeError, RecursionError, ValueError):
+                    pieces.append(original)
+                else:
+                    sanitized_fragment = redact_structure(
+                        decoded_fragment, mode=mode, secret=secret, _depth=depth + 1,
+                    )
+                    if not isinstance(sanitized_fragment, str):
+                        return _REDACTED
+                    if sanitized_fragment != decoded_fragment:
+                        pieces.append(json.dumps(sanitized_fragment, ensure_ascii=False))
+                        changed = True
+                        fragment_changed = True
+                    else:
+                        pieces.append(original)
+                cursor = match.end()
+            if fragments:
+                pieces.append(current[cursor:])
+                assembled = "".join(pieces)
+                if len(assembled) > _MAX_STRUCTURE_CHARACTERS:
+                    return _REDACTED
+                if changed:
+                    current = assembled
+                    continue
+        if "\\\\u" in current:
+            probe = current
+            for _ in range(_MAX_NESTING_DEPTH):
+                collapsed = probe.replace("\\\\", "\\")
+                decoded = _decode_unicode_escapes(collapsed)
+                if decoded is None:
+                    return _REDACTED
+                before = redact(probe, mode, secret)
+                after = redact(decoded, mode, secret)
+                if Counter(_PLACEHOLDER.findall(after)) > Counter(_PLACEHOLDER.findall(before)):
+                    current = after
+                    break
+                if collapsed == probe:
+                    break
+                probe = collapsed
+            else:
+                return _REDACTED
+            if current != value:
+                continue
+            break
         if _JSON_UNICODE_KEY_ESCAPE.search(current):
             decoded = _decode_unicode_escapes(current)
             if decoded is None:
@@ -351,7 +421,8 @@ def _redact_encoded_text(
                  if structured else redact(current, mode, secret))
     if not isinstance(sanitized, str):
         return _REDACTED
-    if sanitized == current and redact(value, mode, secret) == value:
+    if (not fragment_changed and sanitized == current
+            and redact(value, mode, secret) == value):
         return value
     for _ in range(wrappers):
         sanitized = json.dumps(sanitized, ensure_ascii=False)
@@ -875,7 +946,7 @@ def redact(
     if mode == "hash" and not secret:
         raise ValueError("hash mode requires a redaction_secret")
 
-    current = text
+    current = _safe_unicode(text)
     for _ in range(_MAX_REDACTION_PASSES):
         following = _redact_once(current, mode, secret)
         if following == current:
@@ -1225,6 +1296,7 @@ def redact_structure(
     if _depth > _MAX_NESTING_DEPTH:
         return _REDACTED
     if isinstance(value, str):
+        value = _safe_unicode(value)
         if value.lstrip().startswith(("{", "[")):
             duplicate_key = False
 

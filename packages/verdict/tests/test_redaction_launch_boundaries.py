@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import json
+import os
+from contextlib import ExitStack
+from datetime import datetime, timezone
 
 import pytest
 import verdict
+from _postgres_test_safety import isolated_test_dsn
 from fastapi.testclient import TestClient
 from verdict.dashboard.app import create_app
 from verdict.redaction import redact, redact_structure
+from verdict.schema import Trace
 from verdict.storage.sqlite import SQLiteStorage
 
 CARD = "4111111111111111"
@@ -46,6 +51,66 @@ def test_json_text_redacts_numeric_card_without_reformatting_safe_json() -> None
 def test_literal_unicode_escape_in_prose_preserves_the_sentence() -> None:
     raw = r"Why does the page show \u2019?"
     assert redact_structure(raw) == raw
+
+
+def test_harmless_double_escaped_fragment_preserves_context():
+    raw = r'Inspect "\\u2019" at https://example.invalid'
+    assert redact_structure(raw) == r'Inspect "\\u2019" at <URL>'
+
+
+@pytest.mark.parametrize('glyph', [r'\ud83d\ude00', r'\ud800', r'\udfff', r'\u0000'])
+@pytest.mark.parametrize('mode', ['redact', 'hash'])
+def test_unicode_escape_prose_is_persistable_after_redaction(glyph, mode):
+    raw = 'Inspect ' + glyph + ' https://example.invalid now'
+    clean = redact_structure(raw, mode=mode,
+                             secret='synthetic-test-key' if mode == 'hash' else None)
+    assert 'Inspect ' in clean and ' now' in clean
+    assert 'example.invalid' not in clean
+    assert '\x00' not in clean
+    clean.encode('utf-8')
+    assert redact_structure(clean, mode=mode,
+                            secret='synthetic-test-key' if mode == 'hash' else None) == clean
+
+
+def test_json_document_with_lone_surrogate_keeps_safe_context():
+    clean = redact_structure(r'{"note":"\ud800","password":"synthetic"}')
+    assert json.loads(clean)['password'] == '<SECRET>'
+    assert '\x00' not in clean
+    clean.encode('utf-8')
+
+
+@pytest.mark.parametrize('backend', ['sqlite', 'postgres'])
+def test_escaped_unicode_and_nul_reach_storage_and_api_safely(tmp_path, backend):
+    with ExitStack() as stack:
+        if backend == 'postgres':
+            dsn = os.environ.get('VERDICT_TEST_POSTGRES_DSN')
+            if not dsn:
+                pytest.skip('disposable PostgreSQL DSN is required')
+            from verdict.storage import PostgresStorage
+            url = stack.enter_context(isolated_test_dsn(dsn))
+            storage = PostgresStorage(url, min_pool=1, max_pool=2)
+        else:
+            url = str(tmp_path / 'synthetic.db')
+            storage = SQLiteStorage(url)
+        stack.callback(storage.close)
+        now = datetime.now(timezone.utc)
+        storage.insert_trace(Trace(
+            trace_id='synthetic-unicode', tenant_id='local',
+            started_at=now, ended_at=now,
+            prompt_redacted=r'Inspect \u0000 and \ud83d\ude00 and \ud800 https://example.invalid now',
+        ))
+        saved = storage.get_trace('synthetic-unicode')
+        assert saved is not None
+        assert saved.prompt_redacted.startswith('Inspect ')
+        assert '😀' in saved.prompt_redacted
+        assert '\x00' not in saved.prompt_redacted
+        saved.prompt_redacted.encode('utf-8')
+        with TestClient(create_app(storage=url, tenant_id='local')) as client:
+            response = client.get('/api/data?trace_id=synthetic-unicode&report_days=0')
+        assert response.status_code == 200
+        assert 'Inspect ' in response.text
+        assert 'example.invalid' not in response.text
+        assert '\\u0000' not in response.text
 
 
 def test_escaped_prose_keeps_nonsensitive_text_when_a_url_is_redacted() -> None:
