@@ -35,6 +35,17 @@ def test_encoded_credentials_remain_unrecoverable(level, mode):
     assert recover(clean) != SYNTHETIC_KEY
 
 
+@pytest.mark.parametrize('level', [1, 2, 3, 4])
+@pytest.mark.parametrize('mode', ['redact', 'hash'])
+def test_encoded_credentials_in_mapping_keys_remain_unrecoverable(level, mode):
+    key = encoded_secret(level)
+    clean = redact_structure(
+        {key: 'benign'}, mode=mode,
+        secret='synthetic-test-key' if mode == 'hash' else None,
+    )
+    assert all(recover(sanitized_key) != SYNTHETIC_KEY for sanitized_key in clean)
+
+
 @pytest.mark.parametrize('mode', ['redact', 'hash'])
 def test_json_whitespace_before_encoded_string_does_not_hide_credential(mode):
     raw = ' \n' + encoded_secret(2) + ' '
