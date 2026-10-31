@@ -6042,3 +6042,40 @@ def test_only_turns_with_exactly_one_real_model_are_priced(tmp_path: Path) -> No
     assert mixed["agentTurnsPriced"] == 0 and mixed["agentTurnsUnpriced"] == 1
     with_notice = insights_for("notice", client_notice)
     assert with_notice["agentTurnsPriced"] == 1 and with_notice["agentTurnListPriceUsd"] > 0
+
+
+@pytest.mark.parametrize("case", [
+    "codex_text", "codex_tool_name", "codex_call_id", "codex_version",
+    "claude_version",
+])
+def test_plain_local_history_normalizes_nonidentity_unicode(tmp_path: Path, case: str) -> None:
+    root = tmp_path / "source"
+    if case == "claude_version":
+        records = _claude_records()
+        records[0]["version"] = "v\ud800x"
+        source = "claude"
+    else:
+        records = _codex_records()
+        source = "codex"
+        if case == "codex_text":
+            records[3]["payload"]["message"] = "Review \ud800 https://example.invalid now"
+        elif case == "codex_version":
+            records[0]["payload"]["cli_version"] = "v\ud800x"
+        else:
+            records[4]["payload"]["name" if case == "codex_tool_name" else "call_id"] = (
+                "exec_\ud800command"
+            )
+    _write_jsonl(root / "session.jsonl", records)
+    database = tmp_path / "verdict.db"
+    storage = SQLiteStorage(str(database))
+    try:
+        summary = capture_local_agents(storage, tenant_id="local", **{f"{source}_root": root})
+        assert summary.stored == 1 and summary.skipped == 0
+        [bundle] = storage.list_agent_run_bundles("local")
+        with TestClient(create_app(storage=str(database), tenant_id="local")) as client:
+            response = client.get(f"/api/runs/{bundle.run.run_id}")
+        assert response.status_code == 200
+        response.text.encode("utf-8")
+        assert "example.invalid" not in response.text
+    finally:
+        storage.close()

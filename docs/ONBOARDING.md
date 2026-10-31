@@ -101,6 +101,10 @@ the same roots approved again; committed source revisions are checked on
 replacement. A rescan reads the source files again to detect changes.
 Compressed `.jsonl.zst` Codex histories are not currently included in preview
 or capture, so the reported file total does not include them.
+Imported text and nonidentity metadata normalize invalid surrogate units and
+NUL before byte limits and storage. Session identifiers must be valid UTF-8;
+files with invalid source identities are reported as skipped rather than
+joining distinct sessions under a replacement identifier.
 During setup, **Cancel capture** requests a stop after the current file. The
 job then reports `cancelled`, shows committed progress, and refreshes Home;
 already committed files remain available. Preview the roots and approve a
