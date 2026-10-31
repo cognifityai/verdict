@@ -322,10 +322,21 @@ def test_run_sampling_is_all_or_nothing_and_standalone_traces_are_unchanged() ->
     assert storage.get_trace(standalone.trace_id) is not None
 
 
-def test_sampled_run_controls_the_real_provider_wrapper_sampling_decision() -> None:
+def test_sampled_run_controls_the_real_provider_wrapper_sampling_decision(monkeypatch) -> None:
     from verdict.instrumentors.anthropic import AnthropicInstrumentor
 
     storage = InMemoryStorage()
+    capture_errors: list[str] = []
+    original_append = storage.append_agent_capture
+
+    def observed_append(batch, traces=()):
+        try:
+            return original_append(batch, traces)
+        except ValueError as exc:
+            capture_errors.append(str(exc))
+            raise
+
+    monkeypatch.setattr(storage, "append_agent_capture", observed_append)
     client = verdict.init(
         storage=storage,
         tenant_id="tenant-a",
@@ -354,9 +365,11 @@ def test_sampled_run_controls_the_real_provider_wrapper_sampling_decision() -> N
             turn.set_output(response.content[0].text)
 
     [bundle] = storage.list_agent_run_bundles("tenant-a")
-    [model_event] = [
+    model_events = [
         event for event in bundle.events if event.event_type is AgentEventType.MODEL_CALL
     ]
+    assert len(model_events) == 1, f"capture errors: {capture_errors}"
+    [model_event] = model_events
     assert storage.get_trace(model_event.trace_id) is not None  # type: ignore[arg-type]
 
 
