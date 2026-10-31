@@ -40,6 +40,9 @@ def recover_embedded(value):
         seen.add(current)
         if SYNTHETIC_KEY in current:
             return True
+        collapsed = current.replace('\\\\', '\\')
+        if collapsed != current:
+            pending.append(collapsed)
         decoded = re.sub(r"\\u([0-9a-fA-F]{4})", lambda m: chr(int(m[1], 16)), current)
         if decoded != current:
             pending.append(decoded)
@@ -77,6 +80,21 @@ def test_malformed_or_bare_double_escaped_credential_is_not_recoverable(shape):
     clean = redact_structure('Begin ' + fragment + '; continue.')
     assert not recover_embedded(clean)
     assert redact_structure(clean) == clean
+
+
+def test_mixed_double_and_single_escapes_do_not_hide_a_credential():
+    escaped_key = SYNTHETIC_KEY.replace('K', r'\u004b', 1)
+    raw = 'Begin ' + r'\\u2019' + ' ' + escaped_key + '; continue.'
+    clean = redact_structure(raw)
+    assert not recover_embedded(clean)
+    assert clean.startswith('Begin ') and clean.endswith('; continue.')
+
+
+def test_redacted_fragment_with_unrelated_escape_keeps_prose():
+    raw = 'before "s\\u006b-abcdefghijklmnopqrstuvwxyz" and benign ' + r'\\u2019 after'
+    clean = redact_structure(raw)
+    assert clean.startswith('before ') and clean.endswith(' after')
+    assert '<PROVIDER_KEY>' in clean
 
 
 def test_many_serialized_fragments_fail_closed_at_work_limit():

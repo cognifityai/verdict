@@ -389,6 +389,7 @@ def _redact_encoded_text(
                     continue
         if "\\\\u" in current:
             probe = current
+            projection_changed = False
             for _ in range(_MAX_NESTING_DEPTH):
                 collapsed = probe.replace("\\\\", "\\")
                 decoded = _decode_unicode_escapes(collapsed)
@@ -398,13 +399,15 @@ def _redact_encoded_text(
                 after = redact(decoded, mode, secret)
                 if Counter(_PLACEHOLDER.findall(after)) > Counter(_PLACEHOLDER.findall(before)):
                     current = after
+                    fragment_changed = True
+                    projection_changed = True
                     break
                 if collapsed == probe:
                     break
                 probe = collapsed
             else:
                 return _REDACTED
-            if current != value:
+            if projection_changed:
                 continue
             break
         if _JSON_UNICODE_KEY_ESCAPE.search(current):
