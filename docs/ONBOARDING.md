@@ -124,7 +124,8 @@ any earlier accepted evidence retained. Investigation shows a separate sample
 of up to 50 newest source records when available. It may overlap the canonical
 prefix and is inspection only; the
 run status, token totals, issue counts, monitoring, and evaluation use captured
-evidence. Record kinds and previews are sanitized before storage, and a complete final
+evidence. Supported completed messages can show a bounded redacted preview.
+Record kinds and previews are sanitized before storage, and a complete final
 record may appear without a trailing newline. With content capture disabled,
 newest records have no text previews.
 Compressed histories expanding beyond 512 MiB cannot provide this
@@ -767,11 +768,12 @@ Stripe publishable keys are left readable.
 Unknown top-level provider fields are dropped; malformed, cyclic, non-JSON, and
 excessively deep or large values fail closed. Repeated container references fail
 closed at every occurrence so sanitized output cannot alias caller-owned data;
-redacted mapping-key collisions preserve every value under deterministic
-suffixed keys. Recursive Unicode key decoding and bounded JSON-string/
-Unicode-escape value inspection remove recognized credentials hidden behind
-serialization layers before persistence; unresolved excessive nesting fails
-closed. The pattern detector uses Luhn validation
+redacted mapping-key collisions preserve values under deterministic
+suffixed keys. Mapping keys containing Unicode escapes are omitted;
+bounded JSON-string and Unicode-escape value inspection removes recognized
+credentials hidden behind serialization layers while retaining nonsensitive
+prose. Unresolved excessive nesting fails closed. The pattern detector uses
+Luhn validation
 for complete card candidates and grouped prefixes; an ambiguous numeric
 identifier with a valid card-shaped prefix may also be removed. Standard-library
 validation applies to IP candidates, so

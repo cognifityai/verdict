@@ -1299,7 +1299,7 @@ def test_json_escaped_provider_key_is_removed_from_content_fields_before_sqlite_
     mixed = r'Here is data: {"misc":"\u0073k-proj-BBBBBBBBBBBBBBBBBBBBBBBB"}'
     storage.insert_trace(Trace(trace_id="mixed", tenant_id="local", started_at=now,
                                ended_at=now, prompt_redacted=mixed))
-    assert storage.get_trace("mixed").prompt_redacted == "<REDACTED>"
+    assert storage.get_trace("mixed").prompt_redacted == 'Here is data: {"misc":"<PROVIDER_KEY>"}'
     storage.close()
 
 
@@ -1320,27 +1320,28 @@ def test_json_escaped_provider_key_is_removed_from_other_persisted_text_contract
         dimensions=[DimensionScore(name="quality", verdict=Verdict.FAIL, reasoning=mixed)],
         error=mixed,
     )
-    assert judgment.error == "<REDACTED>"
-    assert judgment.dimensions[0].reasoning == "<REDACTED>"
+    safe_mixed = 'Observed: {"misc":"<PROVIDER_KEY>"}'
+    assert judgment.error == safe_mixed
+    assert judgment.dimensions[0].reasoning == safe_mixed
     conversation = validate_conversation({
         "id": "a" * 32, "tenant_id": "local", "source_scope": "b" * 16,
         "messages": [{"role": "user", "content": mixed}], "end_status": "complete",
         "input_issues": [], "labels": {"intent": mixed},
     })
-    assert conversation["messages"][0]["content"] == "<REDACTED>"
-    assert conversation["labels"]["intent"] == "<REDACTED>"
+    assert conversation["messages"][0]["content"] == safe_mixed
+    assert conversation["labels"]["intent"] == safe_mixed
     storage = SQLiteStorage(str(tmp_path / "conversation-escaped.db"))
     storage.save_conversation(conversation)
     saved = storage.get_conversation("local", conversation["id"])
-    assert saved["messages"][0]["content"] == "<REDACTED>"
+    assert saved["messages"][0]["content"] == safe_mixed
     storage.close()
     rubric = validate_rubric({
         "name": "quality", "version": "1", "target": "conversation",
         "instructions": mixed,
         "dimensions": [{"name": "answer", "description": mixed, "type": "binary"}],
     })
-    assert rubric["instructions"] == "<REDACTED>"
-    assert rubric["dimensions"][0]["description"] == "<REDACTED>"
+    assert rubric["instructions"] == safe_mixed
+    assert rubric["dimensions"][0]["description"] == safe_mixed
     assert canary not in json.dumps([judgment.error, conversation, rubric])
 
 

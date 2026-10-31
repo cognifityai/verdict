@@ -771,16 +771,19 @@ def _latest_source_sample(
             return {"status": "unavailable_malformed_record", "records": []}
         payload = _mapping(row.get("payload")) or {}
         message = _mapping(row.get("message")) or {}
+        item = _mapping(payload.get("item")) or {}
         preview = ""
         if capture_content:
             candidates = (
                 payload.get("message"), payload.get("output"), payload.get("arguments"),
-                message.get("content"),
+                item.get("output"), item.get("arguments"), message.get("content"),
             )
             preview = next((text.value for value in candidates
                             if (text := _safe_text(value, home=home)).value), "")
             if not preview and message:
                 preview = _message_text(message, home=home).value
+            if not preview and item:
+                preview = _message_text(item, home=home).value
         outer = row.get("type")
         kind = str(payload.get("type") or outer or "unknown") if capture_content else (
             outer if isinstance(outer, str) and outer in {

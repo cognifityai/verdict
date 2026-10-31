@@ -17,8 +17,9 @@ the product is refined.
   separate redacted sample of up to 50 newest source records in Investigation.
   The newest sample is inspection only and is unavailable for compressed
   histories expanding beyond 512 MiB. Encoded JSON text in record kinds and previews is
-  sanitized before storage; a complete final source record appears in the
-  sample even when the file has no trailing newline.
+  sanitized before storage; supported completed-message records retain a
+  bounded, redacted text preview. A complete final source record appears in
+  the sample even when the file has no trailing newline.
 
 ### Fixed
 
@@ -42,8 +43,9 @@ the product is refined.
   to phone or IP values are also redacted. Harmless JSON formatting and literal
   Unicode escapes are preserved when no content needs redaction. Credentials
   recoverable through nested JSON string and Unicode-escape layers are removed
-  before persistence. Previously
-  stored rows are not rewritten.
+  before persistence. Ambiguous escaped mapping keys are omitted, while
+  redacted prose retains its nonsensitive text. Previously stored rows are not
+  rewritten.
 - OpenAI GPT-6 judge requests omit unsupported temperature, authenticated
   dashboards gate the interactive API documentation, and interrupted capture
   threads record a terminal failed job.

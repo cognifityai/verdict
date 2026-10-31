@@ -17,6 +17,34 @@ KEY = "sk-" + "FAKECANARY" * 4
 NEWEST = "NEWEST_COMPLETE_SYNTHETIC_MESSAGE"
 
 
+@pytest.mark.parametrize("compressed", [False, True])
+def test_newest_completed_message_has_useful_redacted_preview(
+    tmp_path, monkeypatch, store, compressed,
+):
+    tail = {
+        "timestamp": "2026-08-30T11:00:00Z", "type": "event_msg",
+        "payload": {"type": "item_completed", "item": {
+            "type": "UserMessage", "content": [{"type": "text", "text":
+                r"Review https://example.com/pr/1 now, caf\u00e9"}],
+        }},
+    }
+    root = prepare(tmp_path, monkeypatch, compressed, tail)
+    storage, read_sample, api_storage = store
+    assert local_agents.capture_local_agents(
+        storage, tenant_id="local", codex_root=root,
+    ).stored == 1
+    sample = read_sample()["latestSample"]
+    assert sample["records"][-1]["preview"] == "Review <URL> now, café"
+    [bundle] = storage.list_agent_run_bundles("local")
+    with TestClient(create_app(storage=api_storage, tenant_id="local")) as client:
+        response = client.get(f"/api/runs/{bundle.run.run_id}/recent-local-events")
+    assert response.status_code == 200
+    assert response.json()["latestSample"]["records"][-1]["preview"] == (
+        "Review <URL> now, café"
+    )
+    assert "example.com" not in response.text
+
+
 def prefix():
     return [
         {

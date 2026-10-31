@@ -310,12 +310,23 @@ def _decode_unicode_escapes(value: str) -> str | None:
     return None
 
 
-def _contains_sensitive_encoded_layer(
-    value: str, mode: RedactionMode, secret: str | None,
-) -> bool:
-    """Check each bounded JSON-string and Unicode-escape layer before storage."""
+def _redact_encoded_text(
+    value: str, mode: RedactionMode, secret: str | None, depth: int,
+) -> str:
+    """Redact decoded text while retaining its nonsensitive content."""
     current = value
+    wrappers = 0
+    structured = False
     for _ in range(_MAX_NESTING_DEPTH):
+        if current.lstrip().startswith(("{", "[")):
+            try:
+                parsed = json.loads(current)
+            except (json.JSONDecodeError, RecursionError, ValueError):
+                pass
+            else:
+                if isinstance(parsed, (dict, list)):
+                    structured = True
+                    break
         if current.lstrip().startswith('"'):
             try:
                 unwrapped = json.loads(current)
@@ -324,20 +335,27 @@ def _contains_sensitive_encoded_layer(
             else:
                 if isinstance(unwrapped, str) and unwrapped != current:
                     current = unwrapped
-                    if redact(current, mode, secret) != current:
-                        return True
+                    wrappers += 1
                     continue
         if _JSON_UNICODE_KEY_ESCAPE.search(current):
             decoded = _decode_unicode_escapes(current)
             if decoded is None:
-                return True
+                return _REDACTED
             if decoded != current:
                 current = decoded
-                if redact(current, mode, secret) != current:
-                    return True
                 continue
-        return False
-    return True
+        break
+    else:
+        return _REDACTED
+    sanitized = (redact_structure(current, mode=mode, secret=secret, _depth=depth + 1)
+                 if structured else redact(current, mode, secret))
+    if not isinstance(sanitized, str):
+        return _REDACTED
+    if sanitized == current and redact(value, mode, secret) == value:
+        return value
+    for _ in range(wrappers):
+        sanitized = json.dumps(sanitized, ensure_ascii=False)
+    return sanitized
 
 
 def _is_sensitive_key(key: str) -> bool:
@@ -1235,9 +1253,8 @@ def redact_structure(
                     if not duplicate_key and sanitized == parsed and redact(value, mode, secret) == value:
                         return value
                     return json.dumps(sanitized, separators=(",", ":"), ensure_ascii=False)
-        if (_JSON_UNICODE_KEY_ESCAPE.search(value) or value.lstrip().startswith('"')) \
-                and _contains_sensitive_encoded_layer(value, mode, secret):
-            return _REDACTED
+        if _JSON_UNICODE_KEY_ESCAPE.search(value) or value.lstrip().startswith('"'):
+            return _redact_encoded_text(value, mode, secret, _depth)
         return redact(value, mode=mode, secret=secret)
     if value is None or isinstance(value, bool):
         return value
@@ -1263,11 +1280,7 @@ def redact_structure(
                 if not isinstance(key, str):
                     return _REDACTED
                 if _JSON_UNICODE_KEY_ESCAPE.search(key):
-                    decoded_key = _decode_unicode_escapes(key)
-                    if decoded_key is None:
-                        continue
-                    if _is_sensitive_key(decoded_key) or redact(decoded_key, mode, secret) != decoded_key:
-                        continue
+                    continue
                 sanitized_key = redact(key, mode=mode, secret=secret) or _REDACTED
                 if _is_sensitive_key(key):
                     entries.append(
