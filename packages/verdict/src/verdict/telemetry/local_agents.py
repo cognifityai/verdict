@@ -56,16 +56,13 @@ _COMMAND_TOOLS = frozenset({"bash", "shell", "exec_command", "run_command"})
 _MAX_CONTENT_CHARS = 1_000
 _MAX_TURN_CONTENT_BYTES = 65_536
 _MAX_FILES = 100_000
-_MAX_SCAN_FILES = 1_000
-_MAX_SCAN_RAW_BYTES = 128 * 1024 * 1024
-_MAX_SCAN_PROJECTED_ROWS = 100_000
-_MAX_SCAN_SANITIZED_BYTES = 256 * 1024 * 1024
 _MAX_EVENTS = 250_000
 _MAX_PARSED_EVENTS = 100_000
 _MAX_STORED_EVENTS = 1_500
 _MAX_RECENT_EVENTS = 50
 _MAX_LINE_BYTES = 16 * 1024 * 1024
 _MAX_LOCAL_FILE_BYTES = 128 * 1024 * 1024
+_MAX_LOCAL_VERIFY_BYTES = 1024 * 1024 * 1024
 _MAX_FULL_RAW_BYTES = 32 * 1024 * 1024
 _MAX_FULL_RECORDS = 5_000
 _MAX_FULL_PROJECTED_ROWS = 5_000
@@ -102,10 +99,13 @@ class LocalCaptureSummary:
     skip_reasons: dict[str, int] = field(default_factory=dict)
     codex_model_calls: ImportSummary | None = None
     codex_model_call_error: str | None = None
+    source_partial_files: int = 0
+    partial_reasons: dict[str, int] = field(default_factory=dict)
 
     def add_skip(self, reason: str) -> None:
         self.skipped += 1
         self.skip_reasons[reason] = self.skip_reasons.get(reason, 0) + 1
+
 
     def as_dict(self) -> dict[str, object]:
         result: dict[str, object] = {
@@ -114,6 +114,10 @@ class LocalCaptureSummary:
             "skipped": self.skipped,
             "skip_reasons": dict(sorted(self.skip_reasons.items())),
         }
+        if self.source_partial_files:
+            result["source_complete_files"] = self.stored - self.source_partial_files
+            result["source_partial_files"] = self.source_partial_files
+            result["partial_reasons"] = dict(sorted(self.partial_reasons.items()))
         if self.scan_incomplete:
             result["deferred"] = self.deferred
             result["scan_incomplete"] = True
@@ -139,6 +143,14 @@ class LocalCaptureSummary:
                 "error": self.codex_model_call_error,
             }
         return result
+
+
+class CaptureCancelled(Exception):
+    """A requested stop, carrying progress committed before the stop."""
+
+    def __init__(self, summary: LocalCaptureSummary) -> None:
+        super().__init__("capture_cancelled")
+        self.summary = summary
 
 
 @dataclass
@@ -542,18 +554,32 @@ def _finalize_claude_usage(turn: _RawTurn) -> None:
 
 
 def _records(path: Path) -> tuple[list[dict[str, object]], LocalSourceRevision]:
+    if path.stat().st_size > _MAX_LOCAL_VERIFY_BYTES:
+        raise ValueError("history_file_too_large")
     records: list[dict[str, object]] = []
-    omitted_partial_lines = 0
+    partial_tail = False
     prefix_digest = hashlib.sha256()
     prefix_bytes = 0
     full_digest = hashlib.sha256()
     full_bytes = 0
     with path.open("rb") as handle:
         while raw := handle.readline(_MAX_LINE_BYTES + 1):
+            if full_bytes + len(raw) > _MAX_LOCAL_VERIFY_BYTES:
+                raise ValueError("history_file_too_large")
             if len(raw) > _MAX_LINE_BYTES:
                 raise ValueError("history_line_too_large")
             if full_bytes + len(raw) > _MAX_LOCAL_FILE_BYTES:
-                raise ValueError("history_file_too_large")
+                # Keep a bounded parsed prefix, but hash the remainder so the
+                # committed revision still identifies the entire source file.
+                full_digest.update(raw)
+                full_bytes += len(raw)
+                while block := handle.read(1024 * 1024):
+                    if full_bytes + len(block) > _MAX_LOCAL_VERIFY_BYTES:
+                        raise ValueError("history_file_too_large")
+                    full_digest.update(block)
+                    full_bytes += len(block)
+                partial_tail = True
+                break
             full_digest.update(raw)
             full_bytes += len(raw)
             if not raw.strip():
@@ -569,7 +595,7 @@ def _records(path: Path) -> tuple[list[dict[str, object]], LocalSourceRevision]:
                 # Preserve every complete record and expose the omission; a
                 # malformed newline-terminated record still rejects the file.
                 if not raw.endswith((b"\n", b"\r")) and not handle.read(1):
-                    omitted_partial_lines += 1
+                    partial_tail = True
                     break
                 raise ValueError("malformed_jsonl") from exc
             mapped = _mapping(row)
@@ -580,7 +606,7 @@ def _records(path: Path) -> tuple[list[dict[str, object]], LocalSourceRevision]:
             prefix_bytes += len(raw)
     return records, LocalSourceRevision(
         full_bytes, full_digest.hexdigest(), prefix_bytes,
-        prefix_digest.hexdigest(), bool(omitted_partial_lines),
+        prefix_digest.hexdigest(), partial_tail,
     )
 
 
@@ -1697,6 +1723,7 @@ def capture_local_agents(
     capture_content: bool = True,
     home: Path | None = None,
     progress: Callable[[int, int], None] | None = None,
+    should_cancel: Callable[[], bool] | None = None,
 ) -> LocalCaptureSummary:
     """Rescan selected local roots into the canonical agent capture boundary.
 
@@ -1724,34 +1751,19 @@ def capture_local_agents(
         if root is None:
             continue
         source_scope = hashlib.sha256(str(root.resolve()).encode()).hexdigest()
-        attempts = storage.list_local_scan_attempts(tenant_id, source_kind, source_scope)
         for path in listed[source_kind]:
             locator_hash = hashlib.sha256(str(path.resolve()).encode()).hexdigest()
-            try:
-                sort_mtime_ns = path.stat().st_mtime_ns
-            except OSError:
-                sort_mtime_ns = 0
-            scan_work.append((attempts.get(locator_hash, ""), -sort_mtime_ns, locator_hash,
-                              source_kind, path, parser, source_scope))
-    scan_work.sort(key=lambda row: (row[0], row[1], row[2]))
-    scanned_raw_bytes = 0
-    scanned_projected_rows = 0
-    scanned_sanitized_bytes = 0
-    for _attempted_at, _sort_mtime, locator_hash, source_kind, path, parser, source_scope in scan_work:
-        if (summary.files >= _MAX_SCAN_FILES
-                or scanned_raw_bytes >= _MAX_SCAN_RAW_BYTES
-                or scanned_projected_rows >= _MAX_SCAN_PROJECTED_ROWS
-                or scanned_sanitized_bytes >= _MAX_SCAN_SANITIZED_BYTES):
-            break
+            scan_work.append((locator_hash, source_kind, path, parser, source_scope))
+    scan_work.sort(key=lambda row: row[0])
+    for locator_hash, source_kind, path, parser, source_scope in scan_work:
+        if should_cancel is not None and should_cancel():
+            raise CaptureCancelled(summary)
         summary.files += 1
         try:
             stat = path.stat()
             observed_size, observed_mtime_ns = stat.st_size, stat.st_mtime_ns
         except OSError:
             observed_size, observed_mtime_ns = 0, 0
-        measured_bytes = observed_size
-        measured_rows = 0
-        measured_payload_bytes = 0
         started_at = datetime.now(timezone.utc).isoformat()
         generation = storage.claim_local_scan_attempt(
             tenant_id, source_kind, source_scope, locator_hash,
@@ -1759,15 +1771,17 @@ def capture_local_agents(
         )
         accepted_revision = None
         source_line_complete = False
+        source_partial_reason = None
         projection_complete = False
         outcome_code = "failed"
         try:
-                    if observed_size > _MAX_LOCAL_FILE_BYTES:
-                        measured_bytes = 0
+                    if should_cancel is not None and should_cancel():
+                        raise CaptureCancelled(summary)
+                    if observed_size > _MAX_LOCAL_VERIFY_BYTES:
                         raise ValueError("history_file_too_large")
                     parsed = parser(path, home=home)
-                    if parsed.source_revision is not None:
-                        measured_bytes = parsed.source_revision.full_bytes
+                    if should_cancel is not None and should_cancel():
+                        raise CaptureCancelled(summary)
                     if source_kind == "codex":
                         codex_usage_by_thread.setdefault(parsed.session_id, []).extend(
                             _codex_model_usage(parsed)
@@ -1863,21 +1877,6 @@ def capture_local_agents(
                     recent_traces = tuple(
                         trace for trace in traces if trace.trace_id in recent_trace_ids
                     )
-                    stored_facts = (*new_recent_facts, *historical_facts,
-                                    *(full_projection.facts if full_projection else ()))
-                    stored_tail = full_projection.tail_turns if full_projection else ()
-                    measured_rows = (len(bundle.turns) + len(bundle.events)
-                                     + len(stored_facts) + len(stored_tail) + len(traces))
-                    measured_payload_bytes = sum(
-                        _projection_json_size(item)
-                        for item in (*bundle.turns, *bundle.events, *stored_tail,
-                                     *(fact.event for fact in stored_facts), *traces)
-                    )
-                    if recent_window is not None:
-                        measured_payload_bytes += len(json.dumps(
-                            recent_window, ensure_ascii=False,
-                            separators=(",", ":"),
-                        ).encode("utf-8"))
                     capture_service._capture_local_history(
                         bundle,
                         traces=prefix_traces,
@@ -1906,11 +1905,24 @@ def capture_local_agents(
                         )
                     accepted_revision = source_revision.full_sha256
                     source_line_complete = not source_revision.partial_final_line
+                    if not source_line_complete:
+                        source_partial_reason = ("bounded_source_prefix"
+                                  if source_revision.full_bytes > _MAX_LOCAL_FILE_BYTES
+                                  else "unfinished_final_record")
+                        summary.source_partial_files += 1
+                        summary.partial_reasons[source_partial_reason] = (
+                            summary.partial_reasons.get(source_partial_reason, 0) + 1
+                        )
                     projection_complete = full_projection is not None
-                    outcome_code = ("complete_projection" if projection_complete
+                    outcome_code = (f"partial_{source_partial_reason}"
+                                    if source_partial_reason else
+                                    "complete_projection" if projection_complete
                                     else "partial_projection")
                     if any(event.provenance == "verdict:capture_limit" for event in bundle.events):
                         summary.event_limited_runs += 1
+        except CaptureCancelled:
+            outcome_code = "cancelled"
+            raise
         except (OSError, ValueError) as exc:
             reason = _local_failure_reason(exc)
             summary.add_skip(reason)
@@ -1918,9 +1930,6 @@ def capture_local_agents(
         else:
             summary.stored += 1
         finally:
-            scanned_raw_bytes += measured_bytes
-            scanned_projected_rows += measured_rows
-            scanned_sanitized_bytes += measured_payload_bytes
             storage.finish_local_scan_attempt(
                 tenant_id, source_kind, source_scope, locator_hash, generation,
                 datetime.now(timezone.utc).isoformat(), outcome_code,
@@ -1928,8 +1937,8 @@ def capture_local_agents(
             )
             if progress is not None:
                 progress(summary.files, total)
-    summary.deferred = len(scan_work) - summary.files
-    summary.scan_incomplete = summary.deferred > 0
+    if should_cancel is not None and should_cancel():
+        raise CaptureCancelled(summary)
     if codex_root is not None and (diagnostic_path := codex_diagnostic_path(codex_root)):
         try:
             context = ImportContext(

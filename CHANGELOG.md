@@ -6,6 +6,36 @@ the product is refined.
 
 ## [Unreleased]
 
+### Fixed
+
+- Local history setup now attempts every discovered file in one approved
+  background capture and reports per-file progress. A rejected file remains an
+  explicit incomplete result; it no longer defers other files behind an
+  aggregate scan budget. Files above 128 MiB and at most 1 GiB now retain a
+  bounded parsed prefix with explicit partial-source coverage instead of being
+  skipped solely for size. Files above 1 GiB are explicitly skipped.
+  The dashboard refreshes captured evidence after a failed capture as well as
+  a completed one. Setup capture can now be cancelled while importing; it
+  finishes after the current file, preserves committed files, and reports a
+  cancelled job. A file already claimed when cancellation arrives is counted
+  as a cancelled attempt, separately from source failures. Preview and rescan
+  to continue. After a restart, Data Sources also warns about interrupted or
+  cancelled per-file attempts.
+  Discovery currently includes `.jsonl` histories; compressed `.jsonl.zst`
+  Codex histories are outside this capture count.
+- Best-effort redaction now covers numeric JSON values, adjacent sensitive
+  values, private-key blocks, encoded URL credentials, and provider keys after
+  an underscore. Distinctive provider and GitHub credentials directly adjacent
+  to phone or IP values are also redacted. Harmless JSON formatting and literal
+  Unicode escapes are preserved when no content needs redaction. Credentials
+  recoverable through nested JSON string and Unicode-escape layers are removed
+  before persistence. Ambiguous escaped mapping keys are omitted, while
+  redacted prose retains its nonsensitive text. Previously stored rows are not
+  rewritten.
+- OpenAI GPT-6 judge requests omit unsupported temperature, authenticated
+  dashboards gate the interactive API documentation, and interrupted capture
+  threads record a terminal failed job.
+
 ## [0.1.0b3] - 2026-10-24
 
 ### Added

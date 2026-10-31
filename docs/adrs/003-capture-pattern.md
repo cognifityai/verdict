@@ -179,13 +179,15 @@ target deployment before relying on them.
 - Provider message persistence uses an allowlist of supported top-level fields.
   Every string key and value in their JSON-compatible nested structures is
   sanitized recursively, including OpenAI tool arguments and Anthropic-style
-  tool inputs/results. Traversal has node and character budgets. Recursive
-  Unicode key decoding uses the same nesting budget and fails closed beyond it.
+  tool inputs/results. Traversal has node and character budgets. Mapping keys
+  containing Unicode escapes are omitted. Serialized-string
+  inspection uses bounded nesting and removes recognizable credentials decoded
+  from values before storage while retaining nonsensitive text.
   Cycles, repeated
   container references, excessive depth/size, non-finite numbers, non-string
   object keys, and unsupported objects fail closed rather than being copied.
   Sanitized structures never retain caller-owned aliases, and mapping keys that
-  collide after redaction receive deterministic suffixes so no value is lost.
+  collide after redaction receive deterministic suffixes so retained values are preserved.
 - Judge reasoning/errors and manual-span names, errors, and nested attributes are
   sanitized at persistence as well.
 - Content is sanitized before content-size bounds. With content capture
@@ -195,7 +197,8 @@ target deployment before relying on them.
   format-specific validation for other patterns. The email scanner anchors at
   each `@` and advances monotonically, avoiding pathological backtracking on
   malformed or very long input. A **Luhn checksum + valid card-length gate**
-  keeps non-card digit runs (order IDs, tracking numbers) intact, while
+  applies to complete card candidates and their grouped prefixes. A numeric
+  identifier with a valid card-shaped prefix may also be removed. In contrast,
   standard-library IPv6 validation keeps colon-delimited clock values such as
   `12:34:56` intact and separates a validated address from trailing text that
   is not part of that address.

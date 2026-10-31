@@ -25,10 +25,9 @@ from verdict.telemetry.model import ImportContext
 from verdict.telemetry.runner import ImportRunError, import_into_storage
 from verdict.telemetry.sources.voice import map_voice_conversation
 
-# Digits of pi grouped by ten: 0.1.0a23 redacted this differently on every
-# scan, so the snapshot digest computed at mapping time never matched the
-# digest recomputed by storage and the whole import aborted at this record.
-DIGIT_RUN = "1816334467 7522431712 1992458631 5030286182 9627117"
+# Deterministic synthetic digit groups exercise a phone-shaped suffix and
+# require the mapping and storage sanitizers to produce the same digest.
+DIGIT_RUN = "1799311777 4560052966 6432831579 7129466955 2893585"
 
 
 def _record(name: str, assistant_text: str = "first reply") -> dict:
@@ -68,7 +67,7 @@ def storage(request, tmp_path):
 
 def test_digit_run_transcript_imports_and_stored_snapshot_is_its_own_fixed_point(storage):
     summary = import_into_storage(
-        map_voice_conversation(_record("pi", f"digits: {DIGIT_RUN}"), _context()), storage
+        map_voice_conversation(_record("digits", f"digits: {DIGIT_RUN}"), _context()), storage
     )
 
     assert summary.conversations_stored == 1
@@ -79,10 +78,30 @@ def test_digit_run_transcript_imports_and_stored_snapshot_is_its_own_fixed_point
     stored = {key: value for key, value in rows[0].items() if key != "retention_at"}
     assert validate_conversation(deepcopy(stored)) == stored
     content = stored["messages"][-1]["content"]
-    assert content.startswith("digits: 1816334467 7522431712 1992458631 5030286")
+    assert content.startswith("digits: 1799311777 4560052966 6432831579 7129466")
     assert content.count("<PHONE>") == 1
     trace = storage.list_traces(tenant_id="tenant-a", limit=10)[0]
     assert trace.response_redacted == content
+
+
+def test_file_conversation_import_redacts_private_key_and_encoded_url(tmp_path):
+    key_body = "ZmFrZS1maWxlLWtleQ=="
+    text = ("-----BEGIN PRIVATE KEY-----\n" + key_body + "\n-----END PRIVATE KEY----- "
+            "postgres://reader:syntheticP%40ss@db.example.invalid/test")
+    database = tmp_path / "file-import.db"
+    storage = SQLiteStorage(str(database))
+    try:
+        summary = import_into_storage(
+            map_voice_conversation(_record("synthetic-file", text), _context()), storage,
+        )
+        assert summary.conversations_stored == 1
+        conversations, _cursor = storage.list_conversations("tenant-a")
+        assert len(conversations) == 1
+        for canary in (key_body, "syntheticP"):
+            assert canary not in repr(conversations)
+            assert canary.encode() not in database.read_bytes()
+    finally:
+        storage.close()
 
 
 def test_storage_rejected_snapshot_is_counted_and_import_continues(storage):
@@ -157,7 +176,7 @@ def test_live_postgres_digit_run_import_and_storage_rejection_skip():
     with isolated_test_dsn(dsn) as isolated_dsn:
         storage = PostgresStorage(isolated_dsn, min_pool=1, max_pool=2)
         try:
-            results = map_voice_conversation(_record("pi", f"digits: {DIGIT_RUN}"), context)
+            results = map_voice_conversation(_record("digits", f"digits: {DIGIT_RUN}"), context)
             tampered = map_voice_conversation(_record("bad"), context)
             conversation = deepcopy(tampered[0].conversation)
             conversation["revision"] = "0" * 64
@@ -172,12 +191,12 @@ def test_live_postgres_digit_run_import_and_storage_rejection_skip():
             assert summary.seen == summary.stored + summary.skipped
             rows, _cursor = storage.list_conversations(tenant)
             assert {row["id"] for row in rows} == {
-                context.trace_id("pi"), context.trace_id("after")
+                context.trace_id("digits"), context.trace_id("after")
             }
-            pi_row = next(row for row in rows if row["id"] == context.trace_id("pi"))
-            stored = {key: value for key, value in pi_row.items() if key != "retention_at"}
+            digit_row = next(row for row in rows if row["id"] == context.trace_id("digits"))
+            stored = {key: value for key, value in digit_row.items() if key != "retention_at"}
             assert validate_conversation(deepcopy(stored)) == stored
-            assert pi_row["messages"][-1]["content"].count("<PHONE>") == 1
+            assert digit_row["messages"][-1]["content"].count("<PHONE>") == 1
         finally:
             storage.close()
 
@@ -189,7 +208,7 @@ def test_cli_imports_digit_run_file_end_to_end(tmp_path, capsys):
             json.dumps(record)
             for record in (
                 _record("before"),
-                _record("pi", f"digits: {DIGIT_RUN}"),
+                _record("digits", f"digits: {DIGIT_RUN}"),
                 _record("after"),
             )
         )

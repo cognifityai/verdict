@@ -576,6 +576,7 @@ def test_retry_classifier_accepts_real_openai_sdk_transport_errors() -> None:
 
 @pytest.mark.parametrize(("model", "expected"), [
     ("gpt-5-mini", False), ("gpt-5", False), ("gpt-5.1-codex", False), ("GPT-5-nano", False),
+    ("gpt-6-luna", False),
     ("o1", False), ("o1-mini", False), ("o3-mini", False), ("o4-mini", False),
     ("gpt-4.1-mini", True), ("gpt-4o", True), ("gpt-4o-mini", True), ("chatgpt-4o-latest", True),
     ("gpt-3.5-turbo", True), ("qwen3:4b-instruct", True), ("omni-moderation-latest", True),
@@ -600,13 +601,18 @@ def test_openai_adapter_omits_temperature_for_reasoning_models() -> None:
     adapter.complete(CompletionRequest(model="gpt-5-mini", temperature=0.0, messages=[
         {"role": "user", "content": "q"},
     ]))
+    adapter.complete(CompletionRequest(model="gpt-6-luna", temperature=0.0, messages=[
+        {"role": "user", "content": "q"},
+    ]))
     adapter.complete(CompletionRequest(model="gpt-4.1-mini", temperature=0.0, messages=[
         {"role": "user", "content": "q"},
     ]))
 
-    reasoning, sampling = requests
+    reasoning, next_reasoning, sampling = requests
     assert "temperature" not in reasoning
     assert reasoning["max_completion_tokens"] > 0
+    assert "temperature" not in next_reasoning
+    assert next_reasoning["max_completion_tokens"] > 0
     assert sampling["temperature"] == 0.0
     assert adapter.temperature_supported("gpt-5-mini") is False
     assert adapter.temperature_supported("gpt-4.1-mini") is True

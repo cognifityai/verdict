@@ -23,7 +23,11 @@ from verdict.dashboard.control_plane import normalize_source_root
 from verdict.dashboard.storage_url import is_postgres_storage
 from verdict.storage.sqlite import sqlite_path
 from verdict.telemetry.files import SUPPORTED_FORMATS, iter_telemetry_file
-from verdict.telemetry.local_agents import _LOCAL_FAILURE_REASONS, capture_local_agents
+from verdict.telemetry.local_agents import (
+    _LOCAL_FAILURE_REASONS,
+    CaptureCancelled,
+    capture_local_agents,
+)
 from verdict.telemetry.model import ImportContext
 from verdict.telemetry.runner import ImportRunError, import_into_storage
 from verdict.telemetry.sources.codex import codex_diagnostic_path
@@ -54,6 +58,7 @@ class CaptureJob:
     analysis: dict[str, Any] | None = None
     error: str | None = None
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    cancel_requested: threading.Event = field(default_factory=threading.Event, repr=False)
 
     def as_dict(self) -> dict[str, Any]:
         with self.lock:
@@ -67,6 +72,7 @@ class CaptureJob:
                 "summary": self.summary,
                 "analysis": self.analysis,
                 "error": self.error,
+                "cancelRequested": self.cancel_requested.is_set(),
             }
 
     @property
@@ -298,7 +304,7 @@ class SetupRoutes:
             payload = {"job": current_payload}
             if last_imported is not None:
                 payload["lastImportedSummary"] = last_imported
-            if current_payload is None or current_payload["state"] in {"completed", "failed"}:
+            if current_payload is None or current_payload["state"] in {"completed", "failed", "cancelled"}:
                 attempts = setup_capture_attempts(request)
                 if isinstance(attempts, dict) and attempts["trackedFiles"]:
                     payload["attempts"] = attempts
@@ -311,6 +317,23 @@ class SetupRoutes:
 
         setup_capture_status.__annotations__["request"] = Request
         app.get("/api/setup/capture/status")(setup_capture_status)
+
+        def setup_capture_cancel(request, job_id: str):
+            if not self.authorized(request):
+                return JSONResponse({"error": "setup authorization required"}, status_code=403)
+            with self._capture_start_lock:
+                current = self._capture_job
+                if current is None or current.job_id != job_id:
+                    return JSONResponse({"error": "capture job is no longer current"}, status_code=404)
+                with current.lock:
+                    if current.state != "running":
+                        return JSONResponse({"error": "capture is no longer importing files"}, status_code=409)
+                    current.cancel_requested.set()
+                payload = current.as_dict()
+            return JSONResponse({"job": payload}, status_code=202)
+
+        setup_capture_cancel.__annotations__["request"] = Request
+        app.post("/api/setup/capture/{job_id}/cancel")(setup_capture_cancel)
 
         def setup_capture_attempts(request):
             """Show durable latest attempt counts after a dashboard restart."""
@@ -327,7 +350,8 @@ class SetupRoutes:
                 return JSONResponse({"error": "capture attempts unavailable"}, status_code=503)
             result = {
                 "trackedFiles": 0, "completeFiles": 0, "partialFiles": 0,
-                "failedFiles": 0, "unfinishedFiles": 0,
+                "sourcePartialFiles": 0, "partialReasons": {},
+                "failedFiles": 0, "unfinishedFiles": 0, "cancelledFiles": 0,
                 "lastAttemptAt": None, "failureReasons": {},
             }
             for code, count, started in rows:
@@ -336,10 +360,18 @@ class SetupRoutes:
                     result["lastAttemptAt"] = started
                 if code == "complete_projection":
                     result["completeFiles"] += count
-                elif code == "partial_projection":
+                elif code in {"partial_projection", "partial_bounded_source_prefix",
+                              "partial_unfinished_final_record"}:
                     result["partialFiles"] += count
+                    if code in {"partial_bounded_source_prefix",
+                                "partial_unfinished_final_record"}:
+                        reason = code.removeprefix("partial_")
+                        result["sourcePartialFiles"] += count
+                        result["partialReasons"][reason] = count
                 elif code is None:
                     result["unfinishedFiles"] += count
+                elif code == "cancelled":
+                    result["cancelledFiles"] += count
                 else:
                     result["failedFiles"] += count
                     reason = code[7:] if code.startswith("failed_") else "invalid_local_source"
@@ -476,6 +508,7 @@ class SetupRoutes:
                     codex_root=codex_root,
                     capture_content=capture_content,
                     progress=progress,
+                    should_cancel=job.cancel_requested.is_set,
                 )
             finally:
                 writable.close()
@@ -483,6 +516,10 @@ class SetupRoutes:
                 with job.lock:
                     job.summary = summary.as_dict()
                     self._last_imported_capture_summary = job.summary
+                    if job.cancel_requested.is_set():
+                        job.state = "cancelled"
+                        job.error = "capture_cancelled"
+                        return
                     job.state = "analyzing"
             analysis = self._run_analysis()["analysisState"]
             with job.lock:
@@ -502,11 +539,21 @@ class SetupRoutes:
                     job.state = "failed"
                 else:
                     job.state = "completed"
-        except Exception:
-            _log.exception("local history capture failed")
+        except CaptureCancelled as exc:
+            with self._capture_start_lock:
+                with job.lock:
+                    job.summary = exc.summary.as_dict()
+                    self._last_imported_capture_summary = job.summary
+                    job.error = "capture_cancelled"
+                    job.state = "cancelled"
+        except BaseException as exc:
+            if isinstance(exc, Exception):
+                _log.exception("local history capture failed")
             with job.lock:
                 job.error = "capture_failed" if job.state == "running" else "analysis_failed"
                 job.state = "failed"
+            if not isinstance(exc, Exception):
+                raise
         finally:
             with job.lock:
                 job.finished_at = datetime.now(timezone.utc).isoformat()

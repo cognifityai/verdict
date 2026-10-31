@@ -35,6 +35,12 @@ def _dt(day: int, hour: int) -> datetime:
     return datetime(2026, 10, day, hour, tzinfo=timezone.utc)
 
 
+@pytest.fixture(autouse=True)
+def fixed_usage_clock(monkeypatch):
+    """Keep the October source fixtures inside the API's report window."""
+    monkeypatch.setattr(dashboard_app, "_now_utc", lambda: _dt(14, 12))
+
+
 def _bundle(tenant: str, run_id: str, turns, events=(), *, session_id=None):
     started = min(turn.started_at for turn in turns)
     return AgentRunBundle(

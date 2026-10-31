@@ -4202,7 +4202,7 @@ def create_app(
     # The dashboard shell and live data require the password. Health and static
     # assets contain no stored telemetry and remain public.
     def _is_gated(path: str) -> bool:
-        core_path = path in {"/", "/dashboard"} or (
+        core_path = path in {"/", "/dashboard", "/docs", "/redoc", "/openapi.json"} or (
             path.startswith("/api/") and path != "/api/health"
         )
         operations_path = operations_page_url is not None and (

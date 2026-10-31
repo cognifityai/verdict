@@ -210,6 +210,13 @@ _NON_SENSITIVE_TOKEN_FIELDS = frozenset(
     }
 )
 _JSON_UNICODE_KEY_ESCAPE = re.compile(r"\\u([0-9A-Fa-f]{4})", re.IGNORECASE)
+_PEM_PRIVATE_KEY_BEGIN = re.compile(
+    r"-----BEGIN (?P<label>(?:[A-Z0-9]+ )*PRIVATE KEY)-----"
+)
+_CREDENTIAL_URL = re.compile(
+    r"(?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+.-]*://"
+    r"[^\s:@/'\"]+:[^\s@/'\"]+@[^\s'\"]+"
+)
 
 # Vendor credentials whose documented prefix is distinctive enough to redact
 # without a surrounding label. Each body has a minimum length so ordinary
@@ -232,13 +239,27 @@ _VENDOR_CREDENTIAL = (
     r"|lsv2_(?:pt|sk)_[A-Za-z0-9_]{32,}"  # LangSmith
 )
 
+# A variable-length credential can absorb the first digits of a value glued
+# directly to it. The boundary is unknowable, so redact the attached atom as
+# one value rather than leaving an address or phone fragment after the token.
+_CREDENTIAL_CONTINUATION = (
+    r"(?P<lexical>[.:/%-][^\s<>\"'{}\[\],;]+)?"
+    # Longest supported grouped card has 19 digits and 18 separators. Keep
+    # the scan bounded, then validate complete candidates in the callback.
+    r"(?P<numeric_tail> \d[0-9 -]{0,37})?"
+)
+
 _PATTERNS = {
     "PROVIDER_KEY": re.compile(
-        r"\b(?:sk-ant-[A-Za-z0-9_-]{16,}|sk-(?:proj-)?[A-Za-z0-9_-]{20,}|"
-        rf"AKIA[A-Z0-9]{{16}}|AIza[A-Za-z0-9_-]{{30,}}|{_VENDOR_CREDENTIAL})\b"
+        r"(?<![A-Za-z])(?P<credential>sk-ant-[A-Za-z0-9_-]{16,}|"
+        r"sk-(?:proj-)?[A-Za-z0-9_-]{20,}|"
+        rf"AKIA[A-Z0-9]{{16}}|AIza[A-Za-z0-9_-]{{30,}}|{_VENDOR_CREDENTIAL})"
+        rf"{_CREDENTIAL_CONTINUATION}"
     ),
     "GITHUB_TOKEN": re.compile(
-        r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b"
+        r"(?<![A-Za-z])(?P<credential>gh[pousr]_[A-Za-z0-9]{20,}|"
+        r"github_pat_[A-Za-z0-9_]{20,})"
+        rf"{_CREDENTIAL_CONTINUATION}"
     ),
     "BEARER_TOKEN": re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{16,}"),
     "BASIC_AUTH": re.compile(
@@ -251,10 +272,9 @@ _PATTERNS = {
     "URL": re.compile(r"https?://\S+"),
     "SSN": re.compile(r"\b\d{3}-\d{2}-\d{4}\b"),
     # CANDIDATE matcher only — a 13-19 digit run (optionally space/dash grouped)
-    # is merely *card-shaped*. We do NOT redact on the regex alone (that
-    # irreversibly clobbered order IDs, tracking numbers, etc.). A candidate is
-    # only redacted if it passes the Luhn checksum AND has a valid card length;
-    # see _redact_credit_card / _luhn_ok.
+    # is merely *card-shaped*. We do NOT redact on the regex alone. A complete
+    # candidate or grouped prefix must pass Luhn and the valid-length gate;
+    # an ambiguous grouped numeric identifier can still be removed.
     # The candidate ends on a digit so the placeholder never swallows the
     # separator after a card; the address or token that follows keeps its
     # boundary and is scanned normally.
@@ -278,19 +298,69 @@ _PATTERNS = {
 }
 
 
-def _is_sensitive_key(key: str) -> bool:
+def _decode_unicode_escapes(value: str) -> str | None:
     for _ in range(_MAX_NESTING_DEPTH):
         decoded = _JSON_UNICODE_KEY_ESCAPE.sub(
             lambda match: chr(int(match.group(1), 16)),
-            key,
+            value,
         )
-        if decoded == key:
-            break
-        key = decoded
+        if decoded == value:
+            return value
+        value = decoded
+    return None
+
+
+def _redact_encoded_text(
+    value: str, mode: RedactionMode, secret: str | None, depth: int,
+) -> str:
+    """Redact decoded text while retaining its nonsensitive content."""
+    current = value
+    wrappers = 0
+    structured = False
+    for _ in range(_MAX_NESTING_DEPTH):
+        if current.lstrip().startswith(("{", "[")):
+            try:
+                parsed = json.loads(current)
+            except (json.JSONDecodeError, RecursionError, ValueError):
+                pass
+            else:
+                if isinstance(parsed, (dict, list)):
+                    structured = True
+                    break
+        if current.lstrip().startswith('"'):
+            try:
+                unwrapped = json.loads(current)
+            except (json.JSONDecodeError, RecursionError, ValueError):
+                pass
+            else:
+                if isinstance(unwrapped, str) and unwrapped != current:
+                    current = unwrapped
+                    wrappers += 1
+                    continue
+        if _JSON_UNICODE_KEY_ESCAPE.search(current):
+            decoded = _decode_unicode_escapes(current)
+            if decoded is None:
+                return _REDACTED
+            if decoded != current:
+                current = decoded
+                continue
+        break
     else:
-        # A recursively encoded key beyond the shared structure-depth budget is
-        # attacker-controlled ambiguity. Fail closed without rescanning it an
-        # unbounded number of times.
+        return _REDACTED
+    sanitized = (redact_structure(current, mode=mode, secret=secret, _depth=depth + 1)
+                 if structured else redact(current, mode, secret))
+    if not isinstance(sanitized, str):
+        return _REDACTED
+    if sanitized == current and redact(value, mode, secret) == value:
+        return value
+    for _ in range(wrappers):
+        sanitized = json.dumps(sanitized, ensure_ascii=False)
+    return sanitized
+
+
+def _is_sensitive_key(key: str) -> bool:
+    key = _decode_unicode_escapes(key)
+    if key is None:
         return True
     normalized = "".join(re.findall(r"[A-Za-z0-9]+", key)).lower()
     if normalized in _NON_SENSITIVE_TOKEN_FIELDS:
@@ -571,15 +641,20 @@ def _redact_secret_assignments(
     return "".join(output)
 
 
-# Patterns whose candidates are variable-length digit runs. Beside a
-# placeholder their greedy groups can re-partition into one more match per
-# scan (a grouped digit table losing one "phone number" per scan, a hex
-# fingerprint yielding one more "IPv6 address" per scan) until the fail-closed
-# cap destroys the message. For these, and only these, a placeholder edge is
-# opaque. Fixed-prefix credentials and fixed-length addresses cannot creep, so
-# they keep the boundary the placeholder replaced and a value glued to a
-# placeholder is still removed.
-_OPAQUE_EDGE_LABELS = frozenset({"PHONE", "CREDIT_CARD", "IPV6"})
+# Variable-length runs can re-partition next to their own placeholder family
+# on a later scan. Other placeholder families remain ordinary boundaries so
+# separately sensitive values glued together are both removed.
+_DECIMAL_RUN_FAMILY = frozenset({"PHONE", "CREDIT_CARD"})
+_OPAQUE_BESIDE: dict[str, frozenset[str]] = {
+    "PHONE": _DECIMAL_RUN_FAMILY,
+    "CREDIT_CARD": _DECIMAL_RUN_FAMILY,
+    "IPV6": frozenset({"IPV6"}),
+}
+_NO_OPAQUE_EDGES: frozenset[str] = frozenset()
+
+
+def _placeholder_label(placeholder: str) -> str:
+    return placeholder[1:-1].split(":", 1)[0]
 
 
 def _sub_outside_placeholders(
@@ -587,11 +662,11 @@ def _sub_outside_placeholders(
     pattern: re.Pattern[str],
     replacement: str | Callable[[re.Match[str]], str],
     *,
-    opaque_edges: bool = False,
+    opaque_beside: frozenset[str] = _NO_OPAQUE_EDGES,
 ) -> str:
     """Apply ``pattern`` to the text between placeholders.
 
-    With ``opaque_edges`` a candidate that touches a placeholder edge is kept
+    With ``opaque_beside`` a candidate that touches a matching placeholder edge is kept
     only if the pattern still matches the same span with a word character
     standing in for the placeholder; a rejected candidate is skipped whole,
     exactly as ``re.sub`` skips a candidate its callback declined. Without it,
@@ -599,24 +674,27 @@ def _sub_outside_placeholders(
     """
     output: list[str] = []
     cursor = 0
+    previous_opaque = False
     for placeholder in _PLACEHOLDER.finditer(text):
+        this_opaque = _placeholder_label(placeholder.group(0)) in opaque_beside
         output.append(
             _scan_segment(
                 text[cursor : placeholder.start()],
                 pattern,
                 replacement,
-                after_placeholder=opaque_edges and cursor > 0,
-                before_placeholder=opaque_edges,
+                after_placeholder=previous_opaque,
+                before_placeholder=this_opaque,
             )
         )
         output.append(placeholder.group(0))
         cursor = placeholder.end()
+        previous_opaque = this_opaque
     output.append(
         _scan_segment(
             text[cursor:],
             pattern,
             replacement,
-            after_placeholder=opaque_edges and cursor > 0,
+            after_placeholder=previous_opaque,
             before_placeholder=False,
         )
     )
@@ -806,19 +884,97 @@ def redact(
     return _REDACTED
 
 
+def _redact_private_keys(text: str, mode: RedactionMode, secret: str | None) -> str:
+    """Remove complete or truncated PEM private-key blocks in a linear scan."""
+    output: list[str] = []
+    cursor = 0
+    while match := _PEM_PRIVATE_KEY_BEGIN.search(text, cursor):
+        footer = f"-----END {match.group('label')}-----"
+        footer_start = text.find(footer, match.end())
+        end = len(text) if footer_start < 0 else footer_start + len(footer)
+        output.append(text[cursor:match.start()])
+        block = text[match.start():end]
+        output.append(_hash_match(block, "SECRET", secret) if mode == "hash" else "<SECRET>")
+        cursor = end
+    if not output:
+        return text
+    output.append(text[cursor:])
+    return "".join(output)
+
+
+def _credential_repl(
+    match: re.Match[str], label: str, mode: RedactionMode, secret: str | None,
+) -> str:
+    atom = match.group("credential") + (match.group("lexical") or "")
+    tail = match.group("numeric_tail") or ""
+    # AKIA has an exact 20-character width. Its trailing digits belong to the
+    # key, not an inferred adjacent value; the ordinary scanners handle a
+    # separate phone/card after the placeholder.
+    if not tail or (atom.startswith("AKIA") and len(match.group("credential")) == 20):
+        replacement = _hash_match(atom, label, secret) if mode == "hash" else f"<{label}>"
+        return replacement + tail
+
+    # A variable-width credential can swallow the first numeric group. Find
+    # complete, validated values that extend into the bounded following tail.
+    # Prefer a card over a phone and the longest validated card when shorter
+    # prefixes also pass Luhn. Digit-ending credentials are intrinsically
+    # ambiguous; prefer removing a valid sensitive shape.
+    numeric = re.search(r"[0-9 -]{1,37}\Z", atom)
+    prefix = numeric.group(0) if numeric else ""
+    attached = prefix + tail
+    consumed = 0
+    for kind in ("CREDIT_CARD", "PHONE"):
+        for end in range(len(prefix) + 1, len(attached) + 1):
+            if not attached[end - 1].isdigit() or (end < len(attached) and attached[end].isdigit()):
+                continue
+            for start in range(end):
+                if not attached[start].isdigit():
+                    continue
+                candidate = attached[start:end]
+                if kind == "PHONE":
+                    valid = bool(_PATTERNS[kind].fullmatch(candidate))
+                else:
+                    digits = candidate.replace(" ", "").replace("-", "")
+                    valid = (bool(_PATTERNS[kind].fullmatch(candidate))
+                             and len(digits) in _VALID_CARD_LENGTHS and _luhn_ok(digits))
+                if valid:
+                    consumed = end - len(prefix)
+                    break
+            if consumed and kind == "PHONE":
+                break
+        if consumed:
+            break
+    value = atom + tail[:consumed]
+    replacement = _hash_match(value, label, secret) if mode == "hash" else f"<{label}>"
+    return replacement + tail[consumed:]
+
+
 def _redact_once(text: str, mode: RedactionMode, secret: str | None) -> str:
     """Run every scanner once, left to right, in fixed order."""
+    out = _redact_private_keys(text, mode, secret)
+    if "://" in out:
+        out = _sub_outside_placeholders(
+            out,
+            _CREDENTIAL_URL,
+            (lambda match: _hash_match(match.group(0), "URL", secret))
+            if mode == "hash" else "<URL>",
+        )
     # Email discovery is first for classification stability in URL contexts.
-    out = _redact_emails(text, mode, secret)
+    out = _redact_emails(out, mode, secret)
     out = _redact_secret_assignments(out, mode, secret)
     for label, pat in _PATTERNS.items():
-        if label == "CREDIT_CARD":
-            # Gate on Luhn + valid length so non-card digit runs survive intact.
+        if label in {"PROVIDER_KEY", "GITHUB_TOKEN"}:
+            out = _sub_outside_placeholders(
+                out, pat,
+                lambda m, lbl=label: _credential_repl(m, lbl, mode, secret),
+            )
+        elif label == "CREDIT_CARD":
+            # Validate whole candidates and complete grouped prefixes with Luhn.
             out = _sub_outside_placeholders(
                 out,
                 pat,
                 lambda m, lbl=label: _credit_card_repl(m.group(0), lbl, mode, secret),
-                opaque_edges=True,
+                opaque_beside=_OPAQUE_BESIDE[label],
             )
         elif label == "IPV6":
             # A colon is required by every IPv6 spelling.  Avoid entering the
@@ -837,7 +993,7 @@ def _redact_once(text: str, mode: RedactionMode, secret: str | None) -> str:
                     secret,
                     following=m.string[m.end() : m.end() + 1],
                 ),
-                opaque_edges=True,
+                opaque_beside=_OPAQUE_BESIDE[label],
             )
         elif label == "BASIC_AUTH":
             out = _sub_outside_placeholders(
@@ -850,11 +1006,12 @@ def _redact_once(text: str, mode: RedactionMode, secret: str | None) -> str:
                 out,
                 pat,
                 lambda m, lbl=label: _hash_match(m.group(0), lbl, secret),
-                opaque_edges=label in _OPAQUE_EDGE_LABELS,
+                opaque_beside=_OPAQUE_BESIDE.get(label, _NO_OPAQUE_EDGES),
             )
         else:  # redact
             out = _sub_outside_placeholders(
-                out, pat, f"<{label}>", opaque_edges=label in _OPAQUE_EDGE_LABELS,
+                out, pat, f"<{label}>",
+                opaque_beside=_OPAQUE_BESIDE.get(label, _NO_OPAQUE_EDGES),
             )
     return out
 
@@ -906,17 +1063,25 @@ def _luhn_ok(digits: str) -> bool:
 
 
 def _credit_card_repl(value: str, label: str, mode: RedactionMode, secret: str | None) -> str:
-    """Replace a CREDIT_CARD *candidate* only if it's a plausible card number.
+    """Replace a complete Luhn-valid card or a grouped prefix of a candidate.
 
-    Non-Luhn or wrong-length digit runs (order IDs, tracking numbers, etc.) are
-    returned unchanged so they aren't irreversibly destroyed.
+    A later numeric group may be a status rather than part of the card. When
+    a complete grouped prefix validates, privacy takes precedence over an
+    ambiguous longer numeric identifier.
     """
-    digits = re.sub(r"\D", "", value)
-    if len(digits) not in _VALID_CARD_LENGTHS or not _luhn_ok(digits):
-        return value  # leave non-cards untouched
-    if mode == "hash":
-        return _hash_match(value, label, secret)
-    return f"<{label}>"
+    # The candidate regex greedily includes a later numeric status, which can
+    # make a complete PAN fail Luhn. Only consider prefixes ending at a group
+    # separator; never carve a card out of the middle of one digit group.
+    for end in range(len(value), 0, -1):
+        if not value[end - 1].isdigit() or (end < len(value) and value[end] not in " -"):
+            continue
+        candidate = value[:end]
+        digits = candidate.replace(" ", "").replace("-", "")
+        if len(digits) in _VALID_CARD_LENGTHS and _luhn_ok(digits):
+            replacement = (_hash_match(candidate, label, secret) if mode == "hash"
+                           else f"<{label}>")
+            return replacement + value[end:]
+    return value  # leave non-cards untouched
 
 
 def _ipv6_repl(
@@ -1061,9 +1226,20 @@ def redact_structure(
         return _REDACTED
     if isinstance(value, str):
         if value.lstrip().startswith(("{", "[")):
+            duplicate_key = False
+
+            def object_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+                nonlocal duplicate_key
+                result: dict[str, Any] = {}
+                for key, child in pairs:
+                    if key in result:
+                        duplicate_key = True
+                    result[key] = child
+                return result
+
             try:
-                parsed = json.loads(value)
-            except (json.JSONDecodeError, RecursionError):
+                parsed = json.loads(value, object_pairs_hook=object_pairs)
+            except (json.JSONDecodeError, RecursionError, ValueError):
                 pass
             else:
                 if isinstance(parsed, (dict, list)):
@@ -1074,14 +1250,23 @@ def redact_structure(
                     )
                     if not isinstance(sanitized, (dict, list)):
                         return _REDACTED
-                    return json.dumps(sanitized, separators=(",", ":"))
-        if _JSON_UNICODE_KEY_ESCAPE.search(value):
-            return _REDACTED
+                    if not duplicate_key and sanitized == parsed and redact(value, mode, secret) == value:
+                        return value
+                    return json.dumps(sanitized, separators=(",", ":"), ensure_ascii=False)
+        if _JSON_UNICODE_KEY_ESCAPE.search(value) or value.lstrip().startswith('"'):
+            return _redact_encoded_text(value, mode, secret, _depth)
         return redact(value, mode=mode, secret=secret)
-    if value is None or isinstance(value, (bool, int)):
+    if value is None or isinstance(value, bool):
         return value
-    if isinstance(value, float):
-        return value if math.isfinite(value) else _REDACTED
+    if isinstance(value, (int, float)):
+        if isinstance(value, float) and not math.isfinite(value):
+            return _REDACTED
+        try:
+            rendered = str(value)
+        except ValueError:
+            return _REDACTED
+        sanitized = redact(rendered, mode=mode, secret=secret)
+        return value if sanitized == rendered else sanitized
 
     seen = _seen if _seen is not None else set()
     if isinstance(value, dict):
