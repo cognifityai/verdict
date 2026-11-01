@@ -1059,7 +1059,15 @@ def test_real_openai_sdk_tool_response_and_agent_sdk_final_turn_are_distinct():
     openai = pytest.importorskip("openai")
     storage = InMemoryStorage()
     verdict.shutdown()
-    verdict.init(storage=storage, tenant_id="local", instrumentors=["openai"])
+    client = verdict.init(storage=storage, tenant_id="local", instrumentors=["openai"])
+    capture_errors = []
+    original_warning = client.runtime_metrics.warn_capture_failure_once
+
+    def record_capture_warning(logger, *, evidence, target, error):
+        capture_errors.append((evidence, type(error).__name__, str(error)))
+        original_warning(logger, evidence=evidence, target=target, error=error)
+
+    client.runtime_metrics.warn_capture_failure_once = record_capture_warning
     try:
         def respond(_request):
             return httpx.Response(200, json={
@@ -1082,7 +1090,9 @@ def test_real_openai_sdk_tool_response_and_agent_sdk_final_turn_are_distinct():
                         model="gpt-4o-mini", messages=[{"role": "user", "content": "What is the answer?"}],
                     )
                     turn.set_output("The answer is 42.")
-        [trace] = storage.list_traces(tenant_id="local")
+        traces = storage.list_traces(tenant_id="local")
+        assert len(traces) == 1, capture_errors
+        [trace] = traces
         assert not (trace.response_redacted or "").strip()
         assert preview_evaluation(storage, tenant_id="local", config=_config())["eligible"] == 0
         preview = preview_evaluation(storage, tenant_id="local", config={**_config(), "unit": "agent_turn"})

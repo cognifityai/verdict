@@ -164,8 +164,11 @@ TLS termination at a trusted ingress; see
    capture summary and source logs, then rescan. Previously captured runs are
    the last committed snapshots; this cycle status does not identify which
    individual source revision is current.
-   One cycle attempts every discovered `.jsonl` history file once and reports
-   file progress. Compressed `.jsonl.zst` files are not yet discovered.
+   One cycle attempts every discovered `.jsonl` history file and Codex
+   `.jsonl.zst` archive once and reports file progress. An active `.jsonl`
+   file takes precedence over its same-stem archive. An archive replacing a
+   captured active file must preserve the previous source bytes. Corruption
+   beyond a partial decoded prefix is unobserved.
    Discovery is limited to 100,000 files per root; a limit error
    fails the cycle before import. Each file retains its own parse and
    projection limits. A rescan reads the source files again to detect changes.
@@ -174,12 +177,16 @@ TLS termination at a trusted ingress; see
    to continue. Cancellation is unavailable after analysis starts. The
    `/api/setup/capture/attempts` response counts cancelled file attempts
    separately from source failures.
-   A local history file above 128 MiB and at most 1 GiB is parsed only
-   through a bounded prefix. Verdict hashes the whole file for revision checks
-   and reports `bounded_source_prefix` as partial source coverage. Files above
-   1 GiB are skipped as `history_file_too_large`; earlier committed evidence
-   is retained. The unobserved tail
-   cannot support whole-session conclusions. A file with no usable prefix or
+   A local history file with more than 128 MiB of decoded records is parsed
+   only through a bounded prefix. Verdict hashes the whole physical file for
+   revision checks and reports `bounded_source_prefix` as partial source
+   coverage. Files above 1 GiB of physical bytes, including archives, are
+   skipped as `history_file_too_large`; earlier committed evidence is retained.
+   A separate redacted preview of up to 50 newest source records may be shown
+   for inspection. It may overlap the canonical prefix and adds nothing to
+   totals, monitoring, or evaluation. The
+   preview is unavailable when a compressed archive expands beyond 512 MiB.
+   Uncaptured records cannot support whole-session conclusions. A file with no usable prefix or
    a record over the line bound can still be skipped with a reason.
    A file that expands beyond 100,000 parsed events is rejected with
    `history_event_limit`; this counts multiple events from one source row and

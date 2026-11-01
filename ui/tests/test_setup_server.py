@@ -5,6 +5,7 @@ import sqlite3
 
 import httpx
 import pytest
+import zstandard
 from verdict.dashboard.app import create_app
 from verdict.storage import SQLiteStorage
 
@@ -131,6 +132,38 @@ async def _capture_and_wait(client, headers, payload, *, timeout_s: float = 30.0
             return started, job
         await asyncio.sleep(0.02)
     raise AssertionError("capture job did not finish")
+
+
+def test_setup_preview_and_background_capture_include_compressed_codex(tmp_path):
+    root = tmp_path / "codex"
+    plain = root / "session.jsonl"
+    _write_codex(plain)
+    plain.with_suffix(".jsonl.zst").write_bytes(
+        zstandard.ZstdCompressor().compress(plain.read_bytes())
+    )
+    plain.unlink()
+
+    async def exercise():
+        app = create_app(storage=f"sqlite:///{tmp_path / 'verdict.db'}")
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver",
+        ) as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            headers = {"X-Verdict-Setup": token}
+            preview = await client.post(
+                "/api/setup/preview", headers=headers, json={"codexRoot": str(root)},
+            )
+            started, job = await _capture_and_wait(
+                client, headers, {"codexRoot": str(root)},
+            )
+            runs = await client.get("/api/runs")
+            return preview, started, job, runs
+
+    preview, started, job, runs = asyncio.run(exercise())
+    assert preview.json()["codex"]["files"] == 1
+    assert started.status_code == 202
+    assert job["state"] == "completed" and job["filesTotal"] == job["filesDone"] == 1
+    assert runs.status_code == 200 and len(runs.json()["runs"]) == 1
 
 
 def test_setup_preview_then_approved_local_capture(tmp_path):
