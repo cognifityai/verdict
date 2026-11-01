@@ -13,6 +13,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+import zstandard
+
 from verdict.evidence import (
     EVENT_CONTENT_FIELDS,
     AgentRunBundle,
@@ -21,6 +23,26 @@ from verdict.evidence import (
 from verdict.normalized_evidence import merge_agent_event, merge_agent_run, merge_agent_turn
 
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
+_MAX_ZSTD_WINDOW_BYTES = 64 * 1024 * 1024
+
+
+def _archive_extends_plain_revision(path: Path, prior: LocalSourceRevision) -> bool:
+    """Prove an archived file starts with the exact prior source bytes."""
+    remaining = prior.full_bytes
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as handle, zstandard.ZstdDecompressor(
+            max_window_size=_MAX_ZSTD_WINDOW_BYTES,
+        ).stream_reader(handle, read_across_frames=True) as decoded:
+            while remaining:
+                block = decoded.read(min(1024 * 1024, remaining))
+                if not block:
+                    return False
+                digest.update(block)
+                remaining -= len(block)
+    except zstandard.ZstdError as exc:
+        raise ValueError("invalid_compressed_history") from exc
+    return digest.hexdigest() == prior.full_sha256
 
 
 @dataclass(frozen=True)
@@ -99,6 +121,24 @@ def _optional_text(row: Mapping[str, object], name: str) -> str | None:
     return None if value is None else str(value)
 
 
+def validate_latest_source_sample(latest: object) -> None:
+    if (not isinstance(latest, dict)
+            or latest.get("status") not in {
+                "sampled", "unavailable_decoded_limit",
+                "unavailable_malformed_record", "unavailable_no_records",
+            }
+            or not isinstance(latest.get("records"), list)
+            or len(latest["records"]) > 50
+            or (latest["status"] != "sampled" and latest["records"])
+            or any(not isinstance(row, dict)
+                   or any(not isinstance(row.get(key), str)
+                          or len(row[key].encode("utf-8")) > maximum
+                          for key, maximum in (("at", 64), ("kind", 80),
+                                               ("preview", 512)))
+                   for row in latest["records"])):
+        raise ValueError("invalid latest source sample")
+
+
 def validate_recent_window_json(
     value: str | None, *, run_id: str, revision: LocalSourceRevision,
 ) -> dict[str, object] | None:
@@ -121,6 +161,9 @@ def validate_recent_window_json(
             or len(decoded["turns"]) > 100
             or len(decoded["events"]) > 50):
         raise ValueError("invalid recent window")
+    latest = decoded.get("latestSample")
+    if latest is not None:
+        validate_latest_source_sample(latest)
     return decoded
 
 
@@ -216,15 +259,22 @@ def verify_source_revision(
     """Verify source bytes; return whether a compatible larger rewrite needs proof."""
     compatible_rewrite = False
     if prior is not None:
-        if candidate.full_bytes < prior.full_bytes:
+        same_revision = (candidate.full_bytes == prior.full_bytes
+                         and candidate.full_sha256 == prior.full_sha256)
+        archive_transition = (
+            not same_revision and path.name.endswith(".jsonl.zst")
+            and _archive_extends_plain_revision(path, prior)
+        )
+        if not archive_transition and candidate.full_bytes < prior.full_bytes:
             raise ValueError("local_source_conflict")
-        if candidate.full_bytes == prior.full_bytes and candidate.full_sha256 != prior.full_sha256:
+        if (not archive_transition and candidate.full_bytes == prior.full_bytes
+                and candidate.full_sha256 != prior.full_sha256):
             raise ValueError("local_source_conflict")
-        compatible_rewrite = (
+        compatible_rewrite = archive_transition or (
             candidate.full_bytes > prior.full_bytes
             and hash_file_prefix(path, prior.full_bytes) != prior.full_sha256
         )
-        if compatible_rewrite:
+        if compatible_rewrite and not archive_transition:
             if (prior.partial_final_line or candidate.partial_final_line
                     or prior.source_turn_count is None
                     or candidate.source_turn_count is None

@@ -752,6 +752,25 @@ def test_current_codex_user_message_reaches_redacted_turn_and_detail(tmp_path: P
     storage.close()
 
 
+def test_codex_escaped_prose_keeps_useful_request_after_storage(tmp_path: Path) -> None:
+    root = tmp_path / "codex"
+    records = _codex_records()
+    records[3]["payload"]["message"] = (
+        r"Review https://example.com/pr/1 now, caf\u00e9"
+    )
+    _write_jsonl(root / "session.jsonl", records)
+    path = tmp_path / "verdict.db"
+    storage = SQLiteStorage(str(path))
+    try:
+        assert capture_local_agents(storage, tenant_id="local", codex_root=root).stored == 1
+        [bundle] = storage.list_agent_run_bundles("local")
+        assert bundle.turns[0].user_request_redacted == "Review <URL> now, café"
+        detail = build_agent_run_detail(path, tenant="local", run_id=bundle.run.run_id)
+        assert detail["turns"][0]["request"] == bundle.turns[0].user_request_redacted
+    finally:
+        storage.close()
+
+
 def test_codex_user_message_rescan_completes_missing_request(tmp_path: Path) -> None:
     root = tmp_path / "codex"
     records = _codex_item_message_records([{"type": "text", "text": "current request"}])

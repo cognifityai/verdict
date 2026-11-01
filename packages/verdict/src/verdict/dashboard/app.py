@@ -69,7 +69,11 @@ from verdict.evidence import (
     disclosed_event_attributes,
     event_order_key,
 )
-from verdict.local_source_revision import local_scope_partial, verified_recent_findings
+from verdict.local_source_revision import (
+    local_scope_partial,
+    validate_latest_source_sample,
+    verified_recent_findings,
+)
 from verdict.metrics import ScoreCounts, verdict_label
 from verdict.monitor_inputs import LOCAL_TENANT
 from verdict.normalized_evidence import (
@@ -1906,16 +1910,26 @@ def build_recent_local_sample(
                 or any(not isinstance(event, dict) for event in events)):
             raise ValueError("invalid bounded recent local events")
         if sample.get("schema") == "local-recent-window-v2":
-            if (row["source_prefix_bytes"] != row["local_full_bytes"]
-                    or row["source_prefix_sha256"] != row["local_full_sha256"]
-                    or sample.get("sourceRevision") != row["local_full_sha256"]
+            if (sample.get("sourceRevision") != row["local_full_sha256"]
                     or sample.get("sourceTurnCount") != row["local_source_turn_count"]
                     or sample.get("sourceEventCount") != row["local_source_event_count"]):
                 raise KeyError(run_id)
-            verify_facts(session, sample)
-            sample["findings"] = verified_recent_findings(
-                sample, partial_final_line=bool(row["local_partial_line"]),
-            )
+            if (row["source_prefix_bytes"] == row["local_full_bytes"]
+                    and row["source_prefix_sha256"] == row["local_full_sha256"]):
+                verify_facts(session, sample)
+                sample["findings"] = verified_recent_findings(
+                    sample, partial_final_line=bool(row["local_partial_line"]),
+                )
+            elif (sample.get("latestSample") is not None
+                    and row["source_prefix_bytes"] == row["local_prefix_bytes"]
+                    and row["source_prefix_sha256"] == row["local_prefix_sha256"]):
+                validate_latest_source_sample(sample["latestSample"])
+                sample["durableFacts"] = False
+                sample["turns"] = []
+                sample["events"] = []
+                sample["findings"] = []
+            else:
+                raise KeyError(run_id)
         elif sample.get("schema") == "local-recent-events-v1":
             if (row["source_prefix_bytes"] != row["local_prefix_bytes"]
                     or row["source_prefix_sha256"] != row["local_prefix_sha256"]):

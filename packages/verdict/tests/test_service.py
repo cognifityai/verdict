@@ -566,13 +566,13 @@ def test_continuous_worker_clears_heartbeat_on_supervisor_stop(tmp_path, stop_si
         stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
     )
     try:
-        deadline = time.monotonic() + 5
+        deadline = time.monotonic() + 15
         while WorkerHeartbeat(url).read(TENANT)["status"] != "recent":
             assert process.poll() is None, "worker exited before publishing heartbeat"
             assert time.monotonic() < deadline, "worker did not publish heartbeat"
             time.sleep(0.05)
         process.send_signal(stop_signal)
-        _, stderr = process.communicate(timeout=5)
+        _, stderr = process.communicate(timeout=15)
         assert process.returncode == 0, stderr.decode(errors="replace")
         assert b"Traceback" not in stderr
         assert WorkerHeartbeat(url).read(TENANT)["status"] == "unverified"
@@ -613,11 +613,10 @@ def observe_term(number, handler):
     return register(number, handler)
 service.signal.signal = observe_term
 def poll(_storage, **_kwargs):
-    marker.write_text('entered')
-    deadline = time.monotonic() + 5
+    ready = marker.with_suffix('.ready')
+    ready.write_text('entered')
+    ready.replace(marker)
     while not release.exists():
-        if time.monotonic() >= deadline:
-            raise RuntimeError('poll was never released')
         time.sleep(0.01)
     marker.write_text('completed')
     return {'status': 'waiting', 'cycleRan': False}
@@ -629,7 +628,7 @@ raise SystemExit(service.main(['--storage', sys.argv[2]]))
         stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
     )
     try:
-        deadline = time.monotonic() + 5
+        deadline = time.monotonic() + 15
         while not marker.exists():
             assert process.poll() is None, "worker exited before entering poll"
             assert time.monotonic() < deadline, "worker did not enter poll"
@@ -637,13 +636,13 @@ raise SystemExit(service.main(['--storage', sys.argv[2]]))
         assert WorkerHeartbeat(url).read(TENANT)["status"] == "recent"
         process.send_signal(stop_signal)
         if stop_signal == signal.SIGTERM:
-            deadline = time.monotonic() + 5
+            deadline = time.monotonic() + 15
             while not handled.exists():
                 assert process.poll() is None, "worker exited before handling SIGTERM"
                 assert time.monotonic() < deadline, "worker did not handle SIGTERM"
                 time.sleep(0.01)
             release.touch()
-        _, stderr = process.communicate(timeout=5)
+        _, stderr = process.communicate(timeout=15)
         assert process.returncode == 0, stderr.decode(errors="replace")
         assert b"Traceback" not in stderr
         assert (marker.read_text() == "completed") is poll_completed

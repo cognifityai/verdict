@@ -47,15 +47,31 @@ python3.12 -m venv .venv
 
 In the local setup page, choose **Claude Code / Codex**, check the detected
 history directories, select **Preview sources**, then **Approve and capture**.
-The background job attempts every discovered `.jsonl` file once and shows file
+The background job attempts every discovered `.jsonl` file and Codex
+`.jsonl.zst` archive once and shows file
 progress; files it cannot safely parse are reported separately. The same
 approved roots can be rescanned after a source changes or an interrupted job.
-Compressed `.jsonl.zst` Codex histories are not yet included in preview or
-capture.
-For a history file above 128 MiB and at most 1 GiB, Verdict captures a
-bounded prefix and labels the source coverage partial; later activity in that
-file remains unobserved. Files above 1 GiB are skipped with an explicit
-reason so source verification remains bounded.
+Codex archives are decompressed while reading; the archive itself is not
+rewritten. If both forms have the same path stem, the active `.jsonl` file is
+captured and its archive is ignored. When Codex archives a previously captured
+file, Verdict verifies that the archive starts with the same decoded history
+before updating that run.
+Verdict parses at most 128 MiB of decoded history per file and labels a longer
+history partial. Investigation can show up to 50 newest source records as a
+redacted inspection sample. Supported completed messages can show a bounded text
+preview. Record kinds and previews are sanitized before storage, and a
+complete final record can appear without a trailing newline. It may overlap
+the canonical prefix and adds
+nothing to token totals, issue counts, monitoring, or evaluation. With content capture disabled, the sample
+contains only recognized record kinds and timestamps. The 1 GiB
+file limit applies to physical bytes, including compressed archives. Larger
+files are skipped with an explicit reason.
+Records between the prefix and newest sample remain unobserved. The newest
+sample is unavailable when a compressed history expands beyond 512 MiB; its
+remaining tail is not validated.
+A finalized archive whose observed JSONL ends with an unfinished record is
+skipped; an active `.jsonl` file can retain earlier complete records while it
+is still being written.
 Use **Cancel capture** to stop after the current file; already imported files
 remain available, and previewing the roots again allows a safe rescan.
 Verdict reads those files without replaying agent commands. After capture,

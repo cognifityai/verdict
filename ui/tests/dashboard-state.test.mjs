@@ -6561,6 +6561,58 @@ test("large local runs expose a separately labeled recent inspection sample", as
     "a new run must not briefly show the previous run's sampled evidence before effects flush");
 });
 
+test("a short recorded prefix with an oversized source exposes newest inspection", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const run = { ...runListRow("partial-run"), sourceKind: "codex", eventCount: 6,
+    sourcePartial: true };
+  const props = { url: "/api/runs", focusRunIds: ["partial-run"],
+    selectedRunId: "partial-run" };
+  render(ui.Runs, hooks, props);
+  hooks.flushEffects();
+  await resolveJson(requests[0], { ...runListPage(0, ["partial-run"], 1), runs: [run] });
+  const tree = render(ui.Runs, hooks, props);
+  const detail = findAll(tree, (node) => node.type?.name === "RunDetail")[0];
+  const renderedDetail = render(detail.type, createHooks(), detail.props);
+  const component = findAll(renderedDetail,
+    (node) => node.type?.name === "RecentLocalEvents")[0];
+  assert.ok(component);
+  const sampleHooks = createEffectHooks();
+  render(component.type, sampleHooks, component.props);
+  sampleHooks.flushEffects();
+  const initial = render(component.type, sampleHooks, component.props);
+  const pending = findAll(initial, (node) => node.type === "button" &&
+    textOf(node) === "View recent sample")[0].props.onClick();
+  const request = requests.find((item) => item.url ===
+    "/api/runs/partial-run/recent-local-events");
+  await resolveJson(request, { schema: "local-recent-window-v2", runId: "partial-run",
+    capturedAt: "2026-10-19T00:00:00Z", sourceRevision: "f".repeat(64),
+    sourceRecordCount: 8, sourceEventCount: 6, events: [], turns: [], findings: [],
+    latestSample: { status: "sampled", records: [{ at: "2026-10-19T01:00:00Z",
+      kind: "agent_message", preview: "Newest synthetic activity" }] } });
+  await pending;
+  const loaded = render(component.type, sampleHooks, component.props);
+  assert.match(textOf(loaded), /Newest sampled source records/);
+  assert.match(textOf(loaded), /Newest synthetic activity/);
+  assert.match(textOf(loaded), /may overlap the canonical prefix/);
+  assert.match(textOf(loaded), /cannot establish full-session totals/);
+  const unavailablePending = findAll(loaded, (node) => node.type === "button" &&
+    textOf(node) === "View recent sample")[0].props.onClick();
+  const unavailableRequest = requests.filter((item) => item.url ===
+    "/api/runs/partial-run/recent-local-events").at(-1);
+  await resolveJson(unavailableRequest, { schema: "local-recent-window-v2", runId: "partial-run",
+    capturedAt: "2026-10-19T00:00:00Z", sourceRevision: "f".repeat(64),
+    sourceRecordCount: 8, sourceEventCount: 6, omittedMiddleEvents: 57,
+    events: [], turns: [], findings: [],
+    latestSample: { status: "unavailable_decoded_limit", records: [] } });
+  await unavailablePending;
+  const unavailable = textOf(render(component.type, sampleHooks, component.props));
+  assert.match(unavailable, /newest source records are unavailable/);
+  assert.doesNotMatch(unavailable, /newest source-record sample are available|inspect the latest available records/);
+  assert.doesNotMatch(unavailable, /outside the canonical prefix and this sample|Browse recorded events below/);
+});
+
 test("admitted local history pages through recorded middle events", async () => {
   const ui = await loadUiModule();
   const hooks = createEffectHooks();

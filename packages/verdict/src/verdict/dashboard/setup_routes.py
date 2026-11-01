@@ -27,6 +27,7 @@ from verdict.telemetry.local_agents import (
     _LOCAL_FAILURE_REASONS,
     CaptureCancelled,
     capture_local_agents,
+    iter_local_history_paths,
 )
 from verdict.telemetry.model import ImportContext
 from verdict.telemetry.runner import ImportRunError, import_into_storage
@@ -186,15 +187,13 @@ class SetupRoutes:
             except (TypeError, UnicodeError, ValueError):
                 return JSONResponse({"error": "invalid setup request"}, status_code=400)
 
-            def preview(root: Path | None) -> dict[str, Any]:
+            def preview(root: Path | None, source_kind: str) -> dict[str, Any]:
                 if root is None:
                     return {"approvedPath": None, "exists": False, "files": 0}
                 files: list[Path] = []
                 file_limit_reached = False
                 if root.is_dir() and not root.is_symlink():
-                    for path in root.rglob("*.jsonl"):
-                        if not path.is_file() or path.is_symlink():
-                            continue
+                    for path in iter_local_history_paths(root, source_kind):
                         if len(files) == _MAX_FILES_PREVIEW:
                             file_limit_reached = True
                             break
@@ -222,8 +221,8 @@ class SetupRoutes:
                 }
 
             result = {
-                "claude": preview(claude_root),
-                "codex": preview(codex_root),
+                "claude": preview(claude_root, "claude-code"),
+                "codex": preview(codex_root, "codex"),
             }
             diagnostic = codex_diagnostic_path(codex_root) if codex_root else None
             result["codex"]["modelCallDiagnostics"] = {
