@@ -135,6 +135,7 @@ MAX_MANAGEMENT_TIMELINE_DATES = 31
 MAX_MANAGEMENT_LATENCY_SAMPLES = 10_000
 REPORT_PERIOD_DAYS = {0, 7, 30, 90}
 MAX_TRACE_SAMPLES = 30
+MAX_TRACE_CONTENT_PREVIEW_CHARACTERS = 8_000
 # Run detail has stricter record/page bounds than the generic redaction API.
 # These endpoint-only limits cover the maximum valid 50-turn/200-event page
 # without weakening the default fail-closed budget used by capture paths.
@@ -3029,6 +3030,16 @@ def _trace_samples(
         )
         for content_field in ("prompt_redacted", "response_redacted", "error"):
             sample[content_field] = redact_structure(sample.get(content_field))
+        for content_field, flag in (
+            ("prompt_redacted", "promptPreviewTruncated"),
+            ("error", "errorPreviewTruncated"),
+        ):
+            content = sample[content_field]
+            sample[flag] = (
+                isinstance(content, str) and len(content) > MAX_TRACE_CONTENT_PREVIEW_CHARACTERS
+            )
+            if sample[flag]:
+                sample[content_field] = content[:MAX_TRACE_CONTENT_PREVIEW_CHARACTERS]
         sample["providerKey"] = _provider_key(row["provider"])
         sample["contentCaptured"] = (
             row["prompt_redacted"] is not None or row["response_redacted"] is not None

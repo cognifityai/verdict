@@ -1,7 +1,7 @@
-# Verdict 0.1.0b4 target
+# Verdict 0.1.0b5 target
 
 This Python public beta uses the bounded
-[`0.1.0b4` release profile](https://github.com/cognifityai/verdict/blob/v0.1.0b4/docs/RELEASE_PROFILE.md).
+[`0.1.0b5` release profile](https://github.com/cognifityai/verdict/blob/v0.1.0b5/docs/RELEASE_PROFILE.md).
 It is not a production-readiness claim.
 
 ## Install one synchronized set
@@ -52,7 +52,7 @@ dashboard against a non-production copy before restarting.
 
 ## Optional Agent evidence transport
 
-`0.1.0b4` includes the Agent Run SDK, process-owned JSONL capture segments,
+`0.1.0b5` includes the Agent Run SDK, process-owned JSONL capture segments,
 the authenticated PostgreSQL collector, and `verdict-shipper`. Local Codex
 history capture also reads `.jsonl.zst` archives with bounded inspection of
 newest records. Do not add that transport merely to instrument supported provider

@@ -5099,6 +5099,41 @@ test("trace detail distinguishes content, provider failure, and judge availabili
   assert.doesNotMatch(rendered, /response.*historical metadata-only trace/i);
 });
 
+test("trace detail labels a shortened prompt preview", async () => {
+  const ui = await loadUiModule();
+  const sample = {
+    trace_id: "long-prompt", provider: "synthetic", request_model: "sample-model",
+    prompt_redacted: "bounded prompt", promptPreviewTruncated: true,
+    response_redacted: "completed", error: null, started_at: "2026-11-01T00:00:00Z",
+  };
+
+  const shortened = textOf(render(ui.TraceDetail, createHooks(), { s: sample, onClose() {} }));
+  const full = textOf(render(ui.TraceDetail, createHooks(), {
+    s: { ...sample, promptPreviewTruncated: false }, onClose() {},
+  }));
+
+  assert.match(shortened, /Prompt preview shortened to keep this dashboard responsive/);
+  assert.doesNotMatch(full, /Prompt preview shortened/);
+});
+
+test("trace detail labels a shortened provider error preview", async () => {
+  const ui = await loadUiModule();
+  const sample = {
+    trace_id: "long-error", provider: "synthetic", request_model: "sample-model",
+    prompt_redacted: "short prompt", response_redacted: null,
+    error: "bounded provider error", errorPreviewTruncated: true,
+    started_at: "2026-11-01T00:00:00Z",
+  };
+
+  const shortened = textOf(render(ui.TraceDetail, createHooks(), { s: sample, onClose() {} }));
+  const full = textOf(render(ui.TraceDetail, createHooks(), {
+    s: { ...sample, errorPreviewTruncated: false }, onClose() {},
+  }));
+
+  assert.match(shortened, /Provider error preview shortened to keep this dashboard responsive/);
+  assert.doesNotMatch(full, /Provider error preview shortened/);
+});
+
 test("trace detail identifies a tool-only response without calling it uncaptured", async () => {
   const ui = await loadUiModule();
   const sample = {

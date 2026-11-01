@@ -1157,6 +1157,7 @@ function TraceDetail({ s, onClose, onEvaluate = null, source = "sample" }) {
           <div className="text-sm p-2.5" style={{ background: C.panel2, color: C.text, border: `1px solid ${C.border}`, borderRadius: 3 }}>
             {s.prompt_redacted == null ? (hasContent ? "Prompt was not captured for this trace." : "Not available for this historical metadata-only trace.") : (s.prompt_redacted || "Captured prompt was empty.")}
           </div>
+          {s.promptPreviewTruncated && <div className="text-xs mt-1" style={{ color: C.faint }}>Prompt preview shortened to keep this dashboard responsive.</div>}
         </div>
         <div>
           <div className="text-xs mb-1" style={{ color: C.faint }}>RESPONSE</div>
@@ -1165,8 +1166,11 @@ function TraceDetail({ s, onClose, onEvaluate = null, source = "sample" }) {
           </div>
         </div>
         {s.error && (
-          <div className="text-sm p-2.5" style={{ background: C.redBg, color: C.red, border: `1px solid ${C.red}`, borderRadius: 3 }}>
-            Provider failure: {s.error}
+          <div>
+            <div className="text-sm p-2.5" style={{ background: C.redBg, color: C.red, border: `1px solid ${C.red}`, borderRadius: 3 }}>
+              Provider failure: {s.error}
+            </div>
+            {s.errorPreviewTruncated && <div className="text-xs mt-1" style={{ color: C.faint }}>Provider error preview shortened to keep this dashboard responsive.</div>}
           </div>
         )}
         <div className="p-3" style={{ background: C.panel2, border: `1px solid ${C.border}`, borderRadius: 3 }}>

@@ -87,7 +87,7 @@ the wheel built from this checkout.
 uv build packages/verdict --wheel --out-dir build/customer-managed
 # Use the exact wheel path printed by the build; keep just one wheel in this ignored directory.
 docker build -f deploy/customer-managed/Dockerfile \
-  --build-arg VERDICT_WHEEL=build/customer-managed/cognifity_verdict-0.1.0b4-py3-none-any.whl \
+  --build-arg VERDICT_WHEEL=build/customer-managed/cognifity_verdict-0.1.0b5-py3-none-any.whl \
   -t verdict-local:review .
 ```
 
