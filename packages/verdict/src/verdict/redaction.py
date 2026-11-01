@@ -1336,6 +1336,13 @@ def redact_structure(
     if isinstance(value, (int, float)):
         if isinstance(value, float) and not math.isfinite(value):
             return _REDACTED
+        if isinstance(value, float):
+            # A fractional metric is a numeric value, not a text digit run.
+            # Inspect its whole-number component so a card supplied as a JSON
+            # number still fails closed without corrupting latency/cost floats.
+            whole = str(abs(math.trunc(value)))
+            sanitized_whole = redact(whole, mode=mode, secret=secret)
+            return value if sanitized_whole == whole else sanitized_whole
         try:
             rendered = str(value)
         except ValueError:

@@ -56,6 +56,10 @@ the captured Trace has no error field. It does not establish a completed or
 successful model response. Exact Trace IDs remain available for authenticated
 drilldown even when the ID resembles sensitive text; captured prompt, response,
 and error content remain redacted.
+The Model calls list and selected Trace show at most 8,000 characters of each
+redacted prompt or provider error. A visible note marks a shortened preview.
+The stored Trace retains its captured content; this display bound prevents a
+page of long prompts or errors from making Home unavailable.
 
 The current Reliability analysis partitions model calls into **Provider error
 recorded**, **Ended without recorded provider error**, and **Unfinished**.

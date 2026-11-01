@@ -6,6 +6,18 @@ the product is refined.
 
 ## [Unreleased]
 
+## [0.1.0b5] - 2026-11-01
+
+### Fixed
+
+- Bound each redacted model-call prompt and provider error preview in the
+  dashboard to 8,000 characters and mark shortened previews. The stored Trace
+  remains unchanged; a page of large prompts or errors no longer exhausts the
+  Home response budget.
+- Preserve ordinary finite fractional metrics as numbers during recursive
+  redaction. A card-shaped whole numeric value remains redacted, and
+  nonfinite values still fail closed.
+
 ## [0.1.0b4] - 2026-11-01
 
 ### Added
@@ -992,7 +1004,8 @@ the product is refined.
   retain content must explicitly select metadata-only capture. Redaction remains
   best-effort rather than a compliance control.
 
-[Unreleased]: https://github.com/cognifityai/verdict/compare/v0.1.0b4...HEAD
+[Unreleased]: https://github.com/cognifityai/verdict/compare/v0.1.0b5...HEAD
+[0.1.0b5]: https://github.com/cognifityai/verdict/compare/v0.1.0b4...v0.1.0b5
 [0.1.0b4]: https://github.com/cognifityai/verdict/compare/v0.1.0b3...v0.1.0b4
 [0.1.0b3]: https://github.com/cognifityai/verdict/compare/v0.1.0b2...v0.1.0b3
 [0.1.0b2]: https://github.com/cognifityai/verdict/compare/v0.1.0b1...v0.1.0b2
