@@ -6,6 +6,8 @@ the product is refined.
 
 ## [Unreleased]
 
+## [0.1.0b4] - 2026-11-01
+
 ### Added
 
 - Codex local-history preview and capture now include streamed `.jsonl.zst`
@@ -990,7 +992,8 @@ the product is refined.
   retain content must explicitly select metadata-only capture. Redaction remains
   best-effort rather than a compliance control.
 
-[Unreleased]: https://github.com/cognifityai/verdict/compare/v0.1.0b3...HEAD
+[Unreleased]: https://github.com/cognifityai/verdict/compare/v0.1.0b4...HEAD
+[0.1.0b4]: https://github.com/cognifityai/verdict/compare/v0.1.0b3...v0.1.0b4
 [0.1.0b3]: https://github.com/cognifityai/verdict/compare/v0.1.0b2...v0.1.0b3
 [0.1.0b2]: https://github.com/cognifityai/verdict/compare/v0.1.0b1...v0.1.0b2
 [0.1.0b1]: https://github.com/cognifityai/verdict/compare/v0.1.0a23...v0.1.0b1

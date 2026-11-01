@@ -20,7 +20,7 @@ The operational delta is intentionally small:
 - `VERDICT_STORAGE` can supply the pipeline/dashboard storage URL while logs expose
   only the backend name.
 
-Historical profile: use the current [release target](verdict-0.1.0b3.md) for an unpinned install command.
+Historical profile: use the current [release target](verdict-0.1.0b4.md) for an unpinned install command.
 
 Add the provider and `postgres` extras actually used by the application. Do not
 install the unrelated PyPI distribution named `verdict` in the same environment.
