@@ -39,7 +39,7 @@ function componentStub(names) {
 let compiledUi;
 
 async function compileUiModule() {
-  const source = `${await readFile(UI_SOURCE, "utf8")}\nexport { Dashboard, GuidedHome, Traces, TraceDetail, TraceSpans, TabHelp, Judge, Compare, ManagementReport, mountedApiUrl, Monitor };\nexport { useOperations } from "./Operations.jsx";\nexport { Registry, RegistryView, RunOutcomeSummary, RunOutcomePreview } from "./Registry.jsx";\nexport { EvaluatorLab } from "./EvaluatorLab.jsx";\nexport { ConversationEvaluation } from "./ConversationEvaluation.jsx";\nexport { MatchedConversationCompare } from "./MatchedConversationCompare.jsx";\nexport { Runs, TurnAnalysis } from "./Runs.jsx";\nexport { Usage, UsageChart, DayIssueSummary, DayExplanation, DayAiExplanation } from "./Usage.jsx";\nexport { EvidenceExplain } from "./EvidenceExplain.jsx";\nexport { Experiments } from "./Experiments.jsx";\nexport { ScopedEvaluate } from "./ScopedEvaluate.jsx";\nexport { Insights } from "./Insights.jsx";\nexport { SetupWizard } from "./SetupWizard.jsx";\nexport { ControlCenter } from "./ControlCenter.jsx";\nexport { IssueInbox } from "./IssueInbox.jsx";`;
+  const source = `${await readFile(UI_SOURCE, "utf8")}\nexport { Dashboard, GuidedHome, Traces, TraceDetail, TraceSpans, TabHelp, Judge, Compare, ManagementReport, mountedApiUrl, Monitor };\nexport { useOperations } from "./Operations.jsx";\nexport { Registry, RegistryView, RunOutcomeSummary, RunOutcomePreview } from "./Registry.jsx";\nexport { EvaluatorLab } from "./EvaluatorLab.jsx";\nexport { ConversationEvaluation } from "./ConversationEvaluation.jsx";\nexport { MatchedConversationCompare } from "./MatchedConversationCompare.jsx";\nexport { Runs, TurnAnalysis, FollowupReview } from "./Runs.jsx";\nexport { Usage, UsageChart, DayIssueSummary, DayExplanation, DayAiExplanation } from "./Usage.jsx";\nexport { EvidenceExplain } from "./EvidenceExplain.jsx";\nexport { Experiments } from "./Experiments.jsx";\nexport { ScopedEvaluate } from "./ScopedEvaluate.jsx";\nexport { Insights } from "./Insights.jsx";\nexport { SetupWizard } from "./SetupWizard.jsx";\nexport { ControlCenter } from "./ControlCenter.jsx";\nexport { IssueInbox } from "./IssueInbox.jsx";`;
   uiCompileCount += 1;
   const result = await build({
     stdin: {
@@ -142,7 +142,7 @@ test("conversation upload, approved run, and partial coverage refresh", async ()
   const hooks = createEffectHooks();
   const requests = deferredFetches();
   const props = { root: "", token: "setup-token", provider: "anthropic", model: "synthetic",
-    providerState: { configured: true, customEndpointConfigured: true }, updatePreferences: () => {} };
+    providerState: { configured: true }, updatePreferences: () => {} };
   const document = { name: "reply_quality", version: "1", target: "response",
     dimensions: [{ name: "relevance", description: "Addresses the request.", type: "binary" }] };
   let tree = render(ui.ConversationEvaluation, hooks, props);
@@ -160,15 +160,24 @@ test("conversation upload, approved run, and partial coverage refresh", async ()
   await resolveJson(requests[1], { target: "response", scannedConversations: 1,
     eligibleTargets: 2, alreadyJudged: 0, plannedCalls: 1, retryableErrors: 0,
     notEvaluableReasons: {}, plannedTargets: [{ conversationId: "a", revision: "one",
-      targetPosition: 1 }], planFingerprint: "plan", evaluatorFingerprint: "b".repeat(64) });
+    targetPosition: 1 }], planFingerprint: "plan", evaluatorFingerprint: "b".repeat(64),
+    upperStaticListPriceUsd: 0.01 });
   await resolveJson(requests[2], { conversations: [{ id: "a".repeat(32),
     event_at: "2026-09-01T00:00:00Z", end_status: "complete", input_issues: [],
     coverage: { targets: 2, completed: 0, error: 0, missing: 2, fullyGraded: false } }] });
   await loading;
 
   tree = render(ui.ConversationEvaluation, hooks, props);
-  assert.match(textOf(tree), /configured Anthropic endpoint/);
+  assert.match(textOf(tree), /Conservative static list-price bound/);
+  findAll(tree, (node) => node.type === "input" && node.props.type === "number" && node.props.max === "100")[0]
+    .props.onChange({ target: { value: "0.001" } });
   findAll(tree, (node) => node.type === "input" && node.props.type === "checkbox")[0]
+    .props.onChange({ target: { checked: true } });
+  tree = render(ui.ConversationEvaluation, hooks, props);
+  assert.equal(findAll(tree, (node) => node.type === "button" && /Run\s+1\s+judge calls/.test(textOf(node)))[0].props.disabled, true);
+  findAll(tree, (node) => node.type === "input" && node.props.type === "number" && node.props.max === "100")[0]
+    .props.onChange({ target: { value: "0.05" } });
+  findAll(render(ui.ConversationEvaluation, hooks, props), (node) => node.type === "input" && node.props.type === "checkbox")[0]
     .props.onChange({ target: { checked: true } });
   tree = render(ui.ConversationEvaluation, hooks, props);
   const runButton = findAll(tree, (node) => node.type === "button" &&
@@ -177,11 +186,13 @@ test("conversation upload, approved run, and partial coverage refresh", async ()
   const running = runButton.props.onClick();
   assert.equal(JSON.parse(requests[3].options.body).planFingerprint, "plan");
   assert.equal(JSON.parse(requests[3].options.body).confirmExternalEgress, true);
+  assert.equal(JSON.parse(requests[3].options.body).maxEstimatedUsd, 0.05);
   await resolveJson(requests[3], { completed: 1, errors: 0, stale: 0 });
   await resolveJson(requests[4], { target: "response", scannedConversations: 1,
     eligibleTargets: 2, alreadyJudged: 1, plannedCalls: 1, retryableErrors: 0,
     notEvaluableReasons: {}, plannedTargets: [{ conversationId: "a", revision: "one",
-      targetPosition: 3 }], planFingerprint: "plan-next", evaluatorFingerprint: "b".repeat(64) });
+      targetPosition: 3 }], planFingerprint: "plan-next", evaluatorFingerprint: "b".repeat(64),
+    upperStaticListPriceUsd: 0.01 });
   await resolveJson(requests[5], { conversations: [{ id: "a".repeat(32),
     event_at: "2026-09-01T00:00:00Z", end_status: "complete", input_issues: [],
     coverage: { targets: 2, completed: 1, error: 0, missing: 1, fullyGraded: false } }] });
@@ -213,7 +224,8 @@ test("conversation approval is cleared after failed navigation and run", async (
   const preview = { target: "conversation", scannedConversations: 1,
     eligibleTargets: 1, alreadyJudged: 0, plannedCalls: 1, retryableErrors: 0,
     notEvaluableReasons: {}, plannedTargets: [{ conversationId: "a", revision: "one",
-      targetPosition: null }], planFingerprint: "plan", evaluatorFingerprint: "b".repeat(64) };
+      targetPosition: null }], planFingerprint: "plan", evaluatorFingerprint: "b".repeat(64),
+    upperStaticListPriceUsd: 0.01 };
   await resolveJson(requests[1], preview);
   await resolveJson(requests[2], { conversations: [], nextCursor: "next" });
   await load;
@@ -382,9 +394,40 @@ test("testing an edited schedule preserves the reviewed form until it is saved",
   assert.match(textOf(tree), /Cycle checks completed/);
   assert.doesNotMatch(textOf(tree), /selected checks did not complete/);
   assert.match(textOf(tree), /Start the worker for this saved plan/);
-  assert.match(textOf(tree), /verdict-service --tenant-id/);
-  assert.doesNotMatch(textOf(tree), /verdict-service --storage/);
-  assert.match(textOf(tree), /same store and tenant ID as the dashboard/);
+  assert.match(textOf(tree), /verdict-service --storage/);
+  assert.match(textOf(tree), /--tenant-id/);
+  assert.match(textOf(tree), /Set both variables to the dashboard's storage URL and tenant ID/);
+  assert.match(textOf(tree), /absolute SQLite database path/);
+});
+
+test("production setup keeps local history import outside the default plan", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const props = {
+    configUrl: "/api/config", section: "schedule",
+    meta: { totalAgentRuns: 20, monitorEligibleCalls: 0, agentRunSources: [
+      { sourceKind: "verdict_sdk", runs: 20 },
+    ] },
+  };
+  render(ui.ControlCenter, hooks, props);
+  hooks.flushEffects();
+  await resolveJson(requests[0], { setupToken: "setup-token" });
+  await resolveJson(requests[1], { documents: [], worker: { status: "unverified" },
+    dailyOperations: { localAgentSources: [] }, notifications: [], deliveryAttempts: [],
+    reviewQueue: [], deliveryQueue: [], deliveryQueueCounts: {} });
+  const tree = render(ui.ControlCenter, hooks, props);
+  const importOptions = findAll(tree, (node) => node.type === "details"
+    && textOf(node).includes("Import local coding-agent history"));
+  assert.equal(importOptions.length, 1);
+  assert.deepEqual(findAll(importOptions[0], (node) => node.type?.name === "Field")
+    .map((field) => field.props.label),
+  ["Claude Code history directory", "Codex history directory"]);
+  const defaultPlan = textOf(tree).split("Import local coding-agent history")[0];
+  assert.match(defaultPlan, /Already captured activity/);
+  assert.doesNotMatch(defaultPlan, /Claude Code history directory|Codex history directory/);
+  assert.equal(findAll(tree, (node) => node.type?.name === "Button"
+    && textOf(node).includes("Run once and review"))[0].props.disabled, false);
 });
 
 test("guided setup treats a recent worker cycle as verified without a startup prompt", async () => {
@@ -399,14 +442,18 @@ test("guided setup treats a recent worker cycle as verified without a startup pr
   await resolveJson(requests[1], {
     documents: [{ kind: "schedule", documentId: "daily", state: "active", revision: 2,
       payload: { intervalHours: 24, analyzeOnly: true, runMonitor: false } }],
-    worker: { status: "recent" }, lastCycle: { state: "completed", trigger: "worker",
+    worker: { status: "recent" }, lastCycle: { state: "completed", trigger: "manual",
+      scheduleRevision: 2, finishedAt: "2026-10-19T00:00:00Z" },
+    lastWorkerCycle: { state: "completed", trigger: "worker",
       scheduleRevision: 2, finishedAt: "2026-10-19T00:00:00Z" },
     dailyOperations: { localAgentSources: [] }, notifications: [], deliveryAttempts: [],
     reviewQueue: [],
   });
   const summary = textOf(render(ui.ControlCenter, hooks, props));
   assert.match(summary, /Recurring checks ran on current plan/);
+  assert.match(summary, /Worker check on this plan completed/);
   assert.doesNotMatch(summary, /Start the worker for this saved plan/);
+  assert.doesNotMatch(summary, /while paused/);
 });
 
 test("guided plan never treats observed source labels as filesystem roots", async () => {
@@ -427,12 +474,16 @@ test("guided plan never treats observed source labels as filesystem roots", asyn
   await resolveJson(requests[0], { setupToken: "token" });
   await resolveJson(requests[1], { documents: [], worker: {}, dailyOperations: {},
     notifications: [], deliveryAttempts: [], reviewQueue: [] });
+  await resolveJson(requests[2], { reportedOutcomes: { status: "no_reported_outcomes",
+    sampledTerminalRuns: 2, groups: [] } });
   let tree = render(ui.ControlCenter, hooks, props);
   assert.equal(findAll(tree, (node) => node.type === "input" && node.props.value === "~/.claude/projects").length, 0);
   const loaded = { ...props, meta: { totalAgentRuns: 2,
     agentRunSources: [{ sourceKind: "claude-code", runs: 1 }, { sourceKind: "codex", runs: 1 }] } };
   render(ui.ControlCenter, hooks, loaded);
   hooks.flushEffects();
+  await resolveJson(requests[3], { reportedOutcomes: { status: "no_reported_outcomes",
+    sampledTerminalRuns: 2, groups: [] } });
   tree = render(ui.ControlCenter, hooks, loaded);
   assert.equal(findAll(tree, (node) => node.type === "input" && node.props.value === "~/.claude/projects").length, 0);
   assert.equal(findAll(tree, (node) => node.type === "input" && node.props.value === "~/.codex/sessions").length, 0);
@@ -440,9 +491,9 @@ test("guided plan never treats observed source labels as filesystem roots", asyn
   const run = findAll(tree, (node) => node.type?.name === "Button"
     && textOf(node).includes("Run once and review"))[0];
   const running = run.props.onClick();
-  assert.equal(JSON.parse(requests[2].options.body).claudeRoot, undefined);
-  assert.equal(JSON.parse(requests[2].options.body).codexRoot, undefined);
-  await resolveJson(requests[2], { analysis: { status: "completed" }, monitor: null,
+  assert.equal(JSON.parse(requests[4].options.body).claudeRoot, undefined);
+  assert.equal(JSON.parse(requests[4].options.body).codexRoot, undefined);
+  await resolveJson(requests[4], { analysis: { status: "completed" }, monitor: null,
     scheduledEvaluation: { status: "disabled_by_plan" } });
   await running;
   tree = render(ui.ControlCenter, hooks, loaded);
@@ -452,8 +503,8 @@ test("guided plan never treats observed source labels as filesystem roots", asyn
   tree = render(ui.ControlCenter, hooks, loaded);
   const rescan = findAll(tree, (node) => node.type?.name === "Button"
     && textOf(node).includes("Run once and review"))[0].props.onClick();
-  assert.equal(JSON.parse(requests[3].options.body).codexRoot, "/tmp/explicit-synthetic-history");
-  await resolveJson(requests[3], { analysis: { status: "completed" }, monitor: null,
+  assert.equal(JSON.parse(requests[5].options.body).codexRoot, "/tmp/explicit-synthetic-history");
+  await resolveJson(requests[5], { analysis: { status: "completed" }, monitor: null,
     scheduledEvaluation: { status: "disabled_by_plan" } });
   await rescan;
 });
@@ -519,7 +570,7 @@ test("guided setup reviews an AI agent-check draft without saving or starting it
   tree = render(ui.ControlCenter, hooks, props);
   assert.match(textOf(tree), /AI draft filled the local check interval/);
   assert.equal(findAll(tree, (node) => node.type === "input" && node.props.type === "number")[0].props.value, 12);
-  assert.equal(requests.length, 2);
+  assert.equal(requests.length, 3);
 });
 
 test("pause keeps legacy judge consent untouched and resume requires a newly reviewed no-egress cycle", async () => {
@@ -715,7 +766,7 @@ test("switching directly from Anthropic to Google selects its current default", 
   assert.equal(field(tree, "Model", "input").props.value, "gemini-3.5-flash-lite");
 });
 
-test("Evaluator Lab selects Jev and runs only the approved preview", async () => {
+test("Evaluator Lab shows Jev preview but blocks an unpriced dashboard run", async () => {
   const ui = await loadUiModule();
   const hooks = createEffectHooks();
   const requests = deferredFetches();
@@ -775,18 +826,9 @@ test("Evaluator Lab selects Jev and runs only the approved preview", async () =>
     node.props.type === "checkbox").at(-1);
   consent.props.onChange({ target: { checked: true } });
   tree = render(ui.EvaluatorLab, hooks, props);
-  const run = findAll(tree, (node) => node.type === "button" &&
-    textOf(node).includes("Run 1 judge calls"))[0].props.onClick();
-  const approved = JSON.parse(requests[3].options.body);
-  assert.equal(approved.provider, "jev");
-  assert.equal(approved.model, "jev-1.14.0");
-  assert.equal(approved.planFingerprint, "jev-plan");
-  assert.equal(approved.confirmExternalEgress, true);
-  await resolveJson(requests[3], { unit: "trace", availableTraces: 1,
-    eligible: 1, completed: 1, alreadyJudged: 0, errors: 0,
-    notEvaluable: 0, notEvaluableReasons: {}, evaluatorFingerprint: "a".repeat(64) });
-  await run;
-  assert.match(textOf(render(ui.EvaluatorLab, hooks, props)), /Evaluation completed/);
+  assert.equal(findAll(tree, (node) => node.type === "button" &&
+    textOf(node).includes("Run 1 judge calls"))[0].props.disabled, true);
+  assert.equal(requests.length, 3);
 });
 
 test("Evaluator Lab calibration discloses unredacted text and binds the approved endpoint", async () => {
@@ -832,14 +874,9 @@ test("Evaluator Lab calibration discloses unredacted text and binds the approved
     node.props.type === "checkbox").at(-1);
   consent.props.onChange({ target: { checked: true } });
   tree = render(ui.EvaluatorLab, hooks, props);
-  const run = findAll(tree, (node) => node.type === "button" &&
-    textOf(node).includes("Run calibration"))[0].props.onClick();
-  const approved = JSON.parse(requests[3].options.body);
-  assert.equal(approved.planFingerprint, "calibration-plan");
-  assert.equal(approved.labelSetPath, "/tmp/labels.jsonl");
-  await resolveJson(requests[3], { status: "insufficient_data", exampleAgreement: 1,
-    totalExamples: 1, errors: 0 });
-  await run;
+  assert.equal(findAll(tree, (node) => node.type === "button" &&
+    textOf(node).includes("Run calibration"))[0].props.disabled, true);
+  assert.equal(requests.length, 3);
 });
 
 test("Evaluator Lab previews a native Turn page and sends its approved identities", async () => {
@@ -867,6 +904,7 @@ test("Evaluator Lab previews a native Turn page and sends its approved identitie
   await resolveJson(requests[2], {
     unit: "agent_turn", availableTurns: 1, eligible: 1, alreadyJudged: 0,
     notEvaluable: 0, plannedCalls: 1, estimatedMaximumCostUsd: 0.01,
+    upperStaticListPriceUsd: 0.01,
     maximumOutputTokens: 512, notEvaluableReasons: {},
     rubric: { dimensions: ["relevance"], skippedDimensions: [] },
     planFingerprint: "turn-plan", plannedTurns: [{ runId: "run", turnId: "turn", evidenceFingerprint: "a".repeat(64) }],
@@ -876,14 +914,23 @@ test("Evaluator Lab previews a native Turn page and sends its approved identitie
   tree = render(ui.EvaluatorLab, hooks, props);
   assert.match(textOf(tree), /1\s+tenant-visible candidates/);
   assert.match(textOf(tree), /provider billing can exceed it/);
-  assert.match(textOf(tree), /cost is an estimate, not a billing cap/);
+  assert.match(textOf(tree), /Conservative static list-price bound/);
   assert.doesNotMatch(textOf(tree), /maximum estimated cost/i);
+  findAll(tree, (node) => node.type === "input" && node.props.type === "number" && node.props.max === "100")[0]
+    .props.onChange({ target: { value: "0.001" } });
   const consent = findAll(tree, (node) => node.type === "input" && node.props.type === "checkbox").at(-1);
   consent.props.onChange({ target: { checked: true } });
+  tree = render(ui.EvaluatorLab, hooks, props);
+  assert.equal(findAll(tree, (node) => node.type === "button" && textOf(node).includes("Run 1 judge calls"))[0].props.disabled, true);
+  findAll(tree, (node) => node.type === "input" && node.props.type === "number" && node.props.max === "100")[0]
+    .props.onChange({ target: { value: "0.05" } });
+  findAll(render(ui.EvaluatorLab, hooks, props), (node) => node.type === "input" && node.props.type === "checkbox").at(-1)
+    .props.onChange({ target: { checked: true } });
   tree = render(ui.EvaluatorLab, hooks, props);
   const run = findAll(tree, (node) => node.type === "button" &&
     textOf(node).includes("Run 1 judge calls"))[0].props.onClick();
   const approved = JSON.parse(requests[3].options.body);
+  assert.equal(approved.maxEstimatedUsd, 0.05);
   assert.deepEqual(approved.plannedTurns, [{ runId: "run", turnId: "turn", evidenceFingerprint: "a".repeat(64) }]);
   assert.equal(approved.plannedTraces, undefined);
   await resolveJson(requests[3], { unit: "agent_turn", availableTurns: 1,
@@ -896,6 +943,102 @@ test("Evaluator Lab previews a native Turn page and sends its approved identitie
     node.props.value === 1).length, 1);
   assert.doesNotMatch(textOf(tree), /View evaluated traces/);
 });
+
+async function selectedTurnEvaluation() {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const props = { configUrl: "/chosen/api/config", selection: {
+    unit: "agent_turn", runId: "run/selected", turnId: "turn selected",
+  } };
+  render(ui.EvaluatorLab, hooks, props); hooks.flushEffects();
+  await resolveJson(requests[0], { setupToken: "token" });
+  await resolveJson(requests[1], { evalPackageAvailable: true,
+    providers: [{ provider: "anthropic", configured: true }] });
+  let tree = render(ui.EvaluatorLab, hooks, props);
+  const pendingPreview = findAll(tree, (node) => node.type === "button" &&
+    textOf(node) === "Preview eligible calls")[0].props.onClick();
+  await resolveJson(requests[2], { unit: "agent_turn", availableTurns: 1,
+    eligible: 1, plannedCalls: 1, upperStaticListPriceUsd: 0.001,
+    notEvaluable: 0, notEvaluableReasons: {}, rubric: { dimensions: ["relevance"] },
+    planFingerprint: "selected-plan", plannedTurns: [{ runId: "run/selected",
+      turnId: "turn selected", evidenceFingerprint: "b".repeat(64) }] });
+  await pendingPreview;
+  tree = render(ui.EvaluatorLab, hooks, props);
+  findAll(tree, (node) => node.type === "input" && node.props.type === "checkbox").at(-1)
+    .props.onChange({ target: { checked: true } });
+  tree = render(ui.EvaluatorLab, hooks, props);
+  const pendingRun = findAll(tree, (node) => node.type === "button" &&
+    textOf(node) === "Run 1 judge calls")[0].props.onClick();
+  await resolveJson(requests[3], { unit: "agent_turn", availableTurns: 1, eligible: 1,
+    completed: 1, errors: 0, stale: 0, inProgress: 0, alreadyJudged: 0,
+    notEvaluable: 0, notEvaluableReasons: {}, evaluatorFingerprint: "f".repeat(64) });
+  return { ui, hooks, requests, props, pendingRun };
+}
+
+const exactSelectedTurnDetail = () => ({ runId: "run/selected",
+  turnEvaluationScope: { mode: "exact_evaluator", evaluatorFingerprint: "f".repeat(64) },
+  turns: [{ turnId: "turn selected", request: "Inspect the blue fixture",
+    response: "<script>this is inert evidence</script>", evaluation: {
+      evaluatorFingerprint: "f".repeat(64), status: "completed",
+      dimensions: [{ name: "relevance", verdict: "fail" }],
+    } }],
+});
+
+test("selected Turn evaluation displays its exact stored opinion and original evidence inline", async () => {
+  const { ui, hooks, requests, props, pendingRun } = await selectedTurnEvaluation();
+  assert.equal(requests.length, 5);
+  assert.equal(requests[4].url, "/chosen/api/runs/run%2Fselected?turn_id=turn%20selected&turn_evaluator_fingerprint=" + "f".repeat(64));
+  await resolveJson(requests[4], exactSelectedTurnDetail()); await pendingRun;
+  const tree = render(ui.EvaluatorLab, hooks, props);
+  assert.match(textOf(tree), /Selected Turn evaluation/);
+  assert.match(textOf(tree), /relevance\s*:\s*fail/);
+  assert.match(textOf(tree), /The response directly addresses the user's request/);
+  assert.match(textOf(tree), /Inspect the blue fixture/);
+  assert.match(textOf(tree), /<script>this is inert evidence<\/script>/);
+  assert.equal(findAll(tree, (node) => node.type === "script" || node.props?.dangerouslySetInnerHTML).length, 0);
+  assert.equal(requests.filter((request) => request.options.method === "POST" && request.url.endsWith("/run")).length, 1);
+});
+
+for (const mismatch of ["run", "turn", "scope_evaluator", "result_evaluator", "missing", "read_failure"]) {
+  test(`selected Turn details are withheld for ${mismatch} without another judge call`, async () => {
+    const { ui, hooks, requests, props, pendingRun } = await selectedTurnEvaluation();
+    assert.equal(requests.length, 5);
+    const detail = exactSelectedTurnDetail();
+    if (mismatch === "run") detail.runId = "different-run";
+    if (mismatch === "turn") detail.turns[0].turnId = "different-turn";
+    if (mismatch === "scope_evaluator") detail.turnEvaluationScope.evaluatorFingerprint = "e".repeat(64);
+    if (mismatch === "result_evaluator") detail.turns[0].evaluation.evaluatorFingerprint = "e".repeat(64);
+    if (mismatch === "missing") detail.turns[0].evaluation = null;
+    if (mismatch === "read_failure") requests[4].reject(new Error("read unavailable"));
+    else await resolveJson(requests[4], detail);
+    await pendingRun;
+    const text = textOf(render(ui.EvaluatorLab, hooks, props));
+    assert.match(text, /Evaluation completed/);
+    assert.match(text, /Exact selected Turn result unavailable/);
+    assert.doesNotMatch(text, /relevance\s*:\s*fail|Inspect the blue fixture/);
+    assert.equal(requests.filter((request) => request.options.method === "POST" && request.url.endsWith("/run")).length, 1);
+  });
+}
+
+for (const changed of ["root", "selection", "criterion"]) {
+  test(`delayed selected Turn result is hidden after ${changed} changes`, async () => {
+    const { ui, hooks, requests, props, pendingRun } = await selectedTurnEvaluation();
+    assert.equal(requests.length, 5);
+    let current = props;
+    if (changed === "root") current = { ...props, configUrl: "/other/api/config" };
+    if (changed === "selection") current = { ...props, selection: { ...props.selection, turnId: "new-turn" } };
+    if (changed === "criterion") {
+      const tree = render(ui.EvaluatorLab, hooks, props);
+      findAll(tree, (node) => node.type === "textarea")[0].props.onChange({ target: { value: "A different criterion" } });
+    }
+    render(ui.EvaluatorLab, hooks, current);
+    await resolveJson(requests[4], exactSelectedTurnDetail()); await pendingRun;
+    const text = textOf(render(ui.EvaluatorLab, hooks, current));
+    assert.doesNotMatch(text, /Selected Turn evaluation|relevance\s*:\s*fail|Inspect the blue fixture/);
+    assert.equal(requests.filter((request) => request.options.method === "POST" && request.url.endsWith("/run")).length, 1);
+  });
+}
 
 test("Turn tool-count consent binds the displayed preview and disables stale execution", async () => {
   const ui = await loadUiModule();
@@ -923,7 +1066,8 @@ test("Turn tool-count consent binds the displayed preview and disables stale exe
   await resolveJson(requests[2], {
     unit: "agent_turn", toolEvidence: "counts_v1", availableTurns: 1,
     eligible: 1, alreadyJudged: 0, notEvaluable: 0, plannedCalls: 1,
-    estimatedMaximumCostUsd: 0.01, maximumOutputTokens: 512,
+    estimatedMaximumCostUsd: 0.01, upperStaticListPriceUsd: 0.01,
+    maximumOutputTokens: 512,
     notEvaluableReasons: {}, rubric: { dimensions: ["relevance"], skippedDimensions: [] },
     planFingerprint: "tool-plan", plannedTurns: [{ runId: "run", turnId: "turn",
       evidenceFingerprint: "b".repeat(64) }], hasMore: false,
@@ -1387,7 +1531,8 @@ test("usage chart drills from day to session and explains only captured numbers"
     window: { complete: true, turnsComplete: true },
     days: [
       { day: "2026-10-07", turns: 1, tokenKnownTurns: 1, totalTokens: 100, pricedTurns: 1, listPriceUsd: 0.01 },
-      { day: "2026-10-08", turns: 2, tokenKnownTurns: 1, totalTokens: 300, unattributedTokens: 300, pricedTurns: 1, listPriceUsd: 0.02 },
+      { day: "2026-10-08", turns: 2, tokenKnownTurns: 1, totalTokens: 300, unattributedTokens: 300, pricedTurns: 1, listPriceUsd: 0.02,
+        cachedInputTokens: 270, componentCoverage: { cachedInputTokens: 1 } },
     ],
     selectedDay: "2026-10-08", dayModels: [], sessions: [],
     sessionsTruncated: false, selectedSession: null,
@@ -1397,6 +1542,10 @@ test("usage chart drills from day to session and explains only captured numbers"
   assert.equal(requests[0].url, "/api/usage");
   await resolveJson(requests[0], base);
   let tree = render(ui.Usage, hooks, props);
+  const dayTotal = findAll(tree, (node) => node.type?.name === "Fact"
+    && node.props.label === "2026-10-08 UTC")[0];
+  assert.match(dayTotal.props.detail, /270 cache-read input across 1\/2 turns/);
+  assert.match(dayTotal.props.detail, /component coverage may differ from total coverage/);
   const modelUnknown = findAll(tree, (node) => node.type?.name === "Fact"
     && node.props.label === "Tokens without one recorded model")[0];
   assert.ok(modelUnknown);
@@ -1502,19 +1651,60 @@ test("selected day explains its own contributors and optional AI requires previe
     upperStaticListPriceUsd: 0.01, messages: [{ role: "user", content: "aggregate metrics" }] });
   await previewing;
   ai = render(ui.DayAiExplanation, aiHooks, aiProps);
-  const run = findAll(ai, (node) => node.type === "button" && textOf(node) === "Ask AI why")[0];
+  const limitInput = findAll(ai, (node) => node.type === "input" && node.props.type === "number")[0];
+  limitInput.props.onChange({ target: { value: "0.001" } });
+  ai = render(ui.DayAiExplanation, aiHooks, aiProps);
+  const run = findAll(ai, (node) => node.type === "button" && textOf(node) === "Ask AI what to verify")[0];
   assert.equal(run.props.disabled, true);
   findAll(ai, (node) => node.type === "checkbox" || node.type === "input" && node.props.type === "checkbox")[0].props.onChange({ target: { checked: true } });
   ai = render(ui.DayAiExplanation, aiHooks, aiProps);
-  const asking = findAll(ai, (node) => node.type === "button" && textOf(node) === "Ask AI why")[0].props.onClick();
+  assert.equal(findAll(ai, (node) => node.type === "button" && textOf(node) === "Ask AI what to verify")[0].props.disabled, true);
+  findAll(ai, (node) => node.type === "input" && node.props.type === "number")[0].props.onChange({ target: { value: "0.02" } });
+  ai = render(ui.DayAiExplanation, aiHooks, aiProps);
+  const asking = findAll(ai, (node) => node.type === "button" && textOf(node) === "Ask AI what to verify")[0].props.onClick();
   assert.equal(requests[5].url, "/api/usage/explain/run");
   assert.equal(findAll(render(ui.DayAiExplanation, aiHooks, aiProps),
     (node) => node.type === "select")[0].props.disabled, true);
   assert.deepEqual(JSON.parse(requests[5].options.body), { day: days[0].day, provider: "anthropic",
-    planFingerprint: "fingerprint", confirmExternalEgress: true });
+    planFingerprint: "fingerprint", maxEstimatedUsd: 0.02, confirmExternalEgress: true });
   await resolveJson(requests[5], { status: "completed", answer: "Session 1 contributed most." });
   await asking;
-  assert.match(textOf(render(ui.DayAiExplanation, aiHooks, aiProps)), /Session 1 contributed most/);
+  ai = render(ui.DayAiExplanation, aiHooks, aiProps);
+  const dayResponse = findAll(ai, (node) => node.type?.name === "UnverifiedAiResponse")[0];
+  const dayResponseTree = render(dayResponse.type, createHooks(), dayResponse.props);
+  assert.match(textOf(dayResponseTree), /Unverified AI response/);
+  const disclosure = findAll(dayResponseTree, (node) => node.type === "details"
+    && textOf(node).includes("Session 1 contributed most."))[0];
+  assert.ok(disclosure);
+  assert.notEqual(disclosure.props.open, true);
+});
+
+test("day explanation reopens a saved unverified outcome without a provider key or another call", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const props = { root: "", day: "2026-10-17" };
+  render(ui.DayAiExplanation, hooks, props);
+  hooks.flushEffects();
+  await resolveJson(requests[0], { setupToken: "local-token" });
+  await resolveJson(requests[1], { providers: [{ provider: "anthropic", configured: false }] });
+  let tree = render(ui.DayAiExplanation, hooks, props);
+  const previewing = findAll(tree, (node) => node.type === "button"
+    && textOf(node) === "Preview AI context")[0].props.onClick();
+  await resolveJson(requests[2], { day: props.day, provider: "anthropic",
+    model: "claude-haiku-4-5", destination: "Anthropic", planFingerprint: "saved-plan",
+    plannedCalls: 1, providerAvailable: true, upperStaticListPriceUsd: 0.001,
+    savedResult: { status: "completed", answer: "A failed read likely caused the later test failure." } });
+  await previewing;
+  tree = render(ui.DayAiExplanation, hooks, props);
+  const response = findAll(tree, (node) => node.type?.name === "UnverifiedAiResponse")[0];
+  assert.ok(response);
+  const responseTree = render(response.type, createHooks(), response.props);
+  assert.match(textOf(responseTree), /Unverified AI response/);
+  assert.equal(findAll(responseTree, (node) => node.type === "details")[0].props.open, undefined);
+  assert.equal(findAll(tree, (node) => node.type === "button"
+    && textOf(node) === "Ask AI what to verify")[0].props.disabled, true);
+  assert.equal(requests.length, 3);
 });
 
 test("Inspect session pins the displayed UTC day before loading its detail", async () => {
@@ -1549,7 +1739,8 @@ test("usage labels identify source once and turns across runs", async () => {
   const ui = await loadUiModule();
   const hooks = createEffectHooks();
   const requests = deferredFetches();
-  const props = { url: "/api/usage" };
+  const opened = [];
+  const props = { url: "/api/usage", onOpenRun: (...args) => opened.push(args) };
   render(ui.Usage, hooks, props);
   hooks.flushEffects();
   await resolveJson(requests[0], {
@@ -1562,6 +1753,8 @@ test("usage labels identify source once and turns across runs", async () => {
       totalTokens: 200, pricedTurns: 0, listPriceUsd: null }],
     selectedSession: { sessionId: "session-a", sourceKind: "codex", turnCount: 2,
       totalTokens: 200, pricedTurns: 0, listPriceUsd: null,
+      longestTurnSpan: { runId: "run-a", turnId: "run-a-turn", seconds: 1800 },
+      turnSpanKnownTurns: 2,
       turns: ["run-a", "run-b"].map((runId) => ({ runId, turnId: `${runId}-turn`,
         sequence: 19, totalTokens: 100, models: [], listPriceUsd: null })) },
   });
@@ -1570,6 +1763,13 @@ test("usage labels identify source once and turns across runs", async () => {
   assert.doesNotMatch(labels, /codex\s*·\s*codex/);
   assert.match(labels, /run-a.*Turn\s+20/);
   assert.match(labels, /run-b.*Turn\s+20/);
+  findAll(tree, (node) => node.type === "button" && textOf(node) === "Analyze session")[0].props.onClick();
+  const expanded = render(ui.Usage, hooks, props);
+  const analysis = findAll(expanded, (node) => node.type?.name === "SessionExplanation")[0];
+  const evidence = render(analysis.type, createHooks(), analysis.props);
+  assert.match(textOf(evidence), /Longest recorded turn span.*30 minutes.*2\s*\/\s*2\s*turns/);
+  findAll(evidence, (node) => node.type === "button" && textOf(node) === "Inspect long turn")[0].props.onClick();
+  assert.deepEqual(opened, [["run-a", null, null, null, "run-a-turn"]]);
 });
 
 test("usage explains an ambiguous source-qualified session selection", async () => {
@@ -1637,9 +1837,9 @@ test("session usage is shown only for a live store", async () => {
     addEventListener() {}, removeEventListener() {},
   };
   try {
-    const sample = render(ui.Dashboard, createHooks(), { data: bundle("judge-a"), source: "sample" });
+    const loading = render(ui.Dashboard, createHooks(), { data: bundle("judge-a"), source: "loading" });
     const live = render(ui.Dashboard, createHooks(), { data: bundle("judge-a"), source: "live" });
-    assert.equal(findAll(sample, (node) => node.type?.name === "Usage").length, 0);
+    assert.equal(findAll(loading, (node) => node.type?.name === "Usage").length, 0);
     assert.equal(findAll(live, (node) => node.type?.name === "Usage").length, 1);
     assert.equal(findAll(live, (node) => node.type === "details"
       && textOf(node).includes("Model-call diagnostics")).length, 1);
@@ -1693,6 +1893,20 @@ test("Home analysis action names its navigation rather than implying the check r
     && node.props.className === "verdict-home-primary-action");
   assert.ok(action);
   assert.equal(textOf(action).trim(), "Go to local analysis");
+});
+
+test("Home marks a bounded source inventory as incomplete", async () => {
+  const ui = await loadUiModule();
+  for (const truncated of [false, true]) {
+    const tree = render(ui.GuidedHome, createHooks(), {
+      meta: { totalAgentRuns: 17, agentRunSources: Array.from({ length: 16 }, (_, index) =>
+        ({ sourceKind: `source-${index}`, runs: 1 })), agentRunSourcesTruncated: truncated },
+      source: "new", configUrl: "/api/config", insightsUrl: "/api/insights",
+      usageUrl: "/api/usage", onNavigate() {}, onReload() {},
+    });
+    const metric = findAll(tree, (node) => node.props?.className === "verdict-home-metric")[0];
+    assert.equal(/additional sources omitted/.test(textOf(metric)), truncated);
+  }
 });
 
 test("Overview does not report placeholder zero counts while live evidence loads", async () => {
@@ -1785,6 +1999,26 @@ test("empty Home does not imply recurring checks have run", async () => {
   assert.doesNotMatch(summary, /Open recurring issues|since monitoring began/);
 });
 
+test("local-history Home directs recorded issues without fetching a labeling task", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const opened = [];
+  const props = { configUrl: "/api/config", source: "live", monitor: null,
+    meta: { totalAgentRuns: 8, totalTraces: 0, monitorEligibleCalls: 0,
+      agentRunSources: [{ sourceKind: "claude-code" }, { sourceKind: "codex" }] },
+    onNavigate: (...target) => opened.push(target) };
+  render(ui.GuidedHome, hooks, props); hooks.flushEffects();
+  assert.equal(requests.length, 1);
+  await resolveJson(requests[0], { openIssues: 14, documents: [] });
+  const tree = render(ui.GuidedHome, hooks, props);
+  assert.doesNotMatch(textOf(tree), /Review a recent follow-up|Open follow-up pair/);
+  const action = findAll(tree, (node) => node.type === "button" &&
+    /Open recorded issues/.test(textOf(node)))[0];
+  action.props.onClick();
+  assert.deepEqual(opened, [["monitor", "status"]]);
+});
+
 test("Home issue metric leads with saved findings when a schedule has no new notices", async () => {
   const ui = await loadUiModule();
   const hooks = createEffectHooks();
@@ -1820,11 +2054,76 @@ test("Home issue metric leads with saved findings when a schedule has no new not
     /Open recurring issues 1 Recorded failed events or terminal run statuses/);
 });
 
+test("Home makes a partial zero-finding analysis visible before suggesting setup", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const props = { configUrl: "/api/config", source: "live", insightsUrl: "/api/insights",
+    meta: { totalAgentRuns: 8, totalTraces: 2, monitorEligibleCalls: 0 }, monitor: null };
+  render(ui.GuidedHome, hooks, props);
+  hooks.flushEffects();
+  await resolveJson(requests[0], { openIssues: 0, documents: [], worker: { status: "unverified" } });
+  let tree = render(ui.GuidedHome, hooks, props);
+  findAll(tree, (node) => node.type?.name === "Insights")[0].props.onData({
+    analysisState: { status: "completed" },
+    scope: { complete: false, analyzedRuns: 6, availableRuns: 8, partialRuns: 1,
+      traces: { available: 2, analyzed: 2, complete: true } }, findings: [],
+  }, null);
+  tree = render(ui.GuidedHome, hooks, props);
+  assert.match(textOf(tree), /Inspect incomplete evidence/);
+  assert.doesNotMatch(textOf(tree), /Review suggested monitoring/);
+  const metrics = findAll(tree, (node) => node.props?.className === "verdict-home-metric");
+  assert.match(textOf(metrics[2]), /6 of 8 runs analyzed/);
+  assert.match(textOf(metrics[2]), /1 partial histor/);
+  assert.doesNotMatch(textOf(metrics[2]), /all runs|complete coverage/i);
+  const previousDocument = globalThis.document;
+  const focused = [];
+  globalThis.document = { getElementById(id) { focused.push(id); return {
+    scrollIntoView() { focused.push("scroll"); }, focus() { focused.push("focus"); },
+  }; } };
+  try {
+    findAll(tree, (node) => node.type === "button" && textOf(node).includes("Inspect coverage"))[0].props.onClick();
+  } finally { globalThis.document = previousDocument; }
+  assert.deepEqual(focused, ["guided-findings", "scroll", "focus"]);
+  findAll(tree, (node) => node.type?.name === "Insights")[0].props.onData({
+    analysisState: { status: "completed" },
+    scope: { complete: false, analyzedRuns: 8, availableRuns: 8, partialRuns: 0,
+      traces: { available: 2, analyzed: 1, complete: false } }, findings: [],
+  }, null);
+  tree = render(ui.GuidedHome, hooks, props);
+  assert.match(textOf(tree), /Analysis partial/);
+  assert.doesNotMatch(textOf(tree), /1 partial histor/);
+});
+
+test("Home does not count a source-prefix warning as an agent issue", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const props = { configUrl: "/api/config", source: "live", insightsUrl: "/api/insights",
+    meta: { totalAgentRuns: 1, totalTraces: 0, monitorEligibleCalls: 0 }, monitor: null };
+  render(ui.GuidedHome, hooks, props);
+  hooks.flushEffects();
+  await resolveJson(requests[0], { openIssues: 0, documents: [], worker: { status: "unverified" } });
+  let tree = render(ui.GuidedHome, hooks, props);
+  findAll(tree, (node) => node.type?.name === "Insights")[0].props.onData({
+    analysisState: { status: "completed" },
+    scope: { complete: false, analyzedRuns: 1, availableRuns: 1, partialRuns: 1 },
+    findings: [{ code: "source_capture_partial", severity: "warning", runs: 1,
+      runIds: ["local-run"] }],
+  }, null);
+  tree = render(ui.GuidedHome, hooks, props);
+  assert.match(textOf(tree), /Inspect evidence gaps/);
+  assert.doesNotMatch(textOf(tree), /Review suggested monitoring/);
+  const metrics = findAll(tree, (node) => node.props?.className === "verdict-home-metric");
+  assert.match(textOf(metrics[2]), /Evidence gaps 1/);
+  assert.doesNotMatch(textOf(metrics[2]), /Recorded issue types 1/);
+});
+
 test("Home formats capture timestamps for people instead of exposing raw ISO values", async () => {
   const ui = await loadUiModule();
   const stamp = "2026-10-18T04:19:50.368014+00:00";
   const tree = render(ui.GuidedHome, createHooks(), {
-    configUrl: "/api/config", source: "sample",
+    configUrl: "/api/config", source: "live",
     meta: { totalAgentRuns: 1, lastAgentCaptureAt: stamp }, monitor: null,
   });
   const summary = textOf(tree);
@@ -1858,6 +2157,25 @@ test("Home names issue-only evidence without promising a token chart", async () 
   assert.match(textOf(tree), /Recorded issues by day/);
   assert.match(textOf(tree), /Choose a day to inspect recorded issue events/);
   assert.doesNotMatch(textOf(tree), /Choose a day to inspect the captured token evidence/);
+});
+
+test("Home identifies source-reported totals and directs cache inspection without claiming shared coverage", async () => {
+  const ui = await loadUiModule();
+  const hooks = createHooks();
+  const props = { configUrl: "/api/config", insightsUrl: "/api/insights", usageUrl: "/api/usage",
+    source: "live", meta: { totalAgentRuns: 1, monitorEligibleCalls: 0 } };
+  let tree = render(ui.GuidedHome, hooks, props);
+  findAll(tree, (node) => node.type?.name === "Usage")[0].props.onData("/api/usage", {
+    days: [{ day: "2026-11-02", turns: 1, tokenKnownTurns: 1,
+      totalTokens: 1000, cachedInputTokens: 900 }],
+  });
+  tree = render(ui.GuidedHome, hooks, props);
+  const metric = findAll(tree, (node) => node.type === "section"
+    && node.props.className === "verdict-home-metric")[1];
+  assert.match(textOf(metric), /Reported turn tokens 1,000/);
+  assert.match(textOf(metric), /inspect cache reads by day/i);
+  assert.doesNotMatch(textOf(metric), /includes cache reads/i);
+  assert.match(textOf(metric), /not a bill/i);
 });
 
 test("AI agent-run setup draft returns to guided checks instead of statistical drift", async () => {
@@ -2324,6 +2642,258 @@ test("guided setup describes both turn and model-call usage paths", async () => 
   assert.doesNotMatch(summary, /follow a day into its sessions and turns/);
 });
 
+test("guided setup shows recorded application outcomes and a path to their evidence", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const opened = [];
+  const props = { configUrl: "/api/config", section: "schedule", embedded: true,
+    meta: { totalAgentRuns: 6, agentRunSources: [{ sourceKind: "verdict_sdk", runs: 6 }] },
+    onNavigate: (target) => opened.push(target) };
+  render(ui.ControlCenter, hooks, props); hooks.flushEffects();
+  await resolveJson(requests[0], { setupToken: "setup-token" });
+  await resolveJson(requests[1], { documents: [], worker: { status: "unverified" } });
+  assert.equal(requests[2].url, "/api/agent-run-outcomes");
+  await resolveJson(requests[2], { reportedOutcomes: { status: "ready", truncated: false,
+    groups: [{ sourceKind: "verdict_sdk", serviceName: "checkout", environment: "prod",
+      agentName: "resolver", outcomeName: "resolved", outcomeSource: "application",
+      recordedTrue: 4, recordedFalse: 1, unclear: 0, missing: 1, terminalRuns: 6 }] } });
+  const tree = render(ui.ControlCenter, hooks, props);
+  assert.match(textOf(tree), /resolved\s*·\s*4\s*true\s*·\s*1\s*false\s*·\s*1\s*missing/);
+  findAll(tree, (node) => node.type === "button" && textOf(node).includes("Review outcome evidence"))[0]
+    .props.onClick();
+  assert.deepEqual(opened, [{ tab: "monitor", section: "segments" }]);
+});
+
+test("guided setup refreshes outcome evidence when the store changes without adding runs", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const props = { configUrl: "/api/config", section: "schedule", embedded: true,
+    meta: { totalAgentRuns: 6, agentRunSources: [{ sourceKind: "verdict_sdk", runs: 6 }] } };
+  render(ui.ControlCenter, hooks, props); hooks.flushEffects();
+  await resolveJson(requests[0], { setupToken: "setup-token" });
+  await resolveJson(requests[1], { documents: [], worker: { status: "unverified" } });
+  await resolveJson(requests[2], { reportedOutcomes: { status: "no_reported_outcomes", groups: [] } });
+  props.meta = { ...props.meta };
+  render(ui.ControlCenter, hooks, props); hooks.flushEffects();
+  assert.equal(requests[3].url, "/api/agent-run-outcomes");
+  await resolveJson(requests[3], { reportedOutcomes: { status: "ready", groups: [
+    { sourceKind: "verdict_sdk", serviceName: "app", environment: "prod",
+      agentName: "resolver", outcomeName: "resolved", outcomeSource: "application",
+      recordedTrue: 5, recordedFalse: 1, missing: 0, unclear: 0, terminalRuns: 6 },
+  ] } });
+  assert.match(textOf(render(ui.ControlCenter, hooks, props)), /resolved\s*·\s*5\s*true\s*·\s*1\s*false/);
+});
+
+test("saved change records remain read-only without a tracker or outcome comparison", async () => {
+  const ui = await loadUiModule();
+  for (const version of [1, 2]) {
+    const hooks = createEffectHooks();
+    const requests = deferredFetches();
+    const props = { configUrl: "/api/config", section: "schedule", embedded: true,
+      meta: { totalAgentRuns: 6 } };
+    render(ui.ControlCenter, hooks, props); hooks.flushEffects();
+    await resolveJson(requests[0], { setupToken: "setup-token" });
+    await resolveJson(requests[1], { documents: [{ kind: "improvement", documentId: "old",
+      state: "tracking", revision: 1, payload: { version, summary: "Synthetic saved intention",
+        identity: { outcomeName: "resolved" }, baseline: { terminalRuns: 5, recordedTrue: 4,
+          recordedFalse: 1, missing: 0, unclear: 0 } } }], worker: { status: "unverified" } });
+    // Read-only history must work before optional outcome coverage arrives.
+    let text = textOf(render(ui.ControlCenter, hooks, props));
+    assert.match(text, /Synthetic saved intention/);
+    assert.match(text, /read-only/i);
+    assert.match(text, /comparison.*unavailable/i);
+    assert.doesNotMatch(text, /Track an intended change|Changes you are tracking|Same recorded criterion/);
+    await resolveJson(requests[2], { reportedOutcomes: { status: "ready", groups: [{
+      sourceKind: "verdict_sdk", serviceName: "app", environment: "prod", agentName: "worker",
+      outcomeName: "resolved", outcomeSource: "application", terminalRuns: 6,
+      recordedTrue: 5, recordedFalse: 1, missing: 0, unclear: 0,
+      recentRuns: Array.from({ length: 6 }, (_, i) => ({ runId: `r-${i}`,
+        endedAt: "2026-01-01T00:00:00.000000+00:00", state: "recordedTrue" })),
+    }] } });
+    text = textOf(render(ui.ControlCenter, hooks, props));
+    assert.match(text, /resolved/);
+    assert.doesNotMatch(text, /Track an intended change|I applied it|later runs recorded/);
+    assert.equal(requests.some((request) => request.options?.method === "POST"), false);
+  }
+});
+
+test("guided setup asks for outcome capture only for SDK runs with no reports", async () => {
+  const ui = await loadUiModule();
+  for (const [sourceKind, expected] of [["verdict_sdk", true], ["codex", false]]) {
+    const hooks = createEffectHooks();
+    const requests = deferredFetches();
+    const props = { configUrl: "/api/config", section: "schedule", embedded: true,
+      meta: { totalAgentRuns: 3, agentRunSources: [{ sourceKind, runs: 3 }] } };
+    render(ui.ControlCenter, hooks, props); hooks.flushEffects();
+    await resolveJson(requests[0], { setupToken: "setup-token" });
+    await resolveJson(requests[1], { documents: [], worker: { status: "unverified" } });
+    await resolveJson(requests[2], { reportedOutcomes: { status: "no_reported_outcomes",
+      sampledTerminalRuns: 3, groups: [] } });
+    assert.equal(textOf(render(ui.ControlCenter, hooks, props)).includes("record_business_outcome"), expected);
+  }
+});
+
+test("guided setup explains withheld outcome identity instead of claiming none were captured", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const props = { configUrl: "/api/config", section: "schedule", embedded: true,
+    meta: { totalAgentRuns: 5, agentRunSources: [{ sourceKind: "verdict_sdk", runs: 5 }] } };
+  render(ui.ControlCenter, hooks, props); hooks.flushEffects();
+  await resolveJson(requests[0], { setupToken: "setup-token" });
+  await resolveJson(requests[1], { documents: [], worker: { status: "unverified" } });
+  await resolveJson(requests[2], { reportedOutcomes: { status: "ready", sampledTerminalRuns: 5,
+    identityUnavailableReports: 5, unclassifiedReports: 0, groups: [] } });
+  const rendered = textOf(render(ui.ControlCenter, hooks, props));
+  assert.match(rendered, /5\s+reports.*identity.*redacted/i);
+  assert.doesNotMatch(rendered, /No explicit task result was captured/);
+});
+
+test("guided setup does not call a bounded outcome sample the full history", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const props = { configUrl: "/api/config", section: "schedule", embedded: true,
+    meta: { totalAgentRuns: 1200, agentRunSources: [{ sourceKind: "verdict_sdk", runs: 1200 }] } };
+  render(ui.ControlCenter, hooks, props); hooks.flushEffects();
+  await resolveJson(requests[0], { setupToken: "setup-token" });
+  await resolveJson(requests[1], { documents: [], worker: { status: "unverified" } });
+  await resolveJson(requests[2], { reportedOutcomes: { status: "no_reported_outcomes",
+    sampledTerminalRuns: 1000, truncated: true, groups: [] } });
+  const rendered = textOf(render(ui.ControlCenter, hooks, props));
+  assert.match(rendered, /newest\s+1,000\s+sampled terminal runs/);
+  assert.doesNotMatch(rendered, /No explicit task result was captured on sampled application runs/);
+});
+
+test("guided setup routes captured model-call cost, latency and errors to the report", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const opened = [];
+  const props = { configUrl: "/api/config", section: "schedule", embedded: true,
+    meta: { totalAgentRuns: 0, monitorEligibleCalls: 10 },
+    managementReport: { schema: "management-report-v2", scope: { calls: 10,
+      costUsd: 1.5, costKnownCalls: 7, latencyKnownCalls: 6, errorRecordedCalls: 2 } },
+    onNavigate: (target) => opened.push(target) };
+  render(ui.ControlCenter, hooks, props); hooks.flushEffects();
+  await resolveJson(requests[0], { setupToken: "setup-token" });
+  await resolveJson(requests[1], { documents: [], worker: { status: "unverified" } });
+  const tree = render(ui.ControlCenter, hooks, props);
+  const content = textOf(tree);
+  assert.match(content, /7\s+of\s+10\s+calls priced/);
+  assert.match(content, /6\s+of\s+10\s+calls with latency/);
+  assert.match(content, /2\s+provider errors recorded/);
+  assert.match(content, /Capture subsequent supported provider calls through the Verdict SDK/);
+  assert.match(content, /Existing missing values remain unknown/);
+  assert.match(content, /Inspect captured calls or evaluate selected evidence without activating a drift monitor/);
+  assert.doesNotMatch(content, /activate a policy, then select it here/);
+  assert.match(content, /Checks:\s+no effective check selected/);
+  assert.match(content, /Choose a run or model-call check before starting/);
+  assert.doesNotMatch(content, /Verdict will inspect its recorded runs and events/);
+  assert.equal(findAll(tree, (node) => node.type?.name === "Button"
+    && textOf(node).includes("Run once and review"))[0].props.disabled, true);
+  findAll(tree, (node) => node.type === "button" && textOf(node).includes("Open application report"))[0]
+    .props.onClick();
+  assert.deepEqual(opened, [{ tab: "report", section: "management" }]);
+  props.managementReport.scope.costKnownCalls = 10;
+  props.managementReport.scope.latencyKnownCalls = 10;
+  assert.doesNotMatch(textOf(render(ui.ControlCenter, hooks, props)), /Capture subsequent supported provider calls/);
+  delete props.managementReport.scope.costKnownCalls;
+  assert.match(textOf(render(ui.ControlCenter, hooks, props)), /Capture subsequent supported provider calls/);
+});
+
+test("trace-only setup can run an explicitly selected active model-call policy", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const props = { configUrl: "/api/config", section: "schedule", embedded: true,
+    meta: { totalAgentRuns: 0, monitorEligibleCalls: 90 },
+    monitor: { active: { state: "active" } } };
+  render(ui.ControlCenter, hooks, props); hooks.flushEffects();
+  await resolveJson(requests[0], { setupToken: "setup-token" });
+  await resolveJson(requests[1], { documents: [], worker: { status: "unverified" } });
+  let tree = render(ui.ControlCenter, hooks, props);
+  assert.equal(findAll(tree, (node) => node.type?.name === "Button"
+    && textOf(node).includes("Run once and review"))[0].props.disabled, true);
+  const monitorChoice = findAll(tree, (node) => node.type === "label"
+    && textOf(node).includes("Run the active model-call monitor"))[0];
+  findAll(monitorChoice, (node) => node.type === "input")[0]
+    .props.onChange({ target: { checked: true } });
+  tree = render(ui.ControlCenter, hooks, props);
+  assert.match(textOf(tree), /Checks:\s+active model-call monitor/);
+  assert.equal(findAll(tree, (node) => node.type?.name === "Button"
+    && textOf(node).includes("Run once and review"))[0].props.disabled, false);
+});
+
+test("empty workspace starts with live agent instrumentation and offers local history as a choice", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const props = { configUrl: "/api/config", agentSummary: { totalAgentRuns: 0, totalTraces: 0 } };
+  const tree = render(ui.SetupWizard, hooks, props);
+  assert.match(textOf(tree), /Live app through SDK/);
+  assert.match(textOf(tree), /LIVE SDK/);
+  assert.doesNotMatch(textOf(tree), /Claude history directory/);
+  findAll(tree, (node) => node.type === "button" && textOf(node).includes("Claude Code \/ Codex"))[0]
+    .props.onClick();
+  assert.match(textOf(render(ui.SetupWizard, hooks, props)), /Claude history directory/);
+});
+
+test("PostgreSQL onboarding points SDK writes at this dashboard's store and tenant", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const props = { configUrl: "/api/config", agentSummary: {
+    storageBackend: "postgresql", totalAgentRuns: 0, totalTraces: 0 } };
+  let tree = render(ui.SetupWizard, hooks, props);
+  findAll(tree, (node) => node.type === "button"
+    && textOf(node).includes("Manage data sources"))[0].props.onClick();
+  tree = render(ui.SetupWizard, hooks, props);
+  const content = textOf(tree);
+  assert.match(content, /VERDICT_STORAGE/);
+  assert.match(content, /VERDICT_TENANT_ID/);
+  assert.doesNotMatch(content, /storage="sqlite:\/\/\/\.\/verdict\.db"/);
+  assert.match(content, /dashboard startup tenant ID/);
+  assert.match(content, /__verdict_local__/);
+});
+
+test("SQLite onboarding requires one absolute store path across processes", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const props = { configUrl: "/api/config", agentSummary: {
+    storageBackend: "sqlite", totalAgentRuns: 0, totalTraces: 0 } };
+  let tree = render(ui.SetupWizard, hooks, props);
+  findAll(tree, (node) => node.type === "button"
+    && textOf(node).includes("Manage data sources"))[0].props.onClick();
+  tree = render(ui.SetupWizard, hooks, props);
+  const content = textOf(tree);
+  assert.match(content, /same absolute SQLite database path/);
+  assert.match(content, /__verdict_local__/);
+  assert.match(content, /sqlite:\/\/\/\/absolute\/path\/verdict\.db/);
+  assert.match(content, /working directories/);
+});
+
+test("guided setup offers a reviewed quality criterion without implying run analysis judges quality", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const opened = [];
+  const props = { configUrl: "/api/config", section: "schedule", embedded: true,
+    meta: { totalAgentRuns: 2, monitorEligibleCalls: 1,
+      agentRunSources: [{ sourceKind: "verdict_sdk", runs: 2 }] },
+    onNavigate: (target) => opened.push(target) };
+  render(ui.ControlCenter, hooks, props); hooks.flushEffects();
+  await resolveJson(requests[0], { setupToken: "setup-token" });
+  await resolveJson(requests[1], { documents: [], worker: { status: "unverified" } });
+  await resolveJson(requests[2], { reportedOutcomes: { status: "no_reported_outcomes",
+    sampledTerminalRuns: 2, groups: [] } });
+  const tree = render(ui.ControlCenter, hooks, props);
+  assert.match(textOf(tree), /quality criterion.*rubric/i);
+  findAll(tree, (node) => node.type === "button" && textOf(node).includes("Review quality evaluation"))[0]
+    .props.onClick();
+  assert.deepEqual(opened, [{ tab: "evaluate", section: "lab" }]);
+});
+
 test("model-call trend names the report period and bounded display", async () => {
   const ui = await loadUiModule();
   for (const [days, label] of [[90, "last 90 UTC days"], [0, "all captured dates"]]) {
@@ -2414,8 +2984,9 @@ test("Overview leads with actionable issues and keeps evidence limits and techni
   const issueButtons = findAll(chart, (node) => node.type === "button" && node.props.onClick);
   assert.equal(issueButtons.length, 2);
   assert.match(textOf(issueButtons[0]), /Tool failures recorded.*2\s+run/s);
-  assert.match(textOf(issueButtons[1]), /Repeated identical tool calls.*3\s+run/s);
-  assert.match(textOf(tree), /8 of 10 runs in this analysis snapshot/i);
+  assert.match(textOf(issueButtons[1]), /Earlier repeated-call heuristic.*3\s+run/s);
+  assert.match(textOf(tree), /Analysis covers 8 of 10 runs in this snapshot/i);
+  assert.doesNotMatch(textOf(tree), /issue types? across 8 of 10 runs/i);
   assert.match(textOf(tree), /This view is partial/i);
   assert.equal(findAll(tree, (node) => node.type === "details").length, 2);
   assert.equal(findAll(tree, (node) => node.type === "details"
@@ -2434,7 +3005,9 @@ test("Home shows evidence gaps immediately when no recorded issue is found", asy
   const props = { url: "/api/insights", mode: "home", onOpenRuns: (finding) => opened.push(finding.code) };
   const snapshot = insightsSnapshot("completed");
   snapshot.findings = [{ code: "event_capture_partial", severity: "info", runs: 1,
-    message: "Later events were not captured." }];
+    message: "Later events were not captured." },
+  { code: "source_capture_partial", severity: "warning", runs: 1,
+    message: "This history contains only a recorded prefix." }];
   render(ui.Insights, hooks, props);
   hooks.flushEffects();
   await resolveJson(requests[0], snapshot);
@@ -2444,7 +3017,8 @@ test("Home shows evidence gaps immediately when no recorded issue is found", asy
     && textOf(node).includes("Evidence gaps"))[0];
   assert.equal(gap.props.open, true);
   findAll(gap, (node) => node.type === "button" && textOf(node).includes("Event capture reached its limit"))[0].props.onClick();
-  assert.deepEqual(opened, ["event_capture_partial"]);
+  findAll(gap, (node) => node.type === "button" && textOf(node).includes("Local history incomplete"))[0].props.onClick();
+  assert.deepEqual(opened, ["event_capture_partial", "source_capture_partial"]);
 });
 
 test("a mounted dashboard derives its API path from the host prefix", async () => {
@@ -2591,7 +3165,7 @@ test("monitoring lifecycle is one top-level workspace", async () => {
   assert.doesNotMatch(labels, /Registry/);
 });
 
-test("prototype workspace navigation opens the six task pages through the existing route", async () => {
+test("primary workspace navigation has one monitoring destination and preserves advanced routes", async () => {
   const ui = await loadUiModule();
   const hooks = createHooks();
   const visited = [];
@@ -2606,25 +3180,80 @@ test("prototype workspace navigation opens the six task pages through the existi
     assert.ok(sidebar, "prototype workspace sidebar must replace the old horizontal nav");
     const destinations = [
       ["Home", "#tab=overview&section=summary"],
-      ["Suggested setup", "#tab=monitor&section=plan"],
       ["Monitoring", "#tab=monitor&section=status"],
       ["Investigation", "#tab=explore&section=runs"],
-      ["Groups", "#tab=monitor&section=segments"],
-      ["Model drift setup", "#tab=monitor&section=history"],
     ];
+    const primary = findAll(sidebar, (node) => node.type === "nav" && node.props?.["aria-label"] === "Workspace")[0];
+    assert.deepEqual(findAll(primary, (node) => node.type === "button").map((button) => textOf(button).trim()),
+      ["Home", "Monitoring", "Investigation"]);
     for (const [label, route] of destinations) {
       tree = render(ui.Dashboard, hooks, { data: bundle("judge-a"), source: "live", onReload() {} });
       const button = findAll(tree, (node) => node.type === "button" && textOf(node).trim() === label)[0];
       assert.ok(button, `${label} must be a direct destination`);
       button.props.onClick();
       assert.equal(visited.at(-1), route);
-      if (["Suggested setup", "Monitoring", "Groups", "Model drift setup"].includes(label)) {
+      if (label === "Monitoring") {
         const destination = render(ui.Dashboard, hooks, { data: bundle("judge-a"), source: "live", onReload() {} });
         const sectionNav = findAll(destination, (node) => node.type === "nav" && node.props?.["aria-label"] === "monitor sections");
         assert.equal(sectionNav.length, 0, `${label} has one primary navigation owner`);
       }
     }
+    for (const section of ["plan", "segments", "history"]) {
+      globalThis.window.location.hash = `#tab=monitor&section=${section}`;
+      tree = render(ui.Dashboard, createHooks(), { data: bundle("judge-a"), source: "live", onReload() {} });
+      assert.ok(textOf(tree).length > 0, `${section} deep link still renders`);
+    }
   } finally { delete globalThis.window; }
+});
+
+test("a route chosen during initial evidence loading survives the first live snapshot", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  globalThis.window = {
+    location: { hash: "", pathname: "/dashboard", search: "" },
+    history: {
+      pushState(_state, _unused, destination) { globalThis.window.location.hash = destination; },
+      replaceState(_state, _unused, destination) { globalThis.window.location.hash = destination; },
+    },
+    addEventListener() {}, removeEventListener() {},
+  };
+  try {
+    const props = { data: bundle("judge-a"), onReload() {} };
+    const loading = render(ui.Dashboard, hooks, { ...props, source: "loading" });
+    hooks.flushEffects();
+    const sidebar = findAll(loading, (node) => node.props?.className?.includes("verdict-workspace-sidebar"))[0];
+    const evaluate = findAll(sidebar, (node) => node.type === "button" && textOf(node).trim() === "Evaluate")[0];
+    evaluate.props.onClick();
+    assert.equal(globalThis.window.location.hash, "#tab=evaluate&section=results");
+
+    render(ui.Dashboard, hooks, { ...props, source: "live" });
+    hooks.flushEffects();
+    assert.equal(globalThis.window.location.hash, "#tab=evaluate&section=results");
+    assert.match(textOf(render(ui.Dashboard, hooks, { ...props, source: "live" })), /Results/);
+  } finally { delete globalThis.window; }
+});
+
+test("an implicit or invalid initial route resolves to a shareable Home URL", async () => {
+  const ui = await loadUiModule();
+  for (const hash of ["", "#tab=unknown&section=x&run=secret"]) {
+    const hooks = createEffectHooks();
+    globalThis.window = {
+      location: { hash, pathname: "/dashboard", search: "" },
+      history: {
+        pushState(_state, _unused, destination) { globalThis.window.location.hash = destination; },
+        replaceState(_state, _unused, destination) { globalThis.window.location.hash = destination; },
+      },
+      addEventListener() {}, removeEventListener() {},
+    };
+    try {
+      const props = { data: bundle("judge-a"), onReload() {} };
+      render(ui.Dashboard, hooks, { ...props, source: "loading" });
+      hooks.flushEffects();
+      render(ui.Dashboard, hooks, { ...props, source: "live" });
+      hooks.flushEffects();
+      assert.equal(globalThis.window.location.hash, "#tab=overview&section=summary", hash || "empty hash");
+    } finally { delete globalThis.window; }
+  }
 });
 
 test("investigation link names its monitoring destination regardless of entry path", async () => {
@@ -2758,6 +3387,19 @@ test("management report does not render unavailable model tokens as zero", async
   assert.equal(textOf(tokenCells[0]).trim(), "—");
 });
 
+test("empty model-call chart does not say captured agent activity is absent", async () => {
+  const ui = await loadUiModule();
+  const data = bundle("judge-a");
+  data.managementReport.scope.calls = 0;
+  data.managementReport.timeline.rows = [];
+  data.managementReport.timeline.availableDates = 0;
+  const tree = render(ui.ManagementReport, createHooks(), { data, source: "live" });
+  const chart = findAll(tree,
+    (node) => typeof node.type === "function" && node.type.name === "VolumeChart")[0];
+  assert.match(textOf(render(chart.type, createHooks(), chart.props)),
+    /No application model calls in this period/);
+});
+
 test("retired drift links render current Monitor history without the old results", async () => {
   const ui = await loadUiModule();
   let evaluatorLoads = 0;
@@ -2790,7 +3432,7 @@ test("guided home keeps historical checks separate from active monitoring", asyn
     history: { pushState() {}, replaceState() {} },
     addEventListener() {}, removeEventListener() {} };
   try {
-    const tree = render(ui.Dashboard, createHooks(), { data });
+    const tree = render(ui.Dashboard, createHooks(), { data, source: "live" });
     const home = findAll(tree, (node) => node.type?.name === "GuidedHome")[0];
     assert.ok(home);
     const summary = textOf(render(home.type, createHooks(), home.props));
@@ -2799,26 +3441,29 @@ test("guided home keeps historical checks separate from active monitoring", asyn
   } finally { delete globalThis.window; }
 });
 
-test("bundled sample keeps its illustrative monitor badge without a live status claim", async () => {
+test("component fallback never invents monitor activity or provider evidence", async () => {
   const ui = await loadUiModule();
   const dashboard = render(ui.Dashboard, createHooks(), {});
   const monitorButton = findAll(dashboard,
     (node) => node.type === "button" && textOf(node).includes("Monitor"))[0];
-  assert.equal(textOf(monitorButton).trim(), "Monitoring 1");
+  assert.equal(textOf(monitorButton).trim(), "Monitoring");
   const home = findAll(dashboard, (node) => node.type?.name === "GuidedHome")[0];
   assert.ok(home);
-  assert.doesNotMatch(textOf(render(home.type, createHooks(), home.props)), /A monitored change needs review/);
+  const rendered = textOf(render(home.type, createHooks(), home.props));
+  assert.doesNotMatch(rendered, /A monitored change needs review|sample-model|Synthetic sample/);
+  assert.match(rendered, /Loading captured activity/);
 });
 
-test("dashboard shows the six prototype tasks and keeps secondary tools accessible", async () => {
+test("dashboard shows the three primary tasks and keeps secondary tools accessible", async () => {
   const ui = await loadUiModule();
   const tree = render(ui.Dashboard, createHooks(), { data: bundle("judge-a") });
   const navigation = findAll(tree, (node) => node.type === "nav")[0];
   const labels = textOf(navigation);
 
-  for (const label of ["Home", "Suggested setup", "Monitoring", "Investigation", "Groups", "Model drift setup"]) {
+  for (const label of ["Home", "Monitoring", "Investigation"]) {
     assert.match(labels, new RegExp(label));
   }
+  assert.doesNotMatch(labels, /Suggested setup|Groups|Model drift setup/);
   assert.doesNotMatch(labels, /Report|Settings/);
   assert.ok(findAll(tree, (node) => node.type === "button" && textOf(node).trim() === "Report").length);
   assert.ok(findAll(tree, (node) => node.type === "button" && textOf(node).trim() === "Settings").length);
@@ -3241,7 +3886,7 @@ test("Groups gives model-call coverage and does not present a synthetic marker a
   const tree = render(ui.Registry, createHooks(), {
     url: "/api/registry", configUrl: "/api/config", traceCount: 7,
     modelRows: [{ provider: "anthropic", model: "<synthetic>", calls: 7,
-      failedCalls: 2, tokenKnownCalls: 3 }],
+      errorRecordedCalls: 2, tokenKnownCalls: 3 }],
     modelRowsAvailable: 1,
   });
   const rendered = textOf(tree).replace(/\s+/g, " ");
@@ -3315,6 +3960,146 @@ test("Groups shows production run outcome coverage with exact evidence links", a
     && textOf(node).includes("Inspect recorded failure"))[0];
   inspect.props.onClick();
   assert.deepEqual(opened, ["run-failed"]);
+});
+
+test("Groups shows explicit business outcomes with coverage and a failing run link", async () => {
+  const ui = await loadUiModule();
+  const opened = [];
+  const tree = render(ui.RunOutcomeSummary, createHooks(), {
+    data: {
+      status: "ready",
+      scope: { terminalRuns: 4, sampledTerminalRuns: 4, truncated: false },
+      totals: { recordedFailure: 0, observedWithoutFailure: 0, unclear: 4, conflicts: 0 },
+      groups: [],
+      reportedOutcomes: { status: "ready", sampledTerminalRuns: 4, truncated: false,
+        unclassifiedReports: 0, groupsTruncated: false,
+        groups: [{ sourceKind: "verdict_sdk", serviceName: "app", environment: "prod",
+          agentName: "support", outcomeName: "resolved", outcomeSource: "application",
+          terminalRuns: 4, recordedTrue: 1, recordedFalse: 1, unclear: 1, missing: 1,
+          examples: { recordedFalse: ["run-2"] } }],
+      },
+    },
+    onOpenRun: (id) => opened.push(id),
+  });
+  const rendered = textOf(tree).replace(/\s+/g, " ");
+  assert.match(rendered, /Application-reported outcomes/);
+  assert.match(rendered, /resolved/);
+  assert.match(rendered, /1 recorded true.*1 recorded false.*1 unclear.*1 missing/);
+  assert.doesNotMatch(rendered, /Earlier 2 runs.*Newer 2 runs/);
+  assert.match(rendered, /counts describe captured results; they do not measure improvement/i);
+  assert.doesNotMatch(rendered, /run-2/);
+  findAll(tree, (node) => node.type === "button"
+    && textOf(node).includes("Inspect recorded false"))[0].props.onClick();
+  assert.deepEqual(opened, ["run-2"]);
+});
+
+test("Groups explains missing application outcomes without implying local histories need instrumentation", async () => {
+  const ui = await loadUiModule();
+  const base = { status: "ready", scope: { sampledTerminalRuns: 3, truncated: false },
+    totals: { recordedFailure: 0, observedWithoutFailure: 0, unclear: 3, conflicts: 0 },
+    groups: [], reportedOutcomes: { status: "no_reported_outcomes", groups: [] } };
+  const sdk = textOf(render(ui.RunOutcomeSummary, createHooks(), {
+    data: { ...base, execution: { groups: [{ sourceKind: "verdict_sdk" }] } },
+  }));
+  assert.match(sdk, /record_business_outcome/);
+  const imported = textOf(render(ui.RunOutcomeSummary, createHooks(), {
+    data: { ...base, execution: { groups: [{ sourceKind: "codex" }] } },
+  }));
+  assert.doesNotMatch(imported, /record_business_outcome/);
+  const bounded = textOf(render(ui.RunOutcomeSummary, createHooks(), {
+    data: { ...base, execution: { groups: [{ sourceKind: "verdict_sdk" }] },
+      reportedOutcomes: { status: "event_limit", groups: [] } },
+  }));
+  assert.match(bounded, /event limit/);
+  assert.doesNotMatch(bounded, /record_business_outcome/);
+});
+
+test("Groups and guided setup qualify empty outcomes when capture is incomplete", async () => {
+  const ui = await loadUiModule();
+  const reportedOutcomes = { status: "no_reported_outcomes", groups: [],
+    sampledTerminalRuns: 2, outcomeUncertainRuns: 1 };
+  const groups = textOf(render(ui.RunOutcomeSummary, createHooks(), { data: {
+    status: "ready", scope: { sampledTerminalRuns: 2, truncated: false },
+    totals: { recordedFailure: 0, observedWithoutFailure: 0, unclear: 2, conflicts: 0 },
+    groups: [], execution: { groups: [{ sourceKind: "verdict_sdk" }] },
+    reportedOutcomes,
+  } }));
+  assert.match(groups, /capture.*incomplete/i);
+  assert.doesNotMatch(groups, /No explicit business outcome was reported/);
+
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const props = { configUrl: "/api/config", section: "schedule", embedded: true,
+    meta: { totalAgentRuns: 2, agentRunSources: [{ sourceKind: "verdict_sdk", runs: 2 }] } };
+  render(ui.ControlCenter, hooks, props); hooks.flushEffects();
+  await resolveJson(requests[0], { setupToken: "setup-token" });
+  await resolveJson(requests[1], { documents: [], worker: { status: "unverified" } });
+  await resolveJson(requests[2], { reportedOutcomes });
+  const setup = textOf(render(ui.ControlCenter, hooks, props));
+  assert.match(setup, /capture.*incomplete/i);
+  assert.doesNotMatch(setup, /No explicit task result was captured/);
+});
+
+test("Groups explains withheld redacted identities when no comparable group remains", async () => {
+  const ui = await loadUiModule();
+  const tree = render(ui.RunOutcomeSummary, createHooks(), { data: {
+    status: "ready", scope: { sampledTerminalRuns: 5, truncated: false },
+    totals: { recordedFailure: 0, observedWithoutFailure: 0, unclear: 5, conflicts: 0 },
+    groups: [], execution: { groups: [{ sourceKind: "verdict_sdk" }] },
+    reportedOutcomes: { status: "ready", identityUnavailableReports: 5,
+      unclassifiedReports: 0, groups: [] },
+  } });
+  const rendered = textOf(tree);
+  assert.match(rendered, /5\s+reports.*identity.*redacted/i);
+  assert.doesNotMatch(rendered, /No explicit business outcome was reported/);
+});
+
+test("Groups keeps overall run totals while explaining withheld identity splits", async () => {
+  const ui = await loadUiModule();
+  const tree = render(ui.RunOutcomeSummary, createHooks(), { data: {
+    status: "ready", scope: { sampledTerminalRuns: 5, truncated: false },
+    totals: { recordedFailure: 0, observedWithoutFailure: 0, unclear: 5, conflicts: 0 },
+    identityUnavailableRuns: 5, groups: [],
+    execution: { scope: { sampledRuns: 5, truncated: false },
+      totals: { completed: 5, failed: 0, timed_out: 0, cancelled: 0,
+        unfinalized: 0 }, identityUnavailableRuns: 5, groups: [] },
+    reportedOutcomes: { status: "ready", identityUnavailableReports: 5,
+      unclassifiedReports: 0, groups: [] },
+  } });
+  const rendered = textOf(tree).replace(/\s+/g, " ");
+  assert.match(rendered, /5 completed/);
+  assert.match(rendered, /5 unclear/);
+  assert.equal((rendered.match(/5 runs have an identity that was redacted/g) || []).length, 2);
+});
+
+test("Groups keeps valid business outcomes when the separate tool scan reaches its limit", async () => {
+  const ui = await loadUiModule();
+  const rendered = textOf(render(ui.RunOutcomeSummary, createHooks(), { data: {
+    status: "event_limit", execution: { scope: { sampledRuns: 1 },
+      totals: { completed: 1 }, groups: [] },
+    reportedOutcomes: { status: "ready", groups: [{ sourceKind: "verdict_sdk",
+      serviceName: "checkout", environment: "prod", agentName: "worker",
+      outcomeName: "resolved", outcomeSource: "application", terminalRuns: 1,
+      recordedTrue: 1, recordedFalse: 0, unclear: 0, missing: 0,
+      examples: { recordedFalse: [] } }] },
+  } }));
+  assert.match(rendered, /1\s+recorded true/);
+  assert.match(rendered, /tool.*event limit/i);
+  assert.doesNotMatch(rendered, /No outcome counts are shown/);
+});
+
+test("Groups says malformed outcome reports were captured but cannot be compared", async () => {
+  const ui = await loadUiModule();
+  const rendered = textOf(render(ui.RunOutcomeSummary, createHooks(), { data: {
+    status: "ready", scope: { sampledTerminalRuns: 1, truncated: false },
+    totals: { recordedFailure: 0, observedWithoutFailure: 0, unclear: 1, conflicts: 0 },
+    groups: [], execution: { scope: { sampledRuns: 1 },
+      totals: { completed: 1 }, groups: [] },
+    reportedOutcomes: { status: "ready", unclassifiedReports: 1,
+      identityUnavailableReports: 0, groups: [] },
+  } }));
+  assert.match(rendered, /1\s+reports?.*no usable outcome name or source/i);
+  assert.doesNotMatch(rendered, /No explicit business outcome was reported/);
 });
 
 test("Groups with an unmigrated read-only store withholds outcome counts", async () => {
@@ -3408,7 +4193,7 @@ test("Groups keeps a bounded event-limit warning when terminal runs exist", asyn
   });
   const rendered = textOf(tree);
   assert.match(rendered, /Recorded execution status/);
-  assert.match(rendered, /reached its relevant-event limit/);
+  assert.match(rendered, /tool-result preview reached its event limit/);
   assert.doesNotMatch(rendered, /Run outcome coverage|Browse recorded runs/);
 });
 
@@ -3624,6 +4409,55 @@ async function resolveJson(request, payload) {
   for (let index = 0; index < 6; index += 1) await Promise.resolve();
 }
 
+test("an exact explanation preview reopens its saved outcome without another call", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const applied = [];
+  const props = { root: "", scope: "setup", onApplyDraft: (draft) => applied.push(draft) };
+  let tree = render(ui.EvidenceExplain, hooks, props);
+  findAll(tree, (node) => node.type === "button" && textOf(node).includes("Ask AI for a setup draft"))[0].props.onClick();
+  render(ui.EvidenceExplain, hooks, props);
+  hooks.flushEffects();
+  await resolveJson(requests[0], { setupToken: "test-token" });
+  await resolveJson(requests[1], { providers: [{ provider: "anthropic", configured: true }] });
+  tree = render(ui.EvidenceExplain, hooks, props);
+  const preview = findAll(tree, (node) => node.type === "button" && textOf(node).includes("Preview evidence"))[0].props.onClick();
+  await resolveJson(requests[2], { plannedCalls: 1, destination: "Anthropic", planFingerprint: "plan-a",
+    providerAvailable: true, upperStaticListPriceUsd: 0.001, evidencePreview: { coverage: "complete" },
+    savedResult: { status: "error", error: "The approved provider call failed." } });
+  await preview;
+  tree = render(ui.EvidenceExplain, hooks, props);
+  assert.match(textOf(tree), /approved provider call failed/);
+  assert.match(textOf(tree), /No new provider call will be made for this exact preview/);
+  assert.equal(findAll(tree, (node) => node.type === "button" && textOf(node).includes("Draft setup"))[0].props.disabled, true);
+  assert.equal(requests.length, 3);
+  const changed = render(ui.EvidenceExplain, hooks, { ...props, runId: "other-run" });
+  assert.doesNotMatch(textOf(changed), /approved provider call failed/);
+
+  const completedHooks = createEffectHooks();
+  const completedRequests = deferredFetches();
+  tree = render(ui.EvidenceExplain, completedHooks, props);
+  findAll(tree, (node) => node.type === "button" && textOf(node).includes("Ask AI for a setup draft"))[0].props.onClick();
+  render(ui.EvidenceExplain, completedHooks, props);
+  completedHooks.flushEffects();
+  await resolveJson(completedRequests[0], { setupToken: "test-token" });
+  await resolveJson(completedRequests[1], { providers: [{ provider: "anthropic", configured: true }] });
+  tree = render(ui.EvidenceExplain, completedHooks, props);
+  const completedPreview = findAll(tree, (node) => node.type === "button" && textOf(node).includes("Preview evidence"))[0].props.onClick();
+  const draft = { check: "agent_runs", grouping: "none", intervalHours: 24, why: "Review captured runs." };
+  await resolveJson(completedRequests[2], { plannedCalls: 1, destination: "Anthropic", planFingerprint: "plan-b",
+    providerAvailable: true, upperStaticListPriceUsd: 0.001, evidencePreview: { coverage: "complete" },
+    savedResult: { status: "completed", draft } });
+  await completedPreview;
+  tree = render(ui.EvidenceExplain, completedHooks, props);
+  assert.match(textOf(tree), /Review captured runs/);
+  assert.equal(findAll(tree, (node) => node.type === "button" && textOf(node).includes("Draft setup"))[0].props.disabled, true);
+  findAll(tree, (node) => node.type === "button" && textOf(node).includes("Review draft in setup"))[0].props.onClick();
+  assert.deepEqual(applied, [draft]);
+  assert.equal(completedRequests.length, 3);
+});
+
 test("AI result disappears when the selected run changes", async () => {
   const ui = await loadUiModule();
   const hooks = createEffectHooks();
@@ -3647,12 +4481,59 @@ test("AI result disappears when the selected run changes", async () => {
   const runAction = findAll(tree, (node) => node.type === "button" && textOf(node).includes("Explain selected evidence"))[0].props.onClick();
   await resolveJson(requests[3], { status: "completed", answer: "Answer for run A" });
   await runAction;
-  assert.match(textOf(render(ui.EvidenceExplain, hooks, props)), /Answer for run A/);
+  const answered = render(ui.EvidenceExplain, hooks, props);
+  assert.equal(findAll(answered, (node) => node.type?.name === "UnverifiedAiResponse")[0].props.answer,
+    "Answer for run A");
   assert.doesNotMatch(textOf(render(ui.EvidenceExplain, hooks, { ...props, runId: "run-b" })), /Answer for run A/);
   hooks.flushEffects();
   tree = render(ui.EvidenceExplain, hooks, props);
   assert.doesNotMatch(textOf(tree), /Answer for run A/);
   assert.equal(findAll(tree, (node) => node.type === "input" && node.props.type === "checkbox").length, 0);
+});
+
+test("unsupported causal AI prose is disclosed only as unverified on delivery and replay", async () => {
+  const ui = await loadUiModule();
+  const claim = "The failed read_file likely contributed to the test failure.";
+  for (const saved of [false, true]) {
+    const hooks = createEffectHooks();
+    const requests = deferredFetches();
+    const props = { root: "", scope: "run", runId: "synthetic-run" };
+    let tree = render(ui.EvidenceExplain, hooks, props);
+    findAll(tree, (node) => node.type === "button" && textOf(node).includes("Explain this run"))[0].props.onClick();
+    render(ui.EvidenceExplain, hooks, props);
+    hooks.flushEffects();
+    await resolveJson(requests[0], { setupToken: "test-token" });
+    await resolveJson(requests[1], { providers: [{ provider: "anthropic", configured: true }] });
+    tree = render(ui.EvidenceExplain, hooks, props);
+    assert.match(textOf(tree), /What should I verify\?/);
+    const previewing = findAll(tree, (node) => node.type === "button"
+      && textOf(node).includes("Preview evidence"))[0].props.onClick();
+    await resolveJson(requests[2], { plannedCalls: 1, destination: "Anthropic",
+      planFingerprint: "synthetic-plan", providerAvailable: true,
+      upperStaticListPriceUsd: 0.001, evidencePreview: { coverage: "complete" },
+      ...(saved ? { savedResult: { status: "completed", answer: claim } } : {}) });
+    await previewing;
+    if (!saved) {
+      tree = render(ui.EvidenceExplain, hooks, props);
+      findAll(tree, (node) => node.type === "input" && node.props.type === "checkbox")[0]
+        .props.onChange({ target: { checked: true } });
+      tree = render(ui.EvidenceExplain, hooks, props);
+      const running = findAll(tree, (node) => node.type === "button"
+        && textOf(node).includes("Explain selected evidence"))[0].props.onClick();
+      await resolveJson(requests[3], { status: "completed", answer: claim });
+      await running;
+    }
+    tree = render(ui.EvidenceExplain, hooks, props);
+    const response = findAll(tree, (node) => node.type?.name === "UnverifiedAiResponse")[0];
+    const responseTree = render(response.type, createHooks(), response.props);
+    assert.match(textOf(responseTree), /Unverified AI response/);
+    assert.match(textOf(responseTree), /may be wrong/);
+    const disclosure = findAll(responseTree, (node) => node.type === "details"
+      && textOf(node).includes(claim))[0];
+    assert.ok(disclosure, "claim must live inside a disclosure");
+    assert.notEqual(disclosure.props.open, true, "the claim must not lead the issue story");
+    assert.equal(requests.length, saved ? 3 : 4, "replay must not make another call");
+  }
 });
 
 test("AI explanation cannot be approved when the provider SDK is unavailable", async () => {
@@ -3736,7 +4617,8 @@ test("scoped evaluation requires an exact preview and new approval after criteri
   assert.equal(JSON.parse(requests[2].options.body).runId, "synthetic-run");
   await resolveJson(requests[2], { coverage: "complete", plannedCalls: 1, provider: "anthropic",
     model: "claude-haiku-4-5", destination: "https://api.anthropic.com",
-    estimatedMaximumCostUsd: 0.01, planFingerprint: "approved-plan", evidencePreview: { query: "synthetic task" } });
+    estimatedMaximumCostUsd: 0.01, upperStaticListPriceUsd: 0.01,
+    planFingerprint: "approved-plan", evidencePreview: { query: "synthetic task" } });
   await start;
   assert.equal(requests[3].url, "/api/scoped/scheduled");
   await resolveJson(requests[3], { jobs: [] });
@@ -3750,6 +4632,336 @@ test("scoped evaluation requires an exact preview and new approval after criteri
   findAll(tree, (node) => node.type === "textarea")[0].props.onChange({ target: { value: "Different criterion" } });
   tree = render(ui.ScopedEvaluate, hooks, props);
   assert.equal(runButton().props.disabled, true);
+  assert.equal(requests.length, 4);
+  const provider = findAll(tree, (node) => node.type === "select" && node.props["aria-label"] !== "Review focus")[0];
+  provider.props.onChange({ target: { value: "openai" } });
+  tree = render(ui.ScopedEvaluate, hooks, props);
+  assert.equal(findAll(tree, (node) => node.type === "input" && node.props.value === "gpt-4o-mini").length, 1);
+  assert.equal(runButton().props.disabled, true);
+  const openaiPreview = findAll(tree, (node) => node.type === "button" && textOf(node).includes("Preview bounded evidence"))[0].props.onClick();
+  assert.equal(JSON.parse(requests[4].options.body).provider, "openai");
+  assert.equal(JSON.parse(requests[4].options.body).model, "gpt-4o-mini");
+  await resolveJson(requests[4], { coverage: "partial", plannedCalls: 0, provider: "openai",
+    model: "gpt-4o-mini", destination: "https://api.openai.com", evidencePreview: {} });
+  await openaiPreview;
+  tree = render(ui.ScopedEvaluate, hooks, props);
+  findAll(tree, (node) => node.type === "select" && node.props["aria-label"] !== "Review focus")[0]
+    .props.onChange({ target: { value: "google" } });
+  tree = render(ui.ScopedEvaluate, hooks, props);
+  assert.equal(findAll(tree, (node) => node.type === "input" && node.props.value === "gemini-3.5-flash-lite").length, 1);
+  assert.equal(findAll(tree, (node) => node.type === "button" && textOf(node).includes("Run evaluation")).length, 0);
+});
+
+test("direct scoped approval sends the chosen static estimate limit", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const props = { root: "", scope: "run", runId: "synthetic-run" };
+  let tree = render(ui.ScopedEvaluate, hooks, props);
+  findAll(tree, (node) => node.type === "button" && textOf(node).includes("Evaluate this run"))[0]
+    .props.onClick();
+  render(ui.ScopedEvaluate, hooks, props);
+  hooks.flushEffects();
+  await resolveJson(requests[0], { setupToken: "local-token" });
+  await resolveJson(requests[1], { providers: [{ provider: "anthropic", configured: true }] });
+  tree = render(ui.ScopedEvaluate, hooks, props);
+  const previewing = findAll(tree, (node) => node.type === "button"
+    && textOf(node).includes("Preview bounded evidence"))[0].props.onClick();
+  await resolveJson(requests[2], { coverage: "complete", plannedCalls: 1,
+    provider: "anthropic", model: "claude-haiku-4-5", destination: "https://api.anthropic.com",
+    upperStaticListPriceUsd: 0.01, planFingerprint: "approved-plan",
+    evidencePreview: { query: "synthetic task" } });
+  await previewing;
+  await resolveJson(requests[3], { jobs: [] });
+  tree = render(ui.ScopedEvaluate, hooks, props);
+  const budget = () => findAll(tree, (node) => node.type === "input" && node.props.type === "number")[0];
+  const run = () => findAll(tree, (node) => node.type === "button" && textOf(node).includes("Run evaluation"))[0];
+  findAll(tree, (node) => node.type === "input" && node.props.type === "checkbox")[0]
+    .props.onChange({ target: { checked: true } });
+  tree = render(ui.ScopedEvaluate, hooks, props);
+  budget().props.onChange({ target: { value: "0.005" } });
+  tree = render(ui.ScopedEvaluate, hooks, props);
+  assert.equal(run().props.disabled, true);
+  budget().props.onChange({ target: { value: "0.02" } });
+  tree = render(ui.ScopedEvaluate, hooks, props);
+  assert.equal(run().props.disabled, false);
+  const running = run().props.onClick();
+  assert.equal(requests[4].url, "/api/scoped/run");
+  assert.equal(JSON.parse(requests[4].options.body).maxEstimatedUsd, 0.02);
+  await resolveJson(requests[4], { status: "completed", coverage: "complete", dimensions: [] });
+  await running;
+});
+
+test("an exact scoped preview reopens a saved result without another judge call", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const props = { root: "", scope: "turn_window", runId: "synthetic-run", turnId: "turn-2" };
+  let tree = render(ui.ScopedEvaluate, hooks, props);
+  findAll(tree, (node) => node.type === "button"
+    && textOf(node).includes("Review this turn and prior answer"))[0].props.onClick();
+  render(ui.ScopedEvaluate, hooks, props);
+  hooks.flushEffects();
+  await resolveJson(requests[0], { setupToken: "local-token" });
+  await resolveJson(requests[1], { evalPackageAvailable: true,
+    providers: [{ provider: "anthropic", configured: false }] });
+  tree = render(ui.ScopedEvaluate, hooks, props);
+  const previewing = findAll(tree, (node) => node.type === "button"
+    && textOf(node).includes("Preview bounded evidence"))[0].props.onClick();
+  await resolveJson(requests[2], { coverage: "complete", plannedCalls: 1,
+    provider: "anthropic", model: "claude-haiku-4-5",
+    destination: "https://api.anthropic.com", planFingerprint: "exact-plan",
+    evidencePreview: { query: "synthetic pair" },
+    savedResult: { resultId: "saved-review", status: "completed", coverage: "complete",
+      evaluatorFingerprint: "synthetic-evaluator", dimensions: [{ name: "correction",
+        verdict: "fail", citationStatus: "linked", explanation: "[turn:turn-2] supports it",
+        evidenceReferences: ["turn:turn-2"] }] } });
+  await previewing;
+  await resolveJson(requests[3], { jobs: [{ jobId: "pending-review", state: "pending",
+    revision: 1, planFingerprint: "exact-plan" }] });
+  tree = render(ui.ScopedEvaluate, hooks, props);
+  assert.match(textOf(tree), /correction\s*:\s+fail/);
+  assert.match(textOf(tree), /saved review.*no new judge call/i);
+  assert.match(textOf(tree), /Scheduled approval:\s+pending/);
+  assert.equal(findAll(tree, (node) => node.type === "button"
+    && textOf(node).includes("Run evaluation")).length, 0);
+  const cancelling = findAll(tree, (node) => node.type === "button"
+    && textOf(node).includes("Cancel approval"))[0].props.onClick();
+  assert.equal(requests[4].url, "/api/scoped/scheduled/pending-review/cancel");
+  await resolveJson(requests[4], { jobId: "pending-review", state: "cancelled", revision: 2 });
+  await cancelling;
+  tree = render(ui.ScopedEvaluate, hooks, props);
+  assert.match(textOf(tree), /Scheduled approval:\s+cancelled/);
+  assert.equal(requests.filter((item) => item.url === "/api/scoped/run").length, 0);
+  findAll(tree, (node) => node.type === "textarea")[0].props.onChange({
+    target: { value: "A changed synthetic criterion" },
+  });
+  tree = render(ui.ScopedEvaluate, hooks, props);
+  assert.doesNotMatch(textOf(tree), /correction\s*:\s+fail/);
+});
+
+test("blocked adjacent review gives a concrete local next step without enabling a judge", async () => {
+  const ui = await loadUiModule();
+  for (const [reason, expected] of [
+    ["source_capture_partial", /events after the capture limit.*missing/i],
+    ["evidence_limit", /pair exceeds.*bounded review/i],
+    ["turn_content_partial", /request or answer.*incomplete/i],
+    ["__proto__", /selection has incomplete evidence/i],
+  ]) {
+    const hooks = createEffectHooks();
+    const requests = deferredFetches();
+    const props = { root: "", scope: "turn_window", runId: "synthetic-run", turnId: "turn-2" };
+    let tree = render(ui.ScopedEvaluate, hooks, props);
+    findAll(tree, (node) => node.type === "button"
+      && textOf(node).includes("Review this turn and prior answer"))[0].props.onClick();
+    render(ui.ScopedEvaluate, hooks, props);
+    hooks.flushEffects();
+    await resolveJson(requests[0], { setupToken: "local-token" });
+    await resolveJson(requests[1], { providers: [{ provider: "anthropic", configured: true }] });
+    tree = render(ui.ScopedEvaluate, hooks, props);
+    const start = findAll(tree, (node) => node.type === "button"
+      && textOf(node).includes("Preview bounded evidence"))[0].props.onClick();
+    await resolveJson(requests[2], { coverage: "partial", unavailableReason: reason,
+      plannedCalls: 0, provider: "anthropic", model: "claude-haiku-4-5",
+      destination: "https://api.anthropic.com", planFingerprint: "blocked",
+      evidencePreview: { coverage: "partial", query: "", response: "" } });
+    await start;
+    tree = render(ui.ScopedEvaluate, hooks, props);
+    assert.match(textOf(tree), expected);
+    assert.equal(findAll(tree, (node) => node.type === "button"
+      && textOf(node).includes("Run evaluation")).length, 0);
+    assert.equal(requests.length, 3, "a blocked preview does not need schedule or judge calls");
+  }
+});
+
+test("partial adjacent review can switch to fixed text-only evidence with fresh consent", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const props = { root: "", scope: "turn_window", runId: "synthetic-run", turnId: "turn-2" };
+  let tree = render(ui.ScopedEvaluate, hooks, props);
+  findAll(tree, (node) => node.type === "button"
+    && textOf(node).includes("Review this turn and prior answer"))[0].props.onClick();
+  render(ui.ScopedEvaluate, hooks, props);
+  hooks.flushEffects();
+  await resolveJson(requests[0], { setupToken: "local-token" });
+  await resolveJson(requests[1], { evalPackageAvailable: true,
+    providers: [{ provider: "anthropic", configured: true }] });
+  tree = render(ui.ScopedEvaluate, hooks, props);
+  const first = findAll(tree, (node) => node.type === "button"
+    && textOf(node).includes("Preview bounded evidence"))[0].props.onClick();
+  assert.equal(JSON.parse(requests[2].options.body).scope, "turn_window");
+  await resolveJson(requests[2], { coverage: "partial", unavailableReason: "source_capture_partial",
+    plannedCalls: 0, provider: "anthropic", model: "claude-haiku-4-5",
+    destination: "https://api.anthropic.com", planFingerprint: "blocked",
+    evidencePreview: { coverage: "partial", query: "", response: "" } });
+  await first;
+  tree = render(ui.ScopedEvaluate, hooks, props);
+  findAll(tree, (node) => node.type === "button"
+    && textOf(node).includes("Review recorded text only"))[0].props.onClick();
+  tree = render(ui.ScopedEvaluate, hooks, props);
+  assert.match(textOf(tree), /only the two recorded turns/i);
+  assert.equal(findAll(tree, (node) => node.type === "textarea").length, 0);
+  const second = findAll(tree, (node) => node.type === "button"
+    && textOf(node).includes("Preview bounded evidence"))[0].props.onClick();
+  const config = JSON.parse(requests[3].options.body);
+  assert.equal(config.scope, "followup_text");
+  assert.equal(config.runId, "synthetic-run");
+  assert.equal(config.turnId, "turn-2");
+  assert.equal(Object.hasOwn(config, "rubric"), false);
+  await resolveJson(requests[3], { coverage: "complete", plannedCalls: 1,
+    provider: "anthropic", model: "claude-haiku-4-5", destination: "https://api.anthropic.com",
+    estimatedMaximumCostUsd: 0.01, upperStaticListPriceUsd: 0.01, planFingerprint: "text-plan",
+    evidencePreview: { coverageBasis: "recorded_text_only", sourceCoveragePartial: true } });
+  await second;
+  await resolveJson(requests[4], { jobs: [] });
+  tree = render(ui.ScopedEvaluate, hooks, props);
+  assert.equal(findAll(tree, (node) => node.type === "button"
+    && textOf(node).includes("Run evaluation"))[0].props.disabled, true);
+  assert.equal(requests.filter((item) => item.url === "/api/scoped/run").length, 0);
+});
+
+test("request-only follow-up can reach its fixed text-only preview", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const props = { root: "", scope: "turn_window", runId: "synthetic-run", turnId: "turn-2" };
+  let tree = render(ui.ScopedEvaluate, hooks, props);
+  findAll(tree, (node) => node.type === "button"
+    && textOf(node).includes("Review this turn and prior answer"))[0].props.onClick();
+  render(ui.ScopedEvaluate, hooks, props);
+  hooks.flushEffects();
+  await resolveJson(requests[0], { setupToken: "local-token" });
+  await resolveJson(requests[1], { providers: [{ provider: "anthropic", configured: false }] });
+  tree = render(ui.ScopedEvaluate, hooks, props);
+  const first = findAll(tree, (node) => node.type === "button"
+    && textOf(node).includes("Preview bounded evidence"))[0].props.onClick();
+  await resolveJson(requests[2], { coverage: "partial", unavailableReason: "turn_content_partial",
+    plannedCalls: 0, provider: "anthropic", model: "claude-haiku-4-5",
+    destination: "https://api.anthropic.com", planFingerprint: "blocked",
+    evidencePreview: { coverage: "partial", query: "", response: "" } });
+  await first;
+  tree = render(ui.ScopedEvaluate, hooks, props);
+  assert.match(textOf(tree), /Review recorded text only/);
+  findAll(tree, (node) => node.type === "button"
+    && textOf(node).includes("Review recorded text only"))[0].props.onClick();
+  tree = render(ui.ScopedEvaluate, hooks, props);
+  const second = findAll(tree, (node) => node.type === "button"
+    && textOf(node).includes("Preview bounded evidence"))[0].props.onClick();
+  assert.equal(JSON.parse(requests[3].options.body).scope, "followup_text");
+  await resolveJson(requests[3], { coverage: "complete", plannedCalls: 1,
+    provider: "anthropic", model: "claude-haiku-4-5", destination: "https://api.anthropic.com",
+    estimatedMaximumCostUsd: 0.01, upperStaticListPriceUsd: 0.01, planFingerprint: "text-plan",
+    evidencePreview: { coverageBasis: "recorded_text_only", sourceCoveragePartial: false } });
+  await second;
+  await resolveJson(requests[4], { jobs: [] });
+  tree = render(ui.ScopedEvaluate, hooks, props);
+  assert.match(textOf(tree), /Fixed check/);
+  assert.match(textOf(tree), /criterion asks for UNCLEAR when the evidence cannot decide/);
+  assert.match(textOf(tree), /judge may still misclassify the pair/);
+  assert.doesNotMatch(textOf(tree), /Ambiguous cases return UNCLEAR/);
+  assert.equal(findAll(tree, (node) => node.type === "button"
+    && textOf(node).includes("Run evaluation"))[0].props.disabled, true);
+  assert.equal(requests.filter((item) => item.url === "/api/scoped/run").length, 0);
+});
+
+test("optional scoped judge preview is disabled when the eval package is absent", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const props = { root: "", scope: "turn_window", runId: "synthetic-run", turnId: "turn-2" };
+  let tree = render(ui.ScopedEvaluate, hooks, props);
+  findAll(tree, (node) => node.type === "button"
+    && textOf(node).includes("Review this turn and prior answer"))[0].props.onClick();
+  render(ui.ScopedEvaluate, hooks, props);
+  hooks.flushEffects();
+  await resolveJson(requests[0], { setupToken: "local-token" });
+  await resolveJson(requests[1], { evalPackageAvailable: false,
+    providers: [{ provider: "anthropic", configured: true }] });
+  tree = render(ui.ScopedEvaluate, hooks, props);
+  assert.match(textOf(tree), /install the optional cognifity-verdict-eval package/i);
+  assert.equal(findAll(tree, (node) => node.type === "button"
+    && textOf(node).includes("Preview bounded evidence"))[0].props.disabled, true);
+  assert.equal(requests.length, 2);
+});
+
+test("adjacent turn review previews the selected turn with a behavior criterion", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const props = { root: "", scope: "turn_window", runId: "synthetic-run", turnId: "turn-21" };
+  let tree = render(ui.ScopedEvaluate, hooks, props);
+  findAll(tree, (node) => node.type === "button" && textOf(node).includes("Review this turn and prior answer"))[0]
+    .props.onClick();
+  render(ui.ScopedEvaluate, hooks, props);
+  hooks.flushEffects();
+  await resolveJson(requests[0], { setupToken: "local-token" });
+  await resolveJson(requests[1], { providers: [{ provider: "anthropic", configured: true }] });
+  tree = render(ui.ScopedEvaluate, hooks, props);
+  const pending = findAll(tree, (node) => node.type === "button" && textOf(node).includes("Preview bounded evidence"))[0].props.onClick();
+  const config = JSON.parse(requests[2].options.body);
+  assert.equal(config.scope, "turn_window");
+  assert.equal(config.runId, "synthetic-run");
+  assert.equal(config.turnId, "turn-21");
+  assert.equal(config.rubric.dimensions[0].name, "correction");
+  assert.match(config.rubric.dimensions[0].description, /correct or re-explain/);
+  assert.match(config.rubric.dimensions[0].description, /PASS when/i);
+  assert.match(config.rubric.dimensions[0].description, /FAIL when/i);
+  await resolveJson(requests[2], { coverage: "complete", plannedCalls: 1, provider: "anthropic",
+    model: "claude-haiku-4-5", destination: "https://api.anthropic.com", evidencePreview: {} });
+  await pending;
+  tree = render(ui.ScopedEvaluate, hooks, props);
+  assert.match(textOf(tree), /Only these two recorded turns are reviewed/);
+  assert.equal(requests.filter((item) => item.url === "/api/scoped/run").length, 0);
+});
+
+test("session behavior focus changes the reviewed rubric and invalidates old approval", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const props = { root: "", scope: "session", sessionId: "synthetic-session", sourceKind: "synthetic-codex" };
+  let tree = render(ui.ScopedEvaluate, hooks, props);
+  findAll(tree, (node) => node.type === "button" && textOf(node).includes("Evaluate this session"))[0].props.onClick();
+  render(ui.ScopedEvaluate, hooks, props);
+  hooks.flushEffects();
+  await resolveJson(requests[0], { setupToken: "local-token" });
+  await resolveJson(requests[1], { providers: [{ provider: "anthropic", configured: true }] });
+  tree = render(ui.ScopedEvaluate, hooks, props);
+  const focus = findAll(tree, (node) => node.type === "select" && node.props["aria-label"] === "Review focus")[0];
+  assert.ok(focus, "session review must offer a behavior focus");
+  for (const value of ["task_completion", "correction", "status_followup",
+    "requested_brevity", "unsupported_completion"]) {
+    focus.props.onChange({ target: { value } });
+    const wording = findAll(render(ui.ScopedEvaluate, hooks, props),
+      (node) => node.type === "textarea")[0].props.value;
+    assert.match(wording, /PASS when/i);
+    assert.match(wording, /FAIL when/i);
+    assert.match(wording, /UNCLEAR/i);
+  }
+  tree = render(ui.ScopedEvaluate, hooks, props);
+  const criterion = findAll(tree, (node) => node.type === "textarea")[0].props.value;
+  assert.match(criterion, /recorded evidence/i);
+  assert.match(criterion, /UNCLEAR/);
+  assert.match(criterion, /PASS when/i);
+  assert.match(criterion, /FAIL when/i);
+  assert.equal(requests.length, 2, "choosing a focus must not send evidence");
+  const previewing = findAll(tree, (node) => node.type === "button" && textOf(node).includes("Preview bounded evidence"))[0].props.onClick();
+  const sent = JSON.parse(requests[2].options.body);
+  assert.equal(sent.rubric.dimensions[0].name, "unsupported_completion");
+  assert.equal(sent.rubric.dimensions[0].description, criterion);
+  await resolveJson(requests[2], { coverage: "complete", plannedCalls: 1, provider: "anthropic",
+    model: "claude-haiku-4-5", destination: "https://api.anthropic.com",
+    estimatedMaximumCostUsd: 0.01, upperStaticListPriceUsd: 0.01,
+    planFingerprint: "reviewed-plan", evidencePreview: { query: "synthetic task" } });
+  await previewing;
+  await resolveJson(requests[3], { jobs: [] });
+  tree = render(ui.ScopedEvaluate, hooks, props);
+  findAll(tree, (node) => node.type === "input" && node.props.type === "checkbox")[0].props.onChange({ target: { checked: true } });
+  tree = render(ui.ScopedEvaluate, hooks, props);
+  assert.equal(findAll(tree, (node) => node.type === "button" && textOf(node).includes("Run evaluation"))[0].props.disabled, false);
+  findAll(tree, (node) => node.type === "select" && node.props["aria-label"] === "Review focus")[0].props.onChange({ target: { value: "correction" } });
+  tree = render(ui.ScopedEvaluate, hooks, props);
+  assert.equal(findAll(tree, (node) => node.type === "button" && textOf(node).includes("Run evaluation"))[0].props.disabled, true);
   assert.equal(requests.length, 4);
 });
 
@@ -3769,7 +4981,8 @@ test("one-time scheduled evaluation requires a visible budget and persistent con
   assert.equal(JSON.parse(requests[2].options.body).sessionId, "synthetic-session");
   await resolveJson(requests[2], { coverage: "complete", plannedCalls: 1, provider: "anthropic",
     model: "claude-haiku-4-5", destination: "https://api.anthropic.com",
-    estimatedMaximumCostUsd: 0.002, scheduledUpperStaticListPriceUsd: 0.01,
+    estimatedMaximumCostUsd: 0.002, upperStaticListPriceUsd: 0.01,
+    scheduledUpperStaticListPriceUsd: 0.01,
     planFingerprint: "approved-session", evidencePreview: { query: "synthetic task" } });
   await previewing;
   await resolveJson(requests[3], { jobs: [] });
@@ -3820,7 +5033,8 @@ test("spent scheduled approval opens its saved result without another judge requ
     textOf(node).includes("Preview bounded evidence"))[0].props.onClick();
   await resolveJson(requests[2], { coverage: "complete", plannedCalls: 1, provider: "anthropic",
     model: "claude-haiku-4-5", destination: "https://api.anthropic.com",
-    scheduledUpperStaticListPriceUsd: 0.01, planFingerprint: "saved-plan",
+    upperStaticListPriceUsd: 0.01, scheduledUpperStaticListPriceUsd: 0.01,
+    planFingerprint: "saved-plan",
     evidencePreview: { query: "synthetic task" } });
   await previewing;
   await resolveJson(requests[3], { jobs: [{ jobId: "saved-job", state: "spent",
@@ -3832,12 +5046,15 @@ test("spent scheduled approval opens its saved result without another judge requ
   assert.equal(requests[4].url, "/api/scoped/result/saved-result");
   assert.equal(requests[4].options?.method, undefined);
   await resolveJson(requests[4], { status: "completed", coverage: "complete",
-    evaluatorFingerprint: "synthetic-fingerprint", dimensions: [{ name: "completion",
+    evaluatorFingerprint: "synthetic-fingerprint",
+    criterionDescriptions: { completion: "PASS when the recorded work supports completion; FAIL when evidence contradicts it." },
+    dimensions: [{ name: "completion",
       verdict: "pass", citationStatus: "linked", explanation: "[turn:turn-a] supports it",
       evidenceReferences: ["turn:turn-a"] }] });
   await opening;
   tree = render(ui.ScopedEvaluate, hooks, props);
   assert.match(textOf(tree), /completion\s*:\s+pass/);
+  assert.match(textOf(tree), /PASS when the recorded work supports completion/);
   assert.equal(requests.length, 5);
 });
 
@@ -4084,6 +5301,311 @@ function runListPage(offset, runIds, available = 61) {
   };
 }
 
+test("recent follow-up candidates open the exact recorded Turn without a failure label", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const opened = [];
+  const props = { url: "/api/runs", onOpenFollowup: (pair) => opened.push(pair) };
+  render(ui.Runs, hooks, props);
+  hooks.flushEffects();
+  const page = runListPage(0, ["run-a"], 1);
+  page.selectedRun = runListRow("run-a");
+  await resolveJson(requests[0], page);
+  let tree = render(ui.Runs, hooks, props);
+  assert.doesNotMatch(textOf(tree), /You missed the summary/);
+  const toggle = findAll(tree, (node) => node.type === "button"
+    && /Review recent follow-ups/.test(textOf(node)))[0];
+  assert.ok(toggle);
+  toggle.props.onClick();
+  render(ui.Runs, hooks, props);
+  hooks.flushEffects();
+  assert.match(requests[1].url, /view=followups/);
+  await resolveJson(requests[1], {
+    followups: [{ runId: "run-b", turnId: "turn-2", priorTurnId: "turn-1",
+      sourceKind: "codex", agentName: null, startedAt: "2026-11-02T00:00:00Z",
+      priorResponseExcerpt: "The report is complete",
+      requestExcerpt: "You missed the summary", reviewStatus: "correction" }],
+    page: { shown: 1, limit: 20, hasMore: false },
+  });
+  tree = render(ui.Runs, hooks, props);
+  assert.match(textOf(tree), /candidate.*not a confirmed issue/i);
+  assert.match(textOf(tree), /source coverage may still be partial/i);
+  assert.match(textOf(tree), /The report is complete/);
+  assert.match(textOf(tree), /1\s+human-reviewed correction/i);
+  assert.match(textOf(tree), /not an automatic failure rate/i);
+  findAll(tree, (node) => node.type === "button"
+    && /Hide recent follow-ups/.test(textOf(node)))[0].props.onClick();
+  tree = render(ui.Runs, hooks, props);
+  const beforeRefresh = requests.filter((item) => item.url.includes("view=followups")).length;
+  findAll(tree, (node) => node.type === "button"
+    && /Review recent follow-ups/.test(textOf(node)))[0].props.onClick();
+  assert.equal(requests.filter((item) => item.url.includes("view=followups")).length,
+    beforeRefresh + 1);
+  await resolveJson(requests.filter((item) => item.url.includes("view=followups")).at(-1), {
+    followups: [{ runId: "run-b", turnId: "turn-2", priorTurnId: "turn-1",
+      sourceKind: "codex", agentName: null, startedAt: "2026-11-02T00:00:00Z",
+      priorResponseExcerpt: "The report is complete", requestExcerpt: "You missed the summary" }],
+    page: { shown: 1, limit: 20, hasMore: false },
+  });
+  tree = render(ui.Runs, hooks, props);
+  const candidate = findAll(tree, (node) => node.type === "button"
+    && /You missed the summary/.test(textOf(node)))[0];
+  assert.ok(candidate);
+  candidate.props.onClick();
+  assert.deepEqual(opened, [{ runId: "run-b", turnId: "turn-2" }]);
+});
+
+test("an older follow-up response cannot replace a newer opened list", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const props = { url: "/api/runs" };
+  render(ui.Runs, hooks, props);
+  hooks.flushEffects();
+  await resolveJson(requests[0], { ...runListPage(0, ["run-a"], 1),
+    selectedRun: runListRow("run-a") });
+  let tree = render(ui.Runs, hooks, props);
+  findAll(tree, (node) => node.type === "button"
+    && /Review recent follow-ups/.test(textOf(node)))[0].props.onClick();
+  tree = render(ui.Runs, hooks, props);
+  findAll(tree, (node) => node.type === "button"
+    && /Hide recent follow-ups/.test(textOf(node)))[0].props.onClick();
+  tree = render(ui.Runs, hooks, props);
+  findAll(tree, (node) => node.type === "button"
+    && /Review recent follow-ups/.test(textOf(node)))[0].props.onClick();
+  const pairs = requests.filter((item) => item.url.includes("view=followups"));
+  assert.equal(pairs.length, 2);
+  await resolveJson(pairs[1], { followups: [{ runId: "new", turnId: "new-1",
+    sourceKind: "codex", startedAt: "2026-11-02T00:00:00Z",
+    requestExcerpt: "New follow-up" }], page: { shown: 1, limit: 20, hasMore: false } });
+  await resolveJson(pairs[0], { followups: [{ runId: "old", turnId: "old-1",
+    sourceKind: "codex", startedAt: "2026-11-01T00:00:00Z",
+    requestExcerpt: "Old follow-up" }], page: { shown: 1, limit: 20, hasMore: false } });
+  tree = render(ui.Runs, hooks, props);
+  assert.match(textOf(tree), /New follow-up/);
+  assert.doesNotMatch(textOf(tree), /Old follow-up/);
+});
+
+test("a reviewed follow-up saves one human label without a judge call", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const props = { root: "", runId: "run-a", turnId: "turn-2" };
+  let tree = render(ui.FollowupReview, hooks, props);
+  assert.match(textOf(tree), /Review this follow-up locally/);
+  findAll(tree, (node) => node.type === "button"
+    && /Review this follow-up locally/.test(textOf(node)))[0].props.onClick();
+  assert.match(requests[0].url, /\/api\/runs\/run-a\/followup-review\/turn-2/);
+  await resolveJson(requests[0], { eligible: true, runId: "run-a", turnId: "turn-2",
+    priorTurnId: "turn-1", priorRequest: "Write a summary",
+    priorAnswer: "Done", laterRequest: "You missed it", evidenceFingerprint: "a".repeat(64),
+    label: null, stale: false, revision: null });
+  tree = render(ui.FollowupReview, hooks, props);
+  assert.match(textOf(tree), /Your label.*not an automatic agent failure/);
+  assert.match(textOf(tree), /You missed it/);
+  findAll(tree, (node) => node.type === "button"
+    && textOf(node) === "Correction")[0].props.onClick();
+  assert.equal(requests[1].url, "/api/setup/token");
+  await resolveJson(requests[1], { setupToken: "synthetic-token" });
+  assert.equal(requests[2].options.method, "POST");
+  assert.equal(requests[2].options.headers["X-Verdict-Setup"], "synthetic-token");
+  assert.deepEqual(JSON.parse(requests[2].options.body), {
+    label: "correction", evidenceFingerprint: "a".repeat(64), expectedRevision: null,
+  });
+  await resolveJson(requests[2], { eligible: true, runId: "run-a", turnId: "turn-2",
+    priorTurnId: "turn-1", priorRequest: "Write a summary",
+    priorAnswer: "Done", laterRequest: "You missed it", evidenceFingerprint: "a".repeat(64),
+    label: "correction", stale: false, revision: 1 });
+  tree = render(ui.FollowupReview, hooks, props);
+  assert.match(textOf(tree), /Your saved label:\s+correction/);
+  assert.equal(requests.length, 3);
+});
+
+test("an explicit review link loads its exact pair and labels without another click", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const props = { root: "", runId: "run-a", turnId: "turn-24", autoOpen: true };
+  render(ui.FollowupReview, hooks, props);
+  hooks.flushEffects();
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].url, "/api/runs/run-a/followup-review/turn-24");
+  await resolveJson(requests[0], { eligible: true, runId: "run-a", turnId: "turn-24",
+    priorTurnId: "turn-23", priorRequest: "Original request",
+    priorAnswer: "Long answer ".repeat(1000), laterRequest: "Please correct the result",
+    evidenceFingerprint: "a".repeat(64), label: null, stale: false, revision: null });
+  const tree = render(ui.FollowupReview, hooks, props);
+  for (const label of ["Correction", "Ordinary follow-up", "Unclear"]) {
+    assert.equal(findAll(tree, (node) => node.type === "button"
+      && textOf(node) === label).length, 1);
+  }
+  assert.equal(requests.length, 1, "opening a local review must not invoke an AI judge");
+});
+
+test("an explicit review waits for its pair before bringing labels into view", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const scrolls = [];
+  const props = { root: "", runId: "run-a", turnId: "turn-24", autoOpen: true };
+  let tree = render(ui.FollowupReview, hooks, props);
+  hooks.flushEffects();
+  assert.equal(scrolls.length, 0);
+  assert.equal(requests.length, 1);
+  await resolveJson(requests[0], { eligible: true, runId: "run-a", turnId: "turn-24",
+    priorTurnId: "turn-23", priorRequest: "Original request",
+    priorAnswer: "Long answer ".repeat(1000), laterRequest: "Please correct the result",
+    evidenceFingerprint: "a".repeat(64), label: null, stale: false, revision: null });
+  tree = render(ui.FollowupReview, hooks, props);
+  const card = findAll(tree, (node) => node.props?.id === "verdict-followup-review")[0];
+  if (card.props.ref) card.props.ref.current = { scrollIntoView: (options) => scrolls.push(options) };
+  hooks.flushEffects();
+  assert.deepEqual(scrolls, [{ block: "start" }]);
+  render(ui.FollowupReview, hooks, props);
+  hooks.flushEffects();
+  assert.equal(scrolls.length, 1, "a settled pair must not repeatedly pull the reader back");
+});
+
+test("closing an explicit review during loading prevents a late scroll", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const scrolls = [];
+  const props = { root: "", runId: "run-a", turnId: "turn-24", autoOpen: true };
+  render(ui.FollowupReview, hooks, props);
+  hooks.flushEffects();
+  const tree = render(ui.FollowupReview, hooks, props);
+  findAll(tree, (node) => node.type === "button" && textOf(node) === "Hide follow-up review")[0].props.onClick();
+  await resolveJson(requests[0], { eligible: true, runId: "run-a", turnId: "turn-24",
+    priorTurnId: "turn-23", priorRequest: "Original request",
+    priorAnswer: "Long answer", laterRequest: "Please correct the result",
+    evidenceFingerprint: "a".repeat(64), label: null, stale: false, revision: null });
+  const closed = render(ui.FollowupReview, hooks, props);
+  const card = findAll(closed, (node) => node.props?.id === "verdict-followup-review")[0];
+  if (card.props.ref) card.props.ref.current = { scrollIntoView: (options) => scrolls.push(options) };
+  hooks.flushEffects();
+  assert.equal(scrolls.length, 0);
+});
+
+test("changed follow-up evidence withholds the old label and uses its revision", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const props = { root: "", runId: "run-a", turnId: "turn-2" };
+  let tree = render(ui.FollowupReview, hooks, props);
+  findAll(tree, (node) => node.type === "button"
+    && /Review this follow-up locally/.test(textOf(node)))[0].props.onClick();
+  await resolveJson(requests[0], { eligible: true, runId: "run-a", turnId: "turn-2",
+    priorTurnId: "turn-1", priorRequest: "Write a summary",
+    priorAnswer: "Done", laterRequest: "Add a title", evidenceFingerprint: "b".repeat(64),
+    label: null, stale: true, revision: 1 });
+  tree = render(ui.FollowupReview, hooks, props);
+  assert.match(textOf(tree), /previous label is stale/);
+  assert.doesNotMatch(textOf(tree), /Your saved label/);
+  findAll(tree, (node) => node.type === "button"
+    && textOf(node) === "Ordinary follow-up")[0].props.onClick();
+  await resolveJson(requests[1], { setupToken: "synthetic-token" });
+  assert.deepEqual(JSON.parse(requests[2].options.body), {
+    label: "ordinary", evidenceFingerprint: "b".repeat(64), expectedRevision: 1,
+  });
+});
+
+test("older follow-up pages append once and keep the list after a failed request", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const props = { url: "/api/runs" };
+  render(ui.Runs, hooks, props);
+  hooks.flushEffects();
+  await resolveJson(requests[0], { ...runListPage(0, ["run-a"], 1),
+    selectedRun: runListRow("run-a") });
+  let tree = render(ui.Runs, hooks, props);
+  findAll(tree, (node) => node.type === "button"
+    && /Review recent follow-ups/.test(textOf(node)))[0].props.onClick();
+  const pair = (id) => ({ runId: "run-a", turnId: id, sourceKind: "codex",
+    startedAt: "2026-11-02T00:00:00Z", requestExcerpt: `Request ${id}` });
+  await resolveJson(requests[1], { followups: [pair("one"), pair("two")],
+    page: { shown: 2, limit: 20, hasMore: true } });
+  tree = render(ui.Runs, hooks, props);
+  const older = findAll(tree, (node) => node.type === "button"
+    && /Load older follow-ups/.test(textOf(node)))[0];
+  older.props.onClick();
+  tree = render(ui.Runs, hooks, props);
+  assert.match(textOf(tree), /Loading older follow-ups/);
+  assert.equal(findAll(tree, (node) => node.type === "button"
+    && /Loading older follow-ups/.test(textOf(node)))[0].props.disabled, true);
+  assert.equal(requests.length, 3);
+  assert.match(requests[2].url, /view=followups.*offset=2/);
+  requests[2].resolve({ ok: false, status: 503 });
+  for (let index = 0; index < 6; index += 1) await Promise.resolve();
+  tree = render(ui.Runs, hooks, props);
+  assert.match(textOf(tree), /Request one/);
+  assert.match(textOf(tree), /Follow-ups unavailable/);
+  findAll(tree, (node) => node.type === "button"
+    && /Load older follow-ups/.test(textOf(node)))[0].props.onClick();
+  assert.equal(requests.length, 4);
+  assert.match(requests[3].url, /offset=2/);
+  await resolveJson(requests[3], { followups: [pair("two"), pair("three")],
+    page: { shown: 2, limit: 20, hasMore: true } });
+  tree = render(ui.Runs, hooks, props);
+  assert.equal(findAll(tree, (node) => node.type === "button"
+    && /Request two/.test(textOf(node))).length, 1);
+  assert.match(textOf(tree), /Request three/);
+  findAll(tree, (node) => node.type === "button"
+    && /Load older follow-ups/.test(textOf(node)))[0].props.onClick();
+  assert.match(requests[4].url, /offset=4/);
+  await resolveJson(requests[4], { followups: [pair("four")],
+    page: { shown: 1, limit: 20, hasMore: false } });
+  tree = render(ui.Runs, hooks, props);
+  assert.match(textOf(tree), /Request four/);
+  assert.doesNotMatch(textOf(tree), /Load older follow-ups/);
+});
+
+test("changing run scope discards a pending follow-up page", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const props = { url: "/api/runs" };
+  render(ui.Runs, hooks, props);
+  hooks.flushEffects();
+  await resolveJson(requests[0], { ...runListPage(0, ["run-a"], 1),
+    selectedRun: runListRow("run-a") });
+  let tree = render(ui.Runs, hooks, props);
+  findAll(tree, (node) => node.type === "button"
+    && /Review recent follow-ups/.test(textOf(node)))[0].props.onClick();
+  await resolveJson(requests[1], { followups: [{ runId: "run-a", turnId: "one",
+    sourceKind: "codex", requestExcerpt: "Earlier request" }],
+    page: { shown: 1, limit: 20, hasMore: true } });
+  tree = render(ui.Runs, hooks, props);
+  findAll(tree, (node) => node.type === "button"
+    && /Load older follow-ups/.test(textOf(node)))[0].props.onClick();
+  render(ui.Runs, hooks, { ...props, sourceKind: "claude-code" });
+  hooks.flushEffects();
+  await resolveJson(requests[2], { followups: [{ runId: "run-a", turnId: "two",
+    sourceKind: "codex", requestExcerpt: "Stale request" }],
+    page: { shown: 1, limit: 20, hasMore: false } });
+  tree = render(ui.Runs, hooks, props);
+  hooks.flushEffects();
+  await resolveJson(requests.at(-1), { ...runListPage(0, ["run-a"], 1),
+    selectedRun: runListRow("run-a") });
+  tree = render(ui.Runs, hooks, props);
+  assert.doesNotMatch(textOf(tree), /Stale request|Earlier request/);
+  assert.match(textOf(tree), /Review recent follow-ups/);
+});
+
+test("recent cross-run follow-ups stay out of exact evaluator views", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const props = { url: "/api/runs", evaluatorFingerprint: "exact-evaluator" };
+  render(ui.Runs, hooks, props);
+  hooks.flushEffects();
+  await resolveJson(requests[0], { ...runListPage(0, ["run-a"], 1),
+    selectedRun: runListRow("run-a") });
+  assert.doesNotMatch(textOf(render(ui.Runs, hooks, props)), /Review recent follow-ups/);
+});
+
 test("recorded group selection reaches the filtered run API and can be cleared", async () => {
   const ui = await loadUiModule();
   for (const [field, value, query] of [
@@ -4102,6 +5624,7 @@ test("recorded group selection reaches the filtered run API and can be cleared",
     await resolveJson(requests[0], page);
     const tree = render(ui.Runs, hooks, props);
     assert.match(textOf(tree), /Recorded\s+(source|agent):/);
+    assert.doesNotMatch(textOf(tree), /Review recent follow-ups/);
     assert.doesNotMatch(textOf(tree), /2026-09-01T00:00:00Z/);
     assert.match(textOf(tree), /Sep 1, 2026/);
     findAll(tree, (node) => node.type === "button" && textOf(node) === "Clear group")[0].props.onClick();
@@ -4149,6 +5672,103 @@ test("an exact run investigation can browse other recorded runs by agent or sour
     browse.props.onClick();
     assert.deepEqual(browsed, [entry.expected]);
   }
+});
+
+test("an exact turn link requests its page and opens the selected turn", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const run = runListRow("long-run");
+  const props = { url: "/api/runs", focusRunIds: ["long-run"],
+    selectedRunId: "long-run", routedTurnId: "turn-24" };
+  render(ui.Runs, hooks, props);
+  hooks.flushEffects();
+  await resolveJson(requests[0], { ...runListPage(0, ["long-run"], 1),
+    runs: [run], selectedRun: run });
+  render(ui.Runs, hooks, props);
+  hooks.flushEffects();
+  const request = requests.find((item) => item.url.startsWith("/api/runs/long-run?"));
+  assert.match(request.url, /turn_id=turn-24/);
+  await resolveJson(request, { runId: "long-run", events: [], children: [],
+    turns: [{ turnId: "turn-23", sequence: 23, status: "completed",
+      requestState: "present", responseState: "present", request: "Original request",
+      response: "Prior answer", tokenUsage: {} },
+    { turnId: "turn-24", sequence: 24, status: "completed",
+      requestState: "present", responseState: "present", request: "Synthetic request",
+      response: "Synthetic response", progress: "2026-08-30T10:01:04Z · Synthetic update",
+      tokenUsage: {} }],
+    turnPage: { available: 25, shown: 2, offset: 20, limit: 20, truncated: false },
+    page: { available: 0, shown: 0, offset: 0, limit: 100, truncated: false } });
+  const detail = findAll(render(ui.Runs, hooks, props),
+    (node) => node.type?.name === "RunDetail")[0];
+  const tree = render(detail.type, createHooks(), detail.props);
+  const focused = findAll(tree, (node) => node.type === "details"
+    && node.props.id === "verdict-focused-turn")[0];
+  assert.equal(focused?.props.open, true);
+  const prior = findAll(tree, (node) => node.type === "details"
+    && node.props.className === "border p-3" && /Turn\s+24/.test(textOf(node)))[0];
+  assert.equal(prior?.props.open, true);
+  const timeline = findAll(tree, (node) => node.type === "details"
+    && findAll(node, (child) => child.type === "summary"
+      && textOf(child) === "Turns and full event timeline").length > 0)[0];
+  assert.equal(timeline?.props.open, true);
+  assert.match(textOf(focused), /Turn\s+25/);
+  assert.match(textOf(focused), /Synthetic update/);
+  assert.match(textOf(focused), /latest 12 messages, earlier omissions marked, bounded to 4 KB/);
+  assert.match(textOf(focused), /do not prove the user saw an update/);
+  const reviewTree = render(detail.type, createHooks(), {
+    ...detail.props, followupReview: true,
+  });
+  const focusedReview = findAll(reviewTree, (node) => node.type === "details"
+    && node.props.id === "verdict-focused-turn")[0];
+  const reviewCard = findAll(focusedReview, (node) => node.type?.name === "FollowupReview")[0];
+  assert.equal(reviewCard?.props.autoOpen, true);
+  assert.equal(reviewCard?.props.turnId, "turn-24");
+  const priorReview = findAll(reviewTree, (node) => node.type === "details"
+    && node.props.className === "border p-3" && /Turn\s+24/.test(textOf(node)))[0];
+  assert.notEqual(priorReview?.props.open, true,
+    "the prior full transcript must stay collapsed above an explicit review");
+  assert.ok(focusedReview.props.children.findIndex((child) => child?.type?.name === "FollowupReview")
+    < focusedReview.props.children.findIndex((child) => child?.type === "div"),
+  "the local review must appear before a long turn transcript");
+  const sdk = render(detail.type, createHooks(), {
+    ...detail.props, run: { ...detail.props.run, sourceKind: "verdict_sdk" },
+  });
+  assert.match(textOf(sdk), /Recorded progress \(\s*supplied by application, bounded to 4 KB\s*\)/);
+  assert.doesNotMatch(textOf(sdk), /latest 12 messages/);
+  const unavailable = render(detail.type, createHooks(), {
+    ...detail.props,
+    detail: { ...detail.props.detail, data: { ...detail.props.detail.data,
+      turns: [{ ...detail.props.detail.data.turns[0], progress: null }] } },
+  });
+  assert.match(textOf(unavailable), /not captured for this turn/);
+});
+
+test("leaving an exact review clears its route while keeping the chosen turn page", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const cleared = [];
+  const selectedEvents = [];
+  const run = runListRow("run-a");
+  const props = { url: "/api/runs", focusRunIds: ["run-a"],
+    selectedRunId: "run-a", routedTurnId: "turn-24", routedFollowupReview: true,
+    onClearTurnFocus: () => cleared.push(true),
+    onSelectEvent: (eventId) => selectedEvents.push(eventId) };
+  render(ui.Runs, hooks, props);
+  hooks.flushEffects();
+  await resolveJson(requests[0], { ...runListPage(0, ["run-a"], 1),
+    runs: [run], selectedRun: run });
+  const detail = findAll(render(ui.Runs, hooks, props),
+    (node) => node.type?.name === "RunDetail")[0];
+  detail.props.onTurnPage(40);
+  assert.equal(cleared.length, 1);
+  render(ui.Runs, hooks, { ...props, routedTurnId: null,
+    routedFollowupReview: false });
+  hooks.flushEffects();
+  assert.match(requests.at(-1).url, /turn_offset=40/);
+  detail.props.onFocusEvent("event-a");
+  assert.deepEqual(selectedEvents, ["event-a"]);
 });
 
 test("Agent Runs requests lightweight rows and expands only the selected run", async () => {
@@ -5051,6 +6671,39 @@ test("trace explorer filters the newest bounded view by capture state", async ()
   assert.doesNotMatch(rendered, /\bHour\b/);
 });
 
+test("trace search describes and follows its visible-preview boundary", async () => {
+  const ui = await loadUiModule();
+  const hooks = createHooks();
+  const data = bundle("evaluator-a", [
+    { trace_id: "short-trace", provider: "openai", request_model: "gpt-test",
+      prompt_redacted: "visible-needle", response_redacted: "reply" },
+    { trace_id: "deferred-trace", provider: "openai", request_model: "gpt-test",
+      prompt_redacted: "Prompt preview deferred. Select this trace to inspect it.",
+      promptPreviewDeferred: true, contentCaptured: true, response_redacted: "reply" },
+    { trace_id: "metadata-trace", provider: "openai", request_model: "gpt-test",
+      prompt_redacted: null, response_redacted: null },
+  ]);
+  let tree = render(ui.Traces, hooks, { data });
+  const search = findAll(tree, (node) => node.type === "input" &&
+    typeof node.props.placeholder === "string")[0];
+  assert.match(search.props.placeholder, /visible prompt previews.*trace ID/i);
+  assert.match(textOf(tree), /deferred prompt content is not searched/i);
+
+  search.props.onChange({ target: { value: "visible-needle" } });
+  tree = render(ui.Traces, hooks, { data });
+  assert.match(textOf(tree), /visible-needle/);
+  assert.doesNotMatch(textOf(tree), /Prompt preview deferred/);
+
+  search.props.onChange({ target: { value: "deferred-trace" } });
+  tree = render(ui.Traces, hooks, { data });
+  assert.match(textOf(tree), /Prompt preview deferred/);
+
+  search.props.onChange({ target: { value: "hidden-needle" } });
+  tree = render(ui.Traces, hooks, { data });
+  assert.match(textOf(tree), /No traces match/);
+  assert.doesNotMatch(textOf(tree), /Prompt preview deferred/);
+});
+
 test("live trace explorer pages through the existing bounded trace samples", async () => {
   const ui = await loadUiModule();
   const offsets = [];
@@ -5132,6 +6785,39 @@ test("trace detail labels a shortened provider error preview", async () => {
 
   assert.match(shortened, /Provider error preview shortened to keep this dashboard responsive/);
   assert.doesNotMatch(full, /Provider error preview shortened/);
+});
+
+test("trace detail identifies deferred list previews without calling content uncaptured", async () => {
+  const ui = await loadUiModule();
+  const sample = {
+    trace_id: "deferred", provider: "synthetic", request_model: "sample-model",
+    prompt_redacted: "Prompt preview deferred. Select this trace to inspect it.",
+    promptPreviewDeferred: true, promptPreviewTruncated: true,
+    response_redacted: "Response preview deferred. Select this trace to inspect it.",
+    responsePreviewDeferred: true,
+    error: "Provider error preview deferred. Select this trace to inspect it.",
+    errorPreviewDeferred: true, errorPreviewTruncated: true,
+    contentCaptured: true, started_at: "2026-11-01T00:00:00Z",
+  };
+  const rendered = textOf(render(ui.TraceDetail, createHooks(), { s: sample, onClose() {} }));
+  assert.match(rendered, /Select this trace to inspect its redacted prompt preview/);
+  assert.match(rendered, /Select this trace to inspect its redacted provider error preview/);
+  assert.doesNotMatch(rendered, /Prompt and response content were not captured/);
+});
+
+test("trace detail labels deferred facts as loading rather than an old server", async () => {
+  const ui = await loadUiModule();
+  const sample = {
+    trace_id: "deferred-facts", provider: "synthetic", request_model: "example",
+    prompt_redacted: "Prompt preview deferred. Select this trace to inspect it.",
+    response_redacted: "Response preview deferred. Select this trace to inspect it.",
+    promptPreviewDeferred: true, responsePreviewDeferred: true,
+    deterministicFacts: null, deterministicFactsDeferred: true,
+    contentCaptured: true, started_at: "2026-11-02T00:00:00Z",
+  };
+  const rendered = textOf(render(ui.TraceDetail, createHooks(), { s: sample, onClose() {} }));
+  assert.match(rendered, /Loading full trace facts/);
+  assert.doesNotMatch(rendered, /Refresh after upgrading the server/);
 });
 
 test("trace detail identifies a tool-only response without calling it uncaptured", async () => {
@@ -5299,6 +6985,7 @@ test("local capture starts a server job and shows its progress until it complete
     const status = () => findAll(render(ui.SetupWizard, hooks, props),
       (node) => node.props?.role === "status").map(textOf).join(" ");
 
+    button("Claude Code / Codex").props.onClick();
     const previewing = button("Preview sources").props.onClick();
     assert.match(status(), /Previewing sources/);
     await resolveJson(requests[2], { claude: { files: 1 }, codex: { files: 0 } });
@@ -5376,6 +7063,7 @@ test("a failed recapture does not relabel the prior limited capture as the lates
   const button = (label) => findAll(render(ui.SetupWizard, hooks, props),
     (node) => node.type === "button" && textOf(node) === label)[0];
   button("Manage data sources").props.onClick();
+  button("Claude Code / Codex").props.onClick();
   const preview = button("Preview sources").props.onClick();
   await resolveJson(requests[2], { codex: { files: 1 } });
   await preview;
@@ -5400,6 +7088,7 @@ test("failed setup capture refreshes captured evidence and shows skipped files",
   await resolveJson(requests[1], { job: null });
   const button = (label) => findAll(render(ui.SetupWizard, hooks, props),
     (node) => node.type === "button" && textOf(node) === label)[0];
+  button("Claude Code / Codex").props.onClick();
   const preview = button("Preview sources").props.onClick();
   await resolveJson(requests[2], { codex: { files: 2 } });
   await preview;
@@ -5523,6 +7212,7 @@ test("an analysis failure after a mounted import still shows its capture limit",
   const button = (label) => findAll(render(ui.SetupWizard, hooks, props),
     (node) => node.type === "button" && textOf(node) === label)[0];
   button("Manage data sources").props.onClick();
+  button("Claude Code / Codex").props.onClick();
   const preview = button("Preview sources").props.onClick();
   await resolveJson(requests[2], { codex: { files: 1 } });
   await preview;
@@ -5544,6 +7234,7 @@ test("an old capture-status response cannot erase a newer limited capture", asyn
   await resolveJson(requests[0], { setupToken: "setup-token" });
   const button = (label) => findAll(render(ui.SetupWizard, hooks, props),
     (node) => node.type === "button" && textOf(node) === label)[0];
+  button("Claude Code / Codex").props.onClick();
   const preview = button("Preview sources").props.onClick();
   await resolveJson(requests[2], { codex: { files: 1 } });
   await preview;
@@ -5582,6 +7273,32 @@ test("guided home offers retry after an evidence request fails", async () => {
     analysisState: { status: "completed" }, findings: [],
   }, null);
   assert.match(textOf(render(ui.GuidedHome, hooks, props)), /Review suggested monitoring/);
+});
+
+test("guided home opens the saved plan when the latest worker check failed", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const destinations = [];
+  const props = { configUrl: "/api/config", source: "live",
+    meta: { totalAgentRuns: 2, totalTraces: 0, monitorEligibleCalls: 0 }, monitor: null,
+    onNavigate: (...destination) => destinations.push(destination) };
+  render(ui.GuidedHome, hooks, props);
+  hooks.flushEffects();
+  await resolveJson(requests[0], { openIssues: 0,
+    documents: [{ kind: "schedule", documentId: "daily", state: "active", revision: 3 }],
+    worker: { status: "recent" },
+    lastCycle: { state: "completed", trigger: "manual", scheduleRevision: 3 },
+    lastWorkerCycle: { state: "failed", trigger: "worker", scheduleRevision: 3,
+      failureCode: "analysis_error" } });
+  let tree = render(ui.GuidedHome, hooks, props);
+  findAll(tree, (node) => node.type?.name === "Insights")[0].props.onData({
+    analysisState: { status: "completed" }, findings: [],
+  }, null);
+  tree = render(ui.GuidedHome, hooks, props);
+  findAll(tree, (node) => node.type === "button" && textOf(node).includes("Review suggested setup"))[0]
+    .props.onClick();
+  assert.deepEqual(destinations, [["monitor", "plan"]]);
 });
 
 test("guided home keeps historical findings available while leading to reviewed setup", async () => {
@@ -5647,7 +7364,7 @@ test("evidence-gap investigation does not call partial capture a failure", async
       ["event_capture_partial", /Inspect an evidence gap.*what was and was not recorded/s, /Review the recorded failure/],
       ["tool_outcomes_incomplete", /Inspect an evidence gap.*what was and was not recorded/s, /capture limit|Review the recorded failure/],
       ["test_failed", /A captured run recorded a failed test.*Review the recorded finding/s, /Inspect an evidence gap/],
-      ["possible_tool_loop", /Repeated tool calls need review.*Review the recorded finding/s, /Review the recorded failure/],
+      ["possible_tool_loop", /Earlier repeated-call heuristic needs review.*Review the recorded finding/s, /Review the recorded failure/],
     ]) {
       globalThis.window = { location: { hash: `#tab=explore&section=runs&finding=${finding}&run=run-a&selected=run-a`,
         pathname: "/dashboard", search: "" },
@@ -5789,7 +7506,7 @@ test("issue inbox shows linked later pass without calling it recovery", async ()
   assert.deepEqual(opened.at(-1), { runId: "passed-run", eventId: "passed-event", noticeId: "open" });
 });
 
-test("issue inbox searches bounded later check candidates without auto-attaching", async () => {
+test("issue inbox attaches a selected bounded later check without copying IDs", async () => {
   const ui = await loadUiModule();
   const hooks = createEffectHooks();
   const requests = deferredFetches();
@@ -5823,12 +7540,27 @@ test("issue inbox searches bounded later check candidates without auto-attaching
     .props.onClick();
   assert.deepEqual(opened, [{ runId: "later-run", eventId: "later-event",
     recentRevision: "b".repeat(64), recentTurnId: "later-turn" }]);
-  findAll(detail, (node) => node.type === "button" && textOf(node) === "Use these IDs")[0]
-    .props.onClick();
+  const stale = findAll(detail, (node) => node.type === "button" &&
+    textOf(node) === "Attach this recorded pass")[0].props.onClick();
+  assert.match(requests[4].url, /\/api\/control\/issues\/notice\/rechecks$/);
+  assert.deepEqual(JSON.parse(requests[4].options.body),
+    { runId: "later-run", eventId: "later-event" });
+  assert.equal(requests[4].options.headers["X-Verdict-Setup"], "token");
+  requests[4].resolve({ ok: false, status: 400, json: async () => ({}) });
+  await stale;
+  detail = render(component.type, detailHooks, component.props);
+  assert.match(textOf(detail), /selected event was not a later explicit pass/);
+  const attach = findAll(detail, (node) => node.type === "button" &&
+    textOf(node) === "Attach this recorded pass")[0].props.onClick();
+  await resolveJson(requests[5], { recheck: { runId: "later-run",
+    eventId: "later-event", eventAt: "2026-10-02T00:00:00Z" }, recovery: "unverified" });
+  await resolveJson(requests[6], { issues: [], nextOffset: null, state: "open" });
+  await resolveJson(requests[7], { setupToken: "token" });
+  await resolveJson(requests[8], { openIssues: 0, documents: [], worker: { status: "unverified" } });
+  await attach;
   detail = render(component.type, detailHooks, component.props);
   const inputs = findAll(detail, (node) => node.type === "input");
-  assert.deepEqual(inputs.map((node) => node.props.value), ["later-run", "later-event"]);
-  assert.equal(requests.length, 4);
+  assert.deepEqual(inputs.map((node) => node.props.value), ["", ""]);
 });
 
 test("multiple attached passes ask which results cover the failed work", async () => {
@@ -5990,9 +7722,11 @@ test("monitoring page leads to saved linked findings without calling them recurr
   const hooks = createEffectHooks();
   const requests = deferredFetches();
   const opened = [];
+  let planOpens = 0;
   const props = { configUrl: "/api/config", insightsUrl: "/api/insights",
     meta: { totalAgentRuns: 6, totalTraces: 0 }, monitor: null,
-    onOpenFinding: (finding) => opened.push(finding.code) };
+    onOpenFinding: (finding) => opened.push(finding.code),
+    onOpenPlan: () => { planOpens += 1; } };
   render(ui.IssueInbox, hooks, props); hooks.flushEffects();
   await resolveJson(requests[0], { issues: [], nextOffset: null, state: "open" });
   await resolveJson(requests[1], { setupToken: "token" });
@@ -6015,6 +7749,9 @@ test("monitoring page leads to saved linked findings without calling them recurr
   findAll(tree, (node) => node.type === "button" && textOf(node).includes("Inspect affected runs"))[0]
     .props.onClick();
   assert.deepEqual(opened, ["tool_error"]);
+  findAll(tree, (node) => node.type === "button" && textOf(node).includes("Start recurring checks"))[0]
+    .props.onClick();
+  assert.equal(planOpens, 1);
 });
 
 test("active recurring plan still leads with a current linked finding when no notice or alert exists", async () => {
@@ -6022,16 +7759,20 @@ test("active recurring plan still leads with a current linked finding when no no
   const hooks = createEffectHooks();
   const requests = deferredFetches();
   const opened = [];
+  let planOpens = 0;
   const props = { configUrl: "/api/config", insightsUrl: "/api/insights",
     meta: { totalAgentRuns: 6, totalTraces: 0 }, monitor: null,
-    onOpenFinding: (finding) => opened.push(finding.code) };
+    onOpenFinding: (finding) => opened.push(finding.code),
+    onOpenPlan: () => { planOpens += 1; } };
   render(ui.IssueInbox, hooks, props); hooks.flushEffects();
   await resolveJson(requests[0], { issues: [], nextOffset: null, state: "open" });
   await resolveJson(requests[1], { setupToken: "token" });
   await resolveJson(requests[2], { openIssues: 0,
     documents: [{ kind: "schedule", documentId: "daily", state: "active", revision: 2 }],
     worker: { status: "recent" },
-    lastCycle: { state: "completed", trigger: "worker", scheduleRevision: 2 } });
+    lastCycle: { state: "completed", trigger: "manual", scheduleRevision: 2,
+      finishedAt: "2026-11-02T02:00:00Z" },
+    lastWorkerCycle: { state: "completed", trigger: "worker", scheduleRevision: 2 } });
   await resolveJson(requests[3], { analysisState: { status: "completed",
     cutoff: "2026-10-17T09:59:00Z", completedAt: "2026-10-17T10:00:00Z" },
     scope: { availableRuns: 6, analyzedRuns: 6, complete: true, traces: { available: 0 } },
@@ -6039,12 +7780,36 @@ test("active recurring plan still leads with a current linked finding when no no
   const tree = render(ui.IssueInbox, hooks, props);
   const page = textOf(tree);
   assert.match(page, /RECORDED ISSUE TO REVIEW/);
-  assert.ok(page.indexOf("RECORDED ISSUE TO REVIEW") < page.search(/Latest completed\s+worker\s+check/));
+  assert.ok(page.indexOf("RECORDED ISSUE TO REVIEW") < page.search(/Worker check on this plan completed/));
+  assert.match(page, /A separate worker check completed on this plan/);
   assert.match(page, /Tool failures recorded/);
   assert.match(page, /Next local check/);
   findAll(tree, (node) => node.type === "button" && textOf(node).includes("Inspect affected runs"))[0]
     .props.onClick();
   assert.deepEqual(opened, ["tool_error"]);
+  findAll(tree, (node) => node.type === "button" && textOf(node).includes("Review current plan"))[0]
+    .props.onClick();
+  assert.equal(planOpens, 1);
+});
+
+test("Monitoring labels an old worker cycle as historical when no current plan exists", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const props = { configUrl: "/api/config", insightsUrl: "/api/insights",
+    meta: { totalAgentRuns: 1, totalTraces: 0 }, monitor: null };
+  render(ui.IssueInbox, hooks, props); hooks.flushEffects();
+  await resolveJson(requests[0], { issues: [], nextOffset: null, state: "open" });
+  await resolveJson(requests[1], { setupToken: "token" });
+  await resolveJson(requests[2], { openIssues: 0, documents: [],
+    worker: { status: "unverified" }, lastCycle: { state: "completed", trigger: "worker",
+      scheduleRevision: 1, finishedAt: "2026-11-02T01:00:00Z" } });
+  await resolveJson(requests[3], { analysisState: { status: "completed" },
+    scope: { availableRuns: 1, analyzedRuns: 1, complete: true }, findings: [] });
+  const text = textOf(render(ui.IssueInbox, hooks, props));
+  assert.match(text, /Not scheduled/);
+  assert.match(text, /Previous worker check completed:/);
+  assert.doesNotMatch(text, /Latest completed worker check/);
 });
 
 test("Monitoring refreshes stale saved analysis locally and only shows updated findings after reread", async () => {
@@ -6468,6 +8233,7 @@ test("Agent Runs keeps same-run Turn detail while focusing evidence and clears i
     events: [], page: { available: 0, shown: 0, offset: 0, limit: 100, truncated: false } });
   let tree = render(ui.Runs, hooks, props);
   let detail = findAll(tree, (node) => node.type?.name === "RunDetail")[0];
+  assert.equal(detail.props.key, "run-a", "review state must be owned by the exact run");
   detail.props.onFocusEvent("event-a");
   render(ui.Runs, hooks, props);
   hooks.flushEffects();
@@ -6480,6 +8246,7 @@ test("Agent Runs keeps same-run Turn detail while focusing evidence and clears i
   hooks.flushEffects();
   tree = render(ui.Runs, hooks, props);
   detail = findAll(tree, (node) => node.type?.name === "RunDetail")[0];
+  assert.equal(detail.props.key, "run-b", "switching runs must remount review state");
   assert.equal(detail.props.detail.data, null);
 });
 
@@ -6515,6 +8282,46 @@ test("a linked issue keeps its verified later pass beside failed run evidence", 
     ["failed-run", "failed-event", "f".repeat(64), "late-turn"],
     ["later-run", "later-event", null, null],
   ]);
+});
+
+test("a linked issue leads with its matching finding and next recheck", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const run = runListRow("failed-run");
+  run.findings = [{ code: "business_outcome_failed", severity: "error",
+    message: "One reported business outcome failed.", evidenceEventIds: ["failed-event"] }];
+  const props = { url: "/api/runs", focusRunIds: ["failed-run"],
+    selectedRunId: "failed-run", noticeId: "n".repeat(64) };
+  render(ui.Runs, hooks, props); hooks.flushEffects();
+  await resolveJson(requests[0], { ...runListPage(0, ["failed-run"], 1), runs: [run] });
+  const noticeRequest = requests.find((request) => request.url.includes("/api/control/issues/"));
+  await resolveJson(noticeRequest, { noticeId: props.noticeId, runId: "failed-run",
+    eventId: "failed-event", checkCode: "business_outcome_failed", state: "open",
+    rechecks: [] });
+  const tree = render(ui.Runs, hooks, props);
+  assert.ok(findAll(tree, (node) => node.type?.name === "FocusedIssueStory").length);
+  const detail = findAll(tree, (node) => node.type?.name === "RunDetail")[0];
+  assert.match(textOf(render(detail.type, createHooks(), detail.props)),
+    /Repeat or independently verify the outcome/);
+});
+
+test("a linked notice with a different event cannot become the selected issue story", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const run = runListRow("failed-run");
+  run.findings = [{ code: "business_outcome_failed", severity: "error",
+    message: "One reported business outcome failed.", evidenceEventIds: ["actual-event"] }];
+  const props = { url: "/api/runs", focusRunIds: ["failed-run"],
+    selectedRunId: "failed-run", noticeId: "n".repeat(64) };
+  render(ui.Runs, hooks, props); hooks.flushEffects();
+  await resolveJson(requests[0], { ...runListPage(0, ["failed-run"], 1), runs: [run] });
+  await resolveJson(requests.find((request) => request.url.includes("/api/control/issues/")),
+    { noticeId: props.noticeId, runId: "failed-run", eventId: "other-event",
+      checkCode: "business_outcome_failed", state: "open", rechecks: [] });
+  assert.equal(findAll(render(ui.Runs, hooks, props),
+    (node) => node.type?.name === "FocusedIssueStory").length, 0);
 });
 
 test("large local runs expose a separately labeled recent inspection sample", async () => {
@@ -6949,6 +8756,50 @@ test("switching exact recent events while the first fetch is pending opens the l
   assert.equal(findAll(tree, (node) => node.type === "details" && node.props.open).length, 1);
 });
 
+test("a source-prefix finding opens a coverage explanation without inventing an event", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const run = { ...runListRow("local-run"), sourceKind: "codex", sourcePartial: true,
+    turnCount: 3, eventCount: 0, findings: [{ code: "source_capture_partial",
+      severity: "warning", message: "Only the source prefix was captured.", evidenceEventIds: [] }] };
+  const props = { url: "/api/runs", focusRunIds: [run.runId], selectedRunId: run.runId,
+    findingCode: "source_capture_partial" };
+  render(ui.Runs, hooks, props);
+  hooks.flushEffects();
+  await resolveJson(requests[0], { ...runListPage(0, [run.runId], 1), runs: [run] });
+  const tree = render(ui.Runs, hooks, props);
+  const story = findAll(tree, (node) => node.type?.name === "FocusedIssueStory")[0];
+  assert.ok(story);
+  const text = textOf(render(story.type, createHooks(), story.props));
+  assert.match(text, /EVIDENCE GAP.*Only the source prefix was captured/s);
+  assert.match(text, /No event-level evidence recorded for this coverage gap/);
+  assert.match(text, /Review source coverage and the retained prefix/);
+  assert.doesNotMatch(text, /linked event is unavailable|later recovery|Need deeper analysis/);
+});
+
+test("a truncated finding labels linked examples separately from affected runs", async () => {
+  const ui = await loadUiModule();
+  const hooks = createEffectHooks();
+  const requests = deferredFetches();
+  const run = runListRow("run-a");
+  run.findings = [{ code: "possible_tool_loop", severity: "warning",
+    message: "A repeated tool-call pattern was recorded.", evidenceEventIds: [] }];
+  const props = { url: "/api/runs", focusRunIds: ["run-a", "run-b"],
+    selectedRunId: "run-a", findingCode: "possible_tool_loop", runIdsTruncated: true };
+  render(ui.Runs, hooks, props);
+  hooks.flushEffects();
+  await resolveJson(requests[0], { ...runListPage(0, ["run-a", "run-b"], 2), runs: [run] });
+  const investigation = render(ui.Runs, hooks, props);
+  assert.match(textOf(investigation), /showing\s+1\s+of\s+2\s+linked affected runs\s*; more affected runs are not linked here/);
+  const story = findAll(investigation,
+    (node) => node.type?.name === "FocusedIssueStory")[0];
+  assert.ok(story);
+  const text = textOf(render(story.type, createHooks(), story.props));
+  assert.match(text, /2 linked runs · additional affected runs are not linked here/);
+  assert.doesNotMatch(text, /2 affected runs · this run is shown first/);
+});
+
 test("a finding link opens its run with the finding, action, and evidence before technical detail", async () => {
   const ui = await loadUiModule();
   const hooks = createEffectHooks();
@@ -6992,6 +8843,8 @@ test("a finding link opens its run with the finding, action, and evidence before
   const lead = findAll(storyTree, (node) => node.type?.name === "EventRow")[0];
   assert.equal(lead.props.event.traceId, "trace-failure");
   const leadTree = render(lead.type, createEffectHooks(), lead.props);
+  assert.match(textOf(leadTree), /Evidence IDs/);
+  assert.doesNotMatch(textOf(leadTree), /For a later-pass attachment/);
   const leadTrace = findAll(leadTree, (node) => node.type === "button"
     && textOf(node).includes("trace-failure"))[0];
   assert.ok(leadTrace, "the first-screen evidence should expose its recorded Trace");
@@ -7108,13 +8961,20 @@ test("a repeated-call finding gives a review action linked to its recorded event
   hooks.flushEffects();
   await resolveJson(requests[0], { ...runListPage(0, ["run-loop"], 1), runs: [run] });
   const tree = render(ui.Runs, hooks, props);
+  const leadStory = findAll(tree, (node) => node.type?.name === "FocusedIssueStory")[0];
+  assert.ok(leadStory);
+  const leadText = textOf(render(leadStory.type, createHooks(), leadStory.props));
+  assert.match(leadText, /Suggested next action.*Review the linked calls before acting on this earlier heuristic/s);
+  assert.match(leadText, /Redaction can make different arguments look identical/);
+  assert.match(leadText, /does not establish wasted calls or preserved quality/);
   const detail = findAll(tree, (node) => node.type?.name === "RunDetail")[0];
   const focused = [];
   const view = render(detail.type, createHooks(), { ...detail.props,
     onFocusEvent: (eventId) => focused.push(eventId) });
   const content = textOf(view);
-  assert.match(content, /1 tool-call pattern repeated at least 4 times/);
-  assert.match(content, /Inspect the repeated calls and their results/);
+  assert.match(content, /An earlier repeated-call heuristic flagged these events/);
+  assert.doesNotMatch(content, /1 tool-call pattern repeated at least 4 times/);
+  assert.match(content, /Review the linked calls before acting on this earlier heuristic/);
   assert.match(content, /does not establish wasted calls or preserved quality/);
   findAll(view, (node) => node.type === "button" && textOf(node) === "Inspect recorded evidence")[0]
     .props.onClick();
@@ -7163,6 +9023,7 @@ test("a capture job that fails is reported instead of completing the setup", asy
     await resolveJson(requests[1], { job: null });
     const button = (label) => findAll(render(ui.SetupWizard, hooks, props),
       (node) => node.type === "button" && textOf(node) === label)[0];
+    button("Claude Code / Codex").props.onClick();
     const previewing = button("Preview sources").props.onClick();
     await resolveJson(requests[2], { claude: { files: 1 }, codex: { files: 0 } });
     await previewing;

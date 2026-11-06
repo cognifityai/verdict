@@ -112,6 +112,17 @@ EXACT_MODEL_ALIASES: dict[str, str] = {
 }
 
 
+def compute_exact_list_price_usd(
+    model: str, input_tokens: int | None, output_tokens: int | None,
+) -> float | None:
+    """Price only enumerated model IDs for dashboard spend approval."""
+    if not isinstance(model, str) or model.lower() not in (
+        PRICE_PER_1K.keys() | EXACT_MODEL_ALIASES.keys() | _GPT41_ALIASES.keys()
+    ):
+        return None
+    return compute_cost_usd(model, input_tokens, output_tokens)
+
+
 def compute_cost_usd(
     model: str,
     input_tokens: int | None,

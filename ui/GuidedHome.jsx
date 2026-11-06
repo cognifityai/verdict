@@ -19,6 +19,7 @@ function utcStamp(value) {
 
 export function GuidedHome({ meta, monitor, managementReport, insightsUrl, usageUrl, configUrl, source,
   onOpenRun, onOpenFinding, onNavigate, onReload }) {
+  const root = configUrl.replace(/\/api\/config$/, "");
   const [insights, setInsights] = useState(null);
   const [insightsError, setInsightsError] = useState(null);
   const [readiness, setReadiness] = useState(null);
@@ -30,7 +31,6 @@ export function GuidedHome({ meta, monitor, managementReport, insightsUrl, usage
     setInsights(data);
     setInsightsError(error);
   }, []);
-  const root = configUrl.replace(/\/api\/config$/, "");
   useEffect(() => {
     if (source !== "live") return undefined;
     let active = true;
@@ -51,7 +51,7 @@ export function GuidedHome({ meta, monitor, managementReport, insightsUrl, usage
   const runs = meta.totalAgentRuns || 0;
   const calls = meta.monitorEligibleCalls || 0;
   const sourceNames = (meta.agentRunSources || []).map((item) => item.sourceKind);
-  const sourceSummary = sourceNames.length ? [...new Set(sourceNames)].join(" · ") : calls ? "Completed provider calls" : "No captured agent source";
+  const sourceSummary = `${sourceNames.length ? [...new Set(sourceNames)].join(" · ") : calls ? "Completed provider calls" : "No captured agent source"}${meta.agentRunSourcesTruncated ? " · additional sources omitted" : ""}`;
   const staleAnalysis = analysisNeedsRefresh(meta, insights);
   const latestRun = meta.lastAgentCaptureAt ? utcStamp(meta.lastAgentCaptureAt) : null;
   const latestCall = meta.runEnd ? utcStamp(meta.runEnd) : null;
@@ -61,7 +61,7 @@ export function GuidedHome({ meta, monitor, managementReport, insightsUrl, usage
   const issueOnlyDays = !daysWithTurnTotals.length && !callDaysWithTotals.length
     && usageData?.days?.some((day) => day.recordedIssueEvents > 0);
   const tokenMetric = daysWithTurnTotals.length
-    ? { value: daysWithTurnTotals.reduce((sum, day) => sum + day.totalTokens, 0).toLocaleString(), label: "Reported turn tokens", detail: "Last 30 UTC days · source reported" }
+    ? { value: daysWithTurnTotals.reduce((sum, day) => sum + day.totalTokens, 0).toLocaleString(), label: "Reported turn tokens", detail: "Last 30 UTC days · inspect cache reads by day · not a bill" }
     : callDaysWithTotals.length
       ? { value: callDaysWithTotals.reduce((sum, day) => sum + day.totalTokens, 0).toLocaleString(), label: "Known model-call tokens", detail: "Selected report period · not assigned to sessions" }
       : { value: "—", label: "Reported tokens", detail: "No complete token totals captured" };
@@ -69,6 +69,17 @@ export function GuidedHome({ meta, monitor, managementReport, insightsUrl, usage
     ? (insights.findings || []).filter((finding) => !isEvidenceGap(finding)).length : null;
   const evidenceGapTypes = currentIssues === 0
     ? (insights.findings || []).filter(isEvidenceGap).length : 0;
+  const partialScope = insights?.analysisState?.status === "completed" && !staleAnalysis
+    && (insights.scope?.complete === false || insights.scope?.partialRuns > 0);
+  const analyzedRuns = insights?.scope?.analyzedRuns;
+  const availableRuns = insights?.scope?.availableRuns;
+  const partialRuns = insights?.scope?.partialRuns;
+  const coverageDetail = partialScope
+    ? ["Analysis partial", Number.isInteger(analyzedRuns) && Number.isInteger(availableRuns)
+      ? `${analyzedRuns} of ${availableRuns} runs analyzed` : null,
+    Number.isInteger(partialRuns) && partialRuns > 0
+      ? `${partialRuns} partial ${partialRuns === 1 ? "history" : "histories"}` : null].filter(Boolean).join(" · ")
+    : null;
   const openNotices = Number.isInteger(readiness?.openIssues) ? readiness.openIssues : null;
   const hasRecurringSchedule = readiness?.documents?.some((item) => item.kind === "schedule"
     && item.documentId === "daily" && ["active", "disabled"].includes(item.state));
@@ -76,10 +87,11 @@ export function GuidedHome({ meta, monitor, managementReport, insightsUrl, usage
   const leadWithNotices = openNotices > 0 || (currentIssues == null && showNotices);
   const leadWithGaps = !leadWithNotices && evidenceGapTypes > 0;
   const actionLabel = action?.id === "retry" ? "Retry loading"
+    : action?.id === "review_calls" ? "Inspect model calls"
     : action?.id === "review_issues" ? "Open recorded issues" : action?.id === "analyze" ? "Go to local analysis"
       : action?.id === "review_findings" ? "Inspect recorded findings"
-      : action?.id === "inspect_gaps" ? "Inspect evidence gaps"
-      : action?.id === "capture" ? "Set up capture" : ["plan", "schedule", "saved", "resume", "run_cycle"].includes(action?.id)
+      : action?.id === "inspect_gaps" ? "Inspect evidence gaps" : action?.id === "inspect_partial" ? "Inspect coverage"
+      : action?.id === "capture" ? "Set up capture" : ["plan", "schedule", "saved", "resume", "run_cycle", "check_failed", "check_unfinished", "worker_check_failed", "worker_check_unfinished"].includes(action?.id)
         ? "Review suggested setup" : "Open next step";
   const clickAction = () => {
     if (!action) return;
@@ -87,9 +99,10 @@ export function GuidedHome({ meta, monitor, managementReport, insightsUrl, usage
     else if (action.id === "review_issues") onNavigate("monitor", "status");
     else if (action.id === "monitor_alert") onNavigate("monitor", "status");
     else if (action.id === "capture") onNavigate("settings", "sources");
+    else if (action.id === "review_calls") onNavigate("explore", "calls");
     else if (action.id === "monitor") onNavigate("monitor", "history");
-    else if (["plan", "schedule", "run_cycle", "saved", "resume", "check_failed", "check_unfinished"].includes(action.id)) onNavigate("monitor", "plan");
-    else if (["analyze", "inspect_gaps", "review_findings"].includes(action.id)) {
+    else if (["plan", "schedule", "run_cycle", "saved", "resume", "check_failed", "check_unfinished", "worker_check_failed", "worker_check_unfinished"].includes(action.id)) onNavigate("monitor", "plan");
+    else if (["analyze", "inspect_gaps", "inspect_partial", "review_findings"].includes(action.id)) {
       const findings = document.getElementById(action.id === "inspect_gaps" ? "guided-evidence-gaps" : "guided-findings");
       findings?.scrollIntoView({ behavior: "smooth", block: "start" });
       findings?.focus({ preventScroll: true });
@@ -108,7 +121,7 @@ export function GuidedHome({ meta, monitor, managementReport, insightsUrl, usage
     {source === "loading" ? <Panel><p role="status" className="text-sm" style={{ color: C.sub }}>Loading captured activity and monitoring status…</p></Panel> : <div className="grid sm:grid-cols-3 gap-3">
       <section className="verdict-home-metric"><div>Captured agent runs</div><strong>{runs.toLocaleString()}</strong><span>{sourceSummary}</span></section>
       <section className="verdict-home-metric"><div>{tokenMetric.label}</div><strong>{tokenMetric.value}</strong><span>{tokenMetric.detail}</span></section>
-      <section className="verdict-home-metric"><div>{leadWithNotices ? "Open recurring issues" : leadWithGaps ? "Evidence gaps" : runs || calls ? "Recorded issue types" : "Issues to inspect"}</div><strong>{leadWithNotices ? openNotices.toLocaleString() : leadWithGaps ? evidenceGapTypes.toLocaleString() : currentIssues == null ? "—" : currentIssues.toLocaleString()}</strong><span>{leadWithNotices ? "Recorded failed events or terminal run statuses from completed checks" : !runs && !calls ? "Capture activity to look for issues" : currentIssues == null ? "Run local analysis or refresh saved findings" : leadWithGaps ? "Current analyzed scope · inspect below" : showNotices ? "Current analyzed scope · 0 recurring notices" : "Current analyzed scope"}</span></section>
+      <section className="verdict-home-metric"><div>{leadWithNotices ? "Open recurring issues" : leadWithGaps ? "Evidence gaps" : runs || calls ? "Recorded issue types" : "Issues to inspect"}</div><strong>{leadWithNotices ? openNotices.toLocaleString() : leadWithGaps ? evidenceGapTypes.toLocaleString() : currentIssues == null ? "—" : currentIssues.toLocaleString()}</strong><span>{leadWithNotices ? "Recorded failed events or terminal run statuses from completed checks" : !runs && !calls ? "Capture activity to look for issues" : currentIssues == null ? "Run local analysis or refresh saved findings" : coverageDetail ? `Current analyzed scope · ${coverageDetail}` : leadWithGaps ? "Current analyzed scope · inspect below" : showNotices ? "Current analyzed scope · 0 recurring notices" : "Current analyzed scope"}</span></section>
     </div>}
     {(runs > 0 || calls > 0) && <div className="verdict-home-evidence-grid">
       <div><div className="verdict-home-section-title"><h2>{issueOnlyDays ? "Recorded issues by day" : "Usage over time"}</h2><p>{issueOnlyDays ? "Choose a day to inspect recorded issue events." : "Choose a day to inspect the captured token evidence."}</p></div>
@@ -125,6 +138,6 @@ export function GuidedHome({ meta, monitor, managementReport, insightsUrl, usage
       {latestCall && <>Latest model call started: {latestCall}</>}
       {" UTC"}
     </p>}
-    {insights?.analysisState?.status === "completed" && !staleAnalysis && !insights.findings?.length && <div className="text-sm flex gap-2" style={{ color: C.sub }}><CheckCircle2 size={16} style={{ color: C.green }} />No recorded issue in the analyzed scope. This does not assess uncaptured work.</div>}
+    {insights?.analysisState?.status === "completed" && !staleAnalysis && !insights.findings?.length && <div className="text-sm flex gap-2" style={{ color: C.sub }}>{partialScope ? <AlertTriangle size={16} style={{ color: C.amber }} /> : <CheckCircle2 size={16} style={{ color: C.green }} />}{partialScope ? "No recorded issue in captured evidence; coverage is partial." : "No recorded issue in the analyzed scope. This does not assess uncaptured work."}</div>}
   </div>;
 }

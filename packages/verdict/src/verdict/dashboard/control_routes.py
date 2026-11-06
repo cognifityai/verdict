@@ -92,11 +92,13 @@ class ControlRoutes:
             documents = ControlStore(self.storage_url).list_current(self.tenant_id)
             schedule = next((item for item in documents
                              if item["kind"] == "schedule" and item["documentId"] == "daily"), None)
+            last_cycle, last_worker_cycle = WorkerCycleStatus(self.storage_url).read_pair(self.tenant_id)
             return {
                 "schema": "readiness-v1",
                 "documents": ([{key: schedule[key] for key in ("kind", "documentId", "state", "revision")}] if schedule else []),
                 "worker": WorkerHeartbeat(self.storage_url).read(self.tenant_id),
-                "lastCycle": WorkerCycleStatus(self.storage_url).read(self.tenant_id),
+                "lastCycle": last_cycle,
+                "lastWorkerCycle": last_worker_cycle,
                 "nextDue": self._next_due(schedule),
                 "openIssues": IssueNotices(self.storage_url).count_open(self.tenant_id),
                 "deliveryQueue": self._delivery_counts(),
@@ -109,7 +111,7 @@ class ControlRoutes:
             writable = self.setup.writable_storage()
             try:
                 documents = [item for item in ControlStore(self.storage_url).list_current(self.tenant_id)
-                             if item["kind"] in {"settings", "schedule", "alert", "proposal", "review"}]
+                             if item["kind"] in {"settings", "schedule", "alert", "proposal", "improvement", "review"}]
                 schedule = next((item for item in documents
                                  if item["kind"] == "schedule" and item["documentId"] == "daily"), None)
                 attempts = writable.list_notification_delivery_attempts_for_tenant(
@@ -130,6 +132,7 @@ class ControlRoutes:
                     and any(item["payload"].get(name) for name in ("claudeRoot", "codexRoot"))
                     for item in documents
                 )
+                last_cycle, last_worker_cycle = WorkerCycleStatus(self.storage_url).read_pair(self.tenant_id)
                 return {
                     "schema": "product-control-v1",
                     "documents": documents,
@@ -163,7 +166,8 @@ class ControlRoutes:
                         "localAgentSources": local_sources,
                     },
                     "worker": WorkerHeartbeat(self.storage_url).read(self.tenant_id),
-                    "lastCycle": WorkerCycleStatus(self.storage_url).read(self.tenant_id),
+                    "lastCycle": last_cycle,
+                    "lastWorkerCycle": last_worker_cycle,
                     "nextDue": self._next_due(schedule),
                     "defaults": {
                         "captureContent": True,
@@ -329,7 +333,8 @@ class ControlRoutes:
                 return JSONResponse(
                     {"error": "control authorization required"}, status_code=403
                 )
-            if kind in {"case_set", "experiment", "scoped_evaluation", "scheduled_evaluation"}:
+            if (kind in {"case_set", "experiment", "scoped_evaluation", "scheduled_evaluation"}
+                    or (kind == "review" and document_id.startswith("followup:"))):
                 return JSONResponse({"error": "use the experiment workflow"}, status_code=400)
             try:
                 body = payload.get("payload")
@@ -360,7 +365,8 @@ class ControlRoutes:
                 return JSONResponse(
                     {"error": "control authorization required"}, status_code=403
                 )
-            if kind in {"scheduled_evaluation", "experiment", "scoped_evaluation"}:
+            if (kind in {"scheduled_evaluation", "experiment", "scoped_evaluation"}
+                    or (kind == "review" and document_id.startswith("followup:"))):
                 return JSONResponse({"error": "result or egress record cannot be rolled back"},
                                     status_code=400)
             try:

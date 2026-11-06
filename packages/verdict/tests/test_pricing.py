@@ -17,7 +17,23 @@ from verdict.pricing import (
     PRICING_LAST_VERIFIED,
     PRICING_REVIEW_AFTER,
     compute_cost_usd,
+    compute_exact_list_price_usd,
 )
+
+
+def test_spend_approval_prices_only_enumerated_model_ids():
+    assert compute_exact_list_price_usd("gpt-4o-mini", 1000, 1000) == compute_cost_usd(
+        "gpt-4o-mini", 1000, 1000,
+    )
+    assert compute_exact_list_price_usd("gpt-4.1-mini-2025-04-14", 1000, 1000) == (
+        compute_cost_usd("gpt-4.1-mini-2025-04-14", 1000, 1000)
+    )
+    for derivative in (
+        "custom-gpt-4o-mini-private", "ft:gpt-4o-mini-2024-07-18:org:task:id",
+        "claude-haiku-4-5-unknown-date", "other/claude-haiku-4-5",
+    ):
+        assert compute_exact_list_price_usd(derivative, 1000, 1000) is None
+    assert compute_cost_usd("custom-gpt-4o-mini-private", 1000, 1000) is not None
 
 
 def test_known_model_exact_match():

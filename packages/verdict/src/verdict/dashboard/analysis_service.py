@@ -16,7 +16,7 @@ from verdict.analysis_records import (
 from verdict.dashboard.storage_url import is_postgres_storage
 from verdict.delivery_queue import NotificationIntent
 
-ANALYZER_VERSION = "agent-insights-v5"
+ANALYZER_VERSION = "agent-insights-v6"
 SCOPE_KEY = "agent-and-trace"
 
 

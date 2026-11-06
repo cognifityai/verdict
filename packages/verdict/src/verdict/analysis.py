@@ -26,6 +26,7 @@ class AnalysisPolicy:
     required_event_types: tuple[AgentEventType, ...] = ()
     prohibited_tools: tuple[str, ...] = ()
     expected_response_format: Literal["json"] | None = None
+    # Deprecated beta constructor input. Redacted arguments cannot prove equality.
     repeated_tool_call_threshold: int = 4
 
     def __post_init__(self) -> None:
@@ -179,6 +180,12 @@ def analyze_agent_run(
         if recorded_event_issue(event.event_type.value, event.status.value, event.attributes)
         == "business_outcome_failed"
     ]
+    negative_feedback = [
+        event
+        for event in events_by_type[AgentEventType.FEEDBACK]
+        if event.attributes.get("kind") == "thumbs_down"
+        and event.attributes.get("value") is True
+    ]
     model_calls = events_by_type[AgentEventType.MODEL_CALL]
     input_tokens = sum(
         value
@@ -308,6 +315,17 @@ def analyze_agent_run(
                 failed_business_outcomes,
             )
         )
+    if negative_feedback:
+        findings.append(
+            _finding(
+                "negative_feedback_recorded",
+                "warning",
+                ("1 explicit thumbs-down rating was recorded; its cause is unknown."
+                 if len(negative_feedback) == 1 else
+                 f"{len(negative_feedback)} explicit thumbs-down ratings were recorded; their cause is unknown."),
+                negative_feedback,
+            )
+        )
 
     required = set(selected_policy.required_event_types)
     for missing in sorted(
@@ -337,7 +355,6 @@ def analyze_agent_run(
                 prohibited_calls,
             )
         )
-    findings.extend(_loop_findings(tool_calls, selected_policy.repeated_tool_call_threshold))
     if selected_policy.expected_response_format == "json":
         invalid_responses = 0
         last_source_sequence = (
@@ -376,36 +393,3 @@ def _coverage(states: set[EvidenceState]) -> str:
     if len(states) == 1:
         return next(iter(states)).value
     return "mixed"
-
-
-def _loop_findings(tool_calls: list[AgentEvent], threshold: int) -> list[Finding]:
-    grouped: dict[tuple[str, str, str], list[AgentEvent]] = {}
-    for event in tool_calls:
-        arguments = event.attributes.get("arguments")
-        if arguments in (None, ""):
-            continue
-        signature_arguments = (
-            arguments
-            if isinstance(arguments, str)
-            else json.dumps(arguments, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        )
-        signature = (
-            event.turn_id,
-            str(event.attributes.get("tool_name") or "").casefold(),
-            signature_arguments,
-        )
-        grouped.setdefault(signature, []).append(event)
-    loops = [events for events in grouped.values() if len(events) >= threshold]
-    if not loops:
-        return []
-    evidence = [event for events in loops for event in events]
-    return [
-        _finding(
-            "possible_tool_loop",
-            "warning",
-            f"{len(loops)} tool-call pattern{'s' if len(loops) != 1 else ''} "
-            f"repeated at least {threshold} times within a turn "
-            f"({len(evidence)} recorded calls total).",
-            evidence,
-        )
-    ]

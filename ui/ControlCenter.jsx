@@ -21,8 +21,11 @@ const workerTime = (value) => {
     : "time unavailable";
 };
 
-export function ControlCenter({ configUrl, onNavigate = null, section = "all", meta = {}, monitor = null, embedded = false }) {
+export function ControlCenter({ configUrl, onNavigate = null, section = "all", meta = {}, monitor = null, managementReport = null, embedded = false }) {
   const root = configUrl.replace(/\/api\/config$/, "");
+  const runCount = Number(meta.totalAgentRuns || 0);
+  const callCount = Number(meta.monitorEligibleCalls || 0);
+  const outcomeKey = JSON.stringify([root, meta.evidenceRevision ?? null, runCount]);
   const [token, setToken] = useState(null);
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
@@ -45,7 +48,10 @@ export function ControlCenter({ configUrl, onNavigate = null, section = "all", m
   const deliveryPageInFlight = useRef(false);
   const [showQueuedAlerts, setShowQueuedAlerts] = useState(false);
   const [showAllDeliveryProblems, setShowAllDeliveryProblems] = useState(false);
-
+  const [outcomeSnapshot, setOutcomePreview] = useState({ key: null, data: null, error: false });
+  const outcomePreview = outcomeSnapshot.key === outcomeKey && runCount > 0
+    ? outcomeSnapshot : { data: null, error: false };
+  const [outcomeRefresh, setOutcomeRefresh] = useState(0);
   const load = React.useCallback(async () => {
     const generation = ++deliveryGeneration.current;
     setError(null);
@@ -168,15 +174,37 @@ export function ControlCenter({ configUrl, onNavigate = null, section = "all", m
   const schedulePaused = savedSchedule?.state === "disabled";
   const pausedLegacyJudgeChoice = schedulePaused && savedSchedule.payload.includeApprovedEvaluations === undefined;
   const workerRecent = data?.worker?.status === "recent";
-  const currentWorkerCheck = scheduleSaved && data?.lastCycle?.trigger === "worker"
-    && data.lastCycle.scheduleRevision === savedSchedule.revision
-    && data.lastCycle.state === "completed";
+  const currentWorkerCheck = scheduleSaved && Number.isInteger(savedSchedule.revision)
+    && data?.lastWorkerCycle?.state === "completed"
+    && data.lastWorkerCycle.scheduleRevision === savedSchedule.revision;
+  const currentWorkerProblem = scheduleSaved && Number.isInteger(savedSchedule.revision)
+    && !!data?.lastWorkerCycle
+    && data.lastWorkerCycle.scheduleRevision === savedSchedule.revision
+    && ["failed", "started"].includes(data.lastWorkerCycle.state);
   const nextCheck = expectedNextCheck(current("schedule", "daily"), data);
-  const runCount = Number(meta.totalAgentRuns || 0);
-  const callCount = Number(meta.monitorEligibleCalls || 0);
+  const callScope = ["management-report-v1", "management-report-v2"].includes(managementReport?.schema)
+    && Number.isInteger(managementReport?.scope?.calls) ? managementReport.scope : null;
   const hasActiveMonitor = monitor?.active?.state === "active";
   const needsCapture = runCount === 0 && callCount === 0 && !savedSchedule
     && !cyclePlan.claudeRoot && !cyclePlan.codexRoot;
+  const hasRunCheck = runCount > 0 || !!cyclePlan.claudeRoot || !!cyclePlan.codexRoot;
+  const hasSelectedCallCheck = hasActiveMonitor && cyclePlan.runMonitor;
+  const selectedChecks = hasRunCheck
+    ? `deterministic run analysis${hasSelectedCallCheck ? " and the active model-call monitor" : ""}`
+    : hasSelectedCallCheck ? "active model-call monitor" : "no effective check selected";
+  useEffect(() => {
+    if (!runCount || !["all", "schedule"].includes(section)) return undefined;
+    let active = true;
+    setOutcomePreview({ key: outcomeKey, data: null, error: false });
+    fetch(`${root}/api/agent-run-outcomes`, { credentials: "same-origin", cache: "no-store" })
+      .then((response) => response.ok ? response.json() : Promise.reject(new Error("unavailable")))
+      .then((result) => { if (active) setOutcomePreview({ key: outcomeKey, data: result.reportedOutcomes, error: false }); })
+      .catch(() => { if (active) setOutcomePreview({ key: outcomeKey, data: null, error: true }); });
+    return () => { active = false; };
+  }, [root, meta, runCount, section, outcomeRefresh, outcomeKey]);
+  const outcomeGroups = outcomePreview.data?.status === "ready" ? outcomePreview.data.groups : [];
+  const savedChanges = documents.filter((item) => item.kind === "improvement");
+  const hasSdkRuns = (meta.agentRunSources || []).some((item) => item.sourceKind === "verdict_sdk" && item.runs > 0);
 
   const deliveryRow = (item) => <div key={item.intentId} className="border p-3 text-xs" style={{ borderColor: ["failed", "blocked", "exhausted"].includes(item.status) ? color.amber : color.border }}>
     <strong>{item.status === "pending" && !workerRecent ? "Waiting for worker" : deliveryLabel[item.status] || item.status}</strong> · {item.kind === "drift" ? "Model-call comparison" : "Agent finding"}{item.code ? ` · ${item.code}` : ""} · {item.destination} · {item.attemptCount} attempt{item.attemptCount === 1 ? "" : "s"}
@@ -199,7 +227,7 @@ export function ControlCenter({ configUrl, onNavigate = null, section = "all", m
       </div>}
       <div className="verdict-setup-steps" aria-label="Setup steps"><strong>1 · Review evidence</strong><span>2 · Choose checks</span><span>3 · Start and verify</span></div>
       {data && <div className="grid lg:grid-cols-[minmax(0,2fr)_minmax(250px,1fr)] gap-5 items-start">
-        <div className="space-y-5">
+        <div className="min-w-0 space-y-5">
           <section className="border p-5" style={panel}>
             <h3 className="font-semibold">What Verdict found</h3>
             <p className="text-sm mt-2" style={{ color: color.sub }}>{runCount.toLocaleString()} agent runs · {callCount.toLocaleString()} completed monitor-eligible model calls.</p>
@@ -208,14 +236,48 @@ export function ControlCenter({ configUrl, onNavigate = null, section = "all", m
               <div className="verdict-setup-row"><span className="verdict-setup-number">2</span><div><strong>{callCount ? "Provider model calls are available" : "No eligible provider model calls"}</strong><p style={{ color: color.sub }}>{callCount ? "A statistical call comparison is separate from the local run check and requires a reviewed reference." : "Agent history alone may not contain the provider calls needed for a statistical model-call watch."}</p></div></div>
               {needsCapture && <div role="status"><strong>Capture evidence before running a check</strong><p style={{ color: color.sub }}>Connect an agent source or instrument model calls, then return to review this plan.</p><button type="button" className="underline mt-2" style={{ color: color.green }} onClick={() => onNavigate?.({ tab: "settings", section: "sources" })}>Set up capture →</button></div>}
               {(meta.agentRunSources || []).length > 0 && <div className="verdict-setup-row"><span className="verdict-setup-number">3</span><div><strong>Recorded source groups</strong><p style={{ color: color.sub }}>Use source labels to separate captured work. These are not inferred task or intent clusters.</p><ul className="mt-2 space-y-1">{meta.agentRunSources.map((item) => <li key={item.sourceKind}>{item.sourceKind}: {Number(item.runs || 0).toLocaleString()} run{Number(item.runs || 0) === 1 ? "" : "s"}</li>)}</ul></div></div>}
+              {runCount > 0 && <div className="verdict-setup-row"><span className="verdict-setup-number">4</span><div><strong>Application outcome coverage</strong>
+                {outcomePreview.error ? <p style={{ color: color.amber }}>Outcome coverage could not be loaded; no conclusion is available. Reopen this plan to retry.</p>
+                  : !outcomePreview.data ? <p style={{ color: color.sub }}>Checking recorded outcomes…</p>
+                    : outcomePreview.data.status === "event_limit" ? <p style={{ color: color.amber }}>The bounded outcome preview reached its event limit; inspect individual runs for recorded results.</p>
+                      : outcomeGroups.length ? <><p style={{ color: color.sub }}>Explicit results reported by the application; missing or unclear reports are not successes. These counts are descriptive.{outcomePreview.data.truncated ? ` The newest ${outcomePreview.data.sampledTerminalRuns.toLocaleString()} terminal runs were sampled; older runs are outside these counts.` : ""}</p>
+                        <ul className="mt-2 space-y-3">{outcomeGroups.slice(0, 3).map((group) => {
+                          const key = JSON.stringify([outcomeKey, group.sourceKind, group.serviceName, group.environment, group.agentName, group.outcomeName, group.outcomeSource]);
+                          return <li key={key}><strong>{group.outcomeName}</strong> · {group.recordedTrue} true · {group.recordedFalse} false · {group.missing} missing · {group.unclear} unclear / {group.terminalRuns} terminal runs
+                          </li>;
+                        })}</ul>
+                        {outcomePreview.data.groupsTruncated && <p style={{ color: color.amber }}>Additional outcome groups are outside this preview.</p>}
+                        {outcomePreview.data.identityUnavailableReports > 0 && <p style={{ color: color.amber }}>{outcomePreview.data.identityUnavailableReports} reports have an identity that was redacted. Verdict cannot safely group or compare them.</p>}
+                        {outcomePreview.data.unclassifiedReports > 0 && <p style={{ color: color.amber }}>{outcomePreview.data.unclassifiedReports} reports have no usable outcome name or source. Affected runs without an exact report count as unclear in the displayed criteria.</p>}
+                        <button type="button" className="underline mt-2" style={{ color: color.green }} onClick={() => onNavigate?.({ tab: "monitor", section: "segments" })}>Review outcome evidence →</button></>
+                        : outcomePreview.data.outcomeUncertainRuns > 0
+                          ? <p style={{ color: color.amber }}>Outcome capture is incomplete or unclassifiable on {outcomePreview.data.outcomeUncertainRuns} sampled terminal runs. No exact criterion is available for comparison; inspect the recorded runs.</p>
+                        : outcomePreview.data.identityUnavailableReports > 0
+                          ? <><p style={{ color: color.amber }}>{outcomePreview.data.identityUnavailableReports} reports have an identity that was redacted. Verdict cannot safely group or compare them.</p>{outcomePreview.data.unclassifiedReports > 0 && <p style={{ color: color.amber }}>{outcomePreview.data.unclassifiedReports} reports have no usable outcome name or source.</p>}</>
+                        : outcomePreview.data.unclassifiedReports > 0
+                          ? <p style={{ color: color.amber }}>{outcomePreview.data.unclassifiedReports} reports have no usable outcome name or source, so no exact group is available.</p>
+                        : hasSdkRuns && outcomePreview.data.status === "no_reported_outcomes" && outcomePreview.data.sampledTerminalRuns > 0
+                          ? outcomePreview.data.truncated
+                            ? <p style={{ color: color.sub }}>No explicit task result was found in the newest {outcomePreview.data.sampledTerminalRuns.toLocaleString()} sampled terminal runs. Older results may be outside this preview. Record <code>record_business_outcome(name, boolean)</code> at run completion if this source should report a success criterion.</p>
+                            : <p style={{ color: color.sub }}>No explicit task result was captured on sampled application runs. Record <code>record_business_outcome(name, boolean)</code> at run completion to measure your success criterion.</p>
+                          : <p style={{ color: color.sub }}>No application outcome group is available in this sampled run evidence.</p>}
+              </div></div>}
+              {savedChanges.length > 0 && <details className="mt-3 text-sm"><summary>Saved change notes (read-only)</summary><p style={{ color: color.sub }}>Comparison is unavailable. These notes preserve previously saved intentions and do not measure whether a change helped.</p><ul className="mt-2 space-y-2">{savedChanges.map((item) => <li key={item.documentId}><strong>{item.payload.identity?.outcomeName || "Saved change"}</strong> · {item.payload.summary}</li>)}</ul></details>}
+
             </div>
           </section>
           <section className="border p-5" style={panel}>
             <div className="flex flex-wrap items-center justify-between gap-2"><h3 className="font-semibold">Recommended checks</h3><span className="verdict-setup-tag">{cyclePlan.includeApprovedEvaluations ? "Optional approved judge job" : "No judge call selected"}</span></div>
             {needsCapture ? <p className="text-sm mt-3" style={{ color: color.sub }}>Capture agent runs or provider calls to reveal eligible checks for this workspace.</p> : <div className="mt-4 space-y-4 text-sm">
               {runCount > 0 && <div className="verdict-setup-check"><CheckCircle2 size={17} /><div><strong>Review recorded execution issues</strong><p style={{ color: color.sub }}>Check failed tests, tool errors, and other captured run evidence. This does not judge answer quality.</p></div></div>}
+              {(runCount > 0 || callCount > 0) && <div className="verdict-setup-check"><CheckCircle2 size={17} /><div><strong>Define what a good result means</strong><p style={{ color: color.sub }}>Use an application-reported outcome when available. For answer quality, review a precise quality criterion and optional judge rubric on eligible turns or calls. Judge results stay separate by evaluator identity and require provider approval.</p><button type="button" className="underline mt-1" style={{ color: color.green }} onClick={() => onNavigate?.({ tab: "evaluate", section: "lab" })}>Review quality evaluation →</button></div></div>}
               {runCount > 0 && <div className="verdict-setup-check"><CheckCircle2 size={17} /><div><strong>Review captured token use</strong><p style={{ color: color.sub }}>Home shows reported turn or model-call totals where available and labels their coverage. Open a day to inspect the matching sessions or calls. Missing totals stay unknown; usage alone does not trigger a cost alert.</p></div></div>}
-              <div className="verdict-setup-check"><CheckCircle2 size={17} /><div><strong>Watch model-call changes when ready</strong><p style={{ color: color.sub }}>{hasActiveMonitor ? "An active call policy can run during this cycle if selected below." : callCount ? "Preview eligible calls and the reference before activating a separate statistical monitor." : "Connect eligible application model calls before setting up a statistical call watch."}</p>
+              {callScope?.calls > 0 && <div className="verdict-setup-check"><CheckCircle2 size={17} /><div><strong>Inspect model-call cost, latency and errors</strong>
+                <p style={{ color: color.sub }}>{callScope.costKnownCalls || 0} of {callScope.calls} calls priced · {callScope.latencyKnownCalls || 0} of {callScope.calls} calls with latency · {callScope.errorRecordedCalls || 0} provider errors recorded. Missing values remain unknown; these are observed counts, not alerts.</p>
+                {((callScope.costKnownCalls || 0) < callScope.calls || (callScope.latencyKnownCalls || 0) < callScope.calls) && <p className="mt-1" style={{ color: color.sub }}>Capture subsequent supported provider calls through the Verdict SDK to record timing and reported usage. Cost is estimated only for priced models with usage; imported calls need their own reported metrics. Existing missing values remain unknown.</p>}
+                <button type="button" className="underline mt-1" style={{ color: color.green }} onClick={() => onNavigate?.({ tab: "report", section: "management" })}>Open application report →</button>
+              </div></div>}
+              <div className="verdict-setup-check"><CheckCircle2 size={17} /><div><strong>Optional model-call drift monitoring</strong><p style={{ color: color.sub }}>{hasActiveMonitor ? "An active call policy can run during this cycle if selected below." : callCount ? "Preview eligible calls and the reference before activating a separate statistical monitor." : "Connect eligible application model calls before setting up a statistical call watch."}</p>
                 {callCount > 0 && !hasActiveMonitor && <button type="button" className="underline mt-1" style={{ color: color.green }} onClick={() => onNavigate?.({ tab: "monitor", section: "history" })}>Review model-call comparison →</button>}
               </div></div>
             </div>}
@@ -237,13 +299,17 @@ export function ControlCenter({ configUrl, onNavigate = null, section = "all", m
           </section>
           <section className="border p-5" style={panel}>
             <h3 className="font-semibold">Choose what to run</h3>
-            <p className="text-sm mt-2" style={{ color: color.sub }}>Leave these paths blank to analyze already captured activity. Enter a local history directory only if this check should also import or rescan it. A recorded source label does not identify a directory on this machine.</p>
-            <div className="grid sm:grid-cols-2 gap-3 mt-4">
-              <Field label="Claude Code history directory"><input value={schedule.claudeRoot || ""} placeholder="~/.claude/projects" onChange={(event) => setSchedule({ ...schedule, claudeRoot: event.target.value })} /></Field>
-              <Field label="Codex history directory"><input value={schedule.codexRoot || ""} placeholder="~/.codex/sessions" onChange={(event) => setSchedule({ ...schedule, codexRoot: event.target.value })} /></Field>
-            </div>
-            <label className="flex gap-2 text-sm mt-2"><input type="checkbox" checked={schedule.analyzeOnly === true} onChange={(event) => setSchedule({ ...schedule, analyzeOnly: event.target.checked })} />Analyze already captured activity</label>
+            <p className="text-sm mt-2" style={{ color: color.sub }}>Already captured activity is the default source. A local run check uses recorded Agent Runs; model-call monitoring uses a separately activated policy.</p>
+            {!hasRunCheck && callCount > 0 && !hasSelectedCallCheck && <p role="status" className="text-sm mt-2" style={{ color: color.amber }}>Inspect captured calls or evaluate selected evidence without activating a drift monitor. Use the application report and quality evaluation above. Recurring run checks require captured Agent Runs; no run check is scheduled for call-only evidence.</p>}
             <label className="flex gap-2 text-sm mt-3"><input type="checkbox" disabled={!hasActiveMonitor} checked={schedule.runMonitor === true} onChange={(event) => setSchedule({ ...schedule, runMonitor: event.target.checked })} />Run the active model-call monitor{!hasActiveMonitor && " (set up separately first)"}</label>
+            <details className="mt-4 text-sm"><summary className="cursor-pointer">Import local coding-agent history</summary>
+              <p className="mt-3" style={{ color: color.sub }}>Use this only when a check should also import or rescan local files. A recorded source label does not identify a directory on this machine.</p>
+              <div className="grid sm:grid-cols-2 gap-3 mt-3">
+                <Field label="Claude Code history directory"><input value={schedule.claudeRoot || ""} placeholder="~/.claude/projects" onChange={(event) => setSchedule({ ...schedule, claudeRoot: event.target.value })} /></Field>
+                <Field label="Codex history directory"><input value={schedule.codexRoot || ""} placeholder="~/.codex/sessions" onChange={(event) => setSchedule({ ...schedule, codexRoot: event.target.value })} /></Field>
+              </div>
+              <label className="flex gap-2 text-sm mt-2"><input type="checkbox" checked={schedule.analyzeOnly === true} onChange={(event) => setSchedule({ ...schedule, analyzeOnly: event.target.checked })} />Analyze already captured activity</label>
+            </details>
             <details className="mt-4 text-sm"><summary className="cursor-pointer">Cadence and advanced options</summary>
               <div className="mt-3 max-w-xs"><Field label="Hours between checks"><input type="number" min="1" max="168" value={schedule.intervalHours} onChange={(event) => setSchedule({ ...schedule, intervalHours: Number(event.target.value) })} /></Field></div>
               <label className="flex gap-2 text-sm mt-3"><input type="checkbox" checked={schedule.includeApprovedEvaluations === true} onChange={(event) => setSchedule({ ...schedule, includeApprovedEvaluations: event.target.checked })} />Run one separately approved pending scoped judge job per cycle</label>
@@ -255,33 +321,35 @@ export function ControlCenter({ configUrl, onNavigate = null, section = "all", m
             <h3 className="font-semibold">Review and start</h3>
             <div className="text-sm mt-3 space-y-1" style={{ color: color.sub }}>
               <p>Sources: {cyclePlan.claudeRoot || cyclePlan.codexRoot ? [cyclePlan.claudeRoot && `Claude Code: ${cyclePlan.claudeRoot}`, cyclePlan.codexRoot && `Codex: ${cyclePlan.codexRoot}`].filter(Boolean).join(" · ") : needsCapture ? "No source selected" : "Already captured activity only"}</p>
-              <p>Checks: {needsCapture ? "No captured activity to check" : `deterministic run analysis${cyclePlan.runMonitor ? " and the active model-call monitor" : ""}`} · every {cyclePlan.intervalHours} hours after saving</p>
+              <p>Checks: {needsCapture ? "No captured activity to check" : selectedChecks} · every {cyclePlan.intervalHours} hours after saving</p>
               <p>Approved judge jobs: {cyclePlan.includeApprovedEvaluations ? "one pending approved job may run per cycle, with provider egress and cost" : "off; pending approvals are preserved"}</p>
               <p>Delivery: in-app issue inbox{current("alert", "default")?.state === "active" ? alert.destination === "webhook" ? " · configured webhook for aggregate findings" : " · local log for aggregate findings" : " · no external destination configured"}</p>
             </div>
-            <div className="flex flex-wrap gap-2 mt-4"><Button busy={busy === "run"} disabled={!token || needsCapture || (!cyclePlan.analyzeOnly && !cyclePlan.claudeRoot && !cyclePlan.codexRoot)} onClick={async () => { setTestedPlan(null); const result = await post("/api/control/actions/run-schedule", cyclePlan, "run", { reload: false }); if (result) { setLastRun(result); setLastRunPlanKey(planKey); if (cycleVerifiedForPlan(result, cyclePlan)) setTestedPlan(planKey); } }}><ArrowRight size={13} />Run once and review</Button><Button disabled={testedPlan !== planKey} busy={busy === "schedule:daily"} onClick={() => save("schedule", "daily", "active", cyclePlan)}>{schedulePaused ? "Resume recurring checks" : "Save recurring schedule"}</Button>{scheduleSaved && <Button busy={busy === "schedule:daily"} onClick={() => save("schedule", "daily", "disabled", savedSchedule.payload)}>Pause future checks</Button>}</div>
+            <div className="flex flex-wrap gap-2 mt-4"><Button busy={busy === "run"} disabled={!token || needsCapture || (!hasRunCheck && !hasSelectedCallCheck) || (!cyclePlan.analyzeOnly && !cyclePlan.claudeRoot && !cyclePlan.codexRoot)} onClick={async () => { setTestedPlan(null); const result = await post("/api/control/actions/run-schedule", cyclePlan, "run", { reload: false }); if (result) { setLastRun(result); setLastRunPlanKey(planKey); setOutcomeRefresh((value) => value + 1); if (cycleVerifiedForPlan(result, cyclePlan)) setTestedPlan(planKey); } }}><ArrowRight size={13} />Run once and review</Button><Button disabled={testedPlan !== planKey} busy={busy === "schedule:daily"} onClick={() => save("schedule", "daily", "active", cyclePlan)}>{schedulePaused ? "Resume recurring checks" : "Save recurring schedule"}</Button>{scheduleSaved && <Button busy={busy === "schedule:daily"} onClick={() => save("schedule", "daily", "disabled", savedSchedule.payload)}>Pause future checks</Button>}</div>
             {scheduleSaved && <p className="text-xs mt-2" style={{ color: color.sub }}>Pausing stops future worker cycles. A check already selected by the worker may finish.</p>}
             {lastRun && <div role="status" className="text-sm mt-3" style={{ color: testedPlan === planKey ? color.green : color.amber }}>{lastRunPlanKey !== planKey ? "Plan changed since the last check. Run this version before saving." : testedPlan === planKey ? "Cycle checks completed." : "The selected checks did not complete. Review the result and retry before saving."} Analysis: {lastRun.analysis?.status || "no result"}. {cyclePlan.runMonitor ? `Model-call monitor: ${lastRun.monitor?.state || lastRun.monitor?.status || "no result"}.` : "No model-call monitor selected."} {lastRun.newIssues > 0 ? `${lastRun.newIssues} new recorded issue${lastRun.newIssues === 1 ? "" : "s"} entered the inbox.` : "No post-activation issue notices were added."}<button type="button" className="underline block mt-2" onClick={() => onNavigate?.({ tab: "monitor", section: "status" })}>View monitoring results →</button></div>}
           </section>
         </div>
-        <aside className="space-y-5">
-          <section className="border p-5" style={panel}><h3 className="font-semibold">Before you start</h3><p className="text-sm mt-3" style={{ color: color.sub }}>{cyclePlan.includeApprovedEvaluations ? "This plan may consume a separately approved pending judge job, with bounded provider egress and cost." : "This plan runs local checks without consuming pending approved judge jobs or sending session text to a model."}</p><p className="text-sm mt-3" style={{ color: color.sub }}>An external alert destination is optional and configured separately.</p></section>
+        <aside className="min-w-0 space-y-5">
+          <section className="border p-5" style={panel}><h3 className="font-semibold">Before you start</h3><p className="text-sm mt-3" style={{ color: color.sub }}>{!hasRunCheck && !hasSelectedCallCheck ? "Choose a run or model-call check before starting." : cyclePlan.includeApprovedEvaluations ? "This plan may consume a separately approved pending judge job, with bounded provider egress and cost." : "This plan runs local checks without consuming pending approved judge jobs or sending session text to a model."}</p><p className="text-sm mt-3" style={{ color: color.sub }}>An external alert destination is optional and configured separately.</p></section>
           <section className="border p-5" style={panel}><div className="flex justify-between gap-2"><h3 className="font-semibold">Worker readiness</h3><button type="button" onClick={load} aria-label="Refresh worker status"><RefreshCw size={14} /></button></div>
-            <p role="status" className="text-sm mt-3" style={{ color: currentWorkerCheck && workerRecent ? color.green : color.amber }}>{schedulePaused ? workerRecent ? "Plan paused; worker waiting" : "Plan paused; worker not verified" : scheduleSaved ? workerRecent ? currentWorkerCheck ? "Recurring checks ran on current plan" : "Worker seen; current plan check pending" : "Schedule saved; worker not verified" : "No recurring schedule saved"}</p>
+            <p role="status" className="text-sm mt-3" style={{ color: currentWorkerCheck && workerRecent ? color.green : color.amber }}>{schedulePaused ? workerRecent ? "Plan paused; worker waiting" : "Plan paused; worker not verified" : scheduleSaved ? currentWorkerProblem ? "Current plan worker check needs attention" : workerRecent ? currentWorkerCheck ? "Recurring checks ran on current plan" : "Worker seen; current plan check pending" : "Schedule saved; worker not verified" : "No recurring schedule saved"}</p>
             {data.worker?.lastSeenAt && <p className="text-xs mt-2" style={{ color: color.sub }}>Last worker heartbeat: {workerTime(data.worker.lastSeenAt)}</p>}
             {data.lastCycle?.state === "failed" && <p role="alert" className="text-sm mt-3" style={{ color: color.red }}>Latest {data.lastCycle.trigger} check failed: {String(data.lastCycle.failureCode || "cycle error").replaceAll("_", " ")}. Review the evidence and rerun.</p>}
             {data.lastCycle?.state === "started" && <p role="status" className="text-sm mt-3" style={{ color: color.amber }}>A {data.lastCycle.trigger} check started at {workerTime(data.lastCycle.startedAt)}; completion is not recorded.</p>}
             {data.lastCycle?.state === "completed" && <p className="text-sm mt-3" style={{ color: color.sub }}>Latest completed check: {workerTime(data.lastCycle.finishedAt)} · {data.lastCycle.trigger}{data.lastCycle.trigger === "worker" && savedSchedule?.revision !== data.lastCycle.scheduleRevision ? " · before current plan revision" : ""}.</p>}
+            {currentWorkerCheck && data.lastCycle?.trigger === "manual" && <p className="text-sm mt-2" style={{ color: color.sub }}>Worker check on this plan completed: {workerTime(data.lastWorkerCycle.finishedAt)}.</p>}
+            {currentWorkerProblem && data.lastCycle?.trigger === "manual" && <p role="alert" className="text-sm mt-2" style={{ color: color.red }}>Latest worker check on this plan {data.lastWorkerCycle.state === "failed" ? `failed: ${String(data.lastWorkerCycle.failureCode || "cycle error").replaceAll("_", " ")}` : "started but did not record completion"}.</p>}
             {nextCheck && <p className="text-sm mt-2" style={{ color: color.sub }}>Next worker check eligible after {workerTime(nextCheck)} if this worker keeps running. Refresh afterward to confirm its result.</p>}
             {data.lastCycle?.lastSuccessAt && data.lastCycle.state !== "completed" && <p className="text-xs mt-2" style={{ color: color.sub }}>Earlier successful check: {workerTime(data.lastCycle.lastSuccessAt)}. It does not clear the latest failure or unrecorded outcome.</p>}
             {scheduleSaved && !workerRecent && <div className="border p-3 mt-4 text-sm" style={{ borderColor: color.amber }} role="status">
               <strong>Start the worker for this saved plan</strong>
-              <p className="mt-2" style={{ color: color.sub }}>Configure a supervised process with the same store and tenant ID as the dashboard, then run:</p>
-              <pre className="overflow-x-auto mt-2 p-2 text-xs" style={{ background: "#0b0e0d" }}>{'verdict-service --tenant-id "$VERDICT_TENANT_ID"'}</pre>
+              <p className="mt-2" style={{ color: color.sub }}>Set both variables to the dashboard's storage URL and tenant ID in the worker environment, then run it as a supervised process. For SQLite, use the same absolute SQLite database path in the dashboard and worker; relative paths can resolve to different files:</p>
+              <pre className="overflow-x-auto mt-2 p-2 text-xs" style={{ background: "#0b0e0d" }}>{'verdict-service --storage "$VERDICT_STORAGE" --tenant-id "$VERDICT_TENANT_ID"'}</pre>
               <p className="mt-2" style={{ color: color.sub }}>Keep it running, refresh this status, and confirm both a recent heartbeat and a completed cycle for this plan.</p>
             </div>}
             {!scheduleSaved && <p className="text-sm mt-3" style={{ color: color.sub }}>A saved schedule does not start the separate <code>verdict-service</code> worker. The worker must use this store and tenant ID.</p>}
-            {scheduleSaved && workerRecent && <p className="text-sm mt-3" style={{ color: color.sub }}>The worker is running and polls for plan changes while paused. A heartbeat alone does not confirm that this plan completed a cycle.</p>}
+            {(scheduleSaved || schedulePaused) && workerRecent && <p className="text-sm mt-3" style={{ color: color.sub }}>{schedulePaused ? "The worker is present, but this plan is paused." : currentWorkerCheck ? "The worker completed a check on this plan revision. Confirm the next cycle after its eligible time." : "A recent worker heartbeat does not confirm a completed check on this plan revision."}</p>}
           </section>
         </aside>
       </div>}

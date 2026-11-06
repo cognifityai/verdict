@@ -1,4 +1,4 @@
-"""Bounded, read-only coverage preview for reported Agent Run tool outcomes."""
+"""Bounded, read-only coverage of Agent Run execution and reported outcomes."""
 
 from __future__ import annotations
 
@@ -9,13 +9,146 @@ from verdict.analysis import recorded_tool_pairing_complete
 from verdict.dashboard.agent_evidence_queries import available
 from verdict.dashboard.query import PostgresSession, QuerySession, SQLiteSession
 from verdict.dashboard.storage_url import is_postgres_storage
-from verdict.redaction import redact_structure
+from verdict.redaction import _PLACEHOLDER, redact_structure
 from verdict.storage.sqlite import sqlite_path
 
 _TERMINAL = ("completed", "failed", "timed_out", "cancelled")
 _EXECUTION_STATES = (*_TERMINAL, "unfinalized")
 _EXAMPLES = 3
 _RUN_BATCH = 400
+
+
+def _identity_available(values: tuple[str, ...]) -> bool:
+    """A redacted label cannot distinguish two original identities."""
+    return all(not _PLACEHOLDER.search(value) and redact_structure(value) == value
+               for value in values)
+
+
+def _reported_outcomes(session: QuerySession, tenant: str, rows: list,
+                       max_events: int, *, postgres: bool, truncated: bool) -> dict:
+    """Describe explicit boolean outcomes per terminal run, without inferring success."""
+    empty = {"status": "no_reported_outcomes", "sampledTerminalRuns": len(rows),
+             "truncated": truncated, "unclassifiedReports": 0,
+             "identityUnavailableReports": 0, "outcomeUncertainRuns": 0,
+             "groups": [], "groupsTruncated": False}
+    if not rows:
+        return empty
+    if postgres:
+        name_sql = ("CASE WHEN jsonb_typeof(e.attributes_json->'name')='string' "
+                    "THEN e.attributes_json->>'name' END")
+        source_sql = ("CASE WHEN jsonb_typeof(e.attributes_json->'source')='string' "
+                      "THEN e.attributes_json->>'source' END")
+        flag_sql = ("CASE WHEN jsonb_typeof(e.attributes_json->'value')='boolean' "
+                    "THEN CASE WHEN e.attributes_json->>'value'='true' THEN 1 ELSE 0 END END")
+    else:
+        name_sql = ("CASE WHEN json_valid(e.attributes_json) "
+                    "AND json_type(e.attributes_json,'$.name')='text' "
+                    "THEN json_extract(e.attributes_json,'$.name') END")
+        source_sql = ("CASE WHEN json_valid(e.attributes_json) "
+                      "AND json_type(e.attributes_json,'$.source')='text' "
+                      "THEN json_extract(e.attributes_json,'$.source') END")
+        flag_sql = ("CASE WHEN json_valid(e.attributes_json) "
+                    "THEN CASE json_type(e.attributes_json,'$.value') "
+                    "WHEN 'true' THEN 1 WHEN 'false' THEN 0 END END")
+    reports: dict[str, dict[tuple[str, str], list[int | None]]] = {
+        str(row["run_id"]): {} for row in rows
+    }
+    uncertain_runs: set[str] = set()
+    seen = 0
+    invalid = 0
+    for offset in range(0, len(rows), _RUN_BATCH):
+        selected = tuple(str(row["run_id"]) for row in rows[offset:offset + _RUN_BATCH])
+        placeholders = ",".join("?" for _ in selected)
+        events = list(session.execute(
+            "SELECT e.run_id,e.provenance," + name_sql + " AS outcome_name," + source_sql
+            + " AS outcome_source," + flag_sql + " AS outcome_flag "
+            "FROM agent_events e WHERE e.tenant_id=? "
+            "AND (e.event_type='outcome' OR e.provenance='verdict:capture_limit') "
+            f"AND e.run_id IN ({placeholders}) ORDER BY e.run_id,e.event_id LIMIT ?",
+            (tenant, *selected, max_events - seen + 1),
+        ))
+        seen += len(events)
+        if seen > max_events:
+            return {**empty, "status": "event_limit", "unclassifiedReports": invalid}
+        for event in events:
+            run_id = str(event["run_id"])
+            if event["provenance"] == "verdict:capture_limit":
+                uncertain_runs.add(run_id)
+                continue
+            name, source = event["outcome_name"], event["outcome_source"]
+            if (not isinstance(name, str) or not name or len(name.encode()) > 128
+                    or not isinstance(source, str) or not source
+                    or len(source.encode()) > 128):
+                invalid += 1
+                uncertain_runs.add(run_id)
+                continue
+            reports[run_id].setdefault((name, source), []).append(
+                event["outcome_flag"]
+            )
+
+    identities: dict[tuple[str, str, str, str], list[str]] = {}
+    by_run_identity = {}
+    identity_unavailable = 0
+    for row in rows:
+        identity = tuple(str(row[key] or "") for key in
+                         ("source_kind", "service_name", "environment", "agent_name"))
+        run_id = str(row["run_id"])
+        if not _identity_available(identity):
+            identity_unavailable += sum(map(len, reports[run_id].values()))
+            continue
+        identities.setdefault(identity, []).append(run_id)
+        by_run_identity[run_id] = identity
+    names: dict[tuple[str, str, str, str], set[tuple[str, str]]] = {}
+    for run_id, values in reports.items():
+        if run_id not in by_run_identity:
+            continue
+        for name, source in values:
+            if not _identity_available((name, source)):
+                identity_unavailable += len(values[(name, source)])
+                uncertain_runs.add(run_id)
+                continue
+            names.setdefault(by_run_identity[run_id], set()).add((name, source))
+
+    def classify(values: list[int | None], uncertain: bool) -> str:
+        if not values:
+            return "unclear" if uncertain else "missing"
+        if len(values) != 1 or values[0] is None:
+            return "unclear"
+        return "recordedTrue" if values[0] == 1 else "recordedFalse"
+
+    def counts(states: list[str]) -> dict[str, int]:
+        return {"terminalRuns": len(states), **{
+            state: states.count(state) for state in
+            ("recordedTrue", "recordedFalse", "unclear", "missing")
+        }}
+
+    groups = []
+    for identity, outcome_names in names.items():
+        for name, source in outcome_names:
+            chronology = list(reversed(identities[identity]))
+            states = [classify(reports[run_id].get((name, source), []),
+                               run_id in uncertain_runs)
+                      for run_id in chronology]
+            groups.append({
+                "sourceKind": identity[0], "serviceName": identity[1],
+                "environment": identity[2], "agentName": identity[3],
+                "outcomeName": name, "outcomeSource": source,
+                **{key: value for key, value in counts(states).items()
+                   if key != "terminalRuns"},
+                "terminalRuns": len(states),
+                "examples": {"recordedFalse": [run_id for run_id, state in
+                                                 zip(chronology, states, strict=True)
+                                                 if state == "recordedFalse"][:_EXAMPLES]},
+
+            })
+    groups.sort(key=lambda item: (-item["terminalRuns"], item["sourceKind"],
+                                  item["agentName"], item["outcomeName"],
+                                  item["outcomeSource"]))
+    return {**empty, "status": "ready" if groups or invalid or identity_unavailable
+            else "no_reported_outcomes", "unclassifiedReports": invalid,
+            "identityUnavailableReports": identity_unavailable,
+            "outcomeUncertainRuns": len(uncertain_runs), "groups": groups[:20],
+            "groupsTruncated": len(groups) > 20}
 
 
 def _classification(events: list[dict]) -> tuple[str, bool]:
@@ -81,12 +214,16 @@ def _execution_preview(session: QuerySession, tenant: str, max_runs: int) -> dic
     truncated = len(rows) > max_runs
     counts = {state: 0 for state in _EXECUTION_STATES}
     groups: dict[tuple[str, str, str, str], dict] = {}
+    identity_unavailable = 0
     for row in rows[:max_runs]:
         state = (row["status"] if row["ended_at"] is not None
                  and row["status"] in _TERMINAL else "unfinalized")
         counts[state] += 1
         identity = tuple(str(row[key] or "") for key in
                          ("source_kind", "service_name", "environment", "agent_name"))
+        if not _identity_available(identity):
+            identity_unavailable += 1
+            continue
         group = groups.setdefault(identity, {
             "sourceKind": identity[0], "serviceName": identity[1],
             "environment": identity[2], "agentName": identity[3],
@@ -102,7 +239,8 @@ def _execution_preview(session: QuerySession, tenant: str, max_runs: int) -> dic
     ))
     return {
         "scope": {"sampledRuns": min(len(rows), max_runs), "truncated": truncated},
-        "totals": counts, "groups": ordered[:20],
+        "totals": counts, "identityUnavailableRuns": identity_unavailable,
+        "groups": ordered[:20],
         "groupsTruncated": len(ordered) > 20,
     }
 
@@ -116,9 +254,16 @@ def _project(session: QuerySession, tenant: str, *, max_runs: int,
         "totals": {"recordedFailure": 0, "observedWithoutFailure": 0,
                    "unclear": 0, "conflicts": 0},
         "groups": [],
+        "identityUnavailableRuns": 0,
         "execution": {"scope": {"sampledRuns": 0, "truncated": False},
                       "totals": {state: 0 for state in _EXECUTION_STATES},
+                      "identityUnavailableRuns": 0,
                       "groups": [], "groupsTruncated": False},
+        "reportedOutcomes": {"status": "no_reported_outcomes",
+                             "sampledTerminalRuns": 0, "truncated": False,
+                             "unclassifiedReports": 0,
+                             "identityUnavailableReports": 0, "groups": [],
+                             "groupsTruncated": False},
     }
     if not available(session):
         return empty
@@ -139,7 +284,7 @@ def _project(session: QuerySession, tenant: str, *, max_runs: int,
     execution = _execution_preview(session, tenant, max_runs)
     terminal = ",".join("?" for _ in _TERMINAL)
     recent = list(session.execute(
-        "SELECT r.run_id,r.agent_name,r.service_name,r.environment,s.source_kind "
+        "SELECT r.run_id,r.ended_at,r.agent_name,r.service_name,r.environment,s.source_kind "
         "FROM agent_runs r JOIN import_sources s "
         "ON s.tenant_id=r.tenant_id AND s.source_session_id=r.source_session_id "
         f"WHERE r.tenant_id=? AND r.status IN ({terminal}) "
@@ -157,6 +302,9 @@ def _project(session: QuerySession, tenant: str, *, max_runs: int,
     result["scope"] = {"terminalRuns": None if truncated else len(rows),
                        "sampledTerminalRuns": len(rows),
                        "truncated": truncated}
+    result["reportedOutcomes"] = _reported_outcomes(
+        session, tenant, rows, max_events, postgres=postgres, truncated=truncated,
+    )
 
     # Read only outcome flags, bounded call IDs, and capture-limit markers.
     # Event bodies never cross this read model boundary.
@@ -218,10 +366,18 @@ def _project(session: QuerySession, tenant: str, *, max_runs: int,
               "unclear": 0, "conflicts": 0}
     groups: dict[tuple[str, str, str, str], dict] = {}
     group_states: dict[tuple[str, str, str, str], list[str]] = {}
+    identity_unavailable = 0
     for row in rows:
         run_id = str(row["run_id"])
         identity = tuple(str(row[key] or "") for key in
                          ("source_kind", "service_name", "environment", "agent_name"))
+        state, conflict = _classification(by_run[run_id])
+        totals[state] += 1
+        if conflict:
+            totals["conflicts"] += 1
+        if not _identity_available(identity):
+            identity_unavailable += 1
+            continue
         if identity not in groups:
             groups[identity] = {
                 "sourceKind": identity[0], "serviceName": identity[1],
@@ -235,14 +391,11 @@ def _project(session: QuerySession, tenant: str, *, max_runs: int,
             }
             group_states[identity] = []
         group = groups[identity]
-        state, conflict = _classification(by_run[run_id])
         group_states[identity].append(state)
         group["terminalRuns"] += 1
         group[state] += 1
-        totals[state] += 1
         if conflict:
             group["conflicts"] += 1
-            totals["conflicts"] += 1
         examples = group["examples"][state]
         if len(examples) < _EXAMPLES:
             examples.append(run_id)
@@ -259,6 +412,7 @@ def _project(session: QuerySession, tenant: str, *, max_runs: int,
                     "newer": _period_counts(chronology[midpoint:]),
                 }
     result["totals"] = totals
+    result["identityUnavailableRuns"] = identity_unavailable
     result["groups"] = sorted(groups.values(),
                               key=lambda item: (-item["terminalRuns"],
                                                 item["sourceKind"], item["agentName"]))[:20]
@@ -297,6 +451,7 @@ def build_run_outcome_preview(storage: str, *, tenant: str, max_runs: int = 1000
     # Redact descriptive fields, then restore only the bounded exact IDs.
     examples = [group["examples"] for group in result["groups"]]
     execution_examples = [group["examples"] for group in result["execution"]["groups"]]
+    outcome_examples = [group["examples"] for group in result["reportedOutcomes"]["groups"]]
     display = dict(result)
     display["groups"] = [
         {**group, "examples": {state: [] for state in group["examples"]}}
@@ -309,6 +464,13 @@ def build_run_outcome_preview(storage: str, *, tenant: str, max_runs: int = 1000
             for group in result["execution"]["groups"]
         ],
     }
+    display["reportedOutcomes"] = {
+        **result["reportedOutcomes"],
+        "groups": [
+            {**group, "examples": {state: [] for state in group["examples"]}}
+            for group in result["reportedOutcomes"]["groups"]
+        ],
+    }
     redacted = redact_structure(display)
     if not isinstance(redacted, dict):
         raise ValueError("run outcome preview exceeds redaction budget")
@@ -316,5 +478,8 @@ def build_run_outcome_preview(storage: str, *, tenant: str, max_runs: int = 1000
         group["examples"] = exact
     for group, exact in zip(redacted["execution"]["groups"],
                             execution_examples, strict=True):
+        group["examples"] = exact
+    for group, exact in zip(redacted["reportedOutcomes"]["groups"],
+                            outcome_examples, strict=True):
         group["examples"] = exact
     return redacted

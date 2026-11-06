@@ -658,12 +658,28 @@ def build_usage_view(
             seconds = (max(ends) - min(_utc(turn["started_at"]) for turn in matching)).total_seconds()
             if seconds >= 0:
                 elapsed = round(seconds)
+        spans = []
+        for turn in matching:
+            if turn["ended_at"] is None:
+                continue
+            try:
+                seconds = round((_utc(turn["ended_at"]) - _utc(turn["started_at"])).total_seconds())
+            except (TypeError, ValueError, AttributeError):
+                continue
+            if seconds >= 0:
+                spans.append({"runId": turn["run_id"], "turnId": turn["turn_id"],
+                              "seconds": seconds})
         selected = {
             "sessionId": session_id, "sourceKind": selected_key[0],
             "runIds": sorted({turn["run_id"] for turn in matching}),
             **_present(summary, include_models=True),
             "turnCount": len(matching),
             "elapsedSpanSeconds": elapsed,
+            "turnSpanKnownTurns": len(spans),
+            "longestTurnSpan": max(
+                spans, key=lambda item: (item["seconds"], item["runId"], item["turnId"]),
+                default=None,
+            ),
             "turns": [turn_view(turn) for turn in ranked_turns[:MAX_SESSION_TURNS]],
             "turnsTruncated": len(ranked_turns) > MAX_SESSION_TURNS,
             "topTurns": [turn_view(turn) for turn in ranked_turns[:3]],

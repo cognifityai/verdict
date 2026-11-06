@@ -1,6 +1,7 @@
 """Scoped run and tool evaluation via real SQLite/API with a mocked provider."""
 
 import asyncio
+import builtins
 import contextlib
 import hashlib
 import multiprocessing
@@ -8,7 +9,7 @@ import os
 import queue
 import time
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import httpx
 import pytest
@@ -43,6 +44,7 @@ from verdict_eval.providers import CompletionResponse
 def _config(scope="run"):
     return {"scope": scope, "runId": "run-a", "provider": "anthropic",
             "model": "claude-haiku-4-5", "maxOutputTokens": 256,
+            "maxEstimatedUsd": 1,
             "rubric": {"name": "task_review", "version": "1", "dimensions": [
                 {"name": "completion", "description": "Did the recorded work meet the stated task?"},
             ]}, **({"eventId": "call"} if scope == "tool_action" else {})}
@@ -102,6 +104,154 @@ class MockProvider:
             '{"completion":{"reasoning":"' + self.citation +
             ' shows the selected action","verdict":"PASS"}}'
         ), input_tokens=10, output_tokens=10)
+
+
+def test_direct_scoped_judge_requires_a_current_static_price_ceiling_before_egress(tmp_path):
+    path = tmp_path / "direct-budget.db"
+    url = f"sqlite:///{path}"
+    storage = SQLiteStorage(str(path))
+    storage.replace_agent_run_bundle(_bundle())
+    config = _config()
+    preview = preview_scoped(storage, tenant="local", config=config)
+    bound = preview["scheduledUpperStaticListPriceUsd"]
+    assert bound > 0
+    approved = {**config, "planFingerprint": preview["planFingerprint"]}
+    approved.pop("maxEstimatedUsd")
+    provider = MockProvider()
+    for cap in (None, 0, -1, True, "1", bound / 2, 101, float("nan"), float("inf")):
+        candidate = {**approved}
+        if cap is not None:
+            candidate["maxEstimatedUsd"] = cap
+        with pytest.raises(ValueError, match="estimated-spend"):
+            execute_scoped(storage, storage_url=url, tenant="local", config=candidate,
+                           confirm_external_egress=True, provider=provider)
+    assert provider.calls == 0
+    unknown = {**config, "model": "unpriced-synthetic-model"}
+    unknown_preview = preview_scoped(storage, tenant="local", config=unknown)
+    assert unknown_preview["upperStaticListPriceUsd"] is None
+    with pytest.raises(ValueError, match="estimated-spend"):
+        execute_scoped(storage, storage_url=url, tenant="local",
+                       config={**unknown, "planFingerprint": unknown_preview["planFingerprint"],
+                               "maxEstimatedUsd": 1},
+                       confirm_external_egress=True, provider=provider)
+    assert provider.calls == 0
+    result = execute_scoped(storage, storage_url=url, tenant="local",
+                            config={**approved, "maxEstimatedUsd": bound},
+                            confirm_external_egress=True, provider=provider)
+    assert result["status"] == "completed"
+    assert provider.calls == 1
+    assert execute_scoped(storage, storage_url=url, tenant="local", config=approved,
+                          confirm_external_egress=True, provider=provider) == result
+    assert provider.calls == 1
+    storage.close()
+
+
+def test_custom_endpoint_has_no_scoped_list_price_or_approved_egress(tmp_path, monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://synthetic-judge.example/v1")
+    path = tmp_path / "custom-price.db"
+    url = f"sqlite:///{path}"
+    storage = SQLiteStorage(str(path))
+    storage.replace_agent_run_bundle(_bundle())
+    config = _config()
+    preview = preview_scoped(storage, tenant="local", config=config)
+    assert preview["plannedCalls"] == 1
+    assert preview["upperStaticListPriceUsd"] is None
+    assert preview["scheduledUpperStaticListPriceUsd"] is None
+    provider = MockProvider()
+    with pytest.raises(ValueError, match="estimated-spend"):
+        execute_scoped(storage, storage_url=url, tenant="local",
+                       config={**config, "planFingerprint": preview["planFingerprint"],
+                               "maxEstimatedUsd": 100},
+                       confirm_external_egress=True, provider=provider)
+    with pytest.raises(ValueError, match="estimated-spend"):
+        schedule_scoped_once(storage, storage_url=url, tenant="local",
+                             config={**config, "planFingerprint": preview["planFingerprint"]},
+                             max_estimated_usd=100, confirm_persistent_egress=True)
+    assert provider.calls == 0
+    monkeypatch.delenv("ANTHROPIC_BASE_URL")
+    derivative = preview_scoped(storage, tenant="local",
+                                config={**config, "model": "custom-claude-haiku-4-5-private"})
+    assert derivative["upperStaticListPriceUsd"] is None
+    with pytest.raises(ValueError, match="estimated-spend"):
+        execute_scoped(storage, storage_url=url, tenant="local",
+                       config={**config, "model": "custom-claude-haiku-4-5-private",
+                               "planFingerprint": derivative["planFingerprint"],
+                               "maxEstimatedUsd": 100},
+                       confirm_external_egress=True, provider=provider)
+    assert provider.calls == 0
+    storage.close()
+
+
+def test_direct_scoped_api_rejects_over_budget_before_provider_call(tmp_path, monkeypatch):
+    path = tmp_path / "direct-budget-api.db"
+    url = f"sqlite:///{path}"
+    storage = SQLiteStorage(str(path))
+    storage.replace_agent_run_bundle(_bundle())
+    storage.close()
+    provider = MockProvider()
+    monkeypatch.setattr(scoped_evaluation, "_provider", lambda _name: provider)
+    app = create_app(storage=url, tenant_id="local")
+
+    async def request():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            headers = {"X-Verdict-Setup": token}
+            preview_response = await client.post("/api/scoped/preview", json=_config(), headers=headers)
+            assert preview_response.status_code == 200
+            preview = preview_response.json()
+            bound = preview["upperStaticListPriceUsd"]
+            approved = {**_config(), "planFingerprint": preview["planFingerprint"],
+                        "confirmExternalEgress": True}
+            denied = await client.post("/api/scoped/run", json={**approved,
+                "maxEstimatedUsd": bound / 2}, headers=headers)
+            assert denied.status_code == 400
+            assert provider.calls == 0
+            accepted = await client.post("/api/scoped/run", json={**approved,
+                "maxEstimatedUsd": bound}, headers=headers)
+            assert accepted.status_code == 200
+            assert accepted.json()["status"] == "completed"
+            assert provider.calls == 1
+
+    asyncio.run(request())
+
+
+def test_scoped_routes_report_missing_optional_eval_package_without_egress(tmp_path, monkeypatch):
+    path = tmp_path / "missing-eval.db"
+    url = f"sqlite:///{path}"
+    storage = SQLiteStorage(str(path))
+    storage.replace_agent_run_bundle(_bundle())
+    storage.close()
+    app = create_app(storage=url, tenant_id="local")
+    real_import = builtins.__import__
+
+    def without_eval(name, *args, **kwargs):
+        if name == "verdict_eval" or name.startswith("verdict_eval."):
+            raise ModuleNotFoundError("No module named 'verdict_eval'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", without_eval)
+
+    async def requests():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            headers = {"X-Verdict-Setup": token}
+            config = _config()
+            return [await client.post(path, json={**config, **extra}, headers=headers)
+                    for path, extra in (
+                        ("/api/scoped/preview", {}),
+                        ("/api/scoped/run", {"planFingerprint": "unavailable", "confirmExternalEgress": True}),
+                        ("/api/scoped/schedule", {"planFingerprint": "unavailable",
+                                                  "maxEstimatedUsd": 0.05,
+                                                  "confirmPersistentExternalEgress": True}),
+                    )]
+
+    responses = asyncio.run(requests())
+    assert [response.status_code for response in responses] == [503, 503, 503]
+    assert all(response.json() == {"error": "optional evaluation package unavailable"}
+               for response in responses)
+    assert not ControlStore(url).list_current("local")
 
 
 def _sqlite_scoped_worker(path, approved, start, calls, outcomes):
@@ -590,6 +740,338 @@ def test_scoped_run_and_tool_previews_bind_ordered_evidence_and_store_results(tm
     storage.close()
 
 
+def test_saved_scoped_result_is_found_by_exact_plan_after_reload(tmp_path):
+    path = tmp_path / "saved-scoped-plan.db"
+    url = f"sqlite:///{path}"
+    storage = SQLiteStorage(str(path))
+    bundle = _bundle()
+    storage.replace_agent_run_bundle(bundle)
+    storage.replace_agent_run_bundle(_bundle(tenant="foreign"))
+    config = _config()
+    preview = preview_scoped(storage, tenant="local", config=config)
+    provider = MockProvider()
+    result = execute_scoped(
+        storage, storage_url=url, tenant="local",
+        config={**config, "planFingerprint": preview["planFingerprint"]},
+        confirm_external_egress=True, provider=provider,
+    )
+    error_config = {**config, "rubric": {**config["rubric"], "version": "2"}}
+    error_preview = preview_scoped(storage, tenant="local", config=error_config)
+
+    class FailingProvider(MockProvider):
+        def complete(self, request):
+            raise RuntimeError("synthetic provider failure")
+
+    failed = execute_scoped(
+        storage, storage_url=url, tenant="local",
+        config={**error_config, "planFingerprint": error_preview["planFingerprint"]},
+        confirm_external_egress=True, provider=FailingProvider(),
+    )
+    assert failed["status"] == "error"
+    storage.close()
+
+    async def request():
+        app = create_app(storage=url, tenant_id="local")
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            exact = await client.post("/api/scoped/preview", json=config,
+                                      headers={"X-Verdict-Setup": token})
+            exact_error = await client.post("/api/scoped/preview", json=error_config,
+                                            headers={"X-Verdict-Setup": token})
+            changed_criterion = await client.post("/api/scoped/preview", json={
+                **config, "rubric": {**config["rubric"], "dimensions": [{
+                    "name": "completion", "description": "A different synthetic criterion",
+                }]},
+            }, headers={"X-Verdict-Setup": token})
+            denied = await client.post("/api/scoped/preview", json=config)
+        foreign = create_app(storage=url, tenant_id="foreign")
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=foreign),
+                                     base_url="http://testserver") as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            other_tenant = await client.post("/api/scoped/preview", json=config,
+                                             headers={"X-Verdict-Setup": token})
+        return exact, exact_error, changed_criterion, denied, other_tenant
+
+    exact, exact_error, changed_criterion, denied, other_tenant = asyncio.run(request())
+    assert exact.status_code == 200
+    assert exact.json()["savedResult"]["resultId"] == result["resultId"]
+    assert exact.json()["savedResult"]["dimensions"] == result["dimensions"]
+    assert exact_error.json()["savedResult"]["resultId"] == failed["resultId"]
+    assert exact_error.json()["savedResult"]["status"] == "error"
+    assert changed_criterion.status_code == other_tenant.status_code == 200
+    assert changed_criterion.json().get("savedResult") is None
+    assert other_tenant.json().get("savedResult") is None
+    assert denied.status_code == 403
+    assert provider.calls == 1
+
+    storage = SQLiteStorage(str(path))
+    storage.replace_agent_run_bundle(replace(
+        bundle, turns=(replace(bundle.turns[0], final_response_redacted="I read the file. Additional detail."),),
+    ))
+    storage.close()
+    after_change = asyncio.run(request())[0]
+    assert after_change.status_code == 200
+    assert after_change.json().get("savedResult") is None
+
+
+def test_adjacent_turn_review_previews_only_two_turns_in_large_run_and_saves_cited_result(tmp_path):
+    path = tmp_path / "adjacent-turns.db"
+    url = f"sqlite:///{path}"
+    storage = SQLiteStorage(str(path))
+    original = _bundle()
+    turns = tuple(replace(
+        original.turns[0], turn_id=f"turn-{index}", sequence=index,
+        started_at=original.turns[0].started_at + timedelta(minutes=index),
+        ended_at=original.turns[0].ended_at + timedelta(minutes=index),
+        user_request_redacted=f"Request {index}",
+        final_response_redacted=f"Answer {index}",
+        progress_redacted=("early progress " + "x" * 700 + " latest progress update"
+                           if index == 21 else None),
+    ) for index in range(22))
+    excluded = replace(original.events[0], event_id="older-event", turn_id="turn-19",
+                       occurred_at=turns[19].started_at)
+    included = replace(original.events[1], event_id="selected-event", turn_id="turn-20", sequence=0,
+                       occurred_at=turns[20].started_at)
+    storage.replace_agent_run_bundle(replace(original, turns=turns, events=(excluded, included)))
+    config = {**_config("turn_window"), "turnId": "turn-21"}
+
+    async def preview_request():
+        transport = httpx.ASGITransport(app=create_app(storage=url, tenant_id="local"))
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            response = await client.post("/api/scoped/preview", json=config,
+                                         headers={"X-Verdict-Setup": token})
+            return response
+
+    response = asyncio.run(preview_request())
+    assert response.status_code == 200
+    preview = response.json()
+    assert preview["plannedCalls"] == 1
+    evidence = preview["evidencePreview"]
+    assert evidence["turnId"] == "turn-21"
+    assert evidence["evidenceReferences"] == ["turn:turn-20", "turn:turn-21", "event:selected-event"]
+    assert "Request 20" in evidence["query"] and "Request 21" in evidence["query"]
+    assert "Request 19" not in evidence["query"] and "Request 0" not in evidence["query"]
+    assert "not proof of silence" in evidence["query"]
+    assert "latest progress update" in evidence["response"]
+    assert "earlier recorded progress omitted" in evidence["response"]
+    assert "early progress" not in evidence["response"]
+    assert "Answer 20" in evidence["response"] and "Answer 21" in evidence["response"]
+    assert "older-event" not in str(evidence)
+    assert preview_scoped(storage, tenant="local", config=_config())["plannedCalls"] == 0
+    result = execute_scoped(
+        storage, storage_url=url, tenant="local",
+        config={**config, "planFingerprint": preview["planFingerprint"]},
+        confirm_external_egress=True, provider=MockProvider("[turn:turn-20] [turn:turn-21]"),
+    )
+    assert result["scope"] == "turn_window"
+    assert result["turnId"] == "turn-21"
+    assert result["criterionDescriptions"] == {
+        "completion": "Did the recorded work meet the stated task?",
+    }
+    assert result["dimensions"][0]["evidenceReferences"] == ["turn:turn-20", "turn:turn-21"]
+    saved = ControlStore(url).history("local", "scoped_evaluation", result["resultId"])
+    assert saved[0]["payload"]["criterionDescriptions"] == result["criterionDescriptions"]
+    queued = schedule_scoped_once(
+        storage, storage_url=url, tenant="local",
+        config={**config, "planFingerprint": preview["planFingerprint"]},
+        max_estimated_usd=1, confirm_persistent_egress=True,
+    )
+    assert ControlStore(url).history("local", "scheduled_evaluation", queued["jobId"])[0]["payload"]["config"]["turnId"] == "turn-21"
+    replay_provider = MockProvider("[turn:turn-20]")
+    assert run_scheduled_once(url, tenant="local", provider=replay_provider)["resultId"] == result["resultId"]
+    assert replay_provider.calls == 0
+    storage.replace_agent_run_bundle(replace(
+        original, turns=(*turns[:-2], replace(turns[-2], final_response_redacted="Answer 20. More detail"), turns[-1]),
+        events=(excluded, included),
+    ))
+    with pytest.raises(ValueError, match="no longer current"):
+        execute_scoped(storage, storage_url=url, tenant="local",
+                       config={**config, "planFingerprint": preview["planFingerprint"]},
+                       confirm_external_egress=True, provider=MockProvider())
+    storage.close()
+
+
+def test_adjacent_turn_review_rejects_first_missing_and_incomplete_selected_turn(tmp_path):
+    path = tmp_path / "adjacent-invalid.db"
+    storage = SQLiteStorage(str(path))
+    original = _bundle()
+    second = replace(original.turns[0], turn_id="turn-b", sequence=1,
+                     user_request_redacted="Please correct that answer")
+    storage.replace_agent_run_bundle(replace(original, turns=(original.turns[0], second)))
+    for turn_id in ("turn-a", "fabricated"):
+        with pytest.raises((ValueError, KeyError)):
+            preview_scoped(storage, tenant="local",
+                           config={**_config("turn_window"), "turnId": turn_id})
+    storage.replace_agent_run_bundle(replace(
+        original, turns=(original.turns[0], replace(second, response_truncated=True))))
+    preview = preview_scoped(storage, tenant="local",
+                             config={**_config("turn_window"), "turnId": "turn-b"})
+    assert preview["plannedCalls"] == 0
+    assert preview["unavailableReason"] == "turn_content_partial"
+    storage.close()
+
+
+def test_adjacent_turn_review_withholds_when_earlier_capture_limit_affects_window(tmp_path):
+    path = tmp_path / "adjacent-capture-limit.db"
+    storage = SQLiteStorage(str(path))
+    original = _bundle()
+    turns = (
+        original.turns[0],
+        replace(original.turns[0], turn_id="turn-b", sequence=1),
+        replace(original.turns[0], turn_id="turn-c", sequence=2),
+    )
+    limit = replace(original.events[0], provenance="verdict:capture_limit")
+    storage.replace_agent_run_bundle(replace(original, turns=turns, events=(limit,)))
+    preview = preview_scoped(storage, tenant="local",
+                             config={**_config("turn_window"), "turnId": "turn-c"})
+    assert preview["plannedCalls"] == 0
+    assert preview["unavailableReason"] == "source_capture_partial"
+    storage.close()
+
+
+def test_partial_run_allows_only_fixed_text_followup_review(tmp_path):
+    path = tmp_path / "followup-text.db"
+    url = f"sqlite:///{path}"
+    storage = SQLiteStorage(str(path))
+    original = _bundle()
+    first = replace(original.turns[0], user_request_redacted="Summarize the result",
+                    final_response_redacted="The result is ready")
+    second = replace(first, turn_id="turn-b", sequence=1,
+                     user_request_redacted="That did not answer my request; summarize the result",
+                     final_response_redacted="I will revise it")
+    marker = replace(original.events[0], provenance="verdict:capture_limit")
+    storage.replace_agent_run_bundle(replace(original, turns=(first, second), events=(marker,)))
+    config = {key: value for key, value in _config("followup_text").items() if key != "rubric"}
+    config["turnId"] = "turn-b"
+
+    async def preview_request(payload):
+        app = create_app(storage=url, tenant_id="local")
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                    base_url="http://testserver") as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            return await client.post("/api/scoped/preview", json=payload,
+                                     headers={"X-Verdict-Setup": token})
+
+    generic = preview_scoped(storage, tenant="local",
+                             config={**_config("turn_window"), "turnId": "turn-b"})
+    assert generic["plannedCalls"] == 0
+    response = asyncio.run(preview_request(config))
+    assert response.status_code == 200
+    preview = response.json()
+    assert preview["plannedCalls"] == 1
+    assert preview["rubric"]["dimensions"] == ["correction"]
+    evidence = preview["evidencePreview"]
+    assert evidence["coverageBasis"] == "recorded_text_only"
+    assert evidence["sourceCoveragePartial"] is True
+    assert evidence["evidenceReferences"] == ["turn:turn-a", "turn:turn-b"]
+    assert "Summarize the result" in evidence["query"]
+    assert "That did not answer" in evidence["query"]
+    assert "The result is ready" in evidence["response"]
+    assert "I will revise it" not in str(evidence)
+    assert "contract" not in str(evidence)
+    assert asyncio.run(preview_request({**config, "rubric": _config()["rubric"]})).status_code == 400
+    with pytest.raises(KeyError):
+        preview_scoped(storage, tenant="other", config=config)
+
+    class CorrectionProvider(MockProvider):
+        def complete(self, request):
+            self.calls += 1
+            return CompletionResponse(text=(
+                '{"correction":{"reasoning":"[turn:turn-a] [turn:turn-b] show a recorded '
+                'correction, without proving agent fault","verdict":"FAIL"}}'
+            ), input_tokens=10, output_tokens=10)
+
+    provider = CorrectionProvider()
+    result = execute_scoped(storage, storage_url=url, tenant="local",
+                            config={**config, "planFingerprint": preview["planFingerprint"]},
+                            confirm_external_egress=True, provider=provider)
+    assert provider.calls == 1
+    assert result["scope"] == "followup_text"
+    assert result["turnId"] == "turn-b"
+    assert result["dimensions"][0]["verdict"] == "fail"
+    assert result["dimensions"][0]["evidenceReferences"] == ["turn:turn-a", "turn:turn-b"]
+    assert ControlStore(url).history("local", "scoped_evaluation", result["resultId"])
+    storage.replace_agent_run_bundle(replace(original, turns=(replace(first,
+        final_response_redacted="The result is ready, with added detail"), second), events=(marker,)))
+    with pytest.raises(ValueError, match="no longer current"):
+        execute_scoped(storage, storage_url=url, tenant="local",
+                       config={**config, "planFingerprint": preview["planFingerprint"]},
+                       confirm_external_egress=True, provider=CorrectionProvider())
+    storage.close()
+
+
+def test_text_followup_requires_complete_bounded_adjacent_text(tmp_path):
+    original = _bundle()
+    second = replace(original.turns[0], turn_id="turn-b", sequence=1,
+                     user_request_redacted="Please correct the answer")
+    config = {key: value for key, value in _config("followup_text").items() if key != "rubric"}
+    storage = SQLiteStorage(str(tmp_path / "followup-text-missing-pair.db"))
+    storage.replace_agent_run_bundle(original)
+    with pytest.raises((KeyError, ValueError)):
+        preview_scoped(storage, tenant="local", config={**config, "turnId": "turn-b"})
+    storage.close()
+    for index, changed in enumerate((replace(original.turns[0], response_state=EvidenceState.MISSING,
+                            final_response_redacted=None),
+                    replace(original.turns[0], response_truncated=True),
+                    replace(original.turns[0], final_response_redacted="x" * 9_000))):
+        storage = SQLiteStorage(str(tmp_path / f"followup-text-invalid-{index}.db"))
+        storage.replace_agent_run_bundle(replace(original, turns=(changed, second)))
+        preview = preview_scoped(storage, tenant="local",
+                                 config={**config, "turnId": "turn-b"})
+        assert preview["plannedCalls"] == 0, (changed, preview)
+        storage.close()
+
+
+def test_text_followup_queued_review_rechecks_fixed_criterion(tmp_path):
+    path = tmp_path / "followup-text-queued.db"
+    url = f"sqlite:///{path}"
+    storage = SQLiteStorage(str(path))
+    original = _bundle()
+    second = replace(original.turns[0], turn_id="turn-b", sequence=1,
+                     user_request_redacted="That answer missed my request; please correct it")
+    marker = replace(original.events[0], provenance="verdict:capture_limit")
+    storage.replace_agent_run_bundle(replace(original, turns=(original.turns[0], second),
+                                           events=(marker,)))
+    config = {key: value for key, value in _config("followup_text").items() if key != "rubric"}
+    config["turnId"] = "turn-b"
+    preview = preview_scoped(storage, tenant="local", config=config)
+    approved = {**config, "planFingerprint": preview["planFingerprint"]}
+    async def queue_request():
+        app = create_app(storage=url, tenant_id="local")
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                    base_url="http://testserver") as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            return await client.post("/api/scoped/schedule", json={
+                **approved, "maxEstimatedUsd": 1,
+                "confirmPersistentExternalEgress": True,
+            }, headers={"X-Verdict-Setup": token})
+
+    response = asyncio.run(queue_request())
+    assert response.status_code == 200, response.text
+    job = response.json()
+    assert job["state"] == "pending"
+    assert run_scheduled_once(url, tenant="other", provider=MockProvider())["status"] == "idle"
+
+    class CorrectionProvider(MockProvider):
+        def complete(self, request):
+            self.calls += 1
+            return CompletionResponse(text=(
+                '{"correction":{"reasoning":"[turn:turn-a] [turn:turn-b] record an '
+                'explicit correction","verdict":"FAIL"}}'
+            ), input_tokens=10, output_tokens=10)
+
+    provider = CorrectionProvider()
+    result = run_scheduled_once(url, tenant="local", provider=provider)
+    assert provider.calls == 1
+    assert result["resultId"]
+    assert result["status"] == "completed"
+    assert preview_scoped(storage, tenant="local", config=config,
+                          storage_url=url)["savedResult"]["resultId"] == result["resultId"]
+    storage.close()
+
+
 def test_session_evaluation_covers_two_runs_and_rejects_stale_append(tmp_path):
     path = tmp_path / "session-evaluation.db"
     url = f"sqlite:///{path}"
@@ -918,6 +1400,7 @@ def test_destination_change_invalidates_consent_and_midcall_change_invalidates_r
                 self.mutation_error = repr(exc)
             return super().complete(request)
 
+    monkeypatch.delenv("ANTHROPIC_BASE_URL")
     current = preview_scoped(storage, tenant="local", config=config)
     provider = MutatingProvider()
     result = execute_scoped(storage, storage_url=url, tenant="local",

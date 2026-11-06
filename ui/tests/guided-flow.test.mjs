@@ -7,12 +7,32 @@ test("unmatched tool outcomes are evidence gaps rather than recorded failures", 
   assert.equal(isEvidenceGap({ code: "tool_outcomes_incomplete", severity: "warning" }), true);
 });
 
+test("a partial local source is a coverage gap before monitoring setup", () => {
+  const gap = { code: "source_capture_partial", severity: "warning", runs: 1,
+    runIds: ["local-run"] };
+  assert.equal(isEvidenceGap(gap), true);
+  const current = { ...analyzed([gap]), scope: {
+    complete: false, analyzedRuns: 1, availableRuns: 1, partialRuns: 1,
+  } };
+  assert.equal(nextAction({ meta: meta(1, 0), insights: current }).id, "inspect_gaps");
+  assert.equal(nextAction({ meta: meta(1, 0), insights: { ...current,
+    findings: [gap, { code: "business_outcome_failed", severity: "error", runs: 1,
+      runIds: ["other-run"] }],
+  } }).id, "review_findings");
+});
+
 test("next check estimate requires a live worker and current durable due revision", () => {
   const plan = { revision: 2, payload: { intervalHours: 24 } };
   const control = { worker: { status: "recent" }, nextDue: {
     scheduleRevision: 2, nextDueAt: "2026-10-19T10:00:00+00:00",
   }, lastCycle: { state: "completed", trigger: "manual" } };
   assert.equal(expectedNextCheck(plan, control), "2026-10-19T10:00:00.000Z");
+  assert.equal(expectedNextCheck(plan, { ...control,
+    lastWorkerCycle: { state: "started", scheduleRevision: 2 } }), null);
+  assert.equal(expectedNextCheck(plan, { ...control,
+    lastCycle: { state: "started", trigger: "manual" },
+    lastWorkerCycle: { state: "completed", scheduleRevision: 2 } }),
+  "2026-10-19T10:00:00.000Z");
   assert.equal(expectedNextCheck(plan, { ...control, worker: { status: "stale" } }), null);
   assert.equal(expectedNextCheck({ ...plan, revision: 3 }, control), null);
   assert.equal(expectedNextCheck(plan, { ...control, nextDue: { ...control.nextDue, nextDueAt: "bad time" } }), null);
@@ -58,6 +78,17 @@ test("historical findings remain inspectable without displacing monitoring setup
   assert.doesNotMatch(`${configured.title} ${configured.description}`, /new alert|recurring issue/i);
 });
 
+test("recorded failures take priority over optional model-call setup after checks run", () => {
+  const action = nextAction({ meta: meta(12, 10), insights: analyzed([
+    { code: "business_outcome_failed", severity: "error", runs: 3,
+      runIds: ["run-1", "run-2", "run-3"] },
+  ]), control: { documents: [{ kind: "schedule", documentId: "daily", state: "active" }],
+    worker: { status: "recent" }, openIssues: 0,
+    lastCycle: { state: "completed", trigger: "worker" } } });
+  assert.equal(action.id, "review_findings");
+  assert.match(action.description, /linked evidence/i);
+});
+
 test("a current historical finding stays visible after the worker runs without a new notice", () => {
   const configured = { documents: [{ kind: "schedule", documentId: "daily", state: "active" }],
     worker: { status: "recent" }, openIssues: 0,
@@ -79,6 +110,69 @@ test("a current historical finding stays visible after the worker runs without a
     control: configured }).id, "analyze");
 });
 
+test("a current linked explicit outcome failure comes before initial monitoring setup", () => {
+  const finding = { code: "business_outcome_failed", severity: "error", runs: 1,
+    runIds: ["run-1"] };
+  const current = { ...analyzed([finding]), scope: { availableRuns: 3 } };
+  const action = nextAction({ meta: meta(3, 0), insights: current, control: {
+    documents: [], openIssues: 0,
+  } });
+  assert.equal(action.id, "review_findings");
+  assert.match(action.description, /linked evidence/i);
+  assert.equal(nextAction({ meta: meta(4, 0), insights: current }).id, "analyze");
+  assert.equal(nextAction({ meta: meta(3, 0), insights: analyzed([]) }).id, "plan");
+  assert.equal(nextAction({ meta: meta(3, 0), insights: analyzed([{
+    ...finding, runIds: [],
+  }]) }).id, "plan");
+  assert.equal(nextAction({ meta: meta(3, 0), insights: analyzed([{
+    code: "event_capture_partial", severity: "warning", runs: 1, runIds: ["run-1"],
+  }]) }).id, "inspect_gaps");
+});
+
+test("a linked recorded test failure leads to evidence before optional setup", () => {
+  const finding = { code: "test_failed", severity: "error", runs: 1,
+    runIds: ["failed-run"] };
+  const current = { ...analyzed([finding]), scope: { availableRuns: 3 } };
+  assert.equal(nextAction({ meta: meta(3, 0), insights: current }).id,
+    "review_findings");
+  assert.equal(nextAction({ meta: meta(4, 0), insights: current }).id,
+    "analyze");
+  assert.equal(nextAction({ meta: meta(3, 0), insights: analyzed([
+    { ...finding, runIds: [] },
+  ]) }).id, "plan");
+  assert.equal(nextAction({ meta: meta(3, 0), insights: analyzed([
+    { code: "tool_error", severity: "error", runs: 1, runIds: ["tool-run"] },
+  ]) }).id, "plan");
+  const local = { ...meta(3, 0), agentRunSources: [{ sourceKind: "codex" }] };
+  assert.equal(nextAction({ meta: local, insights: current }).id, "review_findings");
+  assert.equal(nextAction({ meta: { ...local, evidenceRevision: 2 },
+    insights: { ...current, analysisState: { status: "completed", verifiedRevision: 1 } } }).id, "analyze");
+});
+
+test("Home lead does not show an unexplained subset count beside total issue types", () => {
+  const action = nextAction({ meta: meta(5, 0), insights: analyzed([
+    { code: "test_failed", severity: "error", runs: 2, runIds: ["run-1", "run-2"] },
+    { code: "tool_error", severity: "error", runs: 1, runIds: ["run-3"] },
+  ]) });
+  assert.equal(action.id, "review_findings");
+  assert.equal(action.title, "Inspect recorded failures");
+  assert.match(action.description, /other recorded issues/i);
+  assert.doesNotMatch(action.title, /\d/);
+});
+
+test("a linked thumbs-down rating leads to evidence review before setup", () => {
+  const rating = { code: "negative_feedback_recorded", severity: "warning", runs: 1,
+    runIds: ["rated-run"] };
+  const action = nextAction({ meta: meta(1, 0), insights: analyzed([rating]), control: {
+    documents: [], openIssues: 0,
+  } });
+  assert.equal(action.id, "review_findings");
+  assert.match(action.title, /feedback/i);
+  assert.equal(nextAction({ meta: meta(1, 0), insights: analyzed([{
+    ...rating, runIds: [],
+  }]) }).id, "plan");
+});
+
 test("a gap-only current analysis directs inspection before recurring setup", () => {
   const gap = { code: "event_capture_partial", severity: "warning", runs: 1,
     runIds: ["run-1"] };
@@ -94,6 +188,20 @@ test("a gap-only current analysis directs inspection before recurring setup", ()
   assert.equal(nextAction({ meta: meta(8, 0), insights: analyzed([gap]),
     control: { documents: [{ kind: "schedule", documentId: "daily", state: "active" }],
       worker: { status: "stale" } } }).id, "run_cycle");
+});
+
+test("partial analysis without findings remains a first-class Home action", () => {
+  const partial = { analysisState: { status: "completed" },
+    scope: { complete: false, analyzedRuns: 6, availableRuns: 8, partialRuns: 1 },
+    findings: [] };
+  const action = nextAction({ meta: meta(8, 0), insights: partial });
+  assert.equal(action.id, "inspect_partial");
+  assert.match(`${action.title} ${action.description}`, /partial|incomplete/i);
+  assert.doesNotMatch(`${action.title} ${action.description}`, /healthy|no issues/i);
+  assert.equal(nextAction({ meta: meta(8, 0), insights: { ...partial,
+    scope: { complete: true, analyzedRuns: 8, availableRuns: 8, partialRuns: 0 } } }).id, "plan");
+  assert.equal(nextAction({ meta: meta(8, 0), insights: { ...partial,
+    findings: [{ code: "tool_error", severity: "error", runs: 1, runIds: ["run-a"] }] } }).id, "plan");
 });
 
 test("a current monitor alert takes priority over historical findings", () => {
@@ -180,6 +288,25 @@ test("saved schedules and collecting monitors never masquerade as healthy monito
   const configured = { documents: [{ kind: "schedule", documentId: "daily", state: "active" }], worker: { status: "stale" } };
   assert.equal(monitoringStatus({ active: { snapshot: { comparison: { status: "no_alert" }, manifest: { prospective_open: false } } } }, configured).id, "saved");
   assert.equal(monitoringStatus(null, { ...configured, worker: { status: "recent" } }).id, "worker_recent");
+  const current = { ...configured,
+    documents: [{ kind: "schedule", documentId: "daily", state: "active", revision: 3 }],
+    worker: { status: "recent" },
+    lastCycle: { state: "completed", trigger: "worker", scheduleRevision: 3 },
+    lastWorkerCycle: { state: "completed", trigger: "worker", scheduleRevision: 3 } };
+  assert.equal(monitoringStatus(null, current).id, "checked");
+  assert.equal(monitoringStatus(null, { ...current,
+    lastWorkerCycle: { state: "completed", trigger: "worker", scheduleRevision: 2 } }).id,
+  "worker_recent");
+  assert.equal(monitoringStatus(null, { ...current,
+    lastCycle: { state: "completed", trigger: "manual", scheduleRevision: 3 } }).id, "checked");
+  assert.equal(monitoringStatus(null, { ...current,
+    lastCycle: { state: "completed", trigger: "manual", scheduleRevision: 3 },
+    lastWorkerCycle: { state: "failed", trigger: "worker", scheduleRevision: 3,
+      failureCode: "analysis_error" } }).id, "worker_check_failed");
+  assert.equal(nextAction({ meta: meta(2, 0), insights: analyzed(), control: { ...current,
+    lastCycle: { state: "completed", trigger: "manual", scheduleRevision: 3 },
+    lastWorkerCycle: { state: "failed", trigger: "worker", scheduleRevision: 3,
+      failureCode: "analysis_error" } } }).id, "worker_check_failed");
   assert.equal(monitoringStatus(null, { ...configured, worker: { status: "recent" },
     lastCycle: { state: "failed", failureCode: "analysis_error" } }).id, "check_failed");
   assert.equal(monitoringStatus(null, { ...configured, worker: { status: "recent" },
@@ -207,4 +334,12 @@ test("retained open issues remain the next action after source data expires", ()
   assert.equal(action.id, "review_issues");
   assert.match(action.title, /1 recorded issue/);
   assert.match(action.description, /recorded issue and any available run evidence/);
+});
+
+test("call-only capture offers inspection without requiring drift setup", () => {
+  const action = nextAction({ meta: { monitorEligibleCalls: 10, totalAgentRuns: 0 },
+    control: { documents: [] }, insights: { analysisState: { status: "completed" },
+      findings: [], scope: { complete: true } } });
+  assert.equal(action.id, "review_calls");
+  assert.match(action.description, /without activating drift/);
 });

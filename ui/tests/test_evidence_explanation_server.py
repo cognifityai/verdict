@@ -73,6 +73,14 @@ class Provider:
 def test_turn_event_and_trace_previews_are_bounded_redacted_and_tenant_scoped(tmp_path):
     path = tmp_path / "explain.db"
     storage = _store(path)
+    [bundle] = storage.list_agent_run_bundles("local")
+    storage.replace_agent_run_bundle(replace(
+        bundle, turns=(replace(bundle.turns[0],
+                               progress_redacted="\n".join(
+                                   f"2026-10-17T00:{index:02d}:00Z · progress update {index}"
+                                   for index in range(20)
+                               )),),
+    ))
     url = f"sqlite:///{path}"
     for selection in ({"scope": "turn", "runId": "run", "turnId": "turn"},
                       {"scope": "event", "runId": "run", "eventId": "event"},
@@ -82,6 +90,12 @@ def test_turn_event_and_trace_previews_are_bounded_redacted_and_tenant_scoped(tm
         assert preview["plannedCalls"] == 1
         assert len(str(preview["evidencePreview"]).encode()) <= 8_000
         assert "sk-test-secret-canary" not in str(preview)
+        if selection["scope"] == "turn":
+            excerpt = preview["evidencePreview"]["turns"][0]["recordedProgressExcerpt"]
+            assert "progress update 19" in excerpt
+            assert "earlier recorded progress omitted" in str(preview["evidencePreview"])
+            assert "progress update 0" not in excerpt
+            assert excerpt.splitlines()[1].startswith("2026-10-17T")
     with pytest.raises(KeyError):
         preview_explanation(storage, storage_url=url, tenant="other",
                             config={"scope": "trace", "traceId": "trace", "provider": "anthropic", "focus": "failure"})
@@ -522,6 +536,26 @@ def test_explanation_requires_current_preview_budget_and_approval_then_replays(t
     storage.close()
 
 
+def test_custom_endpoint_has_no_selected_explanation_list_price(tmp_path, monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://synthetic-judge.example/v1")
+    path = tmp_path / "custom-price.db"
+    storage = _store(path)
+    url = f"sqlite:///{path}"
+    config = {"scope": "event", "runId": "run", "eventId": "event",
+              "provider": "anthropic", "focus": "failure"}
+    preview = preview_explanation(storage, storage_url=url, tenant="local", config=config)
+    assert preview["plannedCalls"] == 1
+    assert preview["upperStaticListPriceUsd"] is None
+    provider = Provider()
+    with pytest.raises(ValueError, match="over budget"):
+        run_explanation(storage, storage_url=url, tenant="local",
+                        config={**config, "planFingerprint": preview["planFingerprint"],
+                                "maxEstimatedUsd": 100},
+                        confirm_external_egress=True, provider_adapter=provider)
+    assert provider.calls == 0
+    storage.close()
+
+
 def test_provider_failure_has_safe_actionable_result_and_remains_one_attempt(tmp_path):
     class RejectedProvider:
         name = "anthropic"
@@ -564,7 +598,9 @@ def test_provider_error_categories_never_persist_raw_messages():
         message = _safe_call_error(failure)
         assert expected in message
         assert "sk-test-secret-canary" not in message
+        assert "Try later" not in message
     assert "sk-test-secret-canary" not in _safe_call_error(RuntimeError("sk-test-secret-canary"))
+    assert "another approved attempt" not in _safe_call_error(RuntimeError("synthetic failure"))
 
 
 def test_setup_draft_uses_aggregate_eligibility_and_rejects_ineligible_choice(tmp_path):
@@ -575,6 +611,7 @@ def test_setup_draft_uses_aggregate_eligibility_and_rejects_ineligible_choice(tm
     assert preview["evidencePreview"]["eligibleChecks"] == ["agent_runs", "model_calls"]
     assert "Find the answer" not in str(preview)
     assert "sk-test-secret-canary" not in str(preview)
+    assert "Use provider_model grouping only for model_calls" in preview["messages"][0]["content"]
 
     class DraftProvider(Provider):
         def complete(self, request):
@@ -590,6 +627,18 @@ def test_setup_draft_uses_aggregate_eligibility_and_rejects_ineligible_choice(tm
                              confirm_external_egress=True, provider_adapter=provider)
     assert result["draft"]["check"] == "model_calls"
     assert provider.calls == 1
+    reopened = preview_explanation(storage, storage_url=url, tenant="local", config=selection)
+    assert reopened["savedResult"]["resultId"] == result["resultId"]
+    assert reopened["savedResult"]["draft"] == result["draft"]
+    assert preview_explanation(storage, storage_url=url, tenant="other",
+                               config=selection).get("savedResult") is None
+    assert preview_explanation(storage, storage_url=url, tenant="local",
+                               config={**selection, "provider": "openai"}).get("savedResult") is None
+    storage.insert_trace(Trace(trace_id="changed-setup-evidence", tenant_id="local",
+                               started_at=datetime(2026, 10, 17, tzinfo=timezone.utc),
+                               ended_at=datetime(2026, 10, 17, tzinfo=timezone.utc)))
+    assert preview_explanation(storage, storage_url=url, tenant="local",
+                               config=selection).get("savedResult") is None
     storage.close()
 
     empty_path = tmp_path / "empty.db"
@@ -602,7 +651,28 @@ def test_setup_draft_uses_aggregate_eligibility_and_rejects_ineligible_choice(tm
                                        "maxEstimatedUsd": 1},
                                confirm_external_egress=True, provider_adapter=DraftProvider())
     assert rejected["status"] == "error"
+    assert preview_explanation(empty, storage_url=empty_url, tenant="local",
+                               config=selection)["savedResult"]["status"] == "error"
     empty.close()
+
+    reserved_path = tmp_path / "reserved.db"
+    reserved_storage = SQLiteStorage(str(reserved_path))
+    reserved_url = f"sqlite:///{reserved_path}"
+    pending = preview_explanation(reserved_storage, storage_url=reserved_url,
+                                  tenant="local", config=selection)
+    ControlStore(reserved_url).append("local", kind="evidence_explanation",
+                                      document_id=pending["planFingerprint"], state="reserved",
+                                      payload={"status": "outcome_unknown"}, expected_revision=None)
+    reopened_pending = preview_explanation(reserved_storage, storage_url=reserved_url,
+                                           tenant="local", config=selection)
+    assert reopened_pending["savedResult"]["status"] == "outcome_unknown"
+    provider = DraftProvider()
+    assert run_explanation(reserved_storage, storage_url=reserved_url, tenant="local",
+                           config={**selection, "planFingerprint": pending["planFingerprint"],
+                                   "maxEstimatedUsd": 1}, confirm_external_egress=True,
+                           provider_adapter=provider)["status"] == "outcome_unknown"
+    assert provider.calls == 0
+    reserved_storage.close()
 
 
 def test_cohort_draft_requires_genuine_calls_and_validates_reviewed_thresholds(tmp_path):

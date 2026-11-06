@@ -18,6 +18,7 @@ from verdict.evidence import (
     AgentRunBundle,
     AgentTurn,
     ExecutionStatus,
+    PrivacyClassification,
     SourceSession,
 )
 from verdict.storage import SQLiteStorage
@@ -26,7 +27,8 @@ NOW = datetime(2026, 10, 19, tzinfo=timezone.utc)
 
 
 def _run(path, *, tenant, run_id, run_status="completed", result_status=None,
-         is_error=None, agent_name="worker", source_kind="verdict_sdk"):
+         is_error=None, agent_name="worker", source_kind="verdict_sdk",
+         service_name="app", environment="prod"):
     store = SQLiteStorage(str(path))
     started = NOW + timedelta(minutes=len(run_id))
     source_id = f"source-{tenant}-{run_id}"
@@ -45,7 +47,8 @@ def _run(path, *, tenant, run_id, run_status="completed", result_status=None,
                           sha256(source_id.encode()).hexdigest(), started, started),
             AgentRun(run_id, source_id, tenant, started, ExecutionStatus(run_status),
                      started + timedelta(seconds=1) if terminal else None,
-                     agent_name=agent_name, service_name="app", environment="prod"),
+                     agent_name=agent_name, service_name=service_name,
+                     environment=environment),
             (AgentTurn(f"turn-{tenant}-{run_id}", run_id, 0, started,
                        ExecutionStatus(run_status),
                        started + timedelta(seconds=1) if terminal else None),),
@@ -80,6 +83,250 @@ def _append_tool_records(path, *, tenant, run_id, calls, results):
         ))
     finally:
         store.close()
+
+
+def _append_reported_outcomes(path, *, tenant, run_id, reports):
+    store = SQLiteStorage(str(path))
+    try:
+        bundle = store.get_agent_run_bundle(tenant, run_id)
+        assert bundle is not None
+        events = list(bundle.events)
+        for name, value in reports:
+            sequence = len(events)
+            events.append(AgentEvent(
+                f"{run_id}-outcome-{sequence}", bundle.turns[0].turn_id,
+                sequence, NOW, AgentEventType.OUTCOME,
+                ExecutionStatus.FAILED if value is False else ExecutionStatus.COMPLETED,
+                "test-application", {"name": name, "value": value, "source": "application"},
+                privacy_classification=PrivacyClassification.REDACTED,
+            ))
+        store.replace_agent_run_bundle(AgentRunBundle(
+            bundle.session, bundle.run, bundle.turns, tuple(events),
+        ))
+    finally:
+        store.close()
+
+
+def _append_capture_limit(path, *, tenant, run_id):
+    store = SQLiteStorage(str(path))
+    try:
+        bundle = store.get_agent_run_bundle(tenant, run_id)
+        assert bundle is not None
+        marker = AgentEvent(
+            f"{run_id}-capture-limit", bundle.turns[0].turn_id, len(bundle.events), NOW,
+            AgentEventType.CONTEXT, ExecutionStatus.UNKNOWN,
+            "verdict:capture_limit", {"name": "source_events_omitted"},
+            PrivacyClassification.METADATA,
+        )
+        store.replace_agent_run_bundle(AgentRunBundle(
+            bundle.session, bundle.run, bundle.turns, (*bundle.events, marker),
+        ))
+    finally:
+        store.close()
+
+
+def test_explicit_business_outcome_preview_keeps_missing_and_conflicting_runs_out_of_rate(tmp_path):
+    path = tmp_path / "business.db"
+    for run_id in ("one", "two", "three", "four", "five", "six"):
+        _run(path, tenant="customer-a", run_id=run_id, agent_name="support")
+    _append_reported_outcomes(path, tenant="customer-a", run_id="one",
+                              reports=[("resolved", True)])
+    _append_reported_outcomes(path, tenant="customer-a", run_id="two",
+                              reports=[("resolved", False)])
+    _append_reported_outcomes(path, tenant="customer-a", run_id="three",
+                              reports=[("resolved", True), ("resolved", False)])
+    _append_reported_outcomes(path, tenant="customer-a", run_id="four",
+                              reports=[("resolved", "unknown")])
+    _append_reported_outcomes(path, tenant="customer-a", run_id="five",
+                              reports=[("escalated", True)])
+    _run(path, tenant="customer-b", run_id="FOREIGN-RUN", agent_name="support")
+    _append_reported_outcomes(path, tenant="customer-b", run_id="FOREIGN-RUN",
+                              reports=[("resolved", False)])
+
+    result = build_run_outcome_preview(f"sqlite:///{path}", tenant="customer-a")
+    outcome = next(group for group in result["reportedOutcomes"]["groups"]
+                   if group["outcomeName"] == "resolved")
+    assert outcome["terminalRuns"] == 6
+    assert outcome["recordedTrue"] == 1
+    assert outcome["recordedFalse"] == 1
+    assert outcome["unclear"] == 2
+    assert outcome["missing"] == 2
+    assert outcome["examples"]["recordedFalse"] == ["two"]
+    assert "comparison" not in outcome
+    assert "recentRuns" not in outcome
+    assert "FOREIGN-RUN" not in json.dumps(result)
+
+
+def test_incomplete_outcome_evidence_is_unclear_in_preview_and_api(tmp_path):
+    path = tmp_path / "incomplete-outcomes.db"
+    for run_id in ("a", "b", "c", "d", "e", "f"):
+        _run(path, tenant="customer-a", run_id=run_id)
+    _append_reported_outcomes(path, tenant="customer-a", run_id="a",
+                              reports=[("resolved", True)])
+    _append_reported_outcomes(path, tenant="customer-a", run_id="b",
+                              reports=[("", True)])
+    _append_reported_outcomes(path, tenant="customer-a", run_id="c",
+                              reports=[("alice@example.com", True)])
+    _append_reported_outcomes(path, tenant="customer-a", run_id="e",
+                              reports=[("resolved", True), ("", False)])
+    _append_capture_limit(path, tenant="customer-a", run_id="d")
+
+    url = f"sqlite:///{path}"
+    result = build_run_outcome_preview(url, tenant="customer-a")
+    group = next(item for item in result["reportedOutcomes"]["groups"]
+                 if item["outcomeName"] == "resolved")
+    assert (group["recordedTrue"], group["unclear"], group["missing"]) == (2, 3, 1)
+
+
+    async def request():
+        app = create_app(storage=url, tenant_id="customer-a")
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                    base_url="http://testserver") as client:
+            return await client.get("/api/agent-run-outcomes")
+
+    response = asyncio.run(request())
+    assert response.status_code == 200
+    assert response.json()["reportedOutcomes"]["groups"] == result["reportedOutcomes"]["groups"]
+
+
+def test_capture_limited_run_without_a_criterion_does_not_claim_complete_absence(tmp_path):
+    path = tmp_path / "capture-limited-outcome.db"
+    _run(path, tenant="customer-a", run_id="limited")
+    _append_capture_limit(path, tenant="customer-a", run_id="limited")
+    _run(path, tenant="customer-a", run_id="complete")
+    _run(path, tenant="customer-b", run_id="FOREIGN")
+    _append_capture_limit(path, tenant="customer-b", run_id="FOREIGN")
+
+    url = f"sqlite:///{path}"
+    result = build_run_outcome_preview(url, tenant="customer-a")["reportedOutcomes"]
+    assert result["groups"] == []
+    assert result["sampledTerminalRuns"] == 2
+    assert result["outcomeUncertainRuns"] == 1
+
+    async def request():
+        app = create_app(storage=url, tenant_id="customer-a")
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                    base_url="http://testserver") as client:
+            return await client.get("/api/agent-run-outcomes")
+
+    response = asyncio.run(request())
+    assert response.status_code == 200
+    assert response.json()["reportedOutcomes"]["outcomeUncertainRuns"] == 1
+    assert "FOREIGN" not in response.text
+
+
+def test_redacted_service_identity_cannot_merge_distinct_outcome_groups(tmp_path):
+    path = tmp_path / "redacted-identity.db"
+    for prefix, service, value, count in (
+        ("early", "alpha@example.invalid", True, 5),
+        ("later", "bravo@example.invalid", False, 6),
+        ("safe", "checkout", True, 5),
+    ):
+        for index in range(count):
+            run_id = f"{prefix}-{index}"
+            _run(path, tenant="tenant-a", run_id=run_id, service_name=service)
+            _append_reported_outcomes(path, tenant="tenant-a", run_id=run_id,
+                                      reports=[("resolved", value)])
+    _run(path, tenant="tenant-b", run_id="foreign", service_name="checkout")
+    _append_reported_outcomes(path, tenant="tenant-b", run_id="foreign",
+                              reports=[("resolved", False)])
+    url = f"sqlite:///{path}"
+    result = build_run_outcome_preview(url, tenant="tenant-a")
+    preview = result["reportedOutcomes"]
+    assert preview["status"] == "ready"
+    assert preview["identityUnavailableReports"] == 11
+    assert len(preview["groups"]) == 1
+    assert preview["groups"][0]["serviceName"] == "checkout"
+    assert preview["groups"][0]["recordedTrue"] == 5
+    assert preview["groups"][0]["recordedFalse"] == 0
+    assert result["execution"]["identityUnavailableRuns"] == 11
+    assert result["identityUnavailableRuns"] == 11
+    assert result["execution"]["totals"]["completed"] == 16
+    assert result["totals"]["unclear"] == 16
+    assert all(group["serviceName"] != "<EMAIL>"
+               for group in result["execution"]["groups"] + result["groups"])
+
+    async def request():
+        app = create_app(storage=url, tenant_id="tenant-a")
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                    base_url="http://testserver") as client:
+            response = await client.get("/api/agent-run-outcomes")
+            return response
+
+    response = asyncio.run(request())
+    assert response.status_code == 200
+    assert response.json()["reportedOutcomes"]["identityUnavailableReports"] == 11
+    assert all(group["serviceName"] != "<EMAIL>"
+               for group in response.json()["reportedOutcomes"]["groups"])
+
+
+def test_redacted_outcome_fields_and_hash_markers_are_not_comparable(tmp_path):
+    path = tmp_path / "ambiguous-outcomes.db"
+    cases = (
+        ("hashed", "service <EMAIL:123456abcdef>", "resolved"),
+        ("named", "checkout", "<EMAIL> resolved"),
+        ("plain", "checkout", "resolved"),
+    )
+    for prefix, service, name in cases:
+        for index in range(5):
+            run_id = f"{prefix}-{index}"
+            _run(path, tenant="tenant-a", run_id=run_id, service_name=service)
+            _append_reported_outcomes(path, tenant="tenant-a", run_id=run_id,
+                                      reports=[(name, True)])
+    result = build_run_outcome_preview(f"sqlite:///{path}", tenant="tenant-a")
+    outcomes = result["reportedOutcomes"]
+    assert outcomes["status"] == "ready"
+    assert outcomes["identityUnavailableReports"] == 10
+    assert len(outcomes["groups"]) == 1
+    assert outcomes["groups"][0]["outcomeName"] == "resolved"
+
+    only_withheld = tmp_path / "only-ambiguous.db"
+    for index in range(5):
+        run_id = f"withheld-{index}"
+        _run(only_withheld, tenant="tenant-a", run_id=run_id,
+             service_name="service <EMAIL:123456abcdef>")
+        _append_reported_outcomes(only_withheld, tenant="tenant-a", run_id=run_id,
+                                  reports=[("resolved", True)])
+    withheld = build_run_outcome_preview(f"sqlite:///{only_withheld}",
+                                         tenant="tenant-a")["reportedOutcomes"]
+    assert withheld["status"] == "ready"
+    assert withheld["identityUnavailableReports"] == 5
+    assert withheld["groups"] == []
+
+
+def test_reported_outcome_failure_example_keeps_exact_run_identity(tmp_path):
+    path = tmp_path / "identity.db"
+    ids = (
+        "alpha@example.invalid", "bravo@example.invalid", "delta@example.invalid",
+        "echoo@example.invalid", "foxtt@example.invalid",
+    )
+    for run_id in ids:
+        _run(path, tenant="tenant-a", run_id=run_id)
+        _append_reported_outcomes(path, tenant="tenant-a", run_id=run_id,
+                                  reports=[("completed", run_id != ids[0])])
+    _run(path, tenant="tenant-b", run_id="foreign@example.invalid")
+    _append_reported_outcomes(path, tenant="tenant-b",
+                              run_id="foreign@example.invalid",
+                              reports=[("completed", False)])
+
+    async def request():
+        app = create_app(storage=f"sqlite:///{path}", tenant_id="tenant-a")
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+        ) as client:
+            return await client.get("/api/agent-run-outcomes")
+
+    response = asyncio.run(request())
+    assert response.status_code == 200
+    group = next(item for item in response.json()["reportedOutcomes"]["groups"]
+                 if item["outcomeName"] == "completed")
+    assert group["examples"]["recordedFalse"] == [ids[0]]
+    assert "recentRuns" not in group
+    assert "foreign@example.invalid" not in response.text
+
+
+
+
 
 
 def test_preview_requires_matched_call_outcomes_before_clean_recorded_coverage(tmp_path):

@@ -1,6 +1,6 @@
 # Tester Onboarding
 
-Goal: get from installation to a first local report on your own approved agent or LLM application evidence. The current beta includes guided Home, worker status, and optional selected-evidence AI explanations. Usage, run reports, Turn analysis, and deterministic suggestions are key-free. An external judge requires your own provider key and explicit evidence approval.
+Goal: get from installation to a first local report on your own approved agent or LLM application evidence. This guide describes the source checkout; the published beta may lag until the next release. Usage, run reports, Turn analysis, and deterministic suggestions are key-free. An external judge requires your own provider key and explicit evidence approval.
 
 ## 0. Prerequisites
 
@@ -60,8 +60,10 @@ in this guide.
 verdict
 ```
 
-An empty loopback-only UI opens at Setup. Select **Claude Code / Codex**, review
-the detected directories, choose **Preview sources**, then explicitly approve
+An empty loopback-only UI opens at Home. Choose **Set up capture**, then select
+**Claude Code / Codex** under **Settings → Data Sources**. The first source
+choice shows live SDK instrumentation; local-history import is the adjacent
+choice. Review the local directories, choose **Preview sources**, then explicitly approve
 the capture. Bounded redacted content capture is on by default; disable it only
 for an intentional metadata-only run. The server rejects capture when those
 exact paths were not previewed in the current process. Source files are
@@ -226,7 +228,7 @@ It is not an all-time store audit. A dashboard restart clears the in-process
 job status.
 
 The Agent runs view shows source sessions, typed turns and observable events,
-tool/command failures, completion evidence, possible repeated-tool loops, and
+tool/command failures, completion evidence, and
 what cannot be evaluated. A failure count is shown only when the source reports
 success or failure for that event type; otherwise it reads **Not reported by
 source**. Current Codex tool output and Claude Code shell commands carry no exit
@@ -243,6 +245,56 @@ linked events let you inspect the evidence behind the review. A partial
 capture is labeled, including when an earlier capture-limit marker means a
 later Turn has no stored events. No judge request is sent. The review shows observable
 behavior; it cannot reconstruct private reasoning or prove task correctness.
+
+In **Investigation → Agent runs**, select **Review recent follow-ups** to see
+the newest 20 answered prior Turns followed by an ended recorded request in
+the same run. The later answer may be missing. Use **Load older follow-ups**
+to continue through earlier pairs. Each card shows a
+short redacted prior answer and follow-up request; selecting it opens the
+later Turn and its recorded pair. These are review candidates, not
+detected mistakes. Reopening the list refreshes it after a new capture.
+Claude Code import excludes rows explicitly marked as system prompts or
+non-human task notifications from human request Turns. Older rows without
+origin metadata remain eligible, so inspect the recorded pair before labeling.
+Rescan a previously imported source to apply this correction to older captured
+Turns. Saved review history remains, but a pair that is no longer eligible
+disappears from the current review list. Any saved cluster assignment tied to
+a changed model call blocks that source's rescan until the registry is repaired,
+including an inactive version that could be activated later.
+The list counts your Correction, ordinary, and unclear labels among the loaded
+candidates, alongside stale and unreviewed pairs and their recorded time
+range. Older pages are separate snapshots, so this is not a failure rate for
+all sessions.
+Its cards show recorded fields; the optional evaluation preview may still
+withhold a judge call for partial source coverage or excessive evidence.
+Selecting a recent follow-up opens its local review above the Turn transcript,
+keeps the earlier full Turn transcript collapsed, and moves to the review after
+the recorded pair loads,
+with the recorded pair and **Correction**, **Ordinary follow-up**, and **Unclear**
+buttons. An exact link with `review=followup` does the same. For an ordinary
+Turn link, select **Review this follow-up locally** to open it. The optional
+**Review this turn and prior answer** control starts a separate AI evaluation.
+The human label needs no provider key. Verdict saves the label with
+an evidence fingerprint and marks it stale if the pair changes. It is not an
+automatic issue count or a claim about the agent's cause of failure. The
+review shows all captured, redacted text in those three fields; the source
+may have omitted context outside them.
+
+For a Turn after the first, **Review this turn and prior answer** offers an
+optional, approved external review of those two recorded Turns. Preview the
+bounded redacted requests, answers, timestamps, and typed events before any
+provider call. The default check asks about a user correction; choose another
+behavior check or edit the criterion if needed. A grade is a cited judge
+opinion, not an automatic finding. Missing required adjacent Turn text prevents
+the call. If events were omitted or the later answer is missing, but both
+recorded requests and the prior answer are complete, the blocked preview offers
+**Review recorded text only** with a
+fixed correction check. Its separate preview excludes events and later work,
+labels the text-only scope and any source gap, and needs fresh approval. It cannot establish task
+quality or why the user followed up.
+Its fixed criterion asks the judge to return UNCLEAR for ambiguous pairs, but
+the model may misclassify them. Review the cited answer before recording your
+own label; judge results do not become automatic correction counts.
 
 Agent timelines are stored as normalized source/run/turn/event rows. Genuine
 model calls link to existing `Trace` records rather than copying their content
@@ -273,6 +325,10 @@ its token basis is unknown; the figure states how many turns it covers.
 The static table recognizes GPT-6 Astra, Sol, 6.1 Sol, and Luna at their
 standard short-context text rates; it does not infer a price for other GPT-6
 variants or service tiers.
+When a saved analysis has no recorded finding but its run or trace scan is
+partial, Home leads with **Inspect incomplete evidence**. Its issue metric
+shows the analyzed run count and partial-history count where available. This
+is a coverage prompt, not a claim that the omitted activity had no issues.
 **Home** shows a 30-day UTC Agent Turn usage chart when turns report token totals. If only recorded issue events are present, Home links the latest issue day directly to its evidence instead of drawing a zero-token chart; Performance details retains the issue-event timeline. If provider calls report token totals but Agent Turns do not, Home shows a separately labeled model-call token chart with call-count coverage; selecting its day opens that UTC date's calls. Call totals are not assigned to agent sessions. On the agent-turn chart, a red marker identifies a UTC date with recorded issue events, including retained selected recent local-history facts; selecting it shows a bounded issue count and linked example runs. Retained-fact examples open their first-seen exact event links. Issue dates use event time, while token dates use turn start time. A partial bounded issue scan withholds the count. If the stored-event scan is complete but local source history is incomplete or unverified, the selected day shows recorded issues as a lower bound and retains exact evidence links, without claiming a full-day total. For an older local import without a source checkpoint, that uncertainty applies to the displayed window until a compatible rescan verifies the source. A partial local-history import with omitted events makes issue counts lower bounds across the displayed window; an admitted complete projection can clear that uncertainty after its event proof and bounded scan. When all Turns and token totals were captured, an event-only cap does not block token comparisons; missing Turns can block days intersecting their verified parsed Turn interval, while an unverified source can affect the displayed window. Empty captured days with partial source coverage remain selectable to inspect that uncertainty. If Home has no token totals or issue examples to chart, use **Inspect incomplete day** to open the day detail. **Performance details** expands the agent-turn drilldown. A turn
 is assigned to the UTC date when it started. Choose a day to see sessions active
 on that date and their model breakdown; choose a session to see its largest
@@ -287,11 +343,33 @@ session, and marks a partial scan. Child runs sharing a logical session ID are
 grouped for this view. The observed first-to-last Turn span includes pauses and
 tool work, so it is not provider latency. Genuine model-call latency remains in
 the LLM Trace performance view when the source supplies it.
+Analyze session also links the longest recorded Turn span in the scanned window
+to that exact Turn in Investigation, including when it is beyond the first
+run-detail page, and shows how many Turns had usable start and end times. This is
+elapsed execution time, including pauses and tools; it does not establish that
+the agent was silent or that the user had to chase an update.
+For newly captured Codex history, the run's Turn detail can show a redacted
+sample of recent recorded commentary messages with timestamps. It retains the
+latest 12 messages, marks omitted earlier updates, and stays within 4 KB per
+Turn. A later capture of the same active Codex history refreshes this sample
+from the verified source revision. Older captures, metadata-only capture,
+Claude history, and SDK runs may not have that field. The displayed records
+do not establish what the user saw or whether an unrecorded update occurred.
 The selected session also opens one combined evidence report and an optional
 session-wide evaluation preview. That report is independent of the 30-day chart
 window and includes up to 20 runs, 20 turns, and 80 events. Larger sessions are
 marked partial and link to their individual runs; external evaluation is then
 unavailable for the whole session.
+For an eligible session or run, **Evaluate** offers one review focus: task
+completion, repeated correction, unsupported completion, status follow-up, or
+requested brevity. The criterion remains editable. Preview shows the bounded
+evidence and destination before any optional judge call, and changing the focus
+or criterion requires a new preview and approval. These are review questions,
+not automatic detections; absent progress messages or completion evidence can
+leave the answer unclear.
+Built-in criteria define PASS as supported desired behavior and FAIL as a
+supported problem. Review the exact criterion text before approving a call;
+changing it creates a different evaluator identity for later comparisons.
 From **Explain this day**, **Inspect session** moves focus to that session's
 detail after it loads. **Investigation → Agent runs** loads a bounded run
 list first and expands only the selected run, so opening the list does not
@@ -343,6 +421,11 @@ Provider instrumentation captures the LLM calls. Add `agent_run` and `turn`
 contexts where the application knows the execution boundary, then record only
 the observable facts it can establish:
 
+The example below uses a local SQLite store. For a separate production process,
+pass the dashboard's protected PostgreSQL storage URL and tenant ID explicitly
+to `verdict.init`; the SDK does not read those environment variables by itself.
+The **Settings → Data Sources** starter shows the environment-backed form.
+
 ```python
 import verdict
 
@@ -386,6 +469,12 @@ Use a boolean `False` only when the application can authoritatively establish
 that the business outcome failed. Verdict retains that fact in the event status
 and surfaces a deterministic `business_outcome_failed` finding, even in
 metadata-only capture. Non-boolean outcome values remain descriptive.
+
+For outcome grouping, use stable, nonsensitive
+service, environment, agent, outcome-name, and outcome-source labels. If any
+part of that recorded identity is redacted, Verdict shows the excluded report
+count and withholds the group because distinct labels could collapse to
+the same redaction marker.
 
 The same contexts work with `async with`. Tool exceptions and run/turn timeout,
 cancellation, failure, or completion are recorded without replacing the
@@ -447,9 +536,12 @@ verdict-collector --host 0.0.0.0 --port 8765
 ```
 
 Terminate TLS before the collector. It accepts bounded `verdict-capture-v1`
-NDJSON batches containing `agent`, standalone `trace`, and `span` records and
-returns durable replay-safe acknowledgements. Older `0.1.0b2` collectors do
-not accept standalone records. On each producer host, start the shipper
+standalone `trace` and `span` records, old v1 agent records, and
+`verdict-capture-v2` agent records with optional Turn progress. Upgrade the
+collector before upgrading producers that emit v2 records; older collectors
+reject the new agent payload. The collector returns durable replay-safe
+acknowledgements. Older `0.1.0b2` collectors do not accept standalone records.
+On each producer host, start the shipper
 with the same protected secret:
 
 ```bash
@@ -681,8 +773,11 @@ storage failure stops the run.
 Use the storage API's tenant-scoped `list_conversations` cursor to review these
 records. In **Evaluate → Evaluator Lab**, select **Conversation or reply** to
 upload a JSON rubric and preview a bounded page. The reviewer sees excluded
-conversations and partial reply coverage. A judge call requires explicit
-approval of the previewed provider, endpoint, and call count. Only clean,
+conversations and partial reply coverage. A dashboard judge run requires
+explicit approval of the previewed provider, endpoint, call count, and a
+user-set maximum static list-price estimate. An unpriced model or custom
+endpoint cannot run through this priced dashboard path. The static estimate
+is a planning limit, not a guarantee of the provider's actual invoice. Only clean,
 closed snapshots with a completed assistant reply after a user message are
 eligible. Correcting a transcript invalidates its previous grades. The example
 rubrics are at `examples/telemetry/conversation-rubric.example.json` and
@@ -852,20 +947,25 @@ estimate. Needs a provider key (the judge makes calls).
 An older event with malformed stored attributes does not stop a scheduled notice scan. Verdict still reports a separately recorded failure or timeout status and continues to later events; a completed event with unknown attributes is not counted as a failure. Deterministic analysis of that malformed evidence can still fail, and readiness marks the cycle failed rather than implying the whole check succeeded.
 
 
-After capture, start with the dashboard's **Home** or **Monitoring**. Home leads to reviewed setup when no recurring plan exists; historical finding counts remain inspectable in the issue panel. Once a plan is configured, a current analysis leads from Home to those linked finding cards even when no post-activation recurring notice exists; older findings do not become new alerts. Monitoring also links saved deterministic findings to affected runs before recurring checks are configured. It labels saved-analysis coverage and freshness separately from post-activation recurring notices, and offers a direct local refresh when the saved analysis is stale. The suggested plan runs deterministic analysis once before a recurring schedule is saved, and a failed selected check does not unlock saving. A new guided plan disables consumption of pending approved judge jobs by default; enabling that advanced option can send bounded evidence to the selected provider and incur its separately approved cost. Existing schedules without this option retain their earlier judge behavior until reviewed. Open recurring notices are paged separately from acknowledged and dismissed history. Explicit event failures link to exact run events; terminal `failed` or `timed_out` Agent Run statuses link to the run without claiming task failure or drift. An authorized operator can attach exact IDs of a later explicitly positive event to an event notice as recheck evidence; the UI links both events and keeps review state separate. For SDK command and test events, an optional matching application-supplied `check_id` is shown as check identity on a linked later pass; it does not prove the same inputs, task, or recovery. Without that ID, the relationship remains unknown. Earlier imported failures remain in saved analysis findings. A run investigation leads with a positively recorded tool failure or timeout before advice about call/result records that cannot be paired one-to-one; both link to the affected evidence. Neither advice establishes cause or later recovery. Other recorded failures without a specific recommendation offer an evidence-linked recheck. The inbox works without an LLM key or external notification destination. A saved schedule still needs a running `verdict-service` worker for future cycles. Readiness reports heartbeat, worker-only next eligibility time, and latest cycle outcome separately; a started cycle without a finish is unknown, while a manual success does not prove a recurring worker ran. Pause stops later worker cycles without stopping its heartbeat; a cycle already selected may finish. Resume requires a fresh local check, and a legacy plan without an explicit judge choice defaults to no paid judging when reviewed for resume. The one-shot worker rejects a saved revision that changed or paused before its cycle lock was acquired. A transient cycle or initial heartbeat error does not terminate the continuous worker; cycle failures record a cooldown, and presence is shown only after a successful heartbeat write.
+After capture, start with the dashboard's **Home** or **Monitoring**. Home leads to linked recorded outcome or test-failure evidence before optional setup when present. Local follow-up review is an optional investigation action and is not a setup task. Historical finding counts remain inspectable in the issue panel. Once a plan is configured, a current analysis leads from Home to those linked finding cards even when no post-activation recurring notice exists; older findings do not become new alerts. Monitoring also links saved deterministic findings to affected runs before recurring checks are configured. It labels saved-analysis coverage and freshness separately from post-activation recurring notices, and offers a direct local refresh when the saved analysis is stale. The suggested plan runs deterministic analysis once before a recurring schedule is saved, and a failed selected check does not unlock saving. A new guided plan disables consumption of pending approved judge jobs by default; enabling that advanced option can send bounded evidence to the selected provider and incur its separately approved cost. Existing schedules without this option retain their earlier judge behavior until reviewed. Open recurring notices are paged separately from acknowledged and dismissed history. Explicit event failures link to exact run events; terminal `failed` or `timed_out` Agent Run statuses link to the run without claiming task failure or drift. An authorized operator can attach exact IDs of a later explicitly positive event to an event notice as recheck evidence; the UI links both events and keeps review state separate. For SDK command and test events, an optional matching application-supplied `check_id` is shown as check identity on a linked later pass; it does not prove the same inputs, task, or recovery. Without that ID, the relationship remains unknown. Earlier imported failures remain in saved analysis findings. A run investigation leads with a positively recorded tool failure or timeout before advice about call/result records that cannot be paired one-to-one; both link to the affected evidence. Neither advice establishes cause or later recovery. Other recorded failures without a specific recommendation offer an evidence-linked recheck. The inbox works without an LLM key or external notification destination. A saved schedule still needs a running `verdict-service` worker for future cycles. Readiness reports heartbeat, worker-only next eligibility time, and latest cycle outcome separately; a started cycle without a finish is unknown, while a manual success does not prove a recurring worker ran. Pause stops later worker cycles without stopping its heartbeat; a cycle already selected may finish. Resume requires a fresh local check, and a legacy plan without an explicit judge choice defaults to no paid judging when reviewed for resume. The one-shot worker rejects a saved revision that changed or paused before its cycle lock was acquired. A transient cycle or initial heartbeat error does not terminate the continuous worker; cycle failures record a cooldown, and presence is shown only after a successful heartbeat write.
 
 New suggested plans leave local history directory fields blank. **Run once and review** analyzes already captured evidence unless you enter a Claude Code or Codex directory to import or rescan. Source labels on stored runs do not establish a directory on the dashboard machine. Existing saved paths are preserved; common directories appear only as input placeholders.
 
 From a linked finding, **Compare runs with the same recorded source and agent** opens a bounded filtered list with its run count. Matching labels help find related evidence; they do not establish a shared cause or task. Existing source-only and agent-only run links remain available.
 
-For a command or test notice with a recorded check ID, **Find later matching checks** suggests bounded later positive events to inspect. Select **Use these IDs** to open the attachment form with editable run and event IDs, then review the evidence before attaching; a candidate is not automatically linked or treated as recovery. The search examines at most 200 later event records, so its partial result may omit a pass. If you attach one or more later passing events to a notice, Monitoring's next step is to compare them with the failed event and verify which, if any, covers the same work. With no attached pass, follow the source-specific recheck shown there.
+For a command or test notice with a recorded check ID, **Find later matching checks** suggests bounded later positive events to inspect. Open the candidate's evidence, then select **Attach this recorded pass** to request a link. The search itself never attaches evidence, and a linked pass is not treated as recovery. The search examines at most 200 later event records, so its partial result may omit a pass; the manual ID form remains available for a known pass outside that scan. If you attach one or more later passing events to a notice, Monitoring's next step is to compare them with the failed event and verify which, if any, covers the same work. With no attached pass, follow the source-specific recheck shown there.
 The **Open run evidence** and **Open recheck evidence** links retain the exact notice in the Investigation URL. That view reloads the current notice and its valid attached passes for the configured tenant, so the failed and later evidence can be compared after a page refresh; it never labels an attached pass as overall recovery.
 
 Capture starts when `verdict.init()` installs the supported provider wrappers.
 By default, bounded redacted content from calls that pass the sampling policy is
 persisted during capture; `capture_content=False` is the explicit metadata-only
 mode. With `buffered_writes=True`, records are queued for a background writer.
-Start the dashboard against the same store. Home opens with captured activity, monitoring status, one suggested next step, recorded issues, and token usage where Agent Turn totals exist:
+Start the dashboard against the same store. Home opens with captured activity, monitoring status, one suggested next step, recorded issues, and token usage where Agent Turn totals exist. If you open another section while the first evidence load is pending, that section remains selected after the load.
+
+Optional adjacent-turn review is available in Investigation. Read the prior
+answer and later request before choosing correction, ordinary follow-up, or
+unclear. These are review candidates, not automatically detected failures.
+Home and monitoring setup do not require these labels.
 
 ```bash
 verdict --storage sqlite:///./verdict.db
@@ -892,16 +992,26 @@ bucket against the frozen reference.
 Evaluator Lab shows NOT_EVALUABLE reasons before any model call, reads provider
 keys only from environment variables, and requires an explicit egress approval.
 For Jev, install `cognifity-verdict-eval[jev]`, set `TYPESAFE_API_KEY` in the
-dashboard process, select **Jev**, enter a versioned model ID, and preview before
-running. `jev-1.13.0` is prefilled. Moving aliases such as `jev-latest` are
+dashboard process, select **Jev**, and enter a versioned model ID to inspect its
+preview. The dashboard's dollar-limited run is unavailable for Jev because
+Verdict has no static Jev price, so its dashboard evaluation and calibration
+actions remain disabled. The standalone eval package retains its programmatic
+Jev API. `jev-1.13.0` is prefilled. Moving aliases such as `jev-latest` are
 rejected so calibration stays tied to one model version. Jev returns labels
 without explanations; Verdict does not estimate Jev charges. The existing
 Monitor statistics remain unchanged. Jev supports final Turn text but not the
 recorded tool-count option.
-If `TYPESAFE_BASE_URL` is set, the preview and approval show its effective URL;
+If `TYPESAFE_BASE_URL` is set, the preview shows its effective URL;
 Verdict pins that URL in the Jev evaluator identity and in the SDK call.
 Dashboard label-set calibration sends query/response text and the rubric without
-automatic redaction. Inspect the file before approving. Optional context is
+automatic redaction. Inspect the file before approving. The dashboard requires
+a positive approved USD limit at least as high as its static list-price bound;
+unknown-priced models and custom endpoints cannot run calibration there.
+The bound is a planning ceiling for the selected prompt and configured output
+limit, not a guarantee of the provider invoice. Spend approval uses explicitly
+listed model IDs and exact documented aliases; a custom or derivative model
+without its own listed price is unavailable for these dashboard paid actions.
+Optional context is
 ignored to match the dashboard's production judge, and labels remain local.
 Labels for context-required dimensions cannot calibrate that context-free judge.
 The stored label-set fingerprint covers the effective examples, excluding the
@@ -952,9 +1062,11 @@ cap remains available. In the same browser tab, the evaluation unit, tool-count
 option, provider, model, scope, and call cap survive a refresh in session
 storage. These preferences are not server-side; previews, cursors, egress
 approvals, and provider credentials are not saved there. Preview shows the exact
-planned calls and a rough static-price cost estimate before approval; it is
-not a billing cap because actual tokenization and provider charges can exceed
-it. Coverage
+planned calls, a rough cost estimate, and a separate conservative static
+list-price bound. A dashboard run requires a user-set maximum static estimate
+at least as large as that bound. Unpriced models and custom endpoints cannot
+use this priced dashboard path. The static limit is not a provider billing cap;
+actual charges can differ. Coverage
 is specific to the exact evaluator configuration; other evaluator results are
 kept separate. The approval screen names the exact dimensions that will be sent
 to the judge and lists context-required dimensions that cannot run because a
@@ -982,7 +1094,7 @@ If the dashboard uses a non-default `--tenant-id`, pass the same routing ID to
 `verdict-service` (for example, `--tenant-id customer-a`). The worker reads only
 that tenant's saved schedule, evidence, monitoring policy, and alert settings;
 the default remains `__verdict_local__`. A mismatched ID leaves the dashboard's
-plan without a worker cycle. Use the same store URL in both commands.
+plan without a worker cycle. Use the same store URL in both commands. If dashboard and worker start from different working directories with SQLite, use one absolute URL such as `sqlite:////absolute/path/verdict.db`; a relative URL can point to different files.
 
 Run that command from cron, systemd, Kubernetes, or another supervisor for
 production scheduling. The continuous `verdict-service` loop is also available.
@@ -1135,6 +1247,9 @@ refusal/apology/hedging signatures, operation, finish reason, tokens, latency,
 and supplied cost. Reliability, Performance, and Behavior summarize the same
 categories across the stored dataset; none of these literal checks establishes
 correctness, sentiment, or response quality.
+Long prompt, response, and error text stays out of unselected list rows. Text
+dependent facts for such a row are deferred until the exact Trace is selected;
+the list still retains captured-content and provider-error status.
 Each row uses its recorded UTC time plus relative age. A metadata-only row is
 described as a **historical metadata-only trace**: this means prompt and response
 were not captured when that trace was recorded, not that capture is currently
@@ -1160,6 +1275,12 @@ tenant (`--tenant-id` or `VERDICT_TENANT_ID`); without one, it keeps using each
 trace's stored `cluster_id`.
 
 Before a judge run exists, Evaluate reports evaluator coverage instead of an empty zero chart. Home presents captured run counts, a source-aware next step, recorded issues, and daily token usage when totals are available; with only recorded issues it links the latest issue day directly to its evidence. Its workspace context separately reports monitor-eligible model calls; Model drift setup shows eligible calls against all stored traces. Eligible calls are completed traces excluding Verdict judge and paired-replay traffic. When turn totals are missing but model calls have totals, Home uses a separately labeled model-call chart without assigning those tokens to sessions. Selecting an issue opens its run evidence; selecting a day opens contributing sessions and turns when that attribution exists. A saved recurring schedule is distinguished from a recently seen worker heartbeat, and an old historical monitor preview is never presented as an active no-alert result. Model drift setup shows prospective collection, pending evaluator results, insufficient evidence, alert, no alert, and stale reference as separate states. A grouped reference must have at least one metric within one group that meets the reviewed sample floor before activation. The comparison controls are under **Advanced comparison settings**. Groups begin with recorded source/provider/model evidence; semantic fitting remains an optional reviewed action when suitable model-call prompts exist.
+Monitoring verifies recurring execution from a completed worker check on the
+current saved plan revision and a recent worker heartbeat. A later manual
+check appears as the latest check without hiding that separate worker result;
+a failed or unfinished worker check replaces an earlier worker success. The
+readiness API exposes these as `lastCycle` and `lastWorkerCycle`, respectively.
+
 Groups also shows the latest bounded sample of recorded Agent Run execution
 statuses by exact source and agent identity. Runs without a recorded end or
 terminal status are unfinalized. If the sample contains only unfinalized runs,
@@ -1178,7 +1299,7 @@ result capture before treating the run as fully observed.
 Malformed or non-object historical tool-result attributes are also unclear
 unless the result itself explicitly reports failure or timeout.
 
-A selected session, run, turn, tool event, model call, or newly tenant-owned span can request an optional AI explanation after preview of the exact bounded redacted context, destination, and static list-price estimate. The model answer is an interpretation, not a quality grade or verified optimization. Existing ownerless span rows remain stored but are not shown in the selected-call span list or sent to AI. **Model drift setup → Advanced comparison settings** can also request an aggregate-only AI setup or cohort draft; applying it fills local controls without activating a policy. A selected call or turn can draft an editable rubric criterion, and a reviewed cluster can draft a label from bounded representatives. These optional provider paths require a key and explicit one-call approval. A rejected provider call is recorded as one attempt with safe error guidance; choose another provider or changed evidence for a new approved preview. Local deterministic analysis, usage, and monitoring setup do not require a key.
+A selected session, run, turn, tool event, model call, or newly tenant-owned span can request an optional AI explanation after preview of the exact bounded redacted context, destination, and static list-price estimate. Its answer is collapsed under **Unverified AI response**; `completed` means the provider call returned, not that a diagnosis was verified. Check linked recorded evidence before acting. Existing ownerless span rows remain stored but are not shown in the selected-call span list or sent to AI. **Model drift setup → Advanced comparison settings** can also request an aggregate-only AI setup or cohort draft; applying it fills local controls without activating a policy. A selected call or turn can draft an editable rubric criterion, and a reviewed cluster can draft a label from bounded representatives. These optional provider paths require a key and explicit one-call approval. A rejected provider call is recorded as one attempt with safe error guidance; choose another provider or changed evidence for a new approved preview. Local deterministic analysis, usage, and monitoring setup do not require a key.
 
 A mounted host that supplies the same-origin Operations adapter also exposes its action from the empty state.
 

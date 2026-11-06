@@ -20,7 +20,7 @@ const LONG_IMPORT = "Importing… Large files can take several minutes. Keep thi
 
 export function SetupWizard({ configUrl, onComplete, onNavigate, onRefresh, agentSummary = {} }) {
   const [token, setToken] = useState(null);
-  const [source, setSource] = useState("local");
+  const [source, setSource] = useState("sdk");
   const [busy, setBusy] = useState(false);
   const [busyLabel, setBusyLabel] = useState(null);
   const [result, setResult] = useState(null);
@@ -158,8 +158,8 @@ export function SetupWizard({ configUrl, onComplete, onNavigate, onRefresh, agen
   }, [root]);  // eslint-disable-line react-hooks/exhaustive-deps
 
   const sources = [
-    ["local", "Claude Code / Codex"], ["file", "Existing telemetry file"],
-    ["sdk", "Live app through SDK"], ["database", "Existing Verdict database"],
+    ["sdk", "Live app through SDK"], ["local", "Claude Code / Codex"],
+    ["file", "Existing telemetry file"], ["database", "Existing Verdict database"],
   ];
   const localKey = JSON.stringify([claudeRoot, codexRoot]);
   const importKey = JSON.stringify([filePath, fileFormat]);
@@ -276,7 +276,8 @@ export function SetupWizard({ configUrl, onComplete, onNavigate, onRefresh, agen
 
       {source === "sdk" && <section className={panel} style={style}>
         <div className="text-xs font-mono" style={{ color: "#56b6ff" }}>2 · LIVE SDK</div>
-        <pre className="mt-4 p-4 overflow-x-auto text-sm" style={{ background: "#0b0e0d" }}>{`import verdict\nverdict.init(\n    storage="sqlite:///./verdict.db",\n    capture_content=True,\n    sample_rate=1.0,\n)\n\nwith verdict.agent_run(name="support-agent", session_id=session_id) as run:\n    with run.turn(user_input=user_message) as turn:\n        answer = handle_request(user_message)\n        turn.set_output(answer)`}</pre>
+        <p className="text-sm mt-3" style={{ color: "#94a39d" }}>Set <code>VERDICT_STORAGE</code> to the same {agentSummary.storageBackend === "postgresql" ? "PostgreSQL DSN" : "SQLite URL with an absolute database path"} used by this dashboard and <code>VERDICT_TENANT_ID</code> to the dashboard startup tenant ID (<code>__verdict_local__</code> by default). For SQLite, use the same absolute SQLite database path in both processes, for example <code>sqlite:////absolute/path/verdict.db</code>; relative paths can resolve to different files from different working directories. Keep credentials in the environment, not in source code. An app on another machine needs a shared PostgreSQL store or the documented file transport.</p>
+        <pre className="mt-4 p-4 overflow-x-auto text-sm" style={{ background: "#0b0e0d" }}>{`import os\nimport verdict\n\nverdict.init(\n    storage=os.environ["VERDICT_STORAGE"],\n    tenant_id=os.environ["VERDICT_TENANT_ID"],\n    capture_content=True,\n    sample_rate=1.0,\n)\n\nwith verdict.agent_run(name="support-agent", session_id=session_id) as run:\n    with run.turn(user_input=user_message) as turn:\n        answer = handle_request(user_message)\n        turn.set_output(answer)`}</pre>
         <p className="text-sm mt-3" style={{ color: "#94a39d" }}>Supported provider calls inside the turn link to genuine LLM Traces automatically. Record tool, command, test, retry, feedback, and business-outcome evidence through the same turn. A few runs appear immediately; drift still needs reviewed reference and current cohorts.</p>
         <button onClick={() => onComplete("sdk")} className="mt-4 border px-4 py-2 text-sm">I ran a few calls — refresh Verdict</button>
       </section>}

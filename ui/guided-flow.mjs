@@ -6,7 +6,7 @@ const pausedSchedule = (control) => (control?.documents || []).find(
   (document) => document.kind === "schedule" && document.documentId === "daily"
     && document.state === "disabled",
 );
-const EVIDENCE_GAP_CODES = new Set(["run_status_unknown", "response_not_evaluable", "event_capture_partial", "tool_outcomes_incomplete"]);
+const EVIDENCE_GAP_CODES = new Set(["run_status_unknown", "response_not_evaluable", "event_capture_partial", "source_capture_partial", "tool_outcomes_incomplete"]);
 
 export function isEvidenceGap(finding) {
   return EVIDENCE_GAP_CODES.has(finding?.code);
@@ -22,7 +22,7 @@ export function cycleVerifiedForPlan(result, plan) {
 export function expectedNextCheck(plan, control) {
   const due = control?.nextDue;
   if (!plan || !due || control?.worker?.status !== "recent" || due.scheduleRevision !== plan.revision
-      || (control?.lastCycle?.state === "started" && control.lastCycle.trigger === "worker")) return null;
+      || control?.lastWorkerCycle?.state === "started") return null;
   const timestamp = Date.parse(due.nextDueAt);
   return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : null;
 }
@@ -73,17 +73,30 @@ export function monitoringStatus(monitor, control) {
     id: "alert", title: "A monitored change needs review",
     description: "Open the comparison to see the metric, cohort sizes, and supporting calls.",
   };
-  if (pausedSchedule(control)) return {
-    id: "paused", title: "Recurring checks are paused",
-    description: "The saved plan will not run again until you review and resume it. A check already in progress when paused may still finish.",
-  };
-  if (schedule(control) && control?.lastCycle?.state === "failed") return {
+  const configured = schedule(control) || pausedSchedule(control);
+  if (configured && control?.lastCycle?.state === "failed") return {
     id: "check_failed", title: "Latest check did not complete",
     description: `The latest ${control.lastCycle.trigger === "manual" ? "manual" : "worker"} cycle recorded ${String(control.lastCycle.failureCode || "a check failure").replaceAll("_", " ")}. Review the plan and retry before relying on monitoring.`,
   };
-  if (schedule(control) && control?.lastCycle?.state === "started") return {
+  if (configured && control?.lastCycle?.state === "started") return {
     id: "check_unfinished", title: "Check completion not recorded",
     description: "A cycle started, but no completion was recorded. Inspect the worker and rerun a check before relying on monitoring.",
+  };
+  const activePlan = schedule(control);
+  const currentWorker = Number.isInteger(activePlan?.revision)
+    && control?.lastWorkerCycle?.scheduleRevision === activePlan.revision
+    ? control.lastWorkerCycle : null;
+  if (currentWorker?.state === "failed") return {
+    id: "worker_check_failed", title: "Latest worker check failed",
+    description: `The worker recorded ${String(currentWorker.failureCode || "a check failure").replaceAll("_", " ")} on this plan. Review the evidence and rerun the worker check.`,
+  };
+  if (currentWorker?.state === "started") return {
+    id: "worker_check_unfinished", title: "Worker check completion not recorded",
+    description: "The worker started a check on this plan, but no completion was recorded. Inspect the worker before relying on monitoring.",
+  };
+  if (pausedSchedule(control)) return {
+    id: "paused", title: "Recurring checks are paused",
+    description: "The saved plan will not run again until you review and resume it. A check already in progress when paused may still finish.",
   };
   if (schedule(control) && control?.worker?.status !== "recent") return {
     id: "saved", title: "Schedule saved; worker not verified",
@@ -100,6 +113,13 @@ export function monitoringStatus(monitor, control) {
   if (active) return {
     id: "waiting", title: "Monitoring needs more evidence",
     description: "Review comparison coverage before treating this policy as a health signal.",
+  };
+  const saved = schedule(control);
+  if (saved && control?.worker?.status === "recent"
+      && control?.lastWorkerCycle?.state === "completed"
+      && control.lastWorkerCycle.scheduleRevision === saved.revision) return {
+    id: "checked", title: "Recurring checks ran on this plan",
+    description: "The worker completed a check on the current plan revision. Review its findings and confirm the next cycle after it is due.",
   };
   if (schedule(control)) return {
     id: "worker_recent", title: "Recurring worker seen recently",
@@ -124,13 +144,28 @@ export function nextAction({ meta = {}, insights = null, monitor = null, control
   };
   const alerts = monitoringStatus(monitor, control);
   if (alerts.id === "alert") return { ...alerts, id: "monitor_alert" };
-  if (["check_failed", "check_unfinished"].includes(alerts.id)) return alerts;
+  if (["check_failed", "check_unfinished", "worker_check_failed", "worker_check_unfinished"].includes(alerts.id)) return alerts;
+  if (alerts.id === "paused") return { ...alerts, id: "resume" };
+  const findings = insights?.findings || [];
+  const coverageFirst = analysisNeedsRefresh(meta, insights)
+    || (findings.some(isEvidenceGap) && !findings.some((finding) => !isEvidenceGap(finding)))
+    || (!findings.length && (insights?.scope?.complete === false || insights?.scope?.partialRuns > 0));
+  const recordedFindings = findings.filter((finding) => !isEvidenceGap(finding));
+  const explicitFailures = recordedFindings.filter((finding) => finding.severity === "error"
+    && Array.isArray(finding.runIds) && finding.runIds.length > 0
+    && ["business_outcome_failed", "test_failed", "required_step_missing", "prohibited_tool_used",
+      "response_schema_invalid"].includes(finding.code));
+  if (insights?.analysisState?.status === "completed" && !coverageFirst
+      && explicitFailures.length && !schedule(control)) return {
+    id: "review_findings",
+    title: "Inspect recorded failures",
+    description: "Open linked evidence for a failure, then review other recorded issues below, if any. These are recorded failures, not new recurring alerts.",
+  };
   if (Number(control?.openIssues) > 0) return {
     id: "review_issues",
     title: `Review ${control.openIssues} recorded issue${control.openIssues === 1 ? "" : "s"}`,
     description: "Open the issue inbox to inspect the recorded issue and any available run evidence, then choose the next check.",
   };
-  if (alerts.id === "paused") return { ...alerts, id: "resume" };
   if (!insights || insights.analysisState?.status === "never_run"
       || insights.analysisState?.status === "error") return {
     id: "analyze", title: "Analyze captured activity",
@@ -141,24 +176,37 @@ export function nextAction({ meta = {}, insights = null, monitor = null, control
     description: "Captured activity changed since these findings were saved. Refresh local analysis before choosing the next check.",
   };
   if (alerts.id === "saved") return { ...alerts, id: "run_cycle" };
-  const findings = insights.findings || [];
   if (findings.some(isEvidenceGap) && !findings.some((finding) => !isEvidenceGap(finding))) return {
     id: "inspect_gaps", title: "Inspect evidence gaps",
     description: "The current check found no recorded issue, but missing or partial evidence limits what can be concluded. Inspect those gaps before setting up recurring checks.",
+  };
+  if (!findings.length && (insights.scope?.complete === false || insights.scope?.partialRuns > 0)) return {
+    id: "inspect_partial", title: "Inspect incomplete evidence",
+    description: "No issue was recorded in the analyzed portion. Review capture and scan coverage before choosing recurring checks.",
+  };
+  if (!schedule(control) && recordedFindings.some((finding) =>
+    finding.code === "negative_feedback_recorded"
+    && Array.isArray(finding.runIds) && finding.runIds.length > 0)) return {
+    id: "review_findings",
+    title: "Review recorded user feedback",
+    description: "Inspect the linked rating and turn before choosing recurring checks or changing the workflow.",
+  };
+  if (!runs && calls && !schedule(control)) return {
+    id: "review_calls", title: "Inspect captured model calls",
+    description: "Review recorded metrics and optionally evaluate a selected call without activating drift monitoring.",
   };
   if (!schedule(control)) return {
     id: "plan", title: "Review suggested monitoring",
     description: "Review the captured evidence, run a local check, and confirm what can keep watching.",
   };
-  if (calls && !monitor?.active) return {
-    id: "monitor", title: "Preview a model-call comparison",
-    description: "Use captured calls to review baseline and current cohorts before activating a monitor.",
-  };
-  const recordedFindings = findings.filter((finding) => !isEvidenceGap(finding));
   if (recordedFindings.length) return {
     id: "review_findings",
     title: `Inspect ${recordedFindings.length} recorded finding type${recordedFindings.length === 1 ? "" : "s"}`,
-    description: "Open the linked evidence in the current analyzed scope. Some findings may be from before this plan was saved; they are not new recurring alerts.",
+    description: "Open the linked evidence where available in the current analyzed scope. Some findings may be from before this plan was saved; they are not new recurring alerts.",
+  };
+  if (calls && !monitor?.active) return {
+    id: "monitor", title: "Preview a model-call comparison",
+    description: "Use captured calls to review baseline and current cohorts before activating a monitor.",
   };
   return {
     id: "review", title: "Review the latest evidence",

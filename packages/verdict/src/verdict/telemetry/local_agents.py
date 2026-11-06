@@ -80,6 +80,9 @@ _LOCAL_FAILURE_REASONS = frozenset({
     "unsupported_history", "missing_child_agent_id", "recent_sample_limit",
     "local_source_conflict", "local_source_changed", "no_root_turns",
     "local_turn_limit", "local_source_revision_unavailable",
+    "invalid_claude_turn_identity",
+    "local_source_registry_conflict",
+    "local_source_reprojection_required",
 })
 
 
@@ -183,11 +186,14 @@ class _RawTurn:
     ended_at: datetime | None = None
     status: ExecutionStatus = ExecutionStatus.UNKNOWN
     request: str = ""
+    automatic: bool = False
     response: str = ""
     legacy_request: str = ""
     legacy_response: str = ""
     request_truncated: bool = False
     response_truncated: bool = False
+    progress: deque[str] = field(default_factory=lambda: deque(maxlen=12))
+    progress_count: int = 0
     token_usage: dict[str, int] = field(default_factory=dict)
     token_usage_basis: str = ""
     usage_invalid: bool = False
@@ -1081,6 +1087,23 @@ def _parse_codex(path: Path, *, home: Path | None) -> _ParsedHistory:
                     status=status,
                     has_content=True,
                 )
+        elif (outer == "response_item" and inner == "message"
+              and payload.get("role") == "assistant"
+              and payload.get("phase") == "commentary"
+              and occurred_at is not None):
+            content = payload.get("content")
+            if isinstance(content, list):
+                parts = [block.get("text") for item in content
+                         if (block := _mapping(item)) is not None
+                         and block.get("type") == "output_text"
+                         and isinstance(block.get("text"), str)]
+                if parts:
+                    safe = _safe_text("\n".join(parts[:8]), home=home).value
+                    note = _bounded_utf8(" ".join(safe.split()), 256)
+                    if note:
+                        line = f"{occurred_at.isoformat()} · {note}"
+                        active.progress.append(line)
+                        active.progress_count += 1
         elif outer == "event_msg" and inner in {"user_message", "item_completed"}:
             if inner == "user_message":
                 text = _safe_text(payload.get("message"), home=home)
@@ -1172,7 +1195,11 @@ def _parse_claude(path: Path, *, home: Path | None) -> _ParsedHistory:
             else:
                 session_id = root_session_id
             version = _bounded_utf8(str(row.get("version") or ""), 256)
-        is_human = (
+        origin = _mapping(row.get("origin"))
+        origin_kind = origin.get("kind") if origin is not None else None
+        turn_origin = row.get("turnOrigin")
+        turn_origin_kind = (_mapping(turn_origin) or {}).get("kind")
+        is_request_boundary = (
             row.get("type") == "user"
             and row.get("sourceToolAssistantUUID") is None
             and row.get("toolUseResult") is None
@@ -1183,20 +1210,27 @@ def _parse_claude(path: Path, *, home: Path | None) -> _ParsedHistory:
                 )
             )
         )
-        if is_human:
+        if is_request_boundary:
             if active is not None:
                 turns.append(active)
             source_id = row.get("uuid")
-            prompt = _message_text(message, home=home)
             if not isinstance(source_id, str) or occurred_at is None:
-                active = None
-                continue
+                raise ValueError("invalid_claude_turn_identity")
+            is_human = (
+                (not isinstance(origin_kind, str) or origin_kind == "human")
+                and row.get("promptSource") != "system"
+                and turn_origin not in ("task_notification", "task-notification")
+                and (not isinstance(turn_origin_kind, str)
+                     or turn_origin_kind == "human")
+            )
+            prompt = _message_text(message, home=home) if is_human else None
             active = _RawTurn(
                 source_id,
                 occurred_at,
-                request=prompt.value,
-                legacy_request=prompt.legacy_value,
-                request_truncated=prompt.truncated,
+                request=prompt.value if prompt else None,
+                automatic=not is_human,
+                legacy_request=prompt.legacy_value if prompt else None,
+                request_truncated=prompt.truncated if prompt else False,
                 event_budget=event_budget,
             )
             model_events = {}
@@ -1569,6 +1603,13 @@ def _project_turn(
     response = _redacted_turn_text(
         raw.response, truncated=raw.response_truncated,
     ) if capture_content else _BoundedText("")
+    progress = None
+    if capture_content and source_kind == "codex":
+        progress_lines = list(raw.progress)
+        omitted = raw.progress_count - len(progress_lines)
+        if omitted:
+            progress_lines.insert(0, f"[{omitted} earlier recorded updates omitted]")
+        progress = "\n".join(progress_lines)
     return AgentTurn(
         turn_id=turn_id, run_id=run_id, sequence=sequence,
         started_at=raw.started_at, ended_at=raw.ended_at, status=raw.status,
@@ -1589,6 +1630,7 @@ def _project_turn(
         token_usage_basis=raw.token_usage_basis or None,
         request_truncated=request.truncated if request.value else False,
         response_truncated=response.truncated if response.value else False,
+        progress_redacted=progress,
     ), source_turn_id
 
 
@@ -2116,6 +2158,13 @@ def capture_local_agents(
                         recent_facts=new_recent_facts,
                         historical_facts=historical_facts,
                         full_projection=full_projection,
+                        automatic_turn_ids=tuple(
+                            stable_evidence_id(
+                                "turn", source_kind, source_scope,
+                                _turn_source_identity(bundle, raw_turn),
+                            )
+                            for raw_turn in parsed.turns if raw_turn.automatic
+                        ),
                         legacy_text_upgrade=_capture_text_compatibility(
                             bundle,
                             prefix_turns,

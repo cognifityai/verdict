@@ -37,9 +37,9 @@ success, or retry causality when the source history does not establish it.
 - **Shadow traffic**: sampled traffic mirrored to another model for comparison.
 - **Case set**: reviewed runnable inputs and expected behavior, versioned before
   a baseline/candidate comparison.
-- **Scoped evaluation**: one bounded session, run, or tool action sent to an
-  explicitly approved judge destination; a scheduled evaluation is a separate
-  one-attempt approval.
+- **Scoped evaluation**: one bounded session, run, adjacent-turn window, or
+  tool action sent to an explicitly approved judge destination; a scheduled
+  evaluation is a separate one-attempt approval.
 
 ## Architecture Principles
 

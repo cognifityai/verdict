@@ -25,7 +25,14 @@ def _write_zst(path: Path, records: list[dict[str, object]]) -> None:
 
 def test_compressed_codex_history_is_previewed_captured_and_readable(tmp_path: Path) -> None:
     root = tmp_path / "codex"
-    _write_zst(root / "session.jsonl.zst", _codex_records())
+    records = _codex_records()
+    records[6:6] = [{
+        "timestamp": f"2026-08-30T10:01:{index + 7:02d}Z", "type": "response_item",
+        "payload": {"type": "message", "role": "assistant", "phase": "commentary",
+                    "content": [{"type": "output_text", "text":
+                                 f"Update {index}: Checking alice@example.com"}]},
+    } for index in range(20)]
+    _write_zst(root / "session.jsonl.zst", records)
     database = tmp_path / "verdict.db"
     storage = SQLiteStorage(str(database))
     try:
@@ -45,6 +52,11 @@ def test_compressed_codex_history_is_previewed_captured_and_readable(tmp_path: P
             response = client.get(f"/api/runs/{bundle.run.run_id}")
         assert response.status_code == 200
         assert response.json()["runId"] == bundle.run.run_id
+        progress = response.json()["turns"][0]["progress"]
+        assert "8 earlier recorded updates omitted" in progress
+        assert "Update 19: Checking <EMAIL>" in progress
+        assert "Update 0" not in progress
+        assert "alice@example.com" not in response.text
         repeated = capture_local_agents(storage, tenant_id="local", codex_root=root)
         assert repeated.stored == 1
         assert len(storage.list_agent_run_bundles("local")) == 1
@@ -423,6 +435,39 @@ def test_active_codex_history_can_be_archived_without_duplicate_run(
             assert len(storage.list_agent_run_bundles("local")) == 1
         finally:
             storage.close()
+
+
+def test_archived_active_codex_history_refreshes_recent_progress(tmp_path: Path) -> None:
+    root = tmp_path / "codex"
+    plain = root / "session.jsonl"
+    rows = _codex_records()[:4]
+    for index in range(13):
+        rows.append({
+            "timestamp": f"2026-08-30T10:01:{index + 4:02d}Z",
+            "type": "response_item",
+            "payload": {"type": "message", "role": "assistant", "phase": "commentary",
+                        "content": [{"type": "output_text", "text": f"update {index}"}]},
+        })
+    plain.parent.mkdir()
+    plain.write_bytes(b"".join((json.dumps(row) + "\n").encode() for row in rows))
+    storage = SQLiteStorage(str(tmp_path / "verdict.db"))
+    try:
+        assert capture_local_agents(storage, tenant_id="local", codex_root=root).stored == 1
+        rows.append({
+            "timestamp": "2026-08-30T10:01:17Z", "type": "response_item",
+            "payload": {"type": "message", "role": "assistant", "phase": "commentary",
+                        "content": [{"type": "output_text", "text": "update 13"}]},
+        })
+        archive = plain.with_suffix(".jsonl.zst")
+        _write_zst(archive, rows)
+        plain.unlink()
+        summary = capture_local_agents(storage, tenant_id="local", codex_root=root)
+        assert summary.stored == 1, summary.as_dict()
+        [bundle] = storage.list_agent_run_bundles("local")
+        assert "update 13" in (bundle.turns[0].progress_redacted or "")
+        assert "2 earlier recorded updates omitted" in bundle.turns[0].progress_redacted
+    finally:
+        storage.close()
 
 
 def test_active_history_to_partial_archive_preserves_recorded_run(

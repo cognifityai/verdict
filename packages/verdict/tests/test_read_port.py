@@ -266,8 +266,8 @@ def test_public_v1_contract_has_exact_fields_and_signatures() -> None:
     )
     assert list(inspect.signature(agent_run_read_to_json).parameters) == ["value"]
     assert AGENT_RUN_READ_SCHEMA_VERSION == "verdict.agent-run-read.v1"
-    assert AGENT_ANALYSIS_VERSION == "verdict.agent-analysis.v1"
-    assert SUPPORTED_AGENT_ANALYSIS_VERSIONS == frozenset({AGENT_ANALYSIS_VERSION})
+    assert AGENT_ANALYSIS_VERSION == "verdict.agent-analysis.v2"
+    assert SUPPORTED_AGENT_ANALYSIS_VERSIONS == frozenset({"verdict.agent-analysis.v1", AGENT_ANALYSIS_VERSION})
 
 
 def test_read_error_has_stable_public_shape() -> None:
@@ -309,7 +309,7 @@ def test_agent_run_read_accepts_every_frozen_status(status: str, ended_at: datet
     "changes",
     [
         {"schema_version": "verdict.agent-run-read.v2"},
-        {"analysis_version": "verdict.agent-analysis.v2"},
+        {"analysis_version": "verdict.agent-analysis.v3"},
         {"tenant_id": ""},
         {"tenant_id": "bad\x00tenant"},
         {"run_id": "x" * 257},
@@ -648,7 +648,7 @@ def test_analysis_v1_golden_finding_semantics() -> None:
     ).get_agent_run(tenant_id="tenant-included", run_id="run-included")
 
     assert value is not None
-    assert value.analysis_version == "verdict.agent-analysis.v1"
+    assert value.analysis_version == "verdict.agent-analysis.v2"
     assert value.finding_count == 4
     assert value.findings_truncated is False
     assert value.findings == (
@@ -659,7 +659,7 @@ def test_analysis_v1_golden_finding_semantics() -> None:
     )
 
 
-def test_analysis_v1_golden_command_test_and_loop_semantics() -> None:
+def test_analysis_v2_retains_failures_without_unverifiable_tool_identity() -> None:
     command_failure = AgentEvent(
         "command-failed",
         "turn-1",
@@ -699,17 +699,12 @@ def test_analysis_v1_golden_command_test_and_loop_semantics() -> None:
     ).get_agent_run(tenant_id="tenant-included", run_id="run-included")
 
     assert value is not None
-    assert value.analysis_version == "verdict.agent-analysis.v1"
-    assert value.finding_count == 3
+    assert value.analysis_version == "verdict.agent-analysis.v2"
+    assert value.finding_count == 2
     assert value.findings_truncated is False
     assert value.findings == (
         FindingRead("command_failed", "error", ("command-failed",)),
         FindingRead("test_failed", "error", ("test-failed",)),
-        FindingRead(
-            "possible_tool_loop",
-            "warning",
-            ("tool-loop-0", "tool-loop-1", "tool-loop-2", "tool-loop-3"),
-        ),
     )
 
 

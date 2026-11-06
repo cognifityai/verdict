@@ -40,6 +40,7 @@ class AgentCaptureService:
         historical_facts: tuple[LocalRecentFact, ...] = (),
         full_projection: LocalFullProjection | None = None,
         recent_traces: tuple[Trace, ...] = (),
+        automatic_turn_ids: tuple[str, ...] = (),
     ) -> None:
         """Use an optional built-in adapter hook for the a17 text transition."""
         capture_traces = tuple(traces)
@@ -56,6 +57,7 @@ class AgentCaptureService:
             recent_facts=recent_facts, historical_facts=historical_facts,
             full_projection=full_projection,
             recent_traces=recent_traces,
+            automatic_turn_ids=automatic_turn_ids,
         )
 
     def append(

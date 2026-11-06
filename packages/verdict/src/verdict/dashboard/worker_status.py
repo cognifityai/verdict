@@ -96,6 +96,9 @@ CREATE TABLE IF NOT EXISTS verdict_worker_cycle_status (
     last_success_at TEXT
 )
 """
+_WORKER_CYCLE_SCHEMA = _CYCLE_SCHEMA.replace(
+    "verdict_worker_cycle_status", "verdict_latest_worker_cycle_status"
+)
 _DUE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS verdict_worker_due (
     tenant_id TEXT PRIMARY KEY,
@@ -153,6 +156,8 @@ class WorkerCycleStatus(WorkerHeartbeat):
         placeholder = "%s" if self.postgres else "?"
         with self._connection() as connection:
             connection.execute(_CYCLE_SCHEMA)
+            connection.execute(_WORKER_CYCLE_SCHEMA)
+            self._preserve_worker_cycle(connection, tenant, placeholder)
             connection.execute(
                 "INSERT INTO verdict_worker_cycle_status "
                 "(tenant_id,trigger_kind,schedule_revision,started_at,state) "
@@ -164,6 +169,18 @@ class WorkerCycleStatus(WorkerHeartbeat):
                 "analysis_status=NULL,failure_code=NULL",
                 (tenant, trigger, schedule_revision, timestamp),
             )
+            if trigger == "worker":
+                connection.execute(
+                    "INSERT INTO verdict_latest_worker_cycle_status "
+                    "(tenant_id,trigger_kind,schedule_revision,started_at,state) "
+                    f"VALUES ({','.join([placeholder] * 4)},'started') "
+                    "ON CONFLICT (tenant_id) DO UPDATE SET "
+                    "trigger_kind=excluded.trigger_kind,"
+                    "schedule_revision=excluded.schedule_revision,"
+                    "started_at=excluded.started_at,finished_at=NULL,state='started',"
+                    "analysis_status=NULL,failure_code=NULL",
+                    (tenant, trigger, schedule_revision, timestamp),
+                )
 
     def finish(self, tenant: str, *, state: str, analysis_status: str | None,
                failure_code: str | None, now: datetime | None = None) -> None:
@@ -175,6 +192,12 @@ class WorkerCycleStatus(WorkerHeartbeat):
         placeholder = "%s" if self.postgres else "?"
         with self._connection() as connection:
             connection.execute(_CYCLE_SCHEMA)
+            connection.execute(_WORKER_CYCLE_SCHEMA)
+            self._preserve_worker_cycle(connection, tenant, placeholder)
+            current = connection.execute(
+                f"SELECT trigger_kind FROM verdict_worker_cycle_status WHERE tenant_id={placeholder} "
+                "AND state='started'", (tenant,),
+            ).fetchone()
             updated = connection.execute(
                 f"UPDATE verdict_worker_cycle_status SET finished_at={placeholder},"
                 f"state={placeholder},analysis_status={placeholder},failure_code={placeholder},"
@@ -185,16 +208,39 @@ class WorkerCycleStatus(WorkerHeartbeat):
             )
             if updated.rowcount != 1:
                 raise ValueError("cycle start missing or already finished")
+            if current[0] == "worker":
+                updated_worker = connection.execute(
+                    f"UPDATE verdict_latest_worker_cycle_status SET finished_at={placeholder},"
+                    f"state={placeholder},analysis_status={placeholder},failure_code={placeholder},"
+                    f"last_success_at=CASE WHEN {placeholder}='completed' THEN {placeholder} "
+                    "ELSE last_success_at END "
+                    f"WHERE tenant_id={placeholder} AND state='started'",
+                    (timestamp, state, analysis_status, failure_code, state, timestamp, tenant),
+                )
+                if updated_worker.rowcount != 1:
+                    raise ValueError("worker cycle start missing or already finished")
 
     def read(self, tenant: str) -> dict[str, object]:
-        placeholder = "%s" if self.postgres else "?"
-        with self._connection() as connection:
-            connection.execute(_CYCLE_SCHEMA)
-            row = connection.execute(
-                "SELECT trigger_kind,schedule_revision,started_at,finished_at,state,"
-                "analysis_status,failure_code,last_success_at "
-                f"FROM verdict_worker_cycle_status WHERE tenant_id={placeholder}", (tenant,),
-            ).fetchone()
+        return self.read_pair(tenant)[0]
+
+    @staticmethod
+    def _preserve_worker_cycle(connection, tenant: str, placeholder: str) -> None:
+        # Preserve the pre-upgrade worker row before a manual cycle replaces the latest row.
+        connection.execute(
+            "INSERT INTO verdict_latest_worker_cycle_status "
+            "(tenant_id,trigger_kind,schedule_revision,started_at,finished_at,state,"
+            "analysis_status,failure_code,last_success_at) "
+            "SELECT tenant_id,trigger_kind,schedule_revision,started_at,finished_at,state,"
+            "analysis_status,failure_code,"
+            "CASE WHEN state='completed' THEN finished_at ELSE NULL END "
+            "FROM verdict_worker_cycle_status "
+            f"WHERE tenant_id={placeholder} AND trigger_kind='worker' "
+            "ON CONFLICT (tenant_id) DO NOTHING",
+            (tenant,),
+        )
+
+    @staticmethod
+    def _view(row) -> dict[str, object]:
         if row is None:
             return {"state": "never_run", "trigger": None, "scheduleRevision": None,
                     "startedAt": None, "finishedAt": None, "analysisStatus": None,
@@ -203,6 +249,27 @@ class WorkerCycleStatus(WorkerHeartbeat):
             ("trigger", "scheduleRevision", "startedAt", "finishedAt", "state",
              "analysisStatus", "failureCode", "lastSuccessAt"), row, strict=True,
         ))
+
+    def read_pair(self, tenant: str) -> tuple[dict[str, object], dict[str, object]]:
+        placeholder = "%s" if self.postgres else "?"
+        with self._connection() as connection:
+            connection.execute(_CYCLE_SCHEMA)
+            connection.execute(_WORKER_CYCLE_SCHEMA)
+            row = connection.execute(
+                "SELECT trigger_kind,schedule_revision,started_at,finished_at,state,"
+                "analysis_status,failure_code,last_success_at "
+                f"FROM verdict_worker_cycle_status WHERE tenant_id={placeholder}", (tenant,),
+            ).fetchone()
+            worker = connection.execute(
+                "SELECT trigger_kind,schedule_revision,started_at,finished_at,state,"
+                "analysis_status,failure_code,last_success_at "
+                f"FROM verdict_latest_worker_cycle_status WHERE tenant_id={placeholder}", (tenant,),
+            ).fetchone()
+        if worker is None and row and row[0] == "worker":
+            # The old single row could inherit a manual success timestamp.
+            # Only this worker's own completed cycle proves worker success.
+            worker = (*row[:7], row[3] if row[4] == "completed" else None)
+        return self._view(row), self._view(worker)
 
 
 class WorkerDue(WorkerHeartbeat):

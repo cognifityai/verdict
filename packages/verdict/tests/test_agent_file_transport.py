@@ -123,7 +123,10 @@ def test_file_transport_keeps_raw_check_id_out_of_spool_and_import(tmp_path: Pat
         storage.close()
 
 
-def test_file_transport_preserves_optional_turn_usage(tmp_path: Path) -> None:
+@pytest.mark.parametrize("mode,secret", [("redact", None), ("hash", "synthetic-secret")])
+def test_file_transport_preserves_optional_turn_usage(
+    tmp_path: Path, mode: str, secret: str | None
+) -> None:
     now = datetime.now(timezone.utc)
     source = SourceSession("source", "tenant-file", "codex", "a" * 64, now, now)
     run = AgentRun("run", "source", "tenant-file", now, ExecutionStatus.UNKNOWN)
@@ -138,11 +141,27 @@ def test_file_transport_preserves_optional_turn_usage(tmp_path: Path) -> None:
         output_tokens=3,
         total_tokens=12,
         token_usage_basis="codex_turn_delta",
+        progress_redacted="10:00 update for canary@example.invalid",
     )
     spool = tmp_path / "spool"
-    sink = FileCaptureSink(spool, redaction_mode="redact", redaction_secret=None)
+    sink = FileCaptureSink(spool, redaction_mode=mode, redaction_secret=secret)
     sink.capture_agent(AgentCaptureBatch(source, run, (turn,)))
     sink.close()
+    [segment] = spool.glob("*.jsonl")
+    record = json.loads(segment.read_text().splitlines()[0])
+    assert record["schema"] == "verdict-capture-v2"
+    legacy = {**record, "schema": "verdict-capture-v1",
+              "record": {**record["record"],
+                         "batch": {**record["record"]["batch"],
+                                   "turns": [{key: value for key, value in item.items()
+                                              if key != "progress_redacted"}
+                                             for item in record["record"]["batch"]["turns"]]}}}
+    old = agent_transport.decode_capture_record(json.dumps(legacy).encode())
+    assert old is not None and old.batch is not None
+    assert old.batch.turns[0].progress_redacted is None
+    assert b"canary@example.invalid" not in b"".join(
+        path.read_bytes() for path in spool.glob("*.jsonl")
+    )
     storage = SQLiteStorage(str(tmp_path / "verdict.db"))
 
     agent_transport.import_capture_records(spool, storage)
@@ -151,7 +170,37 @@ def test_file_transport_preserves_optional_turn_usage(tmp_path: Path) -> None:
     assert loaded.turns[0].total_tokens == 12
     assert loaded.turns[0].cached_input_tokens == 4
     assert loaded.turns[0].token_usage_basis == "codex_turn_delta"
+    assert loaded.turns[0].progress_redacted is not None
+    assert "10:00 update for " in loaded.turns[0].progress_redacted
+    assert "canary@example.invalid" not in loaded.turns[0].progress_redacted
     storage.close()
+
+
+@pytest.mark.parametrize("mode,secret", [("redact", None), ("hash", "synthetic-secret")])
+def test_file_transport_progress_expansion_keeps_capture_bounded(
+    tmp_path: Path, mode: str, secret: str | None
+) -> None:
+    now = datetime.now(timezone.utc)
+    source = SourceSession("source", "tenant-file", "codex", "a" * 64, now, now)
+    run = AgentRun("run", "source", "tenant-file", now, ExecutionStatus.UNKNOWN)
+    progress = "a@b.c " * 600
+    turn = AgentTurn("turn", "run", 0, now, ExecutionStatus.UNKNOWN,
+                     progress_redacted=progress)
+    spool = tmp_path / "spool"
+    sink = FileCaptureSink(spool, redaction_mode=mode, redaction_secret=secret)
+    try:
+        sink.capture_agent(AgentCaptureBatch(source, run, (turn,)))
+    finally:
+        sink.close()
+    segment = b"".join(path.read_bytes() for path in spool.glob("*.jsonl"))
+    assert b"a@b.c" not in segment
+    storage = SQLiteStorage(str(tmp_path / "verdict.db"))
+    try:
+        agent_transport.import_capture_records(spool, storage)
+        [loaded] = storage.list_agent_run_bundles("tenant-file")
+        assert loaded.turns[0].progress_redacted == "<REDACTED>"
+    finally:
+        storage.close()
 
 
 @pytest.mark.asyncio

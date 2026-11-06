@@ -1,4 +1,4 @@
-"""Opt-in evaluation of bounded agent session, run, or tool-action evidence."""
+"""Opt-in evaluation of bounded session, run, turn, or tool evidence."""
 
 from __future__ import annotations
 
@@ -23,9 +23,11 @@ from verdict.dashboard.evaluator_lab import (
     _output_maximum,
     _provider,
     _rubric_summary,
+    _uses_public_list_price,
     _validated_config,
 )
 from verdict.dashboard.setup_routes import SetupRoutes
+from verdict.dashboard.spend_limit import within_static_spend_limit
 from verdict.dashboard.storage_url import is_postgres_storage
 from verdict.evidence import (
     AgentEventType,
@@ -33,19 +35,40 @@ from verdict.evidence import (
     disclosed_event_attributes,
     event_order_key,
 )
-from verdict.pricing import compute_cost_usd
+from verdict.pricing import compute_cost_usd, compute_exact_list_price_usd
 from verdict.redaction import _PLACEHOLDER, redact_structure
 from verdict.storage.sqlite import sqlite_path
 
 _MAX_TURNS = 20
 _MAX_EVENTS = 80
 _MAX_EVIDENCE_CHARS = 8_000
-_PROMPT_VERSION = "ordered-agent-evidence-v2"
+_PROMPT_VERSION = "ordered-agent-evidence-v3"
+_FOLLOWUP_TEXT_RUBRIC = {
+    "name": "followup_text_review", "version": "1", "dimensions": [{
+        "name": "correction",
+        "description": (
+            "PASS only when the later user request is a new task or ordinary refinement. "
+            "FAIL only when that request explicitly corrects or re-explains the earlier "
+            "exchange. Cite both recorded turns. Do not decide whether the agent was wrong, "
+            "what caused the follow-up, or whether the task succeeded. Return UNCLEAR when "
+            "the relationship is not supported by these texts."
+        ),
+    }],
+}
 _REF = re.compile(r"\[([a-z_]+):([^\]]+)\]")
 _CITATION_REQUEST = ("For each scored dimension, cite at least one exact [turn:...] or "
                      "[event:...] reference from the recorded evidence in the reasoning. "
                      "If the evidence does not support a judgment, return UNCLEAR.\n")
 _LOCK = threading.Lock()
+
+
+def _recent_progress_excerpt(value: str | None) -> str | None:
+    if value is None or len(value) <= 512:
+        return value
+    excerpt = value[-512:]
+    if "\n" in excerpt:
+        excerpt = excerpt.split("\n", 1)[1]
+    return "[earlier recorded progress omitted]\n" + excerpt
 
 
 class UnsupportedScopedPlatform(OSError):
@@ -106,7 +129,8 @@ def _session_projection(storage_url: str, tenant: str, config: dict[str, Any]) -
     if (not isinstance(session_id, str) or not session_id or len(session_id.encode()) > 256
             or not isinstance(source_kind, str) or not source_kind
             or len(source_kind.encode()) > 256
-            or config.get("runId") is not None or config.get("eventId") is not None):
+            or config.get("runId") is not None or config.get("eventId") is not None
+            or config.get("turnId") is not None):
         raise ValueError("invalid session evaluation selection")
     report = build_agent_session_bundle(
         storage_url, tenant=tenant, source_kind=source_kind, session_id=session_id,
@@ -187,11 +211,16 @@ def _projection(storage, tenant: str, config: dict[str, Any],
         return _session_projection(storage_url, tenant, config)
     run_id = config.get("runId")
     event_id = config.get("eventId")
-    if (scope not in {"run", "tool_action"} or not isinstance(run_id, str)
+    turn_id = config.get("turnId")
+    if (scope not in {"run", "turn_window", "followup_text", "tool_action"}
+            or not isinstance(run_id, str)
             or not run_id or len(run_id.encode()) > 256 or
             (scope == "tool_action" and (not isinstance(event_id, str) or not event_id
              or len(event_id.encode()) > 256)) or
-            (scope == "run" and event_id is not None)):
+            (scope in {"turn_window", "followup_text"} and (not isinstance(turn_id, str) or not turn_id
+             or len(turn_id.encode()) > 256)) or
+            (scope not in {"turn_window", "followup_text"} and turn_id is not None) or
+            (scope != "tool_action" and event_id is not None)):
         raise ValueError("invalid scoped evaluation selection")
     if bundle is None:
         snapshot = getattr(storage, "get_agent_capture_snapshot", None)
@@ -204,8 +233,70 @@ def _projection(storage, tenant: str, config: dict[str, Any],
     from verdict.local_source_revision import local_scope_partial
     turns = sorted(bundle.turns, key=lambda turn: (turn.sequence, turn.turn_id))
     events = sorted(bundle.events, key=event_order_key)
-    producers = {event.producer_id for event in events if event.producer_id}
-    if scope == "run":
+    extra_evidence: dict[str, Any] = {}
+    if scope == "followup_text":
+        selected_index = next((index for index, turn in enumerate(turns)
+                               if turn.turn_id == turn_id), None)
+        if selected_index is None:
+            raise KeyError(turn_id)
+        if (selected_index == 0 or
+                turns[selected_index].sequence != turns[selected_index - 1].sequence + 1):
+            raise ValueError("adjacent turn evidence unavailable")
+        prior, selected = turns[selected_index - 1:selected_index + 1]
+        reason = None
+        if (prior.request_state is not EvidenceState.PRESENT
+                or prior.response_state is not EvidenceState.PRESENT
+                or selected.request_state is not EvidenceState.PRESENT
+                or prior.request_truncated or prior.response_truncated
+                or selected.request_truncated or prior.ended_at is None
+                or selected.ended_at is None):
+            reason = "turn_content_partial"
+        if reason is not None:
+            return _finish_evidence({
+                "scope": scope, "runId": run_id, "turnId": turn_id,
+                "eventId": None, "query": "", "response": "",
+                "evidenceReferences": [], "coverage": "partial",
+                "unavailableReason": reason,
+            })
+        query = (_CITATION_REQUEST
+                 + "Text-only question: did the later user request explicitly correct or "
+                   "re-explain the preceding exchange? Do not infer task quality or cause "
+                   "from omitted events.\nRecorded user requests:\n"
+                 + json.dumps([
+                     {"reference": f"[turn:{prior.turn_id}]", "request": prior.user_request_redacted},
+                     {"reference": f"[turn:{selected.turn_id}]",
+                      "request": selected.user_request_redacted},
+                 ], ensure_ascii=False))
+        response = "Prior recorded answer only; later agent work and typed events are excluded:\n" + json.dumps({
+            "reference": f"[turn:{prior.turn_id}]", "response": prior.final_response_redacted,
+        }, ensure_ascii=False)
+        refs = [f"turn:{prior.turn_id}", f"turn:{selected.turn_id}"]
+        partial_source = (any(event.provenance == "verdict:capture_limit"
+                              for event in bundle.events)
+                          or local_scope_partial(
+                              bundle.session.source_kind, local_revision,
+                              max((turn.sequence for turn in bundle.turns), default=-1),
+                              selected.sequence,
+                          ))
+        extra_evidence = {
+            "coverageBasis": "recorded_text_only",
+            "sourceCoveragePartial": partial_source,
+            "excludedEvidence": "Typed events and later agent work are not reviewed.",
+        }
+        reason = None
+    elif scope in {"run", "turn_window"}:
+        if scope == "turn_window":
+            selected_index = next((index for index, turn in enumerate(turns)
+                                   if turn.turn_id == turn_id), None)
+            if selected_index is None:
+                raise KeyError(turn_id)
+            if selected_index == 0 or turns[selected_index].sequence != turns[selected_index - 1].sequence + 1:
+                raise ValueError("adjacent turn evidence unavailable")
+            turns = turns[selected_index - 1:selected_index + 1]
+            selected_ids = {turn.turn_id for turn in turns}
+            events = [event for event in events if event.turn_id in selected_ids]
+        producers = {event.producer_id for event in events if event.producer_id}
+        turn_sequences = {turn.turn_id: turn.sequence for turn in bundle.turns}
         reason = None
         if not turns:
             reason = "no_turns"
@@ -213,10 +304,13 @@ def _projection(storage, tenant: str, config: dict[str, Any],
             reason = "evidence_limit"
         elif len(producers) > 1:
             reason = "event_order_uncertain"
-        elif (any(event.provenance == "verdict:capture_limit" for event in events)
+        elif (any(event.provenance == "verdict:capture_limit"
+                  and (scope == "run" or turn_sequences.get(event.turn_id, -1) <= turns[-1].sequence)
+                  for event in bundle.events)
               or local_scope_partial(
                   bundle.session.source_kind, local_revision,
-                  max((turn.sequence for turn in turns), default=-1), None,
+                  max((turn.sequence for turn in bundle.turns), default=-1),
+                  turns[-1].sequence if scope == "turn_window" else None,
               )):
             reason = "source_capture_partial"
         elif any(turn.request_state is not EvidenceState.PRESENT or
@@ -227,14 +321,20 @@ def _projection(storage, tenant: str, config: dict[str, Any],
         if reason is not None:
             return _finish_evidence({
                 "scope": scope, "runId": run_id, "eventId": None,
+                **({"turnId": turn_id} if scope == "turn_window" else {}),
                 "query": "", "response": "", "evidenceReferences": [],
                 "coverage": "partial", "unavailableReason": reason,
             })
-        requests = [{"reference": f"[turn:{turn.turn_id}]", "request": turn.user_request_redacted}
+        requests = [{"reference": f"[turn:{turn.turn_id}]", "request": turn.user_request_redacted,
+                     **({"startedAt": turn.started_at.isoformat()} if scope == "turn_window" else {})}
                     for turn in turns]
         timed = [
             (turn.ended_at or turn.started_at, 1, turn.sequence,
-             {"reference": f"[turn:{turn.turn_id}]", "response": turn.final_response_redacted})
+             {"reference": f"[turn:{turn.turn_id}]", "response": turn.final_response_redacted,
+              **({"endedAt": turn.ended_at.isoformat(),
+                  "recordedProgressExcerpt": _recent_progress_excerpt(
+                      turn.progress_redacted
+                  )} if scope == "turn_window" else {})})
             for turn in turns
         ] + [
             (event.occurred_at, 0, event_order_key(event),
@@ -244,7 +344,11 @@ def _projection(storage, tenant: str, config: dict[str, Any],
             for event in events
         ]
         timeline = [item for _, _, _, item in sorted(timed, key=lambda row: row[:3])]
-        query = _CITATION_REQUEST + "Recorded task requests (ordered by turn):\n" + json.dumps(requests, ensure_ascii=False)
+        query = (_CITATION_REQUEST
+                 + ("Recorded progress is a bounded excerpt when available; it does not prove delivery, and absence is not proof of silence.\n"
+                    if scope == "turn_window" else "")
+                 + "Recorded task requests (ordered by turn):\n"
+                 + json.dumps(requests, ensure_ascii=False))
         response = "Recorded agent work (timestamp ordered events; turn outputs included):\n" + json.dumps(
             timeline, ensure_ascii=False,
         )
@@ -323,14 +427,19 @@ def _projection(storage, tenant: str, config: dict[str, Any],
         reason = "evidence_limit"
         safe = {"query": "", "response": ""}
     evidence = {"scope": scope, "runId": run_id, "eventId": event_id,
+                **({"turnId": turn_id} if scope in {"turn_window", "followup_text"} else {}),
                 "query": safe["query"], "response": safe["response"],
                 "evidenceReferences": refs, "coverage": "complete" if reason is None else "partial",
-                "unavailableReason": reason}
+                "unavailableReason": reason, **extra_evidence}
     return _finish_evidence(evidence)
 
 
 def _plan(storage, tenant: str, config: dict[str, Any],
           storage_url: str | None = None) -> tuple[dict[str, Any], Any]:
+    if config.get("scope") == "followup_text":
+        if config.get("rubric") is not None:
+            raise ValueError("text-only follow-up review uses a fixed criterion")
+        config = {**config, "rubric": _FOLLOWUP_TEXT_RUBRIC}
     provider, model, max_calls, max_output, rubric = _validated_config({
         **config, "unit": "trace", "maxCalls": 1,
     })
@@ -361,15 +470,30 @@ def _plan(storage, tenant: str, config: dict[str, Any],
         if eligible and provider != "jev" else None,
         "destination": destination, "externalEgressRequired": True,
     }
+    preview["upperStaticListPriceUsd"] = _upper_static_cost(preview, rubric)
     preview["scheduledUpperStaticListPriceUsd"] = (
-        _scheduled_upper_cost(preview, rubric) if provider in {"anthropic", "openai"} else None
+        preview["upperStaticListPriceUsd"] if provider in {"anthropic", "openai"} else None
     )
     return preview, rubric
 
 
 def preview_scoped(storage, *, tenant: str, config: dict[str, Any],
                    storage_url: str | None = None) -> dict[str, Any]:
-    return _plan(storage, tenant, config, storage_url)[0]
+    preview = _plan(storage, tenant, config, storage_url)[0]
+    if storage_url is not None and preview["plannedCalls"] == 1:
+        saved = _saved_result(ControlStore(storage_url), tenant, preview["planFingerprint"])
+        if saved is not None:
+            preview["savedResult"] = saved
+    return preview
+
+
+def _saved_result(store: ControlStore, tenant: str, plan_fingerprint: str) -> dict[str, Any] | None:
+    for status in ("completed", "error"):
+        result_id = hashlib.sha256(_canonical([tenant, plan_fingerprint, status])).hexdigest()
+        history = store.history(tenant, "scoped_evaluation", result_id)
+        if history:
+            return {"resultId": result_id, **history[0]["payload"]}
+    return None
 
 
 def execute_scoped(storage, *, storage_url: str, tenant: str, config: dict[str, Any],
@@ -389,13 +513,14 @@ def _execute_scoped_locked(storage, *, storage_url: str, tenant: str,
     if preview["plannedCalls"] != 1 or config.get("planFingerprint") != preview["planFingerprint"]:
         raise ValueError("scoped preview is no longer current")
     store = ControlStore(storage_url)
-    for prior_status in ("completed", "error"):
-        prior_id = hashlib.sha256(_canonical([
-            tenant, preview["planFingerprint"], prior_status,
-        ])).hexdigest()
-        existing = store.history(tenant, "scoped_evaluation", prior_id)
-        if existing:
-            return {"resultId": prior_id, **existing[0]["payload"]}
+    saved = _saved_result(store, tenant, preview["planFingerprint"])
+    if saved is not None:
+        return saved
+    if planned is None:
+        cap = config.get("maxEstimatedUsd")
+        upper_cost = preview["upperStaticListPriceUsd"]
+        if not within_static_spend_limit(upper_cost, cap):
+            raise ValueError("direct evaluation exceeds estimated-spend limit")
     provider_name = preview["provider"]
     judge = _judge(provider or _provider(provider_name), preview["model"], rubric,
                    config.get("maxOutputTokens", 512))
@@ -440,12 +565,18 @@ def _execute_scoped_locked(storage, *, storage_url: str, tenant: str,
         "sessionId": evidence.get("sessionId"),
         "sourceKind": evidence.get("sourceKind"),
         "runIds": evidence.get("runIds"),
+        **({"turnId": evidence["turnId"]}
+           if evidence["scope"] in {"turn_window", "followup_text"} else {}),
         "eventId": evidence["eventId"], "coverage": evidence["coverage"],
         "evidenceFingerprint": evidence["evidenceFingerprint"],
         "evidenceReferences": evidence["evidenceReferences"],
         "evaluatorFingerprint": preview["evaluatorFingerprint"],
         "provider": provider_name, "model": preview["model"],
         "rubric": preview["rubric"], "promptVersion": _PROMPT_VERSION,
+        "criterionDescriptions": {
+            dimension.name: dimension.description for dimension in rubric.dimensions
+            if dimension.name in preview["rubric"]["dimensions"]
+        },
         "status": status, "error": error, "dimensions": dimensions,
     }
     safe = redact_structure(result)
@@ -462,9 +593,9 @@ def _execute_scoped_locked(storage, *, storage_url: str, tenant: str,
     return {"resultId": document_id, **safe}
 
 
-def _scheduled_upper_cost(preview: dict[str, Any], rubric) -> float | None:
+def _upper_static_cost(preview: dict[str, Any], rubric) -> float | None:
     """Conservative static list-price planning bound, never an invoice guarantee."""
-    if preview["plannedCalls"] != 1:
+    if preview["plannedCalls"] != 1 or not _uses_public_list_price(preview["provider"]):
         return None
     from verdict_eval.judge import SYSTEM_PROMPT, _user_prompt
 
@@ -473,7 +604,7 @@ def _scheduled_upper_cost(preview: dict[str, Any], rubric) -> float | None:
     # A byte may become at most one text token in supported provider tokenizers;
     # the extra envelope allowance covers message framing and SDK metadata.
     input_bound = len(SYSTEM_PROMPT.encode()) + len(prompt.encode()) + 1_024
-    return compute_cost_usd(preview["model"], input_bound, preview["maximumOutputTokens"])
+    return compute_exact_list_price_usd(preview["model"], input_bound, preview["maximumOutputTokens"])
 
 
 def _scheduled_config(payload: dict[str, Any]) -> dict[str, Any]:
@@ -488,21 +619,18 @@ def schedule_scoped_once(storage, *, storage_url: str, tenant: str,
                          confirm_persistent_egress: bool) -> dict[str, Any]:
     if confirm_persistent_egress is not True:
         raise ValueError("persistent external judge egress was not confirmed")
-    if (isinstance(max_estimated_usd, bool) or not isinstance(max_estimated_usd, (int, float))
-            or not math.isfinite(max_estimated_usd) or not 0 < max_estimated_usd <= 100):
-        raise ValueError("invalid scheduled estimated-spend limit")
     preview, rubric = _plan(storage, tenant, config, storage_url)
     if (preview["provider"] not in {"anthropic", "openai"}
             or preview["plannedCalls"] != 1
             or config.get("planFingerprint") != preview["planFingerprint"]):
         raise ValueError("scheduled evaluation requires a current bounded preview")
-    upper_cost = _scheduled_upper_cost(preview, rubric)
-    if upper_cost is None or upper_cost > max_estimated_usd:
+    upper_cost = _upper_static_cost(preview, rubric)
+    if not within_static_spend_limit(upper_cost, max_estimated_usd):
         raise ValueError("scheduled evaluation exceeds estimated-spend limit")
     stored_config = {key: config[key] for key in (
         "scope", "provider", "model", "rubric",
-    )}
-    for key in ("runId", "eventId", "sessionId", "sourceKind"):
+    ) if key in config}
+    for key in ("runId", "turnId", "eventId", "sessionId", "sourceKind"):
         if key in config:
             stored_config[key] = config[key]
     stored_config["maxOutput"] = config.get("maxOutputTokens", 512)
@@ -542,15 +670,14 @@ def cancel_scheduled_once(storage_url: str, *, tenant: str, job_id: str,
 def _validated_scheduled_plan(storage, storage_url: str, tenant: str,
                              config: dict[str, Any], payload: dict[str, Any]):
     preview, rubric = _plan(storage, tenant, config, storage_url)
-    upper_cost = _scheduled_upper_cost(preview, rubric)
+    upper_cost = _upper_static_cost(preview, rubric)
     if not (
         preview["plannedCalls"] == 1
         and preview["planFingerprint"] == payload.get("planFingerprint")
         and preview["destination"] == payload.get("destination")
         and preview["provider"] in {"anthropic", "openai"}
         and payload.get("maxCalls") == 1
-        and upper_cost is not None
-        and upper_cost <= payload.get("maxEstimatedUsd", -1)
+        and within_static_spend_limit(upper_cost, payload.get("maxEstimatedUsd"))
     ):
         raise ValueError("scheduled evidence or authorization is stale")
     return preview, rubric
@@ -736,6 +863,8 @@ def register_scoped_routes(app, setup: SetupRoutes) -> None:
                 config=payload, max_estimated_usd=payload.get("maxEstimatedUsd"),
                 confirm_persistent_egress=payload.get("confirmPersistentExternalEgress") is True,
             )
+        except ImportError:
+            return JSONResponse({"error": "optional evaluation package unavailable"}, status_code=503)
         except (KeyError, TypeError, ValueError, UnicodeError):
             return JSONResponse({"error": "invalid, stale, or duplicate scheduled approval"}, status_code=409)
         finally:
@@ -761,6 +890,8 @@ def register_scoped_routes(app, setup: SetupRoutes) -> None:
         try:
             return preview_scoped(storage, tenant=setup.tenant_id, config=payload,
                                   storage_url=setup.storage_url)
+        except ImportError:
+            return JSONResponse({"error": "optional evaluation package unavailable"}, status_code=503)
         except (KeyError, TypeError, ValueError, UnicodeError):
             return JSONResponse({"error": "invalid scoped preview"}, status_code=400)
         finally:
@@ -775,6 +906,8 @@ def register_scoped_routes(app, setup: SetupRoutes) -> None:
             return execute_scoped(storage, storage_url=setup.storage_url,
                                   tenant=setup.tenant_id, config=payload,
                                   confirm_external_egress=payload.get("confirmExternalEgress") is True)
+        except ImportError:
+            return JSONResponse({"error": "optional evaluation package unavailable"}, status_code=503)
         except UnsupportedScopedPlatform as exc:
             return JSONResponse({"error": str(exc)}, status_code=501)
         except (KeyError, TypeError, ValueError, UnicodeError):

@@ -49,7 +49,7 @@ function formatCost(row) {
 
 function VolumeChart({ timeline }) {
   const rows = timeline.rows;
-  if (!rows.length) return <div className="text-sm mt-5" style={{ color: C.sub }}>No application activity is available.</div>;
+  if (!rows.length) return <div className="text-sm mt-5" style={{ color: C.sub }}>No application model calls in this period.</div>;
   const max = Math.max(1, ...rows.map((point) => point.calls));
   const half = Math.round(max / 2);
   return <div className="mt-5 overflow-x-auto pb-1" data-report-chart>

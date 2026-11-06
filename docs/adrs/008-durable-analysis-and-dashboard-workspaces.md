@@ -64,14 +64,14 @@ present those states without treating missing evidence as success or failure.
   not evaluated, judge error, pass, fail, and unclear.
 - Agent Runs show source outcome, evidence coverage, deterministic findings,
   and selected-evaluator coverage separately.
-- Six direct destinations separate concerns: Home, Suggested setup,
-  Monitoring, Investigation, Groups, and Model drift setup. Evaluate, Report,
-  and Settings remain available from the sidebar. Report summarizes application
-  calls separately from evaluator traffic and emits aggregate-only management
-  exports. Monitoring owns recurring issue and worker status; Model drift setup
-  owns historical comparison and prospective policy activation. Groups starts
-  with recorded source, agent, provider, and model fields; intent clusters are
-  optional. Existing route hashes remain valid.
+- The primary journey uses Home, Monitoring, and Investigation. Monitoring
+  links to suggested setup, Groups, and Model drift setup when their evidence
+  is relevant. Evaluate, Report, and Settings remain available from the sidebar.
+  Report summarizes application calls separately from evaluator traffic and
+  emits aggregate-only management exports. Monitoring owns recurring issue and
+  worker status; Model drift setup owns historical comparison and prospective
+  policy activation. Groups starts with recorded source, agent, provider, and
+  model fields; intent clusters are optional. Existing route hashes remain valid.
 - Fixed-window evaluation signals created by earlier releases remain readable
   through the Python storage API. They are excluded from `/api/data` and the
   UI because their rows have no tenant owner. The current pipeline does not

@@ -1,6 +1,9 @@
 import asyncio
+import json
+import os
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from threading import Barrier, Event
@@ -11,12 +14,80 @@ import verdict.service as verdict_service
 from verdict.analysis_records import AnalysisRunStatus, DeterministicAnalysisRun
 from verdict.dashboard.app import create_app
 from verdict.dashboard.control_plane import ControlStore
+from verdict.dashboard.worker_status import WorkerCycleStatus, WorkerHeartbeat
 from verdict.delivery_queue import create_intent
-from verdict.evidence import AgentRun, AgentRunBundle, ExecutionStatus, SourceSession
+from verdict.evidence import (
+    AgentRun,
+    AgentRunBundle,
+    ExecutionStatus,
+    SourceSession,
+)
 from verdict.monitoring import MonitorPolicy, monitor_policy_to_json
 from verdict.schema import DriftSignal, Trace
 from verdict.service import poll_cycle, worker_presence
 from verdict.storage import SQLiteStorage
+
+from packages.verdict.tests._postgres_test_safety import isolated_test_dsn, validate_test_dsn
+
+
+@pytest.mark.parametrize("backend", ["sqlite", "postgres"])
+@pytest.mark.parametrize("version", [1, 2])
+def test_saved_changes_are_read_only_and_tenant_scoped(tmp_path, backend, version, request):
+    with ExitStack() as resources:
+        if backend == "postgres":
+            dsn, reason = validate_test_dsn(os.environ.get("VERDICT_TEST_POSTGRES_DSN"),
+                                            allow_any_database=False)
+            if dsn is None:
+                pytest.skip(reason)
+            url = resources.enter_context(isolated_test_dsn(dsn))
+        else:
+            url = f"sqlite:///{tmp_path / 'saved-change.db'}"
+        store = ControlStore(url)
+        store.list_current("tenant-a")
+        payload = {"version": version, "summary": "Synthetic saved intention",
+                   "identity": {"sourceKind": "verdict_sdk", "serviceName": "app",
+                                "environment": "test", "agentName": "worker",
+                                "outcomeName": "resolved", "outcomeSource": "application"},
+                   "marker": {"runId": "run-1", "endedAt": "2026-01-01T00:00:00.000000+00:00"},
+                   "baseline": {"terminalRuns": 5, "recordedTrue": 4, "recordedFalse": 1,
+                                "missing": 0, "unclear": 0}}
+        if version == 2:
+            payload["appliedAt"] = "2026-01-01T00:01:00.000000+00:00"
+        slot = "%s" if backend == "postgres" else "?"
+        with store._connect() as connection:
+            connection.execute("INSERT INTO product_control_documents "
+                "(tenant_id,kind,document_id,revision,state,payload_json,actor,created_at) "
+                f"VALUES ({','.join([slot] * 8)})", ("tenant-a", "improvement", "old", 1,
+                "tracking", json.dumps(payload), "dashboard-user", datetime.now(timezone.utc).isoformat()))
+            connection.commit()
+        saved = store.history("tenant-a", "improvement", "old")
+        assert len(saved) == 1 and saved[0]["payload"] == payload
+        assert store.list_current("tenant-b") == []
+        for document_id, revision in [("new", None), ("old", 1)]:
+            with pytest.raises(ValueError, match="read-only"):
+                store.append("tenant-a", kind="improvement", document_id=document_id,
+                             state="tracking", payload=payload, expected_revision=revision)
+        with pytest.raises(ValueError, match="read-only"):
+            store.rollback("tenant-a", kind="improvement", document_id="old",
+                           target_revision=1, expected_revision=1)
+
+        async def scenario():
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=create_app(
+                    storage=url, tenant_id="tenant-a")), base_url="http://testserver") as client:
+                initial = await client.get("/api/control")
+                token = (await client.get("/api/setup/token")).json()["setupToken"]
+                for path, body in [("new", {"state": "tracking", "payload": payload}),
+                                   ("old/rollback", {"targetRevision": 1, "expectedRevision": 1})]:
+                    denied = await client.post("/api/control/improvement/" + path, json=body)
+                    rejected = await client.post("/api/control/improvement/" + path, json=body,
+                                                  headers={"X-Verdict-Setup": token})
+                    assert denied.status_code == 403
+                    assert rejected.status_code == 409
+                return initial
+        initial = asyncio.run(scenario())
+        assert initial.json()["documents"] == saved
+        assert store.history("tenant-a", "improvement", "old") == saved
+        assert len(store.list_current("tenant-a")) == 1
 
 
 def test_delivery_rebind_requires_review_and_preserves_source_identity(tmp_path):
@@ -337,6 +408,7 @@ def test_readiness_reports_saved_schedule_without_claiming_a_running_worker(tmp_
     }]
     assert response.json()["worker"]["status"] == "unverified"
     assert response.json()["lastCycle"]["state"] == "never_run"
+    assert response.json()["lastWorkerCycle"]["state"] == "never_run"
     assert response.json()["nextDue"] is None
 
     with worker_presence(url):
@@ -345,6 +417,65 @@ def test_readiness_reports_saved_schedule_without_claiming_a_running_worker(tmp_
         assert live_response.json()["worker"]["status"] == "recent"
         assert live_response.json()["nextDue"]["scheduleRevision"] == 1
         assert datetime.fromisoformat(live_response.json()["nextDue"]["nextDueAt"]) > datetime.now(timezone.utc)
+
+
+@pytest.mark.parametrize("backend", ["sqlite", "postgres"])
+def test_readiness_preserves_worker_completion_after_manual_cycle(tmp_path, backend, request):
+    resources = ExitStack()
+    request.addfinalizer(resources.close)
+    if backend == "postgres":
+        dsn, reason = validate_test_dsn(os.environ.get("VERDICT_TEST_POSTGRES_DSN"),
+                                        allow_any_database=False)
+        if dsn is None:
+            pytest.skip(reason)
+        url = resources.enter_context(isolated_test_dsn(dsn))
+    else:
+        url = f"sqlite:///{tmp_path / 'worker-readiness.db'}"
+    tenant = "__verdict_local__"
+    ControlStore(url).append(tenant, kind="schedule", document_id="daily", state="active",
+                             payload={"intervalHours": 24, "analyzeOnly": True},
+                             expected_revision=None)
+    status = WorkerCycleStatus(url)
+    now = datetime.now(timezone.utc)
+    status.begin(tenant, trigger="worker", schedule_revision=1, now=now)
+    status.finish(tenant, state="completed", analysis_status="completed",
+                  failure_code=None, now=now + timedelta(seconds=1))
+    # Simulate a store written before lastWorkerCycle existed.
+    with status._connection() as connection:
+        connection.execute("DROP TABLE verdict_latest_worker_cycle_status")
+    status.begin(tenant, trigger="manual", schedule_revision=1,
+                 now=now + timedelta(seconds=2))
+    status.finish(tenant, state="completed", analysis_status="completed",
+                  failure_code=None, now=now + timedelta(seconds=3))
+    WorkerHeartbeat(url).touch(tenant, "test-worker", now=now)
+
+    async def scenario():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=create_app(storage=url)),
+                                    base_url="http://testserver") as client:
+            return (await client.get("/api/readiness")).json(), (await client.get("/api/control")).json()
+
+    for response in asyncio.run(scenario()):
+        assert response["worker"]["status"] == "recent"
+        assert response["lastCycle"]["trigger"] == "manual"
+        assert response["lastWorkerCycle"]["state"] == "completed"
+        assert response["lastWorkerCycle"]["scheduleRevision"] == 1
+    assert status.read_pair("other-tenant")[1]["state"] == "never_run"
+    status.begin(tenant, trigger="worker", schedule_revision=2,
+                 now=now + timedelta(minutes=1))
+    assert status.read_pair(tenant)[1]["state"] == "started"
+    status.finish(tenant, state="failed", analysis_status="error",
+                  failure_code="analysis_error", now=now + timedelta(minutes=1, seconds=1))
+    with status._connection() as connection:
+        connection.execute("DROP TABLE verdict_latest_worker_cycle_status")
+    for response in asyncio.run(scenario()):
+        assert response["lastWorkerCycle"]["state"] == "failed"
+        assert response["lastWorkerCycle"]["lastSuccessAt"] is None
+    status.begin(tenant, trigger="manual", schedule_revision=1,
+                 now=now + timedelta(minutes=2))
+    overall, worker = status.read_pair(tenant)
+    assert overall["state"] == "started" and overall["trigger"] == "manual"
+    assert worker["state"] == "failed" and worker["scheduleRevision"] == 2
+    assert worker["lastSuccessAt"] is None
 
 
 def test_readiness_requires_basic_auth_when_dashboard_is_protected(tmp_path, monkeypatch):

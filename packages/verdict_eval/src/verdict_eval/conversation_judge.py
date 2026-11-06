@@ -15,6 +15,7 @@ from verdict.conversation_assessments import (
     validate_rubric,
 )
 from verdict.conversations import _json, validate_conversation
+from verdict.pricing import compute_exact_list_price_usd
 
 from verdict_eval import judge_output
 from verdict_eval.judge_output import (
@@ -23,7 +24,7 @@ from verdict_eval.judge_output import (
     dimension_fields,
     is_truncated,
 )
-from verdict_eval.providers import CompletionRequest
+from verdict_eval.providers import CompletionRequest, output_token_ceiling
 
 # The stored prompt version names the result rules (bump it when they change),
 # then the output contract the reply is decoded with, then a fingerprint of the
@@ -77,6 +78,7 @@ def preview_evaluation(storage, *, tenant_id: str, config: dict) -> dict:
     planned = []
     reasons: dict[str, int] = {}
     eligible = already = failed = 0
+    input_bound = 0
     for row in rows:
         if not _stored_evidence_safe(row):
             reasons["redacted_evidence"] = reasons.get("redacted_evidence", 0) + 1
@@ -105,6 +107,10 @@ def preview_evaluation(storage, *, tenant_id: str, config: dict) -> dict:
                     "conversationId": row["id"], "revision": row["revision"],
                     "targetPosition": target,
                 })
+                input_bound += sum(len(message["content"].encode("utf-8"))
+                                   for message in _messages(row, rubric, target)) + 1_024
+    output_bound = output_token_ceiling(identity["max_output_tokens"], identity["model"]) * len(planned)
+    custom_endpoint = os.environ.get(_ENDPOINT_ENV.get(identity["provider"], "")) is not None
     return {
         "unit": "conversation",
         "target": rubric["target"],
@@ -118,6 +124,8 @@ def preview_evaluation(storage, *, tenant_id: str, config: dict) -> dict:
         "notEvaluableReasons": reasons,
         "plannedTargets": planned,
         "plannedCalls": len(planned),
+        "upperStaticListPriceUsd": (None if custom_endpoint else
+                                    compute_exact_list_price_usd(identity["model"], input_bound, output_bound)),
         "planFingerprint": _digest([tenant_id, fingerprint, maximum, scan_limit, after, planned]),
         "nextCursor": next_cursor,
     }
@@ -231,6 +239,17 @@ def _system_prompt(rubric: dict) -> str:
     return _PROMPT_TEMPLATE.format(example=_output_example(rubric))
 
 
+def _messages(row: dict, rubric: dict, target: int | None) -> list[dict[str, str]]:
+    evidence = {
+        "messages": row["messages"] if target is None else row["messages"][: target + 1],
+        "end_status": row["end_status"],
+    }
+    return [
+        {"role": "system", "content": _system_prompt(rubric)},
+        {"role": "user", "content": _json({"rubric": rubric, "evidence": evidence})},
+    ]
+
+
 def _assess(row: dict, rubric: dict, identity: dict, target: int | None, provider) -> dict:
     if not _stored_evidence_safe(row):
         raise ValueError("stored conversation evidence requires redaction")
@@ -240,17 +259,10 @@ def _assess(row: dict, rubric: dict, identity: dict, target: int | None, provide
         "rubric": rubric, "evaluator": identity,
         "evaluated_at": datetime.now(timezone.utc).isoformat(),
     }
-    evidence = {
-        "messages": row["messages"] if target is None else row["messages"][: target + 1],
-        "end_status": row["end_status"],
-    }
     try:
         response = provider.complete(CompletionRequest(
             model=identity["model"], max_tokens=identity["max_output_tokens"],
-            messages=[
-                {"role": "system", "content": _system_prompt(rubric)},
-                {"role": "user", "content": _json({"rubric": rubric, "evidence": evidence})},
-            ],
+            messages=_messages(row, rubric, target),
         ))
     except Exception:
         return validate_assessment({**envelope, "status": "error", "dimensions": {},

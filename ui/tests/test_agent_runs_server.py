@@ -92,6 +92,337 @@ def _bundle(
     )
 
 
+def test_run_detail_focuses_exact_turn_beyond_first_page(tmp_path):
+    path = tmp_path / "focused-turn.db"
+    now = datetime(2026, 11, 2, tzinfo=timezone.utc)
+    original = _bundle("local", now, with_turn=True)
+    turns = tuple(replace(original.turns[0], turn_id=f"turn-{index}",
+                          sequence=index) for index in range(25))
+    storage = SQLiteStorage(str(path))
+    storage.replace_agent_run_bundle(replace(original, turns=turns, events=()))
+    storage.close()
+
+    focused = build_agent_run_detail(path, tenant="local", run_id="r-local",
+                                    turn_limit=20, turn_id="turn-24")
+    assert focused["turnPage"]["offset"] == 20
+    assert [turn["turnId"] for turn in focused["turns"]] == [
+        f"turn-{index}" for index in range(20, 25)
+    ]
+    with sqlite3.connect(path) as connection:
+        connection.execute("UPDATE agent_turns SET sequence=48 WHERE turn_id='turn-24'")
+    sparse = build_agent_run_detail(path, tenant="local", run_id="r-local",
+                                    turn_limit=20, turn_id="turn-24")
+    assert sparse["turnPage"]["offset"] == 20
+    first = build_agent_run_detail(path, tenant="local", run_id="r-local",
+                                   turn_limit=20, turn_id="turn-0")
+    assert first["turnPage"]["offset"] == 0
+    assert first["turns"][0]["turnId"] == "turn-0"
+    with pytest.raises(KeyError):
+        build_agent_run_detail(path, tenant="local", run_id="r-local",
+                               turn_id="missing")
+    with pytest.raises(KeyError):
+        build_agent_run_detail(path, tenant="other", run_id="r-local", turn_id="turn-24")
+    with pytest.raises(ValueError):
+        build_agent_run_detail(path, tenant="local", run_id="r-local", turn_id="bad\0id")
+
+    async def request_detail():
+        transport = httpx.ASGITransport(app=create_app(storage=f"sqlite:///{path}", tenant_id="local"))
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            return (await client.get("/api/runs/r-local?turn_id=turn-24"),
+                    await client.get("/api/runs/r-local?turn_id=missing"))
+
+    response, missing = asyncio.run(request_detail())
+    assert response.status_code == 200
+    assert response.json()["turnPage"]["offset"] == 20
+    assert missing.status_code == 404
+
+
+def test_recent_followups_are_bounded_candidates_with_exact_tenant_links(tmp_path):
+    path = tmp_path / "followups.db"
+    now = datetime(2026, 11, 2, tzinfo=timezone.utc)
+    prior_answer = "The report is complete" + "x" * 2000
+    followup_request = "You missed the summary; please fix it" + "y" * 2000
+    storage = SQLiteStorage(str(path))
+    for tenant in ("local", "other"):
+        original = _bundle(tenant, now, with_turn=True, source_kind="codex")
+        first = replace(original.turns[0], turn_id=f"{tenant}-0", sequence=0,
+                        user_request_redacted="Build the report",
+                        final_response_redacted=prior_answer)
+        second = replace(first, turn_id=f"{tenant}-1", sequence=1,
+                         started_at=now + timedelta(minutes=1),
+                         ended_at=now + timedelta(minutes=2),
+                         user_request_redacted=followup_request,
+                         final_response_redacted="Added the summary")
+        request_only = replace(second, turn_id=f"{tenant}-2", sequence=2,
+                               started_at=now + timedelta(minutes=3),
+                               ended_at=now + timedelta(minutes=4),
+                               user_request_redacted="Please send a status update",
+                               response_state=EvidenceState.MISSING,
+                               final_response_redacted=None)
+        unfinished = replace(request_only, turn_id=f"{tenant}-3", sequence=3,
+                             started_at=now + timedelta(minutes=5), ended_at=None)
+        storage.replace_agent_run_bundle(replace(original, turns=(first, second, request_only, unfinished), events=()))
+    storage.close()
+
+    result = build_agent_runs_bundle(path, tenant="local", view="followups", limit=10)
+    assert result["page"] == {"shown": 2, "limit": 10, "hasMore": False}
+    assert result["followups"] == [{
+        "runId": "r-local", "turnId": "local-2", "priorTurnId": "local-1",
+        "sourceKind": "codex", "agentName": None,
+        "startedAt": (now + timedelta(minutes=3)).isoformat(),
+        "priorResponseExcerpt": "Added the summary",
+        "requestExcerpt": "Please send a status update",
+        "reviewStatus": "not_reviewed",
+    }, {
+        "runId": "r-local", "turnId": "local-1", "priorTurnId": "local-0",
+        "sourceKind": "codex", "agentName": None,
+        "startedAt": (now + timedelta(minutes=1)).isoformat(),
+        "priorResponseExcerpt": prior_answer[:160],
+        "requestExcerpt": followup_request[:160],
+        "reviewStatus": "not_reviewed",
+    }]
+
+    async def request_candidates():
+        transport = httpx.ASGITransport(app=create_app(storage=f"sqlite:///{path}", tenant_id="local"))
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            return await client.get("/api/runs?view=followups&limit=10")
+
+    response = asyncio.run(request_candidates())
+    assert response.status_code == 200
+    assert response.json()["followups"] == result["followups"]
+    assert [item["reviewStatus"] for item in result["followups"]] == [
+        "not_reviewed", "not_reviewed",
+    ]
+    pair = dashboard_app.build_followup_review(
+        path, tenant="local", run_id="r-local", turn_id="local-1",
+    )
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "INSERT INTO product_control_documents "
+            "(tenant_id,kind,document_id,revision,state,payload_json,actor,created_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            ("local", "review", pair["documentId"], 1, "resolved", json.dumps({
+                "reviewType": "followup_correction_v1", "runId": "r-local",
+                "turnId": "local-1", "priorTurnId": "local-0",
+                "evidenceFingerprint": pair["evidenceFingerprint"],
+                "label": ["fail"],
+            }), "test-fixture", now.isoformat()),
+        )
+    assert build_agent_runs_bundle(path, tenant="local", view="followups", limit=10)[
+        "followups"
+    ][1]["reviewStatus"] == "stale"
+    response = asyncio.run(request_candidates())
+    assert response.status_code == 200
+    assert response.json()["followups"][1]["reviewStatus"] == "stale"
+    async def request_label():
+        transport = httpx.ASGITransport(app=create_app(storage=f"sqlite:///{path}", tenant_id="local"))
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            return await client.get("/api/runs/r-local/followup-review/local-1")
+
+    label_response = asyncio.run(request_label())
+    assert label_response.status_code == 200
+    assert label_response.json()["stale"] is True
+    open_pair = dashboard_app.build_followup_review(
+        path, tenant="local", run_id="r-local", turn_id="local-2",
+    )
+    ControlStore(f"sqlite:///{path}").append(
+        "local", kind="review", document_id=open_pair["documentId"], state="open",
+        payload={"reviewType": "followup_correction_v1", "runId": "r-local",
+                 "turnId": "local-2", "priorTurnId": "local-1",
+                 "evidenceFingerprint": open_pair["evidenceFingerprint"],
+                 "label": "fail"},
+        expected_revision=None,
+    )
+    assert build_agent_runs_bundle(path, tenant="local", view="followups", limit=10)[
+        "followups"
+    ][0]["reviewStatus"] == "stale"
+    unresolved = dashboard_app.build_followup_review(
+        path, tenant="local", run_id="r-local", turn_id="local-2",
+    )
+    assert unresolved["stale"] is True
+    assert unresolved["label"] is None
+
+
+def test_followup_excerpts_redact_full_legacy_text_before_shortening(tmp_path):
+    path = tmp_path / "legacy-followup.db"
+    now = datetime(2026, 11, 2, tzinfo=timezone.utc)
+    original = _bundle("local", now, with_turn=True, source_kind="codex")
+    prior = replace(original.turns[0], turn_id="prior")
+    later = replace(prior, turn_id="later", sequence=1,
+                    started_at=now + timedelta(minutes=1),
+                    ended_at=now + timedelta(minutes=2))
+    storage = SQLiteStorage(str(path))
+    storage.replace_agent_run_bundle(replace(original, turns=(prior, later), events=()))
+    storage.close()
+    canary = "sk-ant-" + "S" * 24
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "UPDATE agent_turns SET user_request_redacted=? WHERE tenant_id=? AND turn_id=?",
+            ("a" * 148 + " " + canary + " more text", "local", "later"),
+        )
+        connection.execute(
+            "UPDATE agent_turns SET final_response_redacted=? WHERE tenant_id=? AND turn_id=?",
+            ("b" * 148 + " " + canary + " more text", "local", "prior"),
+        )
+    async def request_candidates():
+        transport = httpx.ASGITransport(app=create_app(storage=f"sqlite:///{path}", tenant_id="local"))
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            return await client.get("/api/runs?view=followups&limit=20")
+
+    response = asyncio.run(request_candidates())
+    assert response.status_code == 200
+    assert canary not in response.text
+    assert "sk-ant-" not in response.text
+    assert "a" * 100 in response.json()["followups"][0]["requestExcerpt"]
+
+
+def test_human_followup_review_is_bound_to_current_pair_and_tenant(tmp_path):
+    path = tmp_path / "human-followup.db"
+    now = datetime(2026, 11, 2, tzinfo=timezone.utc)
+    storage = SQLiteStorage(str(path))
+    for tenant in ("local", "other"):
+        original = _bundle(tenant, now, with_turn=True, source_kind="codex")
+        prior = replace(original.turns[0], turn_id=f"{tenant}-prior",
+                        user_request_redacted="Prepare a summary",
+                        final_response_redacted="Summary is complete" + "x" * 1500)
+        later = replace(prior, turn_id=f"{tenant}-later", sequence=1,
+                        started_at=now + timedelta(minutes=1),
+                        ended_at=now + timedelta(minutes=2),
+                        user_request_redacted="The summary is missing; fix it",
+                        response_state=EvidenceState.MISSING,
+                        final_response_redacted=None)
+        storage.replace_agent_run_bundle(replace(original, turns=(prior, later), events=()))
+    storage.close()
+
+    async def review():
+        app = create_app(storage=f"sqlite:///{path}", tenant_id="local")
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            endpoint = "/api/runs/r-local/followup-review/local-later"
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            headers = {"X-Verdict-Setup": token}
+            preview = await client.get(endpoint)
+            assert preview.status_code == 200
+            before = preview.json()
+            assert before["eligible"] is True
+            assert before["label"] is None
+            assert before["priorTurnId"] == "local-prior"
+            assert before["priorAnswer"] == "Summary is complete" + "x" * 1500
+            assert before["laterRequest"] == "The summary is missing; fix it"
+            unauthorized = await client.post(endpoint, json={
+                "label": "correction", "evidenceFingerprint": before["evidenceFingerprint"],
+                "expectedRevision": None,
+            })
+            assert unauthorized.status_code == 403
+            saved = await client.post(endpoint, headers=headers, json={
+                "label": "correction", "evidenceFingerprint": before["evidenceFingerprint"],
+                "expectedRevision": None,
+            })
+            assert saved.status_code == 200
+            assert saved.json()["label"] == "correction"
+            assert saved.json()["revision"] == 1
+            page = await client.get("/api/runs?view=followups&limit=20")
+            assert page.status_code == 200
+            assert page.json()["followups"][0]["reviewStatus"] == "correction"
+            generic = await client.post(
+                f"/api/control/review/{before['documentId']}", headers=headers,
+                json={"state": "resolved", "payload": {"label": "pass"},
+                      "expectedRevision": 1},
+            )
+            assert generic.status_code == 400
+            rollback = await client.post(
+                f"/api/control/review/{before['documentId']}/rollback", headers=headers,
+                json={"targetRevision": 1, "expectedRevision": 1},
+            )
+            assert rollback.status_code == 400
+            assert (await client.get(endpoint)).json()["label"] == "correction"
+            duplicate = await client.post(endpoint, headers=headers, json={
+                "label": "correction", "evidenceFingerprint": before["evidenceFingerprint"],
+                "expectedRevision": None,
+            })
+            assert duplicate.status_code == 409
+            foreign = await client.get("/api/runs/r-other/followup-review/other-later")
+            assert foreign.status_code == 404
+            missing = await client.get("/api/runs/r-local/followup-review/local-prior")
+            assert missing.status_code == 409
+            bad = await client.post(endpoint, headers=headers, json={
+                "label": "agent_failed", "evidenceFingerprint": before["evidenceFingerprint"],
+                "expectedRevision": 1,
+            })
+            assert bad.status_code == 400
+            malformed = await client.post(endpoint, headers=headers, json={
+                "label": ["correction"], "evidenceFingerprint": before["evidenceFingerprint"],
+                "expectedRevision": 1,
+            })
+            assert malformed.status_code == 400
+            return before
+
+    before = asyncio.run(review())
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "UPDATE agent_turns SET final_response_redacted=? "
+            "WHERE tenant_id='local' AND turn_id='local-prior'",
+            ("Summary is complete" + "x" * 1499 + "y",),
+        )
+    async def check_stale():
+        app = create_app(storage=f"sqlite:///{path}", tenant_id="local")
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            endpoint = "/api/runs/r-local/followup-review/local-later"
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            current = await client.get(endpoint)
+            assert current.status_code == 200
+            assert current.json()["stale"] is True
+            assert current.json()["label"] is None
+            page = await client.get("/api/runs?view=followups&limit=20")
+            assert page.status_code == 200
+            assert page.json()["followups"][0]["reviewStatus"] == "stale"
+            old = await client.post(endpoint, headers={"X-Verdict-Setup": token}, json={
+                "label": "correction", "evidenceFingerprint": before["evidenceFingerprint"],
+                "expectedRevision": 1,
+            })
+            assert old.status_code == 409
+    asyncio.run(check_stale())
+    documents = ControlStore(f"sqlite:///{path}").list_current("local")
+    review_doc = next(item for item in documents if item["kind"] == "review")
+    assert "summary" not in json.dumps(review_doc["payload"]).lower()
+    assert "missing" not in json.dumps(review_doc["payload"]).lower()
+
+
+def test_concurrent_followup_labels_conflict_instead_of_failing(tmp_path):
+    path = tmp_path / "concurrent-followup.db"
+    now = datetime(2026, 11, 2, tzinfo=timezone.utc)
+    original = _bundle("local", now, with_turn=True)
+    prior = replace(original.turns[0], turn_id="prior")
+    later = replace(prior, turn_id="later", sequence=1,
+                    started_at=now + timedelta(minutes=1),
+                    ended_at=now + timedelta(minutes=2))
+    storage = SQLiteStorage(str(path))
+    storage.replace_agent_run_bundle(replace(original, turns=(prior, later), events=()))
+    storage.close()
+
+    async def race():
+        app = create_app(storage=f"sqlite:///{path}", tenant_id="local")
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app, raise_app_exceptions=False),
+            base_url="http://testserver",
+        ) as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            headers = {"X-Verdict-Setup": token}
+            endpoint = "/api/runs/r-local/followup-review/later"
+            for _ in range(24):
+                current = (await client.get(endpoint)).json()
+                body = {"label": "correction", "expectedRevision": current["revision"],
+                        "evidenceFingerprint": current["evidenceFingerprint"]}
+                first, second = await asyncio.gather(
+                    client.post(endpoint, headers=headers, json=body),
+                    client.post(endpoint, headers=headers, json=body),
+                )
+                assert sorted((first.status_code, second.status_code)) == [200, 409]
+
+    asyncio.run(race())
+
+
 @pytest.mark.parametrize("event_type, attributes, failure_key, coverage_key", [
     (AgentEventType.TOOL_RESULT, {"tool_name": "search"},
      "toolErrors", "toolOutcomesReported"),
@@ -206,7 +537,7 @@ def test_read_only_dashboard_reports_legacy_analysis_without_revision_column(tmp
     storage.save_deterministic_analysis_run(DeterministicAnalysisRun(
         analysis_id="a" * 64, tenant_id="local", scope_key="agent-and-trace",
         cutoff=now, completed_at=now, status=AnalysisRunStatus.COMPLETED,
-        analyzer_version="agent-insights-v5", input_fingerprint="b" * 64,
+        analyzer_version="agent-insights-v6", input_fingerprint="b" * 64,
         result={"schema": "agent-insights-v2", "scope": {"availableRuns": 0,
             "analyzedRuns": 0, "complete": True, "traces": {"available": 0,
                 "analyzed": 0, "complete": True}}},
@@ -222,7 +553,7 @@ def test_read_only_dashboard_reports_legacy_analysis_without_revision_column(tmp
     assert coverage["needsRefresh"] is True
 
 
-def test_previous_trace_outcome_analyzer_is_not_current_after_semantic_change(tmp_path):
+def test_previous_analyzer_is_not_current_after_finding_semantics_change(tmp_path):
     path = tmp_path / "old-outcomes.db"
     url = f"sqlite:///{path}"
     storage = SQLiteStorage(str(path))
@@ -230,7 +561,7 @@ def test_previous_trace_outcome_analyzer_is_not_current_after_semantic_change(tm
     storage.save_deterministic_analysis_run(DeterministicAnalysisRun(
         analysis_id="a" * 64, tenant_id="local", scope_key="agent-and-trace",
         cutoff=now, completed_at=now, status=AnalysisRunStatus.COMPLETED,
-        analyzer_version="agent-insights-v4", input_fingerprint="b" * 64,
+        analyzer_version="agent-insights-v5", input_fingerprint="b" * 64,
         result={"schema": "agent-insights-v2", "reliability": {
             "traceOutcomes": {"succeeded": 1},
         }},
@@ -240,7 +571,7 @@ def test_previous_trace_outcome_analyzer_is_not_current_after_semantic_change(tm
         "schema": "agent-insights-v2", "reliability": {"traceOutcomes": {}},
     })
     assert current["analysisState"]["status"] == "never_run"
-    assert current["analysisState"]["analyzerVersion"] == "agent-insights-v5"
+    assert current["analysisState"]["analyzerVersion"] == "agent-insights-v6"
     assert current["reliability"]["traceOutcomes"] == {}
 
     async def request_data():
@@ -251,6 +582,38 @@ def test_previous_trace_outcome_analyzer_is_not_current_after_semantic_change(tm
     response = asyncio.run(request_data())
     assert response.status_code == 200
     assert response.json()["coverage"]["deterministicAnalysis"]["status"] == "never_run"
+
+
+def test_saved_insights_with_redacted_distinct_calls_has_no_loop_finding(tmp_path):
+    path = tmp_path / "redacted-calls.db"
+    now = datetime(2026, 11, 2, tzinfo=timezone.utc)
+    bundle = _bundle("local", now, with_turn=True)
+    calls = tuple(AgentEvent(
+        f"read-{index}", "turn", index + 2, now, AgentEventType.TOOL_CALL,
+        ExecutionStatus.COMPLETED, "synthetic:tool",
+        {"tool_name": "web_read", "call_id": f"read-{index}",
+         "arguments": f'{{"url":"https://example.invalid/page/{index}"}}'},
+        PrivacyClassification.REDACTED,
+    ) for index in range(4))
+    storage = SQLiteStorage(str(path))
+    AgentCaptureService(storage).capture(replace(bundle, events=(*bundle.events, *calls)))
+    storage.close()
+
+    async def check_path():
+        transport = httpx.ASGITransport(app=create_app(storage=f"sqlite:///{path}", tenant_id="local"))
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            token = (await client.get("/api/setup/token")).json()["setupToken"]
+            result = await client.post("/api/insights/run", headers={"X-Verdict-Setup": token})
+            saved = await client.get("/api/insights")
+            run = await client.get("/api/runs/r-local?tenant=local")
+            return result, saved, run
+
+    result, saved, run = asyncio.run(check_path())
+    assert result.status_code == saved.status_code == run.status_code == 200
+    assert result.json() == saved.json()
+    assert result.json()["analysisState"]["analyzerVersion"] == "agent-insights-v6"
+    assert not any(row["code"] == "possible_tool_loop" for row in saved.json()["findings"])
+    assert len([event for event in run.json()["events"] if event["type"] == "tool_call"]) == 4
 
 
 def test_concurrent_same_identity_analysis_recheck_publishes_the_returned_row(
@@ -653,7 +1016,8 @@ def test_identical_scoped_execution_replays_stored_result_without_provider_call(
             ), input_tokens=10, output_tokens=10)
 
     provider = CountingProvider()
-    approved = {**config, "planFingerprint": preview["planFingerprint"]}
+    approved = {**config, "planFingerprint": preview["planFingerprint"],
+                "maxEstimatedUsd": preview["upperStaticListPriceUsd"]}
     first = execute_scoped(storage, storage_url=url, tenant="local", config=approved,
                            confirm_external_egress=True, provider=provider)
     second = execute_scoped(storage, storage_url=url, tenant="local", config=approved,
@@ -670,7 +1034,8 @@ def test_identical_scoped_execution_replays_stored_result_without_provider_call(
             raise RuntimeError("synthetic provider error")
 
     failing = ErrorProvider()
-    error_approved = {**error_config, "planFingerprint": error_preview["planFingerprint"]}
+    error_approved = {**error_config, "planFingerprint": error_preview["planFingerprint"],
+                      "maxEstimatedUsd": error_preview["upperStaticListPriceUsd"]}
     first_error = execute_scoped(storage, storage_url=url, tenant="local", config=error_approved,
                                  confirm_external_egress=True, provider=failing)
     second_error = execute_scoped(storage, storage_url=url, tenant="local", config=error_approved,
@@ -2226,6 +2591,51 @@ def test_insights_surface_explicit_failed_business_outcomes(tmp_path):
     }
 
 
+def test_sdk_negative_feedback_reaches_saved_insights_and_exact_run_api(tmp_path):
+    path = tmp_path / "feedback.db"
+    url = f"sqlite:///{path}"
+    verdict.shutdown()
+    verdict.init(storage=SQLiteStorage(str(path)), tenant_id="feedback-tenant",
+                 service_name="synthetic-feedback-service", instrumentors=[])
+    try:
+        with verdict.agent_run(name="synthetic-agent") as run:
+            with run.turn(user_input="Check the request") as turn:
+                turn.record_feedback(kind="thumbs_down", value=True)
+                turn.record_feedback(kind="follow_up_question", value=True)
+                turn.set_output("Recorded answer")
+        verdict.shutdown()
+        run_id = run.run_id
+
+        async def request():
+            app = create_app(storage=url, tenant_id="feedback-tenant")
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+            ) as client:
+                token = (await client.get("/api/setup/token")).json()["setupToken"]
+                insights = await client.post("/api/insights/run", headers={"X-Verdict-Setup": token})
+                listing = await client.get("/api/runs")
+                detail = await client.get(f"/api/runs/{run_id}")
+                return insights, listing, detail
+
+        insights, listing, detail = asyncio.run(request())
+        assert insights.status_code == listing.status_code == detail.status_code == 200
+        finding = next(item for item in insights.json()["findings"]
+                       if item["code"] == "negative_feedback_recorded")
+        assert finding["runs"] == 1
+        assert finding["severity"] == "warning"
+        assert finding["runIds"] == [run_id]
+        selected = next(item for item in listing.json()["runs"] if item["runId"] == run_id)
+        linked = next(item for item in selected["findings"]
+                      if item["code"] == "negative_feedback_recorded")
+        assert len(linked["evidenceEventIds"]) == 1
+        event = next(item for item in detail.json()["events"]
+                     if item["eventId"] == linked["evidenceEventIds"][0])
+        assert event["type"] == "feedback"
+        assert event["attributes"]["kind"] == "thumbs_down"
+    finally:
+        verdict.shutdown()
+
+
 def test_analysis_failure_is_persisted_and_returned_as_an_explicit_state(tmp_path):
     storage_url = f"sqlite:///{tmp_path / 'analysis-error.db'}"
 
@@ -2328,7 +2738,7 @@ def test_incompatible_persisted_insights_are_not_served_as_current(tmp_path):
     assert insights_response.status_code == 200
     assert data_response.status_code == 200
     assert result["analysisState"]["status"] == "never_run"
-    assert result["analysisState"]["analyzerVersion"] == "agent-insights-v5"
+    assert result["analysisState"]["analyzerVersion"] == "agent-insights-v6"
     assert result["schema"] == "agent-insights-v2"
     assert "comparisons" not in result
     assert data_response.json()["coverage"]["deterministicAnalysis"] == {
@@ -2703,7 +3113,7 @@ def test_snapshot_from_the_previous_analyzer_version_is_recomputed_on_unchanged_
 
     assert builds == [1]
     assert result["analysisState"]["status"] == "completed"
-    assert result["analysisState"]["analyzerVersion"] == "agent-insights-v5"
+    assert result["analysisState"]["analyzerVersion"] == "agent-insights-v6"
     assert result["performance"]["agentTurnListPriceUsd"] == 0.5
 
 

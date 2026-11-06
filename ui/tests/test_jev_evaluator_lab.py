@@ -410,7 +410,7 @@ def test_dashboard_api_calibration_approval_and_health_match_production(
                       "planFingerprint": preview.json()["planFingerprint"],
                       "confirmExternalEgress": True, "minimumExamples": 1},
             )
-            assert approved.status_code == 200
+            assert approved.status_code == 400  # Jev has no static USD price.
             production_preview = await client.post(
                 "/api/evaluators/preview", headers=headers, json=config,
             )
@@ -422,9 +422,25 @@ def test_dashboard_api_calibration_approval_and_health_match_production(
                       "plannedTraces": production_preview.json()["plannedTraces"],
                       "confirmExternalEgress": True},
             )
-            assert judged.status_code == 200
+            assert judged.status_code == 400  # No static Jev dollar price for the dashboard cap.
+            assert len(requests) == 0
+            writable = SQLiteStorage(str(db))
+            try:
+                programmatic_health = execute_calibration(
+                    writable, tenant_id="local", path=labels,
+                    config={**config, "planFingerprint": preview.json()["planFingerprint"]},
+                    confirm_external_egress=True, minimum_examples=1,
+                )
+                programmatic = execute_evaluation(
+                    writable, tenant_id="local", confirm_external_egress=True,
+                    config={**config,
+                            "planFingerprint": production_preview.json()["planFingerprint"],
+                            "plannedTraces": production_preview.json()["plannedTraces"]},
+                )
+            finally:
+                writable.close()
             data = await client.get("/api/data", headers=headers)
-            return approved.json(), judged.json(), data.text
+            return programmatic_health, programmatic, data.text
 
     health, judged, data = asyncio.run(run())
     assert health["evaluatorFingerprint"] == judged["evaluatorFingerprint"]

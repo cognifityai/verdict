@@ -1591,14 +1591,17 @@ def _sanitize_agent_capture(
         service_name=redact_structure(capture.run.service_name, mode=mode, secret=secret) or "",
         environment=redact_structure(capture.run.environment, mode=mode, secret=secret) or "",
     )
-    turns = tuple(
-        replace(
+    turns = []
+    for turn in capture.turns:
+        progress = redact_structure(turn.progress_redacted, mode=mode, secret=secret)
+        if progress is not None and len(progress.encode("utf-8")) > 4_096:
+            progress = "<REDACTED>"
+        turns.append(replace(
             turn,
             user_request_redacted=redact_structure(turn.user_request_redacted, mode=mode, secret=secret),
             final_response_redacted=redact_structure(turn.final_response_redacted, mode=mode, secret=secret),
-        )
-        for turn in capture.turns
-    )
+            progress_redacted=progress,
+        ))
     events = []
     for event in capture.events:
         attributes = sanitize_agent_event_attributes(
@@ -1611,7 +1614,7 @@ def _sanitize_agent_capture(
     return type(capture)(
         session=capture.session,
         run=run,
-        turns=turns,
+        turns=tuple(turns),
         events=tuple(events),
     )
 

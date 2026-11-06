@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { ScopedEvaluate } from "./ScopedEvaluate.jsx";
-import { EvidenceExplain } from "./EvidenceExplain.jsx";
+import { EvidenceExplain, UnverifiedAiResponse } from "./EvidenceExplain.jsx";
 
 const C = { panel: "#111715", border: "#26332e", sub: "#94a39d", faint: "#68766f", green: "#4ee1aa", bar: "#38b993", amber: "#f2b84b", red: "#ff6b6b" };
 
@@ -105,7 +105,7 @@ function ModelCallTrend({ report, onOpenCalls }) {
   </div>;
 }
 
-function SessionExplanation({ session, selectedDay, dayTotal }) {
+function SessionExplanation({ session, selectedDay, dayTotal, onOpenRun }) {
   const largest = session.topTurns?.find((turn) => turn.totalTokens != null);
   const largestShare = largest && session.totalTokens > 0
     ? Math.round(largest.totalTokens / session.totalTokens * 100) : null;
@@ -119,6 +119,7 @@ function SessionExplanation({ session, selectedDay, dayTotal }) {
     {(session.inputTokens != null || session.outputTokens != null) && <p>Recorded components: {component(session, "inputTokens", "input")}, {component(session, "outputTokens", "output")}, {component(session, "cachedInputTokens", "cache-read input")}, {component(session, "cacheWriteInputTokens", "cache-write input")}. Cached input may be included in input tokens, depending on the source; components should not be added together.</p>}
     <p>Token totals cover {coverage(session.tokenKnownTurns, session.turnCount)}. Estimated list price covers {coverage(session.pricedTurns, session.turnCount)}.</p>
     {session.elapsedSpanSeconds != null && <p>Observed span from first turn start to last turn end: {count(session.elapsedSpanSeconds)} seconds. This includes pauses and tool work; it is not model latency.</p>}
+    {session.longestTurnSpan && <p>Longest recorded turn span in this captured window: {session.longestTurnSpan.seconds < 60 ? `${session.longestTurnSpan.seconds} seconds` : `${Math.round(session.longestTurnSpan.seconds / 60)} minutes`} · {session.turnSpanKnownTurns}/{session.turnCount} turns with a usable start and end. This includes pauses and tool work; it does not establish whether the agent kept you informed. <button type="button" className="underline" style={{ color: C.green }} onClick={() => onOpenRun?.(session.longestTurnSpan.runId, null, null, null, session.longestTurnSpan.turnId)}>Inspect long turn</button></p>}
     <p style={{ color: C.sub }}>These are measured contributors, not a judgment of task quality or whether the tokens were necessary.</p>
   </div>;
 }
@@ -129,6 +130,7 @@ export function DayAiExplanation({ root, day }) {
   const [environment, setEnvironment] = useState(null);
   const [preview, setPreview] = useState(null);
   const [approved, setApproved] = useState(false);
+  const [estimateLimit, setEstimateLimit] = useState("0.05");
   const [result, setResult] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
@@ -142,6 +144,9 @@ export function DayAiExplanation({ root, day }) {
     return () => { active = false; };
   }, [root]);
   const configured = environment?.providers?.find((item) => item.provider === provider)?.configured;
+  const approvedEstimate = Number(estimateLimit);
+  const withinEstimateLimit = Number.isFinite(approvedEstimate) && approvedEstimate > 0
+    && approvedEstimate <= 100 && approvedEstimate >= (preview?.upperStaticListPriceUsd ?? Infinity);
   const post = async (path, body) => {
     setBusy(true); setError(null);
     try {
@@ -156,22 +161,24 @@ export function DayAiExplanation({ root, day }) {
   };
   return <div className="border p-3 mt-4 text-sm" style={{ borderColor: C.border }}>
     <div className="font-semibold">Optional AI interpretation</div>
-    <p className="mt-1" style={{ color: C.sub }}>Ask why this day used these reported tokens. The preview contains aggregate metrics and numbered contributors, without chat text or tool outputs. The answer is an interpretation; inspect linked runs before changing a workflow.</p>
+    <p className="mt-1" style={{ color: C.sub }}>Ask AI what to verify about this day's reported tokens. The preview contains aggregate metrics and numbered contributors, without chat text or tool outputs. The response is unverified; inspect linked runs before changing a workflow.</p>
     <div className="flex flex-wrap items-end gap-3 mt-3">
       <label>Provider<select className="block border p-2 mt-1 bg-transparent" value={provider} disabled={busy} onChange={(event) => { if (busy) return; setProvider(event.target.value); setPreview(null); setApproved(false); setResult(null); }}><option value="anthropic">Anthropic</option><option value="openai">OpenAI</option></select></label>
-      <button type="button" className="border px-3 py-2" disabled={!access || busy} onClick={async () => { const data = await post("/api/usage/explain/preview", { day, provider }); if (data) { setPreview(data); setApproved(false); setResult(null); } }}>Preview AI context</button>
+      <button type="button" className="border px-3 py-2" disabled={!access || busy} onClick={async () => { const data = await post("/api/usage/explain/preview", { day, provider }); if (data) { setPreview(data); setApproved(false); setResult(data.savedResult || null); } }}>Preview AI context</button>
     </div>
     {preview && <div className="border p-3 mt-3" style={{ borderColor: C.border }}>
       <div>{preview.plannedCalls === 1 ? "One optional call" : "No usable token total for an AI explanation"} · {preview.provider}/{preview.model}</div>
       <div style={{ color: C.sub }}>Destination: {preview.destination}. Static list-price bound: {price(preview.upperStaticListPriceUsd)}; actual billing may differ.</div>
+      <label>Maximum approved static estimate (USD)<input className="block border p-2 mt-1 w-32 bg-transparent" type="number" min="0.001" max="100" step="0.001" value={estimateLimit} onChange={(event) => setEstimateLimit(event.target.value)} /></label>
       <details className="mt-2"><summary className="cursor-pointer">Review exact messages and metrics</summary><pre className="whitespace-pre-wrap break-words max-h-72 overflow-auto mt-2 text-xs">{JSON.stringify(preview.messages, null, 2)}</pre></details>
-      <label className="flex gap-2 mt-3"><input type="checkbox" checked={approved} disabled={preview.plannedCalls !== 1} onChange={(event) => setApproved(event.target.checked)} />I approve sending these exact messages to {preview.destination} once.</label>
-      <button type="button" className="border px-3 py-2 mt-2" disabled={!approved || !configured || !preview.providerAvailable || busy || preview.plannedCalls !== 1} onClick={async () => { const data = await post("/api/usage/explain/run", { day, provider, planFingerprint: preview.planFingerprint, confirmExternalEgress: true }); if (data) setResult(data); }}>Ask AI why</button>
+      <label className="flex gap-2 mt-3"><input type="checkbox" checked={approved} disabled={preview.plannedCalls !== 1} onChange={(event) => setApproved(event.target.checked)} />I approve sending these exact messages to {preview.destination} once within the static estimate limit above.</label>
+      <button type="button" className="border px-3 py-2 mt-2" disabled={Boolean(result) || !approved || !withinEstimateLimit || !configured || !preview.providerAvailable || busy || preview.plannedCalls !== 1} onClick={async () => { const data = await post("/api/usage/explain/run", { day, provider, planFingerprint: preview.planFingerprint, maxEstimatedUsd: approvedEstimate, confirmExternalEgress: true }); if (data) setResult(data); }}>Ask AI what to verify</button>
+      {result && <p role="status" style={{ color: C.sub }}>The saved outcome is shown below. This exact preview will not make another provider call.</p>}
       {!configured && <p style={{ color: C.amber }}>Provider key is not configured for this dashboard process.</p>}
       {!preview.providerAvailable && <p style={{ color: C.amber }}>This provider needs the Verdict eval package and its SDK installed in the dashboard environment.</p>}
     </div>}
     {result && <div className="mt-3 border p-3" style={{ borderColor: C.border }} role="status">
-      {result.status === "completed" ? <><div className="font-semibold">AI interpretation</div><p className="mt-2 whitespace-pre-wrap">{result.answer}</p></>
+      {result.status === "completed" ? <UnverifiedAiResponse answer={result.answer} />
         : <p style={{ color: C.amber }}>The call has no available answer ({result.error || result.status}). This approved attempt will not run again automatically.</p>}
     </div>}
     {error && <p role="alert" className="mt-2" style={{ color: C.red }}>{error}</p>}
@@ -270,6 +277,11 @@ export function Usage({ url, onOpenRun, compact = false, home = false, modelCall
 
   const data = state.data;
   const chosenDay = data?.days?.find((item) => item.day === data.selectedDay);
+  const cacheReadCoverage = chosenDay?.componentCoverage?.cachedInputTokens;
+  const cacheReadDetail = Number.isSafeInteger(chosenDay?.cachedInputTokens)
+    && chosenDay.cachedInputTokens >= 0 && Number.isSafeInteger(cacheReadCoverage)
+    && cacheReadCoverage > 0 && cacheReadCoverage <= chosenDay.turns
+    ? ` · ${count(chosenDay.cachedInputTokens)} cache-read input across ${coverage(cacheReadCoverage, chosenDay.turns)}; component coverage may differ from total coverage` : "";
   const session = data?.selectedSession;
   useEffect(() => {
     const pending = pendingSessionRef.current;
@@ -346,7 +358,7 @@ export function Usage({ url, onOpenRun, compact = false, home = false, modelCall
       {compact && day == null && hasTokenTotals && <p className="mt-3 text-sm" style={{ color: C.sub }}>Latest active day: {data.selectedDay} UTC · {chosenDay?.tokenKnownTurns ? `${count(chosenDay.totalTokens)} reported tokens` : "token totals unavailable"} across {coverage(chosenDay?.tokenKnownTurns || 0, chosenDay?.turns || 0)} with totals. Click a bar to inspect sessions.</p>}
       {(!compact || day != null) && selectedDayReady && <>
       <div className="mt-5 grid sm:grid-cols-3 gap-2 text-sm">
-        <Fact label={`${data.selectedDay} UTC`} value={chosenDay?.tokenKnownTurns ? `${count(chosenDay.totalTokens)} reported tokens` : chosenDay?.turns ? "Token totals unavailable" : "No captured token report"} detail={`${coverage(chosenDay?.tokenKnownTurns || 0, chosenDay?.turns || 0)} with totals`} />
+        <Fact label={`${data.selectedDay} UTC`} value={chosenDay?.tokenKnownTurns ? `${count(chosenDay.totalTokens)} reported tokens` : chosenDay?.turns ? "Token totals unavailable" : "No captured token report"} detail={`${coverage(chosenDay?.tokenKnownTurns || 0, chosenDay?.turns || 0)} with totals${cacheReadDetail}`} />
         <Fact label="Estimated list price" value={chosenDay?.pricedTurns ? price(chosenDay.listPriceUsd) : "Not priced"} detail={`${coverage(chosenDay?.pricedTurns || 0, chosenDay?.turns || 0)} priced; not a subscription bill`} />
         <Fact label="Tokens without one recorded model" value={chosenDay?.tokenKnownTurns ? count(chosenDay.unattributedTokens) : "Not captured"} detail="Reported turn totals with no model name or multiple model names" />
       </div>
@@ -378,7 +390,7 @@ export function Usage({ url, onOpenRun, compact = false, home = false, modelCall
         <div className="flex flex-wrap justify-between gap-3"><div><div className="font-semibold">Selected session</div>
           <div className="text-xs mt-1" style={{ color: C.sub }}>Full 30-day window: {count(session.totalTokens)} reported tokens across {session.turnCount} turns · {price(session.listPriceUsd)} estimated list price ({coverage(session.pricedTurns, session.turnCount)} priced)</div></div>
           <button type="button" onClick={() => setAnalyzing((value) => !value)} className="border px-3 py-2 text-sm" style={{ borderColor: C.green, color: C.green }}>{analyzing ? "Hide analysis" : "Analyze session"}</button></div>
-        {analyzing && <SessionExplanation session={session} selectedDay={data.selectedDay} dayTotal={chosenDay?.totalTokens} />}
+        {analyzing && <SessionExplanation session={session} selectedDay={data.selectedDay} dayTotal={chosenDay?.totalTokens} onOpenRun={onOpenRun} />}
         <div className="font-semibold text-sm mt-5">Largest turns</div>
         <div className="mt-2 space-y-2">{session.turns.slice(0, compact ? 5 : undefined).map((turn) => <div key={`${turn.runId}:${turn.turnId}`} className="border p-3 flex flex-wrap justify-between gap-2 text-xs" style={{ borderColor: C.border }}>
           <span>Run {turn.runId} · Turn {turn.sequence + 1} · {turn.models.join(", ") || "model unavailable"} · {count(turn.totalTokens)} tokens · {price(turn.listPriceUsd)}</span>

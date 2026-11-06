@@ -25,7 +25,9 @@ application-declared run, turn, tool, command, test, retry, feedback, and outcom
 structure around them. The provider `Trace` owns LLM content; the linked event
 does not duplicate it. When the application explicitly records a boolean-false
 business outcome, Agent Insights surfaces that failure without a judge call.
-Optional AI explanations use bounded, redacted selected evidence. Masked fields
+Optional AI explanations use bounded, redacted selected evidence. Their model
+prose is collapsed and labeled **Unverified AI response**; `completed` reports
+call delivery, not a verified diagnosis. Masked fields
 are omitted from the AI preview; if they contain the selected failure's only
 recorded diagnostic, no call is offered. A completed execution status cannot
 establish the cause of a failure or prove task success; inspect the linked

@@ -12,6 +12,7 @@ export function ConversationEvaluation({ root, token, provider, model, providerS
   const [detail, setDetail] = useState(null);
   const [result, setResult] = useState(null);
   const [confirmed, setConfirmed] = useState(false);
+  const [estimateLimit, setEstimateLimit] = useState("0.05");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const inFlight = useRef(false);
@@ -19,6 +20,9 @@ export function ConversationEvaluation({ root, token, provider, model, providerS
   const config = (cursor = after) => ({ unit: "conversation", provider, model, rubric,
     maxCalls, maxOutputTokens: 4096, scanLimit: 20, ...(cursor ? { after: cursor } : {}) });
   const current = previewKey === JSON.stringify(config());
+  const approvedEstimate = Number(estimateLimit);
+  const withinEstimateLimit = Number.isFinite(approvedEstimate) && approvedEstimate > 0
+    && approvedEstimate <= 100 && approvedEstimate >= (preview?.upperStaticListPriceUsd ?? Infinity);
 
   async function request(path, options = {}) {
     const response = await fetch(`${root}${path}`, {
@@ -61,11 +65,13 @@ export function ConversationEvaluation({ root, token, provider, model, providerS
   }
 
   async function run() {
-    if (inFlight.current || !providerSupported || !current || !confirmed || !preview?.plannedCalls) return;
+    if (inFlight.current || !providerSupported || !current || !confirmed
+        || !withinEstimateLimit || !preview?.plannedCalls) return;
     inFlight.current = true; setBusy(true); setError(null); setConfirmed(false);
     try {
       const approved = { ...config(), plannedTargets: preview.plannedTargets,
-        planFingerprint: preview.planFingerprint, confirmExternalEgress: true };
+        planFingerprint: preview.planFingerprint, maxEstimatedUsd: approvedEstimate,
+        confirmExternalEgress: true };
       const outcome = await request("/api/evaluators/run", {
         method: "POST", body: JSON.stringify(approved),
       });
@@ -117,9 +123,11 @@ export function ConversationEvaluation({ root, token, provider, model, providerS
       <p className="text-xs font-mono break-all" style={{ color: C.sub }}>Evaluator fingerprint for Monitor: {preview.evaluatorFingerprint}</p>
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-sm">{[["Conversations scanned", preview.scannedConversations], ["Eligible targets", preview.eligibleTargets], ["Already graded", preview.alreadyJudged], ["Planned calls", preview.plannedCalls]].map(([label, value]) => <div key={label} className="border p-3" style={{ borderColor: C.border }}><div style={{ color: C.sub }}>{label}</div><strong>{value}</strong></div>)}</div>
       <p className="text-sm" style={{ color: C.sub }}>Not evaluable: {Object.entries(preview.notEvaluableReasons).map(([reason, count]) => `${reason}: ${count}`).join(" · ") || "none"}. Retryable judge errors: {preview.retryableErrors}.</p>
+      <p className="text-sm" style={{ color: C.sub }}>Conservative static list-price bound: {preview.upperStaticListPriceUsd == null ? "unavailable for this model or endpoint" : `$${preview.upperStaticListPriceUsd.toFixed(4)}`}. Actual provider billing may differ.</p>
+      <label className="block text-sm">Maximum approved static estimate (USD)<input type="number" min="0.001" max="100" step="0.001" value={estimateLimit} onChange={e => { setEstimateLimit(e.target.value); setConfirmed(false); }} className="block w-32 border p-2 mt-1 bg-transparent" /></label>
       {!current && <p className="text-sm" style={{ color: C.amber }}>Configuration changed. Preview again before running.</p>}
-      <label className="flex gap-2 text-sm"><input type="checkbox" disabled={!current} checked={confirmed} onChange={e => setConfirmed(e.target.checked)} />I approve sending {preview.plannedCalls} selected redacted {preview.target === "response" ? "replies with preceding messages" : "full conversations"} to {destination}. Redaction is best effort.</label>
-      <button disabled={!current || !confirmed || !providerState?.configured || !preview.plannedCalls} onClick={run} className="px-4 py-2 text-sm" style={{ background: C.green, color: "#0b0e0d" }}>Run {preview.plannedCalls} judge calls</button>
+      <label className="flex gap-2 text-sm"><input type="checkbox" disabled={!current} checked={confirmed} onChange={e => setConfirmed(e.target.checked)} />I approve sending {preview.plannedCalls} selected redacted {preview.target === "response" ? "replies with preceding messages" : "full conversations"} to {destination} within the static estimate limit above. Redaction is best effort.</label>
+      <button disabled={!current || !confirmed || !withinEstimateLimit || !providerState?.configured || !preview.plannedCalls} onClick={run} className="px-4 py-2 text-sm" style={{ background: C.green, color: "#0b0e0d" }}>Run {preview.plannedCalls} judge calls</button>
       {result && <p role="status" className="text-sm">Saved: {result.completed} · judge errors: {result.errors} · changed during run: {result.stale}</p>}
     </section>}
     {review && <section className="border p-5 space-y-3" style={{ borderColor: C.border, background: C.panel }}>

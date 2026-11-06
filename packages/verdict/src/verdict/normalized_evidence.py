@@ -350,6 +350,7 @@ def merge_capture_trace(
     incoming: Trace,
     *,
     legacy_preview: tuple[str | None, str | None] | None = None,
+    clear_local_request: bool = False,
 ) -> Trace:
     """Preserve recorded request facts and only add compatible completion facts."""
     if current is None:
@@ -369,6 +370,14 @@ def merge_capture_trace(
     )
     if any(getattr(current, name) != getattr(incoming, name) for name in immutable_fields):
         raise ValueError("Trace request identity facts cannot be replaced")
+    if clear_local_request:
+        if not _is_verdict_local_agent_trace(current) or incoming.prompt_redacted is not None:
+            raise ValueError("local Trace request reclassification is invalid")
+        _validate_local_agent_messages(current)
+        current = replace(
+            current, prompt_redacted=None,
+            raw_messages=_local_agent_messages(None, current.response_redacted),
+        )
     local_agent_trace = _is_verdict_local_agent_trace(current)
     prompt = (
         _extend_text(
@@ -521,6 +530,8 @@ def merge_agent_turn(
     incoming: AgentTurn,
     *,
     legacy_preview: tuple[str | None, str | None] | None = None,
+    replace_progress: bool = False,
+    clear_local_request: bool = False,
 ) -> AgentTurn:
     if current is None:
         return incoming
@@ -531,6 +542,13 @@ def merge_agent_turn(
         incoming.started_at,
     ):
         raise ValueError("turn identity facts cannot be replaced")
+    if clear_local_request:
+        if incoming.user_request_redacted is not None or incoming.request_truncated:
+            raise ValueError("local Turn request reclassification is invalid")
+        current = replace(
+            current, user_request_redacted=None,
+            request_state=incoming.request_state, request_truncated=False,
+        )
     request = _extend_text(
         current.user_request_redacted,
         incoming.user_request_redacted,
@@ -610,6 +628,14 @@ def merge_agent_turn(
             else current.response_truncated
             if response == current.final_response_redacted != incoming.final_response_redacted
             else current.response_truncated or incoming.response_truncated
+        ),
+        progress_redacted=(
+            incoming.progress_redacted
+            if replace_progress and incoming.progress_redacted is not None
+            else _extend_text(
+                current.progress_redacted, incoming.progress_redacted,
+                subject="turn progress",
+            )
         ),
     )
 
@@ -844,6 +870,8 @@ def agent_turn_from_row(row: Mapping[str, object]) -> AgentTurn:
         ),
         request_state=EvidenceState(str(row["request_state"])),
         response_state=EvidenceState(str(row["response_state"])),
+        progress_redacted=(str(row["progress_redacted"])
+                           if row.get("progress_redacted") is not None else None),
         input_tokens=(int(row["input_tokens"]) if row.get("input_tokens") is not None else None),
         cached_input_tokens=(
             int(row["cached_input_tokens"])
