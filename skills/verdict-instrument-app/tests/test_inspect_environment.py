@@ -119,14 +119,17 @@ def test_b2_environment_requires_synchronized_upgrade(monkeypatch: pytest.Monkey
     assert report["action"] == "upgrade"
 
 
-def test_b3_environment_requires_synchronized_upgrade(monkeypatch: pytest.MonkeyPatch) -> None:
-    report = inspect(monkeypatch, synchronized("0.1.0b3"))
+@pytest.mark.parametrize("version", ["0.1.0b3", "0.1.0b4", "0.1.0b5"])
+def test_previous_beta_environment_requires_synchronized_upgrade(
+    monkeypatch: pytest.MonkeyPatch, version: str,
+) -> None:
+    report = inspect(monkeypatch, synchronized(version))
 
     assert report["state"] == "upgrade"
     assert report["action"] == "upgrade"
 
 
-def test_b4_environment_is_current(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_b6_environment_is_current(monkeypatch: pytest.MonkeyPatch) -> None:
     report = inspect(monkeypatch, synchronized("0.1.0b6"))
 
     assert report["state"] == "current"

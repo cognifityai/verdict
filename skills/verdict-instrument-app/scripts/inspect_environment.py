@@ -15,7 +15,7 @@ from urllib.parse import urlsplit
 
 TARGET_VERSION = "0.1.0b6"
 UPGRADE_VERSIONS = {f"0.1.0a{release}" for release in range(5, 24)} | {
-    "0.1.0b1", "0.1.0b2", "0.1.0b3", "0.1.0b4"
+    "0.1.0b1", "0.1.0b2", "0.1.0b3", "0.1.0b4", "0.1.0b5"
 }
 REQUIRED_DISTRIBUTIONS = (
     "cognifity-verdict",
