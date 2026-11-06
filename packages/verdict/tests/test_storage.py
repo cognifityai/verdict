@@ -1557,7 +1557,7 @@ def test_postgres_judgment_query_uses_fixed_columns_and_maps_them_in_order():
         ["judge-a"],
         [{"name": "quality", "verdict": "pass", "reasoning": "ok", "judge_model": "judge-a"}],
         True, "openai", {"model": "judge-a"}, "fp-1", ["quality"],
-        "completed", None,
+        "completed", None, "a" * 64,
     )
 
     def fetchall(sql, params):
@@ -1574,6 +1574,7 @@ def test_postgres_judgment_query_uses_fixed_columns_and_maps_them_in_order():
     assert judgment.judgment_id == "judgment-1"
     assert judgment.position_swap_consistent is True
     assert judgment.evaluator_fingerprint == "fp-1"
+    assert judgment.evaluated_trace_fingerprint == "a" * 64
     assert judgment.dimensions[0].verdict is Verdict.PASS
 
 
